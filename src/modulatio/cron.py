@@ -1,0 +1,384 @@
+"""Cron — thin scheduling shim that converts cron-strings → heartbeat task adds.
+
+Locked Option C (project_modulatio_cron_revisit.md, 2026-04-24).
+
+Architectural separation:
+  - **Cron** = scheduling primitive — "when should this run?"
+  - **Heartbeat** (slice 6) = execution primitive — queue + dispatch.
+
+Cron schedules an objective via a friendly DSL (interval or
+calendar-style); when ``dispatch_due()`` fires (called by the daemon in
+slice 8), each due cron job adds a ``heartbeat`` task. The heartbeat
+loop then drains the queue normally.
+
+Schedule DSL (Modulatio-friendly, NOT POSIX-cron 5-field):
+  - ``"30m"`` / ``"6h"`` / ``"1d"`` — interval (delegates to
+    ``heartbeat.parse_interval``)
+  - ``"daily HH:MM"`` — every day at HH:MM (UTC)
+  - ``"weekly DAY HH:MM"`` — every week on DAY (mon|tue|wed|thu|fri|sat|sun)
+  - ``"monthly DAY HH:MM"`` — every month on day-of-month (1-31)
+  - ``"hourly :MM"`` — every hour at minute MM
+
+Users who want POSIX-cron 5-field syntax should run external ``cron``
+or ``systemd`` and call ``modulatio kickoff`` directly. Coexists with
+external schedulers — different layers (this schedules Modulatio
+objectives; system cron handles broader OS-level jobs).
+
+Storage: ``<vault>/cron-config.json``. Per-vault (not per-project) so a
+single daemon instance can serve multiple projects' cron jobs.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import threading
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from modulatio import config, heartbeat
+
+logger = logging.getLogger("modulatio.cron")
+
+
+_WEEKDAYS = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3,
+    "fri": 4, "sat": 5, "sun": 6,
+}
+
+_DAILY_RE = re.compile(r"^daily\s+(\d{1,2}):(\d{2})$")
+_WEEKLY_RE = re.compile(r"^weekly\s+(mon|tue|wed|thu|fri|sat|sun)\s+(\d{1,2}):(\d{2})$")
+_MONTHLY_RE = re.compile(r"^monthly\s+(\d{1,2})\s+(\d{1,2}):(\d{2})$")
+_HOURLY_RE = re.compile(r"^hourly\s+:(\d{2})$")
+
+
+# === Storage ===
+
+def _config_file():
+    return config.get_data_file("cron-config.json")
+
+
+_cron_lock = threading.RLock()
+
+
+def _load() -> list[dict]:
+    cf = _config_file()
+    with _cron_lock:
+        if not cf.exists():
+            return []
+        try:
+            data = json.loads(cf.read_text())
+        except (OSError, json.JSONDecodeError):
+            return []
+        return list(data.get("jobs", []))
+
+
+def _save(jobs: list[dict]) -> None:
+    cf = _config_file()
+    cf.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cf.with_suffix(".json.tmp")
+    with _cron_lock:
+        tmp.write_text(json.dumps({"jobs": jobs}, indent=2, default=str))
+        tmp.replace(cf)
+
+
+# === Time helpers ===
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _now_iso() -> str:
+    return _now().isoformat(timespec="seconds")
+
+
+def _new_id() -> str:
+    return _now().strftime("%Y%m%d%H%M%S%f")[:18]
+
+
+# === Schedule DSL ===
+
+def parse_schedule(schedule_str: str) -> Optional[dict]:
+    """Parse the friendly cron DSL into a structured dict.
+
+    Returns ``None`` when the string doesn't match any supported shape.
+    Keys returned: ``kind`` (interval|daily|weekly|monthly|hourly) plus
+    the relevant fields (interval_seconds, hour, minute, weekday,
+    day_of_month).
+    """
+    s = schedule_str.strip().lower()
+    if not s:
+        return None
+
+    # Interval — delegate to heartbeat.parse_interval
+    delta = heartbeat.parse_interval(s)
+    if delta is not None:
+        return {"kind": "interval", "interval_seconds": int(delta.total_seconds())}
+
+    m = _DAILY_RE.match(s)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return {"kind": "daily", "hour": h, "minute": mi}
+
+    m = _WEEKLY_RE.match(s)
+    if m:
+        day_str, h, mi = m.group(1), int(m.group(2)), int(m.group(3))
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return {"kind": "weekly", "weekday": _WEEKDAYS[day_str], "hour": h, "minute": mi}
+
+    m = _MONTHLY_RE.match(s)
+    if m:
+        d, h, mi = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= d <= 31 and 0 <= h <= 23 and 0 <= mi <= 59:
+            return {"kind": "monthly", "day_of_month": d, "hour": h, "minute": mi}
+
+    m = _HOURLY_RE.match(s)
+    if m:
+        mi = int(m.group(1))
+        if 0 <= mi <= 59:
+            return {"kind": "hourly", "minute": mi}
+
+    return None
+
+
+def compute_next_run(parsed: dict, *, after: Optional[datetime] = None) -> datetime:
+    """Compute the next scheduled run time strictly after ``after``.
+
+    All datetimes are UTC-aware. ``after`` defaults to now.
+    """
+    base = (after or _now()).replace(microsecond=0)
+
+    kind = parsed["kind"]
+    if kind == "interval":
+        return base + timedelta(seconds=parsed["interval_seconds"])
+
+    if kind == "hourly":
+        mi = parsed["minute"]
+        candidate = base.replace(minute=mi, second=0, microsecond=0)
+        if candidate <= base:
+            candidate += timedelta(hours=1)
+        return candidate
+
+    if kind == "daily":
+        h, mi = parsed["hour"], parsed["minute"]
+        candidate = base.replace(hour=h, minute=mi, second=0, microsecond=0)
+        if candidate <= base:
+            candidate += timedelta(days=1)
+        return candidate
+
+    if kind == "weekly":
+        h, mi, target_wd = parsed["hour"], parsed["minute"], parsed["weekday"]
+        candidate = base.replace(hour=h, minute=mi, second=0, microsecond=0)
+        days_ahead = (target_wd - candidate.weekday()) % 7
+        candidate = candidate + timedelta(days=days_ahead)
+        if candidate <= base:
+            candidate += timedelta(days=7)
+        return candidate
+
+    if kind == "monthly":
+        h, mi, target_dom = parsed["hour"], parsed["minute"], parsed["day_of_month"]
+        # First, try this month
+        try:
+            candidate = base.replace(day=target_dom, hour=h, minute=mi, second=0, microsecond=0)
+        except ValueError:
+            # day_of_month doesn't exist this month (e.g. 31 in Feb) — skip to next valid
+            candidate = None
+        if candidate is None or candidate <= base:
+            # Walk forward month by month until we find a valid day
+            year, month = base.year, base.month
+            for _ in range(13):  # up to a year ahead — safety cap
+                month += 1
+                if month > 12:
+                    month = 1
+                    year += 1
+                try:
+                    candidate = datetime(year, month, target_dom, h, mi, 0, tzinfo=timezone.utc)
+                    if candidate > base:
+                        return candidate
+                except ValueError:
+                    continue
+        return candidate  # type: ignore[return-value]
+
+    raise ValueError(f"Unknown schedule kind: {kind}")
+
+
+# === Job CRUD ===
+
+def add(
+    *,
+    name: str,
+    schedule: str,
+    project_code: str,
+    objective: str,
+    description: str = "",
+    priority: int = 5,
+    enabled: bool = True,
+) -> dict:
+    """Add a cron job. Computes initial next_run from schedule. Raises
+    ``ValueError`` if schedule doesn't parse."""
+    parsed = parse_schedule(schedule)
+    if parsed is None:
+        raise ValueError(f"Could not parse schedule: {schedule!r}")
+    nxt = compute_next_run(parsed)
+    job = {
+        "id": _new_id(),
+        "name": name,
+        "description": description,
+        "schedule": schedule,
+        "project_code": project_code.upper(),
+        "objective": objective,
+        "priority": priority,
+        "enabled": enabled,
+        "created": _now_iso(),
+        "next_run": nxt.isoformat(timespec="seconds"),
+        "last_run": None,
+        "last_status": None,
+    }
+    with _cron_lock:
+        jobs = _load()
+        jobs.append(job)
+        _save(jobs)
+    return job
+
+
+def get(job_id: str) -> Optional[dict]:
+    for j in _load():
+        if j.get("id") == job_id:
+            return j
+    return None
+
+
+def list_jobs(*, enabled_only: bool = False, project_code: Optional[str] = None) -> list[dict]:
+    jobs = _load()
+    if enabled_only:
+        jobs = [j for j in jobs if j.get("enabled")]
+    if project_code:
+        jobs = [j for j in jobs if j.get("project_code") == project_code.upper()]
+    return jobs
+
+
+def update(job_id: str, **fields) -> Optional[dict]:
+    with _cron_lock:
+        jobs = _load()
+        for j in jobs:
+            if j.get("id") == job_id:
+                # If schedule changes, recompute next_run.
+                if "schedule" in fields:
+                    parsed = parse_schedule(fields["schedule"])
+                    if parsed is None:
+                        raise ValueError(f"Could not parse schedule: {fields['schedule']!r}")
+                    fields["next_run"] = compute_next_run(parsed).isoformat(timespec="seconds")
+                j.update(fields)
+                _save(jobs)
+                return j
+        return None
+
+
+def remove(job_id: str) -> bool:
+    with _cron_lock:
+        jobs = _load()
+        before = len(jobs)
+        jobs = [j for j in jobs if j.get("id") != job_id]
+        if len(jobs) == before:
+            return False
+        _save(jobs)
+        return True
+
+
+def enable(job_id: str) -> bool:
+    return update(job_id, enabled=True) is not None
+
+
+def disable(job_id: str) -> bool:
+    return update(job_id, enabled=False) is not None
+
+
+# === Due-job dispatch (called by daemon in slice 8) ===
+
+def check_due(*, now: Optional[datetime] = None) -> list[dict]:
+    """Return all enabled jobs whose ``next_run`` <= now."""
+    now = now or _now()
+    out: list[dict] = []
+    for j in _load():
+        if not j.get("enabled"):
+            continue
+        nr = j.get("next_run")
+        if not nr:
+            continue
+        try:
+            nrt = datetime.fromisoformat(nr)
+        except (ValueError, TypeError):
+            logger.warning("Cron job %s: unparseable next_run=%r", j.get("id"), nr)
+            continue
+        if nrt <= now:
+            out.append(j)
+    return out
+
+
+def dispatch_due(*, now: Optional[datetime] = None) -> list[dict]:
+    """For each due job, add a heartbeat task and advance its next_run.
+
+    Returns the list of jobs that were dispatched. Idempotent under
+    concurrent calls thanks to the cron + heartbeat locks.
+    """
+    now = now or _now()
+    fired: list[dict] = []
+    for job in check_due(now=now):
+        try:
+            heartbeat.add_task(
+                description=f"cron:{job.get('name', job.get('id'))}",
+                project_code=job["project_code"],
+                objective=job["objective"],
+                priority=job.get("priority", 5),
+                tags=["cron", job.get("name", "")],
+            )
+        except Exception as e:
+            logger.exception("Cron job %s: heartbeat add_task failed", job.get("id"))
+            update(job["id"], last_run=now.isoformat(timespec="seconds"), last_status=f"error:{e}")
+            continue
+        # Advance next_run regardless — a failed dispatch shouldn't pin us at the same minute forever
+        parsed = parse_schedule(job["schedule"])
+        if parsed is not None:
+            new_next = compute_next_run(parsed, after=now)
+            update(job["id"], last_run=now.isoformat(timespec="seconds"), last_status="ok", next_run=new_next.isoformat(timespec="seconds"))
+        fired.append(job)
+    return fired
+
+
+def run_now(job_id: str) -> Optional[dict]:
+    """Manually trigger a job — adds a heartbeat task immediately, does
+    NOT advance next_run (the regular schedule still fires on time)."""
+    job = get(job_id)
+    if job is None:
+        return None
+    try:
+        heartbeat.add_task(
+            description=f"cron:{job.get('name', job_id)} (manual)",
+            project_code=job["project_code"],
+            objective=job["objective"],
+            priority=job.get("priority", 5),
+            tags=["cron", "manual", job.get("name", "")],
+        )
+    except Exception as e:
+        update(job_id, last_run=_now_iso(), last_status=f"error:{e}")
+        return None
+    update(job_id, last_run=_now_iso(), last_status="ok-manual")
+    return get(job_id)
+
+
+__all__ = [
+    "add",
+    "get",
+    "list_jobs",
+    "update",
+    "remove",
+    "enable",
+    "disable",
+    "parse_schedule",
+    "compute_next_run",
+    "check_due",
+    "dispatch_due",
+    "run_now",
+]

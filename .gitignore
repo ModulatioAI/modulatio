@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.ruff_cache/
+.runs/
+scripts/smoke/*/.vault/
+*.db
+*.sqlite
+*.sqlite3
+/dist/
+build/
+# mkdocs build output — regenerable, not source-of-truth.
+site/
+# docs/dist/ holds the bundled DOCX + PDF that ship with releases —
+# explicitly NOT ignored. The /dist/ rule above is anchored to repo root
+# so Python build artifacts there don't conflict with this.
+.DS_Store
+scripts/eval/*/.vault/

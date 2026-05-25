@@ -1,0 +1,86 @@
+[project]
+name = "modulatio"
+version = "0.1.0"
+description = "Multi-model agent framework with plan-mode orchestration, integrated TUI, and team-state working memory."
+requires-python = ">=3.12"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+keywords = ["agents", "llm", "orchestration", "multi-agent", "tui", "plan-mode"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+
+# Trimmed dependency surface — keep only what's actually imported in src/
+# and tests/. The FastAPI / uvicorn / sqlmodel reservations that existed
+# during earlier engine development have been dropped; if/when an HTTP
+# surface or SQL-backed plan store ships, those deps come back as opt-in
+# extras rather than baseline requirements. Smaller install surface +
+# fewer CVE vectors.
+dependencies = [
+    "pydantic>=2.8",
+    "textual>=0.80",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "litellm>=1.50",
+    # Embedding-fallback routing (MiniLM via fastembed + LanceDB for the
+    # agent-skill index). Routing embedder is decoupled from any
+    # memory/knowledge stack.
+    "fastembed>=0.3",
+    "lancedb>=0.13",
+    # Memory layer: team_memory uses pyarrow schemas for the LanceDB
+    # index (same pattern as qc_history).
+    "pyarrow>=15.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ModulatioAI/modulatio"
+Repository = "https://github.com/ModulatioAI/modulatio"
+Issues = "https://github.com/ModulatioAI/modulatio/issues"
+Changelog = "https://github.com/ModulatioAI/modulatio/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+# `[export]` bundles a pandoc binary via pypandoc_binary so DOCX/PDF
+# export works without a system pandoc install. modulatio/export.py
+# still falls through to system pandoc when this extra isn't present,
+# so either path works.
+export = [
+    "pypandoc_binary>=1.13",
+]
+
+[project.scripts]
+modulatio = "modulatio.cli:main"
+# `modulatio-api` (FastAPI server entry point for a future web dashboard)
+# is intentionally NOT declared until the underlying module ships. A
+# console script that ImportErrors on launch is worse than no script.
+modulatio-tui = "modulatio.tui:run"
+modulatio-standards = "modulatio.cli_standards:main"
+modulatio-memory = "modulatio.cli_memory:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/modulatio"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

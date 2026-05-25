@@ -1,0 +1,87 @@
+# Changelog
+
+All notable changes to Modulatio are documented here. Format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
+follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] — 2026-05-25
+
+Initial release. The engine matured pre-1.0 under a prior name; **v0.1.0 is
+the first release under the Modulatio name.** The prior repository is being
+retired as Modulatio replaces it.
+
+### Engine
+
+- **Five-layer working-memory architecture** for context-bound work. Tool-loop
+  summarization (Layer 1), context-window budget gate with checkpoint-on-overflow
+  (Layer 2), repo_map symbol-aware code digest for Python repos (Layer 3),
+  team-state continuity between sub-objectives (Layer 4), terse-prose templates
+  across every agent prompt (Layer 5).
+- **Producer-collapse / skills-first** model. No fixed role identities; agents
+  are producers-with-skills, tasks are skill-routed to whichever producer holds
+  the matching skill. Three structural seats remain (Leader plans + decides,
+  producers do the work, QC verifies).
+- **QC-as-fixer (ON by default).** When a producer can't clear the bar after
+  exhausting retries, QC patches the artifact from its own findings and the
+  task completes — flagged `qc_authored_fix` for transparency. Opt out with
+  `MODULATIO_QC_FIXER=0`.
+- **Concurrent-wave path** with per-task artifact staging and a deterministic
+  main-thread merge.
+- **Provider thinking on/off control** via per-preset `default_params` so
+  reasoning-toggle producers can run non-thinking.
+- **Three-tier over-scope gate** — plan-time clarifying question for ambiguous
+  size, planner hard cap of 6 tasks per sub-objective, and a 70% soft-warn
+  band below the compression band.
+- **Context-budget exhaustion route** that opens a CRITICAL ticket carrying
+  the conversation checkpoint and routes Leader-reflect to `revise-major`.
+
+### Subsystems
+
+- **17 seed skills** covering Leader-tier planning, planning, producer modes
+  (GENERATE / EDIT / DIFF), QC verification, long-form / consolidation /
+  continuity-check for multi-piece deliverables.
+- **Provider-agnostic model routing.** Anthropic, xAI (Grok), OpenAI,
+  OpenRouter, Ollama, LM Studio supported out of the box. Per-agent fallback
+  chains, OAuth refresh for Pro/Max tokens, `cli_subprocess` auth path for
+  Claude CLI.
+- **Three-layer TQM standards** — universal axes × per-artifact-kind × per-team
+  overrides — managed via `modulatio-standards` CLI or the TUI Standards panel.
+- **Multi-user host hardening.** Checkpoint files, raw tool results, and
+  per-task tool transcripts all written at `0o600`. Bubblewrap sandbox for
+  tool execution when available; allowlist + path-safety + no-shell layers
+  always applied.
+
+### CLI + UI
+
+- `modulatio` CLI with `setup`, `kickoff`, `doctor`, `models`, `auth`,
+  `cron`, `heartbeat`, `daemon`, `telegram`, `project`, `import`, `export`
+  subcommands.
+- `modulatio-tui` Textual-based TUI with Plans tab, Tickets tab, Standards
+  panel, roster panel, slash commands.
+- `modulatio-standards` and `modulatio-memory` for managing TQM standards
+  and per-agent / team-shared memory stores.
+- `modulatio doctor` engine-calibration banner that surfaces what the engine
+  is and isn't sized for on first contact.
+
+### Calibrated honesty
+
+This release ships *with* its known limitations rather than discovering them
+mid-run. See the [v0.1.0 Beta calibration page](https://modulatio.ai/v0-1-0-beta/)
+for the full contract — production-scale multi-phase work, multi-language
+symbol awareness beyond Python, build/test feedback loops, and persona
+continuity across long-running deployments are explicitly NOT yet supported
+and on the roadmap rather than silently broken.
+
+### Requirements
+
+- Python 3.12+
+- An Obsidian vault (or any writable directory) for the working store
+- At least one provider configured during the setup wizard
+
+### Links
+
+- Docs: https://modulatio.ai
+- Repository: https://github.com/ModulatioAI/modulatio
+- License: AGPL-3.0-or-later

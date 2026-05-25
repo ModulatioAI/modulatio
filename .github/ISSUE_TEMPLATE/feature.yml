@@ -1,0 +1,58 @@
+name: Feature / enhancement
+description: Propose a new capability or an improvement to an existing one.
+title: "[feature]: "
+labels: ["enhancement", "status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an enhancement. The fields below help the
+        maintainer evaluate fit and avoid scope drift.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component this would touch
+      options:
+        - engine
+        - cli
+        - tui
+        - wizard
+        - providers
+        - standards
+        - packaging
+        - documentation
+        - cross-cutting / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What problem does this solve? What workflow does it enable?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+      description: Sketch how it would look — CLI shape, config keys, behavior, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you weighed and why this one is preferred.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+    validations:
+      required: false

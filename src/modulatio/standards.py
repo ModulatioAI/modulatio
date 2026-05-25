@@ -1,0 +1,173 @@
+"""Standards loader — the Research-First pattern applied to quality rules.
+
+Standards files live in two locations, searched in order:
+
+1. **Shared defaults** at ``<shared_resources_path>/standards/<domain>.md``
+   — baseline rules for an artifact class (application, code, marketing, research, wordpress…).
+2. **Per-project overrides** at ``<project_vault>/standards/<domain>.md`` —
+   rules specific to one project, stacked on top of the shared defaults.
+
+Both producers and QC read the relevant standards so producers know what
+"good" looks like and QC knows what to enforce. When both exist, the
+loader returns the shared body first, then a labeled "Project-specific
+overrides" section containing the project-local body — the reasoner reads
+the baseline before the overrides.
+
+Frontmatter carries Research-First metadata (``freshness_class``,
+``last_verified_at``) — exposed via :func:`load_with_metadata` so downstream
+code can reason about whether the standards are current without Modulatio
+needing to autonomously refresh them. Standards are human-curated; the
+freshness signal is for humans and for QC to weigh.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from modulatio import config
+from modulatio.vault import project_dir
+
+_STANDARDS_ROOT = config.get_shared_resources_path() / "standards"
+
+_OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class StandardsEntry:
+    """A loaded standards artifact, body + Research-First metadata.
+
+    ``body`` is the combined markdown ready for prompt injection, with each
+    source file's own YAML frontmatter stripped. ``sources`` lists the
+    filesystem paths that contributed, in application order (shared, then
+    project-local). ``freshness_class`` and ``last_verified_at`` are pulled
+    from frontmatter; when both sources supply them, the project-local
+    values win — that is the artifact that actually shipped.
+
+    ``required_capabilities`` is the domain-level capability floor
+    (slice #9b follow-on) — capabilities that any agent executing a
+    task of this artifact_kind must hold, independent of task-level
+    or skill-level floors. Unioned across shared + project-local
+    (either layer can tighten, neither can loosen).
+    """
+
+    body: str
+    freshness_class: str | None
+    last_verified_at: str | None
+    sources: tuple[str, ...]
+    required_capabilities: tuple[str, ...] = ()
+
+
+_EMPTY_ENTRY = StandardsEntry(
+    body="", freshness_class=None, last_verified_at=None, sources=(),
+    required_capabilities=(),
+)
+
+
+def _parse_file(path: Path) -> tuple[dict[str, str], str]:
+    """Split a standards file into (metadata, body).
+
+    Frontmatter is parsed as simple ``key: value`` lines (no nested YAML
+    structures are used in standards files). Body has the frontmatter block
+    removed and leading whitespace trimmed for tidy prompt injection.
+    """
+    raw = path.read_text()
+    m = _OWN_FRONTMATTER_RE.match(raw)
+    if not m:
+        return {}, raw.lstrip()
+    meta: dict[str, str] = {}
+    for line in m.group(1).splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            meta[k.strip()] = v.strip()
+    return meta, raw[m.end():].lstrip()
+
+
+def load_with_metadata(domain: str, project_code: str | None = None) -> StandardsEntry:
+    """Load standards for a domain, stacking project-local over shared.
+
+    Returns an empty entry (rather than raising) when nothing is found —
+    standards are additive leverage, not required infrastructure.
+    """
+    shared_path = _STANDARDS_ROOT / f"{domain}.md"
+    project_path = (
+        project_dir(project_code) / "standards" / f"{domain}.md"
+        if project_code is not None
+        else None
+    )
+
+    shared_meta: dict[str, str] = {}
+    shared_body = ""
+    project_meta: dict[str, str] = {}
+    project_body = ""
+    sources: list[str] = []
+
+    if shared_path.exists():
+        shared_meta, shared_body = _parse_file(shared_path)
+        sources.append(str(shared_path))
+    if project_path is not None and project_path.exists():
+        project_meta, project_body = _parse_file(project_path)
+        sources.append(str(project_path))
+
+    if not sources:
+        return _EMPTY_ENTRY
+
+    if shared_body and project_body:
+        body = (
+            f"{shared_body.rstrip()}\n\n"
+            "## Project-specific overrides\n\n"
+            f"{project_body}"
+        )
+    else:
+        body = project_body or shared_body
+
+    # Project-local metadata wins when present — that artifact is what
+    # actually shipped for this project.
+    freshness = project_meta.get("freshness_class") or shared_meta.get("freshness_class")
+    last_verified = project_meta.get("last_verified_at") or shared_meta.get("last_verified_at")
+
+    # Slice #9b follow-on: domain-level capability floor. Unioned
+    # across shared + project-local (either layer can tighten, neither
+    # can loosen). Order-preserving dedup so fixtures and audit trails
+    # stay stable across runs.
+    shared_caps = _parse_capability_csv(shared_meta.get("required_capabilities", ""))
+    project_caps = _parse_capability_csv(project_meta.get("required_capabilities", ""))
+    seen: set[str] = set()
+    required_caps: list[str] = []
+    for cap in shared_caps + project_caps:
+        if cap and cap not in seen:
+            required_caps.append(cap)
+            seen.add(cap)
+
+    return StandardsEntry(
+        body=body,
+        freshness_class=freshness,
+        last_verified_at=last_verified,
+        sources=tuple(sources),
+        required_capabilities=tuple(required_caps),
+    )
+
+
+def _parse_capability_csv(raw: str) -> list[str]:
+    """Parse a ``required_capabilities`` frontmatter value (comma-
+    separated, bracketed or bare) into a list of capability tags."""
+    s = raw.strip()
+    if not s:
+        return []
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1]
+    return [p.strip() for p in s.split(",") if p.strip()]
+
+
+def load(domain: str, project_code: str | None = None) -> str:
+    """Return the standards markdown body for a domain.
+
+    Backward-compatible string-returning wrapper around
+    :func:`load_with_metadata`. Callers that only need the body keep a plain
+    string interface; callers that care about freshness use the entry form.
+    """
+    return load_with_metadata(domain, project_code).body
+
+
+__all__ = ["StandardsEntry", "load", "load_with_metadata"]

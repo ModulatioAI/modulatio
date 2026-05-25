@@ -1,0 +1,113 @@
+name: Regression report
+description: Worked in a prior version, broken now.
+title: "[regression]: "
+labels: ["bug", "regression", "status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template only when the same workflow worked in a prior
+        Modulatio version and now fails. For brand-new bugs use the
+        regular **Bug report** template instead.
+
+  - type: input
+    id: current-version
+    attributes:
+      label: Current (broken) version
+      placeholder: e.g. 2.0.1
+    validations:
+      required: true
+
+  - type: input
+    id: last-good-version
+    attributes:
+      label: Last known good version
+      description: Most recent version where this workflow still worked. If you bisected, give the exact tag.
+      placeholder: e.g. 2.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: e.g. 3.12.3
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / platform
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - critical
+        - high
+        - medium
+        - low
+      default: 1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - engine
+        - cli
+        - tui
+        - wizard
+        - providers
+        - standards
+        - packaging
+        - documentation
+        - other / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Sequence that worked in the last-good version and now fails.
+    validations:
+      required: true
+
+  - type: textarea
+    id: working-output
+    attributes:
+      label: Output on the last-good version
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: broken-output
+    attributes:
+      label: Output on the current (broken) version
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / crash report
+      description: Paste from `~/.config/modulatio/crashes/` or `~/.config/modulatio/daemon.log` if relevant.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+    validations:
+      required: false

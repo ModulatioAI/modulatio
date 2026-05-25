@@ -1,0 +1,537 @@
+"""Tests for the Agent roster (slice #6a foundation).
+
+Agents are per-project compositions: an agent holds a set of skills,
+runs on a specific model, and carries routing metadata (model_tier,
+cost_class, capability_tags, capacity_cap) that slice #6c will consume
+for dispatch.
+
+Persisted at ``<project_vault>/agents/<agent_id>.md`` — no shared layer
+in #6a (teams compose their own rosters; template presets for the five
+common roles are a slice #6b-or-later addition).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from modulatio import config, roster, vault
+
+PROJECT_CODE = "TST"
+
+
+@pytest.fixture(autouse=True)
+def isolate_config(tmp_path: Path, monkeypatch) -> None:
+    """Keep config writes (defaults.json, team_template.json) out of the
+    real ``~/.config/modulatio/``. Without this, a wizard-written
+    team_template.json on the developer's box hijacks ``seed_default_roster``
+    away from its hardcoded fallback and breaks the default-roster tests."""
+    cfg = tmp_path / "config-isolation"
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg)
+    monkeypatch.setattr(config, "DEFAULTS_FILE", cfg / "defaults.json")
+    monkeypatch.setattr(config, "TEAM_TEMPLATE_FILE", cfg / "team_template.json")
+    monkeypatch.setattr(config, "AUTH_ALERTS_FILE", cfg / "auth_alerts.json")
+    config.reload()
+
+
+@pytest.fixture
+def project_vault(tmp_path: Path, monkeypatch) -> Path:
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(PROJECT_CODE, "Test", "test")
+    return tmp_path / PROJECT_CODE.lower()
+
+
+# ── save / load round-trip ──────────────────────────────────────────────────
+
+def test_agent_save_round_trip_preserves_all_routing_fields(project_vault):
+    original = roster.Agent(
+        id="tuned-specialist",
+        name="Tuned Specialist",
+        identity=(
+            "Producer tuned for a specific house voice. "
+            "Strong on argument-by-example and historical framing."
+        ),
+        skills=["drafter", "contrarian-argument", "house-style"],
+        model="ollama_chat/glm-5.1",
+        model_tier="reasoning-heavy",
+        cost_class="paid-cloud",
+        capability_tags=["writing", "contrarian", "house-style"],
+        capacity_cap=2,
+        template_origin="drafter",
+        freshness_class="semi-stable",
+        last_verified_at="2026-04-20",
+    )
+    roster.save(original, project_code=PROJECT_CODE)
+
+    loaded = roster.load("tuned-specialist", project_code=PROJECT_CODE)
+    assert loaded is not None
+    assert loaded.id == original.id
+    assert loaded.name == original.name
+    assert loaded.identity.strip() == original.identity.strip()
+    assert loaded.skills == original.skills
+    assert loaded.model == original.model
+    assert loaded.model_tier == original.model_tier
+    assert loaded.cost_class == original.cost_class
+    assert loaded.capability_tags == original.capability_tags
+    assert loaded.capacity_cap == original.capacity_cap
+    assert loaded.template_origin == original.template_origin
+    assert loaded.freshness_class == original.freshness_class
+    assert loaded.last_verified_at == original.last_verified_at
+
+
+def test_agent_save_writes_under_project_agents_dir(project_vault):
+    roster.save(
+        roster.Agent(
+            id="drafter",
+            name="Default Drafter",
+            identity="Generic drafter.",
+            skills=["drafter"],
+            model=None,
+            model_tier="generalist",
+            cost_class="paid-cloud",
+        ),
+        project_code=PROJECT_CODE,
+    )
+    path = project_vault / "agents" / "drafter.md"
+    assert path.exists()
+
+
+# ── load missing ────────────────────────────────────────────────────────────
+
+def test_load_missing_agent_returns_none(project_vault):
+    assert roster.load("no-such-agent", project_code=PROJECT_CODE) is None
+
+
+# ── list ────────────────────────────────────────────────────────────────────
+
+def test_list_agents_returns_sorted_by_id(project_vault):
+    for aid in ("qc", "drafter", "researcher", "coordinator", "leader"):
+        roster.save(
+            roster.Agent(
+                id=aid,
+                name=aid.capitalize(),
+                identity=f"{aid} identity",
+                skills=[aid],
+                model=None,
+                model_tier="generalist",
+                cost_class="paid-cloud",
+            ),
+            project_code=PROJECT_CODE,
+        )
+    agents = roster.list_agents(project_code=PROJECT_CODE)
+    assert [a.id for a in agents] == ["coordinator", "drafter", "leader", "qc", "researcher"]
+
+
+def test_list_agents_empty_when_project_has_no_roster(project_vault):
+    assert roster.list_agents(project_code=PROJECT_CODE) == []
+
+
+# ── routing-surface helpers ────────────────────────────────────────────────
+
+def test_agent_has_skill_checks_skill_membership():
+    """Convenience helper used by slice #6c dispatch — quickly tests
+    whether an agent can cover a required skill."""
+    agent = roster.Agent(
+        id="drafter",
+        name="Drafter",
+        identity="x",
+        skills=["drafter", "markdown"],
+        model=None,
+        model_tier="generalist",
+        cost_class="paid-cloud",
+    )
+    assert agent.has_skill("drafter") is True
+    assert agent.has_skill("markdown") is True
+    assert agent.has_skill("wp-cli-admin") is False
+
+
+# ── Agent.tier (slice #6f-F) ───────────────────────────────────────────────
+
+def test_agent_default_tier_is_producer():
+    """New rosters default to producer tier — the most common case. Explicit
+    'leader'/'coordinator'/'qc' declarations are opt-in. Back-compat for
+    existing agents predating the field."""
+    agent = roster.Agent(
+        id="x",
+        name="x",
+        identity="",
+        skills=["drafter"],
+    )
+    assert agent.tier == "producer"
+
+
+def test_agent_tier_round_trip_through_save_load(project_vault):
+    """Tier persists through save/load so routing decisions stay stable
+    across orchestrator runs."""
+    roster.save(
+        roster.Agent(
+            id="qc-kimi",
+            name="QC Kimi",
+            identity="verifier.",
+            skills=["qc"],
+            tier="qc",
+            model="ollama_chat/kimi-k2.5:latest",
+            model_tier="reasoning-heavy",
+            cost_class="premium-cloud",
+        ),
+        project_code=PROJECT_CODE,
+    )
+    loaded = roster.load("qc-kimi", project_code=PROJECT_CODE)
+    assert loaded is not None
+    assert loaded.tier == "qc"
+
+
+def test_agent_covers_required_skills_all_or_nothing():
+    """The dispatch predicate: agent covers the task when it holds every
+    skill the task requires. Missing any single required skill → not a
+    candidate (Leader opens a capability ticket in slice #6d)."""
+    agent = roster.Agent(
+        id="drafter",
+        name="Drafter",
+        identity="x",
+        skills=["drafter", "markdown"],
+        model=None,
+        model_tier="generalist",
+        cost_class="paid-cloud",
+    )
+    assert agent.covers(["drafter"]) is True
+    assert agent.covers(["drafter", "markdown"]) is True
+    assert agent.covers(["drafter", "wp-cli-admin"]) is False
+    assert agent.covers([]) is True  # vacuously
+
+
+# ── capability tag predicate (slice #9a) ───────────────────────────────────
+
+def test_agent_covers_capabilities_all_or_nothing():
+    """The capability-filter analogue of ``covers``. Agent covers the
+    requirement iff every required capability tag is in the agent's
+    declared ``capability_tags``. Missing any → not a candidate.
+
+    Capabilities are the fine-grained attribute axis (reasoning-heavy,
+    structured-output, shell-access) that #9a uses as a hard dispatch
+    filter on top of skill cover. Skills name WHAT the agent does;
+    capabilities name HOW it does it.
+    """
+    agent = roster.Agent(
+        id="a",
+        name="A",
+        identity="x",
+        skills=["producer"],
+        capability_tags=["reasoning-heavy", "long-context"],
+    )
+    assert agent.covers_capabilities(["reasoning-heavy"]) is True
+    assert agent.covers_capabilities(["reasoning-heavy", "long-context"]) is True
+    assert agent.covers_capabilities(["reasoning-heavy", "shell-access"]) is False
+    assert agent.covers_capabilities([]) is True  # vacuous — no constraint
+
+
+# ── default roster seed (slice #11c) ───────────────────────────────────────
+
+_DEFAULT_ROSTER_IDS = {"leader", "producer", "qc", "researcher"}
+
+
+def test_seed_default_roster_writes_four_agents_with_expected_shape(project_vault):
+    """Skills-first (#143): a net-new project seeds four agents — Leader +
+    QC structural roles plus producer + researcher skill-holders. No
+    coordinator agent (the role was removed engine-side in; the
+    planner runner uses the Leader's model). Each agent's model binds to
+    its CLI model flag; template-origin marks it as seeded."""
+    written = roster.seed_default_roster(
+        PROJECT_CODE,
+        leader_model="ld/m",
+        coordinator_model="cd/m",  # accepted for back-compat; no longer seeds an agent
+        specialist_model="sp/m",
+        qc_model="qc/m",
+        researcher_model="rs/m",
+    )
+    assert {a.id for a in written} == _DEFAULT_ROSTER_IDS
+    by_id = {a.id: a for a in written}
+
+    assert "coordinator" not in by_id  # role removed for skills-first
+
+    assert by_id["leader"].model == "ld/m"
+    assert by_id["leader"].tier == "leader"
+    assert sorted(by_id["leader"].skills) == [
+        "leader", "leader-plan", "leader-plan-approve",
+        "leader-reflect", "leader-verify",
+    ]
+
+    assert by_id["producer"].model == "sp/m"
+    assert by_id["producer"].tier == "producer"
+
+    assert by_id["qc"].model == "qc/m"
+    assert by_id["qc"].tier == "qc"
+
+    assert by_id["researcher"].model == "rs/m"
+    # Researcher sits in the producer tier structurally — it isn't QC
+    # and isn't a strategic singleton. Its skill's model_tier
+    # ("tool-using") lives on Agent.model_tier, not Agent.tier.
+    assert by_id["researcher"].tier == "producer"
+
+    for agent in written:
+        assert agent.template_origin == "default-roster"
+
+    # Persisted to disk — list_agents round-trips.
+    loaded = {a.id: a for a in roster.list_agents(PROJECT_CODE)}
+    assert set(loaded) == _DEFAULT_ROSTER_IDS
+
+
+def test_seed_default_roster_capability_union_covers_skill_requirements(
+    project_vault, monkeypatch,
+):
+    """Capability tags are the union of every held skill's
+    ``capability_tags`` AND ``required_capabilities``. That's what makes
+    the seeded roster dispatchable by construction — any task the
+    Coordinator emits citing a capability tag a held skill advertises
+    resolves to the seeded agent, no `ROSTER_GAP` ticket.
+
+    Uses the shared skill definitions at the v1-era location until the
+    setup wizard (slice 3) migrates them into the configured shared
+    resources path. Reads the current shared set rather than asserting
+    a frozen tag list, so shared skill updates don't drift this test
+    out of alignment silently.
+    """
+    import pytest
+    from pathlib import Path
+    from modulatio import skills as skills_mod
+
+    # Slice 1 (config foundations): the seeded shared skills live at the
+    # v1-era Obsidian path until the setup wizard migrates them. Locate
+    # them and monkeypatch _SKILLS_ROOT, or skip if not found (CI envs
+    # without the dev vault populated).
+    legacy_skills = Path.home() / "Obsidian" / "Claude" / "projects" / "modulatio" / "skills"
+    if not (legacy_skills / "leader.md").exists():
+        pytest.skip(
+            "Shared skill fixtures not found. Run setup wizard (slice 3) or "
+            f"populate {legacy_skills}."
+        )
+    monkeypatch.setattr(skills_mod, "_SKILLS_ROOT", legacy_skills)
+
+    written = roster.seed_default_roster(
+        PROJECT_CODE,
+        leader_model="ld/m",
+        coordinator_model="cd/m",
+        specialist_model="sp/m",
+        qc_model="qc/m",
+        researcher_model="rs/m",
+    )
+    by_id = {a.id: a for a in written}
+
+    # For every seeded agent, every held skill's advertised +
+    # required capabilities must appear in agent.capability_tags.
+    for agent in written:
+        expected: set[str] = set()
+        for sname in agent.skills:
+            skill = skills_mod.load_with_metadata(sname)
+            expected.update(skill.capability_tags)
+            expected.update(skill.required_capabilities)
+        missing = expected - set(agent.capability_tags)
+        assert not missing, (
+            f"Agent '{agent.id}' missing capability tags {missing} from its "
+            f"held skills {agent.skills}"
+        )
+
+    # Concrete sample: leader holds leader + leader-verify, so it must
+    # carry tags from both skills unioned — not a subset of just one.
+    leader = by_id["leader"]
+    assert "goal-decomposition" in leader.capability_tags  # from leader skill
+    assert "goal-verification" in leader.capability_tags  # from leader-verify skill
+
+
+def test_seed_default_roster_idempotent_skips_existing_agent_files(project_vault):
+    """If an agent file already exists for a seeded id, the seed leaves
+    it alone — a human pre-seeding their own ``qc.md`` with a tuned
+    identity must not get overwritten by a subsequent kickoff. The
+    normal call site already gates on net-new projects; this defensive
+    check covers pre-existing files within the agents directory."""
+    # Pre-seed a custom qc agent.
+    custom_qc = roster.Agent(
+        id="qc",
+        name="Custom QC",
+        identity="House-tuned QC with project-specific rigor.",
+        skills=["qc"],
+        model="custom/model",
+        tier="qc",
+    )
+    roster.save(custom_qc, project_code=PROJECT_CODE)
+
+    roster.seed_default_roster(
+        PROJECT_CODE,
+        leader_model="ld/m",
+        coordinator_model="cd/m",
+        specialist_model="sp/m",
+        qc_model="qc/m",
+        researcher_model="rs/m",
+    )
+
+    reloaded = roster.load("qc", project_code=PROJECT_CODE)
+    assert reloaded is not None
+    assert reloaded.name == "Custom QC"
+    assert reloaded.identity.startswith("House-tuned QC")
+    assert reloaded.model == "custom/model"
+    # Other four agents still seeded.
+    all_ids = {a.id for a in roster.list_agents(PROJECT_CODE)}
+    assert all_ids == _DEFAULT_ROSTER_IDS
+
+
+def test_seed_default_roster_agents_dispatchable_for_their_held_skills(
+    project_vault,
+):
+    """Integration-level check that the seeded roster is actually
+    reachable via `dispatch.select_agent`. Each seeded agent must win
+    dispatch for a task that requires exactly the skill(s) it holds.
+    This is the real gap #11 closes — pre-#11 a fresh project could not
+    dispatch anything."""
+    from modulatio import dispatch
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+
+    written = roster.seed_default_roster(
+        PROJECT_CODE,
+        leader_model="ld/m",
+        coordinator_model="cd/m",
+        specialist_model="sp/m",
+        qc_model="qc/m",
+        researcher_model="rs/m",
+    )
+
+    cases = [
+        (["drafter"], "producer"),
+        (["leader"], "leader"),
+        (["qc"], "qc"),
+        (["researcher"], "researcher"),
+    ]
+    for required_skills, expected_id in cases:
+        task = Task(
+            id=f"{PROJECT_CODE}-0",
+            project_id=uuid4(),
+            goal_id=f"{PROJECT_CODE}-G-001",
+            description="x",
+            status=TaskStatus.DISPATCHED,
+            required_skills=required_skills,
+        )
+        picked = dispatch.select_agent(task, written)
+        assert picked is not None, (
+            f"No seeded agent covered required_skills={required_skills}"
+        )
+        assert picked.id == expected_id, (
+            f"Expected {expected_id} for {required_skills}, got {picked.id}"
+        )
+
+
+# ── team_template seeding (Bug 5 / wizard-defined roster) ──────────────────
+
+def test_seed_default_roster_uses_team_template_when_present(project_vault):
+    """When ~/.config/modulatio/team_template.json exists (post-wizard),
+    seed_default_roster reads from it and ignores per-role model kwargs.
+    Each agent in the template becomes a real Agent under the project."""
+    config.save_team_template([
+        {
+            "id": "leader",
+            "name": "Leader",
+            "tier": "leader",
+            "model": "team/leader-m",
+            "skills": ["leader"],
+            "capability_tags": ["strategic"],
+            "identity": "Custom leader identity",
+            "template_origin": "leader",
+        },
+        {
+            "id": "writer_a",
+            "name": "Writer A",
+            "tier": "producer",
+            "model": "team/writer-m",
+            "skills": ["drafter"],
+            "capability_tags": ["writing"],
+            "identity": "House voice writer",
+            "template_origin": "writer",
+        },
+    ])
+    config.reload()
+
+    # Per-role kwargs should be IGNORED when template is present
+    written = roster.seed_default_roster(
+        PROJECT_CODE,
+        leader_model="ignored",
+        coordinator_model="ignored",
+        specialist_model="ignored",
+        qc_model="ignored",
+        researcher_model="ignored",
+    )
+    by_id = {a.id: a for a in written}
+    assert set(by_id) == {"leader", "writer_a"}
+    assert by_id["leader"].model == "team/leader-m"
+    assert by_id["leader"].identity == "Custom leader identity"
+    assert by_id["leader"].template_origin == "leader"
+    assert by_id["writer_a"].model == "team/writer-m"
+    assert by_id["writer_a"].tier == "producer"
+
+
+def test_seed_default_roster_falls_back_to_hardcoded_when_no_template(project_vault):
+    """No team_template.json (pre-wizard or template deleted) → hardcoded
+    5-agent template seeded with per-role model kwargs. Preserves boot
+    behavior for users who haven't run the wizard."""
+    assert config.load_team_template() is None
+    written = roster.seed_default_roster(
+        PROJECT_CODE,
+        leader_model="ld/m",
+        coordinator_model="cd/m",
+        specialist_model="sp/m",
+        qc_model="qc/m",
+        researcher_model="rs/m",
+    )
+    assert {a.id for a in written} == {"leader", "producer", "qc", "researcher"}
+    by_id = {a.id: a for a in written}
+    assert by_id["leader"].model == "ld/m"
+    assert by_id["leader"].template_origin == "default-roster"
+
+
+def test_seed_from_team_template_idempotent(project_vault):
+    """Re-seeding with the same template (or any template) must NOT
+    overwrite a project's existing agent files. Same defensive contract
+    as the hardcoded path."""
+    config.save_team_template([
+        {"id": "leader", "name": "Leader", "tier": "leader", "model": "v1", "skills": ["leader"]},
+    ])
+    config.reload()
+    roster.seed_default_roster(
+        PROJECT_CODE,
+        leader_model=None, coordinator_model=None, specialist_model=None,
+        qc_model=None, researcher_model=None,
+    )
+    leader_path = project_vault / "agents" / "leader.md"
+    first_mtime = leader_path.stat().st_mtime
+
+    # Update the template — second seed should skip (file exists)
+    config.save_team_template([
+        {"id": "leader", "name": "Leader", "tier": "leader", "model": "v2", "skills": ["leader"]},
+    ])
+    config.reload()
+    roster.seed_default_roster(
+        PROJECT_CODE,
+        leader_model=None, coordinator_model=None, specialist_model=None,
+        qc_model=None, researcher_model=None,
+    )
+    # Mtime unchanged → file was not rewritten; original v1 model preserved
+    assert leader_path.stat().st_mtime == first_mtime
+    loaded = roster.load("leader", project_code=PROJECT_CODE)
+    assert loaded is not None
+    assert loaded.model == "v1"
+
+
+def test_seed_from_team_template_skips_entries_without_id(project_vault):
+    """Defensive: a malformed template entry without an ``id`` is silently
+    skipped rather than crashing the whole seed."""
+    config.save_team_template([
+        {"id": "leader", "tier": "leader", "model": "x", "skills": []},
+        {"name": "anonymous"},  # no id — skip
+        {"id": "writer", "tier": "producer", "model": "y", "skills": []},
+    ])
+    config.reload()
+    written = roster.seed_default_roster(
+        PROJECT_CODE,
+        leader_model=None, coordinator_model=None, specialist_model=None,
+        qc_model=None, researcher_model=None,
+    )
+    assert {a.id for a in written} == {"leader", "writer"}

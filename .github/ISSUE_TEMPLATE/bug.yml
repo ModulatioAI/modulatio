@@ -1,0 +1,120 @@
+name: Bug report
+description: Something is broken or behaves incorrectly.
+title: "[bug]: "
+labels: ["bug", "status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill in the form so the maintainer
+        and triage automation can route it. If Modulatio crashed and dumped
+        a log to `~/.config/modulatio/crashes/`, paste it into the **Logs**
+        field below — the log is auto-redacted for common secret-shaped
+        flags but please re-check before pasting.
+
+  - type: input
+    id: modulatio-version
+    attributes:
+      label: Modulatio version
+      description: Output of `pip show modulatio | grep Version` or the tag/SHA you installed from.
+      placeholder: e.g. 2.0.1
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: e.g. 3.12.3
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / platform
+      placeholder: e.g. Ubuntu 24.04, macOS 14.5
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: |
+        - **critical**: data loss, security, or fully unusable
+        - **high**: major feature broken or wrong
+        - **medium**: workaround exists; degraded UX
+        - **low**: cosmetic, edge case, or minor polish
+      options:
+        - critical
+        - high
+        - medium
+        - low
+      default: 2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - engine (plan execution, dispatch, daemon, runner)
+        - cli (subcommands, argparse, output)
+        - tui (terminal UI, panes, F-keys)
+        - wizard (first-run / setup)
+        - providers (LiteLLM, OAuth, model presets)
+        - standards (TQM standards, QC axes)
+        - packaging (pyproject, install, wheels)
+        - documentation
+        - other / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimum sequence of commands or actions that triggers the bug.
+      placeholder: |
+        1. Run `modulatio kickoff --code FOO`
+        2. Type "..." at the prompt
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / crash report
+      description: |
+        If Modulatio crashed, paste the contents of the most recent file
+        in `~/.config/modulatio/crashes/` here. Otherwise paste relevant
+        output from stderr or `~/.config/modulatio/daemon.log`.
+        The crash log is auto-redacted but please re-check before pasting.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Anything else that might matter — provider/model in use, plan config, recent changes, etc.
+    validations:
+      required: false
