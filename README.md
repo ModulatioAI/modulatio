@@ -67,14 +67,7 @@ Documentation lives in its own repo (the [Modulatio docs site](https://github.co
 
 ## License
 
-**[Apache License, Version 2.0](LICENSE)** (Apache-2.0).
-
-Plain-language summary (not legal advice; the LICENSE file is authoritative):
-
-- **Use it for anything** — commercial, private, modified, redistributed, embedded in a closed-source product. No copyleft obligations.
-- **Modifications can stay private OR be released under any terms you choose** — including closed-source.
-- **Patent grant included** — contributors grant a perpetual, worldwide, royalty-free patent license to use the contribution. If you sue a user over patent infringement on this code, your own grant terminates.
-- **Attribution required** — if you distribute Modulatio (modified or not), preserve the copyright notice, the LICENSE file, and any NOTICE file. If you modify a file, mark it as modified.
+[Apache License, Version 2.0](LICENSE). Relicensed from AGPL-3.0-or-later prior to v0.1.0.
 
 ---
 
