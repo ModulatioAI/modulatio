@@ -67,16 +67,14 @@ Documentation lives in its own repo (the [Modulatio docs site](https://github.co
 
 ## License
 
-**[GNU Affero General Public License v3.0 or later](LICENSE)** (AGPL-3.0-or-later).
+**[Apache License, Version 2.0](LICENSE)** (Apache-2.0).
 
 Plain-language summary (not legal advice; the LICENSE file is authoritative):
 
-- **Self-hosted private use** — Use, modify, and run Modulatio on your own machines for your own work. No obligations.
-- **Modifications stay yours, until you share** — If you fork and modify Modulatio for your own use, you can keep the changes private. Distributing modified copies (binaries, packages, source) means recipients must get the same AGPL-3.0 rights, including access to your modifications.
-- **Network use is distribution** — The "AGPL" piece, vs. the regular GPL: if you run a modified Modulatio as a service that interacts with users over a network (a hosted UI, an API, a multi-tenant deployment), you must offer those users the modified source under the same license. This is intentional — Modulatio is built to stay open even when run as infrastructure.
-- **Commercial use is allowed** — AGPL doesn't restrict commercial use; it restricts proprietary forks of network-deployed services.
-
-If you need a license that allows building closed-source derivatives or proprietary network services, contact the maintainer about commercial licensing.
+- **Use it for anything** — commercial, private, modified, redistributed, embedded in a closed-source product. No copyleft obligations.
+- **Modifications can stay private OR be released under any terms you choose** — including closed-source.
+- **Patent grant included** — contributors grant a perpetual, worldwide, royalty-free patent license to use the contribution. If you sue a user over patent infringement on this code, your own grant terminates.
+- **Attribution required** — if you distribute Modulatio (modified or not), preserve the copyright notice, the LICENSE file, and any NOTICE file. If you modify a file, mark it as modified.
 
 ---
 
@@ -84,4 +82,4 @@ If you need a license that allows building closed-source derivatives or propriet
 
 Issues and pull requests welcome at <https://github.com/ModulatioAI/modulatio>. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution guide. Three GitHub issue templates are wired (Bug report / Regression / Feature request) plus a labelset for severity / component / status / regression — file issues using the templates so the labels apply correctly.
 
-Contributions are accepted under the project's AGPL-3.0-or-later license (see [LICENSE](LICENSE)). By submitting a contribution, you affirm you have the right to do so under those terms.
+Contributions are accepted under the project's Apache-2.0 license (see [LICENSE](LICENSE)). By submitting a contribution, you affirm you have the right to do so under those terms.

@@ -84,4 +84,4 @@ and on the roadmap rather than silently broken.
 
 - Docs: https://modulatio.ai
 - Repository: https://github.com/ModulatioAI/modulatio
-- License: AGPL-3.0-or-later
+- License: Apache-2.0
