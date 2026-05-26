@@ -68,8 +68,8 @@ def confirm(state: dict) -> Any:
     print(f"    Providers:     {', '.join(state.get('configured_providers', [])) or '(none)'}")
     print(f"    Models:        {len(state.get('configured_models', []))} curated")
     print(f"    API keys:      {len(state.get('staged_api_keys', {}))} staged")
-    # ``triad_agents`` holds the structural roles — Leader + QC only now
-    # (skills-first #143; the Coordinator role was removed).
+    # ``triad_agents`` holds the structural roles — Leader + QC only
+    # (skills-first; a prior standalone planner role has been removed).
     structural = state.get("triad_agents", [])
     workers = state.get("worker_agents", [])
     derived = _derive_default_models(structural, workers)

@@ -29,11 +29,10 @@ jobs:
         run: python -c "import modulatio"
 
       - name: Lint (src + tests)
-        # V2.1 audit Wave 2 (F9): tests are now ruff-clean too. Run
-        # the lint over the whole repo on CI so a regression that
-        # re-introduces unused imports / multi-statement lines /
-        # `lambda` assigns / unused locals fails the install-smoke
-        # job.
+        # Tests are ruff-clean. Run the lint over the whole repo on CI
+        # so a regression that re-introduces unused imports /
+        # multi-statement lines / `lambda` assigns / unused locals
+        # fails the install-smoke job.
         run: ruff check src/ tests/
 
       - name: Pytest

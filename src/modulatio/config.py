@@ -1,7 +1,7 @@
-"""Modulatio v2 configuration — paths, defaults, persistence.
+"""Modulatio configuration — paths, defaults, persistence.
 
-All filesystem paths in v2 source MUST be resolved through this module.
-Hardcoded paths violate the no-hardcoded-paths principle (see
+All filesystem paths in Modulatio source MUST be resolved through this
+module. Hardcoded paths violate the no-hardcoded-paths principle (see
 `feedback_modulatio_no_hardcoded_paths.md`).
 
 Storage:
@@ -27,8 +27,8 @@ ship in source):
     }
 
 The wizard writes this file on first install based on which models
-the user registered + assigned to each role. Path fallbacks let v2
-boot without a wizard run; ``default_models`` has NO fallback —
+the user registered + assigned to each role. Path fallbacks let the
+engine boot without a wizard run; ``default_models`` has NO fallback —
 unconfigured roles return ``None`` and the orchestrator surfaces
 that explicitly rather than silently picking a model.
 """
@@ -199,7 +199,8 @@ def _expand(p: Optional[str], fallback: str) -> Path:
 def get_vault_root() -> Path:
     """Per-project vault folders live under here.
 
-    Default fallback: ~/modulatio/projects/ (Obsidian-agnostic).
+    Default fallback: ``$XDG_DATA_HOME/modulatio/projects/`` (typically
+    ``~/.local/share/modulatio/projects/`` per XDG spec). Obsidian-agnostic.
     Wizard overrides via vault_path step.
     """
     return _expand(_load_defaults().get("vault_root"), _fallback_vault_root())

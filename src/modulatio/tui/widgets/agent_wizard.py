@@ -21,7 +21,7 @@ from modulatio.roster import Agent
 # Skills-first model: a team member is a model + the skills it holds.
 # "producer" is the default — it holds work skills and the team routes
 # matching tasks to it. "leader" and "qc" are the two structural roles.
-# (The legacy "coordinator" role was removed engine-side in; it is
+# (A prior standalone "coordinator" role was removed engine-side and is
 # no longer offered here.)
 _ROLE_CHOICES: tuple[tuple[str, str], ...] = (
     ("skill-holder (holds skills, gets routed work)", "producer"),

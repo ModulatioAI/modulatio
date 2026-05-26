@@ -21,3 +21,5 @@ site/
 # so Python build artifacts there don't conflict with this.
 .DS_Store
 scripts/eval/*/.vault/
+.vault/
+scripts/smoke/*/run.log

@@ -34,8 +34,8 @@ from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
 
 
 # Skills-first: Leader (F1) + QC (F2) are the structural roles; everything
-# else is a producer (skill-holder), F3+. The legacy "coordinator" tier was
-# removed engine-side in.
+# else is a producer (skill-holder), F3+. A prior "coordinator" tier was
+# removed engine-side and no longer appears in this order.
 _TIER_ORDER = ("leader", "qc")
 
 

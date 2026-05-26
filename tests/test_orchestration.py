@@ -81,7 +81,7 @@ def _leader_with_verdict(verdict: str):
     return _stub
 
 
-def _coordinator_stub(prompt: str) -> str:
+def _planner_stub(prompt: str) -> str:
     tasks = [
         {
             "description": f"Draft essay {i}",
@@ -120,7 +120,7 @@ def _qc_stub(prompt: str) -> str:
 def test_orchestrator_runs_end_to_end(project: Project):
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -161,7 +161,7 @@ def test_orchestrator_marks_task_rejected_when_qc_fails(project: Project, monkey
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_reject,
     }
@@ -297,7 +297,7 @@ def test_drafter_prompt_includes_design_intent_block(project: Project, tmp_path,
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_capturing,
         "qc": _qc_stub,
     }
@@ -360,7 +360,7 @@ def test_drafter_prompt_includes_team_canvas_block(project: Project, tmp_path, m
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_capturing,
         "qc": _qc_stub,
     }
@@ -389,7 +389,7 @@ def test_drafter_prompt_includes_standards_when_present(project: Project, tmp_pa
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_capturing,
         "qc": _qc_stub,
     }
@@ -516,7 +516,7 @@ def test_qc_missing_defect_type_defaults_to_generate_mode(project: Project, monk
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_reject_no_classification,
     }
@@ -1029,7 +1029,7 @@ def test_leader_disappointed_within_budget_auto_redoes_until_satisfied(project: 
 
     runners = {
         "leader": _leader_progressive,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -1067,7 +1067,7 @@ def test_leader_disappointed_exhaust_budget_opens_blocker_with_refresh_at(projec
 
     runners = {
         "leader": _leader_always_disappointed,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -1122,7 +1122,7 @@ def test_auto_resume_fires_when_refresh_at_is_in_the_past(project: Project, monk
 
     runners = {
         "leader": _leader_satisfied,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -1163,7 +1163,7 @@ def test_auto_resume_does_not_fire_when_refresh_at_is_in_the_future(project: Pro
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -1943,7 +1943,7 @@ def test_leader_verify_satisfied_completes_goal_and_creates_minor_ticket(project
 
     runners = {
         "leader": _leader_with_verdict("satisfied"),
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -1973,7 +1973,7 @@ def test_leader_verify_on_the_fence_keeps_goal_in_progress_critical_ticket(proje
 
     runners = {
         "leader": _leader_with_verdict("on_the_fence"),
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -1998,7 +1998,7 @@ def test_leader_verify_disappointed_triggers_auto_redo_and_BLOCKERs_on_exhaustio
 
     runners = {
         "leader": _leader_with_verdict("disappointed"),
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -2025,7 +2025,7 @@ def test_leader_verify_writes_report_to_vault_reports_dir(project: Project):
     any markdown viewer). Report file names itself by goal id."""
     runners = {
         "leader": _leader_with_verdict("satisfied"),
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -2071,7 +2071,7 @@ def test_leader_verify_skipped_when_no_task_completed(project: Project):
 
     runners = {
         "leader": _leader_counting,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_always_fails,
         "qc": _qc_stub,
     }
@@ -2535,7 +2535,7 @@ def test_orchestrator_loads_prompt_templates_from_skill_files_when_present(
 
     runners = {
         "leader": _leader_capturing,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -2570,7 +2570,7 @@ def test_orchestrator_falls_back_to_hardcoded_prompt_when_skill_body_empty(
 
     runners = {
         "leader": _leader_capturing,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -2888,7 +2888,7 @@ def test_drafter_prompt_uses_neutral_marker_on_dispatch_fallback(project: Projec
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,  # essay-shaped, no required_skills
+        "planner": _planner_stub,  # essay-shaped, no required_skills
         "drafter": _drafter_capturing,
         "qc": _qc_stub,
     }
@@ -2939,7 +2939,7 @@ def test_coordinator_prompt_includes_available_skills_block(
 
     def _coordinator_capturing(prompt: str) -> str:
         captured["prompt"] = prompt
-        return _coordinator_stub(prompt)
+        return _planner_stub(prompt)
 
     runners = {
         "leader": _leader_stub,
@@ -2973,7 +2973,7 @@ def test_coordinator_prompt_handles_empty_registry_gracefully(project: Project, 
 
     def _coordinator_capturing(prompt: str) -> str:
         captured["prompt"] = prompt
-        return _coordinator_stub(prompt)
+        return _planner_stub(prompt)
 
     runners = {
         "leader": _leader_stub,
@@ -3257,7 +3257,7 @@ def test_drafter_prompt_uses_project_local_standards_when_present(
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_capturing,
         "qc": _qc_stub,
     }
@@ -3282,7 +3282,7 @@ def test_qc_receives_artifact_body_in_prompt(project: Project):
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_capturing,
     }
@@ -3311,7 +3311,7 @@ def test_qc_rejection_surfaces_check_and_notes_to_summary(project: Project, monk
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_reject_with_notes,
     }
@@ -3341,7 +3341,7 @@ def test_qc_retries_once_on_transient_parse_failure(project: Project):
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_flaky,
     }
@@ -3373,7 +3373,7 @@ def test_orchestrator_blocks_failing_task_but_completes_others(project: Project)
 
     runners = {
         "leader": _leader_with_verdict("on_the_fence"),
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_fails_for_task_2,
         "qc": _qc_stub,
     }
@@ -3742,7 +3742,7 @@ def test_coordinator_prompt_includes_available_capabilities_block(
 
     def _coordinator_capturing(prompt: str) -> str:
         captured["prompt"] = prompt
-        return _coordinator_stub(prompt)
+        return _planner_stub(prompt)
 
     runners = {
         "leader": _leader_stub,
@@ -3769,7 +3769,7 @@ def test_coordinator_prompt_handles_empty_capability_set_gracefully(project: Pro
 
     def _coordinator_capturing(prompt: str) -> str:
         captured["prompt"] = prompt
-        return _coordinator_stub(prompt)
+        return _planner_stub(prompt)
 
     runners = {
         "leader": _leader_stub,
@@ -4728,7 +4728,7 @@ def test_qc_proposed_team_memory_stages_proposal(project: Project):
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_with_team_mem,
     }
@@ -4756,7 +4756,7 @@ def test_qc_without_proposed_team_memory_creates_no_proposals(project: Project):
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,  # default stub — no proposed_team_memory field
     }
@@ -4781,7 +4781,7 @@ def test_qc_malformed_proposed_team_memory_does_not_fail_verdict(project: Projec
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_with_malformed,
     }
@@ -4833,7 +4833,7 @@ def test_qc_proposed_standard_persists_to_proposals_dir(project: Project):
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_with_proposal,
     }
@@ -4860,7 +4860,7 @@ def test_qc_without_proposed_standard_field_does_not_create_proposals(project: P
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,  # pre-#10 shape, no proposed_standard
     }
@@ -4890,7 +4890,7 @@ def test_qc_malformed_proposed_standard_does_not_fail_verdict(project: Project):
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_with_bad_proposal,
     }
@@ -5289,7 +5289,7 @@ def test_qc_without_tools_skill_uses_simple_path(
     the simple ``qc`` role-keyed runner handles everything."""
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -5622,7 +5622,7 @@ def test_leader_verify_routes_through_chat_loop_when_skill_has_tool_loadout(
 
     runners = {
         "leader": _leader_counting,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -5650,7 +5650,7 @@ def test_leader_verify_falls_back_to_simple_path_when_no_tool_skill(
     via ``self._run('leader', prompt)`` — no chat_runner needed."""
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -5705,7 +5705,7 @@ def test_leader_verify_writes_transcript_sidecar(
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -5740,7 +5740,7 @@ def test_leader_verify_tool_loadout_skill_helper_returns_none_when_no_skill(
     the legacy single-shot path remains the default."""
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -5769,7 +5769,7 @@ def test_leader_verify_tool_loadout_skill_helper_returns_none_for_empty_loadout(
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -5835,7 +5835,7 @@ def test_plan_tasks_within_cap_passes(project: Project):
     → 1, 2, or 3-task plans all valid."""
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,  # emits 3 tasks (drafter default)
+        "planner": _planner_stub,  # emits 3 tasks (drafter default)
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -6008,7 +6008,7 @@ def test_qc_environmental_defect_blocks_task_without_retry(
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,  # 3 tasks
+        "planner": _planner_stub,  # 3 tasks
         "drafter": _drafter_counting,
         "qc": _qc_environmental,
     }
@@ -6057,7 +6057,7 @@ def test_qc_environmental_defect_recorded_in_qc_history(
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_env,
     }
@@ -6732,7 +6732,7 @@ def test_dispatch_abort_settles_graceful_terminal_not_blocked(project: Project):
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -6830,7 +6830,7 @@ def _qcfix_orch(project):
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": lambda p: "PATCHED ARTIFACT BODY, corrected and on-contract.",
     }
@@ -6932,7 +6932,7 @@ def test_breaker_trips_in_diff_mode(project, monkeypatch):
     storm = "the beacon sink will not converge and so " * 40  # degenerate loop
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": lambda p: storm,
         "qc": _qc_stub,
     }
@@ -6959,7 +6959,7 @@ def test_breaker_diff_sidecars_no_false_no_commit(project, monkeypatch):
     )
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": lambda p: diff,
         "qc": _qc_stub,
     }

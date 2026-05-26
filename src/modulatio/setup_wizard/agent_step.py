@@ -4,8 +4,8 @@ The user first chooses WHAT THE TEAM SHOULD BE ABLE TO DO (skills) and a
 model to power them; skills sharing a model collapse into one producer
 (skill-holder). Then the two structural roles are bound:
 - Producers (skill-holders) come first — the primary act of forming a team.
-- Structural roles: Leader (plans + decides) and QC (verifier). The legacy
-  Coordinator role was removed engine-side in — planning is the
+- Structural roles: Leader (plans + decides) and QC (verifier). A prior
+  standalone planner role was removed engine-side; planning is now the
   Leader's job.
 - Floor: Leader + QC + at least one skill-holder = 3; soft cap 10.
 """
@@ -215,9 +215,10 @@ def _provision_triad(state: dict, default_models: dict[str, str]) -> Any:
     Skills-first (#143): these are the only two structural roles. The
     Leader is the one deliberative seat (it also drives task planning);
     QC is the verifier. Everything else is a producer/skill-holder,
-    provisioned in the skills step. (The legacy Coordinator role was
-    removed engine-side in.) The state key stays ``triad_agents``
-    for back-compat with finalize; it now holds the [leader, qc] pair.
+    provisioned in the skills step. (A prior standalone planner role
+    was removed engine-side; planning is the Leader's job.) The state
+    key stays ``triad_agents`` for back-compat with finalize; it now
+    holds the [leader, qc] pair.
     """
     structural: list[dict] = state.get("triad_agents", [])
     by_tier = {a["tier"]: a for a in structural}

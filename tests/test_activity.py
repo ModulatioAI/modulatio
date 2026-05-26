@@ -56,7 +56,7 @@ def _leader_stub(prompt: str) -> str:
     return f"```json\n{json.dumps(goals)}\n```"
 
 
-def _coordinator_stub(prompt: str) -> str:
+def _planner_stub(prompt: str) -> str:
     tasks = [{
         "description": "Draft",
         "assignee_specialist": "drafter",
@@ -113,7 +113,7 @@ def test_omitting_callback_preserves_existing_behavior(project: Project):
     change. If this breaks, slice #17 is breaking every pre-#17 caller."""
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -130,7 +130,7 @@ def test_callback_fires_for_all_six_phases_in_stub_run(project: Project):
     events: list[ActivityEvent] = []
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -156,7 +156,7 @@ def test_task_events_carry_task_id(project: Project):
     events: list[ActivityEvent] = []
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -177,7 +177,7 @@ def test_leader_verify_events_have_no_task_id_and_leader_role(project: Project):
     events: list[ActivityEvent] = []
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -197,7 +197,7 @@ def test_qc_events_carry_task_id_and_qc_role(project: Project):
     events: list[ActivityEvent] = []
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -217,7 +217,7 @@ def test_callback_events_are_time_ordered(project: Project):
     events: list[ActivityEvent] = []
     runners = {
         "leader": _leader_stub,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }

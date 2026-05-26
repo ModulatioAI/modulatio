@@ -288,10 +288,10 @@ def _derive_agent_caps(skill_names: list[str], project_code: str) -> tuple[list[
 # ``drafter`` skill-name is a pre-#9 naming convention flagged in the
 # deferred cosmetic-cleanup backlog — renaming it is out of scope for
 # the default-roster seed.
-# Skills-first (#143): the fallback roster has NO coordinator agent — the
-# role was removed engine-side in, and task planning is the Leader's
-# job (the planner runner uses the Leader's model). Structural roles are
-# Leader + QC; producer + researcher are skill-holders.
+# Skills-first: the fallback roster has NO standalone planner agent —
+# that prior role was removed engine-side, and task planning is the
+# Leader's job (the planner runner uses the Leader's model). Structural
+# roles are Leader + QC; producer + researcher are skill-holders.
 _DEFAULT_ROSTER_TEMPLATE: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("leader", ("leader", "leader-verify", "leader-plan", "leader-plan-approve", "leader-reflect"), "leader", "leader_model"),
     ("producer", ("drafter", "drafter-edit"), "producer", "specialist_model"),

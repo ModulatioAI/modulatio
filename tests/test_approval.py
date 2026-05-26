@@ -61,7 +61,7 @@ def _leader_with_verdict(verdict: str):
     return _runner
 
 
-def _coordinator_stub(prompt: str) -> str:
+def _planner_stub(prompt: str) -> str:
     tasks = [{
         "description": "Draft task",
         "assignee_specialist": "drafter",
@@ -760,7 +760,7 @@ def test_on_the_fence_verdict_opens_approval_required_ticket(project: Project):
     approval path."""
     runners = {
         "leader": _leader_with_verdict("on_the_fence"),
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -782,7 +782,7 @@ def test_satisfied_verdict_opens_informational_ticket_without_approval_flag(proj
     an approval request."""
     runners = {
         "leader": _leader_with_verdict("satisfied"),
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -837,7 +837,7 @@ def test_leader_verify_prompt_renders_prior_approval_decisions(project: Project)
 
     runners = {
         "leader": _capturing_leader,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
@@ -872,7 +872,7 @@ def test_leader_verify_prompt_neutral_marker_when_no_prior_approvals(project: Pr
 
     runners = {
         "leader": _capturing_leader,
-        "planner": _coordinator_stub,
+        "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }

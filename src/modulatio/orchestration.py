@@ -4743,10 +4743,10 @@ class Orchestrator:
         (caller must NOT settle its own), False to fall through to the
         caller's normal QC_REJECTED / breaker terminal.
 
-        Gated by ``MODULATIO_QC_FIXER=1`` (OFF by default). Requires a
-        non-trivial committed draft to patch — a storm that committed
-        ~nothing has nothing to salvage (re-decompose is the right move,
-        deferred), so we fall through.
+        Gated by ``MODULATIO_QC_FIXER`` — **ON by default**; opt out with
+        ``MODULATIO_QC_FIXER=0``. Requires a non-trivial committed draft to
+        patch — a storm that committed ~nothing has nothing to salvage
+        (re-decompose is the right move, deferred), so we fall through.
         """
         if not _qc_fixer_enabled():
             return False

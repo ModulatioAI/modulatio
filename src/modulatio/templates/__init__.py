@@ -51,9 +51,9 @@ class Template:
     source_path: Path | None = None
 
 
-# Skills-first (#143): the only mandatory structural roles are Leader (the
-# one deliberative seat) and QC (the verifier). Planning is the Leader's
-# job — the legacy "coordinator" role was removed engine-side in,
+# Skills-first: the only mandatory structural roles are Leader (the one
+# deliberative seat) and QC (the verifier). Planning is the Leader's
+# job — a prior standalone "coordinator" role was removed engine-side,
 # so it is no longer part of the mandatory set. Everything else is a
 # producer (skill-holder) the team routes work to.
 _TRIAD_TIERS = ("leader", "qc")
