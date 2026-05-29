@@ -7,7 +7,7 @@ guide covers what to include so triage is fast.
 
 1. Search [open issues](https://github.com/ModulatioAI/modulatio/issues)
    to make sure it isn't already tracked.
-2. Read [`docs/troubleshooting.md`](docs/troubleshooting.md) for known
+2. Read [Troubleshooting](https://modulatio.ai/troubleshooting/) for known
    gotchas and workarounds — many "bugs" turn out to be configuration
    mismatches that the troubleshooting guide already covers.
 3. Reproduce against the latest released version. If the bug is in an
@@ -103,7 +103,7 @@ Two layers: the unit/integration suite (correctness) and the A/B evaluation harn
 
 ### How the model recommendations were derived (the model sweep)
 
-The role→model guidance in [Agents → Choosing models by role](docs/agents.md#choosing-models-by-role) is evidence-based. Method:
+The role→model guidance in [Agents → Choosing models by role](https://modulatio.ai/concepts/agents/#choosing-models-by-role) is evidence-based. Method:
 
 1. **Hold the roster fixed, swap one role's model.** Keep a strong reasoning Leader + a smart agentic QC constant; swap only the producer across a fixed workload. Differences then attribute to the producer model, not the harness.
 2. **Isolate reasoning with a same-model control.** The cleanest result: take the *exact* model that spiraled with reasoning ON and re-run it with reasoning OFF (toggle only, nothing else changed). It went from pathological (endless propose→abandon, never committing) to functional. That's what licenses the causal claim "reasoning hurts the producer role" — a cross-model comparison alone can't (it flips two variables).

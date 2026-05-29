@@ -51,12 +51,11 @@ def load_alerts() -> dict[str, dict[str, Any]]:
 
 
 def save_alerts(alerts: dict[str, dict[str, Any]]) -> None:
-    """Atomic write of the alerts file. chmod 600 (errors are user-private)."""
-    config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = config.AUTH_ALERTS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(alerts, indent=2))
-    os.replace(tmp, config.AUTH_ALERTS_FILE)
-    config.AUTH_ALERTS_FILE.chmod(0o600)
+    """Atomic write of the alerts file at mode 0o600 throughout (errors
+    are user-private). Routes through ``config.write_secret_file`` so the
+    file is never world-readable in the window between create-at-default-
+    umask and an explicit chmod."""
+    config.write_secret_file(config.AUTH_ALERTS_FILE, json.dumps(alerts, indent=2))
 
 
 def has_active_alerts() -> bool:
@@ -173,7 +172,12 @@ def render_cli_banner() -> str | None:
 
     Multi-line — the caller prints to stderr before any subcommand runs.
     """
-    if os.environ.get("MODULATIO_NO_AUTH_BANNER"):
+    # Suppress only on a meaningfully-truthy value. A bare presence check
+    # would treat MODULATIO_NO_AUTH_BANNER=0 / =false as "suppress", the
+    # opposite of what the documented `=1` toggle implies.
+    if os.environ.get("MODULATIO_NO_AUTH_BANNER", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    ):
         return None
     alerts = load_alerts()
     if not alerts:

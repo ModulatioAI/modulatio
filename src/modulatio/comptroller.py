@@ -35,7 +35,10 @@ skip the ledger entirely (no API cost to gate).
 
 from __future__ import annotations
 
+import fcntl
+import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -163,6 +166,31 @@ def _append_ledger(project_code: str, cost_class: str, agent_id: str) -> None:
         f.write(f"{ts} {cost_class} {agent_id}\n")
 
 
+@contextmanager
+def _ledger_lock(project_code: str):
+    """Serialize the count→check→append critical section of a budget-gated
+    escalation. The wave scheduler runs producers concurrently; without
+    this lock two requests can both read ``spent`` below the cap, both pass
+    the check, and both append — exceeding the declared daily budget (which
+    gates *paid* cloud calls, so it's a real-money guardrail).
+
+    Uses ``flock`` on a sidecar lock file. Each acquisition opens a fresh
+    fd, so the exclusive lock serializes across both threads and processes
+    (flock locks attach to the open file description, not the process).
+    POSIX-only, which matches the deployment target.
+    """
+    ledger = _ledger_path(project_code)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = ledger.with_suffix(".lock")
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def authorize_escalation(
     project_code: str,
     cost_class: str | None,
@@ -213,17 +241,20 @@ def authorize_escalation(
             reason=f"unlimited {cost_class} budget",
         )
 
-    spent = _count_today(project_code, cost_class)
-    if spent >= cap:
-        return Authorization(
-            allowed=False,
-            refresh_at=_tomorrow_utc_midnight(),
-            reason=(
-                f"daily {cost_class} escalation budget exhausted "
-                f"({spent}/{cap} used); refreshes at UTC midnight"
-            ),
-        )
-    _append_ledger(project_code, cost_class, agent_id)
+    # Lock the count→check→append so concurrent escalations can't both
+    # slip under the cap and overshoot the daily budget.
+    with _ledger_lock(project_code):
+        spent = _count_today(project_code, cost_class)
+        if spent >= cap:
+            return Authorization(
+                allowed=False,
+                refresh_at=_tomorrow_utc_midnight(),
+                reason=(
+                    f"daily {cost_class} escalation budget exhausted "
+                    f"({spent}/{cap} used); refreshes at UTC midnight"
+                ),
+            )
+        _append_ledger(project_code, cost_class, agent_id)
     return Authorization(
         allowed=True,
         refresh_at=None,

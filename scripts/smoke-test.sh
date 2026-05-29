@@ -59,8 +59,8 @@ PYTHON="${PYTHON:-/usr/bin/python3.12}"
 if [[ ! -x "$PYTHON" ]]; then
   PYTHON="$(command -v python3.12 || command -v python3)"
 fi
-check "Python ≥3.11, <3.14" bash -c "
-  $PYTHON -c 'import sys; v = sys.version_info; assert (3,11) <= (v.major, v.minor) < (3,14), f\"got {v}\"'
+check "Python ≥3.12, <3.14" bash -c "
+  $PYTHON -c 'import sys; v = sys.version_info; assert (3,12) <= (v.major, v.minor) < (3,14), f\"got {v}\"'
 "
 echo
 

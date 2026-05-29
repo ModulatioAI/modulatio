@@ -68,8 +68,11 @@ def write_crash_log(exc: BaseException, argv: Sequence[str]) -> Path:
         version = "unknown"
     d = crash_dir()
     d.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = d / f"crash-{ts}.log"
+    now = datetime.now(timezone.utc)
+    ts = now.strftime("%Y%m%dT%H%M%SZ")
+    # Filename carries microseconds + PID so two crashes in the same second
+    # (or two processes crashing at once) don't overwrite each other's log.
+    path = d / f"crash-{now.strftime('%Y%m%dT%H%M%S_%fZ')}-{os.getpid()}.log"
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     body = (
         "Modulatio crash report\n"
@@ -84,7 +87,11 @@ def write_crash_log(exc: BaseException, argv: Sequence[str]) -> Path:
         "---------\n"
         f"{tb}"
     )
-    path.write_text(body)
+    # Mode 0o600 from creation — the report carries a traceback and
+    # (redacted) argv; on a shared host it must not be world-readable.
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(body)
     return path
 
 

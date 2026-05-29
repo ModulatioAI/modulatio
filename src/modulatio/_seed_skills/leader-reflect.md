@@ -222,7 +222,7 @@ Use `linked_task_id` / `linked_goal_id` / `candidate_id` where the deferral cite
 
 **`non_goals` rationale (Nemo Q2):** every `non_goals` entry must include a `because` field — one sentence on **why** the team is explicitly not doing this. "Out of scope" alone is not a rationale; cite the actual constraint (user said so, plan excluded it, conflicts with goal X).
 
-**Inbox-evidence discipline (Lovecraft L4):** if any `scope_clarification` / `scope_creep_flag` / `risk_callout` proposals were accepted this turn (visible in your inputs as inbox notes), they are **evidence to consider** when shaping `compressed_active_goal`, `deferred_items`, or `non_goals`. They do not auto-feed any field — you decide whether the accepted note changes scope, surfaces a deferral, or names a non-goal. Cite via `source: "inbox_note"` when an inbox proposal motivates a deferred item.
+**Inbox-evidence discipline (Lovecraft L4):** if any `scope_clarification` / `constraint_discovered` / `decomposition_advisory` proposals were accepted this turn (visible in your inputs as inbox notes), they are **evidence to consider** when shaping `compressed_active_goal`, `deferred_items`, or `non_goals`. They do not auto-feed any field — you decide whether the accepted note changes scope, surfaces a deferral, or names a non-goal. Cite via `source: "inbox_note"` when an inbox proposal motivates a deferred item.
 
 **Recent Activity discipline:** push each producer self-claim from this turn as `{"at": "HH:MM", "agent": "<name>", "claim": "<verbatim>"}`. FIFO max 8 — drop oldest. Quote verbatim, don't paraphrase.
 

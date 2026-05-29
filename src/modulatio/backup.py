@@ -269,9 +269,13 @@ def import_backup(
         if not data:
             continue
         target = cfg_dir / fname
-        target.write_text(json.dumps(data, indent=2, sort_keys=True))
-        if fname in ("telegram-config.json",):
-            target.chmod(0o600)  # contains bot token
+        payload = json.dumps(data, indent=2, sort_keys=True)
+        if fname == "telegram-config.json":
+            # Contains the bot token — 0o600 throughout, no world-readable
+            # window between write and chmod.
+            config.write_secret_file(target, payload)
+        else:
+            target.write_text(payload)
         summary["config_files"].append(fname)
 
     config.reload()  # paths in defaults may have changed
@@ -285,8 +289,7 @@ def import_backup(
         if env_path.exists() and not overwrite:
             summary["vault_files_skipped"] += 1
         else:
-            env_path.write_text(backup["vault_env"])
-            env_path.chmod(0o600)
+            config.write_secret_file(env_path, backup["vault_env"])
             summary["vault_files_written"] += 1
 
     # Per-project vault files

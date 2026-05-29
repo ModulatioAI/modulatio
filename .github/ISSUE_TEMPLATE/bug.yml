@@ -17,7 +17,7 @@ body:
     attributes:
       label: Modulatio version
       description: Output of `pip show modulatio | grep Version` or the tag/SHA you installed from.
-      placeholder: e.g. 2.0.1
+      placeholder: e.g. 0.1.0
     validations:
       required: true
 

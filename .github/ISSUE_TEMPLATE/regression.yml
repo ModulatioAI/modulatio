@@ -14,7 +14,7 @@ body:
     id: current-version
     attributes:
       label: Current (broken) version
-      placeholder: e.g. 2.0.1
+      placeholder: e.g. 0.1.0
     validations:
       required: true
 
@@ -23,7 +23,7 @@ body:
     attributes:
       label: Last known good version
       description: Most recent version where this workflow still worked. If you bisected, give the exact tag.
-      placeholder: e.g. 2.0.0
+      placeholder: e.g. 0.1.0
     validations:
       required: true
 

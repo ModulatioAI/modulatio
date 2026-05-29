@@ -289,8 +289,9 @@ def kickoff(
     ),
     coordinator_model: str = typer.Option(
         None, "--coordinator-model", hidden=True, help=(
-            "DEPRECATED alias for --planner-model (the Coordinator role was "
-            "removed in v2.2). Still honored for back-compat."
+            "DEPRECATED alias for --planner-model (a prior standalone "
+            "planner role was removed engine-side). Still honored for "
+            "back-compat."
         ),
     ),
     specialist_model: str = typer.Option(
@@ -771,7 +772,9 @@ def doctor() -> None:
             f"  [SET] MODULATIO_CRASH_DIR={crash_dir} — crash log "
             f"override path."
         )
-    if _os.environ.get("MODULATIO_NO_AUTH_BANNER"):
+    if _os.environ.get("MODULATIO_NO_AUTH_BANNER", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    ):
         typer.echo(
             "  [SET] MODULATIO_NO_AUTH_BANNER=1 — auth-alert banner "
             "suppressed on CLI invocations."

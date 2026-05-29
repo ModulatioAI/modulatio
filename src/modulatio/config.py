@@ -401,7 +401,9 @@ def load_team_template() -> Optional[list[dict]]:
 
 
 def save_team_template(agents: list[dict]) -> None:
-    """Persist the wizard's agent picks. Overwrites any existing template."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    TEAM_TEMPLATE_FILE.write_text(json.dumps(agents, indent=2))
-    TEAM_TEMPLATE_FILE.chmod(0o600)
+    """Persist the wizard's agent picks. Overwrites any existing template.
+
+    Uses ``write_secret_file`` for a 0o600-throughout write — the naive
+    ``write_text`` + ``chmod`` pattern this helper exists to replace would
+    leave the roster briefly world-readable on a multi-user host."""
+    write_secret_file(TEAM_TEMPLATE_FILE, json.dumps(agents, indent=2))

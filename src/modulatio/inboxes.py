@@ -377,7 +377,15 @@ def _load_jsonl(path: Path) -> list[dict]:
             line = line.strip()
             if not line:
                 continue
-            rows.append(json.loads(line))
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                # Tolerate a torn/corrupt line rather than failing the
+                # whole load — matches the skip-malformed behavior of the
+                # other JSONL readers in this module. A partial write (e.g.
+                # the daemon killed mid-append) must not make the entire
+                # inbox unreadable.
+                continue
     return rows
 
 
