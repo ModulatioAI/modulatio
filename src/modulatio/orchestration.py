@@ -786,6 +786,21 @@ def _is_standalone_verification_goal(description: str) -> bool:
     return bool(_VERIFY_GOAL_RE.match(desc))
 
 
+def _goal_emits_artifact(item: dict) -> bool:
+    """True iff a decompose goal item declares ``artifact``-kind evidence —
+    i.e. it PRODUCES a deliverable, not just a report/assertion about prior
+    work. Used as a second gate on the verify-goal drop: a verb-ambiguous
+    goal that actually makes something ("Validate the dataset schema" →
+    produces validator.py; "Review article" as a content type) is KEPT;
+    only a verify-led goal that emits no deliverable is dropped. (Nemo hull
+    note 2026-05-30 — a false-positive drop of real producing work is the
+    worse error.)"""
+    return any(
+        isinstance(r, dict) and str(r.get("kind", "")).strip().lower() == "artifact"
+        for r in (item.get("evidence_required") or [])
+    )
+
+
 #: Slice #9c sentinels for ``_run_escalation_attempt`` return values.
 #: The helper already wrote the terminal StateTransition + status, so
 #: the caller just needs to early-return without duplicating settlement.
@@ -2138,11 +2153,18 @@ class Orchestrator:
         # ENGINE-ENFORCED INVARIANT: drop any standalone verification goal the
         # Leader minted despite the prompt. QC verifies every producing task;
         # a separate reviewer can only report (and, observed live, starves /
-        # loops / decompose-storms). Only drop while PRODUCING goals remain —
-        # never leave the run with nothing to do (degenerate all-verify plan
-        # falls through unchanged). See _is_standalone_verification_goal.
-        producing = [it for it in data
-                     if not _is_standalone_verification_goal(str(it.get("description", "")))]
+        # loops / decompose-storms). A goal is dropped ONLY when its primary
+        # verb is verification AND it emits no artifact deliverable — a
+        # verb-ambiguous goal that actually produces something is kept
+        # (Nemo hull note: a false-positive drop of real work is the worse
+        # error). Only drop while PRODUCING goals remain — never leave the run
+        # with nothing to do (degenerate all-verify plan falls through).
+        def _is_drop(it: dict) -> bool:
+            return (
+                _is_standalone_verification_goal(str(it.get("description", "")))
+                and not _goal_emits_artifact(it)
+            )
+        producing = [it for it in data if not _is_drop(it)]
         dropped = [it for it in data if it not in producing]
         if dropped and producing:
             for it in dropped:

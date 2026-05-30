@@ -7306,3 +7306,41 @@ def test_decompose_keeps_all_when_only_verification_goals(project: Project):
     })
     goals = orch._leader_decompose("verify stuff")
     assert len(goals) == 1  # not dropped — would leave nothing
+
+
+def test_goal_emits_artifact_detects_artifact_evidence():
+    from modulatio.orchestration import _goal_emits_artifact as a
+    assert a({"evidence_required": [{"kind": "artifact", "description": "validator.py"}]})
+    assert not a({"evidence_required": [{"kind": "report", "description": "verification report"}]})
+    assert not a({"evidence_required": [{"kind": "assertion", "description": "x"}]})
+    assert not a({"evidence_required": []})
+    assert not a({})
+
+
+def test_decompose_keeps_verify_verb_goal_that_produces_an_artifact(project: Project):
+    """Nemo hull fold (2026-05-30): a verb-ambiguous goal ('Validate the
+    dataset schema') that actually PRODUCES a deliverable (artifact evidence)
+    is KEPT — only a verify-led goal that emits NO deliverable is dropped.
+    Dropping real producing work is the worse error."""
+    def _leader(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return _leader_stub(prompt)
+        goals = [
+            {"description": "Validate the dataset schema",            # verify verb...
+             "success_criteria": "a working schema validator",
+             "evidence_required": [{"kind": "artifact", "description": "validator.py"}]},  # ...produces an artifact
+            {"description": "Verify that all records are correctly typed",  # pure check
+             "success_criteria": "all verified",
+             "evidence_required": [{"kind": "report", "description": "report"}]},
+        ]
+        return f"```json\n{json.dumps(goals)}\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    goals = orch._leader_decompose("data work")
+    descs = [g.description for g in goals]
+    assert any("Validate the dataset schema" in d for d in descs)   # KEPT — emits artifact
+    assert not any(d.startswith("Verify that") for d in descs)      # dropped — report-only
+    assert len(goals) == 1
