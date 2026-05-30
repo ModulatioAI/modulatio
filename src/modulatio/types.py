@@ -150,7 +150,12 @@ class Goal(BaseModel):
     # Exhaustion → BLOCKER ticket with refresh_at=tomorrow-midnight-UTC;
     # auto-resume picks it up on next kickoff past the refresh time.
     retry_count: int = 0
-    max_retries: int = 3
+    #: Daily Alfred-loop budget (Clif 2026-05-29: raised 3 → 7). The team
+    #: gets up to this many Leader-led reflect-and-redo attempts per UTC day
+    #: to get a goal right (and learn the lesson) BEFORE parking and asking
+    #: the human for help via a BLOCKER ticket. More rope = more chances for
+    #: the loop to recover and codify a lesson before escalating.
+    max_retries: int = 7
     retry_count_date: date | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)

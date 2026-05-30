@@ -973,8 +973,8 @@ def test_orchestrator_opens_critical_ticket_on_roster_gap(
 # ── Slice #7e: Leader auto-redo with daily retry budget ──────────────────
 
 def test_goal_default_retry_budget_fields():
-    """Goal gains retry_count=0, max_retries=3, retry_count_date=None
-    by default. Back-compat for existing goals pre-#7e."""
+    """Goal gains retry_count=0, max_retries=7, retry_count_date=None
+    by default (Alfred-loop budget raised 3→7, Clif 2026-05-29)."""
     from modulatio.types import Goal
     from uuid import uuid4
 
@@ -985,7 +985,7 @@ def test_goal_default_retry_budget_fields():
         success_criteria="anything",
     )
     assert g.retry_count == 0
-    assert g.max_retries == 3
+    assert g.max_retries == 7
     assert g.retry_count_date is None
 
 
@@ -1050,9 +1050,10 @@ def test_leader_disappointed_within_budget_auto_redoes_until_satisfied(project: 
 
 
 def test_leader_disappointed_exhaust_budget_opens_blocker_with_refresh_at(project: Project):
-    """Three disappointed verdicts in a row exhaust the daily budget.
-    BLOCKER ticket fires with refresh_at set to tomorrow midnight UTC.
-    Goal stays IN_PROGRESS — auto-resume on refresh will pick it up."""
+    """Seven disappointed verdicts in a row exhaust the daily budget
+    (Alfred-loop budget = 7, Clif 2026-05-29). BLOCKER ticket fires with
+    refresh_at set to tomorrow midnight UTC. Goal stays IN_PROGRESS —
+    auto-resume on refresh will pick it up."""
     from modulatio.types import TicketPriority
 
     def _leader_always_disappointed(prompt: str) -> str:
@@ -1079,7 +1080,7 @@ def test_leader_disappointed_exhaust_budget_opens_blocker_with_refresh_at(projec
     # abandonment.
     assert goals[0].status == GoalStatus.IN_PROGRESS
     # Full daily budget consumed.
-    assert goals[0].retry_count == 3
+    assert goals[0].retry_count == 7
 
     tickets = store.list_tickets(PROJECT_CODE)
     blockers = [t for t in tickets if t.priority is TicketPriority.BLOCKER]
@@ -2011,7 +2012,7 @@ def test_leader_verify_disappointed_triggers_auto_redo_and_BLOCKERs_on_exhaustio
     # refresh_at.
     assert goals[0].status == GoalStatus.IN_PROGRESS
     # Full daily budget consumed.
-    assert goals[0].retry_count == 3
+    assert goals[0].retry_count == 7
 
     tickets = store.list_tickets(PROJECT_CODE)
     assert len(tickets) == 1
