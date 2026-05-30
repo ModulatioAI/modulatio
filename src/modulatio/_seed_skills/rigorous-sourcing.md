@@ -41,9 +41,9 @@ this is how you meet it the first time so QC has little to fix.
 - If a source was unreachable, stale, paywalled, or contradicted another,
   **say so** in the relevant spot — don't paper over it with confident prose.
 - Keep a short note of claims you could **not** independently verify (e.g.
-  fast-moving figures, single-source assertions). This is exactly what the
-  project lead carries into the human's Product Quality Report — surfacing it
-  is a feature, not a weakness.
+  fast-moving figures, single-source assertions); the project lead carries
+  these into the human's Product Quality Report. Flag what you couldn't
+  verify — that is expected and required, not a shortfall.
 
 Confident prose over thin evidence is a defect. Grounded, honestly-hedged work
 is the goal.

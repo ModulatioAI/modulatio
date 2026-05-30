@@ -171,19 +171,19 @@ def build_product_quality_report(recommendations) -> str:
     lines = [
         f"# {_QUALITY_REPORT_TITLE}",
         "",
-        "_The project lead's assessment of the delivered work, prepared for "
-        "you. The deliverables were produced and quality-controlled by the "
-        "team. The notes below are the lead's remaining reservations and the "
-        "checks it recommends before you rely on the work — they are "
-        "ADVISORY, and did not block or hold back your product._",
+        "_My assessment of the delivered work, as the project lead who oversaw "
+        "it. The deliverables were produced and quality-controlled by the team; "
+        "the notes below are my remaining reservations and the checks I'd run "
+        "before relying on the work. They are ADVISORY — they did not block or "
+        "hold back your product._",
         "",
     ]
     if not recommendations:
         lines += [
             "## No outstanding reservations",
             "",
-            "The lead flagged nothing to double-check — the deliverables "
-            "passed quality control with no caveats.",
+            "All checks passed — I have nothing to flag for you to double-check. "
+            "The deliverables met quality control cleanly.",
             "",
         ]
         return "\n".join(lines)
