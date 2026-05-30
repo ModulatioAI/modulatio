@@ -500,7 +500,18 @@ def kickoff(
     if not stub:
         from modulatio import delivery as _delivery
         _deliverables = _delivery.deliverables_from_tasks(summary.tasks, artifacts_root)
-        if _deliverables:
+        _blocked = _delivery.blocked_task_ids(summary.tasks)
+        if _deliverables and _blocked:
+            # Don't hand over a polished product built on unresolved blocked
+            # work (the "confident, formatted, and wrong" trap). Withhold
+            # until the blocks resolve.
+            shown = ", ".join(_blocked[:5]) + ("…" if len(_blocked) > 5 else "")
+            typer.echo(
+                f"  Finished products WITHHELD — {len(_blocked)} task(s) blocked "
+                f"({shown}). Resolve the blocked work before shipping a product "
+                f"built on it. Drafts remain in artifacts/."
+            )
+        elif _deliverables:
             _delivered = _delivery.deliver_finished_products(_deliverables, project_code=code)
             if _delivered:
                 typer.echo(

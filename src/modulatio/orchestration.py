@@ -738,6 +738,26 @@ _ESCALATION_COMPLETED = object()
 _ESCALATION_EXCEPTION = object()
 
 
+def _parse_redecompose_specs(resp: "str | None") -> "list[dict]":
+    """Extract the child-task spec array from the planner's re-decompose
+    response. Tolerant by design (it's an LLM): finds the first ``[...]``
+    array, ignores prose / code fences. Returns ``[]`` on any failure — the
+    caller treats that as "couldn't split" and escalates."""
+    if not isinstance(resp, str):
+        return []
+    start = resp.find("[")
+    end = resp.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return []
+    try:
+        data = json.loads(resp[start:end + 1])
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [d for d in data if isinstance(d, dict)]
+
+
 def _validate_output_path(candidate: str, artifacts_root: Path) -> str:
     """Resolve ``candidate`` under ``artifacts_root`` and return the
     normalized relative path. Raises :class:`_PlanError` if the path
@@ -4561,16 +4581,16 @@ class Orchestrator:
                 )
 
             except _ctx_budget_module.RecoverableContextError as ctx_exc:
-                # Alpha (W1): context-budget exhaustion is NOT
-                # retriable. Re-running with the same prompt hits the
-                # same wall; even compression already failed. Open a
-                # CRITICAL ticket carrying the checkpoint path, mark
-                # the task BLOCKED, and break out of the redo loop —
-                # Leader-reflect's between-sub-objective turn sees
-                # the ticket and decides revise-major (decompose) or
-                # pause (escalate to user). The checkpoint is an
-                # audit + decomposition input; we do NOT load it
-                # back as a re-input source.
+                # Context-budget exhaustion is NOT producer-retriable (same
+                # prompt → same wall; compression already failed). The right
+                # move is to SPLIT the task. 2026-05-30: hand it back to the
+                # planner's existing decompose skill and run the children
+                # inline (the parent becomes a completed container). Only if
+                # that genuinely can't help (recursion cap, planner can't
+                # split) do we block + ticket — a real "stuck", not the old
+                # confused punt to a Leader-reflect turn that never decomposed.
+                if self._try_decompose_and_run(t, ctx_exc, summary):
+                    return
                 self._block_for_context_budget(t, ctx_exc, summary)
                 return
 
@@ -4954,6 +4974,135 @@ class Orchestrator:
             f"{task.id}: environmental gap — {qc_verdict.check}"
         )
         self._save_task_deferrable(task)
+
+    # ── Overflow → decompose (2026-05-30) — re-invoke the planner's existing
+    #    decompose skill on an over-budget task instead of ticketing out of
+    #    confusion. LLM-first: the planner already knows how to split ("each
+    #    within cap"); we wire the trigger + run the children, nothing more. ─
+    #: Max overflow→decompose recursion before escalating (genuine stuck).
+    _MAX_DECOMPOSE_DEPTH = 3
+
+    def _build_redecompose_prompt(
+        self, t: "Task",
+        ctx_exc: "_ctx_budget_module.RecoverableContextError",
+    ) -> str:
+        """Anticipate-the-questions prompt: hand the over-budget task back to
+        the planner's decompose skill to split THIS task (not re-plan the
+        project) into smaller children that each fit one producer call.
+        LLM-first — give it context + intent, not a rubric."""
+        cp = ""
+        if ctx_exc.checkpoint_path:
+            cp = (
+                f"\nThe work that piled into this one call is checkpointed at "
+                f"{ctx_exc.checkpoint_path} — you don't need to read it, but "
+                f"the split should reflect that this much accumulated in one "
+                f"task.\n"
+            )
+        return (
+            f"One task was too big for a single producer call — it overflowed "
+            f"the context budget (~{ctx_exc.estimated_tokens} tokens vs the "
+            f"{ctx_exc.max_input_tokens}-token cap) even after compression.\n\n"
+            f"TASK TO SPLIT (id {t.id}):\n{t.description}\n{cp}\n"
+            f"Split THIS ONE task — do NOT re-plan the whole project — into "
+            f"2-6 smaller tasks that TOGETHER cover the same scope, each a "
+            f"single focused producer call comfortably within budget. Each "
+            f"child produces its own artifact (downstream work reads them "
+            f"all). Smaller is better; when in doubt, split more.\n\n"
+            f"Return ONLY a JSON array, nothing else:\n"
+            f'[{{"description": "<focused sub-task>", '
+            f'"output_path": "drafts/<short-name>.md"}}, ...]'
+        )
+
+    def _attempt_decompose(
+        self, t: "Task",
+        ctx_exc: "_ctx_budget_module.RecoverableContextError",
+    ) -> "list[Task] | None":
+        """Re-invoke the planner's decompose skill on an over-budget task →
+        smaller children, or ``None`` when it can't/shouldn't split (recursion
+        cap reached, planner errored, or fewer than 2 usable children). ``None``
+        falls through to the genuine-stuck ticket."""
+        if t.decompose_depth >= self._MAX_DECOMPOSE_DEPTH:
+            return None  # recursion exhausted — genuine stuck, escalate
+        prompt = self._build_redecompose_prompt(t, ctx_exc)
+        try:
+            resp = self._run(
+                "planner", prompt, budget_role="planner",
+                task_id=t.id, goal_id=t.goal_id, agent_id="planner",
+            )
+        except Exception:
+            return None
+        specs = _parse_redecompose_specs(resp)
+        children: "list[Task]" = []
+        for i, spec in enumerate(specs, 1):
+            desc = str(spec.get("description") or "").strip()
+            if not desc:
+                continue
+            raw_path = spec.get("output_path")
+            children.append(Task(
+                id=f"{t.id}-D{i}",
+                project_id=t.project_id,
+                goal_id=t.goal_id,
+                description=desc,
+                assignee_specialist=t.assignee_specialist,
+                artifact_kind=t.artifact_kind,
+                required_skills=list(t.required_skills),
+                required_capabilities=list(t.required_capabilities),
+                depends_on=list(t.depends_on),  # children inherit parent's deps
+                output_path=(str(raw_path).strip() if raw_path else None),
+                decompose_depth=t.decompose_depth + 1,
+                status=TaskStatus.PENDING,
+            ))
+        return children if len(children) >= 2 else None
+
+    def _try_decompose_and_run(
+        self, t: "Task",
+        ctx_exc: "_ctx_budget_module.RecoverableContextError",
+        summary: RunSummary,
+    ) -> bool:
+        """Overflow recovery: split the task and run the children INLINE
+        (recursively through the same redo path — a child that still overflows
+        re-decomposes, bounded by depth). The parent becomes a completed
+        CONTAINER once all children complete; downstream depends on the
+        parent, then reads the children's artifacts. Returns True if handled,
+        False to fall through to the genuine-stuck ticket."""
+        children = self._attempt_decompose(t, ctx_exc)
+        if not children:
+            return False
+        self._emit_activity(
+            role="planner", phase="task_decomposed", task_id=t.id,
+            agent_id="planner",
+        )
+        all_ok = True
+        for child in children:
+            store.save_task(self.project.code, child, run_id=self.project.run_id)
+            self._run_task_with_redo(child, summary)
+            store.save_task(self.project.code, child, run_id=self.project.run_id)
+            if child.status is not TaskStatus.COMPLETED:
+                all_ok = False
+        if all_ok:
+            t.transitions.append(StateTransition(
+                from_state=t.status.value,
+                to_state=TaskStatus.COMPLETED.value,
+                actor="orchestrator",
+                rationale=(
+                    f"too big for one call ({ctx_exc.estimated_tokens} > "
+                    f"{ctx_exc.max_input_tokens} tokens) — decomposed into "
+                    f"{len(children)} children, all completed"
+                ),
+            ))
+            t.status = TaskStatus.COMPLETED
+        else:
+            t.transitions.append(StateTransition(
+                from_state=t.status.value,
+                to_state=TaskStatus.BLOCKED.value,
+                actor="orchestrator",
+                rationale=f"decomposed into {len(children)} children; not all completed",
+            ))
+            t.status = TaskStatus.BLOCKED
+            summary.errors.append(
+                f"{t.id}: decomposed but a child task did not complete"
+            )
+        return True
 
     # ── Context-budget exhaustion — task BLOCKED, decompose ticket fired ─
     def _block_for_context_budget(

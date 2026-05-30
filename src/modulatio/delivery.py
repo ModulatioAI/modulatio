@@ -180,9 +180,28 @@ def deliverables_from_tasks(
     return out
 
 
+#: Task states that mean "did not cleanly succeed" — a finished product built
+#: while any of these is unresolved would be ungrounded, so delivery is held.
+_BLOCKED_STATES = frozenset({"blocked", "qc_rejected", "abandoned"})
+
+
+def blocked_task_ids(tasks) -> "list[str]":
+    """Ids of tasks in a blocked/failed terminal state. Used to WITHHOLD
+    finished products: don't hand the user a polished deliverable from a run
+    that still has unresolved blocked work (the "polished wrong product"
+    trap). Duck-typed on ``.status`` / ``.id``."""
+    out: "list[str]" = []
+    for t in tasks:
+        st = str(getattr(t, "status", "")).split(".")[-1].lower()
+        if st in _BLOCKED_STATES:
+            out.append(str(getattr(t, "id", "?")))
+    return out
+
+
 __all__ = [
     "DEFAULT_DELIVERY_FORMAT",
     "DeliveredProduct",
+    "blocked_task_ids",
     "deliver_finished_products",
     "deliver_product",
     "deliverables_from_tasks",

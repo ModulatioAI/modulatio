@@ -151,3 +151,32 @@ def test_real_docx_render(monkeypatch, tmp_path):
     assert dp.error is None
     assert dp.dest.exists() and dp.dest.stat().st_size > 0
     assert dp.dest.suffix == ".docx"
+
+
+# ── withhold guard: don't ship a product built on blocked work ───────────
+
+class _StatusTask:
+    def __init__(self, id, status):
+        self.id = id
+        self.status = status
+
+
+def test_blocked_task_ids_flags_failed_states():
+    tasks = [
+        _StatusTask("T-1", "completed"),
+        _StatusTask("T-2", "blocked"),
+        _StatusTask("T-3", "pending"),
+        _StatusTask("T-4", "qc_rejected"),
+        _StatusTask("T-5", "abandoned"),
+    ]
+    assert delivery.blocked_task_ids(tasks) == ["T-2", "T-4", "T-5"]
+
+
+def test_blocked_task_ids_handles_enum_status():
+    from modulatio.types import TaskStatus
+    tasks = [_StatusTask("T-1", TaskStatus.BLOCKED), _StatusTask("T-2", TaskStatus.COMPLETED)]
+    assert delivery.blocked_task_ids(tasks) == ["T-1"]
+
+
+def test_blocked_task_ids_empty_when_all_clean():
+    assert delivery.blocked_task_ids([_StatusTask("T-1", "completed")]) == []
