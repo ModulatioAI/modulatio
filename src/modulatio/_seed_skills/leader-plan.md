@@ -99,6 +99,8 @@ Plan size should be proportional to the work, NOT proportional to imagined ambig
 
 When in doubt, smaller. The team can always extend the plan if a sub-objective reveals more work; an overly-decomposed plan locks the team into churn before it discovers what's actually needed.
 
+**Enumerable sweeps fan out, they don't pile up.** When a sub-objective is "X for EACH of N items" (survey/gather/compare across a set; one-per-item work), don't shape it as a single "do all N" objective — that pushes the whole sweep into one producer call, which overflows. Shape it so the work fans out one-per-item with a final synthesis that depends on them all (the task-plan step does the actual per-item fan-out; you just keep the sub-objective from being one unbounded lump). If the items aren't named yet, a cheap scout/enumerate step comes first. This is the same discipline as splitting a long deliverable into contiguous within-cap artifacts — applied to breadth instead of length.
+
 ## What the plan must contain
 
 The marker `<!-- modulatio:plan -->` belongs at the very first line of your response **only when you are producing a complete plan with ALL the required sections below.** Clarifying questions, partial dialog responses, or "let me ask first before I plan" replies do **NOT** get the marker — those live in chat as conversation, not as plan-shaped audit-trail entries.

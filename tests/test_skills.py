@@ -378,6 +378,25 @@ def test_seed_skills_dir_ships_coding_and_code_review():
     assert (_SEED_SKILLS_ROOT / "code-review.md").exists()
 
 
+def test_seed_planning_skills_carry_sweep_bounding_guidance():
+    """Plan-time bounding (2026-05-30): the planning skills must tell the
+    LLM to fan an enumerable 'X for each of N items' sweep into one task
+    per item + a synthesis task, with a scout-first step when the items
+    aren't known. Regresses the guidance that prevents a sweep from being
+    crammed into one unbounded, overflowing producer call."""
+    from modulatio.skills import _SEED_SKILLS_ROOT
+
+    task_plan = (_SEED_SKILLS_ROOT / "task-plan.md").read_text()
+    assert "SWEEP" in task_plan
+    assert "PER ITEM" in task_plan
+    assert "SYNTHESIS" in task_plan
+    assert "SCOUT" in task_plan  # unknown-items-first path
+
+    leader_plan = (_SEED_SKILLS_ROOT / "leader-plan.md").read_text()
+    assert "sweep" in leader_plan.lower()
+    assert "synthesis" in leader_plan.lower()
+
+
 def test_load_falls_back_to_seed_when_shared_empty(tmp_path, monkeypatch):
     """Empty shared dir + missing project-local → seed wins. The
     motivating use case: fresh install, user hasn't populated their

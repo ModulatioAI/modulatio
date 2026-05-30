@@ -21,6 +21,7 @@ guard).
 
 from __future__ import annotations
 
+import http.client
 import io
 from pathlib import Path
 import urllib.request
@@ -62,9 +63,14 @@ def test_tool_dataclass_carries_name_description_callable():
 # ── http_get ───────────────────────────────────────────────────────────────
 
 class _FakeResponse:
-    def __init__(self, body: bytes, status: int = 200):
+    def __init__(self, body: bytes, status: int = 200, content_type: str = ""):
         self._body = body
         self.status = status
+        # Mirror http.client.HTTPResponse.headers (an HTTPMessage); the
+        # real http_get reads Content-Type off it.
+        self.headers = http.client.HTTPMessage()
+        if content_type:
+            self.headers["Content-Type"] = content_type
 
     def __enter__(self):
         return self
@@ -72,8 +78,9 @@ class _FakeResponse:
     def __exit__(self, *a):
         return False
 
-    def read(self):
-        return self._body
+    def read(self, amt=None):
+        # Real HTTPResponse.read(amt) returns at most ``amt`` bytes.
+        return self._body if amt is None else self._body[:amt]
 
 
 def test_http_get_returns_response_body_as_text(monkeypatch):
@@ -127,6 +134,73 @@ def test_http_get_default_timeout_present(monkeypatch):
     tools.http_get(url="http://example.test/")
     assert captured["timeout"] is not None
     assert captured["timeout"] > 0
+
+
+# ── http_get size cap + HTML→text extraction (2026-05-30) ──────────────────
+#
+# Root cause of a live research overflow: a single http_get returned
+# 1,238,355 chars (~310k tokens) of raw HTML into a 16k-token producer
+# budget. The docstring claimed a byte cap that didn't exist. These
+# regress the cap + the dependency-free HTML→text reduction.
+
+
+def test_http_get_caps_huge_body(monkeypatch):
+    """A page far over the return ceiling comes back truncated, not whole
+    — the regression for the 1.24M-char live overflow."""
+    huge = b"x" * (2 * 1024 * 1024)  # 2 MiB of plain text
+
+    monkeypatch.setattr(tools, "_urlopen",
+                        lambda req, timeout=None: _FakeResponse(huge, content_type="text/plain"))
+    result = tools.http_get(url="http://example.test/big")
+    assert len(result) <= tools._HTTP_GET_MAX_CHARS + 200  # ceiling + marker
+    assert "truncated" in result
+
+
+def test_http_get_strips_html_to_text(monkeypatch):
+    """HTML responses are reduced to readable text: script/style gone,
+    tags dropped, entities unescaped."""
+    page = (
+        b"<!doctype html><html><head><title>T</title>"
+        b"<style>.x{color:red}</style><script>var a=1;evil()</script></head>"
+        b"<body><h1>Heading</h1><p>Hello&nbsp;&amp; welcome</p></body></html>"
+    )
+    monkeypatch.setattr(tools, "_urlopen",
+                        lambda req, timeout=None: _FakeResponse(page, content_type="text/html; charset=utf-8"))
+    result = tools.http_get(url="http://example.test/page")
+    assert "Heading" in result and "welcome" in result
+    assert "evil()" not in result and "color:red" not in result  # script/style gone
+    assert "<" not in result and ">" not in result               # tags gone
+    assert "&amp;" not in result and "&" in result               # entity unescaped
+
+
+def test_http_get_does_not_strip_json(monkeypatch):
+    """A declared JSON content-type is trusted — we must NOT run the
+    HTML stripper over it (would mangle the payload)."""
+    payload = b'{"items": [{"a": "<b>"}], "n": 3}'
+    monkeypatch.setattr(tools, "_urlopen",
+                        lambda req, timeout=None: _FakeResponse(payload, content_type="application/json"))
+    result = tools.http_get(url="http://example.test/api")
+    assert result == payload.decode()  # untouched
+
+
+def test_http_get_sniffs_html_without_content_type(monkeypatch):
+    """No declared content-type but an HTML signature → still stripped."""
+    page = b"  <html><body><p>Sniffed body</p></body></html>"
+    monkeypatch.setattr(tools, "_urlopen",
+                        lambda req, timeout=None: _FakeResponse(page))  # no content_type
+    result = tools.http_get(url="http://example.test/x")
+    assert "Sniffed body" in result and "<p>" not in result
+
+
+def test_http_get_caps_error_body(monkeypatch):
+    """The non-2xx path is capped too — a giant error page can't overflow
+    either, but the status still surfaces for QC."""
+    big_err = io.BytesIO(b"E" * (1024 * 1024))
+    monkeypatch.setattr(tools, "_urlopen", lambda req, timeout=None: (_ for _ in ()).throw(
+        HTTPError(url="http://example.test/e", code=500, msg="Server Error", hdrs=None, fp=big_err)))
+    result = tools.http_get(url="http://example.test/e")
+    assert "500" in result and "Server Error" in result
+    assert len(result) <= tools._HTTP_GET_MAX_CHARS + 200
 
 
 def test_http_get_rejects_non_http_scheme():

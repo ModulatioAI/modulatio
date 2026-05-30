@@ -27,6 +27,20 @@ setup, ingestion, schema versioning, dual-source verification) unless
 goal explicitly asks to BUILD that infra as deliverable. Prefer
 smallest plan; team adds follow-ons later if artifact reveals gap.
 
+SWEEP work — bound it at PLAN time. When the goal is "do X for EACH of
+N items" (survey/catalog/gather/compare across a set; one-per-item
+work), do NOT cram all N into one task — a single producer call can't
+hold N items' worth and overflows its budget. Instead: one bounded task
+PER ITEM (its own description/topic; no mutual depends_on) + one final
+SYNTHESIS task that depends_on ALL of them, reads their artifacts, and
+produces the combined result (mark it deliverable if it's the finished
+product). Signals: "all/each/every/top N", "survey/compare/gather
+across", an enumerable list. N>7 → cover a bounded batch, defer the rest
+as a phase. Items not named yet ("the current SOTA in X") → a cheap
+SCOUT task enumerates them first; per-item tasks depends_on it. Never
+one task that both discovers AND deep-dives every item — that's the
+unbounded shape that overflows.
+
 CRITICAL — verification is automatic. Wait for QC; do not pre-empt.
 QC reviews every task you emit; DO NOT emit separate "review" /
 "verify" / "test" / "validate" / "execute pytest" / "run lint" tasks

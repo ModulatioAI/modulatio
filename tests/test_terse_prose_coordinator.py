@@ -106,17 +106,25 @@ def test_template_keeps_artifacts_expansion_explanation() -> None:
 
 def test_template_is_under_post_terse_threshold() -> None:
     """Coarse byte-count gate. Pre-terse Coordinator template was
-    ~5,400 chars. Target post-terse is under 4,500 chars. Threshold
-    chosen to catch regressions (someone pads prose back in) without
-    false-failing on minor wording adjustments.
+    ~5,400 chars; the terse pass trimmed it to ~4,500. The gate catches
+    regressions (someone pads prose back in) without false-failing on
+    minor wording adjustments.
+
+    Raised to 5,500 on 2026-05-30: the terse-earned headroom was spent
+    on a genuinely-new, load-bearing SWEEP-bounding contract (~870
+    chars — fan "X for each of N items" into per-item + synthesis tasks
+    so a sweep can't be crammed into one overflowing producer call).
+    That is contract, not padding, and the result (~5,360) still sits
+    under the original pre-terse ~5,400. Keep new additions justified
+    by contract, not prose.
 
     When a future PR applies terse-prose to Leader-reflect / Producer
     / QC, replicate this pattern with their respective baselines.
     """
     char_count = len(orchestration._TASK_PLAN_PROMPT)
-    assert char_count < 4500, (
-        f"_TASK_PLAN_PROMPT is {char_count} chars — terse pass "
-        f"should keep it under 4,500. Pre-terse was ~5,400."
+    assert char_count < 5500, (
+        f"_TASK_PLAN_PROMPT is {char_count} chars — should stay under "
+        f"5,500 (pre-terse was ~5,400 + the sweep-bounding contract)."
     )
     # Lower bound too — a vacuous trim that drops the contract is
     # worse than no trim. 2,500 chars is a sanity floor.
