@@ -128,10 +128,11 @@ def test_ab_harness_event_literals_closed() -> None:
     }
 
 
-def test_varied_dimension_literals_alpha6_scope() -> None:
-    """Alpha.6 ships only the compression dimension; later slices
-    grow this list with deliberate CHANGELOG entries."""
-    assert set(VARIED_DIMENSION_LITERALS) == {"compression"}
+def test_varied_dimension_literals_closed() -> None:
+    """The varied-dimension enum is closed and grows only by deliberate
+    CHANGELOG entry. Started compression-only (alpha.6); concurrent_waves
+    added 2026-05-29 for the wave-executor eval."""
+    assert set(VARIED_DIMENSION_LITERALS) == {"compression", "concurrent_waves"}
 
 
 def test_mode_literals_closed() -> None:
@@ -886,6 +887,57 @@ def test_apply_arm_override_preserves_bool_identity() -> None:
     )
     assert out_true["compression_enabled"] is True
     assert out_false["compression_enabled"] is False
+
+
+def test_apply_arm_override_concurrent_waves_maps_to_config_key() -> None:
+    """concurrent_waves dimension toggles the ``concurrent_waves_enabled``
+    PROJECT FIELD, whose name differs from the dimension name. The override
+    must write the field key (not the bare dimension name) and preserve bool
+    identity, so the factory reads it back correctly."""
+    from modulatio.ab_harness import _apply_arm_override
+    out_true = _apply_arm_override(
+        base_config={}, varied_dimension="concurrent_waves", arm_value=True,
+    )
+    out_false = _apply_arm_override(
+        base_config={}, varied_dimension="concurrent_waves", arm_value=False,
+    )
+    assert out_true["concurrent_waves_enabled"] is True
+    assert out_false["concurrent_waves_enabled"] is False
+    # The bare dimension name must NOT leak as a stray config key.
+    assert "concurrent_waves" not in out_true
+    assert "concurrent_waves" not in out_false
+
+
+@pytest.mark.parametrize(
+    "bad_a, bad_b",
+    [("True", False), (True, "False"), (1, 0), (True, 0)],
+)
+def test_validate_config_rejects_non_bool_concurrent_waves_arms(
+    bad_a, bad_b, tmp_path
+) -> None:
+    """concurrent_waves is a boolean dimension, so the same strict-bool
+    guard as compression applies — strings like ``"True"`` and ints like
+    ``0``/``1`` are rejected to prevent silent ``bool(...)`` coercion."""
+    cfg = ABConfig(
+        base_project_config={}, varied_dimension="concurrent_waves",
+        arm_a_value=bad_a, arm_b_value=bad_b, replicates=3, mode="stub",
+    )
+    with pytest.raises(
+        ABHarnessInvalidConfigError,
+        match=r"varied_dimension='concurrent_waves' requires a strict bool",
+    ):
+        run_experiment(cfg, output_root=tmp_path)
+
+
+def test_validate_config_accepts_bool_concurrent_waves() -> None:
+    """A strict-bool concurrent_waves config validates cleanly."""
+    from modulatio.ab_harness import _validate_config
+    cfg = ABConfig(
+        base_project_config={"code": "abc"},
+        varied_dimension="concurrent_waves",
+        arm_a_value=True, arm_b_value=False, replicates=3, mode="stub",
+    )
+    _validate_config(cfg)  # must not raise
 
 
 # ── audit emitters ──────────────────────────────────────────────────────

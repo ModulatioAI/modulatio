@@ -6489,6 +6489,36 @@ def test_concurrent_waves_runs_independent_tasks(project: Project, monkeypatch):
     )
 
 
+def test_concurrent_waves_enabled_config_or_env(project: Project, monkeypatch):
+    """Config-OR-env (2026-05-29): the wave executor is enabled when EITHER
+    ``project.concurrent_waves_enabled`` is True OR
+    ``MODULATIO_CONCURRENT_WAVES=1``. Default is OFF (sequential stays the
+    production default); the env var is an independent override; ``None``
+    falls back to env-only. This is the config-addressability the A/B harness
+    relies on to vary concurrency as a dimension."""
+    monkeypatch.delenv("MODULATIO_CONCURRENT_WAVES", raising=False)
+    f = Orchestrator._concurrent_waves_enabled
+    proj_off = project  # fixture carries the field's default
+    proj_on = project.model_copy(update={"concurrent_waves_enabled": True})
+
+    assert proj_off.concurrent_waves_enabled is False  # field default OFF
+
+    # env unset → config decides
+    assert f(None) is False
+    assert f(proj_off) is False
+    assert f(proj_on) is True             # config on-switch
+
+    # env=1 → on regardless of config (independent override)
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "1")
+    assert f(proj_off) is True
+    assert f(None) is True
+
+    # only "1" means on; env="0" is not a force-OFF, so config still turns it on
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "0")
+    assert f(proj_on) is True
+    assert f(proj_off) is False
+
+
 def test_concurrent_waves_blocks_artifact_path_conflict(project: Project, monkeypatch):
     """Nemo impl-sweep Blocker 1: two tasks in a concurrent wave targeting
     the same output_path are a plan conflict — both BLOCKED + a CRITICAL

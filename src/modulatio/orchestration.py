@@ -3886,12 +3886,21 @@ class Orchestrator:
         )
 
     @staticmethod
-    def _concurrent_waves_enabled() -> bool:
-        """Core rebuild B4: the concurrent wave executor is opt-in via
-        ``MODULATIO_CONCURRENT_WAVES=1`` and ships OFF by default — the
-        sequential loop stays the production path while concurrency is
-        hardened (full store-write deferral on the rare block paths +
-        capability-floor in wave re-allocation are the pre-default work)."""
+    def _concurrent_waves_enabled(project: "Project | None" = None) -> bool:
+        """Core rebuild B4: the concurrent wave executor is opt-in and ships
+        OFF by default — the sequential loop stays the production path while
+        concurrency is hardened (full store-write deferral on the rare block
+        paths + capability-floor in wave re-allocation are the pre-default
+        work).
+
+        Config-OR-env (concurrent-waves eval, 2026-05-29): concurrency is
+        enabled when EITHER ``project.concurrent_waves_enabled`` is True OR
+        ``MODULATIO_CONCURRENT_WAVES=1``. The config field lets the A/B
+        harness vary concurrency as a dimension; the env var is preserved as
+        an independent override. ``project=None`` falls back to env-only
+        (back-compat for any caller without a project in hand)."""
+        if project is not None and project.concurrent_waves_enabled:
+            return True
         return os.environ.get("MODULATIO_CONCURRENT_WAVES") == "1"
 
     @staticmethod
@@ -6310,7 +6319,7 @@ class Orchestrator:
             # wholesale. Goal verification (after the loop) runs in BOTH
             # modes. Sequential stays the production path until concurrency
             # is fully hardened.
-            run_concurrent = self._concurrent_waves_enabled()
+            run_concurrent = self._concurrent_waves_enabled(self.project)
             if run_concurrent:
                 self._run_task_waves(g, tasks, summary, task_map)
             iterate_enabled = (

@@ -98,13 +98,34 @@ AB_HARNESS_EVENT_LITERALS = (
 )
 
 
-#: Closed enum of varied dimensions. Alpha.6 scope is just compression;
-#: this enum grows as later slices add inboxes / budgets / model
-#: choice as A/B dimensions. Adding a value is a deliberate CHANGELOG
-#: entry, never free text.
+#: Closed enum of varied dimensions. Started as compression-only (alpha.6);
+#: grows as later slices add dimensions. Adding a value is a deliberate
+#: CHANGELOG entry, never free text.
+#: - ``compression`` → toggles ``Project.compression_enabled``
+#: - ``concurrent_waves`` (2026-05-29) → toggles
+#:   ``Project.concurrent_waves_enabled`` (the wave-executor eval: does
+#:   running a goal's tasks in concurrent waves regress verdict quality vs
+#:   the sequential default, and what does it buy in wall-clock?)
+#: Both are BOOLEAN dimensions — see ``_BOOLEAN_DIMENSIONS`` /
+#: ``_validate_config`` for the strict-bool arm-value guard.
 VARIED_DIMENSION_LITERALS = (
     "compression",
+    "concurrent_waves",
 )
+
+#: Dimensions whose arm values must be strict ``bool`` (not "False"/0/1).
+#: Drives the type guard in :func:`_validate_config` and the explicit
+#: dict-key mapping in :func:`_apply_arm_override`.
+_BOOLEAN_DIMENSIONS = frozenset({"compression", "concurrent_waves"})
+
+#: Maps a boolean varied-dimension name → the ``Project`` config key it
+#: toggles. Dimension names and field names deliberately differ (the
+#: dimension is the human-facing axis; the field is the engine knob), so
+#: this mapping is explicit rather than name-derived.
+_DIMENSION_CONFIG_KEY = {
+    "compression": "compression_enabled",
+    "concurrent_waves": "concurrent_waves_enabled",
+}
 
 
 #: Closed enum of harness modes.
@@ -1640,7 +1661,7 @@ def _validate_config(config: ABConfig) -> None:
     # ``isinstance(x, bool)`` deliberately — Python's ``True == 1`` and
     # ``False == 0`` mean ``isinstance(0, bool)`` is False but the bool
     # constructor still happily coerces 0/1 to bool.
-    if config.varied_dimension == "compression":
+    if config.varied_dimension in _BOOLEAN_DIMENSIONS:
         for label, value in (
             ("arm_a_value", config.arm_a_value),
             ("arm_b_value", config.arm_b_value),
@@ -1648,9 +1669,9 @@ def _validate_config(config: ABConfig) -> None:
             if type(value) is not bool:
                 raise ABHarnessInvalidConfigError(
                     f"{label}={value!r} (type={type(value).__name__}); "
-                    f"varied_dimension='compression' requires a strict "
-                    f"bool (True or False). Strings like 'False' and "
-                    f"ints like 0/1 are rejected to prevent silent "
+                    f"varied_dimension={config.varied_dimension!r} requires "
+                    f"a strict bool (True or False). Strings like 'False' "
+                    f"and ints like 0/1 are rejected to prevent silent "
                     f"coercion of arm values."
                 )
 
@@ -1665,17 +1686,21 @@ def _apply_arm_override(
     Returns a fresh dict so per-arm mutations don't leak."""
     import copy
     effective = copy.deepcopy(base_config)
-    if varied_dimension == "compression":
+    if varied_dimension in _BOOLEAN_DIMENSIONS:
         # Nemo Blocker 2 (2026-05-19): direct assign, NOT ``bool(...)``.
         # ``_validate_config`` has already enforced ``type(...) is bool``
-        # for compression arm values, so a non-bool reaching this point
-        # is a programmer error and should fault on the dict op, not be
-        # silently coerced. The earlier ``bool(arm_value)`` was the bug:
+        # for boolean-dimension arm values, so a non-bool reaching this
+        # point is a programmer error and should fault on the dict op, not
+        # be silently coerced. The earlier ``bool(arm_value)`` was the bug:
         # ``bool("False") is True``, ``bool(0) is False``, etc.
-        effective["compression_enabled"] = arm_value
+        # The dimension NAME and the Project FIELD name differ
+        # (compression → compression_enabled, concurrent_waves →
+        # concurrent_waves_enabled), so map explicitly.
+        effective[_DIMENSION_CONFIG_KEY[varied_dimension]] = arm_value
     else:
-        # Future dimensions land here. For now, write the dimension
-        # name as a kwarg so the caller's factory can read it back.
+        # Future non-boolean dimensions land here. For now, write the
+        # dimension name as a kwarg so the caller's factory can read it
+        # back.
         effective[varied_dimension] = arm_value
     return effective
 
