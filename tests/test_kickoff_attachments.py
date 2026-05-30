@@ -184,3 +184,72 @@ def test_kickoff_multimodal_user_text_inlines_documents(
     # Image surfaces as a content block, not in the text.
     types = [b["type"] for b in user_content]
     assert "image_url" in types
+
+
+# ── iteration mode (2026-05-30): --attach pins a file to improve in place ──
+
+def test_iteration_contract_empty_for_greenfield(project: Project):
+    orch = Orchestrator(project, _capturing_runners({}))
+    assert orch._pinned_files == []
+    assert orch._iteration_contract_block() == ""
+
+
+def test_iteration_contract_when_pinned(project: Project):
+    orch = Orchestrator(project, _capturing_runners({}))
+    orch._pinned_files = ["game.py"]
+    block = orch._iteration_contract_block()
+    assert "ITERATION" in block
+    assert "`game.py`" in block
+    assert "EDIT IN PLACE" in block
+    assert "STAY IN THE FILE" in block          # no-scatter contract
+    assert "SMALL, FOCUSED PLAN" in block        # no over-decompose / report tasks
+
+
+def test_iteration_contract_reaches_decompose_prompt(project: Project):
+    captured: dict[str, list[str]] = {}
+    orch = Orchestrator(project, _capturing_runners(captured))
+    orch._pinned_files = ["game.py"]  # simulate a pinned file
+    orch._leader_decompose("improve the game", attachments=[])
+    prompt = captured["leader"][0]
+    assert "ITERATION — improve existing work" in prompt
+    assert "`game.py`" in prompt
+
+
+def test_greenfield_decompose_has_no_iteration_contract(project: Project):
+    captured: dict[str, list[str]] = {}
+    orch = Orchestrator(project, _capturing_runners(captured))
+    orch._leader_decompose("build a new game", attachments=[])
+    assert "ITERATION — improve existing work" not in captured["leader"][0]
+
+
+def test_pin_attachments_copies_into_workspace(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(PROJECT_CODE, "iter", "obj")
+    run_id = "20260530T000000Z-iter01"
+    vault.init_run(PROJECT_CODE, run_id, "obj")
+    proj = Project(
+        code=PROJECT_CODE, name="iter", objective="obj", leader_model="stub",
+        wiki_path=str(tmp_path / PROJECT_CODE.lower()), run_id=run_id,
+    )
+    src = tmp_path / "game.py"
+    src.write_text("import pygame\nJUMP = -12\n")
+    att = build_attachment(src, kind="document")
+
+    orch = Orchestrator(proj, _capturing_runners({}))
+    orch._pin_attachments([att])
+
+    assert orch._pinned_files == ["game.py"]
+    pinned = vault.run_dir(PROJECT_CODE, run_id) / "artifacts" / "game.py"
+    assert pinned.exists()
+    assert pinned.read_text() == "import pygame\nJUMP = -12\n"
+    # and the contract now activates
+    assert "EDIT IN PLACE" in orch._iteration_contract_block()
+
+
+def test_pin_attachments_noop_without_run_id(project: Project, tmp_path: Path):
+    src = tmp_path / "game.py"
+    src.write_text("x = 1\n")
+    att = build_attachment(src, kind="document")
+    orch = Orchestrator(project, _capturing_runners({}))  # project has no run_id
+    orch._pin_attachments([att])
+    assert orch._pinned_files == []  # nothing pinned, greenfield stays greenfield

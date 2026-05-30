@@ -1426,6 +1426,13 @@ class Orchestrator:
         #: within a run, so an instance cache is correct + cheaper.
         self._skill_floor_cache: dict[str, tuple[str, ...]] = {}
         self._domain_floor_cache: dict[str, tuple[str, ...]] = {}
+        #: Iteration mode (2026-05-30): names (artifacts-relative) of files
+        #: pinned into the workspace at kickoff via ``--attach``. Non-empty
+        #: ⇒ this run IMPROVES existing work rather than building greenfield,
+        #: and ``_iteration_contract_block()`` injects the edit-in-place /
+        #: no-scatter / no-over-decompose contract into the decompose,
+        #: task-plan, and producer prompts. Set per kickoff.
+        self._pinned_files: list[str] = []
         #: Per-role context-budget overrides supplied at the dispatcher
         #: entry point (CLI ``--ctx-budget``, daemon, TUI advanced
         #: settings). Keys are budget_role strings; values are
@@ -2140,7 +2147,8 @@ class Orchestrator:
                 standards=_format_standards_block(leader_standards),
                 attachments=_format_kickoff_attachments(doc_only)
                 + "\n\n(Image attachments are included as content blocks "
-                "below — examine them for visual context.)",
+                "below — examine them for visual context.)"
+                + self._iteration_contract_block(),
             )
             response = self._run_multimodal_leader(
                 prompt=prompt, attachments=atts,
@@ -2151,7 +2159,8 @@ class Orchestrator:
                 objective=objective,
                 code=self.project.code,
                 standards=_format_standards_block(leader_standards),
-                attachments=_format_kickoff_attachments(atts),
+                attachments=_format_kickoff_attachments(atts)
+                + self._iteration_contract_block(),
             )
             response = self._run("leader", prompt)
         data = _extract_json(response)
@@ -2241,7 +2250,8 @@ class Orchestrator:
                 [req.model_dump() for req in goal.evidence_required],
                 indent=2,
             ),
-            design_intent=_design_intent.render_for_prompt(self.project.code),
+            design_intent=self._iteration_contract_block()
+            + _design_intent.render_for_prompt(self.project.code),
             available_skills=_format_available_skills(available),
             available_capabilities=_format_available_capabilities(
                 available_capabilities
@@ -2767,7 +2777,10 @@ class Orchestrator:
         # <project>/standards/design-intent.md; neutral marker when
         # absent.
         from modulatio import design_intent as _design_intent
-        design_intent_block = _design_intent.render_for_prompt(self.project.code)
+        design_intent_block = (
+            self._iteration_contract_block()
+            + _design_intent.render_for_prompt(self.project.code)
+        )
         # Slice 1 (#88): per-objective inter-task carry. Producers
         # see Current Focus + Open Blockers + Recent Activity from the
         # state doc Leader-reflect maintains between sub-objectives.
@@ -3426,7 +3439,10 @@ class Orchestrator:
         team_memory_context = self._recall_team_memory(task)
         team_canvas_block = self._build_team_canvas_digest()
         from modulatio import design_intent as _design_intent
-        design_intent_block = _design_intent.render_for_prompt(self.project.code)
+        design_intent_block = (
+            self._iteration_contract_block()
+            + _design_intent.render_for_prompt(self.project.code)
+        )
         from modulatio import team_state as _team_state
         team_state_block = _team_state.render_for_prompt(
             self.project.code, self.project.run_id
@@ -6334,6 +6350,72 @@ class Orchestrator:
             _ctx_budget_module.unbind(ctx_token)
             _tool_sum_module.unbind(ts_token)
 
+    def _pin_attachments(self, attachments: list) -> None:
+        """Copy document attachments into the run's artifacts workspace and
+        record their (artifacts-relative) names as pinned files. This is how
+        an existing file reaches a producer: the producer's ``cat``/``repo_map``
+        are confined to the artifacts dir, so the file must live there. A
+        pinned file flips the run into iteration mode (see
+        :meth:`_iteration_contract_block`). No-op without a run workspace or
+        document attachments — greenfield runs are unaffected."""
+        self._pinned_files = []
+        docs = [a for a in attachments if getattr(a, "kind", None) == "document"]
+        if not docs or self.project.run_id is None:
+            return
+        artifacts_root = self._scope_root() / "artifacts"
+        for a in docs:
+            content = a.content
+            if content is None:
+                try:
+                    content = Path(a.path).read_text()
+                except OSError:
+                    continue
+            try:  # same confinement rule as a producer output_path
+                rel = _validate_output_path(a.name, artifacts_root)
+            except _PlanError:
+                continue
+            dest = artifacts_root / rel
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content)
+            except OSError:
+                continue
+            self._pinned_files.append(rel)
+        if self._pinned_files:
+            self._emit_activity(
+                role="orchestrator", phase="attachments_pinned",
+                agent_id="orchestrator",
+            )
+
+    def _iteration_contract_block(self) -> str:
+        """The ITERATION CONTRACT injected into the decompose / task-plan /
+        producer prompts when this run pins existing file(s). Empty string for
+        a greenfield run (no pins), so greenfield prompts stay byte-identical.
+
+        Engine half of the iteration mode: the trigger is deterministic (a
+        pinned file is present), and the contract bends the LLM toward
+        edit-in-place / stay-in-the-file / small-plan — the exact failure modes
+        a single-file improvement hit live (2026-05-30: a 'higher jump' change
+        landed in an orphan module because the producer scattered a one-file
+        game; three 'fix X' asks ballooned into six implement+report tasks)."""
+        if not self._pinned_files:
+            return ""
+        names = ", ".join(f"`{n}`" for n in self._pinned_files)
+        return (
+            "\n\n# ITERATION — improve existing work (NOT a new build)\n"
+            f"This run IMPROVES file(s) already in the workspace: {names}. They "
+            "are the starting point, not a reference — read before changing.\n"
+            "- EDIT IN PLACE: change the pinned file(s) to satisfy the request "
+            "and preserve everything that already works.\n"
+            "- STAY IN THE FILE: do NOT create new modules/files unless a change "
+            "genuinely cannot live in an existing one. The pinned file IS the "
+            "deliverable; a change that lands in a new orphan file is a defect.\n"
+            "- SMALL, FOCUSED PLAN: map the request to the fewest tasks that "
+            "apply the changes. Do NOT add separate 'report', 'assessment', "
+            "'analysis', 'summary', or 'verify' goals/tasks — the improved file "
+            "speaks for itself.\n"
+        )
+
     def _kickoff_inner(
         self,
         objective: str,
@@ -6345,6 +6427,10 @@ class Orchestrator:
         self._emit_activity(
             role="orchestrator", phase="kickoff_started", agent_id="orchestrator",
         )
+        # Iteration: pin any --attach'd files into the workspace BEFORE
+        # decompose so the contract + the files are live for every downstream
+        # prompt (decompose, task-plan, producer).
+        self._pin_attachments(attachments or [])
 
         # Slice #7e: before decomposing a new objective, resume any
         # previously-blocked goals whose retry budget has refreshed.

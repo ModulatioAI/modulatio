@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Callable
 
 import typer
@@ -42,6 +43,7 @@ from modulatio import (  # noqa: E402 — env must load before modulatio imports
     vault,
 )
 from modulatio import context_budget as _ctx_budget_mod  # noqa: E402
+from modulatio.attachments import build_attachment  # noqa: E402
 from modulatio.orchestration import Orchestrator  # noqa: E402
 from modulatio.runners import default_generic_stub_runners, litellm_runner, maybe_build_chat_runner  # noqa: E402
 from modulatio import tools as _tools_mod  # noqa: E402
@@ -273,6 +275,13 @@ def kickoff(
     code: str = typer.Option(..., help="3-letter project code (e.g. STA)"),
     objective: str = typer.Option(..., help="Top-level project objective"),
     name: str = typer.Option(None, help="Project display name (defaults to objective)"),
+    attach: list[str] = typer.Option(
+        None, "--attach", help=(
+            "Path to an existing file to IMPROVE (repeatable). Pins it into the "
+            "run workspace and switches on iteration mode: producers edit it in "
+            "place instead of building greenfield (no scatter, small plan)."
+        ),
+    ),
     stub: bool = typer.Option(
         False, "--stub", help="Use canned stub runners (offline smoke test)."
     ),
@@ -484,7 +493,21 @@ def kickoff(
         ),
         user_budget_overrides=user_budget_overrides or None,
     )
-    summary = orch.kickoff(objective)
+    _atts = []
+    for _p in (attach or []):
+        _path = Path(_p).expanduser()
+        try:
+            _atts.append(build_attachment(_path, kind="document"))
+        except FileNotFoundError:
+            typer.echo(f"  ! --attach: file not found: {_path}", err=True)
+            raise typer.Exit(1)
+        except (ValueError, UnicodeDecodeError) as _e:
+            typer.echo(f"  ! --attach: cannot attach {_path}: {_e}", err=True)
+            raise typer.Exit(1)
+    if _atts:
+        names = ", ".join(a.name for a in _atts)
+        typer.echo(f"  Iteration mode — improving in place: {names}")
+    summary = orch.kickoff(objective, attachments=_atts or None)
 
     typer.echo("")
     typer.echo(f"  Goals created: {len(summary.goals)}")
