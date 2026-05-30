@@ -238,7 +238,8 @@ def unbind(token) -> None:
 
 
 def get_known_max_input_tokens(model: str | None) -> int | None:
-    """Look up the model's TRUE context window via ``litellm.get_max_tokens``.
+    """Look up the model's TRUE input context window via
+    ``litellm.get_model_info(model)["max_input_tokens"]``.
 
     Returns ``None`` when the window is genuinely UNKNOWN:
       - ``model`` is ``None``
