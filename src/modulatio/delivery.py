@@ -155,6 +155,76 @@ def deliver_finished_products(
     return out
 
 
+_QUALITY_REPORT_TITLE = "Product Quality Report"
+
+
+def build_product_quality_report(recommendations) -> str:
+    """Render the Leader's human-addressed Product Quality Report (Markdown).
+
+    This is the Leader's analysis OF the delivered work — what it stands
+    behind and what it recommends the human double-check — NOT part of the
+    work itself and NOT something the swarm reviews. ``recommendations`` is a
+    list of ``{goal_id, concern, suggestion}`` gathered from the Leader's
+    verdicts. Always produced: an "all clear" is itself useful signal."""
+    lines = [
+        f"# {_QUALITY_REPORT_TITLE}",
+        "",
+        "_The project lead's assessment of the delivered work, prepared for "
+        "you. The deliverables were produced and quality-controlled by the "
+        "team. The notes below are the lead's remaining reservations and the "
+        "checks it recommends before you rely on the work — they are "
+        "ADVISORY, and did not block or hold back your product._",
+        "",
+    ]
+    if not recommendations:
+        lines += [
+            "## No outstanding reservations",
+            "",
+            "The lead flagged nothing to double-check — the deliverables "
+            "passed quality control with no caveats.",
+            "",
+        ]
+        return "\n".join(lines)
+
+    lines += ["## Recommended checks before you rely on this", ""]
+    for r in recommendations:
+        concern = str(r.get("concern", "") or "").strip()
+        suggestion = str(r.get("suggestion", "") or "").strip()
+        gid = str(r.get("goal_id", "") or "").strip()
+        tag = f" _(goal {gid})_" if gid else ""
+        if concern and suggestion:
+            lines.append(f"- **{concern}**{tag}  \n  Recommended check: {suggestion}")
+        elif concern:
+            lines.append(f"- **{concern}**{tag}")
+        elif suggestion:
+            lines.append(f"- {suggestion}{tag}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def deliver_product_quality_report(
+    recommendations,
+    *,
+    project_code: str,
+) -> "DeliveredProduct | None":
+    """Render the Product Quality Report and place it beside the deliverables.
+    Always shipped as DOCX (it sits next to the .docx products and the human
+    opens it the same way), regardless of any other format config. Always
+    produced (the 'all clear' case included). Returns ``None`` only if the
+    report couldn't be staged for render."""
+    body = build_product_quality_report(recommendations)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            md = Path(td) / "product-quality-report.md"
+            md.write_text(body)
+            return deliver_product(
+                md, project_code=project_code,
+                task_id="product-quality-report", fmt="docx",
+            )
+    except OSError:  # pragma: no cover — defensive staging failure
+        return None
+
+
 def deliverables_from_tasks(
     tasks, artifacts_root: Path,
 ) -> "list[tuple[str, Path, str | None]]":
@@ -223,6 +293,8 @@ __all__ = [
     "DeliveredProduct",
     "blocked_goal_ids",
     "blocked_task_ids",
+    "build_product_quality_report",
+    "deliver_product_quality_report",
     "deliver_finished_products",
     "deliver_product",
     "deliverables_from_tasks",

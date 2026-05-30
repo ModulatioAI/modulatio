@@ -77,6 +77,13 @@ class RunSummary:
     #: separation. Surfaced distinctly so a human report never presents
     #: them as clean producer wins.
     qc_authored_fixes: list[str] = field(default_factory=list)
+    #: Leader's reservations FOR THE HUMAN (2026-05-30) — caveats it can't
+    #: resolve inside the swarm (e.g. "couldn't verify these citations are
+    #: authentic", "no plagiarism scan was run"). These do NOT fail a goal,
+    #: loop the swarm, edit the work, or open a ticket — they are gathered
+    #: into the human-addressed "Product Quality Report" that ships beside
+    #: the deliverables. Each item: {goal_id, concern, suggestion}.
+    recommendations: list[dict] = field(default_factory=list)
 
 
 # ── Core rebuild B3: isolated-worker result + deterministic merge ───────
@@ -5505,11 +5512,17 @@ class Orchestrator:
             )
             verdict = "disappointed"
 
-        # Disappointed path forks on retry budget (slice #7e). The
-        # budget-available branch triggers an auto-redo without opening
-        # a ticket; the exhausted branch opens a BLOCKER with
-        # refresh_at. Both paths still wrote the report above so the
-        # audit trail captures every Leader verdict.
+        # Reservations are ADVISORY — gather them for the human-facing
+        # Product Quality Report (2026-05-30). They never fail a goal, loop
+        # the swarm, edit the work, or block the run; they ride out beside
+        # the deliverables. Done for every verdict, including disappointed.
+        self._record_recommendations(goal, data.get("recommendations"), summary)
+
+        # "disappointed" = a fixable WRONG / incomplete deliverable (a
+        # FITNESS gap the team can resolve). Redo the producing work,
+        # bounded by the daily retry budget. On exhaustion we do NOT punt a
+        # ticket to the human and do NOT block the run — we ship the best
+        # result and record the unresolved gap as a recommendation.
         if verdict == "disappointed":
             self._refresh_daily_budget_if_new_day(goal)
             if goal.retry_count < goal.max_retries:
@@ -5518,73 +5531,60 @@ class Orchestrator:
                     goal, tasks, rationale, report_path, summary,
                 )
                 return
-            self._open_budget_exhausted_ticket(
-                goal, rationale, report_path, summary,
-            )
-            self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
-            return
-
-        # satisfied / on_the_fence: open the ticket + transition, no
-        # auto-redo path.
-        if verdict == "satisfied":
-            priority = TicketPriority.MINOR
-            title = f"Goal {goal.id} ready for sign-off"
-            ticket_body = (
-                f"Leader believes goal **{goal.id}** is complete. Please "
-                f"sign off at your convenience.\n\n"
-                f"Goal: {goal.description}\n\n"
-                f"Leader's rationale: {rationale}\n\n"
-                f"Full report: `{report_path}`\n"
-            )
-            approval_required = False
-        else:  # on_the_fence
-            priority = TicketPriority.CRITICAL
-            title = f"Goal {goal.id} completion uncertain — review"
-            ticket_body = (
-                f"Leader has reservations about goal **{goal.id}** — "
-                f"review before accepting.\n\n"
-                f"Goal: {goal.description}\n\n"
-                f"Leader's rationale: {rationale}\n\n"
-                f"Full report: `{report_path}`\n"
-            )
-            approval_required = True
-
-        ticket = store.create_ticket(
-            project_id=self.project.id,
-            project_code=self.project.code,
-            run_id=self.project.run_id,
-            priority=priority,
-            title=title,
-            body=ticket_body,
-            affected_goal_id=goal.id,
-            actor="leader",
-            approval_required=approval_required,
-        )
-        self._emit_ticket_opened(ticket, role="leader")
-
-        if verdict == "satisfied":
-            new_status = GoalStatus.COMPLETED
+            summary.recommendations.append({
+                "goal_id": goal.id,
+                "concern": (
+                    f"The team could not fully satisfy this goal after "
+                    f"{goal.max_retries} attempts."
+                ),
+                "suggestion": (
+                    f"Review this deliverable closely before relying on it — "
+                    f"{rationale}"
+                ),
+            })
             rationale_text = (
-                f"leader verified: {rationale} | report {report_path.name} | "
-                f"ticket {ticket.id}"
+                f"leader: shipped with reservations after {goal.max_retries} "
+                f"attempts: {rationale} | report {report_path.name}"
             )
         else:
-            new_status = goal.status  # stays IN_PROGRESS
+            # satisfied / on_the_fence — both COMPLETE and ship. on_the_fence
+            # no longer blocks or opens a ticket: its reservations were just
+            # recorded above for the Product Quality Report.
             rationale_text = (
-                f"leader verdict {verdict}: {rationale} | "
-                f"report {report_path.name} | ticket {ticket.id}"
+                f"leader verdict {verdict}: {rationale} | report {report_path.name}"
             )
 
+        # Every verdict completes the goal — the run is never blocked on the
+        # Leader's reservations; the human reads them in the Product Quality
+        # Report and decides what to double-check. No tickets.
         goal.transitions.append(
             StateTransition(
                 from_state=goal.status.value,
-                to_state=new_status.value,
+                to_state=GoalStatus.COMPLETED.value,
                 actor="leader",
                 rationale=rationale_text,
             )
         )
-        goal.status = new_status
+        goal.status = GoalStatus.COMPLETED
         self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
+
+    def _record_recommendations(self, goal: Goal, raw, summary: RunSummary) -> None:
+        """Fold the Leader's reservations for ``goal`` into the run's
+        human-facing recommendations (the Product Quality Report). Tolerant
+        of dict items ({concern, suggestion}) or bare strings. Advisory only
+        — never affects goal status or run flow."""
+        for r in raw or []:
+            if isinstance(r, dict):
+                concern = str(r.get("concern", "") or "").strip()
+                suggestion = str(r.get("suggestion", "") or "").strip()
+            else:
+                concern, suggestion = str(r or "").strip(), ""
+            if concern or suggestion:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": concern,
+                    "suggestion": suggestion,
+                })
 
     # ── Leader auto-redo + budget-exhausted BLOCKER (slice #7e) ─────────
     def _leader_auto_redo(
@@ -6630,24 +6630,46 @@ Produce a human-facing report covering: what was delivered, how well
 it matches the criteria, gaps/risks/quality concerns worth flagging,
 and your recommended next step.
 
+Judge COMPLETION and FITNESS — did the team produce the deliverable this
+goal asked for, to scope? You do NOT re-run quality checks: QC already
+verified each artifact against the domain standards and repaired what it
+could. Do NOT invent verification gates (plagiarism scans, sign-offs,
+"ready for review", approval signals) — the swarm has no such tools and
+they are not your job.
+
 Render one of three verdicts:
-- "satisfied": goal is met. Submit for human sign-off at leisure.
-- "on_the_fence": goal is largely met but you have reservations. The
-  human should look before accepting.
-- "disappointed": goal is not met. Substantive rework is needed.
+- "satisfied": the right deliverable exists and QC passed it. Goal done.
+- "on_the_fence": the right deliverable exists but you hold reservations.
+  STILL DONE — ship it; your reservations go to the human as
+  recommendations (below), they do NOT block the goal.
+- "disappointed": the WRONG or incomplete thing was made — a genuine
+  fitness gap the team CAN fix (off-topic, a required section absent).
+  The team redoes the producing work. Use ONLY for fixable wrong-
+  deliverable, NEVER for quality nitpicks or anything you can't verify.
+
+RESERVATIONS → the human, never the loop. Anything you don't fully trust
+but the swarm can't resolve — citations you couldn't independently
+confirm, the absence of a plagiarism scan, a claim worth double-checking
+— goes in "recommendations" FOR THE HUMAN. Reservations NEVER fail a
+goal, loop the swarm, edit the work, or block the run; they ride out in
+the human-addressed **Product Quality Report** beside the delivered work.
 
 Respond with a fenced ```json ... ``` block with exactly these keys:
 
     {{
       "verdict": "satisfied" | "on_the_fence" | "disappointed",
-      "rationale": "<1-3 line summary of why you chose the verdict>",
-      "report_body": "<markdown body for the human, 150-400 words>"
+      "rationale": "<why — for 'disappointed', the concrete fix the team must make>",
+      "recommendations": [
+        {{"concern": "<what you don't fully trust / couldn't verify>",
+          "suggestion": "<the specific check you'd advise the human to run>"}}
+      ],
+      "report_body": "<your human-facing assessment of the finished product, 150-400 words>"
     }}
 
-The rationale lands on the ticket the human sees. The report_body is
-written to a reports/ markdown file they can read in Obsidian. Be
-specific about which tasks worked, which didn't, and what concrete
-risks remain.
+"recommendations" may be empty []. report_body and recommendations are
+the Leader's contribution to the **Product Quality Report** that ships to
+the human beside the deliverables — be specific about what was delivered,
+what you stand behind, and what you'd have the human double-check.
 """
 
 

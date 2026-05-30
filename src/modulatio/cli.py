@@ -538,6 +538,17 @@ def kickoff(
                         typer.echo(f"    ! {d.name}: {d.error}")
                     else:
                         typer.echo(f"    ✓ {d.dest.name}")
+        # The Leader's Product Quality Report ALWAYS ships beside the work
+        # (DOCX) — its assessment + the checks it recommends the human run.
+        # Advisory: it never blocked or held back the product.
+        _qr = _delivery.deliver_product_quality_report(
+            summary.recommendations, project_code=code,
+        )
+        if _qr is not None:
+            if _qr.error:
+                typer.echo(f"  Product Quality Report: ! {_qr.error}")
+            else:
+                typer.echo(f"  Product Quality Report → {_qr.dest.name}")
     if summary.errors:
         typer.echo("")
         typer.echo("Errors:")

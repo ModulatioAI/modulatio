@@ -206,3 +206,41 @@ def test_blocked_goal_ids_handles_enum_status():
 def test_blocked_goal_ids_empty_when_all_clean():
     goals = [_StatusTask("G-1", "completed"), _StatusTask("G-2", "in_progress")]
     assert delivery.blocked_goal_ids(goals) == []
+
+
+# ── Product Quality Report (2026-05-30): Leader's advisory, ships as docx ──
+
+def test_quality_report_all_clear_when_no_reservations():
+    body = delivery.build_product_quality_report([])
+    assert body.startswith("# Product Quality Report")
+    assert "No outstanding reservations" in body
+    assert "ADVISORY" in body  # framed as non-blocking
+
+
+def test_quality_report_lists_concern_and_recommended_check():
+    recs = [{"goal_id": "P-G-001",
+             "concern": "Citations not independently verified",
+             "suggestion": "Spot-check the 12 cited URLs resolve"}]
+    body = delivery.build_product_quality_report(recs)
+    assert "Citations not independently verified" in body
+    assert "Spot-check the 12 cited URLs resolve" in body
+    assert "P-G-001" in body
+
+
+def test_quality_report_delivers_as_docx(monkeypatch, tmp_path, _mock_export):
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    dp = delivery.deliver_product_quality_report(
+        [{"goal_id": "P-G-001", "concern": "X", "suggestion": "Y"}],
+        project_code="ACME",
+    )
+    assert dp is not None and dp.error is None
+    assert dp.dest.suffix == ".docx"             # ships as docx, always
+    assert dp.dest.name == "Product Quality Report.docx"
+    assert dp.dest.exists()
+
+
+def test_quality_report_ships_even_with_no_reservations(monkeypatch, tmp_path, _mock_export):
+    """The 'all clear' report still ships — its absence would be ambiguous."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    dp = delivery.deliver_product_quality_report([], project_code="ACME")
+    assert dp is not None and dp.error is None and dp.dest.exists()
