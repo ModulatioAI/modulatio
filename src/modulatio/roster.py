@@ -523,6 +523,10 @@ def _seed_from_team_template(
             capability_tags=list(entry.get("capability_tags") or []),
             tier=entry.get("tier") or "producer",
             template_origin=entry.get("template_origin") or "wizard-team",
+            # Per-agent context budget (model-agnostic, by role). Usually
+            # None → the tested per-role PIANO defaults govern; set only when
+            # the user deliberately overrode it in the wizard (discouraged).
+            context_budget=entry.get("context_budget"),
         )
         save(agent, project_code)
         written.append(agent)
