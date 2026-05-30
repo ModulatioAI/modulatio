@@ -87,6 +87,32 @@ def test_get_max_input_tokens_unknown_model_returns_fallback() -> None:
     assert n == context_budget._DEFAULT_FALLBACK_MAX_INPUT_TOKENS
 
 
+# ── get_known_max_input_tokens (None = unknown; model-agnostic signal) ─────
+
+
+def test_get_known_max_input_tokens_none_for_unknown() -> None:
+    # Unknown model → None so the per-role budget governs (NOT an invented
+    # floor). This is what unblocked runs on models litellm doesn't know.
+    assert context_budget.get_known_max_input_tokens("totally-fake-model-9999") is None
+
+
+def test_get_known_max_input_tokens_none_for_empty() -> None:
+    assert context_budget.get_known_max_input_tokens(None) is None
+    assert context_budget.get_known_max_input_tokens("") is None
+
+
+def test_get_known_max_input_tokens_uses_input_window_not_output() -> None:
+    # Regression guard for the second bug: litellm.get_max_tokens('gpt-4o')
+    # returns the OUTPUT limit (~16k); the true INPUT context window is ~128k.
+    # The lookup must report the INPUT window, else a model wrongly clamps a
+    # role budget to its output cap.
+    import litellm
+    n = context_budget.get_known_max_input_tokens("gpt-4o")
+    assert n is not None
+    assert n > litellm.get_max_tokens("gpt-4o")  # input window > output limit
+    assert n == litellm.get_model_info("gpt-4o")["max_input_tokens"]
+
+
 # ── write_checkpoint ──────────────────────────────────────────────────────
 
 
