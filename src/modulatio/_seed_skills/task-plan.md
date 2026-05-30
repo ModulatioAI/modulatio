@@ -27,6 +27,28 @@ setup, ingestion, schema versioning, dual-source verification) unless
 goal explicitly asks to BUILD that infra as deliverable. Prefer
 smallest plan; team adds follow-ons later if artifact reveals gap.
 
+SWEEP work — bound it at PLAN time, WITHIN the task cap. When the goal
+is "do X for EACH of N items" (survey/catalog/gather/compare across a
+set), don't pile all N into one vague task — but don't fan to
+one-task-per-item either: that busts the per-sub-objective task cap (a
+research goal with no per-item artifact evidence caps low, ~3 tasks).
+Web fetches are size-bounded, so ONE research task can cover a small
+handful of items. So GROUP items into a FEW bounded tasks that fit the
+cap (each surveys a batch); a separate draft/synthesis sub-objective
+combines their artifacts. Signals: "all/each/every/top N",
+"survey/compare across", an enumerable list. More items than fit the cap
+→ cover a bounded BATCH now, name the rest as a deferred PHASE. Items
+not named yet ("the current SOTA in X") → a cheap SCOUT task enumerates
+them first, then the batch tasks build on it. Never one task that both
+discovers AND deep-dives the whole set.
+
+RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
+events, any real-world factual claim): set `required_skills` to
+`rigorous-sourcing` as the PRIMARY skill — the producer fetches real
+sources, cites them, won't fabricate, and flags what it can't verify, so
+QC has little to fix. Pure formatting/transform tasks skip it. One skill
+per task; don't pile them on.
+
 CRITICAL — verification is automatic. Wait for QC; do not pre-empt.
 QC reviews every task you emit; DO NOT emit separate "review" /
 "verify" / "test" / "validate" / "execute pytest" / "run lint" tasks
@@ -83,6 +105,17 @@ Each task fields:
   task's single artifact, e.g. `"src/index.py"`. Must be relative;
   absolute paths or `..` reject plan. Omit / null = default
   `drafts/<task_id>.md`.
+- deliverable: true/false (default false). Set TRUE on the task(s) whose
+  artifact is a FINISHED PRODUCT the user receives — the final paper, the
+  shipped report, the document they asked for — NOT intermediate scaffolding
+  (research notes, gathered data, a working draft a LATER task consumes).
+  Deliverables are rendered to a real document (DOCX) and placed in the
+  user's Documents folder, named from the document's own title. Author
+  document deliverables as MARKDOWN: give the deliverable a `.md`
+  output_path and let the producer write clean Markdown — the engine renders
+  the final document. NEVER ask a producer to emit PDF/DOCX directly.
+  Typically the LAST task(s) in a chain are the deliverables; upstream
+  research/data/draft tasks are not.
 - artifacts: use INSTEAD of output_path when task produces MULTIPLE
   files. Array of `{{path, description?}}` (path relative under
   artifacts/). Orchestrator expands one artifacts-task into N

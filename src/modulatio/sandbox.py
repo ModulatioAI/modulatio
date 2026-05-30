@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Bubblewrap-based sandbox layer for ``run_shell`` (SEC-001 + SEC-002).
 
 The argv-allowlist in ``tools.py`` is defense in depth, NOT the trust

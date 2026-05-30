@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Team-formation step — skills-first (#143).
 
 The user first chooses WHAT THE TEAM SHOULD BE ABLE TO DO (skills) and a
@@ -100,6 +102,47 @@ _STRUCTURAL_SKILLS = frozenset({
 })
 
 
+def _select_from_skill_list(available: list[str], *, empty_msg: str) -> Any:
+    """Render a numbered skill list + read a comma-separated / 'all' choice.
+    Shared by team-skill selection and per-producer subset selection so the
+    two can never drift in parsing/validation. Returns list[str]
+    (order-preserving, de-duped), BACK, or QUIT."""
+    for i, sname in enumerate(available, 1):
+        skill = skills_mod.load_with_metadata(sname)
+        desc = (skill.description or "")[:50]
+        print(f"    {theme.color(f'{i:>2}', 'highlight')}) {sname:18s}  {theme.color(desc, 'muted')}")
+    print()
+    print(theme.color("  Enter comma-separated numbers (e.g. 1,3,5) or 'all'.", "muted"))
+
+    while True:
+        try:
+            raw = input(theme.prompt_color("  Skills: ", "highlight")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return steps.QUIT
+        if raw in ("b", "q"):
+            return steps.BACK if raw == "b" else steps.QUIT
+        if raw == "all":
+            return list(available)
+        if raw == "":
+            theme.error(empty_msg)
+            continue
+        try:
+            picks = [int(p.strip()) for p in raw.split(",") if p.strip()]
+        except ValueError:
+            theme.error("Enter comma-separated numbers or 'all'.")
+            continue
+        if any(p < 1 or p > len(available) for p in picks):
+            theme.error(f"Pick numbers 1-{len(available)} only.")
+            continue
+        # de-dupe, preserve order
+        seen: list[str] = []
+        for p in picks:
+            s = available[p - 1]
+            if s not in seen:
+                seen.append(s)
+        return seen
+
+
 def _pick_team_skills() -> Any:
     """Skills-first (#143): ask which SKILLS the team needs. Multi-select
     from the shared skill registry (structural-role skills filtered out).
@@ -122,40 +165,10 @@ def _pick_team_skills() -> Any:
     print(theme.color("  What should your team be able to do?", "primary", bold=True))
     print(theme.color("  Pick the skills your producers will hold — tasks route to whoever holds the matching skill.", "muted"))
     print()
-    for i, sname in enumerate(available, 1):
-        skill = skills_mod.load_with_metadata(sname)
-        desc = (skill.description or "")[:50]
-        print(f"    {theme.color(f'{i:>2}', 'highlight')}) {sname:18s}  {theme.color(desc, 'muted')}")
-    print()
-    print(theme.color("  Enter comma-separated numbers (e.g. 1,3,5) or 'all'.", "muted"))
-
-    while True:
-        try:
-            raw = input(theme.prompt_color("  Skills: ", "highlight")).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return steps.QUIT
-        if raw in ("b", "q"):
-            return steps.BACK if raw == "b" else steps.QUIT
-        if raw == "all":
-            return list(available)
-        if raw == "":
-            theme.error("Pick at least one skill — the team needs at least one producer.")
-            continue
-        try:
-            picks = [int(p.strip()) for p in raw.split(",") if p.strip()]
-        except ValueError:
-            theme.error("Enter comma-separated numbers or 'all'.")
-            continue
-        if any(p < 1 or p > len(available) for p in picks):
-            theme.error(f"Pick numbers 1-{len(available)} only.")
-            continue
-        # de-dupe, preserve order
-        seen: list[str] = []
-        for p in picks:
-            s = available[p - 1]
-            if s not in seen:
-                seen.append(s)
-        return seen
+    return _select_from_skill_list(
+        available,
+        empty_msg="Pick at least one skill — the team needs at least one producer.",
+    )
 
 
 def _build_skill_holder(skill_names: list[str], model: str, *, index: int | None = None) -> dict:
@@ -244,6 +257,78 @@ def _provision_triad(state: dict, default_models: dict[str, str]) -> Any:
     return "configured"
 
 
+def _pick_skill_subset(team_skills: list[str], *, producer_label: str) -> Any:
+    """Pick which of the team's already-chosen skills one pool producer holds
+    (the subset path; the caller offers 'all' first for the common case).
+    Constrained to ``team_skills`` so a producer can't acquire a skill the
+    team never picked. Returns list[str], BACK, or QUIT."""
+    print()
+    print(theme.color(f"  Which skills should {producer_label} hold?", "primary", bold=True))
+    return _select_from_skill_list(
+        team_skills,
+        empty_msg="Pick at least one skill for this producer.",
+    )
+
+
+def _provision_producer_pool(
+    team_skills: list[str],
+    default_models: dict[str, str],
+    *,
+    staged_keys: dict[str, str] | None,
+    reserved: int,
+) -> Any:
+    """Build a POOL of producers, one at a time. Each gets its own model and
+    either ALL the team skills or a chosen subset. Capped so
+    Leader + QC + producers <= ``MAX_AGENTS``.
+
+    The payoff is concurrency: tasks route to whichever pool member holds the
+    matching skill, and under concurrent waves
+    (``Project.concurrent_waves_enabled`` / ``MODULATIO_CONCURRENT_WAVES``)
+    the scheduler reserves per-agent capacity and runs independent tasks
+    across the pool in parallel. Under the sequential default a redundant
+    pool is harmless but idle — the picker resolves identical-skill agents to
+    one of them, so the others wait their turn.
+
+    Returns list[dict] (>=1 producer), BACK, or QUIT."""
+    max_producers = max(1, MAX_AGENTS - reserved)
+    producers: list[dict] = []
+    while len(producers) < max_producers:
+        n = len(producers) + 1
+        theme.clear_screen()
+        theme.step_header(4, 7, f"Producer pool — member {n} of up to {max_producers}")
+        model = _pick_model(f"producer {n}", default_models, staged_keys=staged_keys)
+        if model in (steps.BACK, steps.QUIT):
+            return model
+        if steps.confirm_yn(
+            f"Hold ALL {len(team_skills)} team skills? (No = pick a subset)",
+            default=True,
+        ):
+            sks = list(team_skills)
+        else:
+            sks = _pick_skill_subset(team_skills, producer_label=f"producer {n}")
+            if sks in (steps.BACK, steps.QUIT):
+                return sks
+        producers.append(_build_skill_holder(sks, model, index=n))
+        if len(producers) >= max_producers:
+            theme.muted(f"  Reached the {MAX_AGENTS}-member team cap.")
+            break
+        if not steps.confirm_yn("Add another producer to the pool?", default=False):
+            break
+
+    # Coverage check: with the subset path, the pool may not hold every team
+    # skill. An uncovered skill means tasks requiring it route to no producer
+    # and gap — warn (non-blocking; the user can re-run setup or edit the
+    # roster). The one/per shapes can't hit this since every skill gets a model.
+    covered = {s for p in producers for s in p.get("skills", [])}
+    missing = [s for s in team_skills if s not in covered]
+    if missing:
+        theme.warn(
+            f"  No pool producer holds: {', '.join(missing)}. Tasks needing "
+            f"those skills won't route until a producer holds them."
+        )
+    return producers
+
+
 def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
     """Skills-first (#143) producer provisioning. Instead of provisioning
     named worker agents by role/template, the user picks the SKILLS the
@@ -269,39 +354,60 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
         theme.error("Pick at least one skill — the team needs at least one producer.")
         return steps.BACK
 
-    # 2. One model for all those skills, or a model per skill?
-    per_skill = steps.confirm_yn(
-        "Assign a different model per skill? (No = one model powers all)",
-        default=False,
+    # 2. How should producers be staffed? Three shapes:
+    #    one  — a single producer holds all picked skills (one model)
+    #    per  — one producer per skill, each its own model (disjoint skills)
+    #    pool — a pool of producers, each its own model + chosen skills (the
+    #           redundant-pool shape: tasks load-balance across it, and under
+    #           concurrent waves independent tasks run in parallel on it)
+    reserved = len(state.get("triad_agents", [])) or 2  # Leader + QC seats
+    shape = steps.pick_option(
+        "How should producers be staffed?",
+        [
+            ("One model powers all the skills (a single producer)", "one"),
+            ("A different model per skill (one producer each)", "per"),
+            (f"A pool of producers — each its own model + skills "
+             f"(up to {max(1, MAX_AGENTS - reserved)}; the team shares the work)",
+             "pool"),
+        ],
+        default_index=0,
     )
+    if shape in (steps.BACK, steps.QUIT):
+        return shape
 
-    skill_to_model: dict[str, str] = {}
-    if per_skill:
-        for sk in picked:
+    if shape == "pool":
+        producers = _provision_producer_pool(
+            picked, default_models, staged_keys=staged_keys, reserved=reserved,
+        )
+        if producers in (steps.BACK, steps.QUIT):
+            return producers
+    else:
+        skill_to_model: dict[str, str] = {}
+        if shape == "per":
+            for sk in picked:
+                theme.clear_screen()
+                theme.step_header(4, 7, f"Producers — model for skill '{sk}'")
+                model = _pick_model(f"skill '{sk}'", default_models, staged_keys=staged_keys)
+                if model in (steps.BACK, steps.QUIT):
+                    return model
+                skill_to_model[sk] = model
+        else:  # "one"
             theme.clear_screen()
-            theme.step_header(4, 7, f"Producers — model for skill '{sk}'")
-            model = _pick_model(f"skill '{sk}'", default_models, staged_keys=staged_keys)
+            theme.step_header(4, 7, "Producers — model for all producer skills")
+            model = _pick_model("all producer skills", default_models, staged_keys=staged_keys)
             if model in (steps.BACK, steps.QUIT):
                 return model
-            skill_to_model[sk] = model
-    else:
-        theme.clear_screen()
-        theme.step_header(4, 7, "Producers — model for all producer skills")
-        model = _pick_model("all producer skills", default_models, staged_keys=staged_keys)
-        if model in (steps.BACK, steps.QUIT):
-            return model
-        for sk in picked:
-            skill_to_model[sk] = model
+            for sk in picked:
+                skill_to_model[sk] = model
 
-    # 3. Group skills by model → one producer (skill-holder) per distinct model.
-    by_model: dict[str, list[str]] = {}
-    for sk in picked:  # preserve pick order
-        by_model.setdefault(skill_to_model[sk], []).append(sk)
-
-    multi = len(by_model) > 1
-    producers: list[dict] = []
-    for i, (model, sks) in enumerate(by_model.items(), 1):
-        producers.append(_build_skill_holder(sks, model, index=i if multi else None))
+        # Group skills by model → one producer (skill-holder) per distinct model.
+        by_model: dict[str, list[str]] = {}
+        for sk in picked:  # preserve pick order
+            by_model.setdefault(skill_to_model[sk], []).append(sk)
+        multi = len(by_model) > 1
+        producers = []
+        for i, (model, sks) in enumerate(by_model.items(), 1):
+            producers.append(_build_skill_holder(sks, model, index=i if multi else None))
 
     # Soft cap: structural roles + producers shouldn't exceed MAX_AGENTS.
     if len(state.get("triad_agents", [])) + len(producers) > MAX_AGENTS:
@@ -312,6 +418,111 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
 
     state["worker_agents"] = producers
     return "configured"
+
+
+# Headline tested per-role context budgets (model-agnostic, by role). These
+# mirror context_budget.EXPERIMENTAL_DEFAULTS — the Leader runs 8k–16k by call
+# pattern, 12k is the reflect anchor (Lovecraft's number, at the Stanford
+# "Lost in the Middle" onset). Shown to the user as the discouraged baseline.
+_TESTED_ROLE_BUDGETS = (
+    ("leader", 12_000, "reflect anchor; 8k–16k across call patterns"),
+    ("producer", 16_000, "drafting"),
+    ("qc", 8_000, "verification"),
+)
+
+
+def _prompt_role_budget(role: str, default_tokens: int) -> int | None:
+    """Prompt one role's context budget. Blank → ``None`` (keep the tested
+    default). Validates against the same thresholds the CLI/roster enforce:
+    refuses < MIN or > HARD_GLOBAL_CEILING, confirms above CONFIRM_THRESHOLD.
+    Returns the chosen int, or ``None`` to keep the default."""
+    from modulatio.context_budget import (
+        CTX_BUDGET_CONFIRM_THRESHOLD,
+        CTX_BUDGET_MIN_TOKENS,
+        HARD_GLOBAL_CEILING,
+    )
+    while True:
+        try:
+            raw = input(theme.prompt_color(
+                f"  {role} budget [{default_tokens} — Enter to keep]: ", "highlight",
+            )).strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if raw == "":
+            return None
+        try:
+            val = int(raw.replace("_", "").replace(",", ""))
+        except ValueError:
+            theme.error("Enter a whole number of tokens, or Enter to keep the default.")
+            continue
+        if val < CTX_BUDGET_MIN_TOKENS:
+            theme.error(f"Too small — minimum is {CTX_BUDGET_MIN_TOKENS} tokens.")
+            continue
+        if val > HARD_GLOBAL_CEILING:
+            theme.error(
+                f"Refused — {val} exceeds the {HARD_GLOBAL_CEILING}-token hard "
+                f"ceiling. Large windows broke the engine in testing; that ceiling "
+                f"is deliberate."
+            )
+            continue
+        if val > CTX_BUDGET_CONFIRM_THRESHOLD:
+            if not steps.confirm_yn(
+                f"  {val} is past the {CTX_BUDGET_CONFIRM_THRESHOLD}-token "
+                f"measured degradation threshold. Use it anyway?",
+                default=False,
+            ):
+                continue
+        return val
+
+
+def _maybe_customize_context_budgets(state: dict) -> None:
+    """Discouraged opt-in to override the tested per-role context budgets.
+
+    Context is allocated BY ROLE, model-agnostic. The defaults are the tuned
+    Project-Sid/PIANO values from two days of testing — large context windows
+    broke the engine; small role-bounded windows are the design. So the
+    default path keeps them (sets nothing → the engine's per-role defaults
+    govern); customization is gated behind a warn and defaults to No."""
+    theme.clear_screen()
+    theme.step_header(4, 7, "Context budgets (tuned — change is discouraged)")
+    print(theme.color(
+        "  Modulatio allocates context BY ROLE, not by model. These per-role "
+        "budgets are tuned from extensive Project-Sid testing — large context "
+        "windows broke the engine; small, role-bounded windows are the design.",
+        "muted",
+    ))
+    print()
+    for role, tokens, note in _TESTED_ROLE_BUDGETS:
+        print(f"    {theme.color(role, 'highlight'):20s} {tokens:>7,} tokens  "
+              f"{theme.color(note, 'muted')}")
+    print()
+    theme.warn(
+        "  Changing these is discouraged. "
+        "Override only if you have a specific, measured reason."
+    )
+    if not steps.confirm_yn(
+        "Customize context budgets? (tested defaults strongly recommended)",
+        default=False,
+    ):
+        return  # keep tested defaults — agents carry no override
+
+    print()
+    theme.warn("  Overriding tuned budgets. Blank keeps the tested default for that role.")
+    for role, tokens, _note in _TESTED_ROLE_BUDGETS:
+        chosen = _prompt_role_budget(role, tokens)
+        if chosen is None:
+            continue
+        if role == "leader":
+            for a in state.get("triad_agents", []):
+                if a.get("tier") == "leader":
+                    a["context_budget"] = chosen
+        elif role == "qc":
+            for a in state.get("triad_agents", []):
+                if a.get("tier") == "qc":
+                    a["context_budget"] = chosen
+        elif role == "producer":
+            for a in state.get("worker_agents", []):
+                a["context_budget"] = chosen
 
 
 def run(state: dict) -> Any:
@@ -337,6 +548,9 @@ def run(state: dict) -> Any:
             f"skill-holder). Got {total}. Restarting team formation."
         )
         return steps.BACK
+
+    # Tuned per-role context budgets — discouraged opt-in to override.
+    _maybe_customize_context_budgets(state)
     return "provisioned"
 
 

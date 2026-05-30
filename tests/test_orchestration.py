@@ -63,16 +63,19 @@ def _leader_stub(prompt: str) -> str:
     return f"```json\n{json.dumps(goals)}\n```"
 
 
-def _leader_with_verdict(verdict: str):
+def _leader_with_verdict(verdict: str, recommendations=None):
     """Build a leader stub that returns a specific verdict on the
     verify call while preserving the normal decomposition response.
-    Used by #7d tests that exercise on_the_fence / disappointed paths."""
+    Used by #7d tests that exercise on_the_fence / disappointed paths.
+    ``recommendations`` (optional) rides on the verdict so tests can
+    exercise the advisory Product-Quality-Report path."""
 
     def _stub(prompt: str) -> str:
         if "LEADER GOAL VERIFICATION" in prompt:
             payload = {
                 "verdict": verdict,
                 "rationale": f"leader is {verdict}",
+                "recommendations": recommendations or [],
                 "report_body": f"## Goal Report\n\nLeader feels {verdict}.\n",
             }
             return f"```json\n{json.dumps(payload)}\n```"
@@ -797,12 +800,9 @@ def test_orchestrator_empty_required_skills_falls_back_and_runs(project: Project
     assert len(tasks) == 1
     assert tasks[0].status == TaskStatus.COMPLETED
     assert tasks[0].assigned_agent_id is None
-    # Slice #7d: every completed goal now produces a Leader sign-off
-    # ticket. Satisfied verdict (default stub) → MINOR priority.
-    from modulatio.types import TicketPriority
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert len(tickets) == 1
-    assert tickets[0].priority is TicketPriority.MINOR
+    # Post-2026-05-30: goal completion no longer punts a sign-off ticket to
+    # the human — the deliverables + Product Quality Report stand on their own.
+    assert store.list_tickets(PROJECT_CODE) == []
 
 
 def test_orchestrator_audits_no_constraint_fallback(project: Project):
@@ -973,8 +973,8 @@ def test_orchestrator_opens_critical_ticket_on_roster_gap(
 # ── Slice #7e: Leader auto-redo with daily retry budget ──────────────────
 
 def test_goal_default_retry_budget_fields():
-    """Goal gains retry_count=0, max_retries=3, retry_count_date=None
-    by default. Back-compat for existing goals pre-#7e."""
+    """Goal gains retry_count=0, max_retries=7, retry_count_date=None
+    by default (Alfred-loop budget raised 3→7, Clif 2026-05-29)."""
     from modulatio.types import Goal
     from uuid import uuid4
 
@@ -985,7 +985,7 @@ def test_goal_default_retry_budget_fields():
         success_criteria="anything",
     )
     assert g.retry_count == 0
-    assert g.max_retries == 3
+    assert g.max_retries == 7
     assert g.retry_count_date is None
 
 
@@ -1049,10 +1049,12 @@ def test_leader_disappointed_within_budget_auto_redoes_until_satisfied(project: 
     assert blockers == []
 
 
-def test_leader_disappointed_exhaust_budget_opens_blocker_with_refresh_at(project: Project):
-    """Three disappointed verdicts in a row exhaust the daily budget.
-    BLOCKER ticket fires with refresh_at set to tomorrow midnight UTC.
-    Goal stays IN_PROGRESS — auto-resume on refresh will pick it up."""
+def test_leader_disappointed_exhaust_budget_ships_with_recommendation_no_ticket(project: Project):
+    """Seven disappointed verdicts exhaust the daily redo budget
+    (Alfred-loop budget = 7). Post-2026-05-30: the run is NEVER blocked on
+    the Leader's judgement and NEVER punts a ticket to the human — on
+    exhaustion the goal ships (COMPLETED) and the unresolved gap is recorded
+    as a recommendation for the Product Quality Report."""
     from modulatio.types import TicketPriority
 
     def _leader_always_disappointed(prompt: str) -> str:
@@ -1060,6 +1062,7 @@ def test_leader_disappointed_exhaust_budget_opens_blocker_with_refresh_at(projec
             payload = {
                 "verdict": "disappointed",
                 "rationale": "never works",
+                "recommendations": [],
                 "report_body": "## Report\n\nStill bad.\n",
             }
             return f"```json\n{json.dumps(payload)}\n```"
@@ -1072,20 +1075,20 @@ def test_leader_disappointed_exhaust_budget_opens_blocker_with_refresh_at(projec
         "qc": _qc_stub,
     }
     orch = Orchestrator(project, runners)
-    orch.kickoff("exhaust budget")
+    summary = orch.kickoff("exhaust budget")
 
     goals = store.list_goals(PROJECT_CODE)
-    # Goal stays IN_PROGRESS — auto-resume is the recovery path, not
-    # abandonment.
-    assert goals[0].status == GoalStatus.IN_PROGRESS
-    # Full daily budget consumed.
-    assert goals[0].retry_count == 3
+    # Ships rather than blocking — the human reads the caveat, isn't gated.
+    assert goals[0].status == GoalStatus.COMPLETED
+    assert goals[0].retry_count == 7  # full daily budget consumed first
 
-    tickets = store.list_tickets(PROJECT_CODE)
-    blockers = [t for t in tickets if t.priority is TicketPriority.BLOCKER]
-    assert len(blockers) == 1
-    # refresh_at set so the auto-resume path can pick this up next day.
-    assert blockers[0].refresh_at is not None
+    # No BLOCKER ticket punted to the human.
+    blockers = [t for t in store.list_tickets(PROJECT_CODE)
+                if t.priority is TicketPriority.BLOCKER]
+    assert blockers == []
+    # The unresolved gap surfaces as a recommendation instead.
+    assert any(goals[0].id == r["goal_id"] and "could not fully satisfy" in r["concern"]
+               for r in summary.recommendations)
 
 
 def test_auto_resume_fires_when_refresh_at_is_in_the_past(project: Project, monkeypatch):
@@ -1935,12 +1938,10 @@ def test_orchestrator_honors_diamond_dependencies(project: Project):
 
 # ── Slice #7d: Leader goal verification ────────────────────────────────────
 
-def test_leader_verify_satisfied_completes_goal_and_creates_minor_ticket(project: Project):
-    """When Leader's verdict is satisfied, goal moves to COMPLETED and
-    a MINOR-priority sign-off ticket lands in the vault (human signs off
-    at leisure; work continues unconditionally)."""
-    from modulatio.types import TicketPriority
-
+def test_leader_verify_satisfied_completes_goal_no_ticket(project: Project):
+    """Post-2026-05-30: satisfied → goal COMPLETED, and NO ticket is punted
+    to the human. The Leader confirms completion; QC owned quality. The
+    human gets the work + the Product Quality Report, not a sign-off ticket."""
     runners = {
         "leader": _leader_with_verdict("satisfied"),
         "planner": _planner_stub,
@@ -1952,48 +1953,43 @@ def test_leader_verify_satisfied_completes_goal_and_creates_minor_ticket(project
 
     goals = store.list_goals(PROJECT_CODE)
     assert goals[0].status == GoalStatus.COMPLETED
-
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert len(tickets) == 1
-    assert tickets[0].priority is TicketPriority.MINOR
-    assert "sign off" in tickets[0].title.lower() or "sign off" in tickets[0].body.lower()
-    assert tickets[0].affected_goal_id == goals[0].id
-
-    # Report path surfaces on the summary for CLI display.
+    # No human ticket from the verify path.
+    assert store.list_tickets(PROJECT_CODE) == []
+    # Report path still surfaces on the summary for CLI display.
     assert len(summary.goal_reports) == 1
 
 
-def test_leader_verify_on_the_fence_keeps_goal_in_progress_critical_ticket(project: Project):
-    """On-the-fence verdict = reservations flagged. Goal stays
-    IN_PROGRESS pending human review; ticket is CRITICAL priority.
-    Under the ticket semantics (MINOR = watch / CRITICAL = might need
-    intervention / BLOCKER = stop), on-the-fence is 'might need' — work
-    on other goals continues."""
-    from modulatio.types import TicketPriority
-
+def test_leader_verify_on_the_fence_ships_and_records_recommendations(project: Project):
+    """On-the-fence = the right thing was made but the Leader holds
+    reservations. Post-2026-05-30 this NO LONGER blocks: the goal COMPLETES
+    and ships, the reservations are recorded for the Product Quality Report,
+    and NO ticket is punted to the human."""
+    recs = [{"concern": "Citations not independently verified",
+             "suggestion": "Spot-check the cited URLs resolve"}]
     runners = {
-        "leader": _leader_with_verdict("on_the_fence"),
+        "leader": _leader_with_verdict("on_the_fence", recommendations=recs),
         "planner": _planner_stub,
         "drafter": _drafter_stub,
         "qc": _qc_stub,
     }
     orch = Orchestrator(project, runners)
-    orch.kickoff("Draft 3 essays on a chosen theme")
+    summary = orch.kickoff("Draft 3 essays on a chosen theme")
 
     goals = store.list_goals(PROJECT_CODE)
-    # Goal did NOT auto-complete — Leader flagged concerns.
-    assert goals[0].status == GoalStatus.IN_PROGRESS
+    # Ships — reservations never block the run.
+    assert goals[0].status == GoalStatus.COMPLETED
+    assert store.list_tickets(PROJECT_CODE) == []
+    # The reservation rode into the run's recommendations (→ Product Quality Report).
+    assert any(r["concern"] == "Citations not independently verified"
+               and r["goal_id"] == goals[0].id
+               for r in summary.recommendations)
 
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert len(tickets) == 1
-    assert tickets[0].priority is TicketPriority.CRITICAL
 
-
-def test_leader_verify_disappointed_triggers_auto_redo_and_BLOCKERs_on_exhaustion(project: Project):
-    """Post-#7e: disappointed verdict triggers Leader auto-redo until
-    the daily retry budget is exhausted, then fires a BLOCKER with
-    refresh_at. (Pre-#7e this test asserted a CRITICAL ticket after
-    a single disappointed verdict; that behavior no longer applies.)"""
+def test_leader_verify_disappointed_auto_redo_then_ships(project: Project):
+    """Disappointed = a fixable wrong/incomplete deliverable → Leader
+    auto-redo until the daily budget is exhausted. Post-2026-05-30: on
+    exhaustion the goal SHIPS (COMPLETED) with a recommendation — it does
+    NOT stay blocked and does NOT punt a ticket."""
     from modulatio.types import TicketPriority
 
     runners = {
@@ -2003,20 +1999,15 @@ def test_leader_verify_disappointed_triggers_auto_redo_and_BLOCKERs_on_exhaustio
         "qc": _qc_stub,
     }
     orch = Orchestrator(project, runners)
-    orch.kickoff("always-disappointed")
+    summary = orch.kickoff("always-disappointed")
 
     goals = store.list_goals(PROJECT_CODE)
-    # Goal stays IN_PROGRESS — BLOCKER is a stop signal, not goal
-    # abandonment. Auto-resume path recovers on next kickoff past
-    # refresh_at.
-    assert goals[0].status == GoalStatus.IN_PROGRESS
-    # Full daily budget consumed.
-    assert goals[0].retry_count == 3
-
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert len(tickets) == 1
-    assert tickets[0].priority is TicketPriority.BLOCKER
-    assert tickets[0].refresh_at is not None
+    assert goals[0].status == GoalStatus.COMPLETED  # ships, not blocked
+    assert goals[0].retry_count == 7                # full budget tried first
+    blockers = [t for t in store.list_tickets(PROJECT_CODE)
+                if t.priority is TicketPriority.BLOCKER]
+    assert blockers == []
+    assert any("could not fully satisfy" in r["concern"] for r in summary.recommendations)
 
 
 def test_leader_verify_writes_report_to_vault_reports_dir(project: Project):
@@ -2644,13 +2635,9 @@ def test_orchestrator_semantic_match_runs_task_and_records_score(
     # Task ran (completed) — it did NOT become a ROSTER_GAP ticket.
     assert t.status == TaskStatus.COMPLETED
     assert t.assigned_agent_id == "custom-agent"
-    # Slice #7d: goal completion produces a MINOR sign-off ticket now.
-    # No CAPABILITY ticket (the case we care about here) — only the
-    # Leader's sign-off.
-    from modulatio.types import TicketPriority
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert len(tickets) == 1
-    assert tickets[0].priority is TicketPriority.MINOR
+    # No CAPABILITY ticket (the case we care about here), and post-2026-05-30
+    # goal completion no longer punts a sign-off ticket either — no tickets.
+    assert store.list_tickets(PROJECT_CODE) == []
     # DISPATCHED transition rationale records the similarity score so
     # the human can audit threshold tuning.
     dispatched = [
@@ -3360,10 +3347,12 @@ def test_orchestrator_blocks_failing_task_but_completes_others(project: Project)
     """One drafter task consistently failing must not abort the whole pass.
 
     With the redo loop in slice #3, transient failures are retried; only
-    tasks whose every attempt raises stay terminally BLOCKED. Slice #7d
-    adds a Leader verify pass: under this partial-failure scenario the
-    Leader's verdict is on_the_fence (reservations about the blocked
-    task) and the goal stays IN_PROGRESS pending human review.
+    tasks whose every attempt raises stay terminally BLOCKED. The Leader
+    verify pass renders on_the_fence (reservations about the blocked task).
+    Post-2026-05-30 on_the_fence SHIPS (the run is never blocked on the
+    Leader's reservations) — the goal COMPLETES and the blocked task is
+    still surfaced in errors and caught by the task-level delivery
+    withhold guard, so a product built on it won't ship silently.
     """
 
     def _drafter_fails_for_task_2(prompt: str) -> str:
@@ -3391,9 +3380,10 @@ def test_orchestrator_blocks_failing_task_but_completes_others(project: Project)
     assert blocked_task.id in summary.errors[0]
     assert "simulated model stall" in summary.errors[0]
 
-    # Goal stays in_progress since not every task completed.
+    # Goal ships (on_the_fence no longer blocks); the blocked task is
+    # surfaced in errors above and guarded at delivery, not via goal status.
     goals = store.list_goals(PROJECT_CODE)
-    assert goals[0].status == GoalStatus.IN_PROGRESS
+    assert goals[0].status == GoalStatus.COMPLETED
 
     # Only the 2 successful tasks yielded drafts.
     assert len(summary.drafts) == 2
@@ -6489,6 +6479,36 @@ def test_concurrent_waves_runs_independent_tasks(project: Project, monkeypatch):
     )
 
 
+def test_concurrent_waves_enabled_config_or_env(project: Project, monkeypatch):
+    """Config-OR-env (2026-05-29): the wave executor is enabled when EITHER
+    ``project.concurrent_waves_enabled`` is True OR
+    ``MODULATIO_CONCURRENT_WAVES=1``. Default is OFF (sequential stays the
+    production default); the env var is an independent override; ``None``
+    falls back to env-only. This is the config-addressability the A/B harness
+    relies on to vary concurrency as a dimension."""
+    monkeypatch.delenv("MODULATIO_CONCURRENT_WAVES", raising=False)
+    f = Orchestrator._concurrent_waves_enabled
+    proj_off = project  # fixture carries the field's default
+    proj_on = project.model_copy(update={"concurrent_waves_enabled": True})
+
+    assert proj_off.concurrent_waves_enabled is False  # field default OFF
+
+    # env unset → config decides
+    assert f(None) is False
+    assert f(proj_off) is False
+    assert f(proj_on) is True             # config on-switch
+
+    # env=1 → on regardless of config (independent override)
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "1")
+    assert f(proj_off) is True
+    assert f(None) is True
+
+    # only "1" means on; env="0" is not a force-OFF, so config still turns it on
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "0")
+    assert f(proj_on) is True
+    assert f(proj_off) is False
+
+
 def test_concurrent_waves_blocks_artifact_path_conflict(project: Project, monkeypatch):
     """Nemo impl-sweep Blocker 1: two tasks in a concurrent wave targeting
     the same output_path are a plan conflict — both BLOCKED + a CRITICAL
@@ -7211,3 +7231,116 @@ def test_artifacts_root_and_registry_noop_on_sequential_path(project):
     # No buffer → recording is a silent no-op (doesn't raise, records nothing).
     orch._record_artifact_write(orch._scope_root() / "artifacts" / "drafts" / "x.md")
     assert getattr(orch._tls, "artifact_writes", None) is None
+
+
+# ── ENGINE INVARIANT: no standalone verification goals (2026-05-30) ────────
+
+def test_is_standalone_verification_goal_detects_verify_verbs():
+    from modulatio.orchestration import _is_standalone_verification_goal as v
+    assert v("Verify that all claims are correctly sourced")
+    assert v("Review the analysis for accuracy and completeness")
+    assert v("Validate the dataset against the schema")
+    assert v("Audit the report's citations")
+    assert v("Fact-check the figures in the draft")
+    assert v("QA the final document")
+    assert v("Proofread the manuscript")
+    assert v("Confirm the findings are accurate")
+
+
+def test_is_standalone_verification_goal_keeps_producing_goals():
+    from modulatio.orchestration import _is_standalone_verification_goal as v
+    # A producing goal that merely REQUIRES rigorous sources is allowed —
+    # the verb is "produce/research/...", sourcing is a quality spec.
+    assert not v("Produce the analysis, grounded in rigorous, credible sources")
+    assert not v("Research current sources on the conflict and summarize")
+    assert not v("Draft the paper with proper citations to primary sources")
+    assert not v("Build a data validator module")     # produces a tool, not a check
+    assert not v("Write a survey of the field")
+    assert not v("Develop a verification harness")     # leads with produce verb
+    assert not v("")
+
+
+def test_decompose_drops_standalone_verification_goal(project: Project):
+    """The Leader cannot create a standalone verify goal — the engine DROPS it
+    (QC verifies every producing task). A producing goal that requires rigorous
+    sources survives. Regression for the live decompose-storm: a 'verify all
+    claims' goal whose task was a context-bomb."""
+    def _leader_two_goals(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return _leader_stub(prompt)
+        goals = [
+            {"description": "Produce the analysis, grounded in rigorous credible sources",
+             "success_criteria": "analysis doc with citations",
+             "evidence_required": [{"kind": "artifact", "description": "analysis"}]},
+            {"description": "Verify that all claims in the analysis are correctly sourced",
+             "success_criteria": "all claims verified",
+             "evidence_required": [{"kind": "report", "description": "verification report"}]},
+        ]
+        return f"```json\n{json.dumps(goals)}\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader_two_goals, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    goals = orch._leader_decompose("analyze the situation")
+    descs = [g.description for g in goals]
+    assert any("Produce the analysis" in d for d in descs)          # kept
+    assert not any(d.lower().startswith("verify") for d in descs)   # dropped
+    assert len(goals) == 1
+
+
+def test_decompose_keeps_all_when_only_verification_goals(project: Project):
+    """Degenerate guard: never leave the run with nothing to do. If EVERY
+    goal looks like verification, keep them rather than emptying the plan."""
+    def _leader_only_verify(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return _leader_stub(prompt)
+        goals = [{"description": "Verify the existing dataset",
+                  "success_criteria": "verified",
+                  "evidence_required": [{"kind": "report", "description": "r"}]}]
+        return f"```json\n{json.dumps(goals)}\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader_only_verify, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    goals = orch._leader_decompose("verify stuff")
+    assert len(goals) == 1  # not dropped — would leave nothing
+
+
+def test_goal_emits_artifact_detects_artifact_evidence():
+    from modulatio.orchestration import _goal_emits_artifact as a
+    assert a({"evidence_required": [{"kind": "artifact", "description": "validator.py"}]})
+    assert not a({"evidence_required": [{"kind": "report", "description": "verification report"}]})
+    assert not a({"evidence_required": [{"kind": "assertion", "description": "x"}]})
+    assert not a({"evidence_required": []})
+    assert not a({})
+
+
+def test_decompose_keeps_verify_verb_goal_that_produces_an_artifact(project: Project):
+    """Nemo hull fold (2026-05-30): a verb-ambiguous goal ('Validate the
+    dataset schema') that actually PRODUCES a deliverable (artifact evidence)
+    is KEPT — only a verify-led goal that emits NO deliverable is dropped.
+    Dropping real producing work is the worse error."""
+    def _leader(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return _leader_stub(prompt)
+        goals = [
+            {"description": "Validate the dataset schema",            # verify verb...
+             "success_criteria": "a working schema validator",
+             "evidence_required": [{"kind": "artifact", "description": "validator.py"}]},  # ...produces an artifact
+            {"description": "Verify that all records are correctly typed",  # pure check
+             "success_criteria": "all verified",
+             "evidence_required": [{"kind": "report", "description": "report"}]},
+        ]
+        return f"```json\n{json.dumps(goals)}\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    goals = orch._leader_decompose("data work")
+    descs = [g.description for g in goals]
+    assert any("Validate the dataset schema" in d for d in descs)   # KEPT — emits artifact
+    assert not any(d.startswith("Verify that") for d in descs)      # dropped — report-only
+    assert len(goals) == 1

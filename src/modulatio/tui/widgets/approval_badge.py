@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Approval badge renderer — slice #22.
 
 Pure function that turns a Ticket's approval state into a compact cell

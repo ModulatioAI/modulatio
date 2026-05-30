@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Multimodal chat dispatch (slice #31c.2).
 
 When a chat message has at least one image attachment, the regular

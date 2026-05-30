@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Modulatio v2 memory layer (slice 4).
 
 Two layers, per locked design (project_modulatio_v2_memory_architecture.md):

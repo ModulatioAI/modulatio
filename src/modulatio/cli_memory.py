@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """CLI for reviewing QC-proposed team-memory entries (slice 9-finish).
 
 Mirrors ``cli_standards.py``. QC's verdict prompt has an OPTIONAL

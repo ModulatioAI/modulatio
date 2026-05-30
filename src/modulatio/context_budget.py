@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Context-window budget primitive (Slice / #90).
 
 Lands Layer 2 of the five-layer working-memory architecture: the
@@ -237,30 +239,59 @@ def unbind(token) -> None:
     _current_config.reset(token)
 
 
-def get_max_input_tokens_for_model(model: str | None) -> int:
-    """Look up the model's context window via ``litellm.get_max_tokens``.
+def get_known_max_input_tokens(model: str | None) -> int | None:
+    """Look up the model's TRUE input context window via
+    ``litellm.get_model_info(model)["max_input_tokens"]``.
 
-    Falls back to ``_DEFAULT_FALLBACK_MAX_INPUT_TOKENS`` when:
+    Returns ``None`` when the window is genuinely UNKNOWN:
       - ``model`` is ``None``
       - litellm doesn't recognize the model
       - the lookup raises for any reason
 
-    The fallback is deliberately small and conservative — an unknown
-    model trips the gate earlier rather than later. Real failures on
-    real models are caught here; misconfigured tests don't false-pass
-    by accidentally getting a generous cap.
+    ``None`` is the model-agnostic signal — callers must NOT invent a cap
+    for an unknown model. Context is allocated BY ROLE (the per-role PIANO
+    budgets in :data:`EXPERIMENTAL_DEFAULTS`, resolved by
+    :func:`resolve_for_dispatch`), never by which LLM backs the agent. A
+    model window only ever *lowers* a role budget when we genuinely know the
+    model's window is smaller (see :func:`dispatch_context`); when it's
+    unknown the role budget governs unchanged. This is the tested
+    Project-Sid/PIANO discipline — large windows broke the engine, small
+    role-bounded windows are the design — so an unrecognized model must fall
+    back to the ROLE budget, not to an arbitrary token floor.
     """
     if not model:
-        return _DEFAULT_FALLBACK_MAX_INPUT_TOKENS
+        return None
+    # Use the model's INPUT context window (get_model_info.max_input_tokens),
+    # NOT litellm.get_max_tokens — the latter returns max OUTPUT tokens for
+    # many models (e.g. gpt-4o: get_max_tokens()=16384 but the real context
+    # window is 128000), which would wrongly clamp a role budget to the
+    # model's output limit. An unmapped model raises → None → role budget
+    # governs.
     try:
-        from litellm import get_max_tokens
+        from litellm import get_model_info
     except Exception:
-        return _DEFAULT_FALLBACK_MAX_INPUT_TOKENS
+        return None
     try:
-        n = get_max_tokens(model)
-        return int(n) if n else _DEFAULT_FALLBACK_MAX_INPUT_TOKENS
+        info = get_model_info(model)
     except Exception:
-        return _DEFAULT_FALLBACK_MAX_INPUT_TOKENS
+        return None
+    n = info.get("max_input_tokens") if isinstance(info, dict) else None
+    return int(n) if n and int(n) > 0 else None
+
+
+def get_max_input_tokens_for_model(model: str | None) -> int:
+    """Concrete context-window cap for ``model``, with a conservative floor.
+
+    Thin wrapper over :func:`get_known_max_input_tokens` that substitutes
+    :data:`_DEFAULT_FALLBACK_MAX_INPUT_TOKENS` when the window is unknown.
+    Use this ONLY where a concrete int is required and no per-role budget is
+    in hand (the enforcement-gate fallback for un-dispatched direct calls).
+    Everywhere the distinction between "unknown" and "known-small" matters —
+    notably :func:`dispatch_context`, where an unknown window must NOT
+    undercut the role budget — call :func:`get_known_max_input_tokens` and
+    treat ``None`` as "the role budget governs".
+    """
+    return get_known_max_input_tokens(model) or _DEFAULT_FALLBACK_MAX_INPUT_TOKENS
 
 
 def _redact_messages_for_checkpoint(messages: Sequence[dict]) -> list[dict]:
@@ -952,7 +983,13 @@ def dispatch_context(
         status = "unsupported_multimodal"
         # No effective cap — the path won't be enforced.
     else:
-        model_max = get_max_input_tokens_for_model(model) if model else None
+        # Model-agnostic: only a KNOWN model window may lower the per-role
+        # budget. An unrecognized model returns None here → the role budget
+        # governs unchanged, NOT an invented 8192 floor. This is the fix for
+        # the undercut where an unknown model (litellm didn't recognize it)
+        # clamped e.g. a 24k researcher budget down to the fallback, blocking
+        # the run. A genuinely smaller KNOWN window still clamps (correct).
+        model_max = get_known_max_input_tokens(model)
         if model_max:
             effective = min(resolution.resolved_budget_tokens, model_max)
             if effective < resolution.resolved_budget_tokens:
@@ -1284,6 +1321,7 @@ __all__ = [
     "current_config",
     "current_telemetry_context",
     "dispatch_context",
+    "get_known_max_input_tokens",
     "get_max_input_tokens_for_model",
     "parse_cli_override_specs",
     "resolve_for_dispatch",

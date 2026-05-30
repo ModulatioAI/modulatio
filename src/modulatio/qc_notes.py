@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Human-curated QC training notes (slice #8.2).
 
 Lightweight read-only surface for the ``{standing_notes}`` slot on the

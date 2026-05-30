@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Prompt tab — multi-pane per-agent chat layout (slice #31a).
 
 Replaces the single-pane ChatPanel with one ``AgentPanePanel`` per

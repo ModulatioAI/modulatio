@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """OAuth token refresh — Anthropic + OpenAI Codex.
 
 Daemon mode is a Modulatio first-class use case (heartbeat + cron + Telegram

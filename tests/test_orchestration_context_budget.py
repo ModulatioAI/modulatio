@@ -491,3 +491,100 @@ def test_generic_exception_still_uses_retry_budget(project_with_run, monkeypatch
         "generic exceptions must still go through the retry loop; "
         f"got {call_count['n']} invocations, expected 4"
     )
+
+
+# ── overflow → decompose (2026-05-30) ────────────────────────────────────
+
+def _ctx_err(tmp_path, est=200_000, cap=16_000):
+    return context_budget.RecoverableContextError(
+        model="m", estimated_tokens=est, max_input_tokens=cap,
+        checkpoint_path=tmp_path / "cp.json",
+    )
+
+
+def _planner_returns(monkeypatch, payload: str):
+    """Mock _run so the planner re-decompose call returns `payload`."""
+    monkeypatch.setattr(
+        Orchestrator, "_run",
+        lambda self, role, prompt, **kw: payload,
+    )
+
+
+def test_attempt_decompose_splits_into_children(project_with_run, monkeypatch, tmp_path):
+    """The planner's split → child Tasks that inherit goal/deps, carry
+    depth+1, and get parent-derived ids."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"research aider","output_path":"drafts/aider.md"},'
+        '{"description":"research swe-agent","output_path":"drafts/swe.md"}]')
+    parent = _make_task()
+    children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert children is not None and len(children) == 2
+    assert [c.id for c in children] == [f"{parent.id}-D1", f"{parent.id}-D2"]
+    assert all(c.goal_id == parent.goal_id for c in children)
+    assert all(c.depends_on == parent.depends_on for c in children)
+    assert all(c.decompose_depth == parent.decompose_depth + 1 for c in children)
+    assert children[0].description == "research aider"
+    assert children[0].output_path == "drafts/aider.md"
+
+
+def test_attempt_decompose_recursion_cap(project_with_run, monkeypatch, tmp_path):
+    """At the depth cap, don't split again — escalate (genuine stuck)."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, '[{"description":"a"},{"description":"b"}]')
+    parent = _make_task()
+    parent.decompose_depth = orch._MAX_DECOMPOSE_DEPTH
+    assert orch._attempt_decompose(parent, _ctx_err(tmp_path)) is None
+
+
+def test_attempt_decompose_junk_returns_none(project_with_run, monkeypatch, tmp_path):
+    """Planner returns non-JSON → no split → None (falls through to ticket)."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, "I cannot split this further.")
+    assert orch._attempt_decompose(_make_task(), _ctx_err(tmp_path)) is None
+
+
+def test_attempt_decompose_single_child_is_not_a_split(project_with_run, monkeypatch, tmp_path):
+    """Fewer than 2 children isn't a real split → None."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, '[{"description":"only one"}]')
+    assert orch._attempt_decompose(_make_task(), _ctx_err(tmp_path)) is None
+
+
+def test_decompose_and_run_parent_completes_via_children(project_with_run, monkeypatch, tmp_path):
+    """All children complete → parent settles COMPLETED (container), no ticket."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, '[{"description":"a"},{"description":"b"}]')
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo",
+        lambda self, t, summary, **kw: setattr(t, "status", TaskStatus.COMPLETED))
+    parent = _make_task()
+    summary = RunSummary(project=project_with_run)
+    handled = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
+    assert handled is True
+    assert parent.status == TaskStatus.COMPLETED
+    tickets = store.list_tickets(project_with_run.code, run_id=project_with_run.run_id)
+    assert not [tk for tk in tickets if tk.affected_task_id == parent.id]
+
+
+def test_decompose_and_run_parent_blocks_if_a_child_fails(project_with_run, monkeypatch, tmp_path):
+    """A child that doesn't complete → parent BLOCKED (handled, not silent)."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, '[{"description":"a"},{"description":"b"}]')
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo",
+        lambda self, t, summary, **kw: setattr(
+            t, "status",
+            TaskStatus.BLOCKED if t.id.endswith("-D2") else TaskStatus.COMPLETED))
+    parent = _make_task()
+    summary = RunSummary(project=project_with_run)
+    handled = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
+    assert handled is True
+    assert parent.status == TaskStatus.BLOCKED
+
+
+def test_decompose_and_run_falls_through_when_cannot_split(project_with_run, monkeypatch, tmp_path):
+    """Planner can't split → _try_decompose_and_run returns False (caller then
+    blocks + tickets — the genuine-stuck path)."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, "no split possible")
+    summary = RunSummary(project=project_with_run)
+    assert orch._try_decompose_and_run(_make_task(), _ctx_err(tmp_path), summary) is False

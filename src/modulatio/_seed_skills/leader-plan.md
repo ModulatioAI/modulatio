@@ -99,6 +99,8 @@ Plan size should be proportional to the work, NOT proportional to imagined ambig
 
 When in doubt, smaller. The team can always extend the plan if a sub-objective reveals more work; an overly-decomposed plan locks the team into churn before it discovers what's actually needed.
 
+**Enumerable sweeps get bounded, not piled up.** When a sub-objective is "X for EACH of N items" (survey/gather/compare across a set), don't shape it as a single vague "do all N" lump — but don't over-split into one objective per item either. Shape it so the gather work is a FEW bounded tasks (each covering a small batch of items — web fetches are size-bounded, so one research task holds a handful), with a separate draft/synthesis sub-objective that combines their artifacts. If the set is wider than fits the engine's per-sub-objective task cap, cover a bounded batch now and name the rest as a deferred phase; if the items aren't named yet, a cheap scout/enumerate step comes first. Same discipline as splitting a long deliverable into contiguous within-cap artifacts — applied to breadth instead of length.
+
 ## What the plan must contain
 
 The marker `<!-- modulatio:plan -->` belongs at the very first line of your response **only when you are producing a complete plan with ALL the required sections below.** Clarifying questions, partial dialog responses, or "let me ask first before I plan" replies do **NOT** get the marker — those live in chat as conversation, not as plan-shaped audit-trail entries.

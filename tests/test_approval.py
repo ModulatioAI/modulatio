@@ -753,11 +753,10 @@ def test_reexecute_goal_marks_redispatched_in_transition_log(project: Project, m
 
 # ─── Integration tests: orchestrator wires approval_required correctly ──────
 
-def test_on_the_fence_verdict_opens_approval_required_ticket(project: Project):
-    """Leader's on_the_fence verdict = 'review before accepting' — the
-    ticket it opens IS asking for a decision, so approval_required must
-    be True. Under basic semantics, this is the primary Leader-initiated
-    approval path."""
+def test_on_the_fence_verdict_creates_no_human_ticket(project: Project):
+    """Post-2026-05-30: an on_the_fence verdict ships the goal and records
+    the Leader's reservations for the Product Quality Report — it does NOT
+    open a human approval/review ticket. The Leader doesn't gate the human."""
     runners = {
         "leader": _leader_with_verdict("on_the_fence"),
         "planner": _planner_stub,
@@ -767,19 +766,13 @@ def test_on_the_fence_verdict_opens_approval_required_ticket(project: Project):
     orch = Orchestrator(project, runners)
     orch.kickoff("one piece")
 
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert len(tickets) == 1
-    assert tickets[0].priority is TicketPriority.CRITICAL
-    assert tickets[0].approval_required is True, (
-        "on_the_fence tickets explicitly request a human decision"
-    )
+    assert store.list_tickets(PROJECT_CODE) == []
 
 
-def test_satisfied_verdict_opens_informational_ticket_without_approval_flag(project: Project):
-    """'ready for sign-off' tickets are informational; the user may still
-    sign off but Leader isn't gating anything. approval_required stays
-    False to keep the signal honest — not every resolved-goal ticket is
-    an approval request."""
+def test_satisfied_verdict_creates_no_human_ticket(project: Project):
+    """Post-2026-05-30: a satisfied verdict completes the goal silently —
+    no sign-off ticket. The human gets the work + the Product Quality
+    Report; the Leader confirms completion without gating anything."""
     runners = {
         "leader": _leader_with_verdict("satisfied"),
         "planner": _planner_stub,
@@ -789,11 +782,7 @@ def test_satisfied_verdict_opens_informational_ticket_without_approval_flag(proj
     orch = Orchestrator(project, runners)
     orch.kickoff("one piece")
 
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert len(tickets) == 1
-    assert tickets[0].approval_required is False, (
-        "satisfied/sign-off tickets are notifications, not gated approvals"
-    )
+    assert store.list_tickets(PROJECT_CODE) == []
 
 
 # ─── Prompt: Leader verify sees prior approval decisions ────────────────────

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Modulatio Theme — Centralized color palette and terminal UI helpers.
 
 Carried from v1.3.1 (drop-in, no v2 architectural conflict).

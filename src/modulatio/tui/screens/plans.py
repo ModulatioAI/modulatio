@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Plans tab — Phase 3.1b-iv-γ-1.
 
 Visibility surface for project execution. Shows every plan persisted

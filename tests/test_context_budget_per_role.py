@@ -377,8 +377,11 @@ def test_16_planner_fallthrough_preserves_budget_role(project):
 
 
 def test_17_effective_cap_when_model_caps_below_resolved():
+    # A KNOWN model whose input window (10k) is below the producer role
+    # budget (16k) must clamp it. dispatch_context reads the window via
+    # get_known_max_input_tokens (None when unknown), so that's the seam.
     with patch.object(
-        cb, "get_max_input_tokens_for_model", return_value=10_000,
+        cb, "get_known_max_input_tokens", return_value=10_000,
     ):
         with cb.dispatch_context(
             budget_role="producer",
@@ -392,6 +395,41 @@ def test_17_effective_cap_when_model_caps_below_resolved():
             assert tel is not None
             assert tel.effective_cap == 10_000
             assert tel.status == "model_cap_enforced"
+
+
+def test_17b_unknown_model_does_not_undercut_role_budget():
+    # Model-agnostic guarantee: when litellm doesn't recognize the model, the
+    # per-role budget governs UNCHANGED — not clamped to a fallback. Direct
+    # regression for the blocked run where an unknown model dropped a 24k
+    # researcher budget to the 8192 fallback and wedged every task.
+    with cb.dispatch_context(
+        budget_role="researcher",
+        runner_role="researcher",
+        model="totally-unknown-model-xyz",
+        project_code="X",
+        run_id="r1",
+    ) as res:
+        tel = cb.current_telemetry_context()
+        assert res.resolved_budget_tokens == 24_000
+        assert tel is not None
+        assert tel.effective_cap == 24_000   # role budget, NOT 8192
+        assert tel.status == "active"         # no model cap "enforced"
+
+
+def test_17c_known_large_model_does_not_lower_role_budget():
+    # A known model whose window EXCEEDS the role budget leaves it untouched.
+    with patch.object(cb, "get_known_max_input_tokens", return_value=200_000):
+        with cb.dispatch_context(
+            budget_role="researcher",
+            runner_role="researcher",
+            model="big-window-model",
+            project_code="X",
+            run_id="r1",
+        ):
+            tel = cb.current_telemetry_context()
+            assert tel is not None
+            assert tel.effective_cap == 24_000   # role budget governs
+            assert tel.status == "active"
 
 
 # ─── 18. Schema round-trip — project + agent preserve new fields ───────────
@@ -517,21 +555,27 @@ def test_23_multimodal_emits_unsupported_status(project):
 
 def test_24_call_scope_id_distinct_per_dispatch(project):
     audit = vault.run_dir(project.code, project.run_id) / "audit.jsonl"
-    for task in ("BDG-T-001", "BDG-T-002"):
-        with cb.dispatch_context(
-            budget_role="producer",
-            runner_role="drafter",
-            model="grok-4",
-            project_code=project.code,
-            run_id=project.run_id,
-            task_id=task,
-            audit_path=audit,
-        ):
-            cid_iter0 = cb.call_id_for_iteration(0)
-            cid_iter1 = cb.call_id_for_iteration(1)
-            assert cid_iter0.endswith(":iter-000")
-            assert cid_iter1.endswith(":iter-001")
-            assert task in cid_iter0
+    # Force a KNOWN-small model window (10k < producer's 16k) so each dispatch
+    # is model_cap_enforced and emits its entry audit row. (An unknown model
+    # now correctly stays 'active' — role budget governs — and writes no entry
+    # row until the gate fires, so we pin a small window to exercise the
+    # call_scope_id distinctness this test is actually about.)
+    with patch.object(cb, "get_known_max_input_tokens", return_value=10_000):
+        for task in ("BDG-T-001", "BDG-T-002"):
+            with cb.dispatch_context(
+                budget_role="producer",
+                runner_role="drafter",
+                model="grok-4",
+                project_code=project.code,
+                run_id=project.run_id,
+                task_id=task,
+                audit_path=audit,
+            ):
+                cid_iter0 = cb.call_id_for_iteration(0)
+                cid_iter1 = cb.call_id_for_iteration(1)
+                assert cid_iter0.endswith(":iter-000")
+                assert cid_iter1.endswith(":iter-001")
+                assert task in cid_iter0
     # Two dispatches must have distinct call_scope_id prefixes.
     rows = [
         json.loads(line) for line in audit.read_text().splitlines() if line.strip()

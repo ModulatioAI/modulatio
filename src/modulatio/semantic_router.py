@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Semantic routing fallback — slice #6e.
 
 Decoupled from any memory/knowledge stack per v1's lesson

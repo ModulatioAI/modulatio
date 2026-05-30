@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Budget-defaults step — capture per-plan default caps, all optional.
 
 Inserted between the agent and first-project steps so the first project's

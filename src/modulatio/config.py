@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Modulatio configuration — paths, defaults, persistence.
 
 All filesystem paths in Modulatio source MUST be resolved through this

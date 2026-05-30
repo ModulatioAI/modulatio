@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Artifacts tab — slice #23 + per-run isolation + broad file types.
 
 Walks the LATEST run's artifact subfolders recursively

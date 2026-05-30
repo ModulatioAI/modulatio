@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Telegram notifications — outbound message + document send.
 
 Carried from v1.3.1 ``telegram_notify.py`` (~400 LOC) and adapted for

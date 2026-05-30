@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """AttachPathModal — simple text-input file path picker for attachments.
 
 Slice #31c. Pushed by AgentPanePanel when the user hits Ctrl+I (image)

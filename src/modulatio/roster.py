@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Agent roster — per-project composition of skills into dispatchable agents.
 
 An **agent** is a named composition: a skill set + a model + routing
@@ -294,9 +296,9 @@ def _derive_agent_caps(skill_names: list[str], project_code: str) -> tuple[list[
 # roles are Leader + QC; producer + researcher are skill-holders.
 _DEFAULT_ROSTER_TEMPLATE: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("leader", ("leader", "leader-verify", "leader-plan", "leader-plan-approve", "leader-reflect"), "leader", "leader_model"),
-    ("producer", ("drafter", "drafter-edit"), "producer", "specialist_model"),
+    ("producer", ("drafter", "drafter-edit", "rigorous-sourcing"), "producer", "specialist_model"),
     ("qc", ("qc",), "qc", "qc_model"),
-    ("researcher", ("researcher",), "producer", "researcher_model"),
+    ("researcher", ("researcher", "rigorous-sourcing"), "producer", "researcher_model"),
 )
 
 
@@ -523,6 +525,10 @@ def _seed_from_team_template(
             capability_tags=list(entry.get("capability_tags") or []),
             tier=entry.get("tier") or "producer",
             template_origin=entry.get("template_origin") or "wizard-team",
+            # Per-agent context budget (model-agnostic, by role). Usually
+            # None → the tested per-role PIANO defaults govern; set only when
+            # the user deliberately overrode it in the wizard (discouraged).
+            context_budget=entry.get("context_budget"),
         )
         save(agent, project_code)
         written.append(agent)

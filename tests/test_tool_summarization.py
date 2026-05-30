@@ -474,7 +474,10 @@ def test_runner_passes_through_when_under_threshold(tmp_path: Path) -> None:
     assert not (tmp_path / "tool_calls" / "c-small.txt").exists()
 
 
-def test_runner_falls_back_verbatim_on_summarizer_failure(tmp_path: Path) -> None:
+def test_runner_truncates_on_summarizer_failure(tmp_path: Path) -> None:
+    """When the summarizer fails, the runner TRUNCATES the result rather than
+    keeping it verbatim — verbatim accumulation across fetches is what storms a
+    multi-fetch producer loop (2026-05-30). Raw stays on disk."""
     big = "x" * 50_000
     fake = _FakeTool("big_tool", big)
     chat = _scripted(
@@ -504,12 +507,14 @@ def test_runner_falls_back_verbatim_on_summarizer_failure(tmp_path: Path) -> Non
             summarizer_chat_runner_factory=boom_factory,
         )
     assert out == "DONE"
-    # Conversation gets a "summarization failed" marker but still has the
-    # full verbatim content as a fallback. Raw is on disk regardless.
+    # Summarizer failed → truncated (NOT verbatim), with a pointer back to the
+    # persisted raw. Verbatim would re-introduce the storm.
     tool_msg = [m for m in chat.calls[1]["messages"] if m["role"] == "tool"][0]
-    assert "summarization failed" in tool_msg["content"]
-    assert big in tool_msg["content"]
-    assert (tmp_path / "tool_calls" / "c-big.txt").read_text() == big
+    assert "truncated" in tool_msg["content"]
+    assert "read_tool_result" in tool_msg["content"]
+    assert big not in tool_msg["content"]              # not the full 50k verbatim
+    assert len(tool_msg["content"]) < len(big)
+    assert (tmp_path / "tool_calls" / "c-big.txt").read_text() == big  # raw on disk
 
 
 def test_runner_no_op_when_config_disabled() -> None:
@@ -539,3 +544,66 @@ def test_runner_no_op_when_config_disabled() -> None:
     assert out == "DONE"
     tool_msg = [m for m in chat.calls[1]["messages"] if m["role"] == "tool"][0]
     assert big in tool_msg["content"]
+
+
+# ── model-free truncation (2026-05-30): bound raw fetches without a summarizer ──
+
+def test_truncate_tool_result_keeps_small_verbatim():
+    from modulatio import tool_summarization as ts
+    small = "a concise tool result"
+    assert ts.truncate_tool_result(small, call_id="c1", max_tokens=2000, model="gpt-4o") == small
+
+
+def test_truncate_tool_result_bounds_large_to_token_budget():
+    from modulatio import tool_summarization as ts
+    big = "The Israel-Iran conflict escalated sharply. " * 2000  # ~88k chars
+    out = ts.truncate_tool_result(big, call_id="abc", max_tokens=500, model="gpt-4o")
+    # Genuinely fits the token budget (+ small marker overhead), not just shorter.
+    assert ts.count_tokens("gpt-4o", text=out) <= 600
+    assert len(out) < len(big)
+    # Pointer back to the persisted raw so the producer can pull more if needed.
+    assert "read_tool_result" in out and "abc" in out
+
+
+def test_truncate_tool_result_handles_dense_tokenization():
+    """Markup/code tokenizes denser than prose; the bounded tighten-loop must
+    still land under budget (the char heuristic alone would overshoot)."""
+    from modulatio import tool_summarization as ts
+    dense = "<div><span>x</span></div>" * 3000
+    out = ts.truncate_tool_result(dense, call_id="d", max_tokens=400, model="gpt-4o")
+    assert ts.count_tokens("gpt-4o", text=out) <= 500
+
+
+def test_runner_truncates_large_result_when_no_summarizer(tmp_path: Path) -> None:
+    """The live Iran scenario: enabled config, tool_calls_dir set, but NO
+    summarizer_model. A large fetch must be TRUNCATED on arrival (not kept
+    verbatim) so a multi-fetch producer can't accumulate past its budget.
+    Counting uses the agent's own model when no summarizer is configured."""
+    big = "The conflict escalated sharply across the region. " * 3000  # ~150k chars
+    fake = _FakeTool("fetch", big)
+    chat = _scripted(
+        runners.ChatResponse(content=None, tool_calls=(
+            runners.ToolCall(id="c-fetch", name="fetch", args={}),
+        )),
+        runners.ChatResponse(content="DONE", tool_calls=()),
+    )
+    cfg = tool_summarization.ToolSummarizationConfig(
+        enabled=True,
+        threshold_tokens=2000,
+        summarizer_model=None,                       # ← no summarizer
+        tool_calls_dir=tmp_path / "tool_calls",
+    )
+    with tool_summarization.with_config(cfg):
+        out = runners.run_llm_with_tools(
+            chat_runner=chat,
+            prompt="go",
+            tool_loadout=("fetch",),
+            tool_registry={"fetch": fake},
+            model="gpt-4o",                          # agent model used for counting
+        )
+    assert out == "DONE"
+    tool_msg = [m for m in chat.calls[1]["messages"] if m["role"] == "tool"][0]
+    assert "truncated" in tool_msg["content"]
+    assert "read_tool_result" in tool_msg["content"]
+    assert tool_summarization.count_tokens("gpt-4o", text=tool_msg["content"]) <= 2200
+    assert (tmp_path / "tool_calls" / "c-fetch.txt").read_text() == big  # raw on disk

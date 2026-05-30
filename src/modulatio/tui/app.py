@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """ModulatioApp — the main Textual App for TUI v1.2 (slice #20).
 
 First launchable TUI. Tabbed layout with Prompt active + six

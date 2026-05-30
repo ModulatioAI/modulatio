@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Runners: adapt different LLM backends to the AgentRunner protocol.
 
 Two protocols live here:
@@ -783,32 +785,47 @@ def run_llm_with_tools(
                 ts_config is not None
                 and ts_config.enabled
                 and ts_config.tool_calls_dir is not None
-                and ts_config.summarizer_model is not None
-                and summarizer_chat_runner_factory is not None
             ):
-                tokens = _tool_sum.count_tokens(
-                    ts_config.summarizer_model, text=result
-                )
+                # Size the result with the summarizer model when present, else
+                # the agent's own model — we need SOME tokenizer to measure it.
+                count_model = ts_config.summarizer_model or model
+                tokens = _tool_sum.count_tokens(count_model, text=result)
                 if tokens > ts_config.threshold_tokens:
                     _tool_sum.persist_raw_result(
                         call.id, result, ts_config.tool_calls_dir
                     )
-                    try:
-                        summary = _tool_sum.summarize_tool_result(
-                            result,
-                            summarizer_model=ts_config.summarizer_model,
-                            chat_runner_factory=summarizer_chat_runner_factory,
-                        )
-                        conv_content = _tool_sum.format_summarized_message(
-                            call.id, summary
-                        )
-                    except Exception:
-                        # Summarizer failure must not break the loop —
-                        # fall back to verbatim with a flag so the
-                        # caller can see we tried. Raw is still on disk.
-                        conv_content = (
-                            f"[summarization failed for call_id={call.id}]\n"
-                            f"{result}"
+                    have_summarizer = (
+                        ts_config.summarizer_model is not None
+                        and summarizer_chat_runner_factory is not None
+                    )
+                    if have_summarizer:
+                        try:
+                            summary = _tool_sum.summarize_tool_result(
+                                result,
+                                summarizer_model=ts_config.summarizer_model,
+                                chat_runner_factory=summarizer_chat_runner_factory,
+                            )
+                            conv_content = _tool_sum.format_summarized_message(
+                                call.id, summary
+                            )
+                        except Exception:
+                            # Summarizer failed — TRUNCATE, don't keep verbatim:
+                            # verbatim accumulation is exactly what storms the
+                            # loop. Raw is on disk for read_tool_result.
+                            conv_content = _tool_sum.truncate_tool_result(
+                                result, call_id=call.id,
+                                max_tokens=ts_config.threshold_tokens,
+                                model=count_model,
+                            )
+                    else:
+                        # No summarizer configured → model-free truncation so a
+                        # multi-fetch producer can't accumulate raw results past
+                        # its role budget. The producer extracts + cites what it
+                        # needs; the bulky raw never piles up (2026-05-30).
+                        conv_content = _tool_sum.truncate_tool_result(
+                            result, call_id=call.id,
+                            max_tokens=ts_config.threshold_tokens,
+                            model=count_model,
                         )
 
             messages.append({

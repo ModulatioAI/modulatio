@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Standards loader — the Research-First pattern applied to quality rules.
 
 Standards files live in two locations, searched in order:
@@ -30,6 +32,14 @@ from modulatio import config
 from modulatio.vault import project_dir
 
 _STANDARDS_ROOT = config.get_shared_resources_path() / "standards"
+
+#: Package-bundled BASELINE standards, shipped with Modulatio — the lowest
+#: tier, beneath the user's shared defaults and project overrides. Gives a
+#: cold-start install a real quality bar for QC to enforce + repair against
+#: (without it, QC has no domain rules and weak work ships unchecked). These
+#: are a starting baseline; the human-curated tiers and QC's learned
+#: standards (TQM) stack ON TOP and win.
+_SEED_STANDARDS_ROOT = Path(__file__).parent / "_seed_standards"
 
 _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
@@ -90,6 +100,7 @@ def load_with_metadata(domain: str, project_code: str | None = None) -> Standard
     Returns an empty entry (rather than raising) when nothing is found —
     standards are additive leverage, not required infrastructure.
     """
+    seed_path = _SEED_STANDARDS_ROOT / f"{domain}.md"
     shared_path = _STANDARDS_ROOT / f"{domain}.md"
     project_path = (
         project_dir(project_code) / "standards" / f"{domain}.md"
@@ -97,12 +108,17 @@ def load_with_metadata(domain: str, project_code: str | None = None) -> Standard
         else None
     )
 
+    seed_meta: dict[str, str] = {}
+    seed_body = ""
     shared_meta: dict[str, str] = {}
     shared_body = ""
     project_meta: dict[str, str] = {}
     project_body = ""
     sources: list[str] = []
 
+    if seed_path.exists():
+        seed_meta, seed_body = _parse_file(seed_path)
+        sources.append(str(seed_path))
     if shared_path.exists():
         shared_meta, shared_body = _parse_file(shared_path)
         sources.append(str(shared_path))
@@ -113,29 +129,50 @@ def load_with_metadata(domain: str, project_code: str | None = None) -> Standard
     if not sources:
         return _EMPTY_ENTRY
 
+    # Stack the human-curated layers (shared → project) exactly as before,
+    # then lay them over the shipped seed baseline. The reader (producer/QC)
+    # sees the baseline first, then the curated overrides that win.
     if shared_body and project_body:
-        body = (
+        curated_body = (
             f"{shared_body.rstrip()}\n\n"
             "## Project-specific overrides\n\n"
             f"{project_body}"
         )
     else:
-        body = project_body or shared_body
+        curated_body = project_body or shared_body
 
-    # Project-local metadata wins when present — that artifact is what
-    # actually shipped for this project.
-    freshness = project_meta.get("freshness_class") or shared_meta.get("freshness_class")
-    last_verified = project_meta.get("last_verified_at") or shared_meta.get("last_verified_at")
+    if seed_body and curated_body:
+        body = (
+            f"{seed_body.rstrip()}\n\n"
+            "## Team & project standards (override the baseline above)\n\n"
+            f"{curated_body}"
+        )
+    else:
+        body = curated_body or seed_body
+
+    # Metadata precedence: project > shared > seed — the most specific layer
+    # present wins (that artifact is what actually shipped for this project).
+    freshness = (
+        project_meta.get("freshness_class")
+        or shared_meta.get("freshness_class")
+        or seed_meta.get("freshness_class")
+    )
+    last_verified = (
+        project_meta.get("last_verified_at")
+        or shared_meta.get("last_verified_at")
+        or seed_meta.get("last_verified_at")
+    )
 
     # Slice #9b follow-on: domain-level capability floor. Unioned
     # across shared + project-local (either layer can tighten, neither
     # can loosen). Order-preserving dedup so fixtures and audit trails
     # stay stable across runs.
+    seed_caps = _parse_capability_csv(seed_meta.get("required_capabilities", ""))
     shared_caps = _parse_capability_csv(shared_meta.get("required_capabilities", ""))
     project_caps = _parse_capability_csv(project_meta.get("required_capabilities", ""))
     seen: set[str] = set()
     required_caps: list[str] = []
-    for cap in shared_caps + project_caps:
+    for cap in seed_caps + shared_caps + project_caps:
         if cap and cap not in seen:
             required_caps.append(cap)
             seen.add(cap)

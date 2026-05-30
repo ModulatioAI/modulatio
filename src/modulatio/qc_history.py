@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """QC history — precedent log for recursive learning (slice #8.1).
 
 Every QC verdict is appended to ``<project_vault>/qc-history/<domain>/``

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Project execution + Leader reflection (Phase 3.1b-iv-α).
 
 When a plan is approved (status flips to 'approved' via either the

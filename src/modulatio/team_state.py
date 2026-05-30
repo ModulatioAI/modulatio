@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Team state — the per-objective inter-task carry layer.
 
  Lands Layer 4 of the five-layer working-memory

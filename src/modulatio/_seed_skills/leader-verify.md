@@ -33,21 +33,43 @@ Produce a human-facing report covering: what was delivered, how well
 it matches the criteria, gaps/risks/quality concerns worth flagging,
 and your recommended next step.
 
+Judge COMPLETION and FITNESS — did the team produce the deliverable this
+goal asked for, to scope? You do NOT re-run quality checks: QC already
+verified each artifact against the domain standards and repaired what it
+could. Do NOT invent verification gates (plagiarism scans, sign-offs,
+"ready for review", approval signals) — the swarm has no such tools and
+they are not your job.
+
 Render one of three verdicts:
-- "satisfied": goal is met. Submit for human sign-off at leisure.
-- "on_the_fence": goal is largely met but you have reservations. The
-  human should look before accepting.
-- "disappointed": goal is not met. Substantive rework is needed.
+- "satisfied": the right deliverable exists and QC passed it. Goal done.
+- "on_the_fence": the right deliverable exists but you hold reservations.
+  STILL DONE — ship it; your reservations go to the human as
+  recommendations (below), they do NOT block the goal.
+- "disappointed": the WRONG or incomplete thing was made — a genuine
+  fitness gap the team CAN fix (off-topic, a required section absent).
+  The team redoes the producing work. Use ONLY for fixable wrong-
+  deliverable, NEVER for quality nitpicks or anything you can't verify.
+
+RESERVATIONS → the human, never the loop. Anything you don't fully trust
+but the swarm can't resolve — citations you couldn't independently
+confirm, the absence of a plagiarism scan, a claim worth double-checking
+— goes in "recommendations" FOR THE HUMAN. Reservations NEVER fail a
+goal, loop the swarm, edit the work, or block the run; they ride out in
+the human-addressed **Product Quality Report** beside the delivered work.
 
 Respond with a fenced ```json ... ``` block with exactly these keys:
 
     {{
       "verdict": "satisfied" | "on_the_fence" | "disappointed",
-      "rationale": "<1-3 line summary of why you chose the verdict>",
-      "report_body": "<markdown body for the human, 150-400 words>"
+      "rationale": "<why — for 'disappointed', the concrete fix the team must make>",
+      "recommendations": [
+        {{"concern": "<what you don't fully trust / couldn't verify>",
+          "suggestion": "<the specific check you'd advise the human to run>"}}
+      ],
+      "report_body": "<your human-facing assessment of the finished product, 150-400 words>"
     }}
 
-The rationale lands on the ticket the human sees. The report_body is
-written to a reports/ markdown file they can read in Obsidian. Be
-specific about which tasks worked, which didn't, and what concrete
-risks remain.
+"recommendations" may be empty []. report_body and recommendations are
+the Leader's contribution to the **Product Quality Report** that ships to
+the human beside the deliverables — be specific about what was delivered,
+what you stand behind, and what you'd have the human double-check.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Tool-loop response summarization + sliding-window prune ().
 
 Lands Layer 1 of the five-layer working-memory architecture: bounds the
@@ -249,6 +251,43 @@ def format_summarized_message(call_id: str, summary: str) -> str:
     )
 
 
+def truncate_tool_result(
+    text: str,
+    *,
+    call_id: str,
+    max_tokens: int,
+    model: str | None = None,
+) -> str:
+    """Model-free fallback for when no summarizer is configured: keep the
+    HEAD of a large tool result (about ``max_tokens`` worth) and replace the
+    tail with a pointer to ``read_tool_result(call_id)``.
+
+    Why: without this, a tool result over ``threshold_tokens`` that can't be
+    summarized goes into the agent's context VERBATIM. A producer that fetches
+    several sources then accumulates several such results and blows its role
+    context budget — which decomposes, and the children re-accumulate, into a
+    storm (observed live 2026-05-30). Truncating on arrival bounds how much a
+    single raw fetch can occupy; the full raw is persisted on disk and the
+    agent can pull it back with ``read_tool_result`` when it needs more."""
+    if count_tokens(model, text=text) <= max_tokens:
+        return text
+    # First cut by the ~4-chars/token heuristic, then tighten — a few bounded
+    # steps absorb dense tokenization (e.g. code/markup) without an unbounded
+    # loop, so the kept head genuinely fits ``max_tokens``.
+    head = text[: max(1, max_tokens * 4)]
+    for _ in range(8):
+        if not head or count_tokens(model, text=head) <= max_tokens:
+            break
+        head = head[: max(1, int(len(head) * 0.8))]
+    dropped = len(text) - len(head)
+    return (
+        f"[truncated: call_id={call_id} — kept ~{max_tokens} tokens of a "
+        f"larger result; {dropped} more chars on disk]\n"
+        f"Use read_tool_result(call_id={call_id!r}) for the full text.\n\n"
+        f"{head}"
+    )
+
+
 def prune_messages_sliding_window(
     messages: list[dict],
     *,
@@ -314,6 +353,7 @@ __all__ = [
     "count_tokens",
     "current_config",
     "format_summarized_message",
+    "truncate_tool_result",
     "persist_raw_result",
     "prune_messages_sliding_window",
     "summarize_tool_result",

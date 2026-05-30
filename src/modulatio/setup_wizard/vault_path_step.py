@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Vault path step — picks vault root + shared resources path.
 
 Detects ``~/Obsidian/`` presence and suggests an Obsidian-integrated

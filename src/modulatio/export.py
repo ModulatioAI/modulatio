@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Export pipeline for artifacts.
 
 Slice #19. Wraps pandoc so the TUI's Artifacts tab (slice #23) can

@@ -378,6 +378,27 @@ def test_seed_skills_dir_ships_coding_and_code_review():
     assert (_SEED_SKILLS_ROOT / "code-review.md").exists()
 
 
+def test_seed_planning_skills_carry_sweep_bounding_guidance():
+    """Plan-time bounding (2026-05-30, reconciled with the task cap): the
+    planning skills must tell the LLM to bound an enumerable 'X for each
+    of N items' sweep into a FEW cap-compliant batched tasks (NOT one per
+    item — that busts the per-sub-objective cap and is unneeded now that
+    fetches are size-bounded), with a scout-first step for unknown items
+    and a deferred phase when the set is wider than the cap."""
+    from modulatio.skills import _SEED_SKILLS_ROOT
+
+    task_plan = (_SEED_SKILLS_ROOT / "task-plan.md").read_text()
+    assert "SWEEP" in task_plan
+    assert "cap" in task_plan          # cap-aware, not one-per-item
+    assert "BATCH" in task_plan
+    assert "PHASE" in task_plan        # defer the rest when wider than cap
+    assert "SCOUT" in task_plan        # unknown-items-first path
+
+    leader_plan = (_SEED_SKILLS_ROOT / "leader-plan.md").read_text()
+    assert "sweep" in leader_plan.lower()
+    assert "batch" in leader_plan.lower()
+
+
 def test_load_falls_back_to_seed_when_shared_empty(tmp_path, monkeypatch):
     """Empty shared dir + missing project-local → seed wins. The
     motivating use case: fresh install, user hasn't populated their
@@ -428,3 +449,16 @@ def test_seed_load_resolves_metadata_correctly(tmp_path, monkeypatch):
     sk = skills.load_with_metadata("coding")
     assert sk.executor == "llm"
     assert "run_shell" in sk.tool_loadout
+
+
+def test_rigorous_sourcing_skill_ships_for_producers():
+    """The rigorous-sourcing producer skill (2026-05-30) ships as seed data:
+    fetch real sources, cite with resolvable locators, never fabricate, flag
+    what couldn't be verified. The positive complement to dropping verify goals."""
+    from modulatio.skills import _SEED_SKILLS_ROOT
+    sk = (_SEED_SKILLS_ROOT / "rigorous-sourcing.md")
+    assert sk.exists()
+    body = sk.read_text()
+    assert "http_get" in body              # fetch real sources
+    assert "References" in body            # cite with a resolvable locator
+    assert "fabricat" in body.lower()      # never fabricate

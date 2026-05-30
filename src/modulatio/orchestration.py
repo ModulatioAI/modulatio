@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """GSD orchestration loop for Modulatio 2.0.
 
 Minimum v0: runs one pass of Discuss → Plan → Execute → Verify for a project.
@@ -77,6 +79,13 @@ class RunSummary:
     #: separation. Surfaced distinctly so a human report never presents
     #: them as clean producer wins.
     qc_authored_fixes: list[str] = field(default_factory=list)
+    #: Leader's reservations FOR THE HUMAN (2026-05-30) — caveats it can't
+    #: resolve inside the swarm (e.g. "couldn't verify these citations are
+    #: authentic", "no plagiarism scan was run"). These do NOT fail a goal,
+    #: loop the swarm, edit the work, or open a ticket — they are gathered
+    #: into the human-addressed "Product Quality Report" that ships beside
+    #: the deliverables. Each item: {goal_id, concern, suggestion}.
+    recommendations: list[dict] = field(default_factory=list)
 
 
 # ── Core rebuild B3: isolated-worker result + deterministic merge ───────
@@ -731,11 +740,92 @@ class _PlanError(Exception):
 _PLAN_HARD_CAP = 6
 
 
+# ── ENGINE-ENFORCED INVARIANT: no standalone verification goals ────────────
+# The Leader may NOT create a goal whose job is to verify/review/audit other
+# work. Prose guidance bends the LLM but does not bind it — observed live, a
+# minted verify goal starved the research (off-topic output), invented an
+# impossible Turnitin plagiarism gate (ticket death-loop), and "verify ALL
+# claims" decompose-stormed (20 tickets, nothing shipped). QC already verifies
+# every PRODUCING task and repairs it; a separate reviewer can only report.
+# RULE (Clif 2026-05-30): the Leader MAY require producing goals to draw on
+# rigorous, credible sources — that's a quality spec on production — but it
+# MAY NOT request verification as its own goal/task. Distrust of a source or
+# claim belongs in the end-of-run Product Quality Report, never a swarm goal.
+# The verb is the tell: "Produce the analysis from rigorous sources" → keep;
+# "Verify that all claims are correctly sourced" → drop. So we gate on the
+# PRIMARY action: a production verb leading the description keeps the goal; a
+# verification verb leading it (and no production verb) drops it.
+_VERIFY_GOAL_RE = re.compile(
+    r"^\s*(?:please\s+|first\s+|then\s+)*"
+    r"(?:re-?)?(?:verif|validat|review|audit|vet\b|"
+    r"fact[\s-]?check|proof[\s-]?read|cross[\s-]?check|double[\s-]?check|"
+    r"sanity[\s-]?check|quality[\s-]?(?:assur|control|check)|qa\b|"
+    r"confirm)\w*\b",
+    re.IGNORECASE,
+)
+_PRODUCE_VERB_RE = re.compile(
+    r"^\s*(?:please\s+|first\s+|then\s+)*"
+    r"(?:produc|research|draft|writ|build|creat|develop|design|compil|"
+    r"assembl|analy[sz]|summari[sz]|gather|generat|implement|prepar|"
+    r"author|deliver|investigat|surve|catalog|document|map\b|outlin)\w*\b",
+    re.IGNORECASE,
+)
+
+
+def _is_standalone_verification_goal(description: str) -> bool:
+    """True iff a goal's PRIMARY action is to verify/review/audit existing
+    work rather than produce a deliverable — a standalone verification goal
+    the Leader is not permitted to create. A production verb leading the
+    description (even one demanding rigorous sources) keeps the goal; a
+    verification verb leading it, with no production verb, drops it."""
+    desc = (description or "").strip()
+    if not desc:
+        return False
+    if _PRODUCE_VERB_RE.match(desc):
+        return False  # leads with production → it's making something, keep it
+    return bool(_VERIFY_GOAL_RE.match(desc))
+
+
+def _goal_emits_artifact(item: dict) -> bool:
+    """True iff a decompose goal item declares ``artifact``-kind evidence —
+    i.e. it PRODUCES a deliverable, not just a report/assertion about prior
+    work. Used as a second gate on the verify-goal drop: a verb-ambiguous
+    goal that actually makes something ("Validate the dataset schema" →
+    produces validator.py; "Review article" as a content type) is KEPT;
+    only a verify-led goal that emits no deliverable is dropped. (Nemo hull
+    note 2026-05-30 — a false-positive drop of real producing work is the
+    worse error.)"""
+    return any(
+        isinstance(r, dict) and str(r.get("kind", "")).strip().lower() == "artifact"
+        for r in (item.get("evidence_required") or [])
+    )
+
+
 #: Slice #9c sentinels for ``_run_escalation_attempt`` return values.
 #: The helper already wrote the terminal StateTransition + status, so
 #: the caller just needs to early-return without duplicating settlement.
 _ESCALATION_COMPLETED = object()
 _ESCALATION_EXCEPTION = object()
+
+
+def _parse_redecompose_specs(resp: "str | None") -> "list[dict]":
+    """Extract the child-task spec array from the planner's re-decompose
+    response. Tolerant by design (it's an LLM): finds the first ``[...]``
+    array, ignores prose / code fences. Returns ``[]`` on any failure — the
+    caller treats that as "couldn't split" and escalates."""
+    if not isinstance(resp, str):
+        return []
+    start = resp.find("[")
+    end = resp.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return []
+    try:
+        data = json.loads(resp[start:end + 1])
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [d for d in data if isinstance(d, dict)]
 
 
 def _validate_output_path(candidate: str, artifacts_root: Path) -> str:
@@ -2060,6 +2150,35 @@ class Orchestrator:
         if not isinstance(data, list):
             raise ValueError(f"expected list of goals, got {type(data).__name__}")
 
+        # ENGINE-ENFORCED INVARIANT: drop any standalone verification goal the
+        # Leader minted despite the prompt. QC verifies every producing task;
+        # a separate reviewer can only report (and, observed live, starves /
+        # loops / decompose-storms). A goal is dropped ONLY when its primary
+        # verb is verification AND it emits no artifact deliverable — a
+        # verb-ambiguous goal that actually produces something is kept
+        # (Nemo hull note: a false-positive drop of real work is the worse
+        # error). Only drop while PRODUCING goals remain — never leave the run
+        # with nothing to do (degenerate all-verify plan falls through).
+        def _is_drop(it: dict) -> bool:
+            return (
+                _is_standalone_verification_goal(str(it.get("description", "")))
+                and not _goal_emits_artifact(it)
+            )
+        producing = [it for it in data if not _is_drop(it)]
+        dropped = [it for it in data if it not in producing]
+        if dropped and producing:
+            for it in dropped:
+                self._emit_activity(
+                    role="leader", phase="leader_verify_goal_dropped",
+                    agent_id="leader",
+                )
+                _logger.info(
+                    "Dropped standalone verification goal (QC verifies "
+                    "producing tasks automatically): %s",
+                    str(it.get("description", ""))[:120],
+                )
+            data = producing
+
         goals: list[Goal] = []
         for item in data:
             gid = self._next_goal_id()
@@ -2279,6 +2398,10 @@ class Orchestrator:
                     tool_args=tool_args,
                     depends_on=list(depends_on),
                     output_path=output_path,
+                    # Finished-product tag from the Leader's plan. Whole
+                    # spec-group inherits it (an ``artifacts: [...]`` group
+                    # that's a deliverable delivers each rendered piece).
+                    deliverable=bool(item.get("deliverable", False)),
                     evidence_required=[
                         _build_requirement(req)
                         for req in item.get("evidence_required", [])
@@ -3886,12 +4009,21 @@ class Orchestrator:
         )
 
     @staticmethod
-    def _concurrent_waves_enabled() -> bool:
-        """Core rebuild B4: the concurrent wave executor is opt-in via
-        ``MODULATIO_CONCURRENT_WAVES=1`` and ships OFF by default — the
-        sequential loop stays the production path while concurrency is
-        hardened (full store-write deferral on the rare block paths +
-        capability-floor in wave re-allocation are the pre-default work)."""
+    def _concurrent_waves_enabled(project: "Project | None" = None) -> bool:
+        """Core rebuild B4: the concurrent wave executor is opt-in and ships
+        OFF by default — the sequential loop stays the production path while
+        concurrency is hardened (full store-write deferral on the rare block
+        paths + capability-floor in wave re-allocation are the pre-default
+        work).
+
+        Config-OR-env (concurrent-waves eval, 2026-05-29): concurrency is
+        enabled when EITHER ``project.concurrent_waves_enabled`` is True OR
+        ``MODULATIO_CONCURRENT_WAVES=1``. The config field lets the A/B
+        harness vary concurrency as a dimension; the env var is preserved as
+        an independent override. ``project=None`` falls back to env-only
+        (back-compat for any caller without a project in hand)."""
+        if project is not None and project.concurrent_waves_enabled:
+            return True
         return os.environ.get("MODULATIO_CONCURRENT_WAVES") == "1"
 
     @staticmethod
@@ -4548,16 +4680,16 @@ class Orchestrator:
                 )
 
             except _ctx_budget_module.RecoverableContextError as ctx_exc:
-                # Alpha (W1): context-budget exhaustion is NOT
-                # retriable. Re-running with the same prompt hits the
-                # same wall; even compression already failed. Open a
-                # CRITICAL ticket carrying the checkpoint path, mark
-                # the task BLOCKED, and break out of the redo loop —
-                # Leader-reflect's between-sub-objective turn sees
-                # the ticket and decides revise-major (decompose) or
-                # pause (escalate to user). The checkpoint is an
-                # audit + decomposition input; we do NOT load it
-                # back as a re-input source.
+                # Context-budget exhaustion is NOT producer-retriable (same
+                # prompt → same wall; compression already failed). The right
+                # move is to SPLIT the task. 2026-05-30: hand it back to the
+                # planner's existing decompose skill and run the children
+                # inline (the parent becomes a completed container). Only if
+                # that genuinely can't help (recursion cap, planner can't
+                # split) do we block + ticket — a real "stuck", not the old
+                # confused punt to a Leader-reflect turn that never decomposed.
+                if self._try_decompose_and_run(t, ctx_exc, summary):
+                    return
                 self._block_for_context_budget(t, ctx_exc, summary)
                 return
 
@@ -4941,6 +5073,135 @@ class Orchestrator:
             f"{task.id}: environmental gap — {qc_verdict.check}"
         )
         self._save_task_deferrable(task)
+
+    # ── Overflow → decompose (2026-05-30) — re-invoke the planner's existing
+    #    decompose skill on an over-budget task instead of ticketing out of
+    #    confusion. LLM-first: the planner already knows how to split ("each
+    #    within cap"); we wire the trigger + run the children, nothing more. ─
+    #: Max overflow→decompose recursion before escalating (genuine stuck).
+    _MAX_DECOMPOSE_DEPTH = 3
+
+    def _build_redecompose_prompt(
+        self, t: "Task",
+        ctx_exc: "_ctx_budget_module.RecoverableContextError",
+    ) -> str:
+        """Anticipate-the-questions prompt: hand the over-budget task back to
+        the planner's decompose skill to split THIS task (not re-plan the
+        project) into smaller children that each fit one producer call.
+        LLM-first — give it context + intent, not a rubric."""
+        cp = ""
+        if ctx_exc.checkpoint_path:
+            cp = (
+                f"\nThe work that piled into this one call is checkpointed at "
+                f"{ctx_exc.checkpoint_path} — you don't need to read it, but "
+                f"the split should reflect that this much accumulated in one "
+                f"task.\n"
+            )
+        return (
+            f"One task was too big for a single producer call — it overflowed "
+            f"the context budget (~{ctx_exc.estimated_tokens} tokens vs the "
+            f"{ctx_exc.max_input_tokens}-token cap) even after compression.\n\n"
+            f"TASK TO SPLIT (id {t.id}):\n{t.description}\n{cp}\n"
+            f"Split THIS ONE task — do NOT re-plan the whole project — into "
+            f"2-6 smaller tasks that TOGETHER cover the same scope, each a "
+            f"single focused producer call comfortably within budget. Each "
+            f"child produces its own artifact (downstream work reads them "
+            f"all). Smaller is better; when in doubt, split more.\n\n"
+            f"Return ONLY a JSON array, nothing else:\n"
+            f'[{{"description": "<focused sub-task>", '
+            f'"output_path": "drafts/<short-name>.md"}}, ...]'
+        )
+
+    def _attempt_decompose(
+        self, t: "Task",
+        ctx_exc: "_ctx_budget_module.RecoverableContextError",
+    ) -> "list[Task] | None":
+        """Re-invoke the planner's decompose skill on an over-budget task →
+        smaller children, or ``None`` when it can't/shouldn't split (recursion
+        cap reached, planner errored, or fewer than 2 usable children). ``None``
+        falls through to the genuine-stuck ticket."""
+        if t.decompose_depth >= self._MAX_DECOMPOSE_DEPTH:
+            return None  # recursion exhausted — genuine stuck, escalate
+        prompt = self._build_redecompose_prompt(t, ctx_exc)
+        try:
+            resp = self._run(
+                "planner", prompt, budget_role="planner",
+                task_id=t.id, goal_id=t.goal_id, agent_id="planner",
+            )
+        except Exception:
+            return None
+        specs = _parse_redecompose_specs(resp)
+        children: "list[Task]" = []
+        for i, spec in enumerate(specs, 1):
+            desc = str(spec.get("description") or "").strip()
+            if not desc:
+                continue
+            raw_path = spec.get("output_path")
+            children.append(Task(
+                id=f"{t.id}-D{i}",
+                project_id=t.project_id,
+                goal_id=t.goal_id,
+                description=desc,
+                assignee_specialist=t.assignee_specialist,
+                artifact_kind=t.artifact_kind,
+                required_skills=list(t.required_skills),
+                required_capabilities=list(t.required_capabilities),
+                depends_on=list(t.depends_on),  # children inherit parent's deps
+                output_path=(str(raw_path).strip() if raw_path else None),
+                decompose_depth=t.decompose_depth + 1,
+                status=TaskStatus.PENDING,
+            ))
+        return children if len(children) >= 2 else None
+
+    def _try_decompose_and_run(
+        self, t: "Task",
+        ctx_exc: "_ctx_budget_module.RecoverableContextError",
+        summary: RunSummary,
+    ) -> bool:
+        """Overflow recovery: split the task and run the children INLINE
+        (recursively through the same redo path — a child that still overflows
+        re-decomposes, bounded by depth). The parent becomes a completed
+        CONTAINER once all children complete; downstream depends on the
+        parent, then reads the children's artifacts. Returns True if handled,
+        False to fall through to the genuine-stuck ticket."""
+        children = self._attempt_decompose(t, ctx_exc)
+        if not children:
+            return False
+        self._emit_activity(
+            role="planner", phase="task_decomposed", task_id=t.id,
+            agent_id="planner",
+        )
+        all_ok = True
+        for child in children:
+            store.save_task(self.project.code, child, run_id=self.project.run_id)
+            self._run_task_with_redo(child, summary)
+            store.save_task(self.project.code, child, run_id=self.project.run_id)
+            if child.status is not TaskStatus.COMPLETED:
+                all_ok = False
+        if all_ok:
+            t.transitions.append(StateTransition(
+                from_state=t.status.value,
+                to_state=TaskStatus.COMPLETED.value,
+                actor="orchestrator",
+                rationale=(
+                    f"too big for one call ({ctx_exc.estimated_tokens} > "
+                    f"{ctx_exc.max_input_tokens} tokens) — decomposed into "
+                    f"{len(children)} children, all completed"
+                ),
+            ))
+            t.status = TaskStatus.COMPLETED
+        else:
+            t.transitions.append(StateTransition(
+                from_state=t.status.value,
+                to_state=TaskStatus.BLOCKED.value,
+                actor="orchestrator",
+                rationale=f"decomposed into {len(children)} children; not all completed",
+            ))
+            t.status = TaskStatus.BLOCKED
+            summary.errors.append(
+                f"{t.id}: decomposed but a child task did not complete"
+            )
+        return True
 
     # ── Context-budget exhaustion — task BLOCKED, decompose ticket fired ─
     def _block_for_context_budget(
@@ -5343,11 +5604,17 @@ class Orchestrator:
             )
             verdict = "disappointed"
 
-        # Disappointed path forks on retry budget (slice #7e). The
-        # budget-available branch triggers an auto-redo without opening
-        # a ticket; the exhausted branch opens a BLOCKER with
-        # refresh_at. Both paths still wrote the report above so the
-        # audit trail captures every Leader verdict.
+        # Reservations are ADVISORY — gather them for the human-facing
+        # Product Quality Report (2026-05-30). They never fail a goal, loop
+        # the swarm, edit the work, or block the run; they ride out beside
+        # the deliverables. Done for every verdict, including disappointed.
+        self._record_recommendations(goal, data.get("recommendations"), summary)
+
+        # "disappointed" = a fixable WRONG / incomplete deliverable (a
+        # FITNESS gap the team can resolve). Redo the producing work,
+        # bounded by the daily retry budget. On exhaustion we do NOT punt a
+        # ticket to the human and do NOT block the run — we ship the best
+        # result and record the unresolved gap as a recommendation.
         if verdict == "disappointed":
             self._refresh_daily_budget_if_new_day(goal)
             if goal.retry_count < goal.max_retries:
@@ -5356,73 +5623,60 @@ class Orchestrator:
                     goal, tasks, rationale, report_path, summary,
                 )
                 return
-            self._open_budget_exhausted_ticket(
-                goal, rationale, report_path, summary,
-            )
-            self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
-            return
-
-        # satisfied / on_the_fence: open the ticket + transition, no
-        # auto-redo path.
-        if verdict == "satisfied":
-            priority = TicketPriority.MINOR
-            title = f"Goal {goal.id} ready for sign-off"
-            ticket_body = (
-                f"Leader believes goal **{goal.id}** is complete. Please "
-                f"sign off at your convenience.\n\n"
-                f"Goal: {goal.description}\n\n"
-                f"Leader's rationale: {rationale}\n\n"
-                f"Full report: `{report_path}`\n"
-            )
-            approval_required = False
-        else:  # on_the_fence
-            priority = TicketPriority.CRITICAL
-            title = f"Goal {goal.id} completion uncertain — review"
-            ticket_body = (
-                f"Leader has reservations about goal **{goal.id}** — "
-                f"review before accepting.\n\n"
-                f"Goal: {goal.description}\n\n"
-                f"Leader's rationale: {rationale}\n\n"
-                f"Full report: `{report_path}`\n"
-            )
-            approval_required = True
-
-        ticket = store.create_ticket(
-            project_id=self.project.id,
-            project_code=self.project.code,
-            run_id=self.project.run_id,
-            priority=priority,
-            title=title,
-            body=ticket_body,
-            affected_goal_id=goal.id,
-            actor="leader",
-            approval_required=approval_required,
-        )
-        self._emit_ticket_opened(ticket, role="leader")
-
-        if verdict == "satisfied":
-            new_status = GoalStatus.COMPLETED
+            summary.recommendations.append({
+                "goal_id": goal.id,
+                "concern": (
+                    f"The team could not fully satisfy this goal after "
+                    f"{goal.max_retries} attempts."
+                ),
+                "suggestion": (
+                    f"Review this deliverable closely before relying on it — "
+                    f"{rationale}"
+                ),
+            })
             rationale_text = (
-                f"leader verified: {rationale} | report {report_path.name} | "
-                f"ticket {ticket.id}"
+                f"leader: shipped with reservations after {goal.max_retries} "
+                f"attempts: {rationale} | report {report_path.name}"
             )
         else:
-            new_status = goal.status  # stays IN_PROGRESS
+            # satisfied / on_the_fence — both COMPLETE and ship. on_the_fence
+            # no longer blocks or opens a ticket: its reservations were just
+            # recorded above for the Product Quality Report.
             rationale_text = (
-                f"leader verdict {verdict}: {rationale} | "
-                f"report {report_path.name} | ticket {ticket.id}"
+                f"leader verdict {verdict}: {rationale} | report {report_path.name}"
             )
 
+        # Every verdict completes the goal — the run is never blocked on the
+        # Leader's reservations; the human reads them in the Product Quality
+        # Report and decides what to double-check. No tickets.
         goal.transitions.append(
             StateTransition(
                 from_state=goal.status.value,
-                to_state=new_status.value,
+                to_state=GoalStatus.COMPLETED.value,
                 actor="leader",
                 rationale=rationale_text,
             )
         )
-        goal.status = new_status
+        goal.status = GoalStatus.COMPLETED
         self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
+
+    def _record_recommendations(self, goal: Goal, raw, summary: RunSummary) -> None:
+        """Fold the Leader's reservations for ``goal`` into the run's
+        human-facing recommendations (the Product Quality Report). Tolerant
+        of dict items ({concern, suggestion}) or bare strings. Advisory only
+        — never affects goal status or run flow."""
+        for r in raw or []:
+            if isinstance(r, dict):
+                concern = str(r.get("concern", "") or "").strip()
+                suggestion = str(r.get("suggestion", "") or "").strip()
+            else:
+                concern, suggestion = str(r or "").strip(), ""
+            if concern or suggestion:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": concern,
+                    "suggestion": suggestion,
+                })
 
     # ── Leader auto-redo + budget-exhausted BLOCKER (slice #7e) ─────────
     def _leader_auto_redo(
@@ -6310,7 +6564,7 @@ class Orchestrator:
             # wholesale. Goal verification (after the loop) runs in BOTH
             # modes. Sequential stays the production path until concurrency
             # is fully hardened.
-            run_concurrent = self._concurrent_waves_enabled()
+            run_concurrent = self._concurrent_waves_enabled(self.project)
             if run_concurrent:
                 self._run_task_waves(g, tasks, summary, task_map)
             iterate_enabled = (
@@ -6468,24 +6722,46 @@ Produce a human-facing report covering: what was delivered, how well
 it matches the criteria, gaps/risks/quality concerns worth flagging,
 and your recommended next step.
 
+Judge COMPLETION and FITNESS — did the team produce the deliverable this
+goal asked for, to scope? You do NOT re-run quality checks: QC already
+verified each artifact against the domain standards and repaired what it
+could. Do NOT invent verification gates (plagiarism scans, sign-offs,
+"ready for review", approval signals) — the swarm has no such tools and
+they are not your job.
+
 Render one of three verdicts:
-- "satisfied": goal is met. Submit for human sign-off at leisure.
-- "on_the_fence": goal is largely met but you have reservations. The
-  human should look before accepting.
-- "disappointed": goal is not met. Substantive rework is needed.
+- "satisfied": the right deliverable exists and QC passed it. Goal done.
+- "on_the_fence": the right deliverable exists but you hold reservations.
+  STILL DONE — ship it; your reservations go to the human as
+  recommendations (below), they do NOT block the goal.
+- "disappointed": the WRONG or incomplete thing was made — a genuine
+  fitness gap the team CAN fix (off-topic, a required section absent).
+  The team redoes the producing work. Use ONLY for fixable wrong-
+  deliverable, NEVER for quality nitpicks or anything you can't verify.
+
+RESERVATIONS → the human, never the loop. Anything you don't fully trust
+but the swarm can't resolve — citations you couldn't independently
+confirm, the absence of a plagiarism scan, a claim worth double-checking
+— goes in "recommendations" FOR THE HUMAN. Reservations NEVER fail a
+goal, loop the swarm, edit the work, or block the run; they ride out in
+the human-addressed **Product Quality Report** beside the delivered work.
 
 Respond with a fenced ```json ... ``` block with exactly these keys:
 
     {{
       "verdict": "satisfied" | "on_the_fence" | "disappointed",
-      "rationale": "<1-3 line summary of why you chose the verdict>",
-      "report_body": "<markdown body for the human, 150-400 words>"
+      "rationale": "<why — for 'disappointed', the concrete fix the team must make>",
+      "recommendations": [
+        {{"concern": "<what you don't fully trust / couldn't verify>",
+          "suggestion": "<the specific check you'd advise the human to run>"}}
+      ],
+      "report_body": "<your human-facing assessment of the finished product, 150-400 words>"
     }}
 
-The rationale lands on the ticket the human sees. The report_body is
-written to a reports/ markdown file they can read in Obsidian. Be
-specific about which tasks worked, which didn't, and what concrete
-risks remain.
+"recommendations" may be empty []. report_body and recommendations are
+the Leader's contribution to the **Product Quality Report** that ships to
+the human beside the deliverables — be specific about what was delivered,
+what you stand behind, and what you'd have the human double-check.
 """
 
 
@@ -6502,14 +6778,32 @@ objective. Goal count is proportional to deliverable complexity, not
 to the breadth of words in the objective.
 
 - A short verb-objective ("analyze X", "summarize Y", "produce a top-N
-  list of Z") is usually a SINGLE-deliverable request — aim for 1-3
-  goals (research → produce → verify), not infrastructure.
+  list of Z") is usually a SINGLE-deliverable request — aim for 1-2
+  goals (e.g. research → produce), not infrastructure.
 - Multi-artifact platform work (e.g. "build a SaaS with auth + billing
   + admin + public site + API") legitimately decomposes into many
   goals. Use that breadth only when the objective explicitly names
   multiple distinct deliverables.
 - When in doubt, fewer goals. The team can open follow-on work later;
   it can't easily un-decompose an over-planned project mid-run.
+
+You may NOT create a standalone "verify" / "review" / "QA" / "audit" /
+"validate" / "fact-check" GOAL — for ANY kind (code, document, design,
+dataset, report). The engine DROPS such goals: every producing goal is
+already quality-controlled by QC, and QC does not just flag problems, it
+REPAIRS them (patches the artifact, or authors the fix when the producer
+can't). A standalone reviewer can only report — no repair authority — so
+it stalls, loops, or decompose-storms.
+
+What you MAY do instead:
+- Require a PRODUCING goal to draw on rigorous, credible sources — that's a
+  quality spec on production, e.g. "Produce the analysis, grounded in
+  primary/authoritative sources with citations." (Equip its producer with
+  the `rigorous-sourcing` skill.) The verb stays "produce", not "verify".
+- If you DON'T trust a source or a claim, do not gate the work on it —
+  it ships, and your reservation is carried to the human in the end-of-run
+  Product Quality Report. Verification is QC's job; trust judgement is yours
+  to voice, not to block on.
 
 Decompose this objective into goals, following the standards above. Respond
 with ONLY a JSON array, fenced in ```json ... ```. No prose outside the
@@ -6551,6 +6845,28 @@ production tasks: gather, draft. Do NOT add infrastructure tasks (db
 setup, ingestion, schema versioning, dual-source verification) unless
 goal explicitly asks to BUILD that infra as deliverable. Prefer
 smallest plan; team adds follow-ons later if artifact reveals gap.
+
+SWEEP work — bound it at PLAN time, WITHIN the task cap. When the goal
+is "do X for EACH of N items" (survey/catalog/gather/compare across a
+set), don't pile all N into one vague task — but don't fan to
+one-task-per-item either: that busts the per-sub-objective task cap (a
+research goal with no per-item artifact evidence caps low, ~3 tasks).
+Web fetches are size-bounded, so ONE research task can cover a small
+handful of items. So GROUP items into a FEW bounded tasks that fit the
+cap (each surveys a batch); a separate draft/synthesis sub-objective
+combines their artifacts. Signals: "all/each/every/top N",
+"survey/compare across", an enumerable list. More items than fit the cap
+→ cover a bounded BATCH now, name the rest as a deferred PHASE. Items
+not named yet ("the current SOTA in X") → a cheap SCOUT task enumerates
+them first, then the batch tasks build on it. Never one task that both
+discovers AND deep-dives the whole set.
+
+RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
+events, any real-world factual claim): set `required_skills` to
+`rigorous-sourcing` as the PRIMARY skill — the producer fetches real
+sources, cites them, won't fabricate, and flags what it can't verify, so
+QC has little to fix. Pure formatting/transform tasks skip it. One skill
+per task; don't pile them on.
 
 CRITICAL — verification is automatic. Wait for QC; do not pre-empt.
 QC reviews every task you emit; DO NOT emit separate "review" /

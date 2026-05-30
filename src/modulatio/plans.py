@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Plan persistence — Phase 3.1b-i.
 
 When the Leader (or any agent) produces a plan-shaped response in

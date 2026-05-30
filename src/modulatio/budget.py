@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Budget tracking + cap enforcement for plan execution.
 
 When a plan declares ``max_tokens`` or ``max_cost_usd`` in frontmatter,

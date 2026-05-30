@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Standards proposals — QC's side-channel for suggesting new team rules (slice #10).
 
 When QC sees a recurring pattern across prior verdicts (via #8.1's

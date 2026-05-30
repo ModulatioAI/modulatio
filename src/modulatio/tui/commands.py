@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """TUI command registry + slash-command dispatcher.
 
 Slice #20 established the registry shape (just a tuple of metadata for

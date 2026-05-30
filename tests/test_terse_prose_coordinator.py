@@ -106,17 +106,24 @@ def test_template_keeps_artifacts_expansion_explanation() -> None:
 
 def test_template_is_under_post_terse_threshold() -> None:
     """Coarse byte-count gate. Pre-terse Coordinator template was
-    ~5,400 chars. Target post-terse is under 4,500 chars. Threshold
-    chosen to catch regressions (someone pads prose back in) without
-    false-failing on minor wording adjustments.
+    ~5,400 chars; the terse pass trimmed it to ~4,500. The gate catches
+    regressions (someone pads prose back in) without false-failing on
+    minor wording adjustments.
+
+    Raised over time as genuinely-new, load-bearing CONTRACT was added
+    (not padding): the SWEEP-bounding rule (~870 chars) and the
+    RIGOROUS-SOURCING per-task rule (~370 chars — fact-bearing tasks load
+    the rigorous-sourcing skill so claims are grounded the first time).
+    Each is contract the planner must honor, not prose. Keep new
+    additions justified by contract; the cap catches padding regressions.
 
     When a future PR applies terse-prose to Leader-reflect / Producer
     / QC, replicate this pattern with their respective baselines.
     """
     char_count = len(orchestration._TASK_PLAN_PROMPT)
-    assert char_count < 4500, (
-        f"_TASK_PLAN_PROMPT is {char_count} chars — terse pass "
-        f"should keep it under 4,500. Pre-terse was ~5,400."
+    assert char_count < 6000, (
+        f"_TASK_PLAN_PROMPT is {char_count} chars — should stay under "
+        f"6,000 (terse baseline + sweep + rigorous-sourcing contracts)."
     )
     # Lower bound too — a vacuous trim that drops the contract is
     # worse than no trim. 2,500 chars is a sanity floor.

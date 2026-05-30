@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Tool registry and builtin tools (slice #9e + run_shell phase 1).
 
 Modulatio's "tool-using specialists" are skills whose executor is a
@@ -39,7 +41,9 @@ Out of scope (later phases / slices):
 
 from __future__ import annotations
 
+import html
 import ipaddress
+import re
 import shlex
 import socket
 import subprocess
@@ -115,6 +119,69 @@ class Tool:
 # ── builtin: http_get ──────────────────────────────────────────────────────
 
 _DEFAULT_HTTP_TIMEOUT_SECONDS = 10.0
+
+# A single fetch must never be able to blow a producer's role context
+# budget. Two ceilings, defence-in-depth:
+#   * read ceiling — never pull more than this off the socket, so a
+#     multi-GB endpoint can't OOM the orchestrator before we even cap.
+#   * return ceiling — after HTML→text extraction, the returned body is
+#     truncated to this many chars (~8k tokens — half the smallest
+#     producer budget). The PIANO discipline: small bounded context; one
+#     raw web page (we measured a live 1.24M-char fetch) is not allowed
+#     to become 310k tokens in a 16k window.
+_HTTP_GET_READ_LIMIT_BYTES = 4 * 1024 * 1024  # 4 MiB socket-read ceiling
+_HTTP_GET_MAX_CHARS = 32_000                  # ~8k tokens returned ceiling
+
+# Crude, dependency-free HTML→text (no bs4/lxml/html2text in the venv).
+# Not a parser — just enough to turn a markup firehose into the prose a
+# producer actually wants, at a fraction of the tokens.
+_SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style|noscript|template)\b.*?</\1\s*>")
+_TAG_RE = re.compile(r"(?s)<[^>]+>")
+_INLINE_WS_RE = re.compile(r"[ \t\f\v]+")
+_BLANK_LINES_RE = re.compile(r"\n[ \t]*\n[ \t]*(?:\n[ \t]*)+")
+
+
+def _html_to_text(body: str) -> str:
+    """Strip script/style blocks, drop tags, unescape entities, collapse
+    whitespace. Lossy by design — we want readable content, not fidelity."""
+    text = _SCRIPT_STYLE_RE.sub(" ", body)
+    text = _TAG_RE.sub(" ", text)
+    text = html.unescape(text)
+    text = _INLINE_WS_RE.sub(" ", text)
+    text = _BLANK_LINES_RE.sub("\n\n", text)
+    return text.strip()
+
+
+def _looks_like_html(content_type: str, body: str) -> bool:
+    """HTML if the Content-Type says so; if a non-HTML type is declared
+    (json/plain/xml) trust it and DON'T strip (would corrupt JSON). With
+    no declared type, sniff the first bytes for an HTML signature."""
+    ct = content_type.lower()
+    if "html" in ct:
+        return True
+    if ct.strip():
+        return False
+    head = body[:512].lstrip().lower()
+    return (
+        head.startswith("<!doctype html")
+        or head.startswith("<html")
+        or "<head" in head
+        or "<body" in head
+    )
+
+
+def _cap_http_body(text: str, *, over_read: bool) -> str:
+    """Truncate to the return ceiling (chars), noting the dropped amount
+    and whether the read itself hit the socket ceiling."""
+    if len(text) <= _HTTP_GET_MAX_CHARS and not over_read:
+        return text
+    dropped = max(0, len(text) - _HTTP_GET_MAX_CHARS)
+    note = f"{dropped} more chars" if dropped else "read ceiling reached"
+    if over_read and dropped:
+        note += "; response exceeded the 4 MiB read ceiling"
+    elif over_read:
+        note = "response exceeded the 4 MiB read ceiling"
+    return text[:_HTTP_GET_MAX_CHARS] + f"\n... [truncated, {note}]"
 
 
 # Cloud-metadata + private-host names worth blocking by name. IPs in
@@ -218,6 +285,11 @@ def http_get(url: str, timeout: float = _DEFAULT_HTTP_TIMEOUT_SECONDS) -> str:
     Network errors propagate as exceptions — the orchestrator's redo
     loop treats them as producer failures (same as any other raised
     exception on a producer call).
+
+    Size: HTML responses are reduced to readable text (script/style/tags
+    stripped), and every response is capped at the return ceiling
+    (``_HTTP_GET_MAX_CHARS``) with a truncation marker — a single page
+    must not be able to blow a producer's role context budget.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -227,9 +299,18 @@ def http_get(url: str, timeout: float = _DEFAULT_HTTP_TIMEOUT_SECONDS) -> str:
     _check_url_safe_for_http_get(url)
     try:
         with _urlopen(url, timeout=timeout) as resp:
-            raw = resp.read()
-            body = raw.decode("utf-8", errors="replace")
-            return body
+            # Bounded read: pull at most the ceiling + 1 byte so we can
+            # detect (and flag) an over-large body without buffering it all.
+            raw = resp.read(_HTTP_GET_READ_LIMIT_BYTES + 1)
+            content_type = ""
+            headers = getattr(resp, "headers", None)
+            if headers is not None:
+                content_type = headers.get("Content-Type", "") or ""
+        over_read = len(raw) > _HTTP_GET_READ_LIMIT_BYTES
+        body = raw[:_HTTP_GET_READ_LIMIT_BYTES].decode("utf-8", errors="replace")
+        if _looks_like_html(content_type, body):
+            body = _html_to_text(body)
+        return _cap_http_body(body, over_read=over_read)
     except HTTPError as err:
         # Surface the status in the body so QC reads the failure from
         # the artifact rather than treating it as a passing response.
@@ -238,7 +319,7 @@ def http_get(url: str, timeout: float = _DEFAULT_HTTP_TIMEOUT_SECONDS) -> str:
             body = err.read().decode("utf-8", errors="replace")
         except Exception:  # pragma: no cover — defensive
             pass
-        return f"HTTP {err.code} {err.reason}\n\n{body}"
+        return f"HTTP {err.code} {err.reason}\n\n{_cap_http_body(body, over_read=False)}"
 
 
 # ── builtin: run_shell (phase 1) ───────────────────────────────────────────

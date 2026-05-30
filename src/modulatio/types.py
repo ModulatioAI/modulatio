@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Core contract for Modulatio 2.0.
 
 Shared between backend, TUI, and future web surfaces. Matches the
@@ -150,7 +152,12 @@ class Goal(BaseModel):
     # Exhaustion → BLOCKER ticket with refresh_at=tomorrow-midnight-UTC;
     # auto-resume picks it up on next kickoff past the refresh time.
     retry_count: int = 0
-    max_retries: int = 3
+    #: Daily Alfred-loop budget (Clif 2026-05-29: raised 3 → 7). The team
+    #: gets up to this many Leader-led reflect-and-redo attempts per UTC day
+    #: to get a goal right (and learn the lesson) BEFORE parking and asking
+    #: the human for help via a BLOCKER ticket. More rope = more chances for
+    #: the loop to recover and codify a lesson before escalating.
+    max_retries: int = 7
     retry_count_date: date | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
@@ -219,6 +226,14 @@ class Task(BaseModel):
     # it wants a specific path, or by the expansion of an
     # ``artifacts: [...]`` list (one sub-task per declared path).
     output_path: str | None = None
+    #: Finished-product flag (2026-05-29). When True, this task's artifact is
+    #: a deliverable the user should receive — the Leader tags it at plan
+    #: time. The run-finalization stage renders every deliverable's Markdown
+    #: to a real document (DOCX default), names it from the document's own
+    #: title, and copies it to ``~/Documents/Modulatio/<project>/``. Default
+    #: False: intermediate scaffolding (research notes, data) stays in the
+    #: run's ``artifacts/`` only. See :mod:`modulatio.delivery`.
+    deliverable: bool = False
     # GENERATE draws a fresh artifact from scratch; EDIT applies surgical
     # patches to a prior draft. The planner flips this on the next retry
     # when QC classifies the defect as mechanical (fix-by-editing).
@@ -239,6 +254,12 @@ class Task(BaseModel):
     transitions: list[StateTransition] = Field(default_factory=list)
     retry_count: int = 0
     max_retries: int = 3
+    #: Recursion guard for overflow→decompose (2026-05-30). A task that
+    #: overflowed its context budget is split into smaller children, each
+    #: ``decompose_depth = parent + 1``. Past a small cap the engine stops
+    #: re-splitting and escalates (genuine stuck, not confusion). 0 = an
+    #: originally-planned task.
+    decompose_depth: int = 0
     # QC-as-fixer Slice 3: True when QC AUTHORED a fix for this task's
     # artifact after the producer exhausted its attempts (or stormed).
     # LOAD-BEARING flag, not cosmetic: a qc-authored artifact has NO
@@ -402,6 +423,18 @@ class Project(BaseModel):
     #: breaker's hard backstop derives from the soft cap, so this is the one
     #: knob an operator turns. Bound-checked at construction.
     output_budgets: dict[str, int] = Field(default_factory=dict)
+    #: Core-rebuild B4 / concurrent-waves eval (2026-05-29): make the
+    #: concurrent wave executor config-addressable so the A/B harness can
+    #: vary it as a dimension (previously env-only via
+    #: ``MODULATIO_CONCURRENT_WAVES``). Semantics in
+    #: ``Orchestrator._concurrent_waves_enabled`` are config-OR-env: EITHER
+    #: this field being True OR the env var == "1" turns concurrency ON, so
+    #: the env override is preserved and config is an independent on-switch.
+    #: Default ``False`` — the sequential loop stays the production default;
+    #: flipping this default ON is a SEPARATE, eval-gated decision
+    #: (build != flip), pending the wave-path quality eval + reviewer
+    #: sign-off.
+    concurrent_waves_enabled: bool = False
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

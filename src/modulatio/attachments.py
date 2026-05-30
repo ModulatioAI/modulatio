@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Per-message attachments for chat dispatch (slice #31c).
 
 The Prompt tab's per-agent panes can attach images and documents to the
