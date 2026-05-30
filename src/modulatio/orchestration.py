@@ -2279,6 +2279,10 @@ class Orchestrator:
                     tool_args=tool_args,
                     depends_on=list(depends_on),
                     output_path=output_path,
+                    # Finished-product tag from the Leader's plan. Whole
+                    # spec-group inherits it (an ``artifacts: [...]`` group
+                    # that's a deliverable delivers each rendered piece).
+                    deliverable=bool(item.get("deliverable", False)),
                     evidence_required=[
                         _build_requirement(req)
                         for req in item.get("evidence_required", [])

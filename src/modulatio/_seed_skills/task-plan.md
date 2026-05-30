@@ -83,6 +83,17 @@ Each task fields:
   task's single artifact, e.g. `"src/index.py"`. Must be relative;
   absolute paths or `..` reject plan. Omit / null = default
   `drafts/<task_id>.md`.
+- deliverable: true/false (default false). Set TRUE on the task(s) whose
+  artifact is a FINISHED PRODUCT the user receives — the final paper, the
+  shipped report, the document they asked for — NOT intermediate scaffolding
+  (research notes, gathered data, a working draft a LATER task consumes).
+  Deliverables are rendered to a real document (DOCX) and placed in the
+  user's Documents folder, named from the document's own title. Author
+  document deliverables as MARKDOWN: give the deliverable a `.md`
+  output_path and let the producer write clean Markdown — the engine renders
+  the final document. NEVER ask a producer to emit PDF/DOCX directly.
+  Typically the LAST task(s) in a chain are the deliverables; upstream
+  research/data/draft tasks are not.
 - artifacts: use INSTEAD of output_path when task produces MULTIPLE
   files. Array of `{{path, description?}}` (path relative under
   artifacts/). Orchestrator expands one artifacts-task into N

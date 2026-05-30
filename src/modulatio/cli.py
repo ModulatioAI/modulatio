@@ -494,6 +494,23 @@ def kickoff(
         typer.echo(f"  Goal reports: {len(summary.goal_reports)}")
         for p in summary.goal_reports:
             typer.echo(f"    - {p}")
+    # Finished products: render Leader-tagged deliverables to real documents
+    # (DOCX) and place them, human-named, under ~/Documents/Modulatio/<code>/.
+    # Only on real runs — ``artifacts_root`` is unset under --stub.
+    if not stub:
+        from modulatio import delivery as _delivery
+        _deliverables = _delivery.deliverables_from_tasks(summary.tasks, artifacts_root)
+        if _deliverables:
+            _delivered = _delivery.deliver_finished_products(_deliverables, project_code=code)
+            if _delivered:
+                typer.echo(
+                    f"  Finished products → {_delivery.project_delivery_dir(code)}:"
+                )
+                for d in _delivered:
+                    if d.error:
+                        typer.echo(f"    ! {d.name}: {d.error}")
+                    else:
+                        typer.echo(f"    ✓ {d.dest.name}")
     if summary.errors:
         typer.echo("")
         typer.echo("Errors:")

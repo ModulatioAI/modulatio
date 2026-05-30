@@ -219,6 +219,14 @@ class Task(BaseModel):
     # it wants a specific path, or by the expansion of an
     # ``artifacts: [...]`` list (one sub-task per declared path).
     output_path: str | None = None
+    #: Finished-product flag (2026-05-29). When True, this task's artifact is
+    #: a deliverable the user should receive — the Leader tags it at plan
+    #: time. The run-finalization stage renders every deliverable's Markdown
+    #: to a real document (DOCX default), names it from the document's own
+    #: title, and copies it to ``~/Documents/Modulatio/<project>/``. Default
+    #: False: intermediate scaffolding (research notes, data) stays in the
+    #: run's ``artifacts/`` only. See :mod:`modulatio.delivery`.
+    deliverable: bool = False
     # GENERATE draws a fresh artifact from scratch; EDIT applies surgical
     # patches to a prior draft. The planner flips this on the next retry
     # when QC classifies the defect as mechanical (fix-by-editing).
