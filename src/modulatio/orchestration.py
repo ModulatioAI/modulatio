@@ -760,6 +760,14 @@ _VERIFY_GOAL_RE = re.compile(
     r"(?:re-?)?(?:verif|validat|review|audit|vet\b|"
     r"fact[\s-]?check|proof[\s-]?read|cross[\s-]?check|double[\s-]?check|"
     r"sanity[\s-]?check|quality[\s-]?(?:assur|control|check)|qa\b|"
+    # "test / playtest / play through" is the same anti-pattern as "verify":
+    # running a finished deliverable to confirm it works is QC's job, never a
+    # standalone goal — and for an interactive/GUI artifact no agent can do it
+    # at all (it asks the team to *watch a game play*). Live repro 2026-05-30:
+    # a "Test the game on a clean env" goal blocked on a capability gap and
+    # wedged a finished game behind a CRITICAL human-punt ticket. The
+    # production-verb guard still keeps "write a test suite" / "build tests".
+    r"test|play[\s-]?test|play[\s-]?through|smoke[\s-]?test|"
     r"confirm)\w*\b",
     re.IGNORECASE,
 )

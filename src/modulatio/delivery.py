@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,6 +95,33 @@ def human_name_from_markdown(text: str, *, fallback: str) -> str:
     return _sanitize_filename((title or "").strip() or fallback)
 
 
+#: Source extensions that are CODE, not prose. A code deliverable ships as
+#: runnable source — copied verbatim, original filename + extension preserved —
+#: never pandoc-rendered into a DOCX (a Word doc full of Python is useless as
+#: a game). Markdown / plain text still flow through the document-render path.
+#: Live repro 2026-05-30: a Hollow-Knight ``game.py`` (artifact_kind=code) was
+#: headed for a .docx wrapper. Detection is by on-disk extension — the real
+#: signal of "would pandoc-rendering this make sense" — independent of how the
+#: planner tagged it.
+_CODE_SUFFIXES = frozenset({
+    ".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs",
+    ".go", ".java", ".kt", ".kts", ".c", ".h", ".cpp", ".hpp", ".cc",
+    ".cs", ".rb", ".php", ".swift", ".scala", ".sh", ".bash", ".zsh",
+    ".ps1", ".pl", ".lua", ".r", ".sql", ".html", ".htm", ".css", ".scss",
+    ".sass", ".vue", ".svelte", ".json", ".toml", ".yaml", ".yml", ".xml",
+    ".ini", ".cfg", ".dockerfile", ".ipynb", ".gd", ".tscn",
+})
+
+
+def _is_code_source(source: Path) -> bool:
+    """True iff ``source`` is a code/source artifact that should ship verbatim
+    rather than being rendered to a document. Matches on extension; a bare
+    ``Dockerfile`` / ``Makefile`` (no suffix) is treated as code by name."""
+    if source.suffix.lower() in _CODE_SUFFIXES:
+        return True
+    return source.name.lower() in {"dockerfile", "makefile"}
+
+
 def deliver_product(
     source_md: Path,
     *,
@@ -102,25 +130,43 @@ def deliver_product(
     fmt: ExportFormat = DEFAULT_DELIVERY_FORMAT,
     fallback_name: str | None = None,
 ) -> DeliveredProduct:
-    """Render one Markdown artifact to ``fmt`` and place it, human-named,
-    under the project's delivery dir. Returns a :class:`DeliveredProduct`
-    (``error`` set on failure)."""
+    """Deliver one finished product under the project's delivery dir.
+
+    Markdown / prose deliverables are rendered to ``fmt`` (DOCX by default),
+    human-named from their H1. CODE deliverables (``.py`` etc., see
+    :data:`_CODE_SUFFIXES`) are copied **verbatim**, keeping their original
+    filename + extension, so a game ships as runnable ``game.py`` — not a Word
+    doc wrapping the source. Returns a :class:`DeliveredProduct` (``error`` set
+    on failure)."""
     source_md = Path(source_md)
-    text = source_md.read_text(errors="replace")
-    name = human_name_from_markdown(text, fallback=fallback_name or task_id)
     dest_dir = project_delivery_dir(project_code)
-    ext = "md" if fmt == "markdown" else fmt
-    dest = dest_dir / f"{name}.{ext}"
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return DeliveredProduct(task_id, source_md, dest, name, f"mkdir failed: {exc}")
+        return DeliveredProduct(
+            task_id, source_md, dest_dir, source_md.stem, f"mkdir failed: {exc}"
+        )
+    # CODE: ship runnable source verbatim, original name + extension preserved.
+    if _is_code_source(source_md):
+        name = source_md.stem
+        dest = dest_dir / source_md.name
+        if dest.exists():  # don't clobber a prior same-named source
+            dest = dest_dir / f"{source_md.stem} ({task_id}){source_md.suffix}"
+        try:
+            shutil.copyfile(source_md, dest)
+        except OSError as exc:
+            return DeliveredProduct(task_id, source_md, dest, name, f"copy failed: {exc}")
+        return DeliveredProduct(task_id, source_md, dest, name, None)
+    # PROSE: render through a ``.md`` temp so pandoc always treats the producer's
+    # content as Markdown, regardless of the artifact's on-disk extension
+    # (a deliverable the Leader named ``report.pdf`` is still Markdown text).
+    text = source_md.read_text(errors="replace")
+    name = human_name_from_markdown(text, fallback=fallback_name or task_id)
+    ext = "md" if fmt == "markdown" else fmt
+    dest = dest_dir / f"{name}.{ext}"
     # Don't clobber a same-named prior deliverable — disambiguate with task id.
     if dest.exists():
         dest = dest_dir / f"{name} ({task_id}).{ext}"
-    # Render through a ``.md`` temp so pandoc always treats the producer's
-    # content as Markdown, regardless of the artifact's on-disk extension
-    # (a deliverable the Leader named ``report.pdf`` is still Markdown text).
     try:
         with tempfile.TemporaryDirectory() as td:
             md = Path(td) / "deliverable.md"

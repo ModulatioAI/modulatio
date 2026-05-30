@@ -100,6 +100,48 @@ def test_deliver_product_collision_disambiguates(monkeypatch, tmp_path, _mock_ex
     assert dp.dest.name == "Report (ACME-T-009).docx"  # didn't clobber
 
 
+# ── code deliverables ship verbatim (not pandoc'd to docx) ───────────────
+
+def test_code_source_detection():
+    assert delivery._is_code_source(Path("a/game.py"))
+    assert delivery._is_code_source(Path("a/main.js"))
+    assert delivery._is_code_source(Path("a/lib.rs"))
+    assert delivery._is_code_source(Path("a/Dockerfile"))  # no suffix, by name
+    assert not delivery._is_code_source(Path("a/report.md"))
+    assert not delivery._is_code_source(Path("a/notes.txt"))
+
+
+def test_deliver_code_ships_verbatim(monkeypatch, tmp_path):
+    """A code deliverable is copied byte-for-byte, keeping game.py — never
+    rendered through pandoc into a Word doc. export_artifact must NOT be
+    called for code (assert via a poisoned stub)."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+
+    def _poison(*a, **k):  # pragma: no cover - must not run for code
+        raise AssertionError("export_artifact called for a code deliverable")
+    monkeypatch.setattr(delivery, "export_artifact", _poison)
+
+    src = tmp_path / "game.py"
+    body = "import pygame\n\n\ndef main():\n    pass\n"
+    src.write_text(body)
+    dp = delivery.deliver_product(src, project_code="MOD", task_id="MOD-T-003")
+    assert dp.error is None
+    assert dp.dest == tmp_path / "MOD" / "game.py"  # name + extension preserved
+    assert dp.dest.read_text() == body  # byte-for-byte, runnable
+
+
+def test_deliver_code_collision_keeps_extension(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    (tmp_path / "MOD").mkdir(parents=True)
+    (tmp_path / "MOD" / "game.py").write_text("old")
+    src = tmp_path / "g.py"
+    src.write_text("new source")
+    src = src.rename(tmp_path / "game.py")  # same basename as the existing dest
+    dp = delivery.deliver_product(src, project_code="MOD", task_id="MOD-T-003")
+    assert dp.dest.name == "game (MOD-T-003).py"  # disambiguated, .py kept
+    assert dp.dest.read_text() == "new source"
+
+
 def test_deliver_finished_products_skips_missing(monkeypatch, tmp_path, _mock_export):
     monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
     real = tmp_path / "real.md"
