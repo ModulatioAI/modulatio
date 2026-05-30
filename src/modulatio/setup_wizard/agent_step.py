@@ -365,7 +365,7 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
             ("One model powers all the skills (a single producer)", "one"),
             ("A different model per skill (one producer each)", "per"),
             (f"A pool of producers — each its own model + skills "
-             f"(up to {max(1, MAX_AGENTS - reserved)}, best with concurrent waves)",
+             f"(up to {max(1, MAX_AGENTS - reserved)}; the team shares the work)",
              "pool"),
         ],
         default_index=0,
@@ -466,7 +466,7 @@ def _prompt_role_budget(role: str, default_tokens: int) -> int | None:
         if val > CTX_BUDGET_CONFIRM_THRESHOLD:
             if not steps.confirm_yn(
                 f"  {val} is past the {CTX_BUDGET_CONFIRM_THRESHOLD}-token "
-                f"degradation onset (Stanford 'Lost in the Middle'). Use it anyway?",
+                f"measured degradation threshold. Use it anyway?",
                 default=False,
             ):
                 continue
@@ -495,7 +495,7 @@ def _maybe_customize_context_budgets(state: dict) -> None:
               f"{theme.color(note, 'muted')}")
     print()
     theme.warn(
-        "  Changing these is discouraged — the defaults are battle-tested. "
+        "  Changing these is discouraged. "
         "Override only if you have a specific, measured reason."
     )
     if not steps.confirm_yn(
