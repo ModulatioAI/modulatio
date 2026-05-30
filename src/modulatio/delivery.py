@@ -198,9 +198,30 @@ def blocked_task_ids(tasks) -> "list[str]":
     return out
 
 
+def blocked_goal_ids(goals) -> "list[str]":
+    """Ids of goals in a blocked/failed terminal state — the cross-GOAL
+    companion to ``blocked_task_ids``.
+
+    Why this exists (2026-05-30, live run): a goal whose task-plan is
+    REJECTED produces ZERO tasks — just a BLOCKED goal + a ticket — so it
+    is invisible to ``blocked_task_ids``. In the wild this shipped a
+    polished but OFF-TOPIC product: the research goal (G-001) was blocked,
+    yet the downstream draft goal (G-002) ran ungrounded and its hallucinated
+    paper was delivered with a ✓. Goals don't model explicit cross-goal
+    deps yet, so the guard stays CONSERVATIVE: ANY blocked goal in the run
+    withholds ALL finished products. Duck-typed on ``.status`` / ``.id``."""
+    out: "list[str]" = []
+    for g in goals:
+        st = str(getattr(g, "status", "")).split(".")[-1].lower()
+        if st in _BLOCKED_STATES:
+            out.append(str(getattr(g, "id", "?")))
+    return out
+
+
 __all__ = [
     "DEFAULT_DELIVERY_FORMAT",
     "DeliveredProduct",
+    "blocked_goal_ids",
     "blocked_task_ids",
     "deliver_finished_products",
     "deliver_product",

@@ -501,15 +501,31 @@ def kickoff(
         from modulatio import delivery as _delivery
         _deliverables = _delivery.deliverables_from_tasks(summary.tasks, artifacts_root)
         _blocked = _delivery.blocked_task_ids(summary.tasks)
-        if _deliverables and _blocked:
+        # Cross-goal guard: a goal whose plan was REJECTED produces zero tasks
+        # (just a BLOCKED goal + ticket), so it is invisible to the task-level
+        # check above. Without this, a blocked research goal lets a downstream
+        # draft goal ship an ungrounded, off-topic product (observed 2026-05-30).
+        _blocked_goals = _delivery.blocked_goal_ids(summary.goals)
+        if _deliverables and (_blocked or _blocked_goals):
             # Don't hand over a polished product built on unresolved blocked
             # work (the "confident, formatted, and wrong" trap). Withhold
             # until the blocks resolve.
-            shown = ", ".join(_blocked[:5]) + ("…" if len(_blocked) > 5 else "")
+            _parts = []
+            if _blocked:
+                _parts.append(
+                    f"{len(_blocked)} task(s) blocked ("
+                    + ", ".join(_blocked[:5]) + ("…" if len(_blocked) > 5 else "") + ")"
+                )
+            if _blocked_goals:
+                _parts.append(
+                    f"{len(_blocked_goals)} goal(s) blocked ("
+                    + ", ".join(_blocked_goals[:5])
+                    + ("…" if len(_blocked_goals) > 5 else "") + ")"
+                )
             typer.echo(
-                f"  Finished products WITHHELD — {len(_blocked)} task(s) blocked "
-                f"({shown}). Resolve the blocked work before shipping a product "
-                f"built on it. Drafts remain in artifacts/."
+                f"  Finished products WITHHELD — {'; '.join(_parts)}. Downstream "
+                f"products may be built on this unresolved work; resolve it before "
+                f"shipping. Drafts remain in artifacts/."
             )
         elif _deliverables:
             _delivered = _delivery.deliver_finished_products(_deliverables, project_code=code)

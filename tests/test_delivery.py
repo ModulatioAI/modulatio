@@ -180,3 +180,29 @@ def test_blocked_task_ids_handles_enum_status():
 
 def test_blocked_task_ids_empty_when_all_clean():
     assert delivery.blocked_task_ids([_StatusTask("T-1", "completed")]) == []
+
+
+# ── cross-goal withhold guard (2026-05-30): a blocked GOAL withholds too ──
+
+def test_blocked_goal_ids_flags_blocked_and_abandoned():
+    """The live failure: a research goal whose plan is rejected goes BLOCKED
+    with zero tasks, invisible to the task-level guard. blocked_goal_ids
+    catches it so the downstream ungrounded product is withheld."""
+    goals = [
+        _StatusTask("G-1", "completed"),
+        _StatusTask("G-2", "blocked"),       # plan-rejected research goal
+        _StatusTask("G-3", "in_progress"),
+        _StatusTask("G-4", "abandoned"),
+    ]
+    assert delivery.blocked_goal_ids(goals) == ["G-2", "G-4"]
+
+
+def test_blocked_goal_ids_handles_enum_status():
+    from modulatio.types import GoalStatus
+    goals = [_StatusTask("G-1", GoalStatus.BLOCKED), _StatusTask("G-2", GoalStatus.COMPLETED)]
+    assert delivery.blocked_goal_ids(goals) == ["G-1"]
+
+
+def test_blocked_goal_ids_empty_when_all_clean():
+    goals = [_StatusTask("G-1", "completed"), _StatusTask("G-2", "in_progress")]
+    assert delivery.blocked_goal_ids(goals) == []
