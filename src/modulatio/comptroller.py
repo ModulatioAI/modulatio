@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Comptroller — authorization layer for producer escalations (slice #9d).
 
 Deterministic, non-LLM business function: given a project's declared

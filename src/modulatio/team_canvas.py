@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Team canvas — what the team has built so far in this run.
 
 Pre-V2 Slice C stopgap. Producers (drafter / drafter-edit / coding /

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Team-shared QC memory pool — locked Option B (slice 4).
 
 Built on v2's ``qc_history`` substrate (LanceDB + MiniLM) rather than

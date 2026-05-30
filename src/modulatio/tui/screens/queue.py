@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Queue tab — Heartbeat persistent task queue (slice 6, Phase 2.5 merge).
 
 Read-only viewer with per-row [Cancel] action for pending tasks. Live

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Repo map — symbol-aware digest of code in this run's artifacts tree.
 
 Slice (#82, PR-A). Lands the FIRST piece of Layer 3 for code

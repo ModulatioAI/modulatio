@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Wizard step framework — navigation sentinels + state machine.
 
 Carried from v1.3.1 setup_wizard.py (lines 26-122 + dispatch loop) and

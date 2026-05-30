@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """First project step — capture project code + objective for auto-launch.
 
 After ``finalize.commit()``, the wizard initializes this project's vault,

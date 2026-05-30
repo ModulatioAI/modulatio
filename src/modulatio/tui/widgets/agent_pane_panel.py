@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """AgentPanePanel — per-agent pane for the multi-pane Prompt screen.
 
 Slice #31a: layout primitive (status header + identity + history +

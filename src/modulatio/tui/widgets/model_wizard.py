@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Model wizard (inline panel) — slice #26.
 
 Thin wrapper around ``roster.add_model``. Unlike AgentWizard /

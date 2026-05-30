@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Tool-loop response summarization + sliding-window prune ().
 
 Lands Layer 1 of the five-layer working-memory architecture: bounds the

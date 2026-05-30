@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """ModulatioCommands — Textual command-palette Provider for #27.
 
 F1 used to call ``action_show_commands`` (a placeholder that just rang

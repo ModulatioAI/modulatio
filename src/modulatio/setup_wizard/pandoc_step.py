@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Pandoc check step — first wizard step.
 
 Detects pandoc availability; if missing, presents a cross-OS install

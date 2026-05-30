@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Tool registry and builtin tools (slice #9e + run_shell phase 1).
 
 Modulatio's "tool-using specialists" are skills whose executor is a

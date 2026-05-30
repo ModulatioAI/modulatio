@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Auth alert system — surface 401s loudly across every channel.
 
 When ``runners.litellm_runner`` catches a LiteLLM AuthenticationError and

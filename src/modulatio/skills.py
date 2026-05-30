@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Skill registry — Research-First pattern applied to agent capabilities.
 
 A **skill** is a named capability an agent can hold. Each skill file

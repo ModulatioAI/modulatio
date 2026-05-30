@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Team-formation step — skills-first (#143).
 
 The user first chooses WHAT THE TEAM SHOULD BE ABLE TO DO (skills) and a

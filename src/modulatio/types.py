@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Core contract for Modulatio 2.0.
 
 Shared between backend, TUI, and future web surfaces. Matches the

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """GSD orchestration loop for Modulatio 2.0.
 
 Minimum v0: runs one pass of Discuss → Plan → Execute → Verify for a project.

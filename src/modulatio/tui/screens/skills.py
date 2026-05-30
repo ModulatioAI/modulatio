@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Skills tab — slice #25 + add-to-agent binding flow.
 
 DataTable of shared + project-local skills. Two action buttons:

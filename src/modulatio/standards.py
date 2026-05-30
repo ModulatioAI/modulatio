@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Standards loader — the Research-First pattern applied to quality rules.
 
 Standards files live in two locations, searched in order:

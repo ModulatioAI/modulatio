@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Skill wizard (inline panel) — slice #25.
 
 Same inline-panel pattern as slice #24's AgentWizard. Thin wrapper

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """User preferences — small JSON file outside the install dir so it survives
 reinstalls. Currently just stores backup_dir; extend as needed.
 

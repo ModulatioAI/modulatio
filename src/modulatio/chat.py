@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Per-agent chat dispatch — Prompt-tab chat backend (slice #31b).
 
 Pure dispatch helper: given an ``Agent``, a user message, and the prior

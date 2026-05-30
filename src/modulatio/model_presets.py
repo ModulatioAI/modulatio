@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Modulatio model registry — self-contained user-curated entries.
 
 Each entry IS a complete model definition: label + endpoint + auth + the

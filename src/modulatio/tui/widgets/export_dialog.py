@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Export dialog (inline panel) — slice #23.
 
 Inline panel rather than a ModalScreen so tests + the app share a single

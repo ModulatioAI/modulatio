@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Modulatio setup wizard package — first-run + re-invocation flow.
 
 Entry point: ``run_setup()``. Called by ``modulatio setup`` CLI subcommand

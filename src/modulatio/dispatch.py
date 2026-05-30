@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Skill-based agent dispatch — the tactical roster-selection step.
 
 Given a task's ``required_skills`` (emitted by the task-plan LLM call

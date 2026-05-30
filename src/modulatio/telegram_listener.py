@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Telegram listener — bidirectional bot for Modulatio slash-commands.
 
 Carried from v1.3.1 ``telegram_listener.py`` (~487 LOC), adapted for v2:

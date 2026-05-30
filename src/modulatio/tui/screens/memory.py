@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Memory tab — slice 5 (Phase 2.5 merge).
 
 Inspects per-agent memory (episodic + semantic) and the team-shared QC

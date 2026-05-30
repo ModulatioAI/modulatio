@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Combined model-curation step — single-flow add of self-contained models.
 
 (File still named provider_step.py for git-history continuity; the

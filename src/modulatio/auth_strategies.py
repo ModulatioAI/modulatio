@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Auth strategies — provider-agnostic credential resolution.
 
 Until B-1, ``runners.py`` had explicit ``if auth_type == "oauth_anthropic"

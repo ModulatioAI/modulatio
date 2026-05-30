@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Per-dispatch circuit breaker — bound a runaway producer (QC-as-fixer Slice 2).
 
 The context-budget primitive (``context_budget.py``) bounds **input**

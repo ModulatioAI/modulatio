@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Chat-panel widget — prompt input + kickoff button + response area.
 
 Slice #20. The Prompt tab's content. Wraps the three primitives so the

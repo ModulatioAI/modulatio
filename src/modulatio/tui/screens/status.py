@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Status tab content (slice #21 + auth-alerts banner + Step 0 toggles).
 
 One team-aggregate ``ActivityLog`` plus one per default-role panel

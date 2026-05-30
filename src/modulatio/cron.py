@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Cron — thin scheduling shim that converts cron-strings → heartbeat task adds.
 
 Locked Option C (project_modulatio_cron_revisit.md, 2026-04-24).

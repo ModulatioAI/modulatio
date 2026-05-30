@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Modulatio Daemon — headless runner for heartbeat + cron + telegram.
 
 Carried from v1.3.1 ``daemon.py`` (~493 LOC) and adapted for v2:

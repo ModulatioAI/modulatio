@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Project design-intent — the WHY behind THIS project's intentional choices.
 
 Pre-V2 Slice B. Distinct from team_memory (curated cross-run wisdom) and
