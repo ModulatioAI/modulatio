@@ -738,6 +738,52 @@ class _PlanError(Exception):
 _PLAN_HARD_CAP = 6
 
 
+# ── ENGINE-ENFORCED INVARIANT: no standalone verification goals ────────────
+# The Leader may NOT create a goal whose job is to verify/review/audit other
+# work. Prose guidance bends the LLM but does not bind it — observed live, a
+# minted verify goal starved the research (off-topic output), invented an
+# impossible Turnitin plagiarism gate (ticket death-loop), and "verify ALL
+# claims" decompose-stormed (20 tickets, nothing shipped). QC already verifies
+# every PRODUCING task and repairs it; a separate reviewer can only report.
+# RULE (Clif 2026-05-30): the Leader MAY require producing goals to draw on
+# rigorous, credible sources — that's a quality spec on production — but it
+# MAY NOT request verification as its own goal/task. Distrust of a source or
+# claim belongs in the end-of-run Product Quality Report, never a swarm goal.
+# The verb is the tell: "Produce the analysis from rigorous sources" → keep;
+# "Verify that all claims are correctly sourced" → drop. So we gate on the
+# PRIMARY action: a production verb leading the description keeps the goal; a
+# verification verb leading it (and no production verb) drops it.
+_VERIFY_GOAL_RE = re.compile(
+    r"^\s*(?:please\s+|first\s+|then\s+)*"
+    r"(?:re-?)?(?:verif|validat|review|audit|vet\b|"
+    r"fact[\s-]?check|proof[\s-]?read|cross[\s-]?check|double[\s-]?check|"
+    r"sanity[\s-]?check|quality[\s-]?(?:assur|control|check)|qa\b|"
+    r"confirm)\w*\b",
+    re.IGNORECASE,
+)
+_PRODUCE_VERB_RE = re.compile(
+    r"^\s*(?:please\s+|first\s+|then\s+)*"
+    r"(?:produc|research|draft|writ|build|creat|develop|design|compil|"
+    r"assembl|analy[sz]|summari[sz]|gather|generat|implement|prepar|"
+    r"author|deliver|investigat|surve|catalog|document|map\b|outlin)\w*\b",
+    re.IGNORECASE,
+)
+
+
+def _is_standalone_verification_goal(description: str) -> bool:
+    """True iff a goal's PRIMARY action is to verify/review/audit existing
+    work rather than produce a deliverable — a standalone verification goal
+    the Leader is not permitted to create. A production verb leading the
+    description (even one demanding rigorous sources) keeps the goal; a
+    verification verb leading it, with no production verb, drops it."""
+    desc = (description or "").strip()
+    if not desc:
+        return False
+    if _PRODUCE_VERB_RE.match(desc):
+        return False  # leads with production → it's making something, keep it
+    return bool(_VERIFY_GOAL_RE.match(desc))
+
+
 #: Slice #9c sentinels for ``_run_escalation_attempt`` return values.
 #: The helper already wrote the terminal StateTransition + status, so
 #: the caller just needs to early-return without duplicating settlement.
@@ -2086,6 +2132,28 @@ class Orchestrator:
         data = _extract_json(response)
         if not isinstance(data, list):
             raise ValueError(f"expected list of goals, got {type(data).__name__}")
+
+        # ENGINE-ENFORCED INVARIANT: drop any standalone verification goal the
+        # Leader minted despite the prompt. QC verifies every producing task;
+        # a separate reviewer can only report (and, observed live, starves /
+        # loops / decompose-storms). Only drop while PRODUCING goals remain —
+        # never leave the run with nothing to do (degenerate all-verify plan
+        # falls through unchanged). See _is_standalone_verification_goal.
+        producing = [it for it in data
+                     if not _is_standalone_verification_goal(str(it.get("description", "")))]
+        dropped = [it for it in data if it not in producing]
+        if dropped and producing:
+            for it in dropped:
+                self._emit_activity(
+                    role="leader", phase="leader_verify_goal_dropped",
+                    agent_id="leader",
+                )
+                _logger.info(
+                    "Dropped standalone verification goal (QC verifies "
+                    "producing tasks automatically): %s",
+                    str(it.get("description", ""))[:120],
+                )
+            data = producing
 
         goals: list[Goal] = []
         for item in data:
@@ -6695,14 +6763,23 @@ to the breadth of words in the objective.
 - When in doubt, fewer goals. The team can open follow-on work later;
   it can't easily un-decompose an over-planned project mid-run.
 
-Do NOT create a separate "verify" / "review" / "QA" / "test" GOAL for a
-deliverable — for ANY kind (code, document, design, dataset, report).
-Every deliverable is automatically quality-controlled by QC, and QC does
-not just flag problems: it REPAIRS them (edits/patches the artifact, or
-authors the fix itself when the producer can't). A standalone reviewer
-goal can only emit a report — it has no repair authority, so it bypasses
-that fix loop, re-reviews an unchanged artifact, and stalls. Let the
-producing goal own its quality; QC verifies AND heals it in place.
+You may NOT create a standalone "verify" / "review" / "QA" / "audit" /
+"validate" / "fact-check" GOAL — for ANY kind (code, document, design,
+dataset, report). The engine DROPS such goals: every producing goal is
+already quality-controlled by QC, and QC does not just flag problems, it
+REPAIRS them (patches the artifact, or authors the fix when the producer
+can't). A standalone reviewer can only report — no repair authority — so
+it stalls, loops, or decompose-storms.
+
+What you MAY do instead:
+- Require a PRODUCING goal to draw on rigorous, credible sources — that's a
+  quality spec on production, e.g. "Produce the analysis, grounded in
+  primary/authoritative sources with citations." (Equip its producer with
+  the `rigorous-sourcing` skill.) The verb stays "produce", not "verify".
+- If you DON'T trust a source or a claim, do not gate the work on it —
+  it ships, and your reservation is carried to the human in the end-of-run
+  Product Quality Report. Verification is QC's job; trust judgement is yours
+  to voice, not to block on.
 
 Decompose this objective into goals, following the standards above. Respond
 with ONLY a JSON array, fenced in ```json ... ```. No prose outside the
@@ -6759,6 +6836,13 @@ combines their artifacts. Signals: "all/each/every/top N",
 not named yet ("the current SOTA in X") → a cheap SCOUT task enumerates
 them first, then the batch tasks build on it. Never one task that both
 discovers AND deep-dives the whole set.
+
+RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
+events, any real-world factual claim): set `required_skills` to
+`rigorous-sourcing` as the PRIMARY skill — the producer fetches real
+sources, cites them, won't fabricate, and flags what it can't verify, so
+QC has little to fix. Pure formatting/transform tasks skip it. One skill
+per task; don't pile them on.
 
 CRITICAL — verification is automatic. Wait for QC; do not pre-empt.
 QC reviews every task you emit; DO NOT emit separate "review" /

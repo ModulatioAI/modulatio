@@ -7231,3 +7231,78 @@ def test_artifacts_root_and_registry_noop_on_sequential_path(project):
     # No buffer → recording is a silent no-op (doesn't raise, records nothing).
     orch._record_artifact_write(orch._scope_root() / "artifacts" / "drafts" / "x.md")
     assert getattr(orch._tls, "artifact_writes", None) is None
+
+
+# ── ENGINE INVARIANT: no standalone verification goals (2026-05-30) ────────
+
+def test_is_standalone_verification_goal_detects_verify_verbs():
+    from modulatio.orchestration import _is_standalone_verification_goal as v
+    assert v("Verify that all claims are correctly sourced")
+    assert v("Review the analysis for accuracy and completeness")
+    assert v("Validate the dataset against the schema")
+    assert v("Audit the report's citations")
+    assert v("Fact-check the figures in the draft")
+    assert v("QA the final document")
+    assert v("Proofread the manuscript")
+    assert v("Confirm the findings are accurate")
+
+
+def test_is_standalone_verification_goal_keeps_producing_goals():
+    from modulatio.orchestration import _is_standalone_verification_goal as v
+    # A producing goal that merely REQUIRES rigorous sources is allowed —
+    # the verb is "produce/research/...", sourcing is a quality spec.
+    assert not v("Produce the analysis, grounded in rigorous, credible sources")
+    assert not v("Research current sources on the conflict and summarize")
+    assert not v("Draft the paper with proper citations to primary sources")
+    assert not v("Build a data validator module")     # produces a tool, not a check
+    assert not v("Write a survey of the field")
+    assert not v("Develop a verification harness")     # leads with produce verb
+    assert not v("")
+
+
+def test_decompose_drops_standalone_verification_goal(project: Project):
+    """The Leader cannot create a standalone verify goal — the engine DROPS it
+    (QC verifies every producing task). A producing goal that requires rigorous
+    sources survives. Regression for the live decompose-storm: a 'verify all
+    claims' goal whose task was a context-bomb."""
+    def _leader_two_goals(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return _leader_stub(prompt)
+        goals = [
+            {"description": "Produce the analysis, grounded in rigorous credible sources",
+             "success_criteria": "analysis doc with citations",
+             "evidence_required": [{"kind": "artifact", "description": "analysis"}]},
+            {"description": "Verify that all claims in the analysis are correctly sourced",
+             "success_criteria": "all claims verified",
+             "evidence_required": [{"kind": "report", "description": "verification report"}]},
+        ]
+        return f"```json\n{json.dumps(goals)}\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader_two_goals, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    goals = orch._leader_decompose("analyze the situation")
+    descs = [g.description for g in goals]
+    assert any("Produce the analysis" in d for d in descs)          # kept
+    assert not any(d.lower().startswith("verify") for d in descs)   # dropped
+    assert len(goals) == 1
+
+
+def test_decompose_keeps_all_when_only_verification_goals(project: Project):
+    """Degenerate guard: never leave the run with nothing to do. If EVERY
+    goal looks like verification, keep them rather than emptying the plan."""
+    def _leader_only_verify(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return _leader_stub(prompt)
+        goals = [{"description": "Verify the existing dataset",
+                  "success_criteria": "verified",
+                  "evidence_required": [{"kind": "report", "description": "r"}]}]
+        return f"```json\n{json.dumps(goals)}\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader_only_verify, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    goals = orch._leader_decompose("verify stuff")
+    assert len(goals) == 1  # not dropped — would leave nothing

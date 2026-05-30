@@ -110,21 +110,20 @@ def test_template_is_under_post_terse_threshold() -> None:
     regressions (someone pads prose back in) without false-failing on
     minor wording adjustments.
 
-    Raised to 5,500 on 2026-05-30: the terse-earned headroom was spent
-    on a genuinely-new, load-bearing SWEEP-bounding contract (~870
-    chars — fan "X for each of N items" into per-item + synthesis tasks
-    so a sweep can't be crammed into one overflowing producer call).
-    That is contract, not padding, and the result (~5,360) still sits
-    under the original pre-terse ~5,400. Keep new additions justified
-    by contract, not prose.
+    Raised over time as genuinely-new, load-bearing CONTRACT was added
+    (not padding): the SWEEP-bounding rule (~870 chars) and the
+    RIGOROUS-SOURCING per-task rule (~370 chars — fact-bearing tasks load
+    the rigorous-sourcing skill so claims are grounded the first time).
+    Each is contract the planner must honor, not prose. Keep new
+    additions justified by contract; the cap catches padding regressions.
 
     When a future PR applies terse-prose to Leader-reflect / Producer
     / QC, replicate this pattern with their respective baselines.
     """
     char_count = len(orchestration._TASK_PLAN_PROMPT)
-    assert char_count < 5500, (
+    assert char_count < 6000, (
         f"_TASK_PLAN_PROMPT is {char_count} chars — should stay under "
-        f"5,500 (pre-terse was ~5,400 + the sweep-bounding contract)."
+        f"6,000 (terse baseline + sweep + rigorous-sourcing contracts)."
     )
     # Lower bound too — a vacuous trim that drops the contract is
     # worse than no trim. 2,500 chars is a sanity floor.

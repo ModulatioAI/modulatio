@@ -42,6 +42,13 @@ not named yet ("the current SOTA in X") → a cheap SCOUT task enumerates
 them first, then the batch tasks build on it. Never one task that both
 discovers AND deep-dives the whole set.
 
+RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
+events, any real-world factual claim): set `required_skills` to
+`rigorous-sourcing` as the PRIMARY skill — the producer fetches real
+sources, cites them, won't fabricate, and flags what it can't verify, so
+QC has little to fix. Pure formatting/transform tasks skip it. One skill
+per task; don't pile them on.
+
 CRITICAL — verification is automatic. Wait for QC; do not pre-empt.
 QC reviews every task you emit; DO NOT emit separate "review" /
 "verify" / "test" / "validate" / "execute pytest" / "run lint" tasks
