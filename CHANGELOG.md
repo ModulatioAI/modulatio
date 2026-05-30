@@ -6,6 +6,64 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-30
+
+The QC-thesis arc: cheap producers generate the bulk; the smart QC reviews
+cheaply and patches only the errors (speculative decoding for agents) — the
+cost of a cheap model with the quality of the best. Reviewed fresh and signed
+off by two independent reviewers (hull + coherence).
+
+### Added
+
+- **Product Quality Report** — the project lead's advisory assessment of the
+  delivered work ships as a `.docx` beside the deliverables, in the lead's own
+  voice. Reservations it can't resolve (unverifiable citations, "double-check
+  X") are surfaced here; they never block a goal, loop the swarm, or open a
+  ticket.
+- **Default standards** — bundled baseline quality bars for `research`, `code`,
+  `text`, and `marketing` artifact kinds, as a seed tier beneath the user's
+  shared/project standards. Cold-start QC now has a real bar to enforce.
+- **`rigorous-sourcing` producer skill** — fetch real sources, cite with
+  resolvable locators, never fabricate, flag what couldn't be verified.
+  Assigned per-task to fact-bearing work (loaded only when relevant — no
+  always-on context cost).
+- **Deliverable export pipeline** — producers write Markdown; Leader-tagged
+  deliverables render to `.docx`, human-named from the document title, into
+  `~/Documents/Modulatio/<project>/`.
+- **Producer pool** wizard option — up to N producers, each its own model and
+  all/subset of team skills, with a coverage-gap warning.
+- Apache `NOTICE` file + SPDX headers on all source files
+  (© Modulatio AI, created by Clifton Knox and Cowboy Claude).
+
+### Changed
+
+- **QC-as-fixer made the explicit model**: the Leader judges *completion +
+  fitness* and confirms; QC owns *quality + repair*. Standalone verify/review
+  goals are dropped at decompose (verify-led with no artifact deliverable) —
+  QC already verifies every producing task.
+- Leader goal-verification no longer punts human tickets: every verdict
+  completes the goal; reservations flow to the Product Quality Report.
+- Goal Alfred-loop retry budget raised 3 → 7 before escalating.
+- Plan-time sweep bounding — "do X for each of N items" is batched within the
+  per-sub-objective task cap.
+
+### Fixed
+
+- **`http_get` output is now capped** (32k chars) and HTML is reduced to text
+  — a single fetch could return 1.24M chars and wedge a producer's context
+  budget.
+- **Tool results are truncated on arrival** when no summarizer is configured,
+  so a multi-fetch producer can't accumulate past its role budget and
+  decompose-storm. Full raw is persisted to disk, retrievable on demand.
+- **Context budgets are model-agnostic** — an unknown model's window no longer
+  undercuts the tuned per-role budget; the lookup uses the input window, not
+  the output limit.
+- Finished products are **withheld** when any task *or* goal is blocked (a
+  plan-rejected goal makes zero tasks and was invisible to the task-level
+  guard).
+- Over-budget tasks re-invoke the planner's decompose skill (depth-bounded)
+  instead of failing.
+
 ## [0.1.0] — 2026-05-25
 
 Initial release. The engine matured pre-1.0 under a prior name; **v0.1.0 is
