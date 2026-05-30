@@ -6664,14 +6664,23 @@ objective. Goal count is proportional to deliverable complexity, not
 to the breadth of words in the objective.
 
 - A short verb-objective ("analyze X", "summarize Y", "produce a top-N
-  list of Z") is usually a SINGLE-deliverable request — aim for 1-3
-  goals (research → produce → verify), not infrastructure.
+  list of Z") is usually a SINGLE-deliverable request — aim for 1-2
+  goals (e.g. research → produce), not infrastructure.
 - Multi-artifact platform work (e.g. "build a SaaS with auth + billing
   + admin + public site + API") legitimately decomposes into many
   goals. Use that breadth only when the objective explicitly names
   multiple distinct deliverables.
 - When in doubt, fewer goals. The team can open follow-on work later;
   it can't easily un-decompose an over-planned project mid-run.
+
+Do NOT create a separate "verify" / "review" / "QA" / "test" GOAL for a
+deliverable — for ANY kind (code, document, design, dataset, report).
+Every deliverable is automatically quality-controlled by QC, and QC does
+not just flag problems: it REPAIRS them (edits/patches the artifact, or
+authors the fix itself when the producer can't). A standalone reviewer
+goal can only emit a report — it has no repair authority, so it bypasses
+that fix loop, re-reviews an unchanged artifact, and stalls. Let the
+producing goal own its quality; QC verifies AND heals it in place.
 
 Decompose this objective into goals, following the standards above. Respond
 with ONLY a JSON array, fenced in ```json ... ```. No prose outside the

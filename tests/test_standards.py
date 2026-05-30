@@ -10,12 +10,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from modulatio import standards, vault
 
 
 def _write_standards(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+
+
+@pytest.fixture(autouse=True)
+def seed_standards_root(tmp_path_factory, monkeypatch):
+    """Isolate the bundled-seed tier for the shared/project stacking tests —
+    they assert exact bodies and would otherwise pick up Modulatio's shipped
+    baseline standards. Points _SEED_STANDARDS_ROOT at an empty dir and
+    returns it so the seed-tier tests below can drop controlled files in."""
+    empty = tmp_path_factory.mktemp("seed_standards")
+    monkeypatch.setattr(standards, "_SEED_STANDARDS_ROOT", empty)
+    return empty
 
 
 def test_load_returns_empty_when_no_sources_exist(tmp_path, monkeypatch):
@@ -201,3 +214,45 @@ def test_load_with_metadata_unions_capabilities_across_shared_and_project(tmp_pa
     entry = standards.load_with_metadata("research", project_code="TST")
     # Union — order stable (shared first, then project-local additions).
     assert set(entry.required_capabilities) == {"long-context", "reasoning-heavy"}
+
+
+# ── seed/baseline tier (2026-05-30): shipped defaults give cold-start QC a bar ──
+
+def test_seed_baseline_loads_when_no_shared_or_project(tmp_path, monkeypatch, seed_standards_root):
+    """Cold start — empty shared + project — still yields the shipped baseline,
+    so QC has a real quality bar to enforce + repair against from day one."""
+    monkeypatch.setattr(standards, "_STANDARDS_ROOT", tmp_path / "shared")  # empty
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")          # empty
+    _write_standards(
+        seed_standards_root / "research.md",
+        "---\nfreshness_class: stable\n---\n# Baseline\n- Cite real sources; include a References section.\n",
+    )
+    body = standards.load("research")
+    assert "References section" in body
+    assert standards.load_with_metadata("research").freshness_class == "stable"
+
+
+def test_curated_standards_stack_over_seed_baseline(tmp_path, monkeypatch, seed_standards_root):
+    """Shared/project standards layer ON TOP of the seed baseline — baseline
+    first, curated overrides after, clearly demarcated and order-preserving."""
+    shared_root = tmp_path / "shared"
+    monkeypatch.setattr(standards, "_STANDARDS_ROOT", shared_root)
+    _write_standards(seed_standards_root / "research.md", "# Seed baseline\n- baseline rule\n")
+    _write_standards(shared_root / "research.md", "# Team rules\n- team rule\n")
+    body = standards.load("research")
+    assert "Seed baseline" in body and "Team rules" in body
+    assert "override the baseline" in body.lower()
+    assert body.index("Seed baseline") < body.index("Team rules")  # baseline beneath
+
+
+def test_bundled_seed_standards_ship_with_real_teeth(monkeypatch):
+    """The package actually ships baseline standards as data, and they carry a
+    real bar: research demands citations + a references section; code demands
+    tests. This is what makes QC-as-fixer able to enforce quality cold-start."""
+    real_seed = Path(standards.__file__).parent / "_seed_standards"
+    monkeypatch.setattr(standards, "_SEED_STANDARDS_ROOT", real_seed)
+    monkeypatch.setattr(standards, "_STANDARDS_ROOT", real_seed / "_no_shared_")
+    research = standards.load("research")
+    assert "References" in research and "citation" in research.lower()
+    assert "tests" in standards.load("code").lower()
+    assert standards.load("text")  # neutral default also ships a baseline
