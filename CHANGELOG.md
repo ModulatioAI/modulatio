@@ -6,6 +6,61 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-31
+
+The **skill-library keystone**: producers become model endpoints, and a
+capability gap becomes a checkout instead of a dead end. Reviewed fresh and
+signed off by two independent reviewers (hull + coherence), and validated on two
+live heterogeneous runs.
+
+### Changed
+
+- **A producer is now a model endpoint, not a holder of skills.** This completes
+  the producer-collapse / no-roles thesis: a producer no longer freezes a skill
+  list at config time — it checks out whatever a task needs from a shared skill
+  library at run-time, so **any producer can run any task**. The capability gap
+  that used to block a task (no producer *held* the required skill → CRITICAL
+  ticket) is dissolved.
+- **Dispatch routes on capability + availability, and NEVER blocks.** Routing
+  picks the least-loaded producer first (so a wave spreads across idle models
+  instead of serializing onto one), prefers producers whose model meets the
+  task's capability floor — but if none do, runs the **best-available** model and
+  ships the shortfall as a **Product Quality Report reservation**, never a block.
+  The one remaining hard gap (`ROSTER_GAP`) fires only when *no producer exists
+  at all* — a setup error, not a per-task gap. A referenced skill not yet in the
+  library is advisory, never a CRITICAL block. This is the honesty thesis applied
+  one layer down: a task always runs, with an honest caveat if imperfect.
+- **Setup wizard no longer assigns skills to producers.** You set up API keys and
+  add up to 8 producers by **assigning an LLM and confirming what it's good at**
+  (a quick capability tag, smart-defaulted for known models) — that's it. Skills
+  are composed per task from the library, not picked per producer.
+
+### Added
+
+- **Skill library — first working brick.** A producer can discover skills it
+  doesn't hold (`search_skills`), check one out to read its guidance
+  (`load_skill`), and drop it (`drop_skill`), drawn from a shared pool. A cheap
+  resident index (names + one-liners, no bodies) makes discovery nearly free.
+  (The full lazy checkout/drop library + the skill-creation flow are specced in
+  `docs/design/skill-library.md` and land in later bricks.)
+- **Capabilities come from the model.** `model_capabilities` infers a model's
+  `(tier, cost_class, capability_tags)` from its id for known families
+  (overridable per-model in the wizard); `roster` resolves them at load time.
+
+### Fixed
+
+- **Self-contained goals/tasks.** The goal-decompose step could write a goal that
+  referred to its subject symbolically ("covers the three *requested topics*")
+  without naming it; since a producer sees only its own task text, the reference
+  was unbuildable. Decomposition now names the concrete subject, and the project
+  objective is threaded into the producer prompt as a north-star.
+
+### Notes
+
+- `Agent.skills` is retained for backward-compatibility (old rosters parse and
+  route unchanged) and for the TUI / chat skill-body injection — it is now
+  **advisory and does not gate routing**.
+
 ## [0.2.2] — 2026-05-31
 
 Web search, and a redo loop that provably terminates. Reviewed fresh and signed

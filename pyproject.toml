@@ -1,6 +1,6 @@
 [project]
 name = "modulatio"
-version = "0.2.2"
+version = "0.3.0"
 description = "Multi-model agent framework with plan-mode orchestration, integrated TUI, and team-state working memory."
 requires-python = ">=3.12"
 license = "Apache-2.0"

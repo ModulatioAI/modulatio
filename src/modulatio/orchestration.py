@@ -6231,15 +6231,17 @@ class Orchestrator:
                 "goal_id": goal.id,
                 "concern": (
                     f"Task {task.id} ran on the best-available producer "
-                    f"({task.assigned_agent_id}), below the requested "
-                    f"capability floor: {caps}."
+                    f"({task.assigned_agent_id}). No configured model "
+                    f"advertised the capability this task preferred ({caps}) "
+                    f"— a soft preference, not a hard requirement, so it ran "
+                    f"on the strongest available model instead of blocking."
                 ),
                 "suggestion": (
                     f"Add a producer whose model advertises {caps} if this "
                     f"task's quality matters; otherwise the result stands."
                 ),
             })
-            notes.append(f"below capability floor ({caps}) — best-available")
+            notes.append(f"ran below preferred capability ({caps}) — best-available")
         if result.missing_skills:
             sk = ", ".join(result.missing_skills)
             summary.recommendations.append({
@@ -7243,12 +7245,12 @@ SELF-CONTAINMENT (critical): each goal must NAME its concrete subject
 matter — never refer to it symbolically. A goal is executed by producers
 that see ONLY that goal's own text (description + success_criteria) plus
 prior-task output — NOT this objective and NOT sibling goals. So restate
-the actual content: if the objective names "leading programs, recent
-milestones, and open challenges", the goal says those exact words — never
-"the three topics", "the requested items", "the above", or "as discussed".
-A dangling reference produces a goal nobody downstream can build. The same
-rule binds each goal's success_criteria: spell out what is required, don't
-point at it.
+the actual content: whatever the objective enumerates — report sections,
+code modules, chapters, ad variants, data fields, whatever the deliverable
+is — the goal restates those exact names, never "the three topics", "the
+requested items", "the above", or "as discussed". A dangling reference
+produces a goal nobody downstream can build. The same rule binds each
+goal's success_criteria: spell out what is required, don't point at it.
 
 You may NOT create a standalone "verify" / "review" / "QA" / "audit" /
 "validate" / "fact-check" GOAL — for ANY kind (code, document, design,

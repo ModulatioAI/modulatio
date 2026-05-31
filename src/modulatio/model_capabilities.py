@@ -31,9 +31,11 @@ MODEL_TIERS: tuple[str, ...] = (
 # Canonical cost classes, cheapest → dearest (matches dispatch._COST_RANK).
 COST_CLASSES: tuple[str, ...] = ("free-local", "paid-cloud", "premium-cloud")
 
-# Free-form capability tags a model can advertise. Not exhaustive — a human
-# can type anything in the wizard — but these are the ones routing + the seed
-# skills lean on, so the picker offers them.
+# Free-form capability tags a model can advertise. They describe model FIT for
+# ANY deliverable class — code, long-form prose, marketing, data, research
+# alike — never a task domain. Not exhaustive: a human can type anything in the
+# wizard; these are the ones routing + the seed skills lean on, so the picker
+# offers them.
 CAPABILITY_TAGS: tuple[str, ...] = (
     "reasoning-heavy", "long-context", "vision", "structured-output",
     "code-production", "web-search", "fast",

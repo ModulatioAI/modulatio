@@ -15,8 +15,9 @@ Selection, top to bottom:
 1. **Availability first.** Least-loaded producer wins, so a multi-task wave
    spreads across idle models instead of serializing onto one ("never queue
    onto a busy model when others are idle").
-2. **Capability floor — soft.** Producers whose model meets the task's
-   capability floor are preferred; but if none do, the best-available
+2. **Capability floor — soft** (it *prefers* but does not *require*).
+   Producers whose model meets the task's capability floor are preferred;
+   but if none do, the best-available
    producer is picked anyway and the shortfall ships as a Product Quality
    Report reservation. Routing NEVER blocks on capability ("always
    best-available + PQR").
