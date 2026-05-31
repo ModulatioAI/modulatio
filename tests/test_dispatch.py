@@ -73,14 +73,16 @@ def test_select_returns_none_when_roster_is_empty():
     assert dispatch.select_agent(_task(["drafter"]), []) is None
 
 
-def test_select_returns_none_when_no_agent_covers_required_skills():
-    """No agent in the roster holds all the required skills → None.
-    Capability ticket candidate (slice #6d), fallback for now."""
+def test_select_skills_do_not_gate_a_producer_is_picked():
+    """Skill-library arc: skills are checked out at run-time, so they never
+    gate routing. A producer that 'holds' no matching skill is still picked
+    (it checks the skill out of the library)."""
     agents = [
         _agent("drafter", ["drafter"]),
         _agent("researcher", ["researcher"]),
     ]
-    assert dispatch.select_agent(_task(["wp-cli-admin"]), agents) is None
+    picked = dispatch.select_agent(_task(["wp-cli-admin"]), agents)
+    assert picked is not None  # a producer is always available now
 
 
 # ── covering candidates ────────────────────────────────────────────────────
@@ -106,17 +108,17 @@ def test_select_prefers_tightest_fit_over_generalist():
     assert picked.id == "drafter"
 
 
-def test_select_prefers_broader_agent_when_task_actually_needs_the_breadth():
-    """Inverse of the tight-fit test: when required_skills includes
-    skills only the generalist holds, the generalist wins."""
-    specialist = _agent("drafter", ["drafter"])
-    generalist = _agent("swiss-army", ["drafter", "researcher", "qc"])
+def test_select_prefers_producer_meeting_the_capability_floor():
+    """The capability floor is a SOFT preference: among producers, one whose
+    model meets the floor is preferred over one that doesn't."""
+    weak = _agent("weak", ["drafter"], capability_tags=["generalist"])
+    strong = _agent("strong", ["drafter"], capability_tags=["reasoning-heavy"])
     picked = dispatch.select_agent(
-        _task(["drafter", "researcher"]),
-        [specialist, generalist],
+        _task(["drafter"], required_capabilities=["reasoning-heavy"]),
+        [weak, strong],
     )
     assert picked is not None
-    assert picked.id == "swiss-army"
+    assert picked.id == "strong"
 
 
 def test_select_prefers_cheaper_cost_class_when_skill_fit_ties():
@@ -166,52 +168,41 @@ def test_plan_dispatch_matched_when_agent_covers_valid_skills():
     assert result.missing_skills == ()
 
 
-def test_plan_dispatch_invalid_skill_when_required_not_in_registry():
-    """Coordinator LLM invented a skill name that doesn't exist in the
-    registry — upstream hallucination. Classify distinctly from
-    roster-gap so the ticket priority can be CRITICAL (dev fix) instead
-    of BLOCKER (roster-decision)."""
-    task = _task(["drafter", "hallucinated-skill"])
-    agents = [_agent("drafter", ["drafter", "hallucinated-skill"])]
+def test_plan_dispatch_unknown_skill_is_advisory_not_a_block():
+    """A skill the plan referenced that isn't in the library is no longer a
+    CRITICAL block — it's advisory ``missing_skills`` on a MATCHED result
+    (the producer runs; the Leader can propose creating the skill)."""
+    task = _task(["drafter", "not-in-library"])
+    agents = [_agent("producer", ["drafter"])]
     result = dispatch.plan_dispatch(
         task, agents, available_skill_names=["drafter"]
     )
-    assert result.outcome is dispatch.DispatchOutcome.INVALID_SKILL
-    assert result.agent is None
-    # missing_skills reports what wasn't in the registry.
-    assert "hallucinated-skill" in result.missing_skills
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert result.agent is not None
+    assert "not-in-library" in result.missing_skills
     assert "drafter" not in result.missing_skills
 
 
-def test_plan_dispatch_roster_gap_when_all_valid_but_no_cover():
-    """All required_skills are in the registry, but no agent holds
-    every one of them → ROSTER_GAP. Capability gap that needs a human
-    roster decision, not a dev fix."""
+def test_plan_dispatch_no_cover_now_matches_a_producer():
+    """No producer 'holds' the skill, but skills don't gate — a producer is
+    picked and checks the skill out at run-time. No gap, no ticket."""
     task = _task(["drafter", "wp-cli-admin"])
     agents = [
-        _agent("drafter", ["drafter"]),  # covers drafter only
-        _agent("sysadmin", ["linux-admin"]),  # covers neither
+        _agent("p1", ["drafter"]),
+        _agent("p2", ["linux-admin"]),
     ]
     result = dispatch.plan_dispatch(
         task, agents,
         available_skill_names=["drafter", "wp-cli-admin", "linux-admin"],
     )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
-    assert result.agent is None
-    # missing_skills reports skills held by NO agent at all — actionable
-    # "install this" list. Skills held by some agent but not the right
-    # agent don't appear (that's a composition problem, not a capability
-    # gap).
-    assert "wp-cli-admin" in result.missing_skills
-    assert "drafter" not in result.missing_skills
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert result.agent is not None
 
 
-def test_plan_dispatch_roster_gap_when_skills_scattered_across_agents():
-    """Edge case: every required skill IS held by *some* agent, but no
-    single agent has all of them. Still a ROSTER_GAP (the dispatcher
-    can't pick), but missing_skills comes back empty — the resolution
-    is compositional (combine skills on one agent), not capability
-    acquisition. Body text disambiguates for the human."""
+def test_plan_dispatch_matches_regardless_of_skill_scatter():
+    """Skills scattered across agents used to be a ROSTER_GAP; now any
+    producer is picked (skills are checked out from the library, not held by
+    a single agent)."""
     task = _task(["drafter", "researcher"])
     agents = [
         _agent("d", ["drafter"]),
@@ -221,42 +212,41 @@ def test_plan_dispatch_roster_gap_when_skills_scattered_across_agents():
         task, agents,
         available_skill_names=["drafter", "researcher"],
     )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
-    assert result.missing_skills == ()  # every skill held by some agent
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
 
 
-def test_plan_dispatch_empty_roster_with_valid_skills_is_roster_gap():
-    """Empty roster + declared required_skills that exist in the registry
-    → ROSTER_GAP. The skills are real; the project just has no agents
-    yet. Human needs to compose the initial roster."""
+def test_plan_dispatch_empty_roster_is_roster_gap():
+    """No producer exists at all → ROSTER_GAP (a setup gap the wizard
+    normally prevents). Known skills aren't reported missing — they exist
+    in the library; the gap is the absent producer."""
     result = dispatch.plan_dispatch(
         _task(["drafter"]), [], available_skill_names=["drafter"]
     )
     assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
-    assert "drafter" in result.missing_skills
+    assert result.missing_skills == ()
 
 
 # ── plan_dispatch semantic layer (slice #6e.b) ─────────────────────────────
 
-def test_plan_dispatch_semantic_matched_when_deterministic_misses_but_matcher_hits():
-    """When deterministic skill-intersection finds no cover but the
-    semantic matcher returns a hit, plan_dispatch returns
-    SEMANTIC_MATCHED with the score. This is the embedding-fallback
-    path that prevents ticket-flood for "close enough" matches."""
+def test_plan_dispatch_semantic_matcher_is_ignored_now():
+    """The embedding fallback is no longer used — every producer is already a
+    candidate. A matcher passed for back-compat is never consulted, and a
+    task with no skill cover still MATCHES a producer directly."""
     task = _task(["long-form-production"])
-    agent = _agent("custom-agent", ["drafter", "contrarian"])
-    # Agent doesn't literally cover "long-form-production", but the matcher
-    # decides it's semantically close.
+    agent = _agent("producer", ["drafter", "contrarian"])
+    calls = {"n": 0}
+
     def matcher(t):
-        return (agent, 0.82) if t is task else None
+        calls["n"] += 1
+        return (agent, 0.82)
 
     result = dispatch.plan_dispatch(
         task, [agent], available_skill_names=["long-form-production"],
         semantic_matcher=matcher,
     )
-    assert result.outcome is dispatch.DispatchOutcome.SEMANTIC_MATCHED
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
     assert result.agent is agent
-    assert result.similarity_score == 0.82
+    assert calls["n"] == 0  # matcher never consulted
 
 
 def test_plan_dispatch_prefers_deterministic_match_over_semantic():
@@ -279,12 +269,12 @@ def test_plan_dispatch_prefers_deterministic_match_over_semantic():
     assert matcher_called["n"] == 0
 
 
-def test_plan_dispatch_semantic_not_tried_on_invalid_skill():
-    """INVALID_SKILL means the Coordinator hallucinated a skill name —
-    upstream bug, CRITICAL ticket. Semantic fallback must NOT rescue
-    this; papering over a hallucination ships wrong output."""
+def test_plan_dispatch_unknown_skill_still_matches_a_producer():
+    """A skill not in the library is advisory, not a block: a producer is
+    still picked (it runs with what it has) and the matcher is not consulted.
+    The unknown skill rides as advisory ``missing_skills``."""
     task = _task(["made-up-skill"])
-    agent = _agent("any", ["drafter"])
+    agent = _agent("producer", ["drafter"])
     matcher_called = {"n": 0}
 
     def matcher(t):
@@ -295,7 +285,8 @@ def test_plan_dispatch_semantic_not_tried_on_invalid_skill():
         task, [agent], available_skill_names=["drafter"],
         semantic_matcher=matcher,
     )
-    assert result.outcome is dispatch.DispatchOutcome.INVALID_SKILL
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert "made-up-skill" in result.missing_skills
     assert matcher_called["n"] == 0
 
 
@@ -319,10 +310,9 @@ def test_plan_dispatch_semantic_not_tried_on_no_constraint():
     assert matcher_called["n"] == 0
 
 
-def test_plan_dispatch_roster_gap_when_semantic_matcher_also_misses():
-    """Deterministic miss AND semantic miss → ROSTER_GAP ticket. This
-    is the case where neither layer finds a home for the task; the
-    human has to install a skill or create an agent."""
+def test_plan_dispatch_unrelated_producer_still_matches():
+    """A producer whose skills look 'unrelated' is still picked — skills
+    don't gate, and the matcher is irrelevant."""
     task = _task(["drafter"])
     agent = _agent("unrelated", ["researcher"])
     def matcher(_t):
@@ -332,28 +322,25 @@ def test_plan_dispatch_roster_gap_when_semantic_matcher_also_misses():
         task, [agent], available_skill_names=["drafter", "researcher"],
         semantic_matcher=matcher,
     )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert result.agent is agent
 
 
-def test_plan_dispatch_without_matcher_still_produces_roster_gap():
-    """Back-compat: plan_dispatch without a semantic_matcher argument
-    (or with None) behaves exactly like slice #6d — deterministic
-    only, ROSTER_GAP on no cover."""
+def test_plan_dispatch_without_matcher_matches_any_producer():
+    """No matcher argument, no skill cover → still MATCHED (skills don't
+    gate; a producer checks the skill out)."""
     task = _task(["drafter"])
     agent = _agent("unrelated", ["researcher"])
 
     result = dispatch.plan_dispatch(
         task, [agent], available_skill_names=["drafter", "researcher"],
     )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
 
 
-def test_plan_dispatch_empty_roster_with_matcher_still_tries_matcher():
-    """Empty roster but a matcher is present — let the matcher try
-    (though it'll typically return None since the underlying index is
-    empty). Important edge: a matcher could be backed by a shared index
-    across projects some day; plan_dispatch shouldn't assume empty
-    roster = no semantic chance."""
+def test_plan_dispatch_empty_roster_is_roster_gap_even_with_matcher():
+    """No producers + a matcher → ROSTER_GAP (setup gap). The matcher is not
+    consulted — the embedding fallback path is gone."""
     task = _task(["drafter"])
     matcher_called = {"n": 0}
 
@@ -365,7 +352,7 @@ def test_plan_dispatch_empty_roster_with_matcher_still_tries_matcher():
         task, [], available_skill_names=["drafter"], semantic_matcher=matcher,
     )
     assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
-    assert matcher_called["n"] == 1
+    assert matcher_called["n"] == 0
 
 
 # ── QC tier dispatch (slice #6f-F) ─────────────────────────────────────────
@@ -513,15 +500,13 @@ def test_select_qc_agent_tiebreak_by_cost_then_id():
     assert picked.id == "qc-paid-a"
 
 
-def test_plan_dispatch_empty_roster_with_invalid_skills_is_invalid_skill():
-    """When a required skill isn't in the registry, classify as
-    INVALID_SKILL regardless of roster state. Invalid-skill takes
-    precedence — fix the upstream hallucination before worrying about
-    roster composition."""
+def test_plan_dispatch_empty_roster_with_unknown_skill_is_roster_gap():
+    """No producers → ROSTER_GAP (setup gap), whether or not a skill exists
+    in the library. The unknown skill rides as advisory missing_skills."""
     result = dispatch.plan_dispatch(
         _task(["made-up"]), [], available_skill_names=["drafter"]
     )
-    assert result.outcome is dispatch.DispatchOutcome.INVALID_SKILL
+    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
     assert "made-up" in result.missing_skills
 
 
@@ -547,10 +532,9 @@ def test_select_agent_filters_by_required_capabilities():
     assert picked.id == "producer-reasoning"
 
 
-def test_select_agent_returns_none_when_skills_match_but_capabilities_miss():
-    """Every agent covers the skill but none covers the required
-    capability → no candidate. Orchestrator opens a ROSTER_GAP ticket
-    via ``plan_dispatch`` (covered below)."""
+def test_select_agent_best_available_when_no_producer_meets_capability():
+    """The capability floor is SOFT: when no producer meets it, the
+    best-available producer is still picked (never None, never a block)."""
     a = _agent(
         "producer-a", ["producer"],
         capability_tags=["generalist"],
@@ -560,7 +544,8 @@ def test_select_agent_returns_none_when_skills_match_but_capabilities_miss():
         capability_tags=["long-context"],
     )
     task = _task(["producer"], required_capabilities=["structured-output"])
-    assert dispatch.select_agent(task, [a, b]) is None
+    picked = dispatch.select_agent(task, [a, b])
+    assert picked is not None  # best-available, never blocks
 
 
 def test_select_agent_vacuous_capabilities_does_not_filter():
@@ -594,11 +579,10 @@ def test_plan_dispatch_matched_when_skills_and_capabilities_both_cover():
     assert result.missing_capabilities == ()
 
 
-def test_plan_dispatch_roster_gap_when_capability_uncovered():
-    """Skills covered, capability not held by any agent → ROSTER_GAP
-    with ``missing_capabilities`` populated. Human resolution is same
-    shape as a skills gap: install the capability on an existing agent,
-    pick a different-tier model, or defer."""
+def test_plan_dispatch_capability_uncovered_is_advisory_shortfall():
+    """Capability not met by any producer → MATCHED on the best-available
+    producer, with the shortfall reported as advisory ``capability_shortfall``
+    (it ships a PQR reservation), never a ROSTER_GAP block."""
     agent = _agent(
         "producer-budget", ["producer"],
         capability_tags=["generalist"],
@@ -607,16 +591,15 @@ def test_plan_dispatch_roster_gap_when_capability_uncovered():
     result = dispatch.plan_dispatch(
         task, [agent], available_skill_names=["producer"],
     )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
-    assert result.missing_capabilities == ("reasoning-heavy",)
-    # Skills were covered — nothing reported on the skills axis.
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert result.agent is agent
+    assert result.capability_shortfall == ("reasoning-heavy",)
     assert result.missing_skills == ()
 
 
-def test_plan_dispatch_reports_both_gap_types_when_both_missing():
-    """When both a required skill AND a required capability are absent
-    from the roster, the result reports both actionable lists so the
-    ticket body can surface both."""
+def test_plan_dispatch_reports_advisories_when_skill_and_capability_short():
+    """An unknown skill AND an unmet capability both ride as advisory
+    metadata on a MATCHED result — never a block."""
     agent = _agent(
         "producer", ["producer"],
         capability_tags=["generalist"],
@@ -627,61 +610,50 @@ def test_plan_dispatch_reports_both_gap_types_when_both_missing():
     )
     result = dispatch.plan_dispatch(
         task, [agent],
-        available_skill_names=["producer", "shell-runner"],
+        available_skill_names=["producer"],  # shell-runner NOT in the library
     )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
     assert "shell-runner" in result.missing_skills
-    assert result.missing_capabilities == ("reasoning-heavy",)
+    assert result.capability_shortfall == ("reasoning-heavy",)
 
 
-def test_plan_dispatch_semantic_hit_filtered_by_capability():
-    """Semantic fallback that returns an agent lacking a required
-    capability is NOT rescued — capabilities are a hard human-configured
-    filter. Falls through to ROSTER_GAP with missing_capabilities."""
-    task = _task(
-        ["long-form-production"],  # not literally covered by any agent
-        required_capabilities=["reasoning-heavy"],
-    )
-    semantic_pick = _agent(
-        "producer", ["producer"],
-        capability_tags=["generalist"],  # missing reasoning-heavy
-    )
-    def matcher(t):
-        return (semantic_pick, 0.82) if t is task else None
-
-    result = dispatch.plan_dispatch(
-        task, [semantic_pick],
-        available_skill_names=["long-form-production"],
-        semantic_matcher=matcher,
-    )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
-    assert result.missing_capabilities == ("reasoning-heavy",)
-    assert result.agent is None
-
-
-def test_plan_dispatch_semantic_hit_with_capability_cover_succeeds():
-    """Semantic match whose agent DOES cover the required capabilities
-    → SEMANTIC_MATCHED. Capabilities filter doesn't block — it's a
-    hard gate, and this candidate passes it."""
+def test_plan_dispatch_below_floor_producer_matches_with_shortfall():
+    """A producer below the capability floor is picked best-available (no
+    semantic layer, no block) with the shortfall as advisory metadata."""
     task = _task(
         ["long-form-production"],
         required_capabilities=["reasoning-heavy"],
     )
-    semantic_pick = _agent(
+    producer = _agent(
+        "producer", ["producer"],
+        capability_tags=["generalist"],  # missing reasoning-heavy
+    )
+    result = dispatch.plan_dispatch(
+        task, [producer],
+        available_skill_names=["long-form-production"],
+    )
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert result.agent is producer
+    assert result.capability_shortfall == ("reasoning-heavy",)
+
+
+def test_plan_dispatch_producer_meeting_floor_matches_clean():
+    """A producer that meets the capability floor → MATCHED, no shortfall."""
+    task = _task(
+        ["long-form-production"],
+        required_capabilities=["reasoning-heavy"],
+    )
+    producer = _agent(
         "producer", ["producer"],
         capability_tags=["reasoning-heavy", "long-context"],
     )
-    def matcher(t):
-        return (semantic_pick, 0.90) if t is task else None
-
     result = dispatch.plan_dispatch(
-        task, [semantic_pick],
+        task, [producer],
         available_skill_names=["long-form-production"],
-        semantic_matcher=matcher,
     )
-    assert result.outcome is dispatch.DispatchOutcome.SEMANTIC_MATCHED
-    assert result.agent is semantic_pick
-    assert result.similarity_score == 0.90
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert result.agent is producer
+    assert result.capability_shortfall == ()
 
 
 def test_select_treats_unknown_cost_class_as_most_expensive():
@@ -802,11 +774,10 @@ def test_select_agent_unions_floors_across_multiple_required_skills():
     assert picked.id == "b"
 
 
-def test_plan_dispatch_roster_gap_when_skill_floor_not_met():
-    """A skill-floor gap surfaces as ROSTER_GAP with missing_capabilities
-    populated. Ticket body (orchestrator concern) reads the capability
-    axis; the dispatch layer doesn't distinguish floor-derived vs
-    task-declared — same resolution for the human."""
+def test_plan_dispatch_skill_floor_unmet_is_advisory_shortfall():
+    """A skill-declared capability floor the producer doesn't meet → MATCHED
+    best-available with the shortfall as advisory ``capability_shortfall``,
+    never a ROSTER_GAP block."""
     weak = _agent(
         "runner-no-shell", ["shell-runner"],
         capability_tags=["generalist"],
@@ -818,31 +789,27 @@ def test_plan_dispatch_roster_gap_when_skill_floor_not_met():
         available_skill_names=["shell-runner"],
         skill_floor_for=skill_floor_for,
     )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
-    assert result.missing_capabilities == ("shell-access",)
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert result.capability_shortfall == ("shell-access",)
 
 
-def test_plan_dispatch_semantic_hit_gated_by_skill_floor():
-    """Semantic hit whose agent fails a skill-declared floor does NOT
-    rescue. Hard filter, consistent with #9a: capability floors are
-    human-configured constraints that semantic similarity can't bypass."""
-    task = _task(["long-form-production"])  # not literally covered
-    semantic_pick = _agent(
+def test_plan_dispatch_skill_floor_below_producer_matches_with_shortfall():
+    """No semantic layer: a producer below a skill-declared floor is picked
+    best-available, the shortfall riding as advisory metadata."""
+    task = _task(["long-form-production"])
+    producer = _agent(
         "producer", ["producer"],
         capability_tags=["generalist"],  # missing reasoning-heavy
     )
-    def matcher(t):
-        return (semantic_pick, 0.88) if t is task else None
     skill_floor_for = _floor({"long-form-production": ("reasoning-heavy",)})
 
     result = dispatch.plan_dispatch(
-        task, [semantic_pick],
+        task, [producer],
         available_skill_names=["long-form-production"],
-        semantic_matcher=matcher,
         skill_floor_for=skill_floor_for,
     )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
-    assert result.missing_capabilities == ("reasoning-heavy",)
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert result.capability_shortfall == ("reasoning-heavy",)
 
 
 def test_plan_dispatch_matched_when_skill_floor_is_met():
@@ -924,11 +891,9 @@ def test_effective_capabilities_union_task_skill_and_domain_floors():
     assert picked.id == "b"
 
 
-def test_plan_dispatch_roster_gap_when_domain_floor_unmet():
-    """Domain-level floor gap surfaces as ROSTER_GAP with
-    missing_capabilities populated — same ticket shape as task-level
-    or skill-level gaps. Dispatch doesn't distinguish the source; the
-    ticket just names the missing capability."""
+def test_plan_dispatch_domain_floor_unmet_is_advisory_shortfall():
+    """A domain-level floor the producer doesn't meet → MATCHED best-available
+    with the shortfall as advisory ``capability_shortfall``, never a block."""
     agent = _agent(
         "producer", ["producer"],
         capability_tags=["generalist"],
@@ -941,8 +906,8 @@ def test_plan_dispatch_roster_gap_when_domain_floor_unmet():
         available_skill_names=["producer"],
         domain_floor_for=domain_floor_for,
     )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
-    assert "structured-output" in result.missing_capabilities
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert "structured-output" in result.capability_shortfall
 
 
 def test_plan_dispatch_no_domain_floor_callable_preserves_pre_followon_behavior():
@@ -962,27 +927,23 @@ def test_plan_dispatch_no_domain_floor_callable_preserves_pre_followon_behavior(
     assert result.outcome is dispatch.DispatchOutcome.MATCHED
 
 
-def test_semantic_hit_gated_by_domain_floor():
-    """A semantic-matched agent missing a domain-declared capability
-    falls through to ROSTER_GAP. Domain floors are hard, same as task
-    and skill floors."""
+def test_domain_floor_below_producer_matches_with_shortfall():
+    """No semantic layer: a producer below a domain-declared floor is picked
+    best-available, the shortfall riding as advisory metadata."""
     task = _task(["long-form-production"])
     task.artifact_kind = "research"
-    semantic_pick = _agent(
+    producer = _agent(
         "producer", ["producer"],
         capability_tags=["generalist"],
     )
-    def matcher(t):
-        return (semantic_pick, 0.85) if t is task else None
     domain_floor_for = _domain_floor({"research": ("long-context",)})
     result = dispatch.plan_dispatch(
-        task, [semantic_pick],
+        task, [producer],
         available_skill_names=["long-form-production"],
-        semantic_matcher=matcher,
         domain_floor_for=domain_floor_for,
     )
-    assert result.outcome is dispatch.DispatchOutcome.ROSTER_GAP
-    assert "long-context" in result.missing_capabilities
+    assert result.outcome is dispatch.DispatchOutcome.MATCHED
+    assert "long-context" in result.capability_shortfall
 
 
 # ── producer escalation (slice #9c) ────────────────────────────────────────
@@ -1228,18 +1189,17 @@ def test_select_agent_honors_continuity_hint_when_qualified():
     assert dispatch.select_agent(task, [cheaper, pricier]).id == "engineer-b"
 
 
-def test_select_agent_ignores_continuity_hint_when_unqualified():
-    """Hinted agent that doesn't cover the required skills is silently
-    ignored — falls through to normal selection. A continuity hint is
-    advisory; can't override the dispatch correctness floor."""
+def test_select_agent_honors_continuity_hint_now_that_skills_dont_gate():
+    """A continuity hint is honored as long as the hinted agent is a producer
+    in the pool — a 'mismatched' skill no longer disqualifies it (it checks
+    the skill out at run-time)."""
     fits = _agent("engineer-a", ["coding"])
-    misfit = _agent("writer-b", ["drafter"])  # lacks 'coding'
+    other = _agent("writer-b", ["drafter"])
     task = _task(["coding"])
     task.preferred_continuity_agent = "writer-b"
-    # Hint points at unqualified agent → fall through.
-    picked = dispatch.select_agent(task, [fits, misfit])
+    picked = dispatch.select_agent(task, [fits, other])
     assert picked is not None
-    assert picked.id == "engineer-a"
+    assert picked.id == "writer-b"  # hint honored — skills don't gate
 
 
 def test_select_agent_ignores_continuity_hint_pointing_at_nonexistent_agent():
@@ -1481,13 +1441,18 @@ def test_schedule_wave_capacity_cap_gt_one_takes_multiple():
     assert {d[0] for d in sched.deferred} == {"W-T-003"}
 
 
-def test_schedule_wave_roster_gap_when_no_qualifying_agent():
+def test_schedule_wave_gap_only_when_no_producers():
+    """A wave gaps a task only when there's no producer at all. A producer
+    'holding' no matching skill is still assigned (skills don't gate); an
+    empty producer pool gaps the task."""
     tasks = [_wtask("W-T-001", ["wp-cli-admin"])]
-    agents = [_wagent("d", ["drafter"])]
-    sched = dispatch.schedule_wave(tasks, agents)
-    assert sched.assignments == {}
-    assert sched.deferred == ()
-    assert sched.gaps == ("W-T-001",)
+    sched = dispatch.schedule_wave(tasks, [_wagent("d", ["drafter"])])
+    assert sched.assignments == {"W-T-001": "d"}
+    assert sched.gaps == ()
+
+    sched_empty = dispatch.schedule_wave(tasks, [])
+    assert sched_empty.assignments == {}
+    assert sched_empty.gaps == ("W-T-001",)
 
 
 def test_schedule_wave_global_cap_limits_total():

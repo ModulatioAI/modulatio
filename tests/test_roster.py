@@ -375,14 +375,14 @@ def test_seed_default_roster_idempotent_skips_existing_agent_files(project_vault
     assert all_ids == _DEFAULT_ROSTER_IDS
 
 
-def test_seed_default_roster_agents_dispatchable_for_their_held_skills(
+def test_seed_default_roster_dispatches_to_a_producer(
     project_vault,
 ):
-    """Integration-level check that the seeded roster is actually
-    reachable via `dispatch.select_agent`. Each seeded agent must win
-    dispatch for a task that requires exactly the skill(s) it holds.
-    This is the real gap #11 closes — pre-#11 a fresh project could not
-    dispatch anything."""
+    """Integration-level check that the seeded roster is reachable via
+    `dispatch.select_agent`. Since the skill-library arc, skills don't gate:
+    any skill-carrying task routes to a PRODUCER-tier agent (which checks the
+    skill out of the library at run-time). Leader/QC are structural roles with
+    their own selection paths, never producer-dispatch targets."""
     from modulatio import dispatch
     from modulatio.types import Task, TaskStatus
     from uuid import uuid4
@@ -395,14 +395,12 @@ def test_seed_default_roster_agents_dispatchable_for_their_held_skills(
         qc_model="qc/m",
         researcher_model="rs/m",
     )
+    producer_ids = {a.id for a in written if a.tier == "producer"}
+    assert producer_ids, "the seeded roster must include at least one producer"
 
-    cases = [
-        (["drafter"], "producer"),
-        (["leader"], "leader"),
-        (["qc"], "qc"),
-        (["researcher"], "researcher"),
-    ]
-    for required_skills, expected_id in cases:
+    # Every skill-carrying task — even one naming a skill no agent 'holds' —
+    # routes to a producer (never None, never leader/qc).
+    for required_skills in (["drafter"], ["researcher"], ["nothing-holds-this"]):
         task = Task(
             id=f"{PROJECT_CODE}-0",
             project_id=uuid4(),
@@ -413,10 +411,10 @@ def test_seed_default_roster_agents_dispatchable_for_their_held_skills(
         )
         picked = dispatch.select_agent(task, written)
         assert picked is not None, (
-            f"No seeded agent covered required_skills={required_skills}"
+            f"No producer routed for required_skills={required_skills}"
         )
-        assert picked.id == expected_id, (
-            f"Expected {expected_id} for {required_skills}, got {picked.id}"
+        assert picked.id in producer_ids, (
+            f"Expected a producer for {required_skills}, got {picked.id}"
         )
 
 

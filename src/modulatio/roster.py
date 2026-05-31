@@ -34,26 +34,28 @@ _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
 class Agent(BaseModel):
-    """A persisted agent profile — what skills this agent holds, which
-    LLM runs it, and the routing metadata dispatch consumes.
+    """A persisted agent profile — which LLM runs it and the routing
+    metadata dispatch consumes.
 
-    Fields that drive slice #6c routing:
+    Fields that drive routing (since the skill-library arc, Brick 3):
 
-    - ``skills`` — which skills this agent can cover. Dispatch matches
-      task-required-skills ⊆ agent.skills.
-    - ``model`` + ``model_tier`` — the specific LLM and the tier it
-      serves. ``model_tier`` pairs with ``Skill.model_tier`` at dispatch.
-      ``model`` may be ``None`` when the agent inherits whichever model
-      the CLI has wired for its tier.
+    - ``skills`` — **advisory / non-routing.** A producer no longer "holds"
+      skills for dispatch; it checks out whatever a task needs from the
+      shared library at run-time, so any producer can run any task. This
+      list is kept for backward-compat (old rosters carry it) and as a seed-
+      familiarity hint surfaced in the TUI and the chat skill-body injection.
+      Dispatch does NOT match against it.
+    - ``model`` + ``model_tier`` — the specific LLM and the tier it serves.
+      ``model_tier`` is the producer's capability tier (it now comes from the
+      MODEL, not from assigned skills — see ``_caps_from_model``). ``model``
+      may be ``None`` when the agent inherits the CLI-wired model for its tier.
     - ``cost_class`` — free-local / paid-cloud / premium-cloud. Routing
-      prefers the cheapest qualifying agent (cron-agent policy echo).
-    - ``capability_tags`` — declared strengths. Can diverge from the
-      default tags on the agent's skills (e.g. a drafter agent running
-      on a stronger model might claim ``reasoning-heavy`` tags even if
-      its skills' defaults are ``generalist``). Slice #8 capability-floor
-      routing consumes.
-    - ``capacity_cap`` — max concurrent tasks (murmuration input — slice
-      #6d+ backpressure reads this).
+      prefers the cheapest qualifying producer (cron-agent policy echo).
+    - ``capability_tags`` — the producer's declared strengths, sourced from
+      its model. The capability floor is a SOFT preference at dispatch
+      (best-available + a Product Quality Report reservation, never a block).
+    - ``capacity_cap`` — max concurrent tasks; the wave scheduler reads this
+      to spread a wave across idle producers.
     """
 
     id: str
