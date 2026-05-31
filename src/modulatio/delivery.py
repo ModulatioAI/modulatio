@@ -66,6 +66,98 @@ def project_delivery_dir(project_code: str) -> Path:
     return delivery_root() / project_code
 
 
+#: Per-job folder-name length cap — shorter than the filename cap; it's a path
+#: prefix a human browses, kept comfortably readable.
+_MAX_JOB_SLUG_LEN = 64
+
+#: Unicode BIDI controls + C1 NEL that survive the ASCII illegal-char regex.
+#: Harmless on Linux (no path escape), but a right-to-left override can scramble
+#: an ``ls`` listing — and the slug comes from Leader JSON in Feature B, so we
+#: strip them here (Nemo's Feature-A hull advisory A3, defense-in-depth).
+_UNICODE_CONTROL_CHARS = re.compile("[\u0085\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _job_slug(raw: str | None) -> str:
+    """Folder-safe, human-readable, **path-traversal-safe** slug for a per-job
+    folder. Returns ``""`` when there's nothing usable — the caller then falls
+    back to the flat project dir (NOT an "Untitled" folder). Drops path
+    separators and leading dots, so an LLM-supplied ``../../etc`` (the slug
+    comes from Leader JSON in Feature B) can never escape the delivery dir."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    s = s.replace(":", " -")
+    s = _ILLEGAL_FILENAME_CHARS.sub("", s)   # strips / \\ < > : " | ? * + control chars
+    s = _UNICODE_CONTROL_CHARS.sub("", s)    # strips BIDI overrides / NEL (ls-display safety)
+    s = re.sub(r"\s+", " ", s).strip(" .")   # collapse whitespace; strip leading/trailing dots+spaces
+    if len(s) > _MAX_JOB_SLUG_LEN:
+        s = s[:_MAX_JOB_SLUG_LEN].rstrip(" .")
+    return s
+
+
+def _run_date(run_id: str | None) -> str:
+    """``YYYYMMDD`` parsed from a ``YYYYMMDDTHHMMSSZ-<hex6>`` run id; ``""`` if
+    the id isn't in that shape."""
+    if run_id and len(run_id) >= 8 and run_id[:8].isdigit():
+        return run_id[:8]
+    return ""
+
+
+def _run_hex(run_id: str | None) -> str:
+    """The ``<hex6>`` suffix of a run id — a collision tiebreaker; ``""`` if
+    absent."""
+    if run_id and "-" in run_id:
+        tail = run_id.rsplit("-", 1)[-1]
+        if tail and tail.isalnum():
+            return tail
+    return ""
+
+
+def job_folder_name(slug: str | None, *, fallback: str, run_id: str | None) -> str | None:
+    """Human-readable per-job folder name: ``"<slug-or-fallback> YYYYMMDD"``.
+    Returns ``None`` when neither a slug nor a fallback yields anything usable —
+    the caller then ships into the flat project dir (back-compat)."""
+    base = _job_slug(slug) or _job_slug(fallback)
+    if not base:
+        return None
+    date = _run_date(run_id)
+    return f"{base} {date}".rstrip()
+
+
+def job_dir(
+    project_code: str,
+    job_slug: str | None = None,
+    *,
+    run_id: str | None = None,
+    fallback: str = "",
+) -> Path:
+    """Per-job delivery folder: ``<project_delivery_dir>/<job-folder>``.
+
+    Named from ``job_slug`` (the Leader's human name for the job, once Feature B
+    supplies it) or a slug of ``fallback`` (the project name / objective), plus
+    the run date. **When nothing names it, returns the flat
+    ``project_delivery_dir`` unchanged** — a run with no slug behaves exactly as
+    before. On a name collision with a DIFFERENT run's folder (two same-named
+    jobs the same day), the run hex is appended as a tiebreaker.
+
+    Concurrency (Nemo's Feature-A hull advisory A1): the ``exists()`` check is
+    not atomic with the later ``mkdir``, so two *simultaneous* runs of the same
+    project + same slug + same day could both resolve to the bare name and share
+    a folder. Per-file disambiguation inside :func:`deliver_product` (``name
+    (task_id).ext``) still prevents data loss; the products would merely
+    cohabitate. Extreme edge for a single-user CLI; not guarded here."""
+    base = project_delivery_dir(project_code)
+    name = job_folder_name(job_slug, fallback=fallback, run_id=run_id)
+    if not name:
+        return base
+    target = base / name
+    if target.exists():
+        hex6 = _run_hex(run_id)
+        if hex6:
+            target = base / f"{name} ({hex6})"
+    return target
+
+
 def _sanitize_filename(name: str) -> str:
     """Turn a document title into a safe, still-human-readable filename stem
     (no extension). Colons become ' -', illegal chars drop, whitespace
@@ -131,6 +223,7 @@ def deliver_product(
     fallback_name: str | None = None,
     pinned_names: "set[str] | None" = None,
     verbatim: bool = False,
+    dest_override: Path | None = None,
 ) -> DeliveredProduct:
     """Deliver one finished product under the project's delivery dir.
 
@@ -150,7 +243,9 @@ def deliver_product(
     user gets one clean ``game.py``, the latest version. Returns a
     :class:`DeliveredProduct` (``error`` set on failure)."""
     source_md = Path(source_md)
-    dest_dir = project_delivery_dir(project_code)
+    # ``dest_override`` (the per-job folder) wins when given; else the flat
+    # per-project dir (back-compat).
+    dest_dir = dest_override if dest_override is not None else project_delivery_dir(project_code)
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -200,6 +295,7 @@ def deliver_finished_products(
     project_code: str,
     fmt: ExportFormat = DEFAULT_DELIVERY_FORMAT,
     pinned_names: "set[str] | None" = None,
+    dest_override: Path | None = None,
 ) -> list[DeliveredProduct]:
     """Deliver every finished product.
 
@@ -224,7 +320,7 @@ def deliver_finished_products(
             deliver_product(
                 src, project_code=project_code, task_id=task_id,
                 fmt=fmt, fallback_name=fallback, pinned_names=pinned_names,
-                verbatim=verbatim,
+                verbatim=verbatim, dest_override=dest_override,
             )
         )
     return out
@@ -281,6 +377,7 @@ def deliver_product_quality_report(
     recommendations,
     *,
     project_code: str,
+    dest_override: Path | None = None,
 ) -> "DeliveredProduct | None":
     """Render the Product Quality Report and place it beside the deliverables.
     Always shipped as DOCX (it sits next to the .docx products and the human
@@ -295,6 +392,7 @@ def deliver_product_quality_report(
             return deliver_product(
                 md, project_code=project_code,
                 task_id="product-quality-report", fmt="docx",
+                dest_override=dest_override,
             )
     except OSError:  # pragma: no cover — defensive staging failure
         return None
@@ -378,5 +476,7 @@ __all__ = [
     "deliverables_from_tasks",
     "delivery_root",
     "human_name_from_markdown",
+    "job_dir",
+    "job_folder_name",
     "project_delivery_dir",
 ]

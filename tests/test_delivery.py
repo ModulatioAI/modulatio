@@ -379,3 +379,98 @@ def test_pure_prose_run_still_renders_docx(monkeypatch, tmp_path, _mock_export):
         [("T-1", art / "paper.md", None)], project_code="MOD",
     )
     assert out[0].dest.name == "Annual Report.docx"  # unchanged behavior
+
+
+# ── Feature A: per-job output folders ────────────────────────────────────
+
+_RUN_ID = "20260531T143000Z-ab12cd"  # YYYYMMDDTHHMMSSZ-<hex6>
+
+
+def test_job_folder_name_slug_and_date():
+    assert delivery.job_folder_name("Daily Philosophy", fallback="x", run_id=_RUN_ID) \
+        == "Daily Philosophy 20260531"
+
+
+def test_job_folder_name_uses_fallback_when_no_slug():
+    assert delivery.job_folder_name(None, fallback="Q3 Revenue Brief", run_id=_RUN_ID) \
+        == "Q3 Revenue Brief 20260531"
+
+
+def test_job_folder_name_none_when_nothing_usable():
+    # Empty slug AND empty fallback → None (caller ships flat, not "Untitled").
+    assert delivery.job_folder_name("", fallback="", run_id=_RUN_ID) is None
+    assert delivery.job_folder_name("   ", fallback="  .. ", run_id=_RUN_ID) is None
+
+
+def test_job_folder_name_handles_missing_run_id_date():
+    # No parseable date → just the slug, no trailing space.
+    assert delivery.job_folder_name("Brief", fallback="x", run_id=None) == "Brief"
+
+
+def test_job_dir_none_slug_is_flat_project_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    # Nothing names it → byte-identical to the flat per-project dir (back-compat).
+    assert delivery.job_dir("ABC", None, run_id=_RUN_ID, fallback="") \
+        == delivery.project_delivery_dir("ABC")
+
+
+def test_job_dir_nests_under_project(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    d = delivery.job_dir("ABC", "Daily Philosophy", run_id=_RUN_ID, fallback="obj")
+    assert d == tmp_path / "ABC" / "Daily Philosophy 20260531"
+
+
+def test_job_dir_collision_appends_run_hex(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    # A prior run already created the same-named folder today.
+    (tmp_path / "ABC" / "Daily Philosophy 20260531").mkdir(parents=True)
+    d = delivery.job_dir("ABC", "Daily Philosophy", run_id=_RUN_ID, fallback="obj")
+    assert d == tmp_path / "ABC" / "Daily Philosophy 20260531 (ab12cd)"
+
+
+def test_job_slug_strips_unicode_bidi_controls():
+    # Nemo hull advisory A3: BIDI override / isolates / NEL survive the ASCII
+    # regex but scramble an `ls` listing -- strip them (slug is Leader JSON in B2).
+    assert delivery._job_slug("a\u202ebc") == "abc"          # RLO override
+    assert delivery._job_slug("Brief\u2066x\u2069") == "Briefx"  # isolates
+    assert delivery._job_slug("line\u0085two") == "linetwo"      # C1 NEL
+
+
+def test_job_dir_rejects_path_traversal(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    # An LLM-supplied traversal slug must stay inside the project's dir.
+    d = delivery.job_dir("ABC", "../../etc/passwd", run_id=_RUN_ID, fallback="obj")
+    assert delivery.project_delivery_dir("ABC") in d.parents
+    assert ".." not in d.parts
+
+
+def test_deliver_product_dest_override_nests(monkeypatch, tmp_path, _mock_export):
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    job = delivery.job_dir("ACME", "My Job", run_id=_RUN_ID, fallback="obj")
+    src = tmp_path / "p.md"
+    src.write_text("# Annual Report 2026\n\nbody")
+    dp = delivery.deliver_product(src, project_code="ACME", task_id="T-1", dest_override=job)
+    assert dp.error is None
+    assert dp.dest == job / "Annual Report 2026.docx"
+    assert dp.dest.exists()
+
+
+def test_deliver_product_dest_override_none_is_flat(monkeypatch, tmp_path, _mock_export):
+    # dest_override=None → byte-identical to today's flat placement.
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    src = tmp_path / "p.md"
+    src.write_text("# Report\n\nbody")
+    dp = delivery.deliver_product(src, project_code="ACME", task_id="T-1", dest_override=None)
+    assert dp.dest == tmp_path / "ACME" / "Report.docx"
+
+
+def test_deliver_finished_products_threads_dest_override(monkeypatch, tmp_path, _mock_export):
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    job = delivery.job_dir("MOD", "Sprint Output", run_id=_RUN_ID, fallback="obj")
+    art = tmp_path / "art"
+    art.mkdir()
+    (art / "paper.md").write_text("# Brief\n\nbody")
+    out = delivery.deliver_finished_products(
+        [("T-1", art / "paper.md", None)], project_code="MOD", dest_override=job,
+    )
+    assert out[0].dest == job / "Brief.docx"

@@ -525,6 +525,12 @@ def kickoff(
     # Only on real runs — ``artifacts_root`` is unset under --stub.
     if not stub:
         from modulatio import delivery as _delivery
+        # Each job gets its OWN aptly-named output folder so a new run never
+        # lands in (or clobbers) the last one's products. None slug → flat dir.
+        _job_out = _delivery.job_dir(
+            code, summary.job_slug,
+            run_id=summary.project.run_id, fallback=name or objective,
+        )
         _deliverables = _delivery.deliverables_from_tasks(summary.tasks, artifacts_root)
         _blocked = _delivery.blocked_task_ids(summary.tasks)
         # Cross-goal guard: a goal whose plan was REJECTED produces zero tasks
@@ -557,10 +563,11 @@ def kickoff(
             _delivered = _delivery.deliver_finished_products(
                 _deliverables, project_code=code,
                 pinned_names=set(summary.pinned_files),
+                dest_override=_job_out,
             )
             if _delivered:
                 typer.echo(
-                    f"  Finished products → {_delivery.project_delivery_dir(code)}:"
+                    f"  Finished products → {_job_out}:"
                 )
                 for d in _delivered:
                     if d.error:
@@ -572,6 +579,7 @@ def kickoff(
         # Advisory: it never blocked or held back the product.
         _qr = _delivery.deliver_product_quality_report(
             summary.recommendations, project_code=code,
+            dest_override=_job_out,
         )
         if _qr is not None:
             if _qr.error:

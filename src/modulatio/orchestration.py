@@ -91,6 +91,13 @@ class RunSummary:
     #: the improved file under its real name, REPLACING the prior copy rather
     #: than accumulating disambiguated duplicates.
     pinned_files: list[str] = field(default_factory=list)
+    #: Human-readable slug for this job's output folder (Feature A). The Leader
+    #: names the job; delivery nests this run's products in
+    #: ``~/Documents/Modulatio/<project>/<slug> <date>/`` instead of the flat
+    #: per-project dir. ``None`` → flat (back-compat); Feature B (the JT
+    #: interview/decompose) fills it authoritatively, until then it stays None
+    #: and delivery falls back to a slug of the project name/objective.
+    job_slug: str | None = None
 
 
 # ── Core rebuild B3: isolated-worker result + deterministic merge ───────
