@@ -1592,3 +1592,26 @@ def test_http_get_sends_identifying_user_agent(monkeypatch):
     except RuntimeError:
         pass
     assert "Modulatio" in (captured["ua"] or "")  # polite UA, not bare/none
+
+
+# ── source-credibility discipline (flag content-farm slop, don't drop) ──
+
+def test_web_search_flags_and_sinks_low_credibility(monkeypatch):
+    class FakeDDGS:
+        def text(self, q, max_results):
+            return [
+                {"title": "Slop", "href": "https://grokipedia.com/x", "body": "fabricated"},
+                {"title": "Real", "href": "https://www.reuters.com/y", "body": "reported"},
+            ]
+    monkeypatch.setattr("ddgs.DDGS", FakeDDGS)
+    out = tools.web_search("israel iran 2026", max_results=2)
+    assert out.index("Real") < out.index("Slop")          # credible re-ranked first
+    assert "LOW-CREDIBILITY" in out                         # slop flagged
+    assert "grokipedia.com/x" in out                        # but NOT dropped
+
+
+def test_is_low_credibility_matches_subdomains():
+    assert tools._is_low_credibility("https://grokipedia.com/p")
+    assert tools._is_low_credibility("https://www.kennelbiscotti.com/a")
+    assert not tools._is_low_credibility("https://www.aljazeera.com/n")
+    assert not tools._is_low_credibility("not-a-url")

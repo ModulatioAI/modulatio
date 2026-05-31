@@ -48,6 +48,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -1044,6 +1045,30 @@ _WEB_SEARCH_DEFAULT_RESULTS = 6
 _WEB_SEARCH_MAX_RESULTS = 12
 _WEB_SEARCH_RETURN_CHARS = 8_000
 
+#: Low-credibility domains — AI-content-farms / unvetted wikis that fabricate
+#: plausible-looking "facts" (esp. current events). We FLAG, never drop: the
+#: producer + audit still see what was found and why it's suspect, and the
+#: producer is told (web-search / rigorous-sourcing skills) not to cite a
+#: flagged hit on its own. Extensible — add domains as new slop surfaces.
+_LOW_CREDIBILITY_DOMAINS: frozenset[str] = frozenset({
+    "grokipedia.com",
+    "kennelbiscotti.com",
+})
+
+
+def _is_low_credibility(href: str) -> bool:
+    """True iff ``href``'s host is (or is a subdomain of) a known low-trust
+    content-farm domain."""
+    try:
+        host = (urllib.parse.urlsplit(href).hostname or "").lower()
+    except (ValueError, AttributeError):
+        return False
+    if not host:
+        return False
+    return any(
+        host == d or host.endswith("." + d) for d in _LOW_CREDIBILITY_DOMAINS
+    )
+
 
 def web_search(query: str, max_results: int = _WEB_SEARCH_DEFAULT_RESULTS) -> str:
     """Search the web (DuckDuckGo, no API key) and return ranked results as
@@ -1075,12 +1100,23 @@ def web_search(query: str, max_results: int = _WEB_SEARCH_DEFAULT_RESULTS) -> st
         return f"web_search error for {q!r}: {type(exc).__name__}: {exc}"
     if not results:
         return f"web_search: no results for {q!r}."
-    lines = [f"Web search results for: {q}", ""]
-    for i, r in enumerate(results, 1):
-        title = (r.get("title") or "").strip()
+    # Source-credibility pass: flag known content-farm/low-trust hits and sink
+    # them below credible ones (stable within each group). FLAG, don't drop —
+    # the producer sees everything and is told not to cite a flagged hit alone.
+    normalized = []
+    for r in results:
         href = (r.get("href") or r.get("url") or "").strip()
-        body = " ".join((r.get("body") or "").split())
-        lines.append(f"{i}. {title}\n   {href}\n   {body}")
+        normalized.append((
+            (r.get("title") or "").strip(),
+            href,
+            " ".join((r.get("body") or "").split()),
+            _is_low_credibility(href),
+        ))
+    normalized.sort(key=lambda t: t[3])  # credible (False) first; stable
+    lines = [f"Web search results for: {q}", ""]
+    for i, (title, href, body, low) in enumerate(normalized, 1):
+        flag = "  [LOW-CREDIBILITY SOURCE — verify independently before citing]" if low else ""
+        lines.append(f"{i}. {title}{flag}\n   {href}\n   {body}")
     return "\n".join(lines)[:_WEB_SEARCH_RETURN_CHARS]
 
 

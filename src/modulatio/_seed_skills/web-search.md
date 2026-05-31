@@ -19,3 +19,15 @@ Never assume or hard-code a URL — find it by searching. Your training cutoff i
 in the past; for current events, prices, versions, or any fast-moving subject,
 searching the live web and reading it is the only way to be right. A claim
 written from memory on a current topic is wrong by default.
+
+SOURCE CREDIBILITY — the open web is full of AI-generated content farms and
+unvetted wikis that fabricate plausible-looking "facts" (made-up operation
+names, events, dates). Results may be marked
+`[LOW-CREDIBILITY SOURCE — verify independently before citing]`:
+- A low-credibility hit is NOT a citable source on its own. Treat it as a lead
+  to chase down in a real source, not as evidence.
+- Prefer primary / authoritative reporting: major news outlets, official
+  agencies, peer-reviewed work, established reference works.
+- For any current-events claim, corroborate it across at least TWO independent
+  credible sources before stating it. If you can only find it on a flagged or
+  single obscure source, do not assert it — mark it "unverified" instead.

@@ -19,6 +19,12 @@ this is how you meet it the first time so QC has little to fix.
 - Prefer **primary** and **authoritative** sources (official sites/docs, the
   original report, the org's own statement, the repository) over second-hand
   summaries. Triangulate contested claims across more than one source.
+- **Distrust content farms.** The open web is full of AI-generated/unvetted
+  sites that fabricate plausible-looking facts; a search hit marked
+  `[LOW-CREDIBILITY SOURCE]` is a lead, never a citation. A current-events
+  claim needs corroboration from **≥2 independent credible** sources; if it
+  only appears on a flagged or single obscure site, mark it "unverified"
+  rather than assert it.
 - For anything time-sensitive (current events, prices, versions, standings),
   fetch the **freshest** sources you can and record their dates.
 
