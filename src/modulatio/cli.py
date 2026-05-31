@@ -553,7 +553,10 @@ def kickoff(
                 f"shipping. Drafts remain in artifacts/."
             )
         elif _deliverables:
-            _delivered = _delivery.deliver_finished_products(_deliverables, project_code=code)
+            _delivered = _delivery.deliver_finished_products(
+                _deliverables, project_code=code,
+                pinned_names=set(summary.pinned_files),
+            )
             if _delivered:
                 typer.echo(
                     f"  Finished products → {_delivery.project_delivery_dir(code)}:"

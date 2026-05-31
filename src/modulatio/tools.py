@@ -540,6 +540,67 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
             and _is_safe_file_arg(argv[3], root)
         ):
             return True
+    if head == "tail":
+        # tail <file>, tail -<N> <file>, tail -n <N> <file>  (head's twin)
+        if len(argv) == 2 and _is_safe_file_arg(argv[1], root):
+            return True
+        if (
+            len(argv) == 3
+            and argv[1].startswith("-")
+            and argv[1][1:].isdigit()
+            and _is_safe_file_arg(argv[2], root)
+        ):
+            return True
+        if (
+            len(argv) == 4
+            and argv[1] == "-n"
+            and argv[2].isdigit()
+            and _is_safe_file_arg(argv[3], root)
+        ):
+            return True
+    if head == "wc":
+        # wc [-lwcmL...] <file> [<file>...] — read-only line/word/byte counts.
+        rest = argv[1:]
+        flags = [a for a in rest if a.startswith("-") and a != "-"]
+        files = [a for a in rest if not (a.startswith("-") and a != "-")]
+        if (
+            files
+            and all(set(f[1:]) <= set("lwcmL") for f in flags)
+            and all(_is_safe_file_arg(a, root) for a in files)
+        ):
+            return True
+    if head == "grep":
+        # grep [search-flags] PATTERN <file> [<file>...] — read-only search.
+        # The PATTERN is a string grep never executes; cwd guard +
+        # _is_safe_file_arg confine the reads. Reject recursive / read-from-
+        # file / dir-walk forms (-r/-R/-f/-d/-Z and any long --option) and
+        # require an explicit confined file arg (so it can't be pointed at a
+        # tree or outside the artifacts root). Code iteration's #1 ask:
+        # "find the JUMP constant" in one call vs re-cat'ing 300 lines.
+        rest = argv[1:]
+        flags = [a for a in rest if a.startswith("-") and a != "-"]
+        nonflags = [a for a in rest if not (a.startswith("-") and a != "-")]
+        safe_flags = all(
+            not a.startswith("--") and set(a[1:]) <= set("niEcwoHhsvxF")
+            for a in flags
+        )
+        if safe_flags and len(nonflags) >= 2:  # PATTERN + >=1 file
+            files = nonflags[1:]
+            if all(_is_safe_file_arg(f, root) for f in files):
+                return True
+    if head == "sed":
+        # ONLY the read-only line-range print form: ``sed -n 'A,Bp' <file>``.
+        # Raw sed is a footgun (-i writes in place; the `e`/`w`/`r` commands
+        # execute shell / touch files), so we match the print form EXACTLY
+        # and reject everything else. Gives surgical line-range reads with no
+        # write/exec surface — the safe replacement for "let them use sed".
+        if (
+            len(argv) == 4
+            and argv[1] == "-n"
+            and re.fullmatch(r"\d+,\d+p", argv[2])
+            and _is_safe_file_arg(argv[3], root)
+        ):
+            return True
     return False
 
 

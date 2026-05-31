@@ -86,6 +86,11 @@ class RunSummary:
     #: into the human-addressed "Product Quality Report" that ships beside
     #: the deliverables. Each item: {goal_id, concern, suggestion}.
     recommendations: list[dict] = field(default_factory=list)
+    #: Iteration mode (2026-05-30): artifacts-relative names of files pinned
+    #: via ``--attach`` for in-place improvement. Delivery uses this to ship
+    #: the improved file under its real name, REPLACING the prior copy rather
+    #: than accumulating disambiguated duplicates.
+    pinned_files: list[str] = field(default_factory=list)
 
 
 # ── Core rebuild B3: isolated-worker result + deterministic merge ───────
@@ -6431,6 +6436,7 @@ class Orchestrator:
         # decompose so the contract + the files are live for every downstream
         # prompt (decompose, task-plan, producer).
         self._pin_attachments(attachments or [])
+        summary.pinned_files = list(self._pinned_files)
 
         # Slice #7e: before decomposing a new objective, resume any
         # previously-blocked goals whose retry budget has refreshed.

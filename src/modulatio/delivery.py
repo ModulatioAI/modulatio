@@ -129,6 +129,7 @@ def deliver_product(
     task_id: str,
     fmt: ExportFormat = DEFAULT_DELIVERY_FORMAT,
     fallback_name: str | None = None,
+    pinned_names: "set[str] | None" = None,
 ) -> DeliveredProduct:
     """Deliver one finished product under the project's delivery dir.
 
@@ -136,8 +137,13 @@ def deliver_product(
     human-named from their H1. CODE deliverables (``.py`` etc., see
     :data:`_CODE_SUFFIXES`) are copied **verbatim**, keeping their original
     filename + extension, so a game ships as runnable ``game.py`` — not a Word
-    doc wrapping the source. Returns a :class:`DeliveredProduct` (``error`` set
-    on failure)."""
+    doc wrapping the source.
+
+    ``pinned_names`` (iteration mode): when a code deliverable's filename is in
+    this set it is an IMPROVED pinned file, so it REPLACES its prior same-named
+    copy in the delivery dir instead of getting a disambiguated duplicate — the
+    user gets one clean ``game.py``, the latest version. Returns a
+    :class:`DeliveredProduct` (``error`` set on failure)."""
     source_md = Path(source_md)
     dest_dir = project_delivery_dir(project_code)
     try:
@@ -150,7 +156,11 @@ def deliver_product(
     if _is_code_source(source_md):
         name = source_md.stem
         dest = dest_dir / source_md.name
-        if dest.exists():  # don't clobber a prior same-named source
+        # Iteration: an improved PINNED file replaces its prior same-named copy
+        # (one clean game.py, latest version). Otherwise don't clobber an
+        # unrelated prior same-named source — disambiguate with the task id.
+        is_pinned = bool(pinned_names) and source_md.name in pinned_names
+        if dest.exists() and not is_pinned:
             dest = dest_dir / f"{source_md.stem} ({task_id}){source_md.suffix}"
         try:
             shutil.copyfile(source_md, dest)
@@ -182,13 +192,16 @@ def deliver_finished_products(
     *,
     project_code: str,
     fmt: ExportFormat = DEFAULT_DELIVERY_FORMAT,
+    pinned_names: "set[str] | None" = None,
 ) -> list[DeliveredProduct]:
     """Deliver every finished product.
 
     ``deliverables`` is an iterable of ``(task_id, source_md_path,
     fallback_name)``. Missing source files are skipped (the task may not have
-    produced an artifact). Returns one :class:`DeliveredProduct` per delivered
-    file, in input order."""
+    produced an artifact). ``pinned_names`` is threaded to
+    :func:`deliver_product` so improved iteration files replace their prior
+    copy. Returns one :class:`DeliveredProduct` per delivered file, in input
+    order."""
     out: list[DeliveredProduct] = []
     for task_id, src, fallback in deliverables:
         src = Path(src)
@@ -197,7 +210,7 @@ def deliver_finished_products(
         out.append(
             deliver_product(
                 src, project_code=project_code, task_id=task_id,
-                fmt=fmt, fallback_name=fallback,
+                fmt=fmt, fallback_name=fallback, pinned_names=pinned_names,
             )
         )
     return out
@@ -283,19 +296,22 @@ def deliverables_from_tasks(
     ``artifacts_root``, else the default ``drafts/<task_id>.md``. Tasks are
     duck-typed (``.deliverable`` / ``.id`` / ``.output_path`` / ``.description``)
     so this stays decoupled from the orchestration types. The task description
-    is the fallback name when a deliverable has no Markdown title of its own."""
+    is the fallback name when a deliverable has no Markdown title of its own.
+
+    DEDUP: when several deliverable tasks target the SAME artifact path (the
+    iteration shape — three in-place edits to one ``game.py``), the file is
+    emitted ONCE, keyed to the LAST such task (its on-disk content is the final
+    state). Without this, one improved file shipped as three identical copies."""
     artifacts_root = Path(artifacts_root)
-    out: "list[tuple[str, Path, str | None]]" = []
+    by_path: "dict[Path, tuple[str, Path, str | None]]" = {}
     for t in tasks:
         if not getattr(t, "deliverable", False):
             continue
         rel = getattr(t, "output_path", None) or f"drafts/{getattr(t, 'id')}.md"
-        out.append((
-            getattr(t, "id"),
-            artifacts_root / rel,
-            getattr(t, "description", None),
-        ))
-    return out
+        path = artifacts_root / rel
+        # Last writer wins — later tasks edited the same file after earlier ones.
+        by_path[path] = (getattr(t, "id"), path, getattr(t, "description", None))
+    return list(by_path.values())
 
 
 #: Task states that mean "did not cleanly succeed" — a finished product built

@@ -286,3 +286,58 @@ def test_quality_report_ships_even_with_no_reservations(monkeypatch, tmp_path, _
     monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
     dp = delivery.deliver_product_quality_report([], project_code="ACME")
     assert dp is not None and dp.error is None and dp.dest.exists()
+
+
+# ── 2b (2026-05-30): iteration delivery — dedup one file, replace not pile ──
+
+class _DT:
+    def __init__(self, tid, op):
+        self.deliverable = True
+        self.id = tid
+        self.output_path = op
+        self.description = "d"
+
+
+def test_deliverables_dedup_same_path(tmp_path):
+    """Iteration shape: three tasks edit one game.py → ONE deliverable, keyed
+    to the last (final-state) task — not three identical copies."""
+    tasks = [_DT("T-1", "game.py"), _DT("T-2", "game.py"), _DT("T-3", "game.py")]
+    out = delivery.deliverables_from_tasks(tasks, tmp_path / "art")
+    assert len(out) == 1
+    assert out[0][0] == "T-3"  # last writer wins
+
+
+def test_deliverables_keep_distinct_paths(tmp_path):
+    """Distinct output paths are all kept (dedup only collapses same-path)."""
+    tasks = [_DT("T-1", "game.py"), _DT("T-2", "level.py")]
+    out = delivery.deliverables_from_tasks(tasks, tmp_path / "art")
+    assert {o[0] for o in out} == {"T-1", "T-2"}
+
+
+def test_pinned_code_replaces_prior_copy(tmp_path, monkeypatch):
+    """An improved PINNED file overwrites its prior same-named copy (one clean
+    game.py, latest version) instead of a disambiguated duplicate."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    art = tmp_path / "art"; art.mkdir()
+    (art / "game.py").write_text("JUMP=-20\n")
+    (tmp_path / "MOD").mkdir(parents=True)
+    (tmp_path / "MOD" / "game.py").write_text("JUMP=-12 old\n")
+    dp = delivery.deliver_product(
+        art / "game.py", project_code="MOD", task_id="T-3",
+        pinned_names={"game.py"},
+    )
+    assert dp.dest.name == "game.py"          # replaced, not "game (T-3).py"
+    assert dp.dest.read_text() == "JUMP=-20\n"
+
+
+def test_non_pinned_code_still_disambiguates(tmp_path, monkeypatch):
+    """A non-pinned code collision still disambiguates (don't clobber unrelated
+    prior work)."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    art = tmp_path / "art"; art.mkdir()
+    (art / "util.py").write_text("new\n")
+    (tmp_path / "MOD").mkdir(parents=True)
+    (tmp_path / "MOD" / "util.py").write_text("old\n")
+    dp = delivery.deliver_product(art / "util.py", project_code="MOD", task_id="T-9")
+    assert dp.dest.name == "util (T-9).py"
+    assert (tmp_path / "MOD" / "util.py").read_text() == "old\n"  # preserved
