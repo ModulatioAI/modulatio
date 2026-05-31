@@ -98,6 +98,9 @@ def add_preset(
     model: str,
     auth_config: dict[str, Any] | None = None,
     default_params: dict[str, Any] | None = None,
+    model_tier: str | None = None,
+    cost_class: str | None = None,
+    capability_tags: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Register a new model entry. Raises ValueError on collision or invalid input.
 
@@ -107,6 +110,13 @@ def add_preset(
     reasoning-toggle model thinking-OFF (the producer-role requirement;
     OpenRouter honors this). Lets the preset express the FULL model contract
     — "the human picks any model, including its reasoning mode."
+
+    ``model_tier`` / ``cost_class`` / ``capability_tags`` (optional, Brick 2 of
+    the skill-library arc): the model's CAPABILITY surface — what a producer
+    bound to this model can do. Stored only when provided; when absent,
+    :func:`modulatio.roster._caps_from_model` infers a sensible default from
+    the model id (the setup wizard surfaces this as a confirmable "quick tag").
+    Capabilities live on the MODEL now, not on assigned skills.
     """
     if api_format not in VALID_API_FORMATS:
         raise ValueError(f"api_format must be one of {VALID_API_FORMATS}, got {api_format!r}")
@@ -135,6 +145,12 @@ def add_preset(
     }
     if default_params:
         entry["default_params"] = default_params
+    if model_tier:
+        entry["model_tier"] = model_tier
+    if cost_class:
+        entry["cost_class"] = cost_class
+    if capability_tags:
+        entry["capability_tags"] = [t for t in capability_tags if t]
     presets[key] = entry
     save_presets(presets)
     return entry

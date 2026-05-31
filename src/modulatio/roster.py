@@ -165,15 +165,25 @@ def _parse_file(path: Path) -> Agent:
     else:
         context_budget = None
 
+    model = meta.get("model") or None
+    model_tier = meta.get("model_tier") or None
+    cost_class = meta.get("cost_class") or None
+    capability_tags = _parse_csv(meta.get("capability_tags", ""))
+    # Brick 2: a producer that declares NO capabilities of its own draws them
+    # from its MODEL (the new capability source). An agent carrying literal
+    # caps — old rosters, skill-derived seeds — keeps them untouched.
+    if model and not capability_tags and not model_tier and not cost_class:
+        capability_tags, model_tier, cost_class = _caps_from_model(model)
+
     return Agent(
         id=meta.get("id") or path.stem,
         name=meta.get("name") or path.stem,
         identity=body.rstrip(),
         skills=_parse_csv(meta.get("skills", "")),
-        model=meta.get("model") or None,
-        model_tier=meta.get("model_tier") or None,
-        cost_class=meta.get("cost_class") or None,
-        capability_tags=_parse_csv(meta.get("capability_tags", "")),
+        model=model,
+        model_tier=model_tier,
+        cost_class=cost_class,
+        capability_tags=capability_tags,
         capacity_cap=_parse_int(meta.get("capacity_cap", ""), 1),
         template_origin=meta.get("template_origin") or None,
         freshness_class=meta.get("freshness_class") or None,
@@ -279,6 +289,33 @@ def _derive_agent_caps(skill_names: list[str], project_code: str) -> tuple[list[
                 max_cost_rank = rank
                 max_cost = s.cost_class
     return seen_caps, primary_tier, max_cost
+
+
+def _caps_from_model(model_key: str | None) -> tuple[list[str], str | None, str | None]:
+    """Compute ``(capability_tags, model_tier, cost_class)`` for a producer
+    bound to ``model_key`` — the MODEL is the capability source once producers
+    stop holding skills (Brick 2 of the skill-library arc).
+
+    An explicit per-model tag stored on the preset (wizard-set) always wins;
+    otherwise a sensible default is inferred from the model id via
+    :mod:`modulatio.model_capabilities`. Returns empties when the model is
+    unknown and uninferrable — the caller keeps whatever the agent already had.
+    """
+    if not model_key:
+        return [], None, None
+    from modulatio import model_capabilities, model_presets
+
+    preset = model_presets.get_preset(model_key)
+    if not preset:
+        return [], None, None
+    explicit_caps = preset.get("capability_tags")
+    if isinstance(explicit_caps, str):
+        explicit_caps = _parse_csv(explicit_caps)
+    inf_tier, inf_cost, inf_caps = model_capabilities.infer_for_preset(preset)
+    caps = list(explicit_caps) if explicit_caps else list(inf_caps)
+    tier = preset.get("model_tier") or inf_tier
+    cost = preset.get("cost_class") or inf_cost
+    return caps, tier, cost
 
 
 # Ordered roster template. Each entry declares the agent id, the skills
