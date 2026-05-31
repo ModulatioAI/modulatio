@@ -103,6 +103,12 @@ class Skill:
     capability_tags: tuple[str, ...] = ()
     required_capabilities: tuple[str, ...] = ()
     executor: str = "llm"
+    #: Skill version (Brick 4 self-codification). ``None`` for the bundled
+    #: seeds; an autonomously-codified skill starts at ``"1"`` and an
+    #: improvement bumps it (``"2"``, ``"3"`` …). The bumped file overwrites
+    #: in place — the FULL history is kept by git (the skill library is a
+    #: git repo), so nothing earned at a real token cost is ever lost.
+    version: str | None = None
     freshness_class: str | None = None
     last_verified_at: str | None = None
     #: Sandbox: skill explicitly opts in to network access for its
@@ -161,6 +167,7 @@ def _parse_file(path: Path) -> Skill:
         capability_tags=_parse_csv(meta.get("capability_tags", "")),
         required_capabilities=_parse_csv(meta.get("required_capabilities", "")),
         executor=meta.get("executor") or "llm",
+        version=meta.get("version") or None,
         freshness_class=meta.get("freshness_class") or None,
         last_verified_at=meta.get("last_verified_at") or None,
         needs_network=str(meta.get("needs_network", "")).strip().lower() in ("true", "yes", "1"),
@@ -246,6 +253,8 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
         f"required_capabilities: {', '.join(skill.required_capabilities)}",
         f"executor: {skill.executor}",
     ]
+    if skill.version is not None:
+        fm_lines.append(f"version: {skill.version}")
     if skill.freshness_class is not None:
         fm_lines.append(f"freshness_class: {skill.freshness_class}")
     if skill.last_verified_at is not None:
@@ -272,6 +281,7 @@ def create_skill(
     capability_tags: tuple[str, ...] = (),
     required_capabilities: tuple[str, ...] = (),
     executor: str = "llm",
+    version: str | None = None,
     project_code: str | None = None,
 ) -> Skill:
     """Create a new skill file, shared or project-local.
@@ -307,6 +317,7 @@ def create_skill(
         capability_tags=capability_tags,
         required_capabilities=required_capabilities,
         executor=executor,
+        version=version,
     )
     save(skill, project_code)
     return skill

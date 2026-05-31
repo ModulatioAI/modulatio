@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
-from modulatio import comptroller, dispatch, qc_history, qc_notes, research, roster, skills, standards, standards_proposals, store, tools
+from modulatio import comptroller, dispatch, lessons, qc_history, qc_notes, research, roster, skill_git, skills, standards, standards_proposals, store, tools
 from modulatio import context_budget as _ctx_budget_module
 from modulatio import dispatch_breaker as _dispatch_breaker_module
 from modulatio import tool_summarization as _tool_sum_module
@@ -6210,6 +6210,193 @@ class Orchestrator:
         )
 
     # ── Capability tickets (slice #6d) ──────────────────────────────────
+    # ── Brick 4: autonomous self-codification (the Alfred loop) ──────────
+    @staticmethod
+    def _codification_enabled() -> bool:
+        """Default ON — the compounding learning loop (lessons → skills) is the
+        point. Kill-switch: ``MODULATIO_SKILL_CODIFICATION=0``."""
+        return os.environ.get("MODULATIO_SKILL_CODIFICATION", "1") != "0"
+
+    def _existing_skill_index(self) -> tuple[str, list[str]]:
+        """(formatted ``name — description`` index, names) of skills visible to
+        this project — the candidates the Leader may IMPROVE instead of
+        duplicating."""
+        names = skills.list_skills(project_code=self.project.code)
+        lines: list[str] = []
+        for nm in names:
+            try:
+                s = skills.load_with_metadata(nm, project_code=self.project.code)
+                lines.append(f"- {nm}: {(s.description or '').strip()[:100]}")
+            except Exception:  # noqa: BLE001
+                lines.append(f"- {nm}")
+        return ("\n".join(lines) or "(none)", names)
+
+    def _post_run_codification(self, summary: RunSummary) -> None:
+        """End-of-run hook (the Alfred loop). The LEADER reviews recent QC
+        failures and JUDGES whether any problem recurred enough to codify into a
+        skill — recurrence is judgment, not a mechanical count (a live trigger
+        pass proved a QC-emitted tag is unreliable; a prior system and our own memory-v3
+        promotion both leave the call to the model that *reads* the log). The
+        Leader's judgment is authoritative — NO QC re-check: QC already voted via
+        the repeated fail-verdicts the lesson is built from, and re-verifying a
+        skill drafted by the smartest seat with a weaker QC would invert the
+        capability floor. The engine binds the invariants (version, git-commit,
+        consume-the-evidence; revertible). BEST-EFFORT — never breaks a run.
+        Kill-switch: ``MODULATIO_SKILL_CODIFICATION=0``.
+
+        The swallow paths emit a ``skill_codification_skipped:<reason>``
+        breadcrumb before returning (Nemo's Brick-4 hull review): the silence is
+        intentional — never raise — but a swallowed error (bad key, network,
+        config drift) must be distinguishable from "nothing recurred," or the
+        Alfred loop dies silently across runs and nobody knows."""
+        if not self._codification_enabled():
+            return
+        try:
+            fails = lessons.unconsumed_fails(self.project.code)
+        except Exception:  # noqa: BLE001
+            self._codification_skipped("feed_load_failed")
+            return
+        # Cheap pre-gate: a pattern needs ~3 instances; fewer total fails can't
+        # recur, so don't spend an LLM call judging a clean/light run. (Not a
+        # failure — no breadcrumb; a clean run legitimately codifies nothing.)
+        if len(fails) < 3:
+            return
+        feed = "\n".join(
+            f"- [{fv.entry_id}] ({fv.domain}) — {fv.rationale[:280]}" for fv in fails
+        )
+        existing_index, existing_names = self._existing_skill_index()
+        prompt = self._prompt("skill-create", _SKILL_CREATE_PROMPT).format(
+            fail_verdicts=feed, existing_skills=existing_index,
+        )
+        try:
+            decision = _extract_json(self._run_agent_call(None, "leader", prompt))
+        except Exception:  # noqa: BLE001
+            self._codification_skipped("leader_call_failed")
+            return
+        codifications = (
+            decision.get("codifications") if isinstance(decision, dict) else None
+        )
+        if not isinstance(codifications, list):
+            self._codification_skipped("leader_output_unparsable")
+            return
+        for spec in codifications:
+            if isinstance(spec, dict):
+                try:
+                    self._persist_codification(spec, existing_names, summary)
+                except Exception:  # noqa: BLE001 — one can't stop the rest
+                    self._codification_skipped("persist_failed")
+                    continue
+
+    def _codification_skipped(self, reason: str) -> None:
+        """Raise-safe observability breadcrumb for a swallowed codification
+        path. The hook is best-effort and its call site is unwrapped, so this
+        must never propagate — it wraps the emit in its own guard. Grep
+        ``skill_codification_skipped`` to diagnose a silent Alfred-loop stall."""
+        try:
+            self._emit_activity(
+                role="orchestrator", agent_id="orchestrator",
+                phase=f"skill_codification_skipped:{reason}",
+            )
+        except Exception:  # noqa: BLE001 — observability must never break a run
+            pass
+
+    @staticmethod
+    def _slug_skill(raw: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "-", (raw or "").lower()).strip("-")[:60]
+
+    def _persist_codification(
+        self, spec: dict, existing_names: list[str], summary: RunSummary
+    ) -> None:
+        """Persist ONE Leader-proposed codification (versioned, git-committed)
+        and consume its evidence so it isn't re-codified. NO QC verification:
+        the Leader is the smartest seat and its judgment to create/improve a
+        skill is authoritative — the same way a QC-authored fix isn't re-checked
+        by the Leader. The engine binds the safety net (every codification is
+        git-versioned and revertible; the runtime QC still reviews the ARTIFACTS
+        the skill influences). Only cheap mechanical guards apply here."""
+        action = str(spec.get("action", "")).strip().lower()
+        name = self._slug_skill(str(spec.get("name", "")))
+        guidance = str(spec.get("guidance", "") or "").strip()
+        description = str(spec.get("description", "") or "").strip()
+        problem = str(spec.get("recurring_problem", "") or "").strip()
+        raw_ids = spec.get("evidence_ids")
+        evidence_ids = (
+            [str(e).strip() for e in raw_ids if str(e).strip()]
+            if isinstance(raw_ids, list) else []
+        )
+        raw_tags = spec.get("capability_tags")
+        tags = (
+            tuple(str(t).strip() for t in raw_tags if str(t).strip())
+            if isinstance(raw_tags, list) else ()
+        )
+        if not name or not guidance:
+            return
+        if action == "create" and name in existing_names:
+            action = "improve"
+        if action not in ("create", "improve"):
+            return
+
+        # Persist directly — the Leader's judgment is authoritative; no QC
+        # re-check. QC already expressed the need: this lesson is distilled from
+        # QC's OWN repeated fail-verdicts, so re-verifying the skill would just
+        # double-count the same QC. The engine binds the safety net (versioned +
+        # git-committed = revertible; runtime QC still reviews the artifacts the
+        # skill influences).
+        if action == "create":
+            new_skill = skills.create_skill(
+                name=name,
+                description=description or f"Codified from a recurring problem: {problem}.",
+                prompt_template=guidance, capability_tags=tags, version="1",
+                project_code=None,
+            )
+        else:  # improve — append the learned guidance, bump the version.
+            base = skills.load_with_metadata(name, project_code=self.project.code)
+            if not base.name:
+                base = skills.load_with_metadata(name)
+            try:
+                next_v = str(int(base.version) + 1) if base.version else "2"
+            except ValueError:
+                next_v = "2"
+            improved_body = (
+                base.prompt_template.rstrip()
+                + f"\n\n## Learned — {problem or 'recurring defect'}\n\n{guidance}\n"
+            )
+            new_skill = skills.Skill(
+                name=base.name or name, description=base.description or description,
+                prompt_template=improved_body, tool_loadout=base.tool_loadout,
+                standards_domain=base.standards_domain, model_tier=base.model_tier,
+                cost_class=base.cost_class,
+                capability_tags=tuple(dict.fromkeys((*base.capability_tags, *tags))),
+                required_capabilities=base.required_capabilities,
+                executor=base.executor, version=next_v,
+            )
+            skills.save(new_skill, project_code=None)
+
+        # git-commit (history = "never lose what was earned"), consume, report.
+        skill_path = skills._SKILLS_ROOT / f"{new_skill.name}.md"
+        skill_git.ensure_repo(skills._SKILLS_ROOT)
+        skill_git.commit_paths(
+            skills._SKILLS_ROOT, [skill_path],
+            f"codify: {new_skill.name} v{new_skill.version or '1'} ({action}) "
+            f"— {problem[:60]}",
+        )
+        lessons.mark_consumed(self.project.code, evidence_ids)
+        summary.recommendations.append({
+            "goal_id": "",
+            "concern": (
+                f"Autonomously codified skill '{new_skill.name}' "
+                f"(v{new_skill.version}, {action}) from a recurring problem: {problem}."
+            ),
+            "suggestion": (
+                "The team learned this on its own — it's in your git-versioned "
+                "skill library. Review or revert it if it overreaches."
+            ),
+        })
+        self._emit_activity(
+            role="leader", phase="skill_codified", agent_id="leader",
+            task_id=new_skill.name,
+        )
+
     def _record_dispatch_advisories(
         self,
         goal: "Goal",
@@ -7139,6 +7326,9 @@ class Orchestrator:
             "metrics": len(summary.drafts),
             "qc_assertions": len(summary.tasks),
         }
+        # Brick 4: autonomous self-codification — recurring lessons become
+        # skills. Best-effort, never blocks; runs once per kickoff at the end.
+        self._post_run_codification(summary)
         self._emit_activity(
             role="orchestrator", phase="kickoff_ended", agent_id="orchestrator",
         )
@@ -8074,4 +8264,53 @@ mis-scoped. Respond with a fenced ```json ... ``` block:
 
 Omit a task to keep it unchanged. Only include tasks you actually want to
 change.
+"""
+
+
+# Brick 4 — autonomous self-codification (the Alfred loop). Fallback for the
+# `skill-create` seed skill (the Leader's drafting template — it judges
+# recurrence over qc-history and drafts the codification; no QC re-checks it).
+# Mirror the seed file at _seed_skills/skill-create.md.
+_SKILL_CREATE_PROMPT = """\
+You are reviewing the team's recent QC failures to see whether the team should
+LEARN something durable. When the SAME kind of problem keeps coming back, the
+fix should stop being re-derived every run at a real token cost — codify it into
+a skill so producers stop repeating it.
+
+Recent QC FAIL verdicts (each is `[id] (domain) — what QC found wrong`):
+
+{fail_verdicts}
+
+Skills that already exist (name — description):
+
+{existing_skills}
+
+Look across the failures. Codify a problem ONLY when it genuinely RECURRED — you
+see roughly 3 or more instances of the SAME kind of defect, not a one-off. A
+single mistake is not a lesson; a pattern is. If nothing recurred enough, return
+an empty list — that is the correct answer most of the time.
+
+For each recurring problem: IMPROVE an existing skill when one already owns that
+area of work (prefer this, don't mint a near-duplicate); CREATE a new
+single-purpose skill only when none fits. Write the guidance as a GENERAL RULE a
+producer follows to AVOID the defect — imperative, concrete, short,
+artifact-agnostic within its domain. Cite the verdict ids that show the pattern.
+
+Respond ONLY with a JSON object fenced in ```json ... ```:
+
+    {{
+      "codifications": [
+        {{
+          "action": "improve" | "create",
+          "name": "<kebab skill name — the EXISTING skill to improve, or the NEW skill>",
+          "description": "<one-line — required for create>",
+          "capability_tags": ["<general capability tags>"],
+          "recurring_problem": "<one line: the pattern you saw repeat>",
+          "evidence_ids": ["<verdict ids that show the recurrence>"],
+          "guidance": "<the durable rule(s) — whole body for create, guidance to ADD for improve>"
+        }}
+      ]
+    }}
+
+Return {{"codifications": []}} when nothing recurred enough to codify.
 """
