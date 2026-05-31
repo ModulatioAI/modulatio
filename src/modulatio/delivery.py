@@ -130,6 +130,7 @@ def deliver_product(
     fmt: ExportFormat = DEFAULT_DELIVERY_FORMAT,
     fallback_name: str | None = None,
     pinned_names: "set[str] | None" = None,
+    verbatim: bool = False,
 ) -> DeliveredProduct:
     """Deliver one finished product under the project's delivery dir.
 
@@ -138,6 +139,10 @@ def deliver_product(
     :data:`_CODE_SUFFIXES`) are copied **verbatim**, keeping their original
     filename + extension, so a game ships as runnable ``game.py`` — not a Word
     doc wrapping the source.
+
+    ``verbatim`` forces the copy-as-is path even for non-code (e.g. a
+    ``README.md`` companion in a CODE BUNDLE keeps its name + sits beside the
+    code, instead of becoming a stray ``Some Title.docx``).
 
     ``pinned_names`` (iteration mode): when a code deliverable's filename is in
     this set it is an IMPROVED pinned file, so it REPLACES its prior same-named
@@ -152,8 +157,10 @@ def deliver_product(
         return DeliveredProduct(
             task_id, source_md, dest_dir, source_md.stem, f"mkdir failed: {exc}"
         )
-    # CODE: ship runnable source verbatim, original name + extension preserved.
-    if _is_code_source(source_md):
+    # VERBATIM: ship the file as-is, original name + extension preserved — code
+    # always, plus markdown companions in a code bundle (keep README.md beside
+    # game.py rather than rendering it to a stray .docx).
+    if _is_code_source(source_md) or verbatim:
         name = source_md.stem
         dest = dest_dir / source_md.name
         # Iteration: an improved PINNED file replaces its prior same-named copy
@@ -201,16 +208,23 @@ def deliver_finished_products(
     produced an artifact). ``pinned_names`` is threaded to
     :func:`deliver_product` so improved iteration files replace their prior
     copy. Returns one :class:`DeliveredProduct` per delivered file, in input
-    order."""
+    order.
+
+    CODE BUNDLE: if any deliverable is code, markdown/prose companions
+    (``README.md`` etc.) ship VERBATIM beside the code — a coherent runnable
+    folder — instead of being rendered to a stray ``.docx``. A pure-prose run
+    (no code) is unaffected: its deliverables still render to ``fmt``."""
+    present = [(t, Path(s), f) for t, s, f in deliverables if Path(s).exists()]
+    bundle_has_code = any(_is_code_source(s) for _, s, _ in present)
     out: list[DeliveredProduct] = []
-    for task_id, src, fallback in deliverables:
-        src = Path(src)
-        if not src.exists():
-            continue
+    for task_id, src, fallback in present:
+        # markdown companion in a code bundle → keep it verbatim (README.md)
+        verbatim = bundle_has_code and not _is_code_source(src)
         out.append(
             deliver_product(
                 src, project_code=project_code, task_id=task_id,
                 fmt=fmt, fallback_name=fallback, pinned_names=pinned_names,
+                verbatim=verbatim,
             )
         )
     return out

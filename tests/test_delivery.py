@@ -341,3 +341,37 @@ def test_non_pinned_code_still_disambiguates(tmp_path, monkeypatch):
     dp = delivery.deliver_product(art / "util.py", project_code="MOD", task_id="T-9")
     assert dp.dest.name == "util (T-9).py"
     assert (tmp_path / "MOD" / "util.py").read_text() == "old\n"  # preserved
+
+
+# ── README polish: markdown companions ship beside code in a bundle ──
+
+def test_code_bundle_markdown_companion_ships_verbatim(monkeypatch, tmp_path):
+    """game.py + README.md → README.md stays README.md beside the code, NOT a
+    rendered .docx. export_artifact must not run for either."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+
+    def _poison(*a, **k):  # pragma: no cover
+        raise AssertionError("export_artifact called in a code bundle")
+    monkeypatch.setattr(delivery, "export_artifact", _poison)
+
+    art = tmp_path / "art"; art.mkdir()
+    (art / "game.py").write_text("import pygame\n")
+    (art / "README.md").write_text("# Hollow Knight Demo\n\nRun: python game.py\n")
+    out = delivery.deliver_finished_products(
+        [("T-1", art / "game.py", None), ("T-2", art / "README.md", "readme")],
+        project_code="MOD",
+    )
+    names = sorted(d.dest.name for d in out)
+    assert names == ["README.md", "game.py"]  # both verbatim, coherent folder
+    assert (tmp_path / "MOD" / "README.md").read_text().startswith("# Hollow Knight")
+
+
+def test_pure_prose_run_still_renders_docx(monkeypatch, tmp_path, _mock_export):
+    """No code in the batch → markdown deliverables still render to .docx."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    art = tmp_path / "art"; art.mkdir()
+    (art / "paper.md").write_text("# Annual Report\n\nbody")
+    out = delivery.deliver_finished_products(
+        [("T-1", art / "paper.md", None)], project_code="MOD",
+    )
+    assert out[0].dest.name == "Annual Report.docx"  # unchanged behavior
