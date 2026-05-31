@@ -1188,6 +1188,47 @@ def _parse_diff_blocks(response: str) -> dict[str, str]:
     return blocks
 
 
+#: Increment 3 (2026-05-30): SEARCH/REPLACE patch blocks for in-place iteration.
+#: ``<<<<<<< SEARCH`` / ``=======`` / ``>>>>>>> REPLACE`` (aider-style). The
+#: SEARCH text must match the current file EXACTLY; the engine replaces it and
+#: keeps every other byte. That is what a prose "preserve everything" contract
+#: cannot guarantee — a regen drops untouched code; a patch structurally can't.
+_SEARCH_REPLACE_RE = re.compile(
+    r"<{5,}[ \t]*SEARCH[ \t]*\r?\n(.*?)\r?\n={5,}[ \t]*\r?\n(.*?)\r?\n>{5,}[ \t]*REPLACE",
+    re.DOTALL,
+)
+
+
+def _parse_search_replace_blocks(response: "str | None") -> "list[tuple[str, str]]":
+    """Pull ``(search, replace)`` pairs out of a producer patch response.
+    Empty list when none are present — the caller treats that as "producer
+    returned a full file instead" and falls back to the edit path."""
+    if not response:
+        return []
+    return [(m.group(1), m.group(2)) for m in _SEARCH_REPLACE_RE.finditer(response)]
+
+
+def _apply_search_replace(
+    content: str, blocks: "list[tuple[str, str]]",
+) -> "tuple[str, int, list[str]]":
+    """Apply SEARCH/REPLACE blocks to ``content``, in order. Each SEARCH must
+    occur in the current text; its FIRST occurrence is replaced. Everything not
+    covered by a block is preserved byte-for-byte — the whole point of patch
+    mode. Returns ``(new_content, applied_count, failed_searches)``; a SEARCH
+    that doesn't match is skipped (recorded) rather than corrupting the file."""
+    new = content
+    applied = 0
+    failures: list[str] = []
+    for search, replace in blocks:
+        if search and search in new:
+            new = new.replace(search, replace, 1)
+            applied += 1
+        else:
+            snippet = (search.strip().splitlines()[0] if search.strip() else "")[:60]
+            failures.append(snippet or "(empty SEARCH)")
+    return new, applied, failures
+
+
 def _draft_is_multifile(task: "Task", draft_path: "Path") -> bool:
     """True when the task's artifact should be patched as MULTI-FILE
     (``diff`` mode) rather than a single in-place ``edit``.
@@ -2823,6 +2864,30 @@ class Orchestrator:
         if specialist_role_for_inbox not in self.runners:
             specialist_role_for_inbox = self.default_producer_role
 
+        # Increment 3 (2026-05-30): iteration PATCH mode. A generate-pass task
+        # that improves a PINNED file emits surgical search/replace blocks; the
+        # engine applies them and keeps every untouched line byte-identical, so
+        # a cheap producer can't silently drop working code (the live regression
+        # where 'raise the jump' rewrote game.py and lost the A/D, W, X + mouse
+        # bindings). QC-reject redos keep the mode _next_producer_mode picked.
+        if (
+            task.producer_mode == "generate"
+            and self._is_iteration_target(task)
+            and path.exists()
+        ):
+            return self._producer_patch(
+                task, path,
+                domain_standards=domain_standards,
+                research_context=research_context,
+                team_memory_context=team_memory_context,
+                team_canvas_block=team_canvas_block,
+                design_intent_block=design_intent_block,
+                team_state_block=team_state_block,
+                repo_map_block=repo_map_block,
+                agent_identity=agent_identity,
+                corrective_notes=corrective_notes,
+            )
+
         # Slice #82 PR-C: diff-mode producer. Single LLM call
         # emits ``=== FILE: <path> ===`` blocks for N files; the
         # multi-file writer handles the rest. Returns the same
@@ -2990,6 +3055,122 @@ class Orchestrator:
         )
         if abort is not None:
             raise abort
+
+    # ── Producer: patch mode (increment 3 — in-place iteration) ────
+    def _producer_patch(
+        self,
+        task: Task,
+        path: Path,
+        *,
+        domain_standards: Any,
+        research_context: str,
+        team_memory_context: Any,
+        team_canvas_block: str,
+        design_intent_block: str,
+        team_state_block: str,
+        repo_map_block: str,
+        agent_identity: str,
+        corrective_notes: str = "",
+    ) -> tuple[Path, str, int]:
+        """Improve a PINNED file with SURGICAL search/replace edits.
+
+        The producer is shown the current file and asked for
+        ``<<<<<<< SEARCH`` / ``>>>>>>> REPLACE`` blocks. The engine applies them
+        and keeps every untouched byte — so a regen can't silently drop working
+        code (the live regression that lost the A/D · W · X · mouse bindings).
+
+        Fallbacks keep the run moving:
+          - producer returns a FULL FILE (no blocks) → write it (the prior
+            edit-mode behavior; prose-preserve);
+          - blocks present but NONE match the current text (producer
+            hallucinated the existing lines) → leave the file unchanged and let
+            QC reject, rather than writing marker soup.
+
+        Returns ``(path, checksum, token_count)`` like the other producers."""
+        specialist_role = task.assignee_specialist or self.default_producer_role
+        if specialist_role not in self.runners:
+            specialist_role = self.default_producer_role
+        current = path.read_text()
+        prompt = self._prompt("drafter-patch", _DRAFTER_PATCH_PROMPT).format(
+            task_id=task.id,
+            artifact_kind=task.artifact_kind,
+            description=task.description,
+            agent_identity=_format_agent_identity(agent_identity),
+            design_intent=design_intent_block,
+            team_state=team_state_block,
+            standards=_format_standards_block(domain_standards),
+            research_context=_format_research_context(research_context),
+            team_memory_context=_format_team_memory_block(team_memory_context),
+            team_canvas=_format_team_canvas(team_canvas_block),
+            repo_map=repo_map_block,
+            existing_draft=current,
+            corrective_notes=corrective_notes.strip()
+            or "(no specific notes — apply the task's requested changes)",
+            inbox_notes=self._inbox_block_for(
+                specialist_role, target_agent_id=task.assigned_agent_id,
+            ),
+        )
+        raw_response = self._run_agent_call(
+            task.assigned_agent_id, specialist_role, prompt
+        )
+        raw_response = self._extract_producer_proposals(
+            raw_response,
+            source_role=specialist_role,
+            source_agent_id=task.assigned_agent_id,
+            linked_task_id=task.id,
+            linked_goal_id=task.goal_id,
+        )
+        from modulatio import team_state as _team_state
+        body_text, summary_claim = _team_state.parse_summary_for_state_doc(
+            raw_response
+        )
+        if summary_claim is not None:
+            task.summary_for_state_doc = summary_claim
+        cleaned = _strip_thinking(body_text)
+        blocks = _parse_search_replace_blocks(cleaned)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if blocks:
+            new_content, applied, failures = _apply_search_replace(current, blocks)
+            if applied > 0:
+                path.write_text(new_content)
+                self._record_artifact_write(path)
+                if failures:
+                    task.transitions.append(StateTransition(
+                        from_state=task.status.value,
+                        to_state=task.status.value,
+                        actor="producer-patch",
+                        rationale=(
+                            f"patch: applied {applied} block(s); "
+                            f"{len(failures)} SEARCH had no match, skipped: "
+                            + "; ".join(failures[:3])
+                        ),
+                    ))
+                checksum = (
+                    f"sha256:{hashlib.sha256(new_content.encode()).hexdigest()}"
+                )
+                return path, checksum, len(new_content.split())
+            # Blocks present but none matched — don't write marker soup; keep
+            # the file as-is and let QC reject so the redo router recovers.
+            task.transitions.append(StateTransition(
+                from_state=task.status.value,
+                to_state=task.status.value,
+                actor="producer-patch",
+                rationale=(
+                    "patch: no SEARCH block matched the current file; left "
+                    "unchanged for QC to rule on (producer hallucinated lines)"
+                ),
+            ))
+            checksum = f"sha256:{hashlib.sha256(current.encode()).hexdigest()}"
+            return path, checksum, len(current.split())
+
+        # No SEARCH/REPLACE blocks → producer returned a full file. Fall back to
+        # edit-mode behavior: write the cleaned body as the new artifact.
+        path.write_text(cleaned)
+        self._record_artifact_write(path)
+        self._maybe_trip_breaker(specialist_role, raw_response, cleaned)
+        checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
+        return path, checksum, len(cleaned.split())
 
     # ── Producer: diff mode (Slice #82, PR-C) ──────────────────────
     def _producer_diff(
@@ -6421,6 +6602,14 @@ class Orchestrator:
             "speaks for itself.\n"
         )
 
+    def _is_iteration_target(self, task: Task) -> bool:
+        """True iff this task improves a PINNED file (its output_path is one of
+        the --attach'd files). Such a task's first producer pass routes to
+        PATCH mode (surgical search/replace) so untouched code can't be dropped
+        by a regen — increment 3, the engine half of 'preserve everything'."""
+        op = (getattr(task, "output_path", None) or "").strip()
+        return bool(op) and op in self._pinned_files
+
     def _kickoff_inner(
         self,
         objective: str,
@@ -7190,6 +7379,75 @@ summary_for_state_doc, also stripped before save:
        "priority": "P1", "reason": "constraint_discovered",
        "content": "<=280 chars one-liner>"}}]
     ```
+"""
+
+
+_DRAFTER_PATCH_PROMPT = """\
+Task: {task_id}
+Artifact kind: {artifact_kind}
+Description: {description}
+
+{agent_identity}
+
+{design_intent}
+
+{team_state}
+
+{standards}
+
+{research_context}
+
+{team_memory_context}
+
+{inbox_notes}
+
+{team_canvas}
+
+{repo_map}
+
+You are in PATCH mode. You are IMPROVING an existing file in place — NOT
+writing a new one. Make ONLY the change the task asks for and leave every
+other line exactly as it is.
+
+CURRENT FILE (between the markers — this is the live file you are editing):
+
+>>>EXISTING-DRAFT-START<<<
+{existing_draft}
+>>>EXISTING-DRAFT-END<<<
+
+{corrective_notes}
+
+Respond with one or more SEARCH/REPLACE blocks, and NOTHING else before them.
+Each block names an EXACT span of the current file to replace:
+
+<<<<<<< SEARCH
+<exact text copied verbatim from the current file — enough lines to be unique>
+=======
+<the replacement text>
+>>>>>>> REPLACE
+
+Rules — these matter:
+- The SEARCH text must be copied EXACTLY from the current file above
+  (same indentation, same characters). If it isn't an exact match the edit
+  is dropped. Include a few surrounding lines so the match is unique.
+- Emit a separate block for each distinct change. Keep each block small.
+- To DELETE code, leave the REPLACE section empty. To ADD code, SEARCH an
+  existing anchor line and REPLACE it with itself plus the new lines.
+- Do NOT reproduce the whole file. Do NOT touch code the task didn't ask you
+  to change — preserving the rest is the engine's job, not yours, as long as
+  you only emit blocks for what changes. PRESERVE all existing behavior and
+  controls that the task did not ask you to change.
+
+If — and only if — the change is so pervasive that a patch is impractical,
+you may instead output the COMPLETE updated file verbatim (no SEARCH/REPLACE
+markers). Prefer patch blocks.
+
+AFTER the blocks (or full file), add a single trailing block:
+
+    ## summary_for_state_doc
+    <one or two sentences naming the edit you applied>
+
+Read by team-state renderer ONLY. QC does NOT see it.
 """
 
 
