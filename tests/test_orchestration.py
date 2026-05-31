@@ -973,8 +973,8 @@ def test_orchestrator_opens_critical_ticket_on_roster_gap(
 # ── Slice #7e: Leader auto-redo with daily retry budget ──────────────────
 
 def test_goal_default_retry_budget_fields():
-    """Goal gains retry_count=0, max_retries=7, retry_count_date=None
-    by default (Alfred-loop budget raised 3→7, Clif 2026-05-29)."""
+    """Goal gains retry_count=0, max_retries=4, retry_count_date=None
+    by default (Alfred-loop budget 3→7→4; absolute per-run cap)."""
     from modulatio.types import Goal
     from uuid import uuid4
 
@@ -985,7 +985,7 @@ def test_goal_default_retry_budget_fields():
         success_criteria="anything",
     )
     assert g.retry_count == 0
-    assert g.max_retries == 7
+    assert g.max_retries == 4
     assert g.retry_count_date is None
 
 
@@ -1080,7 +1080,7 @@ def test_leader_disappointed_exhaust_budget_ships_with_recommendation_no_ticket(
     goals = store.list_goals(PROJECT_CODE)
     # Ships rather than blocking — the human reads the caveat, isn't gated.
     assert goals[0].status == GoalStatus.COMPLETED
-    assert goals[0].retry_count == 7  # full daily budget consumed first
+    assert goals[0].retry_count == 4  # full per-run budget consumed first
 
     # No BLOCKER ticket punted to the human.
     blockers = [t for t in store.list_tickets(PROJECT_CODE)
@@ -2003,7 +2003,7 @@ def test_leader_verify_disappointed_auto_redo_then_ships(project: Project):
 
     goals = store.list_goals(PROJECT_CODE)
     assert goals[0].status == GoalStatus.COMPLETED  # ships, not blocked
-    assert goals[0].retry_count == 7                # full budget tried first
+    assert goals[0].retry_count == 4                # full budget tried first
     blockers = [t for t in store.list_tickets(PROJECT_CODE)
                 if t.priority is TicketPriority.BLOCKER]
     assert blockers == []

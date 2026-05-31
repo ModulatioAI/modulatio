@@ -5857,7 +5857,15 @@ class Orchestrator:
         # ticket to the human and do NOT block the run — we ship the best
         # result and record the unresolved gap as a recommendation.
         if verdict == "disappointed":
-            self._refresh_daily_budget_if_new_day(goal)
+            # HARD INVARIANT (2026-05-31): the redo loop must terminate — an
+            # infinite redo is not a possibility; the goal always exits to the
+            # Product Quality Report. So within a single run retry_count is an
+            # ABSOLUTE counter (climbs to max_retries, never reset). We do NOT
+            # refresh the daily budget here: that refresh is keyed to the
+            # calendar date, and calling it inside the loop let a run that
+            # crossed midnight reset its own budget and grind on. The daily
+            # refresh is for RESUMING a blocked goal in a LATER run/day, and
+            # lives only at kickoff (_auto_resume_refreshable_goals).
             # fix-is-final + deadlock guard (2026-05-31): if QC already had to
             # AUTHOR the fix this round (the producer exhausted its own budget)
             # AND we've already redone at least once, another pass won't help —
@@ -5961,14 +5969,23 @@ class Orchestrator:
     ) -> None:
         """Consume one retry-budget slot, reset the goal's tasks for
         a fresh execution pass, and invoke ``_leader_verify_goal``
-        again. Bounded by ``Goal.max_retries`` in the current daily
-        window — recursion is guaranteed to terminate.
+        again. Bounded by an ABSOLUTE ``Goal.max_retries`` within the run
+        (retry_count only climbs, never resets mid-run) — recursion is
+        GUARANTEED to terminate; the goal always exits to the Product
+        Quality Report. An infinite redo is not a possibility.
 
         Leader's prior rationale becomes the ``initial_corrective_notes``
         for each task's per-task redo loop, so producers see an
         aggregate-level critique in addition to any per-task QC notes.
         """
         goal.retry_count += 1
+        # Stamp the budget window's date as the budget is consumed. The in-run
+        # loop no longer refreshes on a date roll (the absolute-cap invariant),
+        # but the date is still recorded so the CROSS-RUN resume
+        # (_auto_resume_refreshable_goals, at the next day's kickoff) can tell a
+        # same-day-exhausted goal from one whose daily budget has genuinely
+        # rolled over.
+        goal.retry_count_date = date.today()
         attempt = goal.retry_count
         goal.transitions.append(
             StateTransition(

@@ -240,3 +240,44 @@ def test_leader_verify_deadlock_bows_out_on_qc_authored(project: Project, tmp_pa
         "limit of what it could verify" in r.get("concern", "")
         for r in summary.recommendations
     ), summary.recommendations
+
+
+def test_leader_verify_no_midrun_budget_reset_on_date_roll(project: Project, tmp_path: Path):
+    """HARD INVARIANT (2026-05-31): an infinite redo is not a possibility.
+    A stale retry_count_date (a run that crossed midnight) must NOT reset the
+    in-run budget and hand out fresh redos — the cap is absolute. Goal at
+    max_retries with YESTERDAY's date + disappointed → ships with a reservation,
+    does NOT redo. (Before the fix, the in-run daily refresh reset retry_count
+    to 0 here and the loop ground on.)"""
+    import datetime
+    artifacts_root = tmp_path / PROJECT_CODE.lower() / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    (artifacts_root / "doc.md").write_text("# Doc\n\nbody\n")
+
+    yesterday = datetime.date.today() - datetime.timedelta(days=1)
+    goal = Goal(
+        id="LVA-G-003", project_id=project.id,
+        description="Produce a current summary", success_criteria="current",
+        status=GoalStatus.IN_PROGRESS,
+        retry_count=4, max_retries=4,          # budget already exhausted this run
+        retry_count_date=yesterday,            # …and the clock rolled over
+    )
+    store.save_goal(project.code, goal)
+    task = Task(
+        id="LVA-T-003", project_id=project.id, goal_id=goal.id,
+        description="Draft", output_path="doc.md",
+        status=TaskStatus.COMPLETED, qc_authored_fix=False,  # not a qc deadlock — pure budget cap
+    )
+    store.save_task(project.code, task)
+
+    orch, calls = _disappointed_orch(project)
+    summary = RunSummary(project=project)
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert len(calls) == 1, "stale date must NOT grant a fresh redo (no recursion)"
+    assert goal.status == GoalStatus.COMPLETED
+    assert goal.retry_count == 4, "retry_count must NOT have been reset by the date roll"
+    assert any(
+        "could not fully satisfy" in r.get("concern", "")
+        for r in summary.recommendations
+    ), summary.recommendations
