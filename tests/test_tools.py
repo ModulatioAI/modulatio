@@ -1615,3 +1615,13 @@ def test_is_low_credibility_matches_subdomains():
     assert tools._is_low_credibility("https://www.kennelbiscotti.com/a")
     assert not tools._is_low_credibility("https://www.aljazeera.com/n")
     assert not tools._is_low_credibility("not-a-url")
+
+
+def test_low_credibility_domains_env_extensible(monkeypatch):
+    """Nemo hull note: the seed set will bit-rot, so it's extensible per-
+    deployment via MODULATIO_LOW_CREDIBILITY_DOMAINS (no code change)."""
+    assert not tools._is_low_credibility("https://made-up-farm.example/x")
+    monkeypatch.setenv("MODULATIO_LOW_CREDIBILITY_DOMAINS", "made-up-farm.example, another.test")
+    assert tools._is_low_credibility("https://made-up-farm.example/x")
+    assert tools._is_low_credibility("https://sub.another.test/y")  # subdomain too
+    assert tools._is_low_credibility("https://grokipedia.com/z")    # seed still applies

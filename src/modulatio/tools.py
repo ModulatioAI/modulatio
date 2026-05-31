@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import html
 import ipaddress
+import os
 import re
 import shlex
 import socket
@@ -1049,16 +1050,35 @@ _WEB_SEARCH_RETURN_CHARS = 8_000
 #: plausible-looking "facts" (esp. current events). We FLAG, never drop: the
 #: producer + audit still see what was found and why it's suspect, and the
 #: producer is told (web-search / rigorous-sourcing skills) not to cite a
-#: flagged hit on its own. Extensible — add domains as new slop surfaces.
+#: flagged hit on its own.
+#:
+#: This seed set WILL bit-rot — content farms proliferate faster than code
+#: ships (Nemo hull note, 2026-05-31). It is a COMMUNITY-MAINTAINED SURFACE:
+#: extend it here via PR, OR per-deployment without a code change by setting
+#: ``MODULATIO_LOW_CREDIBILITY_DOMAINS`` (comma-separated) — merged in at call
+#: time by :func:`_low_credibility_domains`.
 _LOW_CREDIBILITY_DOMAINS: frozenset[str] = frozenset({
     "grokipedia.com",
     "kennelbiscotti.com",
 })
 
+_LOW_CREDIBILITY_ENV = "MODULATIO_LOW_CREDIBILITY_DOMAINS"
+
+
+def _low_credibility_domains() -> frozenset[str]:
+    """The active low-credibility domain set: the built-in seed plus any from
+    the ``MODULATIO_LOW_CREDIBILITY_DOMAINS`` env var (comma-separated). Read at
+    call time so a deployment can extend it without a code change."""
+    extra = os.environ.get(_LOW_CREDIBILITY_ENV, "")
+    if not extra.strip():
+        return _LOW_CREDIBILITY_DOMAINS
+    add = {d.strip().lower().lstrip(".") for d in extra.split(",") if d.strip()}
+    return _LOW_CREDIBILITY_DOMAINS | add
+
 
 def _is_low_credibility(href: str) -> bool:
     """True iff ``href``'s host is (or is a subdomain of) a known low-trust
-    content-farm domain."""
+    content-farm domain (seed set + env extension)."""
     try:
         host = (urllib.parse.urlsplit(href).hostname or "").lower()
     except (ValueError, AttributeError):
@@ -1066,7 +1086,7 @@ def _is_low_credibility(href: str) -> bool:
     if not host:
         return False
     return any(
-        host == d or host.endswith("." + d) for d in _LOW_CREDIBILITY_DOMAINS
+        host == d or host.endswith("." + d) for d in _low_credibility_domains()
     )
 
 
