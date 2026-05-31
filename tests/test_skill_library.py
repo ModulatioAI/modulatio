@@ -9,9 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
-from modulatio import skill_library, skills, tools
+from modulatio import skill_library, tools
 
 
 # ── the resident index ────────────────────────────────────────────────────

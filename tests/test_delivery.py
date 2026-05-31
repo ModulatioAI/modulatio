@@ -318,7 +318,8 @@ def test_pinned_code_replaces_prior_copy(tmp_path, monkeypatch):
     """An improved PINNED file overwrites its prior same-named copy (one clean
     game.py, latest version) instead of a disambiguated duplicate."""
     monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
-    art = tmp_path / "art"; art.mkdir()
+    art = tmp_path / "art"
+    art.mkdir()
     (art / "game.py").write_text("JUMP=-20\n")
     (tmp_path / "MOD").mkdir(parents=True)
     (tmp_path / "MOD" / "game.py").write_text("JUMP=-12 old\n")
@@ -334,7 +335,8 @@ def test_non_pinned_code_still_disambiguates(tmp_path, monkeypatch):
     """A non-pinned code collision still disambiguates (don't clobber unrelated
     prior work)."""
     monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
-    art = tmp_path / "art"; art.mkdir()
+    art = tmp_path / "art"
+    art.mkdir()
     (art / "util.py").write_text("new\n")
     (tmp_path / "MOD").mkdir(parents=True)
     (tmp_path / "MOD" / "util.py").write_text("old\n")
@@ -354,7 +356,8 @@ def test_code_bundle_markdown_companion_ships_verbatim(monkeypatch, tmp_path):
         raise AssertionError("export_artifact called in a code bundle")
     monkeypatch.setattr(delivery, "export_artifact", _poison)
 
-    art = tmp_path / "art"; art.mkdir()
+    art = tmp_path / "art"
+    art.mkdir()
     (art / "game.py").write_text("import pygame\n")
     (art / "README.md").write_text("# Hollow Knight Demo\n\nRun: python game.py\n")
     out = delivery.deliver_finished_products(
@@ -369,7 +372,8 @@ def test_code_bundle_markdown_companion_ships_verbatim(monkeypatch, tmp_path):
 def test_pure_prose_run_still_renders_docx(monkeypatch, tmp_path, _mock_export):
     """No code in the batch → markdown deliverables still render to .docx."""
     monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
-    art = tmp_path / "art"; art.mkdir()
+    art = tmp_path / "art"
+    art.mkdir()
     (art / "paper.md").write_text("# Annual Report\n\nbody")
     out = delivery.deliver_finished_products(
         [("T-1", art / "paper.md", None)], project_code="MOD",

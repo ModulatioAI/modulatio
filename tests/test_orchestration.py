@@ -3826,7 +3826,6 @@ def test_orchestrator_skill_floor_shortfall_ships_pqr_reservation(
     Quality Report reservation (advisory), not a CRITICAL ticket. The floor
     lives on the skill, not the task."""
     from modulatio import skills as skills_mod
-    from modulatio.types import TicketPriority
 
     shared_skills = tmp_path / "shared_skills"
     shared_skills.mkdir()
@@ -3900,7 +3899,6 @@ def test_orchestrator_domain_floor_shortfall_ships_pqr_reservation(
     from modulatio import roster as roster_mod
     from modulatio import skills as skills_mod
     from modulatio import standards as standards_mod
-    from modulatio.types import TicketPriority
 
     shared_skills = tmp_path / "shared_skills"
     shared_skills.mkdir()
@@ -3972,7 +3970,6 @@ def test_orchestrator_capability_shortfall_ships_pqr_reservation(
     shortfall ships as a Product Quality Report reservation — never a CRITICAL
     ticket."""
     from modulatio import skills as skills_mod
-    from modulatio.types import TicketPriority
 
     shared_skills = tmp_path / "shared_skills"
     shared_skills.mkdir()
