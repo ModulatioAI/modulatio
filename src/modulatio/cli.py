@@ -278,8 +278,8 @@ def kickoff(
     attach: list[str] = typer.Option(
         None, "--attach", help=(
             "Path to an existing file to IMPROVE (repeatable). Pins it into the "
-            "run workspace and switches on iteration mode: producers edit it in "
-            "place instead of building greenfield (no scatter, small plan)."
+            "run workspace and switches on in-place edit: producers edit the "
+            "file surgically instead of building greenfield (no scatter)."
         ),
     ),
     stub: bool = typer.Option(
@@ -506,7 +506,7 @@ def kickoff(
             raise typer.Exit(1)
     if _atts:
         names = ", ".join(a.name for a in _atts)
-        typer.echo(f"  Iteration mode — improving in place: {names}")
+        typer.echo(f"  In-place edit — improving: {names}")
     summary = orch.kickoff(objective, attachments=_atts or None)
 
     typer.echo("")

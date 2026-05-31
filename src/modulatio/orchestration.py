@@ -6593,8 +6593,8 @@ class Orchestrator:
             "are the starting point, not a reference — read before changing.\n"
             "- EDIT IN PLACE: change the pinned file(s) to satisfy the request "
             "and preserve everything that already works.\n"
-            "- STAY IN THE FILE: do NOT create new modules/files unless a change "
-            "genuinely cannot live in an existing one. The pinned file IS the "
+            "- STAY IN THE FILE: do NOT create new files unless a change "
+            "genuinely cannot live in an existing one. The attached file IS the "
             "deliverable; a change that lands in a new orphan file is a defect.\n"
             "- SMALL, FOCUSED PLAN: map the request to the fewest tasks that "
             "apply the changes. Do NOT add separate 'report', 'assessment', "
@@ -7431,12 +7431,12 @@ Rules — these matter:
   (same indentation, same characters). If it isn't an exact match the edit
   is dropped. Include a few surrounding lines so the match is unique.
 - Emit a separate block for each distinct change. Keep each block small.
-- To DELETE code, leave the REPLACE section empty. To ADD code, SEARCH an
+- To DELETE content, leave the REPLACE section empty. To ADD content, SEARCH an
   existing anchor line and REPLACE it with itself plus the new lines.
-- Do NOT reproduce the whole file. Do NOT touch code the task didn't ask you
+- Do NOT reproduce the whole file. Do NOT touch anything the task didn't ask you
   to change — preserving the rest is the engine's job, not yours, as long as
-  you only emit blocks for what changes. PRESERVE all existing behavior and
-  controls that the task did not ask you to change.
+  you only emit blocks for what changes. PRESERVE everything the task did not
+  ask you to change (whatever the file is — code, prose, config, data).
 
 If — and only if — the change is so pervasive that a patch is impractical,
 you may instead output the COMPLETE updated file verbatim (no SEARCH/REPLACE
