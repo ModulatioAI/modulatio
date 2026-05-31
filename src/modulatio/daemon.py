@@ -336,6 +336,7 @@ def _make_dispatch_callback(*, stub: bool):
             tool_registry = _tools_mod.build_registry(
                 artifacts_root=run_workspace / "artifacts",
                 tool_calls_dir=run_workspace / "tool_calls",
+                project_code=project_code,
             )
             chat_runner = maybe_build_chat_runner(
                 defaults.get("qc") or defaults["specialist"],

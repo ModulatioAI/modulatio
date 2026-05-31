@@ -460,6 +460,7 @@ def kickoff(
         tool_registry = _tools_mod.build_registry(
             artifacts_root=artifacts_root,
             tool_calls_dir=run_workspace / "tool_calls",
+            project_code=code,
         )
         chat_runner = maybe_build_chat_runner(
             qc_model or specialist_model,

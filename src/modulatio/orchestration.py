@@ -1297,6 +1297,11 @@ _VALID_ITERATE_OUTCOMES: frozenset[str] = frozenset(
     {"continue", "revise-task", "drop-task"}
 )
 
+#: Skill-library builtins appended to every producer loadout (Brick 1) so a
+#: producer can discover + check out skills from the shared pool at run-time.
+#: Only those actually present in the active tool registry are wired in.
+_SKILL_LIBRARY_TOOLS: tuple[str, ...] = ("search_skills", "load_skill", "drop_skill")
+
 
 def _extract_iterate_decision(response: str) -> dict | None:
     """Pull the leader-iterate outcome dict from a response.
@@ -3617,6 +3622,15 @@ class Orchestrator:
                 if tool not in seen:
                     seen.add(tool)
                     loadout.append(tool)
+        # Skill-library builtins (Brick 1): every producer can DISCOVER and
+        # CHECK OUT skills from the shared pool at run-time. The candidate set
+        # (required_skills, unioned above) is pre-authorized; anything beyond is
+        # a logged self-heal. Only append the ones actually registered, so a
+        # stub / minimal registry (tests) never trips the loadout fail-fast.
+        for tool in _SKILL_LIBRARY_TOOLS:
+            if tool not in seen and tool in self.tool_registry:
+                seen.add(tool)
+                loadout.append(tool)
         return tuple(loadout)
 
     def _llm_with_tools_execute(
@@ -4371,6 +4385,7 @@ class Orchestrator:
         rebound = tools.build_registry(
             artifacts_root=staging,
             tool_calls_dir=staging / "tool_calls",
+            project_code=self.project.code,
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # staging-bound builtins win over shared ones

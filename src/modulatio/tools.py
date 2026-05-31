@@ -1140,11 +1140,84 @@ def web_search(query: str, max_results: int = _WEB_SEARCH_DEFAULT_RESULTS) -> st
     return "\n".join(lines)[:_WEB_SEARCH_RETURN_CHARS]
 
 
+# ── builtins: skill library (search / load / drop) ──────────────────────────
+# Brick 1 of the skill-library arc. These let a producer DISCOVER a skill it
+# doesn't already hold (search_skills), CHECK IT OUT to read its full guidance
+# (load_skill), and release it (drop_skill) — drawn from the shared pool via
+# modulatio.skill_library. v1 load is body-injection only: the checked-out
+# skill's guidance enters the conversation; its tools are pre-authorized via
+# the task's candidate-set tool union, so the frozen-loadout chat loop is
+# unchanged. Every call is auto-audited through the existing on_tool_call hook.
+
+def make_search_skills(project_code: str | None):
+    def search_skills(query: str, limit: int = 8) -> str:
+        """Search the skill library and return matching skills (name +
+        one-line description + capability tags) — bodies excluded."""
+        from modulatio import skill_library
+        q = (query or "").strip()
+        if not q:
+            return "search_skills requires a non-empty query."
+        try:
+            n = int(limit)
+        except (TypeError, ValueError):
+            n = 8
+        entries = skill_library.search_skills(q, project_code=project_code, limit=n)
+        if not entries:
+            return f"search_skills: no skills match {q!r}."
+        lines = [f"Skills matching {q!r}:", ""]
+        for e in entries:
+            tags = f"  [{', '.join(e.capability_tags)}]" if e.capability_tags else ""
+            lines.append(f"- {e.name}: {e.description}{tags}")
+        lines.append("")
+        lines.append("Use load_skill(name) to check one out and read its full guidance.")
+        return "\n".join(lines)
+
+    return search_skills
+
+
+def make_load_skill(project_code: str | None):
+    def load_skill(name: str) -> str:
+        """Check a skill out of the library and return its full guidance body."""
+        from modulatio import skill_library
+        nm = (name or "").strip()
+        if not nm:
+            return "load_skill requires a skill name."
+        skill = skill_library.checkout(nm, project_code=project_code)
+        if not skill.name:
+            return (
+                f"load_skill: no skill named {nm!r} in the library. "
+                f"Try search_skills(...) to find the right name."
+            )
+        body = skill.prompt_template.strip()
+        if not body:
+            return f"load_skill: skill {nm!r} has no guidance body."
+        return f"## Skill checked out: {skill.name}\n\n{body}"
+
+    return load_skill
+
+
+def make_drop_skill(project_code: str | None):
+    def drop_skill(name: str) -> str:
+        """Release a checked-out skill. v1 is advisory — the existing
+        tool-result summarization reclaims the window; this records the
+        intent (audited) and is reversible via load_skill at any time."""
+        nm = (name or "").strip()
+        if not nm:
+            return "drop_skill requires a skill name."
+        return (
+            f"Dropped skill {nm!r} (guidance released; re-load it any time "
+            f"with load_skill)."
+        )
+
+    return drop_skill
+
+
 # ── registry ────────────────────────────────────────────────────────────────
 
 def build_registry(
     artifacts_root: Path | None = None,
     tool_calls_dir: Path | None = None,
+    project_code: str | None = None,
 ) -> dict[str, Tool]:
     """Return a fresh dict of builtin tools. Callers (CLI / tests)
     merge their own tools in and pass the result into the
@@ -1205,6 +1278,68 @@ def build_registry(
                     },
                 },
                 "required": ["query"],
+            },
+        ),
+        "search_skills": Tool(
+            name="search_skills",
+            description=(
+                "Search the skill library and return matching skills (name, "
+                "one-line description, capability tags) — bodies excluded. Use "
+                "it to DISCOVER a capability you don't already have loaded, "
+                "then load_skill the one you want."
+            ),
+            call=make_search_skills(project_code),
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What capability you're looking for (plain keywords).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max skills to return (default 8).",
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        "load_skill": Tool(
+            name="load_skill",
+            description=(
+                "Check a skill out of the library and read its full guidance. "
+                "Your task's required_skills are pre-authorized — load them as "
+                "needed. If you need something beyond them, search_skills first, "
+                "then load_skill it (the checkout is logged)."
+            ),
+            call=make_load_skill(project_code),
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Exact skill name (from search_skills or your required_skills).",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        "drop_skill": Tool(
+            name="drop_skill",
+            description=(
+                "Release a checked-out skill you no longer need, to reclaim "
+                "context. Reversible — load_skill it again any time."
+            ),
+            call=make_drop_skill(project_code),
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name to drop.",
+                    },
+                },
+                "required": ["name"],
             },
         ),
     }
