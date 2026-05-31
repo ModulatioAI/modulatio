@@ -1,0 +1,344 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
+"""Job Template registry — the Leader's self-authored job-SETUP memory.
+
+A **Job Template (JT)** is the setup-side companion to a skill. Where a skill
+captures *how to do a unit of work*, a JT captures *how to set up a class of
+job*: the questions the Leader should ask the operator before planning, the
+parameters those answers fill, and the shape of the output. It is domain-
+AGNOSTIC — the engine reads nothing about "anthologies" or "briefs"; a JT is
+pure operator-authored structure. The same format expresses a single report
+(``cardinality: one``), N separate pieces over a list param (``per-item``), or
+a literal count (``fixed:N``).
+
+A JT has two states:
+  - **unbound template** — this file: schema + question prose + defaults +
+    output spec. Used to interview an operator (or run from defaults).
+  - **bound instance** — the template plus a concrete answer set (a small JSON
+    blob), runnable headless. That lives as state (a cron job's payload / a
+    kickoff-history record), NOT in this library.
+
+Files live in three locations, searched in order (project > shared > seed),
+exactly like skills — a project-local JT fully replaces the shared one.
+
+This module (Brick B1a) is the artifact format + loaders ONLY. No call sites;
+the library/index, the interview, cron-binding, and self-codification land in
+later bricks.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from modulatio import config
+from modulatio.vault import project_dir
+
+_JT_ROOT = config.get_shared_resources_path() / "job_templates"
+
+#: Package-bundled seed JTs (read-only canonical defaults — e.g. the Leader's
+#: ``jt-create`` drafting template, added in Brick B4). Resolved last, after the
+#: user's shared + project-local copies, mirroring the skill seed dir.
+_SEED_JT_ROOT = Path(__file__).parent / "_seed_job_templates"
+
+_OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class ParamField:
+    """One operator-supplied parameter in a JT's schema.
+
+    ``prompt`` is the conversational/machine duality: an LLM (or human)
+    operator reads ``prompt`` and answers; a code operator fills ``name``
+    directly from a bound-params dict. Same field, two consumers."""
+    name: str
+    type: str = "str"          # str | int | list[str] | enum | bool ... (advisory)
+    required: bool = False
+    default: Any = None
+    prompt: str = ""           # the question to ask an interactive operator
+    enum: tuple[str, ...] = ()  # allowed values when type == "enum"
+
+
+@dataclass(frozen=True)
+class OutputSpec:
+    """The shape of a JT's output — the ONLY thing the engine branches on
+    (purely by cardinality; it never knows the domain)."""
+    cardinality: str = "one"        # "one" | "per-item" | "fixed:N"
+    per: str | None = None          # the param field driving per-item fan-out
+    artifact_kind: str = "document"  # document | code | ...
+    naming: str = ""                 # naming template, e.g. "{competitor} — Brief"
+
+
+@dataclass(frozen=True)
+class JobTemplate:
+    """A loaded Job Template — setup schema + interview prose + output shape.
+
+    Team-AGNOSTIC: ``capability_preferences`` expresses *preferences* only
+    (free tags), never a pinned model — the engine always runs best-available
+    with whatever Team exists (the never-block routing contract). ``version``
+    is the self-codification marker (Brick B4): ``None`` for hand/seed JTs,
+    ``"1"`` for the first autonomously-codified one, bumped on improvement; the
+    full history is kept by git (the JT library is a git repo)."""
+
+    name: str
+    description: str
+    interview_body: str
+    output_spec: OutputSpec = field(default_factory=OutputSpec)
+    param_schema: tuple[ParamField, ...] = ()
+    capability_preferences: tuple[str, ...] = ()
+    version: str | None = None
+    last_verified_at: str | None = None
+    sources: tuple[str, ...] = ()
+
+    # ── pure schema semantics (no I/O) — used by the interview / cron bind ──
+    def defaults(self) -> dict[str, Any]:
+        """The "just do it like I always do it" binding: every param at its
+        declared default (params with no default are omitted)."""
+        return {p.name: p.default for p in self.param_schema if p.default is not None}
+
+    def missing_required(self, params: dict[str, Any]) -> list[str]:
+        """Names of required params absent (or None) in ``params`` — the
+        validation a cron-bind must pass before a headless run (Brick B3)."""
+        return [
+            p.name for p in self.param_schema
+            if p.required and params.get(p.name) is None
+        ]
+
+
+_EMPTY_JT = JobTemplate(name="", description="", interview_body="")
+
+
+def _parse_csv(raw: str) -> tuple[str, ...]:
+    """``"a, b, c"`` (or ``"[a, b, c]"``) → tuple. Mirrors skills._parse_csv."""
+    s = raw.strip()
+    if not s:
+        return ()
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1]
+    return tuple(p.strip() for p in s.split(",") if p.strip())
+
+
+def _parse_param_schema(raw: str) -> tuple[ParamField, ...]:
+    """Parse the single-line JSON ``param_schema`` value into ParamFields.
+    Best-effort: any malformed JSON → empty schema (never raises)."""
+    raw = raw.strip()
+    if not raw:
+        return ()
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    fields: list[ParamField] = []
+    for fname, spec in data.items():  # dict order = declaration order (py3.7+)
+        if not isinstance(spec, dict):
+            continue
+        enum_raw = spec.get("enum")
+        fields.append(ParamField(
+            name=str(fname),
+            type=str(spec.get("type", "str")),
+            required=bool(spec.get("required", False)),
+            default=spec.get("default"),
+            prompt=str(spec.get("prompt", "")),
+            enum=tuple(str(e) for e in enum_raw) if isinstance(enum_raw, list) else (),
+        ))
+    return tuple(fields)
+
+
+def _parse_output_spec(raw: str) -> OutputSpec:
+    """Parse the single-line JSON ``output_spec`` value. Best-effort → default
+    (``cardinality: one``) on anything malformed."""
+    raw = raw.strip()
+    if not raw:
+        return OutputSpec()
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return OutputSpec()
+    if not isinstance(data, dict):
+        return OutputSpec()
+    return OutputSpec(
+        cardinality=str(data.get("cardinality", "one")),
+        per=str(data["per"]) if data.get("per") else None,
+        artifact_kind=str(data.get("artifact_kind", "document")),
+        naming=str(data.get("naming", "")),
+    )
+
+
+def _dump_param_schema(fields: tuple[ParamField, ...]) -> str:
+    """ParamFields → single-line JSON (round-trips through _parse_param_schema).
+    Omits falsy/default attributes to keep the line lean + git-diffable."""
+    obj: dict[str, dict[str, Any]] = {}
+    for f in fields:
+        d: dict[str, Any] = {"type": f.type}
+        if f.required:
+            d["required"] = True
+        if f.default is not None:
+            d["default"] = f.default
+        if f.prompt:
+            d["prompt"] = f.prompt
+        if f.enum:
+            d["enum"] = list(f.enum)
+        obj[f.name] = d
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def _dump_output_spec(spec: OutputSpec) -> str:
+    obj: dict[str, Any] = {"cardinality": spec.cardinality}
+    if spec.per:
+        obj["per"] = spec.per
+    obj["artifact_kind"] = spec.artifact_kind
+    if spec.naming:
+        obj["naming"] = spec.naming
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def _parse_file(path: Path) -> JobTemplate:
+    raw = path.read_text()
+    m = _OWN_FRONTMATTER_RE.match(raw)
+    meta: dict[str, str] = {}
+    body = raw
+    if m:
+        for line in m.group(1).splitlines():
+            if ":" in line:
+                k, _, v = line.partition(":")  # first colon only — JSON values keep theirs
+                meta[k.strip()] = v.strip()
+        body = raw[m.end():].lstrip()
+    else:
+        body = raw.lstrip()
+
+    return JobTemplate(
+        name=meta.get("name") or path.stem,
+        description=meta.get("description") or "",
+        interview_body=body,
+        output_spec=_parse_output_spec(meta.get("output_spec", "")),
+        param_schema=_parse_param_schema(meta.get("param_schema", "")),
+        capability_preferences=_parse_csv(meta.get("capability_preferences", "")),
+        version=meta.get("version") or None,
+        last_verified_at=meta.get("last_verified_at") or None,
+        sources=(str(path),),
+    )
+
+
+def load_with_metadata(name: str, project_code: str | None = None) -> JobTemplate:
+    """Load a JT by name. Resolution chain (highest precedence first):
+
+    1. Project-local at ``<project>/job_templates/<name>.md``
+    2. User-curated shared at ``<shared_resources>/job_templates/<name>.md``
+    3. Package-bundled seed at ``modulatio/_seed_job_templates/<name>.md``
+
+    Missing in all three → empty JT (``.name == ""``), not an error.
+    """
+    if project_code is not None:
+        local = project_dir(project_code) / "job_templates" / f"{name}.md"
+        if local.exists():
+            return _parse_file(local)
+    shared = _JT_ROOT / f"{name}.md"
+    if shared.exists():
+        return _parse_file(shared)
+    seed = _SEED_JT_ROOT / f"{name}.md"
+    if seed.exists():
+        return _parse_file(seed)
+    return _EMPTY_JT
+
+
+def load_interview(name: str, project_code: str | None = None) -> str:
+    """Return the JT's interview-body prose (empty string if missing)."""
+    return load_with_metadata(name, project_code).interview_body
+
+
+def list_job_templates(project_code: str | None = None) -> list[str]:
+    """Sorted union of JT names visible to a project (seed + shared + local)."""
+    names: set[str] = set()
+    if _SEED_JT_ROOT.exists():
+        names.update(p.stem for p in _SEED_JT_ROOT.glob("*.md"))
+    if _JT_ROOT.exists():
+        names.update(p.stem for p in _JT_ROOT.glob("*.md"))
+    if project_code is not None:
+        local_dir = project_dir(project_code) / "job_templates"
+        if local_dir.exists():
+            names.update(p.stem for p in local_dir.glob("*.md"))
+    return sorted(names)
+
+
+def save(jt: JobTemplate, project_code: str | None = None) -> Path:
+    """Write a JT to shared (no project_code) or the project's override dir.
+    Nested schema/output written as single-line JSON. Returns the written path."""
+    if project_code is not None:
+        root = project_dir(project_code) / "job_templates"
+    else:
+        root = _JT_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{jt.name}.md"
+
+    fm_lines: list[str] = [
+        f"name: {jt.name}",
+        f"description: {jt.description}",
+        f"capability_preferences: {', '.join(jt.capability_preferences)}",
+        f"param_schema: {_dump_param_schema(jt.param_schema)}",
+        f"output_spec: {_dump_output_spec(jt.output_spec)}",
+    ]
+    if jt.version is not None:
+        fm_lines.append(f"version: {jt.version}")
+    if jt.last_verified_at is not None:
+        fm_lines.append(f"last_verified_at: {jt.last_verified_at}")
+
+    content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + jt.interview_body.rstrip() + "\n"
+    path.write_text(content)
+    return path
+
+
+def create_job_template(
+    *,
+    name: str,
+    description: str,
+    interview_body: str,
+    output_spec: OutputSpec | None = None,
+    param_schema: tuple[ParamField, ...] = (),
+    capability_preferences: tuple[str, ...] = (),
+    version: str | None = None,
+    project_code: str | None = None,
+) -> JobTemplate:
+    """Create a new JT file, shared or project-local.
+
+    Idempotency: raises ``FileExistsError`` if a JT with the same name exists
+    at the target scope (the name-dedup hard guard; Brick B4's codification
+    flips create→improve on collision rather than colliding here)."""
+    if project_code is not None:
+        root = project_dir(project_code) / "job_templates"
+    else:
+        root = _JT_ROOT
+    target = root / f"{name}.md"
+    if target.exists():
+        raise FileExistsError(
+            f"job template already exists at {target}; pick a different name "
+            f"or improve the existing one"
+        )
+
+    jt = JobTemplate(
+        name=name,
+        description=description,
+        interview_body=interview_body,
+        output_spec=output_spec or OutputSpec(),
+        param_schema=param_schema,
+        capability_preferences=capability_preferences,
+        version=version,
+    )
+    save(jt, project_code)
+    return jt
+
+
+__all__ = [
+    "JobTemplate",
+    "OutputSpec",
+    "ParamField",
+    "create_job_template",
+    "list_job_templates",
+    "load_interview",
+    "load_with_metadata",
+    "save",
+]

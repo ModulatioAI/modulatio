@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
-from modulatio import comptroller, dispatch, lessons, qc_history, qc_notes, research, roster, skill_git, skills, standards, standards_proposals, store, tools
+from modulatio import comptroller, dispatch, kickoff_history, lessons, qc_history, qc_notes, research, roster, skill_git, skills, standards, standards_proposals, store, tools
 from modulatio import context_budget as _ctx_budget_module
 from modulatio import dispatch_breaker as _dispatch_breaker_module
 from modulatio import tool_summarization as _tool_sum_module
@@ -6238,6 +6238,21 @@ class Orchestrator:
                 lines.append(f"- {nm}")
         return ("\n".join(lines) or "(none)", names)
 
+    def _record_kickoff_history(self, summary: RunSummary) -> None:
+        """Brick B1b: write a silent per-run kickoff-history record (objective +
+        outcome) into ``runs/<run_id>/kickoff.json`` so the B4 recurrence
+        trigger has data to read. Best-effort — never breaks a run. The JT
+        fields + the operator-redo flag stay at their defaults until B2/B4
+        populate them."""
+        try:
+            outcome = "failed" if summary.errors else "completed"
+            kickoff_history.record(
+                self.project.code, self.project.run_id,
+                objective=self.project.objective, outcome=outcome,
+            )
+        except Exception:  # noqa: BLE001 — observability must never break a run
+            pass
+
     def _post_run_codification(self, summary: RunSummary) -> None:
         """End-of-run hook (the Alfred loop). The LEADER reviews recent QC
         failures and JUDGES whether any problem recurred enough to codify into a
@@ -7333,6 +7348,9 @@ class Orchestrator:
             "metrics": len(summary.drafts),
             "qc_assertions": len(summary.tasks),
         }
+        # Brick B1b: silent per-run kickoff-history record — the substrate the
+        # B4 recurrence trigger reads. Best-effort, never blocks.
+        self._record_kickoff_history(summary)
         # Brick 4: autonomous self-codification — recurring lessons become
         # skills. Best-effort, never blocks; runs once per kickoff at the end.
         self._post_run_codification(summary)
