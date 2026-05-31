@@ -965,8 +965,8 @@ def test_orchestrator_opens_critical_ticket_on_roster_gap(
     t = tickets[0]
     assert t.priority is TicketPriority.CRITICAL
     assert t.affected_task_id == tasks[0].id
-    # Body names the capability gap so the human can resolve it.
-    assert "shell-ops" in t.body
+    # The gap is now "no producer is configured" (the roster is empty) — the
+    # body points the human at adding an agent, not at a specific skill.
     assert "roster" in t.body.lower() or "agent" in t.body.lower()
 
 
@@ -2225,10 +2225,8 @@ def test_orchestrator_qc_falls_back_to_role_runner_when_no_qc_tier_agent(
 def test_orchestrator_qc_excludes_producer_agent_from_qc_candidates(
     project: Project, tmp_path, monkeypatch
 ):
-    """Different-mind enforcement: even if the producer agent has
-    tier='qc' declared (weird, but possible), it's excluded from QC
-    candidates for tasks it produced. The second qc-tier agent in the
-    roster is picked instead."""
+    """Different-mind enforcement: the producer agent is never selected as
+    its own QC — the qc-tier agent in the roster is picked instead."""
     from modulatio import skills as skills_mod
 
     shared_skills = tmp_path / "shared_skills"
@@ -2248,7 +2246,7 @@ def test_orchestrator_qc_excludes_producer_agent_from_qc_candidates(
             name="Polyvalent",
             identity="does both.",
             skills=["drafter"],
-            tier="qc",  # intentionally also declares qc tier
+            tier="producer",  # the producer; QC is the separate qc-tier agent
             model="model-x",
             model_tier="reasoning-heavy",
         ),
@@ -2293,8 +2291,8 @@ def test_orchestrator_qc_excludes_producer_agent_from_qc_candidates(
     orch.kickoff("anything")
 
     tasks = store.list_tasks(PROJECT_CODE)
-    # Producer was 'polyvalent' (dispatch picks the tightest-fit
-    # drafter match). QC must be the OTHER qc-tier agent.
+    # Producer is 'polyvalent' (the only producer-tier agent). QC must be the
+    # separate qc-tier agent — never the producer itself (different-mind).
     assert tasks[0].assigned_agent_id == "polyvalent"
     assert tasks[0].qc_agent_id == "qc-only"
 
@@ -2632,19 +2630,11 @@ def test_orchestrator_semantic_match_runs_task_and_records_score(
     tasks = store.list_tasks(PROJECT_CODE)
     assert len(tasks) == 1
     t = tasks[0]
-    # Task ran (completed) — it did NOT become a ROSTER_GAP ticket.
+    # Skills don't gate: the producer is picked DIRECTLY (no semantic layer)
+    # and the task runs to completion — it never became a ROSTER_GAP ticket.
     assert t.status == TaskStatus.COMPLETED
     assert t.assigned_agent_id == "custom-agent"
-    # No CAPABILITY ticket (the case we care about here), and post-2026-05-30
-    # goal completion no longer punts a sign-off ticket either — no tickets.
     assert store.list_tickets(PROJECT_CODE) == []
-    # DISPATCHED transition rationale records the similarity score so
-    # the human can audit threshold tuning.
-    dispatched = [
-        tr for tr in t.transitions if tr.to_state == TaskStatus.DISPATCHED.value
-    ]
-    assert any("semantic match" in tr.rationale for tr in dispatched)
-    assert any("0.730" in tr.rationale for tr in dispatched)
 
 
 def test_orchestrator_opens_ticket_when_semantic_matcher_misses(
@@ -2695,13 +2685,11 @@ def test_orchestrator_opens_ticket_when_semantic_matcher_misses(
     orch.kickoff("anything")
 
     tasks = store.list_tasks(PROJECT_CODE)
-    assert tasks[0].status == TaskStatus.BLOCKED
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert len(tickets) == 1
-    from modulatio.types import TicketPriority
-    # Priority semantics 2026-04-21: ROSTER_GAP → CRITICAL (not BLOCKER,
-    # which is reserved for auto-resumable budget exhaustion).
-    assert tickets[0].priority is TicketPriority.CRITICAL
+    # Skills don't gate: the producer is picked and the task runs to
+    # completion. rare-skill is in the library, so there's no advisory and no
+    # ticket — the run just succeeds (the matcher miss is irrelevant now).
+    assert tasks[0].status == TaskStatus.COMPLETED
+    assert store.list_tickets(PROJECT_CODE) == []
 
 
 def test_orchestrator_semantic_matcher_not_called_for_deterministic_match(project: Project):
@@ -3829,16 +3817,14 @@ def test_coordinator_without_required_capabilities_field_defaults_to_empty_list(
     assert tasks[0].required_capabilities == []
 
 
-def test_orchestrator_opens_blocker_ticket_on_skill_floor_capability_gap(
+def test_orchestrator_skill_floor_shortfall_ships_pqr_reservation(
     project: Project, tmp_path, monkeypatch
 ):
-    """Slice #9b: when a skill file declares required_capabilities (a
-    capability floor on its executing agent) and no agent in the roster
-    meets the floor, dispatch opens a BLOCKER ticket surfacing the
-    capability gap — even though the Coordinator didn't emit
-    required_capabilities on the task. The floor lives on the skill,
-    not the task. Business-harness level: applies to any skill of any
-    artifact class."""
+    """Brick 3 never-block: when a skill file declares a capability floor and
+    no producer meets it, dispatch does NOT block. The producer runs
+    best-available, the task completes, and the shortfall ships as a Product
+    Quality Report reservation (advisory), not a CRITICAL ticket. The floor
+    lives on the skill, not the task."""
     from modulatio import skills as skills_mod
     from modulatio.types import TicketPriority
 
@@ -3888,34 +3874,29 @@ def test_orchestrator_opens_blocker_ticket_on_skill_floor_capability_gap(
         "qc": _qc_stub,
     }
     orch = Orchestrator(project, runners)
-    orch.kickoff("anything")
+    summary = orch.kickoff("anything")
 
     tasks = store.list_tasks(PROJECT_CODE)
     assert len(tasks) == 1
-    assert tasks[0].status == TaskStatus.BLOCKED
-    assert drafter_calls["n"] == 0
-
-    tickets = store.list_tickets(PROJECT_CODE)
-    # Priority semantics 2026-04-21: capability gaps → CRITICAL (BLOCKER
-    # is reserved for auto-resumable budget exhaustion via refresh_at).
-    gap_tickets = [t for t in tickets if t.priority is TicketPriority.CRITICAL]
-    assert len(gap_tickets) == 1
-    body = gap_tickets[0].body
-    # Ticket body names the floor-derived capability so the human
-    # understands WHAT to install.
-    assert "shell-access" in body
-    assert "capabilit" in body.lower()
+    # Never-block: the producer runs best-available and the task completes.
+    assert tasks[0].status == TaskStatus.COMPLETED
+    assert drafter_calls["n"] >= 1
+    assert store.list_tickets(PROJECT_CODE) == []
+    # The shortfall surfaces as a Product Quality Report reservation.
+    assert any(
+        "shell-access" in (r.get("concern", "") + r.get("suggestion", ""))
+        for r in summary.recommendations
+    )
 
 
-def test_orchestrator_enforces_domain_capability_floor_from_standards(
+def test_orchestrator_domain_floor_shortfall_ships_pqr_reservation(
     project: Project, tmp_path, monkeypatch
 ):
-    """Slice #9b follow-on: when a domain's standards file declares
-    ``required_capabilities`` in frontmatter, dispatch enforces it as
-    a hard floor on every task of that artifact_kind — regardless of
-    which skill runs it, regardless of whether the Coordinator or the
-    skill named the capability. Cross-cutting rule: "any task of kind
-    X needs capability Y" set once in standards, applied everywhere."""
+    """Brick 3 never-block: a domain-level capability floor (declared in a
+    standards file) that no producer meets does NOT block. The producer runs
+    best-available, the task completes, and the shortfall ships as a Product
+    Quality Report reservation — applied to every task of that artifact_kind
+    regardless of which skill runs it."""
     from modulatio import roster as roster_mod
     from modulatio import skills as skills_mod
     from modulatio import standards as standards_mod
@@ -3970,24 +3951,26 @@ def test_orchestrator_enforces_domain_capability_floor_from_standards(
         "qc": _qc_stub,
     }
     orch = Orchestrator(project, runners)
-    orch.kickoff("anything")
+    summary = orch.kickoff("anything")
 
     tasks = store.list_tasks(PROJECT_CODE)
     assert len(tasks) == 1
-    assert tasks[0].status == TaskStatus.BLOCKED
-    tickets = store.list_tickets(PROJECT_CODE)
-    gap = [t for t in tickets if t.priority is TicketPriority.CRITICAL]
-    assert len(gap) == 1
-    assert "structured-output" in gap[0].body
+    # Never-block: completes best-available, shortfall → PQR reservation.
+    assert tasks[0].status == TaskStatus.COMPLETED
+    assert store.list_tickets(PROJECT_CODE) == []
+    assert any(
+        "structured-output" in (r.get("concern", "") + r.get("suggestion", ""))
+        for r in summary.recommendations
+    )
 
 
-def test_orchestrator_opens_critical_ticket_on_capability_gap(
+def test_orchestrator_capability_shortfall_ships_pqr_reservation(
     project: Project, tmp_path, monkeypatch
 ):
-    """When the skill requirement is covered but the capability requirement
-    is not held by any agent in the roster, open a BLOCKER ticket
-    surfacing the capability gap in the body. Task BLOCKED; producer
-    skipped."""
+    """Brick 3 never-block: a task-declared capability no producer holds does
+    NOT block. The producer runs best-available, the task completes, and the
+    shortfall ships as a Product Quality Report reservation — never a CRITICAL
+    ticket."""
     from modulatio import skills as skills_mod
     from modulatio.types import TicketPriority
 
@@ -4033,25 +4016,19 @@ def test_orchestrator_opens_critical_ticket_on_capability_gap(
         "qc": _qc_stub,
     }
     orch = Orchestrator(project, runners)
-    orch.kickoff("anything")
+    summary = orch.kickoff("anything")
 
     tasks = store.list_tasks(PROJECT_CODE)
     assert len(tasks) == 1
-    assert tasks[0].status == TaskStatus.BLOCKED
-    assert drafter_calls["n"] == 0
-
-    tickets = store.list_tickets(PROJECT_CODE)
-    # Exactly one CRITICAL ticket for the capability gap (Leader
-    # verify does not ticket on an incomplete goal — only the dispatch
-    # gap is ticketed). Priority semantics 2026-04-21: capability gaps
-    # are CRITICAL, not BLOCKER — human resolution, not auto-resume.
-    gap_tickets = [t for t in tickets if t.priority is TicketPriority.CRITICAL]
-    assert len(gap_tickets) == 1
-    body = gap_tickets[0].body
-    assert "reasoning-heavy" in body
-    # Body mentions capability axis explicitly so the human knows what
-    # kind of gap this is (vs a skills-only gap).
-    assert "capabilit" in body.lower()
+    # Never-block: the producer runs best-available and the task completes.
+    assert tasks[0].status == TaskStatus.COMPLETED
+    assert drafter_calls["n"] >= 1
+    assert store.list_tickets(PROJECT_CODE) == []
+    # The shortfall surfaces as a Product Quality Report reservation.
+    assert any(
+        "reasoning-heavy" in (r.get("concern", "") + r.get("suggestion", ""))
+        for r in summary.recommendations
+    )
 
 
 # ── Slice #9c: producer escalation on QC-fail exhaustion ───────────────────

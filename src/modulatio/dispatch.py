@@ -1,34 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Skill-based agent dispatch — the tactical roster-selection step.
+"""Producer dispatch — the tactical roster-selection step.
 
-Given a task's ``required_skills`` (emitted by the task-plan LLM call
-in slice #6b) and the project's agent roster, pick the single best
-agent to execute the task. Pure Python — no LLM call here; the planner
-already did the reasoning when it declared the skills. This is
-deterministic selection against the roster.
+Given a task and the project's agent roster, pick the best PRODUCER to
+execute it. Pure Python — no LLM call here; this is deterministic selection.
 
-Returns ``None`` as a safety-net signal so the orchestrator falls back
-to hardcoded role routing (the behavior that shipped in slices #1–#6b):
+Since the skill-library arc (Brick 3) a producer is just a model endpoint —
+it holds no skills; it checks out whatever its task needs from the shared
+library at run-time. So **skills are not a routing constraint**: any producer
+can run any task, and routing always finds one when producers exist.
 
-- Empty ``required_skills`` — the planner declared no constraint.
-- Empty roster — cold project, no agents composed yet.
-- No agent in the roster covers the required skills — capability gap,
-  slice #6d opens a ticket for the human.
+Selection, top to bottom:
 
-Ranking, top to bottom:
+1. **Availability first.** Least-loaded producer wins, so a multi-task wave
+   spreads across idle models instead of serializing onto one ("never queue
+   onto a busy model when others are idle").
+2. **Capability floor — soft** (it *prefers* but does not *require*).
+   Producers whose model meets the task's capability floor are preferred;
+   but if none do, the best-available
+   producer is picked anyway and the shortfall ships as a Product Quality
+   Report reservation. Routing NEVER blocks on capability ("always
+   best-available + PQR").
+3. **Cost, then determinism.** Among equals, cheapest ``cost_class`` (cheap
+   producers do the bulk — the QC thesis), then lexicographic ``agent.id``.
 
-1. **Tightest fit.** Fewer extra skills wins — a specialist beats a
-   swiss-army agent for a task that only needs one of its skills.
-   Echoes Modulatio's core thesis: narrow agents ship narrow prompts.
-2. **Cheapest cost_class.** free-local < paid-cloud < premium-cloud.
-   Mirrors the cron-agent policy (route to the cheapest tier that can
-   actually do the work).
-3. **Deterministic.** Lexicographic ``agent.id`` so dispatch is
-   reproducible across runs.
-
-Not in #6c: model_tier filtering, capability-tag floor, capacity-aware
-backpressure. Those are later slices — #6d / #8 / murmuration.
+``select_agent`` returns ``None`` only for a no-required-skills task (legacy
+NO_CONSTRAINT) or an empty producer pool. ``schedule_wave`` adds capacity-aware
+backpressure for concurrent waves. A referenced skill that isn't in the
+library, or a capability the picked producer lacks, is advisory metadata on a
+MATCHED result — never a block.
 """
 
 from __future__ import annotations
@@ -129,71 +129,92 @@ def _effective_required_capabilities(
     return effective
 
 
+def _producer_pool(agents: list[Agent]) -> list[Agent]:
+    """Producers are the only routing targets now — skills are checked out
+    at run-time, so any producer can run any task. Leader/QC are excluded by
+    tier; they have their own selection paths (``select_qc_agent`` etc.)."""
+    return [a for a in agents if a.tier == "producer"]
+
+
+def _capability_shortfall(agent: Agent, effective_caps: list[str]) -> tuple[str, ...]:
+    """Effective capability tags the picked producer does NOT declare — the
+    advisory that rides to the Product Quality Report when we route
+    best-available below the requested floor (never a block)."""
+    held = set(agent.capability_tags)
+    return tuple(c for c in effective_caps if c not in held)
+
+
+def _rank_producers(
+    producers: list[Agent], effective_caps: list[str]
+) -> tuple[list[Agent], bool]:
+    """Return ``(pool, is_fallback)``. The pool is the producers that meet
+    the capability floor; if NONE do, it's ALL producers (best-available,
+    never block) and ``is_fallback`` is True."""
+    meeting = [a for a in producers if a.covers_capabilities(effective_caps)]
+    if meeting:
+        return meeting, False
+    return list(producers), True
+
+
+def _producer_sort_key(
+    agent: Agent, load: dict[str, int], is_fallback: bool
+) -> tuple:
+    """Availability-first ranking shared by the single-pick and the wave
+    scheduler so they can't drift. Least-loaded first (spread a wave across
+    idle models, never serialize onto one); then — among producers that meet
+    the floor — cheapest wins (cheap producers do the bulk, the QC thesis);
+    among the best-available fallback set, highest tier wins (closest to the
+    requested floor). Lexicographic id is the deterministic final tiebreak."""
+    base = load.get(agent.id, 0)
+    if is_fallback:
+        return (base, -_TIER_RANK.get(agent.model_tier or "", 0),
+                _cost_rank(agent.cost_class), agent.id)
+    return (base, _cost_rank(agent.cost_class), agent.id)
+
+
 def select_agent(
     task: Task,
     agents: list[Agent],
     skill_floor_for: SkillFloorLookup | None = None,
     domain_floor_for: DomainFloorLookup | None = None,
+    load: dict[str, int] | None = None,
 ) -> Agent | None:
-    """Pick the best agent for ``task`` from ``agents``, or ``None`` to
-    signal fallback to the hardcoded role.
+    """Pick the best PRODUCER for ``task`` — capability-and-availability
+    routing. Returns ``None`` only when the task declared no required_skills
+    (legacy NO_CONSTRAINT fallback) or no producer exists at all.
 
-    Empty ``task.required_skills`` or an empty agent list → ``None``.
-    No covering agent → ``None``. Otherwise returns the lowest-ranking
-    (best) candidate by (extra-skills-count, cost-rank, id).
+    Since the skill-library arc (Brick 3), skills are NOT a routing
+    constraint: a producer checks out whatever its task needs from the
+    library, so any producer can run any task. The capability floor is a
+    SOFT preference — producers that meet it are preferred, but if none do,
+    the best-available producer is picked anyway and the shortfall ships as a
+    Product Quality Report reservation (never a block). Availability is
+    primary: among the least-loaded producers (``load`` maps agent_id →
+    tasks already assigned this pass), pick the best fit, so a multi-task
+    wave spreads across idle models instead of serializing onto one.
 
-    Slice #9a: candidate set is also filtered by
-    ``task.required_capabilities`` — skill cover AND capability cover
-    are both required.
-
-    Slice #9b: when ``skill_floor_for`` is provided, the effective
-    capability requirement is the union of the task's caps and each
-    required skill's declared floor. ``None`` (default) preserves
-    pre-#9b behavior for every call site that isn't capability-floor
-    aware yet.
-
-    Pre-V2 Slice D: when ``task.preferred_continuity_agent`` is set,
-    that agent is picked first IF they qualify (cover skills + caps).
-    Lets a code-task chain stick with the same engineer (who has the
-    prior file in their working memory) instead of fanning out to a
-    fresh engineer with no context. Hinted agent that doesn't qualify
-    is silently ignored — falls through to normal selection.
+    A ``preferred_continuity_agent`` hint wins when it's in the chosen pool
+    (a code-task chain sticks with the producer that has the prior file in
+    its working memory). A hint outside the pool is silently ignored.
     """
     if not task.required_skills:
         return None
-    if not agents:
+    producers = _producer_pool(agents)
+    if not producers:
         return None
-
-    required_set = set(task.required_skills)
+    load = load or {}
     effective_caps = _effective_required_capabilities(
         task, skill_floor_for, domain_floor_for
     )
-    candidates = [
-        a for a in agents
-        if a.covers(task.required_skills)
-        and a.covers_capabilities(effective_caps)
-    ]
-    if not candidates:
-        return None
+    pool, is_fallback = _rank_producers(producers, effective_caps)
 
-    # Slice D: continuity hint takes precedence over the cheapest-first
-    # sort when the hinted agent is among qualifying candidates.
     hint = getattr(task, "preferred_continuity_agent", None)
     if hint:
-        for a in candidates:
+        for a in pool:
             if a.id == hint:
                 return a
 
-    return min(candidates, key=lambda a: _candidate_sort_key(a, required_set))
-
-
-def _candidate_sort_key(agent: Agent, required_set: set) -> tuple[int, int, str]:
-    """Ranking shared by ``select_agent`` and ``schedule_wave``: tightest
-    fit (fewest extra skills) → cheapest cost_class → lexicographic id.
-    Factored so the single-task picker and the wave scheduler can never
-    drift apart in how they rank qualifying agents."""
-    extra = len(set(agent.skills) - required_set)
-    return (extra, _cost_rank(agent.cost_class), agent.id)
+    return min(pool, key=lambda a: _producer_sort_key(a, load, is_fallback))
 
 
 def _qualifying_candidates(
@@ -202,19 +223,22 @@ def _qualifying_candidates(
     skill_floor_for: SkillFloorLookup | None,
     domain_floor_for: DomainFloorLookup | None,
 ) -> list[Agent]:
-    """Agents that cover ``task``'s required skills AND effective
-    capabilities — the same filter ``select_agent`` applies, factored for
-    reuse by ``schedule_wave``. Empty required_skills → no skill-routed
-    candidate (mirrors ``select_agent`` returning None for NO_CONSTRAINT)."""
+    """The producers eligible to run ``task`` this wave, ranked best-fit
+    first by the SAME sort ``select_agent`` uses (so the wave scheduler and
+    the single picker never drift). Skills don't gate — every producer is a
+    candidate; the capability floor only orders them (with the
+    best-available fallback when none meet it). Empty required_skills → no
+    skill-routed candidate (legacy NO_CONSTRAINT handled by the caller)."""
     if not task.required_skills:
+        return []
+    producers = _producer_pool(agents)
+    if not producers:
         return []
     effective_caps = _effective_required_capabilities(
         task, skill_floor_for, domain_floor_for
     )
-    return [
-        a for a in agents
-        if a.covers(task.required_skills) and a.covers_capabilities(effective_caps)
-    ]
+    pool, is_fallback = _rank_producers(producers, effective_caps)
+    return sorted(pool, key=lambda a: _producer_sort_key(a, {}, is_fallback))
 
 
 @dataclass(frozen=True)
@@ -247,12 +271,14 @@ def schedule_wave(
     post-selection batch limiter would assign five ready tasks that all
     fit the cheapest specialist to that ONE agent, then serialize them).
 
-    For each task (deterministic id order): find qualifying candidates
-    (skill + capability cover); among those with remaining per-agent
-    ``capacity_cap`` AND a free global slot, pick the best by
-    ``_candidate_sort_key`` (continuity hint honored first); decrement
-    capacity. A qualifying agent that's at cap → DEFERRED_CAPACITY (retry
-    next wave). No qualifying agent → ROSTER_GAP.
+    For each task (deterministic id order): rank the producer pool best-fit
+    first (capability floor + best-available fallback — skills don't gate);
+    among those with remaining per-agent ``capacity_cap`` AND a free global
+    slot, take the best-ranked (continuity hint honored first); decrement
+    capacity. Walking the pre-ranked list IS the load-balance — as the best
+    pick fills to capacity the next task falls to the next idle producer. A
+    producer at cap → DEFERRED_CAPACITY (retry next wave). No producer at all
+    → ROSTER_GAP.
 
     Tasks with empty required_skills (NO_CONSTRAINT legacy fallback) are
     NOT skill-scheduled here — the caller routes them via the legacy path.
@@ -271,29 +297,36 @@ def schedule_wave(
     for task in sorted(wave_tasks, key=lambda t: t.id):
         if not task.required_skills:
             continue  # legacy NO_CONSTRAINT — not skill-scheduled
+        # candidates are every producer, already ranked best-fit first
+        # (capability floor + best-available fallback). Skills don't gate.
         candidates = _qualifying_candidates(
             task, agents, skill_floor_for, domain_floor_for
         )
         if not candidates:
-            gaps.append(task.id)
+            gaps.append(task.id)  # no producer exists at all — setup gap
             continue
         if global_remaining is not None and global_remaining <= 0:
-            blocking = min(candidates, key=lambda a: a.id)
+            blocking = candidates[0]
             deferred.append((task.id, blocking.id, blocking.capacity_cap))
             continue
-        available = [a for a in candidates if remaining.get(a.id, 0) > 0]
-        if not available:
-            # Every qualifying agent is at capacity this wave.
-            blocking = min(candidates, key=lambda a: a.id)
-            deferred.append((task.id, blocking.id, blocking.capacity_cap))
-            continue
-        required_set = set(task.required_skills)
+        # Honor a continuity hint with free capacity, else take the
+        # best-ranked producer that still has a slot this wave. Walking the
+        # pre-ranked list IS the load-balance: as the best pick fills to
+        # capacity, the next task falls to the next-best idle producer.
         hint = getattr(task, "preferred_continuity_agent", None)
         pick = None
-        if hint and hint in by_id and remaining.get(hint, 0) > 0 and by_id[hint] in available:
+        if hint and hint in by_id and remaining.get(hint, 0) > 0:
             pick = by_id[hint]
         if pick is None:
-            pick = min(available, key=lambda a: _candidate_sort_key(a, required_set))
+            for a in candidates:
+                if remaining.get(a.id, 0) > 0:
+                    pick = a
+                    break
+        if pick is None:
+            # Every qualifying producer is at capacity this wave.
+            blocking = candidates[0]
+            deferred.append((task.id, blocking.id, blocking.capacity_cap))
+            continue
         assignments[task.id] = pick.id
         remaining[pick.id] -= 1
         if global_remaining is not None:
@@ -314,29 +347,37 @@ class DispatchOutcome(str, Enum):
     fallback layer.
     """
 
-    #: An agent covers every required skill deterministically —
-    #: strict skill-intersection match. Cheapest + most trustworthy.
+    #: A producer was picked for the task. Since the skill-library arc
+    #: (Brick 3) this is the routing outcome for essentially every
+    #: skill-carrying task: skills are checked out at run-time, so any
+    #: producer can run any task and routing always finds one. The result
+    #: may carry ADVISORY metadata that never blocks the run —
+    #: ``capability_shortfall`` (the picked producer is below the requested
+    #: capability floor → ships a Product Quality Report reservation) and
+    #: ``missing_skills`` (a referenced skill isn't in the library yet →
+    #: feeds the skill-creation proposal).
     MATCHED = "matched"
     #: Task declared no required_skills — orchestrator uses the
     #: hardcoded-role path. Not a gap; not a ticket.
     NO_CONSTRAINT = "no_constraint"
-    #: At least one required_skill is not in the skill registry —
-    #: treat as an upstream hallucination that needs a dev fix. Ticket
-    #: priority CRITICAL. Semantic fallback does NOT rescue this —
-    #: papering over a hallucinated skill name ships wrong output.
-    INVALID_SKILL = "invalid_skill"
-    #: Deterministic miss but the embedding-fallback matcher (slice
-    #: #6e) returned a hit above its similarity threshold. Agent has
-    #: the right *shape* even if the declared skill names don't line
-    #: up exactly. ``DispatchResult.similarity_score`` carries the
-    #: match score so the human can audit whether dispatch was too
-    #: lenient.
-    SEMANTIC_MATCHED = "semantic_matched"
-    #: All required_skills are valid, but no single agent in the roster
-    #: covers them deterministically AND no semantic fallback hit
-    #: either. Legitimate capability gap — BLOCKER ticket asking the
-    #: human to install the skill, create an agent, or defer.
+    #: No producer-tier agent exists in the roster at all — a SETUP gap
+    #: (the wizard guarantees at least one producer, so this only fires on
+    #: a hand-broken roster). Unlike the pre-skill-library era this is no
+    #: longer a per-task capability gap: a producer that lacks a skill just
+    #: checks it out, and one below the capability floor still runs
+    #: best-available. Kept as the one legitimate ticket.
     ROSTER_GAP = "roster_gap"
+    #: DEPRECATED — no longer produced. Before the skill library, a skill
+    #: name absent from the registry was a hard CRITICAL block; now it is
+    #: advisory ``missing_skills`` on a MATCHED result (feeds skill
+    #: creation), never a block. Kept for back-compat of any external
+    #: consumer of the enum.
+    INVALID_SKILL = "invalid_skill"
+    #: DEPRECATED — no longer produced. The embedding fallback existed to
+    #: rescue skill-name mismatches into a held-skill match; with skills no
+    #: longer gating routing, every producer is already a candidate, so the
+    #: semantic layer is never reached. Kept for back-compat.
+    SEMANTIC_MATCHED = "semantic_matched"
 
 
 @dataclass(frozen=True)
@@ -357,13 +398,21 @@ class DispatchResult:
 
     outcome: DispatchOutcome
     agent: Agent | None = None
+    #: On MATCHED: skills the task referenced that aren't in the library
+    #: yet — advisory, feeds the skill-creation proposal (Brick 4), never a
+    #: block. On ROSTER_GAP: unchanged (the actionable subset for the
+    #: setup ticket).
     missing_skills: tuple[str, ...] = field(default_factory=tuple)
     #: Capability tags required by the task but not declared by any
     #: agent in the roster (slice #9a). Populated on ROSTER_GAP when
-    #: the capability axis is the gap; empty on MATCHED and on the
-    #: skill-gap-only flavor of ROSTER_GAP. Capabilities are the HOW
+    #: the capability axis is the gap. Capabilities are the HOW
     #: axis (reasoning-heavy, structured-output, shell-access …).
     missing_capabilities: tuple[str, ...] = field(default_factory=tuple)
+    #: On MATCHED: effective capability tags the PICKED producer does not
+    #: declare — it was routed best-available below the requested floor.
+    #: Advisory → a Product Quality Report reservation, never a block
+    #: (Brick 3: "always best-available + PQR").
+    capability_shortfall: tuple[str, ...] = field(default_factory=tuple)
     similarity_score: float | None = None
 
 
@@ -374,80 +423,70 @@ def plan_dispatch(
     semantic_matcher: SemanticMatcher | None = None,
     skill_floor_for: SkillFloorLookup | None = None,
     domain_floor_for: DomainFloorLookup | None = None,
+    load: dict[str, int] | None = None,
 ) -> DispatchResult:
-    """Classify a task against the registry + roster, returning the
-    outcome the orchestrator should act on.
+    """Classify a task against the roster, returning the outcome the
+    orchestrator should act on.
 
-    Precedence: NO_CONSTRAINT > INVALID_SKILL > MATCHED >
-    SEMANTIC_MATCHED > ROSTER_GAP.
+    Outcomes (since the skill-library arc, Brick 3):
 
-    - INVALID_SKILL short-circuits before deterministic or semantic
-      matching — a hallucinated skill name is an upstream dev problem
-      that neither layer should paper over.
-    - Deterministic MATCHED short-circuits before semantic — exact
-      skill-intersection is both cheaper and more trustworthy.
-    - Semantic layer only fires when a ``semantic_matcher`` is passed
-      and deterministic missed.
+    - **NO_CONSTRAINT** — the task declared no required_skills; the legacy
+      hardcoded-role path handles it.
+    - **MATCHED** — a producer was picked (the normal outcome). Skills are
+      checked out at run-time, so any producer can run any task; routing
+      always finds one when producers exist. The result may carry advisory
+      ``missing_skills`` (a referenced skill isn't in the library yet → feeds
+      skill creation) and ``capability_shortfall`` (the picked producer is
+      below the requested floor → ships a Product Quality Report
+      reservation). Neither blocks.
+    - **ROSTER_GAP** — no producer-tier agent exists at all (a setup gap the
+      wizard normally prevents). The one legitimate ticket.
 
-    Slice #9b: ``skill_floor_for`` lets each required skill contribute
-    its own capability floor to the effective filter. Union happens
-    once, at the top; both deterministic and semantic paths consume it.
-    Callers that don't care about floors can omit the arg for
-    back-compat.
+    ``load`` (agent_id → tasks already assigned this pass) spreads a wave's
+    assignments across idle producers. ``skill_floor_for`` / ``domain_floor_for``
+    contribute the capability floor that orders producers (soft, never a
+    gate). ``semantic_matcher`` is accepted for signature back-compat and is
+    no longer used — every producer is already a candidate.
     """
     required = list(task.required_skills)
     if not required:
         return DispatchResult(outcome=DispatchOutcome.NO_CONSTRAINT)
 
+    # A skill the plan referenced that isn't in the library yet is NO LONGER
+    # a block — it's recorded as advisory ``missing_skills`` so the Leader can
+    # propose creating it (Brick 4). The producer runs with what it has.
     registry = set(available_skill_names)
-    invalid = tuple(s for s in required if s not in registry)
-    if invalid:
-        return DispatchResult(
-            outcome=DispatchOutcome.INVALID_SKILL,
-            missing_skills=invalid,
-        )
+    unknown_skills = tuple(s for s in required if s not in registry)
 
     picked = select_agent(
         task, agents,
         skill_floor_for=skill_floor_for,
         domain_floor_for=domain_floor_for,
+        load=load,
     )
-    if picked is not None:
-        return DispatchResult(outcome=DispatchOutcome.MATCHED, agent=picked)
+    if picked is None:
+        # No producer-tier agent exists at all — a setup gap, not a per-task
+        # capability gap. (The wizard guarantees >= 1 producer.)
+        effective_caps = _effective_required_capabilities(
+            task, skill_floor_for, domain_floor_for
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.ROSTER_GAP,
+            missing_skills=unknown_skills,
+            missing_capabilities=tuple(effective_caps),
+        )
 
+    # Best-available producer picked. Anything it can't meet is advisory —
+    # never a block (Brick 3: "always best-available + PQR").
     effective_caps = _effective_required_capabilities(
         task, skill_floor_for, domain_floor_for
     )
-    if semantic_matcher is not None:
-        hit = semantic_matcher(task)
-        if hit is not None:
-            match_agent, score = hit
-            # Slice #9a/#9b: capabilities — task-declared and
-            # skill-floor — are a hard filter. A semantic hit that
-            # lacks any effective capability is not rescued; fall
-            # through to ROSTER_GAP so the ticket surfaces the gap.
-            if match_agent.covers_capabilities(effective_caps):
-                return DispatchResult(
-                    outcome=DispatchOutcome.SEMANTIC_MATCHED,
-                    agent=match_agent,
-                    similarity_score=float(score),
-                )
-
-    # ROSTER_GAP — actionable subsets for each axis so the ticket body
-    # can surface exactly what the human needs to install or add.
-    held_by_anyone: set[str] = set()
-    capabilities_held_by_anyone: set[str] = set()
-    for a in agents:
-        held_by_anyone.update(a.skills)
-        capabilities_held_by_anyone.update(a.capability_tags)
-    missing_from_roster = tuple(s for s in required if s not in held_by_anyone)
-    missing_caps_from_roster = tuple(
-        c for c in effective_caps if c not in capabilities_held_by_anyone
-    )
+    shortfall = _capability_shortfall(picked, effective_caps)
     return DispatchResult(
-        outcome=DispatchOutcome.ROSTER_GAP,
-        missing_skills=missing_from_roster,
-        missing_capabilities=missing_caps_from_roster,
+        outcome=DispatchOutcome.MATCHED,
+        agent=picked,
+        missing_skills=unknown_skills,
+        capability_shortfall=shortfall,
     )
 
 
@@ -487,8 +526,9 @@ def select_escalation_agent(
        mind. Same-agent retry is the orchestrator's job to handle when
        this helper returns ``None``; it is never a valid escalation
        target.
-    2. Covers ``task.required_skills`` — same skill-cover constraint
-       as first-pick dispatch.
+    2. ``tier == "producer"`` — escalation targets a producer, like
+       first-pick dispatch. Skills no longer gate (they're checked out at
+       run-time), so skill-cover is not a constraint.
     3. Covers the effective required capabilities — union of
        ``task.required_capabilities`` and each required skill's floor
        (slice #9b). Escalation is NOT a relaxation of the capability
@@ -523,7 +563,7 @@ def select_escalation_agent(
     candidates = [
         a for a in agents
         if a.id != current_agent_id
-        and a.covers(task.required_skills)
+        and a.tier == "producer"
         and a.covers_capabilities(effective_caps)
         and _strictly_higher(a)
     ]

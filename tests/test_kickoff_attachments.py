@@ -390,3 +390,35 @@ def test_task_tool_loadout_primary_only_when_no_extras(project: Project):
         required_skills = ["researcher"]
 
     assert orch._task_tool_loadout(FakeTask(), primary) == ("http_get",)
+
+
+def test_task_tool_loadout_appends_registered_skill_library_tools(project: Project):
+    """Brick 1: when the registry carries the skill-library builtins, every
+    producer loadout gains discover/checkout so a capability gap can self-heal
+    into a checkout instead of a block."""
+    from modulatio import tools as _tools
+    orch = Orchestrator(
+        project, _capturing_runners({}), tool_registry=_tools.build_registry()
+    )
+    primary = _sk.load_with_metadata("researcher")
+
+    class FakeTask:
+        required_skills = ["researcher"]
+
+    out = orch._task_tool_loadout(FakeTask(), primary)
+    assert out[0] == "http_get"  # task tools still come first
+    assert {"search_skills", "load_skill", "drop_skill"} <= set(out)
+
+
+def test_task_tool_loadout_skips_skill_library_tools_when_unregistered(project: Project):
+    """Defensive: an empty/stub registry must NOT get skill-library tools wired
+    in (they'd trip the loadout fail-fast). The bare orchestrator has {}."""
+    orch = Orchestrator(project, _capturing_runners({}))  # default registry = {}
+    primary = _sk.load_with_metadata("researcher")
+
+    class FakeTask:
+        required_skills = ["researcher"]
+
+    out = orch._task_tool_loadout(FakeTask(), primary)
+    assert out == ("http_get",)
+    assert "load_skill" not in out

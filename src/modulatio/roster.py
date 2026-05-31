@@ -34,26 +34,28 @@ _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
 class Agent(BaseModel):
-    """A persisted agent profile — what skills this agent holds, which
-    LLM runs it, and the routing metadata dispatch consumes.
+    """A persisted agent profile — which LLM runs it and the routing
+    metadata dispatch consumes.
 
-    Fields that drive slice #6c routing:
+    Fields that drive routing (since the skill-library arc, Brick 3):
 
-    - ``skills`` — which skills this agent can cover. Dispatch matches
-      task-required-skills ⊆ agent.skills.
-    - ``model`` + ``model_tier`` — the specific LLM and the tier it
-      serves. ``model_tier`` pairs with ``Skill.model_tier`` at dispatch.
-      ``model`` may be ``None`` when the agent inherits whichever model
-      the CLI has wired for its tier.
+    - ``skills`` — **advisory / non-routing.** A producer no longer "holds"
+      skills for dispatch; it checks out whatever a task needs from the
+      shared library at run-time, so any producer can run any task. This
+      list is kept for backward-compat (old rosters carry it) and as a seed-
+      familiarity hint surfaced in the TUI and the chat skill-body injection.
+      Dispatch does NOT match against it.
+    - ``model`` + ``model_tier`` — the specific LLM and the tier it serves.
+      ``model_tier`` is the producer's capability tier (it now comes from the
+      MODEL, not from assigned skills — see ``_caps_from_model``). ``model``
+      may be ``None`` when the agent inherits the CLI-wired model for its tier.
     - ``cost_class`` — free-local / paid-cloud / premium-cloud. Routing
-      prefers the cheapest qualifying agent (cron-agent policy echo).
-    - ``capability_tags`` — declared strengths. Can diverge from the
-      default tags on the agent's skills (e.g. a drafter agent running
-      on a stronger model might claim ``reasoning-heavy`` tags even if
-      its skills' defaults are ``generalist``). Slice #8 capability-floor
-      routing consumes.
-    - ``capacity_cap`` — max concurrent tasks (murmuration input — slice
-      #6d+ backpressure reads this).
+      prefers the cheapest qualifying producer (cron-agent policy echo).
+    - ``capability_tags`` — the producer's declared strengths, sourced from
+      its model. The capability floor is a SOFT preference at dispatch
+      (best-available + a Product Quality Report reservation, never a block).
+    - ``capacity_cap`` — max concurrent tasks; the wave scheduler reads this
+      to spread a wave across idle producers.
     """
 
     id: str
@@ -165,15 +167,25 @@ def _parse_file(path: Path) -> Agent:
     else:
         context_budget = None
 
+    model = meta.get("model") or None
+    model_tier = meta.get("model_tier") or None
+    cost_class = meta.get("cost_class") or None
+    capability_tags = _parse_csv(meta.get("capability_tags", ""))
+    # Brick 2: a producer that declares NO capabilities of its own draws them
+    # from its MODEL (the new capability source). An agent carrying literal
+    # caps — old rosters, skill-derived seeds — keeps them untouched.
+    if model and not capability_tags and not model_tier and not cost_class:
+        capability_tags, model_tier, cost_class = _caps_from_model(model)
+
     return Agent(
         id=meta.get("id") or path.stem,
         name=meta.get("name") or path.stem,
         identity=body.rstrip(),
         skills=_parse_csv(meta.get("skills", "")),
-        model=meta.get("model") or None,
-        model_tier=meta.get("model_tier") or None,
-        cost_class=meta.get("cost_class") or None,
-        capability_tags=_parse_csv(meta.get("capability_tags", "")),
+        model=model,
+        model_tier=model_tier,
+        cost_class=cost_class,
+        capability_tags=capability_tags,
         capacity_cap=_parse_int(meta.get("capacity_cap", ""), 1),
         template_origin=meta.get("template_origin") or None,
         freshness_class=meta.get("freshness_class") or None,
@@ -279,6 +291,33 @@ def _derive_agent_caps(skill_names: list[str], project_code: str) -> tuple[list[
                 max_cost_rank = rank
                 max_cost = s.cost_class
     return seen_caps, primary_tier, max_cost
+
+
+def _caps_from_model(model_key: str | None) -> tuple[list[str], str | None, str | None]:
+    """Compute ``(capability_tags, model_tier, cost_class)`` for a producer
+    bound to ``model_key`` — the MODEL is the capability source once producers
+    stop holding skills (Brick 2 of the skill-library arc).
+
+    An explicit per-model tag stored on the preset (wizard-set) always wins;
+    otherwise a sensible default is inferred from the model id via
+    :mod:`modulatio.model_capabilities`. Returns empties when the model is
+    unknown and uninferrable — the caller keeps whatever the agent already had.
+    """
+    if not model_key:
+        return [], None, None
+    from modulatio import model_capabilities, model_presets
+
+    preset = model_presets.get_preset(model_key)
+    if not preset:
+        return [], None, None
+    explicit_caps = preset.get("capability_tags")
+    if isinstance(explicit_caps, str):
+        explicit_caps = _parse_csv(explicit_caps)
+    inf_tier, inf_cost, inf_caps = model_capabilities.infer_for_preset(preset)
+    caps = list(explicit_caps) if explicit_caps else list(inf_caps)
+    tier = preset.get("model_tier") or inf_tier
+    cost = preset.get("cost_class") or inf_cost
+    return caps, tier, cost
 
 
 # Ordered roster template. Each entry declares the agent id, the skills

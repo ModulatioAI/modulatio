@@ -1738,6 +1738,7 @@ def _make_default_kickoff(
         tool_registry = _tools.build_registry(
             artifacts_root=artifacts_root,
             tool_calls_dir=run_dir / "tool_calls",
+            project_code=project.code,
         )
 
         orch = Orchestrator(

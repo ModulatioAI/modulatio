@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from modulatio import model_presets, skills as skills_mod, templates as templates_pkg, theme
+from modulatio import model_presets, templates as templates_pkg, theme
 from modulatio.setup_wizard import steps
 
 
@@ -95,92 +95,54 @@ def _pick_model(
     return steps.pick_option(f"{role} model", options, default_index=default_idx)
 
 
-# Structural-role skills are not "team skills" the user assigns to
-# producers — they belong to the Leader/QC seats picked separately.
-_STRUCTURAL_SKILLS = frozenset({
-    "leader", "leader-verify", "leader-iterate", "qc", "coordinator",
-})
+def _producer_caps_for_model(model: str) -> tuple[str | None, str | None, list[str]]:
+    """Resolve a model's (model_tier, cost_class, capability_tags) and let the
+    user confirm or override — the "quick tag" (skill-library Brick 3). An
+    explicit tag already on the preset wins; otherwise a default is inferred
+    from the model id (modulatio.model_capabilities). Confirming is one
+    keystroke; declining lets the user type the strengths."""
+    from modulatio import model_capabilities, model_presets
 
+    preset = model_presets.get_preset(model) or {}
+    tier = preset.get("model_tier")
+    cost = preset.get("cost_class")
+    caps = preset.get("capability_tags")
+    if not (tier or cost or caps):
+        tier, cost, caps = (
+            model_capabilities.infer_for_preset(preset)
+            if preset else model_capabilities.infer(model)
+        )
+    caps = list(caps or ())
 
-def _select_from_skill_list(available: list[str], *, empty_msg: str) -> Any:
-    """Render a numbered skill list + read a comma-separated / 'all' choice.
-    Shared by team-skill selection and per-producer subset selection so the
-    two can never drift in parsing/validation. Returns list[str]
-    (order-preserving, de-duped), BACK, or QUIT."""
-    for i, sname in enumerate(available, 1):
-        skill = skills_mod.load_with_metadata(sname)
-        desc = (skill.description or "")[:50]
-        print(f"    {theme.color(f'{i:>2}', 'highlight')}) {sname:18s}  {theme.color(desc, 'muted')}")
-    print()
-    print(theme.color("  Enter comma-separated numbers (e.g. 1,3,5) or 'all'.", "muted"))
-
-    while True:
-        try:
-            raw = input(theme.prompt_color("  Skills: ", "highlight")).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return steps.QUIT
-        if raw in ("b", "q"):
-            return steps.BACK if raw == "b" else steps.QUIT
-        if raw == "all":
-            return list(available)
-        if raw == "":
-            theme.error(empty_msg)
-            continue
-        try:
-            picks = [int(p.strip()) for p in raw.split(",") if p.strip()]
-        except ValueError:
-            theme.error("Enter comma-separated numbers or 'all'.")
-            continue
-        if any(p < 1 or p > len(available) for p in picks):
-            theme.error(f"Pick numbers 1-{len(available)} only.")
-            continue
-        # de-dupe, preserve order
-        seen: list[str] = []
-        for p in picks:
-            s = available[p - 1]
-            if s not in seen:
-                seen.append(s)
-        return seen
-
-
-def _pick_team_skills() -> Any:
-    """Skills-first (#143): ask which SKILLS the team needs. Multi-select
-    from the shared skill registry (structural-role skills filtered out).
-    Returns list[str], BACK, or QUIT.
-
-    UX: numbered list + comma-separated number input, plus 'all' shortcut.
-    These skills become producers (skill-holders) the team routes work to.
-    """
-    available = sorted(s for s in skills_mod.list_skills() if s not in _STRUCTURAL_SKILLS)
-    print()
-    if not available:
-        theme.warn("No shared work skills are installed yet.")
-        theme.muted("Add skills via the Skills tab or `modulatio kickoff` after install.")
-        try:
-            input(theme.prompt_color("  Press Enter to continue...", "muted"))
-        except (EOFError, KeyboardInterrupt):
-            return steps.QUIT
-        return []
-
-    print(theme.color("  What should your team be able to do?", "primary", bold=True))
-    print(theme.color("  Pick the skills your producers will hold — tasks route to whoever holds the matching skill.", "muted"))
-    print()
-    return _select_from_skill_list(
-        available,
-        empty_msg="Pick at least one skill — the team needs at least one producer.",
+    shown = ", ".join(caps) if caps else "(none)"
+    print(theme.color(
+        f"  Detected: tier={tier or '?'}, cost={cost or '?'}, strengths=[{shown}]",
+        "muted",
+    ))
+    if steps.confirm_yn("  Use these capabilities for this model?", default=True):
+        return tier, cost, caps
+    # Override: let the user name the strengths (free text; the known vocab is
+    # offered as a hint). Tier/cost keep the detected values.
+    print(theme.color(
+        f"  Known strengths: {', '.join(model_capabilities.CAPABILITY_TAGS)}",
+        "muted",
+    ))
+    raw = steps.prompt_nav(
+        "Capabilities (comma-separated)", default=shown if caps else "",
+        required=False,
     )
+    if raw in (steps.BACK, steps.QUIT):
+        return tier, cost, caps
+    edited = [c.strip() for c in str(raw or "").split(",") if c.strip()]
+    return tier, cost, (edited or caps)
 
 
-def _build_skill_holder(skill_names: list[str], model: str, *, index: int | None = None) -> dict:
-    """Materialize a producer (skill-holder) wizard-state dict from a set of
-    skills + a model. capability_tags = union of each skill's tags +
-    required_capabilities (same derivation as roster.seed_default_roster)."""
-    capability_tags: list[str] = []
-    for sname in skill_names:
-        skill = skills_mod.load_with_metadata(sname)
-        for tag in list(skill.capability_tags) + list(skill.required_capabilities):
-            if tag and tag not in capability_tags:
-                capability_tags.append(tag)
+def _build_producer(model: str, *, index: int | None = None) -> dict:
+    """Materialize a producer wizard-state dict — a pure MODEL endpoint
+    (skill-library Brick 3). It holds NO skills: it checks out whatever a task
+    needs from the shared library at run-time, so any task can route to it. Its
+    capabilities come from the model (confirmed via the quick tag)."""
+    tier, cost, caps = _producer_caps_for_model(model)
     pid = "producer" if index is None else f"producer_{index}"
     name = "Producer" if index is None else f"Producer {index}"
     return {
@@ -188,17 +150,17 @@ def _build_skill_holder(skill_names: list[str], model: str, *, index: int | None
         "name": name,
         "role": "Producer",
         "identity": (
-            f"You are a skill-holder on this team. Your skills are "
-            f"{', '.join(skill_names)}. Work requiring those skills will be "
-            f"routed to you."
+            "You are a producer on this team — a model endpoint. You check out "
+            "whatever skills a task needs from the shared library; any task can "
+            "be routed to you."
         ),
-        "skills": list(skill_names),
-        "capability_tags": capability_tags,
-        "model_tier": "generalist",
-        "cost_class": "paid-cloud",
+        "skills": [],  # no held skills — checked out from the library per task
+        "capability_tags": list(caps),
+        "model_tier": tier,
+        "cost_class": cost,
         "tier": "producer",
         "model": model,
-        "template_origin": "skill-holder",
+        "template_origin": "producer-endpoint",
     }
 
 
@@ -257,164 +219,50 @@ def _provision_triad(state: dict, default_models: dict[str, str]) -> Any:
     return "configured"
 
 
-def _pick_skill_subset(team_skills: list[str], *, producer_label: str) -> Any:
-    """Pick which of the team's already-chosen skills one pool producer holds
-    (the subset path; the caller offers 'all' first for the common case).
-    Constrained to ``team_skills`` so a producer can't acquire a skill the
-    team never picked. Returns list[str], BACK, or QUIT."""
-    print()
-    print(theme.color(f"  Which skills should {producer_label} hold?", "primary", bold=True))
-    return _select_from_skill_list(
-        team_skills,
-        empty_msg="Pick at least one skill for this producer.",
-    )
-
-
-def _provision_producer_pool(
-    team_skills: list[str],
-    default_models: dict[str, str],
-    *,
-    staged_keys: dict[str, str] | None,
-    reserved: int,
-) -> Any:
-    """Build a POOL of producers, one at a time. Each gets its own model and
-    either ALL the team skills or a chosen subset. Capped so
-    Leader + QC + producers <= ``MAX_AGENTS``.
-
-    The payoff is concurrency: tasks route to whichever pool member holds the
-    matching skill, and under concurrent waves
-    (``Project.concurrent_waves_enabled`` / ``MODULATIO_CONCURRENT_WAVES``)
-    the scheduler reserves per-agent capacity and runs independent tasks
-    across the pool in parallel. Under the sequential default a redundant
-    pool is harmless but idle — the picker resolves identical-skill agents to
-    one of them, so the others wait their turn.
-
-    Returns list[dict] (>=1 producer), BACK, or QUIT."""
+def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
+    """Producer-pool provisioning (skill-library Brick 3). A producer is just
+    a MODEL endpoint — you assign an LLM and confirm its capability tag; there
+    are NO skills to pick. Skills are checked out from the shared library per
+    task, so any producer can run any task and the dispatcher load-balances
+    across the pool. Adds up to ``MAX_AGENTS - 2`` (Leader + QC) producers.
+    Sets ``state['worker_agents']``."""
+    staged_keys = state.get("staged_api_keys")
+    reserved = len(state.get("triad_agents", [])) or 2  # Leader + QC seats
     max_producers = max(1, MAX_AGENTS - reserved)
+
+    theme.clear_screen()
+    theme.step_header(4, 7, "Build your team — add producers")
+    print(theme.color(
+        "  A producer is a model endpoint. Assign an LLM and confirm what it's "
+        "good at — skills are drawn from the shared library per task, so any "
+        "producer can run any task and work spreads across the pool.", "muted",
+    ))
+    print()
+
     producers: list[dict] = []
     while len(producers) < max_producers:
         n = len(producers) + 1
         theme.clear_screen()
-        theme.step_header(4, 7, f"Producer pool — member {n} of up to {max_producers}")
+        theme.step_header(4, 7, f"Producer {n} of up to {max_producers}")
         model = _pick_model(f"producer {n}", default_models, staged_keys=staged_keys)
         if model in (steps.BACK, steps.QUIT):
-            return model
-        if steps.confirm_yn(
-            f"Hold ALL {len(team_skills)} team skills? (No = pick a subset)",
-            default=True,
-        ):
-            sks = list(team_skills)
-        else:
-            sks = _pick_skill_subset(team_skills, producer_label=f"producer {n}")
-            if sks in (steps.BACK, steps.QUIT):
-                return sks
-        producers.append(_build_skill_holder(sks, model, index=n))
+            # BACK before any producer is added bubbles up; otherwise just
+            # stop adding and keep what we have (>=1 enforced below).
+            if not producers:
+                return model
+            if model is steps.QUIT:
+                return model
+            break
+        producers.append(_build_producer(model, index=n))
         if len(producers) >= max_producers:
             theme.muted(f"  Reached the {MAX_AGENTS}-member team cap.")
             break
         if not steps.confirm_yn("Add another producer to the pool?", default=False):
             break
 
-    # Coverage check: with the subset path, the pool may not hold every team
-    # skill. An uncovered skill means tasks requiring it route to no producer
-    # and gap — warn (non-blocking; the user can re-run setup or edit the
-    # roster). The one/per shapes can't hit this since every skill gets a model.
-    covered = {s for p in producers for s in p.get("skills", [])}
-    missing = [s for s in team_skills if s not in covered]
-    if missing:
-        theme.warn(
-            f"  No pool producer holds: {', '.join(missing)}. Tasks needing "
-            f"those skills won't route until a producer holds them."
-        )
-    return producers
-
-
-def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
-    """Skills-first (#143) producer provisioning. Instead of provisioning
-    named worker agents by role/template, the user picks the SKILLS the
-    team needs and assigns a model to power them. Skills sharing a model
-    collapse into one producer (skill-holder); tasks route to whichever
-    producer holds the matching skill. Sets ``state['worker_agents']``."""
-    staged_keys = state.get("staged_api_keys")
-
-    theme.clear_screen()
-    theme.step_header(4, 7, "Build your team — start with skills")
-    print(theme.color(
-        "  A Modulatio team is defined by what it can DO. Pick your producers' "
-        "skills first — the two fixed seats (Leader + QC) are configured right "
-        "after.", "muted",
-    ))
-    print()
-
-    # 1. Which skills does the team need?
-    picked = _pick_team_skills()
-    if picked in (steps.BACK, steps.QUIT):
-        return picked
-    if not picked:
-        theme.error("Pick at least one skill — the team needs at least one producer.")
+    if not producers:
+        theme.error("A team needs at least one producer.")
         return steps.BACK
-
-    # 2. How should producers be staffed? Three shapes:
-    #    one  — a single producer holds all picked skills (one model)
-    #    per  — one producer per skill, each its own model (disjoint skills)
-    #    pool — a pool of producers, each its own model + chosen skills (the
-    #           redundant-pool shape: tasks load-balance across it, and under
-    #           concurrent waves independent tasks run in parallel on it)
-    reserved = len(state.get("triad_agents", [])) or 2  # Leader + QC seats
-    shape = steps.pick_option(
-        "How should producers be staffed?",
-        [
-            ("One model powers all the skills (a single producer)", "one"),
-            ("A different model per skill (one producer each)", "per"),
-            (f"A pool of producers — each its own model + skills "
-             f"(up to {max(1, MAX_AGENTS - reserved)}; the team shares the work)",
-             "pool"),
-        ],
-        default_index=0,
-    )
-    if shape in (steps.BACK, steps.QUIT):
-        return shape
-
-    if shape == "pool":
-        producers = _provision_producer_pool(
-            picked, default_models, staged_keys=staged_keys, reserved=reserved,
-        )
-        if producers in (steps.BACK, steps.QUIT):
-            return producers
-    else:
-        skill_to_model: dict[str, str] = {}
-        if shape == "per":
-            for sk in picked:
-                theme.clear_screen()
-                theme.step_header(4, 7, f"Producers — model for skill '{sk}'")
-                model = _pick_model(f"skill '{sk}'", default_models, staged_keys=staged_keys)
-                if model in (steps.BACK, steps.QUIT):
-                    return model
-                skill_to_model[sk] = model
-        else:  # "one"
-            theme.clear_screen()
-            theme.step_header(4, 7, "Producers — model for all producer skills")
-            model = _pick_model("all producer skills", default_models, staged_keys=staged_keys)
-            if model in (steps.BACK, steps.QUIT):
-                return model
-            for sk in picked:
-                skill_to_model[sk] = model
-
-        # Group skills by model → one producer (skill-holder) per distinct model.
-        by_model: dict[str, list[str]] = {}
-        for sk in picked:  # preserve pick order
-            by_model.setdefault(skill_to_model[sk], []).append(sk)
-        multi = len(by_model) > 1
-        producers = []
-        for i, (model, sks) in enumerate(by_model.items(), 1):
-            producers.append(_build_skill_holder(sks, model, index=i if multi else None))
-
-    # Soft cap: structural roles + producers shouldn't exceed MAX_AGENTS.
-    if len(state.get("triad_agents", [])) + len(producers) > MAX_AGENTS:
-        theme.warn(
-            f"That's more than {MAX_AGENTS} team members. Consider sharing a "
-            f"model across skills to keep the team lean."
-        )
 
     state["worker_agents"] = producers
     return "configured"

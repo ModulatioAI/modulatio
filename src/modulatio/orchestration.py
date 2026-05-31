@@ -1297,6 +1297,11 @@ _VALID_ITERATE_OUTCOMES: frozenset[str] = frozenset(
     {"continue", "revise-task", "drop-task"}
 )
 
+#: Skill-library builtins appended to every producer loadout (Brick 1) so a
+#: producer can discover + check out skills from the shared pool at run-time.
+#: Only those actually present in the active tool registry are wired in.
+_SKILL_LIBRARY_TOOLS: tuple[str, ...] = ("search_skills", "load_skill", "drop_skill")
+
 
 def _extract_iterate_decision(response: str) -> dict | None:
     """Pull the leader-iterate outcome dict from a response.
@@ -2917,6 +2922,7 @@ class Orchestrator:
                 task_id=task.id,
                 artifact_kind=task.artifact_kind,
                 description=task.description,
+                objective=self.project.objective,
                 agent_identity=_format_agent_identity(agent_identity),
                 design_intent=design_intent_block,
                 team_state=team_state_block,
@@ -2937,6 +2943,7 @@ class Orchestrator:
                 task_id=task.id,
                 artifact_kind=task.artifact_kind,
                 description=task.description,
+                objective=self.project.objective,
                 agent_identity=_format_agent_identity(agent_identity),
                 design_intent=design_intent_block,
                 team_state=team_state_block,
@@ -3617,6 +3624,15 @@ class Orchestrator:
                 if tool not in seen:
                     seen.add(tool)
                     loadout.append(tool)
+        # Skill-library builtins (Brick 1): every producer can DISCOVER and
+        # CHECK OUT skills from the shared pool at run-time. The candidate set
+        # (required_skills, unioned above) is pre-authorized; anything beyond is
+        # a logged self-heal. Only append the ones actually registered, so a
+        # stub / minimal registry (tests) never trips the loadout fail-fast.
+        for tool in _SKILL_LIBRARY_TOOLS:
+            if tool not in seen and tool in self.tool_registry:
+                seen.add(tool)
+                loadout.append(tool)
         return tuple(loadout)
 
     def _llm_with_tools_execute(
@@ -4371,6 +4387,7 @@ class Orchestrator:
         rebound = tools.build_registry(
             artifacts_root=staging,
             tool_calls_dir=staging / "tool_calls",
+            project_code=self.project.code,
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # staging-bound builtins win over shared ones
@@ -6193,6 +6210,63 @@ class Orchestrator:
         )
 
     # ── Capability tickets (slice #6d) ──────────────────────────────────
+    def _record_dispatch_advisories(
+        self,
+        goal: "Goal",
+        task: Task,
+        result: "dispatch.DispatchResult",
+        summary: RunSummary,
+        dispatch_notes: dict[str, str],
+    ) -> None:
+        """Surface a MATCHED dispatch's advisory shortfalls WITHOUT blocking
+        (Brick 3: "always best-available + PQR"). A capability shortfall — the
+        picked producer is below the requested floor — ships as a Product
+        Quality Report reservation. A referenced skill that isn't in the
+        library yet is recorded the same way (Brick 4 turns it into a
+        skill-creation proposal). Both are advisory; the task still runs."""
+        notes: list[str] = []
+        if result.capability_shortfall:
+            caps = ", ".join(result.capability_shortfall)
+            summary.recommendations.append({
+                "goal_id": goal.id,
+                "concern": (
+                    f"Task {task.id} ran on the best-available producer "
+                    f"({task.assigned_agent_id}). No configured model "
+                    f"advertised the capability this task preferred ({caps}) "
+                    f"— a soft preference, not a hard requirement, so it ran "
+                    f"on the strongest available model instead of blocking."
+                ),
+                "suggestion": (
+                    f"Add a producer whose model advertises {caps} if this "
+                    f"task's quality matters; otherwise the result stands."
+                ),
+            })
+            notes.append(f"ran below preferred capability ({caps}) — best-available")
+        if result.missing_skills:
+            sk = ", ".join(result.missing_skills)
+            summary.recommendations.append({
+                "goal_id": goal.id,
+                "concern": (
+                    f"Task {task.id} referenced skill(s) not in the "
+                    f"library: {sk}."
+                ),
+                "suggestion": (
+                    "Create the skill (the Leader can draft one) or adjust "
+                    "the plan; the producer ran with the capabilities it had."
+                ),
+            })
+            self._emit_activity(
+                role="planner",
+                phase="dispatch_skill_not_in_library",
+                agent_id="planner",
+                task_id=task.id,
+            )
+            notes.append(f"skill not in library ({sk}) — advisory")
+        if notes:
+            prior = dispatch_notes.get(task.id)
+            joined = "; ".join(notes)
+            dispatch_notes[task.id] = f"{prior}; {joined}" if prior else joined
+
     def _open_capability_ticket(
         self,
         task: Task,
@@ -6801,6 +6875,10 @@ class Orchestrator:
             # Hint is advisory — dispatch's ``select_agent`` ignores it
             # silently if the hinted agent doesn't qualify.
             id_to_task = {t.id: t for t in tasks}
+            # Brick 3 load-balance: each assignment bumps the picked
+            # producer's load so the next task in this goal prefers a
+            # different, idle producer instead of piling onto one model.
+            assigned_load: dict[str, int] = {}
             for t in tasks:
                 _propagate_continuity_hint(t, id_to_task)
                 result = dispatch.plan_dispatch(
@@ -6810,6 +6888,7 @@ class Orchestrator:
                     semantic_matcher=self.semantic_matcher,
                     skill_floor_for=self._skill_floor_for,
                     domain_floor_for=self._domain_floor_for,
+                    load=assigned_load,
                 )
                 if result.outcome is dispatch.DispatchOutcome.MATCHED:
                     if result.agent is None:
@@ -6817,24 +6896,22 @@ class Orchestrator:
                             f"dispatch.MATCHED with agent=None (task {t.id})"
                         )
                     t.assigned_agent_id = result.agent.id
-                elif result.outcome is dispatch.DispatchOutcome.SEMANTIC_MATCHED:
-                    # Slice #6e fallback: agent has the right shape
-                    # semantically even though declared skills don't
-                    # line up. Score rides on the DISPATCHED transition
-                    # so the human can audit threshold tuning.
-                    if result.agent is None or result.similarity_score is None:
-                        raise RuntimeError(
-                            f"dispatch.SEMANTIC_MATCHED missing agent or "
-                            f"similarity_score (task {t.id})"
-                        )
-                    t.assigned_agent_id = result.agent.id
-                    dispatch_notes[t.id] = (
-                        f"semantic match (similarity {result.similarity_score:.3f})"
+                    assigned_load[result.agent.id] = (
+                        assigned_load.get(result.agent.id, 0) + 1
                     )
-                elif result.outcome in (
-                    dispatch.DispatchOutcome.INVALID_SKILL,
-                    dispatch.DispatchOutcome.ROSTER_GAP,
-                ):
+                    # Advisory shortfalls never block (Brick 3 "always
+                    # best-available + PQR"): a producer below the requested
+                    # capability floor, or a skill referenced but not yet in
+                    # the library, ship to the human as Product Quality
+                    # Report reservations — the task still runs.
+                    self._record_dispatch_advisories(
+                        g, t, result, summary, dispatch_notes
+                    )
+                elif result.outcome is dispatch.DispatchOutcome.ROSTER_GAP:
+                    # No producer-tier agent exists at all — a genuine SETUP
+                    # gap (the wizard guarantees >= 1 producer). A producer
+                    # that merely lacks a skill or sits below the floor is
+                    # MATCHED above, never gapped.
                     self._open_capability_ticket(t, result, summary)
                     # Blocked tasks skip QC dispatch too — no QC on a
                     # task that won't run a producer.
@@ -7164,6 +7241,17 @@ to the breadth of words in the objective.
 - When in doubt, fewer goals. The team can open follow-on work later;
   it can't easily un-decompose an over-planned project mid-run.
 
+SELF-CONTAINMENT (critical): each goal must NAME its concrete subject
+matter — never refer to it symbolically. A goal is executed by producers
+that see ONLY that goal's own text (description + success_criteria) plus
+prior-task output — NOT this objective and NOT sibling goals. So restate
+the actual content: whatever the objective enumerates — report sections,
+code modules, chapters, ad variants, data fields, whatever the deliverable
+is — the goal restates those exact names, never "the three topics", "the
+requested items", "the above", or "as discussed". A dangling reference
+produces a goal nobody downstream can build. The same rule binds each
+goal's success_criteria: spell out what is required, don't point at it.
+
 You may NOT create a standalone "verify" / "review" / "QA" / "audit" /
 "validate" / "fact-check" GOAL — for ANY kind (code, document, design,
 dataset, report). The engine DROPS such goals: every producing goal is
@@ -7267,7 +7355,9 @@ fenced in ```json ... ```. No prose outside fence.
 
 Each task fields:
 
-- description: string
+- description: string — SELF-CONTAINED: NAME the concrete subject; never
+  "the three topics" / "the above" / "as discussed". The producer sees only
+  this task text, not the goal or objective.
 - assignee_specialist: role that executes (e.g. "drafter",
   "researcher"). Default "drafter".
 - artifact_kind: product class — selects domain standards. Examples:
@@ -7407,6 +7497,10 @@ _DRAFTER_EXECUTE_PROMPT = """\
 Task: {task_id}
 Artifact kind: {artifact_kind}
 Description: {description}
+
+Overall project objective this task serves (your north star — use it to
+resolve anything the task description leaves implicit, e.g. "the three
+topics"; do NOT expand scope beyond your own task): {objective}
 
 {agent_identity}
 
