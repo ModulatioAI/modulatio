@@ -1,6 +1,6 @@
 ---
 name: web-search
-description: Search the web (DuckDuckGo, no API key) to DISCOVER current sources. A separate, single-purpose capability a producer holds when a task needs to find current/external information — never a hard-coded URL. Grants ONLY web_search; pair it with a fetch tool (http_get) to read what it finds. Grant it on any task whose answer depends on what is true NOW.
+description: Search the web (DuckDuckGo, no API key) to find out what is TRUE NOW. A separate, single-purpose capability a producer holds whenever a task's answer depends on current truth — current events, live data, anything past a training cutoff, or any fact the producer can't already know — whatever the deliverable is. Never a hard-coded URL. Grants ONLY web_search; pair it with a fetch tool (http_get) to read what it finds.
 executor: llm
 tool_loadout: [web_search]
 capability_tags: web-search, research, currency

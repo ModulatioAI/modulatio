@@ -7244,11 +7244,11 @@ events, any real-world factual claim): set the PRIMARY (first)
 sources, cites them, won't fabricate, and flags what it can't verify, so
 QC has little to fix. Pure formatting/transform tasks skip it.
 
-WEB SEARCH — for tasks needing CURRENT/external info (recent events, live
-data, anything past a training cutoff), ALSO add `web-search` to
-`required_skills`: it grants the `web_search` tool so the producer DISCOVERS
-sources by searching instead of guessing URLs or recalling stale facts.
-Never hand a producer a hard-coded URL.
+WEB SEARCH — whenever a task's answer depends on what is TRUE NOW (current
+events, live data, versions, anything past a training cutoff — whatever the
+deliverable), ALSO add `web-search` to `required_skills`: it grants the
+`web_search` tool so the producer DISCOVERS sources by searching instead of
+guessing URLs or recalling stale facts. Never hand a producer a hard-coded URL.
 
 The first `required_skills` entry is the PRIMARY producing skill (its prompt
 drives the task); any further entries are CAPABILITY skills, added only for
