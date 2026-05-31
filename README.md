@@ -5,7 +5,7 @@
 Modulatio orchestrates teams of LLM agents — each on its own model and provider — through plan-mode execution with a real quality gate. Designed for work that takes more than one prompt: long-form drafting, small-business loops, multi-step research, codebase work, anything where output quality matters.
 
 > [!WARNING]
-> **v0.2.0 — Beta.** Builds on the v0.1.0 engine with the QC-thesis arc (see the [CHANGELOG](CHANGELOG.md)): the **Product Quality Report**, bundled default quality standards, the explicit QC-as-fixer model, and hardened context-budget safety (capped fetches + tool-result truncation). Validated end-to-end on a heterogeneous live model lineup (reasoning Leader + agentic QC + thinking-off producer). **2351 tests pass.** Read the [Beta calibration](https://modulatio.ai/v0-1-0-beta/) page before kicking off serious work — knowing the engine's real ceilings is the difference between a smooth run and a frustrated one. Bug reports + discussions welcome on the [issues tab](https://github.com/ModulatioAI/modulatio/issues) and [discussions](https://github.com/ModulatioAI/modulatio/discussions).
+> **v0.4.0 — Beta.** The team now **learns from its own failures**: when the same defect keeps recurring, the Leader codifies the correction into durable, **git-versioned** skill guidance that cheap producers load next time — the QC thesis closing its own loop (pay for a fix once, keep it forever). Builds on v0.3.0's **skill-library keystone** (a producer is now a **model endpoint** that checks skills out of a shared library per task, so any producer runs any task; dispatch routes on **capability + availability and never blocks**) and the v0.2.x **QC-thesis arc** (cheap producers generate the bulk; the smarter QC reviews and patches only the errors; the **Product Quality Report** ships honest caveats, never a gate). See the [CHANGELOG](CHANGELOG.md) for the full delta. Validated end-to-end on live heterogeneous model lineups and cleared fresh two-reviewer audits. **2442 tests pass.** Read the [Beta calibration](https://modulatio.ai/v0-1-0-beta/) page before kicking off serious work — knowing the engine's real ceilings is the difference between a smooth run and a frustrated one. Bug reports + discussions welcome on the [issues tab](https://github.com/ModulatioAI/modulatio/issues) and [discussions](https://github.com/ModulatioAI/modulatio/discussions).
 
 **Requires Python 3.12+.**
 
@@ -47,7 +47,7 @@ Full documentation lives at **<https://modulatio.ai>**.
 - **QC-as-fixer (on by default).** Cheap, fast producers generate the bulk of the work; the smarter QC reviews it and *patches only the errors* — the cost of a cheap model with the quality of a strong one (speculative decoding, applied to agents). When a producer can't clear the bar, QC authors the fix from its own findings and the task completes. Bundled default standards give QC a real bar from a cold start. Opt out with `MODULATIO_QC_FIXER=0`.
 - **Product Quality Report.** Every run ships an advisory note (`.docx`) in the project lead's own voice — what it stands behind and what it recommends you double-check. Honest caveats, never a gate: reservations the swarm can't resolve are surfaced here, never block the work or open a ticket.
 - **Finished products, delivered.** Producers write Markdown; the lead's tagged deliverables render to `.docx`, human-named from the document title, into `~/Documents/Modulatio/<project>/`.
-- **Skills over fixed roles.** Agents are compositions of skills; skills are conversationally creatable and persist to your vault.
+- **A producer is a model endpoint that learns.** No fixed roles and no skills to assign — give a producer an LLM and tag what it's good at; the team composes the skills each task needs from a shared, **git-versioned** library at run-time, and routing never blocks on a capability gap. When the same defect keeps recurring, the team **codifies** the correction into durable skill guidance that cheap producers load next time, so it gets quietly better at the work you give it.
 - **Plan-mode end-to-end.** Leader is a conversational partner, plan is the unit of execution, daemon-driven async, Telegram approvals, full audit trail.
 - **Open architecture.** Your data, your vault, your providers, your models. No SaaS, no per-instance subscription.
 
@@ -58,7 +58,7 @@ Full documentation lives at **<https://modulatio.ai>**.
 ```
 modulatio/
 ├── src/modulatio/    # Source — agents, runners, daemon, TUI, CLI
-├── tests/            # Pytest suite (2351 tests)
+├── tests/            # Pytest suite (2442 tests)
 ├── scripts/          # Build / release scripts
 └── pyproject.toml    # Package metadata + deps
 ```
