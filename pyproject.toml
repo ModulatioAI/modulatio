@@ -1,6 +1,6 @@
 [project]
 name = "modulatio"
-version = "0.2.1"
+version = "0.2.2"
 description = "Multi-model agent framework with plan-mode orchestration, integrated TUI, and team-state working memory."
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -31,6 +31,7 @@ dependencies = [
     "httpx>=0.27",
     "python-dotenv>=1.0",
     "litellm>=1.50",
+    "ddgs>=9.0",
     # Embedding-fallback routing (MiniLM via fastembed + LanceDB for the
     # agent-skill index). Routing embedder is decoupled from any
     # memory/knowledge stack.

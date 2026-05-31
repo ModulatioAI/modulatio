@@ -43,11 +43,20 @@ them first, then the batch tasks build on it. Never one task that both
 discovers AND deep-dives the whole set.
 
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
-events, any real-world factual claim): set `required_skills` to
-`rigorous-sourcing` as the PRIMARY skill — the producer fetches real
+events, any real-world factual claim): set the PRIMARY (first)
+`required_skills` entry to `rigorous-sourcing` — the producer fetches real
 sources, cites them, won't fabricate, and flags what it can't verify, so
-QC has little to fix. Pure formatting/transform tasks skip it. One skill
-per task; don't pile them on.
+QC has little to fix. Pure formatting/transform tasks skip it.
+
+WEB SEARCH — whenever a task's answer depends on what is TRUE NOW (current
+events, live data, versions, anything past a training cutoff — whatever the
+deliverable), ALSO add `web-search` to `required_skills`: it grants the
+`web_search` tool so the producer DISCOVERS sources by searching instead of
+guessing URLs or recalling stale facts. Never hand a producer a hard-coded URL.
+
+The first `required_skills` entry is the PRIMARY producing skill (its prompt
+drives the task); any further entries are CAPABILITY skills, added only for
+tools the task needs (e.g. `web-search`). Compose deliberately.
 
 CRITICAL — verification is automatic. Wait for QC; do not pre-empt.
 QC reviews every task you emit; DO NOT emit separate "review" /

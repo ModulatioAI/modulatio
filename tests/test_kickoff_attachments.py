@@ -361,3 +361,32 @@ def test_producer_patch_nonmatching_leaves_file_unchanged(project: Project, tmp_
                 description="d", output_path="game.py", artifact_kind="code")
     orch._producer_patch(task, f, **_PATCH_KW)
     assert f.read_text() == "real = 1\n"  # unchanged, not marker soup
+
+
+# ── per-task tool union (the first-brick composability) ──────────────────
+
+import modulatio.skills as _sk  # noqa: E402
+
+
+def test_task_tool_loadout_unions_required_skills(project: Project):
+    """A task carrying [researcher, web-search] gets http_get + web_search,
+    with neither skill bundling both — composed per task."""
+    orch = Orchestrator(project, _capturing_runners({}))
+    primary = _sk.load_with_metadata("researcher")  # tool_loadout [http_get]
+
+    class FakeTask:
+        required_skills = ["researcher", "web-search"]
+
+    out = orch._task_tool_loadout(FakeTask(), primary)
+    assert set(out) == {"http_get", "web_search"}
+    assert out[0] == "http_get"  # primary skill's tools come first
+
+
+def test_task_tool_loadout_primary_only_when_no_extras(project: Project):
+    orch = Orchestrator(project, _capturing_runners({}))
+    primary = _sk.load_with_metadata("researcher")
+
+    class FakeTask:
+        required_skills = ["researcher"]
+
+    assert orch._task_tool_loadout(FakeTask(), primary) == ("http_get",)

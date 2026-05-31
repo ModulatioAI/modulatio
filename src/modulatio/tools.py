@@ -43,11 +43,13 @@ from __future__ import annotations
 
 import html
 import ipaddress
+import os
 import re
 import shlex
 import socket
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,13 +83,25 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 _no_redirect_opener = urllib.request.build_opener(_NoRedirectHandler())
 
+#: A polite, identifying User-Agent. Without one, courteous sources (Wikipedia,
+#: many news/docs sites) reject the request with 403 — which silently starved
+#: research and pushed producers back onto stale training-data claims. An
+#: identifying UA that names the project + a contact URL is the well-behaved
+#: default for a research fetcher.
+_HTTP_USER_AGENT = (
+    "ModulatioResearchBot/0.2 (+https://modulatio.ai; respects robots) "
+    "python-urllib"
+)
+
 
 def _urlopen(url, timeout=None):
-    """Production HTTP fetch routed through the no-redirect opener.
-    Function name preserved (separate from ``urllib.request.urlopen``)
-    so tests can monkeypatch this surface to inject canned responses.
+    """Production HTTP fetch routed through the no-redirect opener, with a
+    polite identifying User-Agent (see :data:`_HTTP_USER_AGENT`). Function name
+    preserved (separate from ``urllib.request.urlopen``) so tests can
+    monkeypatch this surface to inject canned responses.
     """
-    return _no_redirect_opener.open(url, timeout=timeout)
+    req = urllib.request.Request(url, headers={"User-Agent": _HTTP_USER_AGENT})
+    return _no_redirect_opener.open(req, timeout=timeout)
 
 
 @dataclass(frozen=True)
@@ -1023,6 +1037,109 @@ def make_write_artifact(artifacts_root: Path) -> Callable[..., str]:
     return write_artifact
 
 
+# ── builtin: web_search (DuckDuckGo, no API key) ────────────────────────────
+
+#: Caps for the search tool. A handful of ranked hits is enough for an agent to
+#: pick the right sources to ``http_get``; the return-text cap keeps it inside a
+#: reasonable context slice.
+_WEB_SEARCH_DEFAULT_RESULTS = 6
+_WEB_SEARCH_MAX_RESULTS = 12
+_WEB_SEARCH_RETURN_CHARS = 8_000
+
+#: Low-credibility domains — AI-content-farms / unvetted wikis that fabricate
+#: plausible-looking "facts" (esp. current events). We FLAG, never drop: the
+#: producer + audit still see what was found and why it's suspect, and the
+#: producer is told (web-search / rigorous-sourcing skills) not to cite a
+#: flagged hit on its own.
+#:
+#: This seed set WILL bit-rot — content farms proliferate faster than code
+#: ships (Nemo hull note, 2026-05-31). It is a COMMUNITY-MAINTAINED SURFACE:
+#: extend it here via PR, OR per-deployment without a code change by setting
+#: ``MODULATIO_LOW_CREDIBILITY_DOMAINS`` (comma-separated) — merged in at call
+#: time by :func:`_low_credibility_domains`.
+_LOW_CREDIBILITY_DOMAINS: frozenset[str] = frozenset({
+    "grokipedia.com",
+    "kennelbiscotti.com",
+})
+
+_LOW_CREDIBILITY_ENV = "MODULATIO_LOW_CREDIBILITY_DOMAINS"
+
+
+def _low_credibility_domains() -> frozenset[str]:
+    """The active low-credibility domain set: the built-in seed plus any from
+    the ``MODULATIO_LOW_CREDIBILITY_DOMAINS`` env var (comma-separated). Read at
+    call time so a deployment can extend it without a code change."""
+    extra = os.environ.get(_LOW_CREDIBILITY_ENV, "")
+    if not extra.strip():
+        return _LOW_CREDIBILITY_DOMAINS
+    add = {d.strip().lower().lstrip(".") for d in extra.split(",") if d.strip()}
+    return _LOW_CREDIBILITY_DOMAINS | add
+
+
+def _is_low_credibility(href: str) -> bool:
+    """True iff ``href``'s host is (or is a subdomain of) a known low-trust
+    content-farm domain (seed set + env extension)."""
+    try:
+        host = (urllib.parse.urlsplit(href).hostname or "").lower()
+    except (ValueError, AttributeError):
+        return False
+    if not host:
+        return False
+    return any(
+        host == d or host.endswith("." + d) for d in _low_credibility_domains()
+    )
+
+
+def web_search(query: str, max_results: int = _WEB_SEARCH_DEFAULT_RESULTS) -> str:
+    """Search the web (DuckDuckGo, no API key) and return ranked results as
+    text — title, URL, and snippet per hit.
+
+    This is how an agent **discovers** current sources instead of guessing a URL
+    or leaning on stale training data: search a query, read the ranked hits,
+    then ``http_get`` the promising URLs to read them in full. URLs are never
+    hard-coded — they're found.
+    """
+    q = (query or "").strip()
+    if not q:
+        return "web_search requires a non-empty query string."
+    try:
+        from ddgs import DDGS
+    except ImportError:  # pragma: no cover - dependency guard
+        return (
+            "web_search is unavailable: the 'ddgs' package is not installed. "
+            "Install it (`pip install ddgs`) to enable web search."
+        )
+    try:
+        n = int(max_results)
+    except (TypeError, ValueError):
+        n = _WEB_SEARCH_DEFAULT_RESULTS
+    n = max(1, min(n, _WEB_SEARCH_MAX_RESULTS))
+    try:
+        results = list(DDGS().text(q, max_results=n))
+    except Exception as exc:  # network / rate-limit / backend change
+        return f"web_search error for {q!r}: {type(exc).__name__}: {exc}"
+    if not results:
+        return f"web_search: no results for {q!r}."
+    # Source-credibility pass: flag known content-farm/low-trust hits and sink
+    # them below credible ones (stable within each group). FLAG, don't drop —
+    # the producer sees everything and is told not to cite a flagged hit alone.
+    normalized = []
+    for r in results:
+        href = (r.get("href") or r.get("url") or "").strip()
+        normalized.append((
+            (r.get("title") or "").strip(),
+            href,
+            " ".join((r.get("body") or "").split()),
+            _is_low_credibility(href),
+        ))
+    normalized.sort(key=lambda t: t[3])  # credible (False) first; stable
+    lines = [f"Web search results for: {q}", ""]
+    for i, (title, href, body, low) in enumerate(normalized, 1):
+        flag = "  [LOW-CREDIBILITY SOURCE — verify independently before citing]" if low else ""
+        lines.append(f"{i}. {title}{flag}\n   {href}\n   {body}")
+    return "\n".join(lines)[:_WEB_SEARCH_RETURN_CHARS]
+
+
 # ── registry ────────────────────────────────────────────────────────────────
 
 def build_registry(
@@ -1065,6 +1182,29 @@ def build_registry(
                     },
                 },
                 "required": ["url"],
+            },
+        ),
+        "web_search": Tool(
+            name="web_search",
+            description=(
+                "Search the web (DuckDuckGo) and return ranked results — "
+                "title, URL, snippet. Use it to DISCOVER current sources, then "
+                "http_get the URLs you choose to read them. Never assume a URL."
+            ),
+            call=web_search,
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (plain keywords).",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "How many hits to return (1-12, default 6).",
+                    },
+                },
+                "required": ["query"],
             },
         ),
     }

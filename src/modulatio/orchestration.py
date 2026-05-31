@@ -2792,17 +2792,18 @@ class Orchestrator:
             )
             if primary_skill.executor == "tool":
                 return self._tool_execute(task, primary_skill, path)
-            # Phase 2A: executor=llm WITH a non-empty tool_loadout means
-            # the producer should reason WHILE having access to the
-            # declared tools (run_shell, http_get, etc.). Dispatch falls
-            # through to ``_llm_with_tools_execute`` only after the
-            # standard prompt-build path below — same prompt, but a
-            # function-calling loop instead of a single LLM round-trip.
-            if (
-                primary_skill.executor == "llm"
-                and primary_skill.tool_loadout
-            ):
-                return self._llm_with_tools_execute(task, primary_skill, path)
+            # Phase 2A + skill-library brick (2026-05-31): a producer reasons
+            # WHILE holding the tools its TASK needs — the UNION of every
+            # required skill's loadout, not just the primary's. So a task with
+            # required_skills [researcher, web-search] gets http_get + web_search
+            # in one loop, with neither skill bundling both — tools are separate,
+            # composed per task. (First brick of the skill library: capabilities
+            # granted to a producer as needed, no fixed roles.)
+            task_loadout = self._task_tool_loadout(task, primary_skill)
+            if primary_skill.executor == "llm" and task_loadout:
+                return self._llm_with_tools_execute(
+                    task, primary_skill, path, tool_loadout=task_loadout,
+                )
 
         research_context = self._ensure_research(task)
         domain_standards = standards.load(task.artifact_kind, project_code=self.project.code)
@@ -3593,11 +3594,38 @@ class Orchestrator:
                 return sk
         return None
 
+    def _task_tool_loadout(self, task: Task, primary_skill) -> tuple[str, ...]:
+        """The tools a producer holds for THIS task — the union of every
+        required skill's ``tool_loadout``, primary first, de-duplicated in
+        order. First brick of the skill library: capabilities are separate,
+        single-purpose, and composed onto a producer per task (a research task
+        carrying ``[researcher, web-search]`` gets ``http_get`` + ``web_search``
+        without any one skill bundling both). No fixed roles — a producer is
+        whatever skills its task grants it."""
+        loadout: list[str] = list(primary_skill.tool_loadout)
+        seen = set(loadout)
+        for name in task.required_skills:
+            if name == primary_skill.name:
+                continue
+            try:
+                extra = skills.load_with_metadata(
+                    name, project_code=self.project.code,
+                )
+            except Exception:
+                continue
+            for tool in extra.tool_loadout:
+                if tool not in seen:
+                    seen.add(tool)
+                    loadout.append(tool)
+        return tuple(loadout)
+
     def _llm_with_tools_execute(
         self,
         task: Task,
         skill: "skills.Skill",
         path: Path,
+        *,
+        tool_loadout: "tuple[str, ...] | None" = None,
     ) -> tuple[Path, str, int]:
         """Run an LLM-executor skill with a function-calling loop.
 
@@ -3681,7 +3709,10 @@ class Orchestrator:
         transcript_path = artifacts_root / "tool_calls" / f"{task.id.lower()}.jsonl"
         response = self._run_chat_loop(
             prompt=prompt,
-            tool_loadout=tuple(skill.tool_loadout),
+            tool_loadout=(
+                tool_loadout if tool_loadout is not None
+                else tuple(skill.tool_loadout)
+            ),
             role=task.assignee_specialist or self.default_producer_role,
             agent_id=task.assigned_agent_id or self.default_producer_role,
             task_id=task.id,
@@ -5826,28 +5857,67 @@ class Orchestrator:
         # ticket to the human and do NOT block the run — we ship the best
         # result and record the unresolved gap as a recommendation.
         if verdict == "disappointed":
-            self._refresh_daily_budget_if_new_day(goal)
-            if goal.retry_count < goal.max_retries:
+            # HARD INVARIANT (2026-05-31): the redo loop must terminate — an
+            # infinite redo is not a possibility; the goal always exits to the
+            # Product Quality Report. So within a single run retry_count is an
+            # ABSOLUTE counter (climbs to max_retries, never reset). We do NOT
+            # refresh the daily budget here: that refresh is keyed to the
+            # calendar date, and calling it inside the loop let a run that
+            # crossed midnight reset its own budget and grind on. The daily
+            # refresh is for RESUMING a blocked goal in a LATER run/day, and
+            # lives only at kickoff (_auto_resume_refreshable_goals).
+            # fix-is-final + deadlock guard (2026-05-31): if QC already had to
+            # AUTHOR the fix this round (the producer exhausted its own budget)
+            # AND we've already redone at least once, another pass won't help —
+            # QC's authored fix IS final. Bow out and ship with a reservation
+            # rather than grinding the whole retry budget on a structural
+            # deadlock (the producer↔QC stalemate — e.g. current-events claims
+            # QC can't independently verify). A round the producer cleared on
+            # its own still gets a redo; only the repeated qc-authored wall stops.
+            qc_authored_round = any(
+                getattr(t, "qc_authored_fix", False) for t in tasks
+            )
+            deadlocked = qc_authored_round and goal.retry_count >= 1
+            if goal.retry_count < goal.max_retries and not deadlocked:
                 self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
                 self._leader_auto_redo(
                     goal, tasks, rationale, report_path, summary,
                 )
                 return
-            summary.recommendations.append({
-                "goal_id": goal.id,
-                "concern": (
-                    f"The team could not fully satisfy this goal after "
-                    f"{goal.max_retries} attempts."
-                ),
-                "suggestion": (
-                    f"Review this deliverable closely before relying on it — "
-                    f"{rationale}"
-                ),
-            })
-            rationale_text = (
-                f"leader: shipped with reservations after {goal.max_retries} "
-                f"attempts: {rationale} | report {report_path.name}"
-            )
+            if deadlocked:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        "The team reached the limit of what it could verify for "
+                        "this goal — QC authored the best fix it could and further "
+                        "redos kept hitting the same wall."
+                    ),
+                    "suggestion": (
+                        f"Review this deliverable closely before relying on it — "
+                        f"{rationale}"
+                    ),
+                })
+                rationale_text = (
+                    f"leader: shipped with reservations — QC-authored fix is "
+                    f"final, redo deadlocked after {goal.retry_count} attempt(s): "
+                    f"{rationale} | report {report_path.name}"
+                )
+            else:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        f"The team could not fully satisfy this goal after "
+                        f"{goal.max_retries} attempts."
+                    ),
+                    "suggestion": (
+                        f"Review this deliverable closely before relying on it — "
+                        f"{rationale}"
+                    ),
+                })
+                rationale_text = (
+                    f"leader: shipped with reservations after {goal.max_retries} "
+                    f"attempts: {rationale} | report {report_path.name}"
+                )
         else:
             # satisfied / on_the_fence — both COMPLETE and ship. on_the_fence
             # no longer blocks or opens a ticket: its reservations were just
@@ -5899,14 +5969,23 @@ class Orchestrator:
     ) -> None:
         """Consume one retry-budget slot, reset the goal's tasks for
         a fresh execution pass, and invoke ``_leader_verify_goal``
-        again. Bounded by ``Goal.max_retries`` in the current daily
-        window — recursion is guaranteed to terminate.
+        again. Bounded by an ABSOLUTE ``Goal.max_retries`` within the run
+        (retry_count only climbs, never resets mid-run) — recursion is
+        GUARANTEED to terminate; the goal always exits to the Product
+        Quality Report. An infinite redo is not a possibility.
 
         Leader's prior rationale becomes the ``initial_corrective_notes``
         for each task's per-task redo loop, so producers see an
         aggregate-level critique in addition to any per-task QC notes.
         """
         goal.retry_count += 1
+        # Stamp the budget window's date as the budget is consumed. The in-run
+        # loop no longer refreshes on a date roll (the absolute-cap invariant),
+        # but the date is still recorded so the CROSS-RUN resume
+        # (_auto_resume_refreshable_goals, at the next day's kickoff) can tell a
+        # same-day-exhausted goal from one whose daily budget has genuinely
+        # rolled over.
+        goal.retry_count_date = date.today()
         attempt = goal.retry_count
         goal.transitions.append(
             StateTransition(
@@ -5919,6 +5998,11 @@ class Orchestrator:
                 ),
             )
         )
+        # Persist the consumed budget NOW (observability): the goal is otherwise
+        # only saved at the very end of the run, so a mid-run read of the goal
+        # file showed a stale retry_count=0 — which masked how close the loop
+        # was to its cap. Save so progress toward max_retries is visible live.
+        store.save_goal(self.project.code, goal, run_id=self.project.run_id)
 
         # Reset tasks to PENDING so the execution loop runs them fresh.
         # Previous evidence + agent assignments cleared — Leader's
@@ -5941,6 +6025,10 @@ class Orchestrator:
             t.assigned_agent_id = None
             t.qc_agent_id = None
             t.evidence_provided = []
+            # Clear the prior round's QC-authored flag so the next round's
+            # disappointed-branch deadlock check reflects THIS round only
+            # (whether QC had to author the fix again).
+            t.qc_authored_fix = False
             store.save_task(self.project.code, t, run_id=self.project.run_id)
 
         # Re-run the per-task execution loop with Leader's rationale
@@ -7151,11 +7239,20 @@ them first, then the batch tasks build on it. Never one task that both
 discovers AND deep-dives the whole set.
 
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
-events, any real-world factual claim): set `required_skills` to
-`rigorous-sourcing` as the PRIMARY skill — the producer fetches real
+events, any real-world factual claim): set the PRIMARY (first)
+`required_skills` entry to `rigorous-sourcing` — the producer fetches real
 sources, cites them, won't fabricate, and flags what it can't verify, so
-QC has little to fix. Pure formatting/transform tasks skip it. One skill
-per task; don't pile them on.
+QC has little to fix. Pure formatting/transform tasks skip it.
+
+WEB SEARCH — whenever a task's answer depends on what is TRUE NOW (current
+events, live data, versions, anything past a training cutoff — whatever the
+deliverable), ALSO add `web-search` to `required_skills`: it grants the
+`web_search` tool so the producer DISCOVERS sources by searching instead of
+guessing URLs or recalling stale facts. Never hand a producer a hard-coded URL.
+
+The first `required_skills` entry is the PRIMARY producing skill (its prompt
+drives the task); any further entries are CAPABILITY skills, added only for
+tools the task needs (e.g. `web-search`). Compose deliberately.
 
 CRITICAL — verification is automatic. Wait for QC; do not pre-empt.
 QC reviews every task you emit; DO NOT emit separate "review" /

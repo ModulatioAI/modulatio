@@ -1549,3 +1549,79 @@ def test_run_shell_passive_read_tools_stay_confined(tmp_path):
     ]:
         with pytest.raises(ValueError, match="not allowed"):
             rs(cmd=bad, profile="passive")
+
+
+# ── web_search tool (DuckDuckGo via ddgs) + http_get User-Agent ──────────
+
+def test_web_search_formats_ranked_results(monkeypatch):
+    class FakeDDGS:
+        def text(self, q, max_results):
+            return [
+                {"title": "Twelve-Day War", "href": "https://x/a", "body": "June 2025 war"},
+                {"title": "2026 Iran war", "href": "https://x/b", "body": "later conflict"},
+            ]
+    monkeypatch.setattr("ddgs.DDGS", FakeDDGS)
+    out = tools.web_search("israel iran war", max_results=2)
+    assert "Web search results for: israel iran war" in out
+    assert "Twelve-Day War" in out and "https://x/a" in out and "June 2025 war" in out
+
+
+def test_web_search_empty_query_guarded():
+    assert "non-empty" in tools.web_search("   ")
+
+
+def test_web_search_clamps_max_results(monkeypatch):
+    seen = {}
+    class FakeDDGS:
+        def text(self, q, max_results):
+            seen["n"] = max_results
+            return []
+    monkeypatch.setattr("ddgs.DDGS", FakeDDGS)
+    tools.web_search("x", max_results=999)
+    assert seen["n"] == tools._WEB_SEARCH_MAX_RESULTS  # clamped to 12
+
+
+def test_http_get_sends_identifying_user_agent(monkeypatch):
+    captured = {}
+    def fake_open(req, timeout=None):
+        captured["ua"] = req.get_header("User-agent")
+        raise RuntimeError("stop after capturing the request")
+    monkeypatch.setattr(tools._no_redirect_opener, "open", fake_open)
+    try:
+        tools._urlopen("http://example.com")
+    except RuntimeError:
+        pass
+    assert "Modulatio" in (captured["ua"] or "")  # polite UA, not bare/none
+
+
+# ── source-credibility discipline (flag content-farm slop, don't drop) ──
+
+def test_web_search_flags_and_sinks_low_credibility(monkeypatch):
+    class FakeDDGS:
+        def text(self, q, max_results):
+            return [
+                {"title": "Slop", "href": "https://grokipedia.com/x", "body": "fabricated"},
+                {"title": "Real", "href": "https://www.reuters.com/y", "body": "reported"},
+            ]
+    monkeypatch.setattr("ddgs.DDGS", FakeDDGS)
+    out = tools.web_search("israel iran 2026", max_results=2)
+    assert out.index("Real") < out.index("Slop")          # credible re-ranked first
+    assert "LOW-CREDIBILITY" in out                         # slop flagged
+    assert "grokipedia.com/x" in out                        # but NOT dropped
+
+
+def test_is_low_credibility_matches_subdomains():
+    assert tools._is_low_credibility("https://grokipedia.com/p")
+    assert tools._is_low_credibility("https://www.kennelbiscotti.com/a")
+    assert not tools._is_low_credibility("https://www.aljazeera.com/n")
+    assert not tools._is_low_credibility("not-a-url")
+
+
+def test_low_credibility_domains_env_extensible(monkeypatch):
+    """Nemo hull note: the seed set will bit-rot, so it's extensible per-
+    deployment via MODULATIO_LOW_CREDIBILITY_DOMAINS (no code change)."""
+    assert not tools._is_low_credibility("https://made-up-farm.example/x")
+    monkeypatch.setenv("MODULATIO_LOW_CREDIBILITY_DOMAINS", "made-up-farm.example, another.test")
+    assert tools._is_low_credibility("https://made-up-farm.example/x")
+    assert tools._is_low_credibility("https://sub.another.test/y")  # subdomain too
+    assert tools._is_low_credibility("https://grokipedia.com/z")    # seed still applies

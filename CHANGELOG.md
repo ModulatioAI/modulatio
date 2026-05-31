@@ -6,6 +6,52 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-05-31
+
+Web search, and a redo loop that provably terminates. Reviewed fresh and signed
+off by two independent reviewers (hull + coherence).
+
+### Added
+
+- **Web search** (`web_search` tool — DuckDuckGo via `ddgs`, no API key).
+  Producers can now **discover** current sources by searching, instead of only
+  fetching a URL they already know or recalling stale training data. Shipped as
+  the **first brick of the skill library**: a separate, single-purpose
+  `web-search` skill composed onto a task via a per-task **tool union** (no
+  fixed roles, no bundling). The planner grants it whenever a task's answer
+  depends on what's true now.
+- **Source-credibility flagging** — `web_search` flags known content-farm /
+  low-trust domains and sinks them below credible hits (**flag, never drop** —
+  the producer and the audit see everything). Extensible per deployment via
+  `MODULATIO_LOW_CREDIBILITY_DOMAINS`.
+
+### Changed
+
+- **`http_get` sends a polite, identifying User-Agent** — it sent none, which
+  403'd Wikipedia and other courteous sites, silently pushing research back onto
+  stale memory.
+- **Redo budget tightened 7 → 4** per goal.
+
+### Fixed
+
+- **The redo loop provably terminates — an infinite loop is not a possibility.**
+  The per-goal retry budget was keyed to the calendar date and refreshed *inside*
+  the loop, so a run that crossed midnight reset its own budget and could grind
+  day after day. Within a run the budget is now **absolute** (never reset
+  mid-run); the daily refresh applies only to resuming a parked goal in a *later*
+  run. The goal always exits to the **Product Quality Report**.
+- **fix-is-final + deadlock bow-out** — a producer↔QC stalemate (QC keeps having
+  to author the fix) bows out early with a PQR reservation instead of re-grinding
+  QC's final fix.
+- **`drafter-patch` roster gap** — patch mode (0.2.1) shipped the skill but never
+  added it to the roster; the planner assigning it gapped on a capability ticket.
+  Producers now hold it.
+
+### Design
+
+- **Skill-library spec** (`docs/design/skill-library.md`) — the design for the
+  brick's generalization (lazy checkout/drop from a shared pool). Not yet built.
+
 ## [0.2.1] — 2026-05-31
 
 In-place editing: hand Modulatio an existing file and it improves it surgically
