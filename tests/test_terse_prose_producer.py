@@ -78,9 +78,12 @@ def test_execute_format_slots_intact() -> None:
 def test_execute_under_post_terse_threshold() -> None:
     """Pre-terse: 2,221 chars. Post-terse target: under 2,150 (Slice #91).
     Alpha.4 added the optional inbox_proposals block + {inbox_notes}
-    slot (~260 chars). New target: under 2,450."""
+    slot (~260 chars). The skill-library arc added the {objective}
+    north-star block (~190 chars — load-bearing contract: it lets a
+    producer resolve a reference the task left implicit, e.g. "the three
+    topics", instead of stalling). New target: under 2,750."""
     n = len(orchestration._DRAFTER_EXECUTE_PROMPT)
-    assert n < 2450, f"_DRAFTER_EXECUTE_PROMPT is {n} chars (was 2,221)"
+    assert n < 2750, f"_DRAFTER_EXECUTE_PROMPT is {n} chars (was 2,221)"
     assert n > 1500, f"too small ({n}) — likely dropped contract content"
 
 
@@ -245,6 +248,7 @@ def test_coding_diff_skill_renders_terse_summary_trailer() -> None:
 def test_execute_template_renders_with_format() -> None:
     rendered = orchestration._DRAFTER_EXECUTE_PROMPT.format(
         task_id="T-1", artifact_kind="code", description="ship the thing",
+        objective="ship a thing well",
         agent_identity="(agent: engineer)", design_intent="(no design intent)",
         team_state="## Team State\n(empty)", standards="(no standards)",
         research_context="(no research)", team_memory_context="(no memory)",

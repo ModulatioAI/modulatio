@@ -2922,6 +2922,7 @@ class Orchestrator:
                 task_id=task.id,
                 artifact_kind=task.artifact_kind,
                 description=task.description,
+                objective=self.project.objective,
                 agent_identity=_format_agent_identity(agent_identity),
                 design_intent=design_intent_block,
                 team_state=team_state_block,
@@ -2942,6 +2943,7 @@ class Orchestrator:
                 task_id=task.id,
                 artifact_kind=task.artifact_kind,
                 description=task.description,
+                objective=self.project.objective,
                 agent_identity=_format_agent_identity(agent_identity),
                 design_intent=design_intent_block,
                 team_state=team_state_block,
@@ -7237,6 +7239,17 @@ to the breadth of words in the objective.
 - When in doubt, fewer goals. The team can open follow-on work later;
   it can't easily un-decompose an over-planned project mid-run.
 
+SELF-CONTAINMENT (critical): each goal must NAME its concrete subject
+matter — never refer to it symbolically. A goal is executed by producers
+that see ONLY that goal's own text (description + success_criteria) plus
+prior-task output — NOT this objective and NOT sibling goals. So restate
+the actual content: if the objective names "leading programs, recent
+milestones, and open challenges", the goal says those exact words — never
+"the three topics", "the requested items", "the above", or "as discussed".
+A dangling reference produces a goal nobody downstream can build. The same
+rule binds each goal's success_criteria: spell out what is required, don't
+point at it.
+
 You may NOT create a standalone "verify" / "review" / "QA" / "audit" /
 "validate" / "fact-check" GOAL — for ANY kind (code, document, design,
 dataset, report). The engine DROPS such goals: every producing goal is
@@ -7340,7 +7353,9 @@ fenced in ```json ... ```. No prose outside fence.
 
 Each task fields:
 
-- description: string
+- description: string — SELF-CONTAINED: NAME the concrete subject; never
+  "the three topics" / "the above" / "as discussed". The producer sees only
+  this task text, not the goal or objective.
 - assignee_specialist: role that executes (e.g. "drafter",
   "researcher"). Default "drafter".
 - artifact_kind: product class — selects domain standards. Examples:
@@ -7480,6 +7495,10 @@ _DRAFTER_EXECUTE_PROMPT = """\
 Task: {task_id}
 Artifact kind: {artifact_kind}
 Description: {description}
+
+Overall project objective this task serves (your north star — use it to
+resolve anything the task description leaves implicit, e.g. "the three
+topics"; do NOT expand scope beyond your own task): {objective}
 
 {agent_identity}
 

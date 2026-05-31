@@ -71,7 +71,9 @@ fenced in ```json ... ```. No prose outside fence.
 
 Each task fields:
 
-- description: string
+- description: string — SELF-CONTAINED: NAME the concrete subject; never
+  "the three topics" / "the above" / "as discussed". The producer sees only
+  this task text, not the goal or objective.
 - assignee_specialist: role that executes (e.g. "drafter",
   "researcher"). Default "drafter".
 - artifact_kind: product class — selects domain standards. Examples:
