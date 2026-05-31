@@ -6,6 +6,43 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-31
+
+**Autonomous skill self-codification** — the "Alfred loop". The team now learns
+from its own repeated failures: smart-model corrections stop being one-time
+expenditures and become the rising floor for every cheap producer. Reviewed
+fresh and signed off by two independent reviewers (hull + coherence), and
+proven on a live run against real failures.
+
+### Added
+
+- **End-of-run self-codification hook.** At the end of a kickoff, the Leader
+  reads the team's recent QC **fail verdicts** and **judges** whether any
+  problem recurred enough to be worth durable guidance (roughly three or more
+  of the same kind of defect). When it has, it codifies the lesson — either
+  **improving** an existing skill (appends a "Learned" section and bumps its
+  version) or **creating** a new single-purpose one. Recurrence is the model's
+  judgment over the log, not a mechanical counter.
+- **The skill library is now git-backed.** Each codification is versioned and
+  committed, so a lesson earned at token cost is never lost and is always
+  revertible. The git layer is best-effort and inert when git is absent — it
+  never raises and never touches global git config.
+- **Observability breadcrumbs.** The best-effort hook emits a
+  `skill_codification_skipped:<reason>` activity event on any swallowed path,
+  so a silently stalled learning loop is diagnosable without the hook ever
+  breaking a run.
+- Kill-switch: `MODULATIO_SKILL_CODIFICATION=0` (the loop is on by default).
+
+### Design notes
+
+- **No QC re-check of a drafted skill.** QC already voted — through the very
+  repeated fail-verdicts the lesson is distilled from — so re-verifying the
+  draft would double-count it, and a weaker QC gating the smartest seat's
+  judgment would invert the capability floor. This mirrors QC-as-fixer, where
+  the Leader does not re-check the fixer's patch. The engine binds the
+  invariants instead (versioned, git-committed, evidence consumed); runtime QC
+  still reviews the *artifacts* the codified skill later influences.
+
 ## [0.3.0] — 2026-05-31
 
 The **skill-library keystone**: producers become model endpoints, and a
