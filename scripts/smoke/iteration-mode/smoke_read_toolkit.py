@@ -22,6 +22,7 @@ deny = [
     "grep -r x .",                  # recursive tree walk
     "grep -n root /etc/passwd",     # outside root
     "grep -f patterns.txt game.py", # read-from-file flag
+    "grep -n JUMP game.py -",       # bare - = stdin, not a file (Nemo note)
     "sed -i s/x/y/ game.py",        # in-place WRITE
     "sed -n 1e/bin/sh game.py",     # exec via e command
     "tail -n 5 /etc/shadow",        # outside root

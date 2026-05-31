@@ -1540,6 +1540,7 @@ def test_run_shell_passive_read_tools_stay_confined(tmp_path):
     rs = tools.make_run_shell(art)
     for bad in [
         "grep -r x .",                 # recursive tree walk
+        "grep -n x game.py -",         # bare - = stdin, not a file
         "grep -n root /etc/passwd",    # outside root
         "sed -i s/x/y/ game.py",       # in-place WRITE
         "sed -n 1e/bin/sh game.py",    # exec via e command

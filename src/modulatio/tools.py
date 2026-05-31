@@ -381,6 +381,12 @@ def _is_safe_file_arg(arg: str, root: Path | None) -> bool:
     """
     if not arg:
         return False
+    # A bare ``-`` means STDIN to cat/head/tail/grep/wc — never a legitimate
+    # file in the confined producer context (stdin is /dev/null there), and it
+    # would otherwise slip past as a "file" arg. Reject it (Nemo hull note,
+    # 2026-05-31).
+    if arg == "-":
+        return False
     if arg.startswith("/") or arg.startswith("\\"):
         if root is None:
             return False
