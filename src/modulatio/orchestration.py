@@ -5858,27 +5858,58 @@ class Orchestrator:
         # result and record the unresolved gap as a recommendation.
         if verdict == "disappointed":
             self._refresh_daily_budget_if_new_day(goal)
-            if goal.retry_count < goal.max_retries:
+            # fix-is-final + deadlock guard (2026-05-31): if QC already had to
+            # AUTHOR the fix this round (the producer exhausted its own budget)
+            # AND we've already redone at least once, another pass won't help —
+            # QC's authored fix IS final. Bow out and ship with a reservation
+            # rather than grinding the whole retry budget on a structural
+            # deadlock (the producer↔QC stalemate — e.g. current-events claims
+            # QC can't independently verify). A round the producer cleared on
+            # its own still gets a redo; only the repeated qc-authored wall stops.
+            qc_authored_round = any(
+                getattr(t, "qc_authored_fix", False) for t in tasks
+            )
+            deadlocked = qc_authored_round and goal.retry_count >= 1
+            if goal.retry_count < goal.max_retries and not deadlocked:
                 self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
                 self._leader_auto_redo(
                     goal, tasks, rationale, report_path, summary,
                 )
                 return
-            summary.recommendations.append({
-                "goal_id": goal.id,
-                "concern": (
-                    f"The team could not fully satisfy this goal after "
-                    f"{goal.max_retries} attempts."
-                ),
-                "suggestion": (
-                    f"Review this deliverable closely before relying on it — "
-                    f"{rationale}"
-                ),
-            })
-            rationale_text = (
-                f"leader: shipped with reservations after {goal.max_retries} "
-                f"attempts: {rationale} | report {report_path.name}"
-            )
+            if deadlocked:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        "The team reached the limit of what it could verify for "
+                        "this goal — QC authored the best fix it could and further "
+                        "redos kept hitting the same wall."
+                    ),
+                    "suggestion": (
+                        f"Review this deliverable closely before relying on it — "
+                        f"{rationale}"
+                    ),
+                })
+                rationale_text = (
+                    f"leader: shipped with reservations — QC-authored fix is "
+                    f"final, redo deadlocked after {goal.retry_count} attempt(s): "
+                    f"{rationale} | report {report_path.name}"
+                )
+            else:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        f"The team could not fully satisfy this goal after "
+                        f"{goal.max_retries} attempts."
+                    ),
+                    "suggestion": (
+                        f"Review this deliverable closely before relying on it — "
+                        f"{rationale}"
+                    ),
+                })
+                rationale_text = (
+                    f"leader: shipped with reservations after {goal.max_retries} "
+                    f"attempts: {rationale} | report {report_path.name}"
+                )
         else:
             # satisfied / on_the_fence — both COMPLETE and ship. on_the_fence
             # no longer blocks or opens a ticket: its reservations were just
@@ -5950,6 +5981,11 @@ class Orchestrator:
                 ),
             )
         )
+        # Persist the consumed budget NOW (observability): the goal is otherwise
+        # only saved at the very end of the run, so a mid-run read of the goal
+        # file showed a stale retry_count=0 — which masked how close the loop
+        # was to its cap. Save so progress toward max_retries is visible live.
+        store.save_goal(self.project.code, goal, run_id=self.project.run_id)
 
         # Reset tasks to PENDING so the execution loop runs them fresh.
         # Previous evidence + agent assignments cleared — Leader's
@@ -5972,6 +6008,10 @@ class Orchestrator:
             t.assigned_agent_id = None
             t.qc_agent_id = None
             t.evidence_provided = []
+            # Clear the prior round's QC-authored flag so the next round's
+            # disappointed-branch deadlock check reflects THIS round only
+            # (whether QC had to author the fix again).
+            t.qc_authored_fix = False
             store.save_task(self.project.code, t, run_id=self.project.run_id)
 
         # Re-run the per-task execution loop with Leader's rationale
@@ -7182,11 +7222,20 @@ them first, then the batch tasks build on it. Never one task that both
 discovers AND deep-dives the whole set.
 
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
-events, any real-world factual claim): set `required_skills` to
-`rigorous-sourcing` as the PRIMARY skill — the producer fetches real
+events, any real-world factual claim): set the PRIMARY (first)
+`required_skills` entry to `rigorous-sourcing` — the producer fetches real
 sources, cites them, won't fabricate, and flags what it can't verify, so
-QC has little to fix. Pure formatting/transform tasks skip it. One skill
-per task; don't pile them on.
+QC has little to fix. Pure formatting/transform tasks skip it.
+
+WEB SEARCH — for tasks needing CURRENT/external info (recent events, live
+data, anything past a training cutoff), ALSO add `web-search` to
+`required_skills`: it grants the `web_search` tool so the producer DISCOVERS
+sources by searching instead of guessing URLs or recalling stale facts.
+Never hand a producer a hard-coded URL.
+
+The first `required_skills` entry is the PRIMARY producing skill (its prompt
+drives the task); any further entries are CAPABILITY skills, added only for
+tools the task needs (e.g. `web-search`). Compose deliberately.
 
 CRITICAL — verification is automatic. Wait for QC; do not pre-empt.
 QC reviews every task you emit; DO NOT emit separate "review" /
