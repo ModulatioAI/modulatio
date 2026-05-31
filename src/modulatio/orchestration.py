@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
-from modulatio import comptroller, dispatch, kickoff_history, lessons, qc_history, qc_notes, research, roster, skill_git, skills, standards, standards_proposals, store, tools
+from modulatio import comptroller, dispatch, job_template_library, kickoff_history, lessons, qc_history, qc_notes, research, roster, skill_git, skills, standards, standards_proposals, store, tools
+from modulatio.job_templates import JobTemplate
 from modulatio import context_budget as _ctx_budget_module
 from modulatio import dispatch_breaker as _dispatch_breaker_module
 from modulatio import tool_summarization as _tool_sum_module
@@ -1491,6 +1492,15 @@ class Orchestrator:
         #: no-scatter / no-over-decompose contract into the decompose,
         #: task-plan, and producer prompts. Set per kickoff.
         self._pinned_files: list[str] = []
+        #: Job Template bound for this run (B2). ``None`` ⇒ greenfield (no JT
+        #: matched / supplied) and every downstream prompt stays byte-identical.
+        #: When set, the Leader interviewed-or-defaulted the JT's params at
+        #: intake; ``_bound_jt_params`` holds the answer set. Set per kickoff.
+        self._bound_jt: "JobTemplate | None" = None
+        self._bound_jt_params: dict[str, Any] = {}
+        #: Fuzzy JT matches surfaced to the Leader at intake as candidates it
+        #: MAY choose (a nudge, not a bind) — ``(name, description)`` pairs.
+        self._jt_candidates: list[tuple[str, str]] = []
         #: Per-role context-budget overrides supplied at the dispatcher
         #: entry point (CLI ``--ctx-budget``, daemon, TUI advanced
         #: settings). Keys are budget_role strings; values are
@@ -2206,7 +2216,8 @@ class Orchestrator:
                 attachments=_format_kickoff_attachments(doc_only)
                 + "\n\n(Image attachments are included as content blocks "
                 "below — examine them for visual context.)"
-                + self._iteration_contract_block(),
+                + self._iteration_contract_block()
+                + self._job_template_block(),
             )
             response = self._run_multimodal_leader(
                 prompt=prompt, attachments=atts,
@@ -2218,7 +2229,8 @@ class Orchestrator:
                 code=self.project.code,
                 standards=_format_standards_block(leader_standards),
                 attachments=_format_kickoff_attachments(atts)
-                + self._iteration_contract_block(),
+                + self._iteration_contract_block()
+                + self._job_template_block(),
             )
             response = self._run("leader", prompt)
         data = _extract_json(response)
@@ -2309,6 +2321,7 @@ class Orchestrator:
                 indent=2,
             ),
             design_intent=self._iteration_contract_block()
+            + self._job_template_block()
             + _design_intent.render_for_prompt(self.project.code),
             available_skills=_format_available_skills(available),
             available_capabilities=_format_available_capabilities(
@@ -6238,6 +6251,173 @@ class Orchestrator:
                 lines.append(f"- {nm}")
         return ("\n".join(lines) or "(none)", names)
 
+    def _resolve_job_template(
+        self,
+        objective: str,
+        *,
+        bound_jt_name: str | None,
+        bound_jt_params: dict | None,
+        ask_operator: "Callable[[str], str] | None",
+        summary: RunSummary,
+    ) -> None:
+        """B2 — Job Template retrieval at job intake. Using a JT is the
+        Leader's CHOICE, a strong situational suggestion — not an engine
+        override. Two paths:
+
+        - **explicit bind** (``bound_jt_name`` — a cron, or the operator saying
+          "use template X"): the operator already chose, so it binds. Params =
+          the supplied ``bound_jt_params`` over the JT's defaults; the interview
+          fills any gaps via ``ask_operator`` (else defaults — "do it like I
+          always do it").
+        - **fuzzy match** (an objective grep hits a JT): NOT bound. The match is
+          *surfaced* to the Leader as a candidate (``self._jt_candidates``) so it
+          can choose to follow that shape — a nudge, not a forced bind. The
+          real adopt-and-bind lives in the conversational surface (the coming
+          TUI); in the batch engine it stays a suggestion.
+
+        Greenfield (no explicit name, no match) ⇒ ``_bound_jt`` stays None and
+        every downstream prompt is byte-identical. BEST-EFFORT — a failure here
+        never breaks a kickoff (it just falls back to greenfield)."""
+        self._bound_jt = None
+        self._bound_jt_params = {}
+        self._jt_candidates = []
+        try:
+            if bound_jt_name:
+                cand = job_template_library.checkout(bound_jt_name, self.project.code)
+                if cand.name:
+                    self._bind_job_template(cand, bound_jt_params or {}, ask_operator, summary)
+                return
+            if objective:
+                matches = job_template_library.search_job_templates(
+                    objective, self.project.code, limit=3,
+                )
+                # Surface as candidates — the Leader chooses (or not). No bind.
+                self._jt_candidates = [
+                    (m.name, m.description) for m in matches if m.name
+                ]
+                if self._jt_candidates:
+                    self._emit_activity(
+                        role="leader",
+                        phase=f"jt_candidates_surfaced:{len(self._jt_candidates)}",
+                        agent_id="leader",
+                    )
+        except Exception:  # noqa: BLE001 — JT resolution must never break a run
+            self._bound_jt = None
+            self._bound_jt_params = {}
+            self._jt_candidates = []
+
+    def _bind_job_template(
+        self,
+        jt: JobTemplate,
+        bound_params: dict,
+        ask_operator: "Callable[[str], str] | None",
+        summary: RunSummary,
+    ) -> None:
+        """Bind a JT the operator explicitly chose: interview-or-default its
+        params, name the output folder, record it, and surface any unmet HARD
+        (required) setup answer as an honest PQR reservation. Never blocks."""
+        params = self._run_jt_interview(jt, bound_params, ask_operator)
+        self._bound_jt = jt
+        self._bound_jt_params = params
+        summary.job_slug = jt.name  # names this job's output folder (Feature A)
+        self._emit_activity(
+            role="leader", phase=f"jt_bound:{jt.name}", agent_id="leader",
+        )
+        # Hard goals the operator drew but the headless engine couldn't ask for
+        # → an honest PQR reservation (never blocks; the Leader's other advisory
+        # notes ship the same way).
+        missing = jt.missing_required(params)
+        if missing:
+            summary.recommendations.append({
+                "goal_id": "",
+                "concern": (
+                    f"Job template '{jt.name}' ran without required "
+                    f"setup answer(s): {', '.join(missing)}."
+                ),
+                "suggestion": (
+                    "Bind these parameters (interactively or via the cron "
+                    "job's params) so the job isn't under-specified."
+                ),
+            })
+
+    def _run_jt_interview(
+        self,
+        jt: JobTemplate,
+        provided: dict,
+        ask_operator: "Callable[[str], str] | None",
+    ) -> dict:
+        """Bind a JT's params. Starts from the JT's standing **defaults** (the
+        "do it like I always do it" recipe) overlaid with any explicitly
+        ``provided`` params (cron / API pre-binds).
+
+        ``ask_operator`` is the **conversational seam** the future streaming TUI
+        drives — the Leader-as-conversational-partner asking the operator the
+        JT's setup questions. When present (interactive *refresh*), each
+        not-pre-bound param's ``prompt`` is asked and the answer overrides the
+        default. When absent (headless / cron *run-as-always*), the defaults
+        stand and nothing is asked. A broken callback can't break a run."""
+        params = dict(jt.defaults())
+        params.update({k: v for k, v in (provided or {}).items() if v is not None})
+        if ask_operator is None:
+            return params
+        for pf in jt.param_schema:
+            if pf.name in (provided or {}) or not pf.prompt:
+                continue  # don't re-ask pre-bound params or fields with no question
+            try:
+                answer = ask_operator(pf.prompt)
+            except Exception:  # noqa: BLE001 — a broken UI callback can't break a run
+                answer = None
+            if answer is not None and str(answer).strip():
+                params[pf.name] = answer
+                self._emit_activity(
+                    role="leader",
+                    phase=f"jt_interview_answered:{pf.name}",
+                    agent_id="leader",
+                )
+        return params
+
+    def _validate_output_contract(self, summary: RunSummary) -> None:
+        """B2 — verify a bound JT's HARD cardinality, report a shortfall firmly,
+        never block. The operator drew the line (exactly N separate
+        deliverables); if the finished plan came up short, the engine surfaces
+        it LOUDLY in the Product Quality Report + a breadcrumb. It does NOT
+        re-prompt or fail the run — never-block is Modulatio's ethos, and the
+        Leader (the smart seat that chose the JT) carries the judgment; the
+        engine's job is to make the truth visible. Best-effort."""
+        try:
+            jt = self._bound_jt
+            if jt is None:
+                return
+            n = self._jt_target_count(jt, self._bound_jt_params)
+            if n is None:
+                return
+            paths = {
+                op for t in summary.tasks
+                if getattr(t, "deliverable", False)
+                and (op := (getattr(t, "output_path", None) or "").strip())
+            }
+            got = len(paths)
+            if got < n:
+                self._emit_activity(
+                    role="orchestrator",
+                    phase=f"jt_output_contract_short:{got}/{n}",
+                    agent_id="orchestrator",
+                )
+                summary.recommendations.append({
+                    "goal_id": "",
+                    "concern": (
+                        f"Job template '{jt.name}' set a HARD requirement of "
+                        f"{n} separate deliverables, but the run produced {got}."
+                    ),
+                    "suggestion": (
+                        "Re-run, or check the Leader emitted one artifacts-list "
+                        "task with an entry per item — the operator asked for "
+                        f"{n} distinct files."
+                    ),
+                })
+        except Exception:  # noqa: BLE001 — a verification check can't break a run
+            pass
+
     def _record_kickoff_history(self, summary: RunSummary) -> None:
         """Brick B1b: write a silent per-run kickoff-history record (objective +
         outcome) into ``runs/<run_id>/kickoff.json`` so the B4 recurrence
@@ -6246,9 +6426,13 @@ class Orchestrator:
         populate them."""
         try:
             outcome = "failed" if summary.errors else "completed"
+            jt = self._bound_jt
             kickoff_history.record(
                 self.project.code, self.project.run_id,
                 objective=self.project.objective, outcome=outcome,
+                jt_id=jt.name if jt else None,
+                jt_version=jt.version if jt else None,
+                bound_params=dict(self._bound_jt_params) or None,
             )
         except Exception:  # noqa: BLE001 — observability must never break a run
             pass
@@ -6856,6 +7040,9 @@ class Orchestrator:
         *,
         attachments: list | None = None,
         chat_completion: "Callable[..., Any] | None" = None,
+        bound_jt_name: str | None = None,
+        bound_jt_params: dict | None = None,
+        ask_operator: "Callable[[str], str] | None" = None,
     ) -> RunSummary:
         # Alpha (F1): bind Layer 1 (tool_summarization) + Layer 2
         # (context_budget) configs for the duration of the kickoff so
@@ -6870,6 +7057,9 @@ class Orchestrator:
                 objective,
                 attachments=attachments,
                 chat_completion=chat_completion,
+                bound_jt_name=bound_jt_name,
+                bound_jt_params=bound_jt_params,
+                ask_operator=ask_operator,
             )
 
     @contextmanager
@@ -6973,6 +7163,88 @@ class Orchestrator:
             "speaks for itself.\n"
         )
 
+    def _job_template_block(self) -> str:
+        """Job-Template guidance appended to the decompose / task-plan prompts.
+        Empty string when no JT is bound and none surfaced ⇒ greenfield prompts
+        stay byte-identical (mirrors ``_iteration_contract_block``). Two cases:
+
+        - a JT is **bound** → the OUTPUT CONTRACT for its HARD goals (required
+          params + an explicit per-item / ``fixed:N`` cardinality), steering the
+          Leader to the ``artifacts: [...]`` mechanism so N separate
+          deliverables actually land. Delegated aspects stay soft.
+        - candidates were **surfaced** (a fuzzy match, not bound) → a suggestion
+          the Leader MAY adopt — its choice, never a requirement."""
+        jt = self._bound_jt
+        if jt is not None:
+            return self._output_contract_text(jt, self._bound_jt_params)
+        if self._jt_candidates:
+            lines = "\n".join(f"- `{n}` — {d}" for n, d in self._jt_candidates)
+            return (
+                "\n\n# JOB TEMPLATE — a saved setup may fit (your choice)\n"
+                "Saved job template(s) match this kind of job. Using one is "
+                "OPTIONAL — adopt its shape if it fits the operator's intent, "
+                "ignore it if not:\n"
+                f"{lines}\n"
+            )
+        return ""
+
+    @staticmethod
+    def _jt_target_count(jt: JobTemplate, params: dict) -> int | None:
+        """N for an enforceable cardinality — a per-item list's length, or the
+        literal of ``fixed:N``; else None. N<1 (e.g. an empty list) → None: a
+        setup error already surfaced as a PQR note, not a contract to enforce."""
+        spec = jt.output_spec
+        card = (spec.cardinality or "").strip()
+        if card == "per-item" and spec.per:
+            val = params.get(spec.per)
+            if isinstance(val, (list, tuple)):
+                return len(val) or None
+            return None
+        if card.startswith("fixed:"):
+            try:
+                n = int(card.split(":", 1)[1])
+            except (ValueError, IndexError):
+                return None
+            return n if n >= 1 else None
+        return None
+
+    def _output_contract_text(self, jt: JobTemplate, params: dict) -> str:
+        """The OUTPUT CONTRACT block for a bound JT — only the HARD goals (the
+        lines the operator drew). Returns "" when nothing is hard to enforce
+        (e.g. a single-deliverable JT with no required params), so a bound JT
+        with no hard requirements stays byte-identical."""
+        spec = jt.output_spec
+        n = self._jt_target_count(jt, params)
+        parts: list[str] = []
+        if n is not None:
+            per = spec.per
+            item_phrase = (
+                f"one per `{per}`" if (spec.cardinality == "per-item" and per)
+                else "each distinct"
+            )
+            naming = f" Name them per `{spec.naming}`." if spec.naming else ""
+            parts.append(
+                f"This job MUST produce **exactly {n} separate deliverables** "
+                f"({item_phrase}), each its own {spec.artifact_kind} file — the "
+                f"operator set this as a hard requirement. Emit a SINGLE task "
+                f"with an `artifacts: [...]` list of {n} entries (one per item), "
+                f"each marked `deliverable: true`.{naming} Do NOT merge them into "
+                f"fewer files and do NOT batch them away — the efficiency "
+                f"grouping rule is OVERRIDDEN for this job.\n"
+            )
+        hard = [pf.name for pf in jt.param_schema if pf.required]
+        kv = ", ".join(
+            f"{k}={params.get(k)!r}" for k in hard if params.get(k) is not None
+        )
+        if kv:
+            parts.append(f"Honor these operator-set parameters exactly: {kv}.\n")
+        if not parts:
+            return ""
+        return (
+            f"\n\n# OUTPUT CONTRACT — Job Template `{jt.name}` (hard requirements)\n"
+            + "".join(parts)
+        )
+
     def _is_iteration_target(self, task: Task) -> bool:
         """True iff this task improves a PINNED file (its output_path is one of
         the --attach'd files). Such a task's first producer pass routes to
@@ -6987,10 +7259,23 @@ class Orchestrator:
         *,
         attachments: list | None = None,
         chat_completion: "Callable[..., Any] | None" = None,
+        bound_jt_name: str | None = None,
+        bound_jt_params: dict | None = None,
+        ask_operator: "Callable[[str], str] | None" = None,
     ) -> RunSummary:
         summary = RunSummary(project=self.project)
         self._emit_activity(
             role="orchestrator", phase="kickoff_started", agent_id="orchestrator",
+        )
+        # B2: resolve a Job Template at intake (the Leader greps its job memory
+        # against the objective, or an explicit JT is bound for headless/cron).
+        # On a match it interviews-or-defaults the params and names the job's
+        # output folder. No match ⇒ greenfield, every downstream prompt stays
+        # byte-identical.
+        self._resolve_job_template(
+            objective, bound_jt_name=bound_jt_name,
+            bound_jt_params=bound_jt_params, ask_operator=ask_operator,
+            summary=summary,
         )
         # Iteration: pin any --attach'd files into the workspace BEFORE
         # decompose so the contract + the files are live for every downstream
@@ -7348,6 +7633,9 @@ class Orchestrator:
             "metrics": len(summary.drafts),
             "qc_assertions": len(summary.tasks),
         }
+        # B2: verify a bound JT's HARD output cardinality — report a shortfall
+        # firmly in the PQR, never block (the operator's line, made visible).
+        self._validate_output_contract(summary)
         # Brick B1b: silent per-run kickoff-history record — the substrate the
         # B4 recurrence trigger reads. Best-effort, never blocks.
         self._record_kickoff_history(summary)
