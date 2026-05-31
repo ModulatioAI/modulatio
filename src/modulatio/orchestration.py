@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
-from modulatio import comptroller, dispatch, job_template_library, kickoff_history, lessons, qc_history, qc_notes, research, roster, skill_git, skills, standards, standards_proposals, store, tools
+from modulatio import comptroller, dispatch, job_template_library, job_templates, kickoff_history, lessons, qc_history, qc_notes, research, roster, skill_git, skills, standards, standards_proposals, store, tools
 from modulatio.job_templates import JobTemplate
 from modulatio import context_budget as _ctx_budget_module
 from modulatio import dispatch_breaker as _dispatch_breaker_module
@@ -6427,12 +6427,21 @@ class Orchestrator:
         try:
             outcome = "failed" if summary.errors else "completed"
             jt = self._bound_jt
+            # B4: a cheap operator-redo signal — this objective recurs a prior
+            # run's shape. Genuine recurrence (K≥3) is the primary trigger; this
+            # flag is an accelerant the B4 hook also honors.
+            slug = kickoff_history.objective_slug(self.project.objective or "")
+            operator_redo = False
+            if slug:
+                prior = kickoff_history.recent(self.project.code, limit=20)
+                operator_redo = any(r.objective_slug == slug for r in prior)
             kickoff_history.record(
                 self.project.code, self.project.run_id,
                 objective=self.project.objective, outcome=outcome,
                 jt_id=jt.name if jt else None,
                 jt_version=jt.version if jt else None,
                 bound_params=dict(self._bound_jt_params) or None,
+                operator_redo=operator_redo,
             )
         except Exception:  # noqa: BLE001 — observability must never break a run
             pass
@@ -6602,6 +6611,261 @@ class Orchestrator:
             role="leader", phase="skill_codified", agent_id="leader",
             task_id=new_skill.name,
         )
+
+    # ── B4: the setup-side Alfred loop — recurring jobs become Job Templates ──
+
+    @staticmethod
+    def _jt_codification_enabled() -> bool:
+        """Default ON. Kill-switch: ``MODULATIO_JT_CODIFICATION=0``."""
+        return os.environ.get("MODULATIO_JT_CODIFICATION", "1") != "0"
+
+    def _jt_codification_skipped(self, reason: str) -> None:
+        """Raise-safe observability breadcrumb for a swallowed JT-codification
+        path (mirrors ``_codification_skipped``)."""
+        try:
+            self._emit_activity(
+                role="orchestrator", agent_id="orchestrator",
+                phase=f"jt_codification_skipped:{reason}",
+            )
+        except Exception:  # noqa: BLE001 — observability must never break a run
+            pass
+
+    def _existing_jt_index(self) -> tuple[str, list[str]]:
+        """(formatted ``name — description`` index, names) of Job Templates the
+        Leader may IMPROVE instead of minting a near-duplicate (the semantic-
+        dedup nudge — a richer index helps the Leader spot the dup)."""
+        names = job_templates.list_job_templates(project_code=self.project.code)
+        lines: list[str] = []
+        for nm in names:
+            if nm == "jt-create":  # the drafting template itself, not a real JT
+                continue
+            try:
+                t = job_templates.load_with_metadata(nm, project_code=self.project.code)
+                prefs = ", ".join(t.capability_preferences)
+                lines.append(f"- {nm}: {(t.description or '').strip()[:100]}"
+                             + (f" [{prefs}]" if prefs else ""))
+            except Exception:  # noqa: BLE001
+                lines.append(f"- {nm}")
+        names = [n for n in names if n != "jt-create"]
+        return ("\n".join(lines) or "(none)", names)
+
+    def _post_run_jt_codification(self, summary: RunSummary) -> None:
+        """End-of-run hook — the SETUP-side Alfred loop. When a KIND of job keeps
+        coming back, the Leader JUDGES whether to codify a Job Template. The
+        engine BINDS the trigger (it detects the recurrence and creates the
+        moment — a cheap Leader won't self-initiate); the Leader makes the call
+        (templating is its choice, like the operator's *using* one is theirs).
+        Mirrors ``_post_run_codification`` but reads kickoff-history job shapes,
+        not QC fails. BEST-EFFORT — never breaks a run. Kill-switch:
+        ``MODULATIO_JT_CODIFICATION=0``."""
+        if not self._jt_codification_enabled():
+            return
+        try:
+            history = kickoff_history.recent(self.project.code, limit=50)
+        except Exception:  # noqa: BLE001
+            self._jt_codification_skipped("history_load_failed")
+            return
+        try:
+            consumed = kickoff_history.consumed_slugs(self.project.code)
+        except Exception:  # noqa: BLE001
+            consumed = set()
+        groups: dict[str, list] = {}
+        for r in history:
+            if r.objective_slug and r.objective_slug not in consumed:
+                groups.setdefault(r.objective_slug, []).append(r)
+        # Pre-gate: a shape needs ~3 instances OR an operator redo to be worth
+        # the LLM call. Below that, nothing to template (the common case).
+        recurring = {
+            slug: rs for slug, rs in groups.items()
+            if len(rs) >= 3 or any(r.operator_redo for r in rs)
+        }
+        if not recurring:
+            return
+        feed = "\n".join(
+            f"- [{slug}] ×{len(rs)}{' (redo)' if any(r.operator_redo for r in rs) else ''}"
+            f" — {(rs[0].objective or '')[:200]}"
+            for slug, rs in recurring.items()
+        )
+        try:
+            existing_index, existing_names = self._existing_jt_index()
+        except Exception:  # noqa: BLE001 — symmetry with the other swallow paths (Nemo gap #3)
+            self._jt_codification_skipped("existing_jt_index_failed")
+            return
+        prompt_body = job_templates.load_interview("jt-create") or _JT_CREATE_PROMPT
+        try:
+            prompt = prompt_body.format(recurring_jobs=feed, existing_jts=existing_index)
+        except (KeyError, IndexError, ValueError):
+            prompt = _JT_CREATE_PROMPT.format(recurring_jobs=feed, existing_jts=existing_index)
+        try:
+            decision = _extract_json(self._run_agent_call(None, "leader", prompt))
+        except Exception:  # noqa: BLE001
+            self._jt_codification_skipped("leader_call_failed")
+            return
+        codifications = (
+            decision.get("codifications") if isinstance(decision, dict) else None
+        )
+        if not isinstance(codifications, list):
+            self._jt_codification_skipped("leader_output_unparsable")
+            return
+        recurring_keys = set(recurring)
+        for spec in codifications:
+            if isinstance(spec, dict):
+                try:
+                    self._persist_jt_codification(spec, existing_names, summary, recurring_keys)
+                except Exception:  # noqa: BLE001 — one can't stop the rest
+                    self._jt_codification_skipped("persist_failed")
+                    continue
+
+    @staticmethod
+    def _jt_paramfields_from_spec(raw) -> tuple:
+        """Build ParamFields from the Leader's JSON ``param_schema`` list."""
+        if not isinstance(raw, list):
+            return ()
+        out = []
+        for d in raw:
+            if not isinstance(d, dict) or not str(d.get("name", "")).strip():
+                continue
+            enum_raw = d.get("enum")
+            out.append(job_templates.ParamField(
+                name=str(d["name"]).strip(),
+                type=str(d.get("type", "str")),
+                required=bool(d.get("required", False)),
+                default=d.get("default"),
+                prompt=str(d.get("prompt", "")),
+                enum=tuple(str(e) for e in enum_raw) if isinstance(enum_raw, list) else (),
+            ))
+        return tuple(out)
+
+    @staticmethod
+    def _jt_outputspec_from_spec(raw) -> "job_templates.OutputSpec":
+        if not isinstance(raw, dict):
+            return job_templates.OutputSpec()
+        return job_templates.OutputSpec(
+            cardinality=str(raw.get("cardinality", "one")),
+            per=str(raw["per"]) if raw.get("per") else None,
+            artifact_kind=str(raw.get("artifact_kind", "document")),
+            naming=str(raw.get("naming", "")),
+        )
+
+    def _persist_jt_codification(
+        self, spec: dict, existing_names: list[str], summary: RunSummary,
+        recurring_keys: set | None = None,
+    ) -> None:
+        """Persist ONE Leader-proposed Job Template (versioned, git-committed)
+        and consume the job shapes so they aren't re-templated. The Leader's
+        judgment is authoritative; the engine binds the invariants (version,
+        git, consume) + the version-skew guard. Mirrors ``_persist_codification``.
+
+        ``recurring_keys`` (Nemo gap #4): only evidence slugs that are REAL
+        recurring group keys are consumed — a paraphrased/typoed slug can't
+        silently consume the wrong shape, and a valid one reliably stops the
+        templated shape re-firing."""
+        action = str(spec.get("action", "")).strip().lower()
+        name = self._slug_skill(str(spec.get("name", "")))
+        description = str(spec.get("description", "") or "").strip()
+        shape = str(spec.get("recurring_shape", "") or "").strip()
+        interview = str(spec.get("interview_body", "") or "").strip()
+        raw_slugs = spec.get("evidence_slugs")
+        evidence = (
+            [str(s).strip() for s in raw_slugs if str(s).strip()]
+            if isinstance(raw_slugs, list) else []
+        )
+        raw_prefs = spec.get("capability_preferences")
+        prefs = (
+            tuple(str(t).strip() for t in raw_prefs if str(t).strip())
+            if isinstance(raw_prefs, list) else ()
+        )
+        param_schema = self._jt_paramfields_from_spec(spec.get("param_schema"))
+        output_spec = self._jt_outputspec_from_spec(spec.get("output"))
+        if not name:
+            return
+        if action == "create" and name in existing_names:
+            action = "improve"
+        if action not in ("create", "improve"):
+            return
+
+        if action == "create":
+            new_jt = job_templates.create_job_template(
+                name=name,
+                description=description or f"Templated from a recurring job: {shape}.",
+                interview_body=interview or f"# Interview\nConfirm the setup for: {shape}.\n",
+                output_spec=output_spec, param_schema=param_schema,
+                capability_preferences=prefs, version="1", project_code=None,
+            )
+        else:  # improve — merge params, bump version, append interview guidance.
+            base = job_templates.load_with_metadata(name, project_code=self.project.code)
+            if not base.name:
+                base = job_templates.load_with_metadata(name)
+            base_names = {p.name for p in base.param_schema}
+            # Version-skew guard: a NEW required param would under-specify every
+            # existing bound cron at a headless 3am run — demote it to optional
+            # (additive-only for required fields).
+            guarded: list = []
+            for p in param_schema:
+                if p.name not in base_names and p.required and p.default is None:
+                    p = job_templates.ParamField(
+                        name=p.name, type=p.type, required=False,
+                        default=p.default, prompt=p.prompt, enum=p.enum,
+                    )
+                guarded.append(p)
+            merged = self._merge_jt_params(base.param_schema, tuple(guarded))
+            try:
+                next_v = str(int(base.version) + 1) if base.version else "2"
+            except ValueError:
+                next_v = "2"
+            improved_body = (
+                base.interview_body.rstrip()
+                + f"\n\n## Refined — {shape or 'recurring job'}\n\n{interview}\n"
+            ) if interview else base.interview_body
+            # Keep the base's output shape unless the base had none and the
+            # improvement supplies one (don't silently change a hard cardinality).
+            out = base.output_spec
+            if base.output_spec.cardinality == "one" and output_spec.cardinality != "one":
+                out = output_spec
+            new_jt = job_templates.JobTemplate(
+                name=base.name or name,
+                description=base.description or description,
+                interview_body=improved_body, output_spec=out, param_schema=merged,
+                capability_preferences=tuple(dict.fromkeys((*base.capability_preferences, *prefs))),
+                version=next_v,
+            )
+            job_templates.save(new_jt, project_code=None)
+
+        path = job_templates._JT_ROOT / f"{new_jt.name}.md"
+        skill_git.ensure_repo(job_templates._JT_ROOT)
+        skill_git.commit_paths(
+            job_templates._JT_ROOT, [path],
+            f"jt-codify: {new_jt.name} v{new_jt.version or '1'} ({action}) — {shape[:60]}",
+        )
+        consume = [s for s in evidence if recurring_keys is None or s in recurring_keys]
+        kickoff_history.mark_consumed_slugs(self.project.code, consume)
+        summary.recommendations.append({
+            "goal_id": "",
+            "concern": (
+                f"Autonomously saved Job Template '{new_jt.name}' "
+                f"(v{new_jt.version}, {action}) from a recurring job: {shape}."
+            ),
+            "suggestion": (
+                "The team noticed you keep running this kind of job and saved a "
+                "template — it's in your git-versioned library. Use it next time, "
+                "or revert it if it doesn't fit."
+            ),
+        })
+        self._emit_activity(
+            role="leader", phase="jt_codified", agent_id="leader", task_id=new_jt.name,
+        )
+
+    @staticmethod
+    def _merge_jt_params(base: tuple, new: tuple) -> tuple:
+        """Merge param schemas: base order preserved, a new field with the same
+        name overrides the base one, genuinely-new fields appended."""
+        by_name = {p.name: p for p in base}
+        order = [p.name for p in base]
+        for p in new:
+            if p.name not in by_name:
+                order.append(p.name)
+            by_name[p.name] = p
+        return tuple(by_name[n] for n in order)
 
     def _record_dispatch_advisories(
         self,
@@ -7642,6 +7906,9 @@ class Orchestrator:
         # Brick 4: autonomous self-codification — recurring lessons become
         # skills. Best-effort, never blocks; runs once per kickoff at the end.
         self._post_run_codification(summary)
+        # Brick B4: the setup-side loop — recurring JOBS become Job Templates.
+        # Reads the kickoff-history record just written above. Best-effort.
+        self._post_run_jt_codification(summary)
         self._emit_activity(
             role="orchestrator", phase="kickoff_ended", agent_id="orchestrator",
         )
@@ -8626,4 +8893,55 @@ Respond ONLY with a JSON object fenced in ```json ... ```:
     }}
 
 Return {{"codifications": []}} when nothing recurred enough to codify.
+"""
+
+
+# Brick B4 — the setup-side Alfred loop. Fallback for the `jt-create` seed (the
+# Leader's JT-drafting template — it judges which recurring job shapes are worth
+# templating and drafts the schema + output). Mirror of
+# _seed_job_templates/jt-create.md.
+_JT_CREATE_PROMPT = """\
+You are reviewing the operator's recent jobs to see whether a KIND of job keeps
+coming back. When the same shape of work recurs, codify it into a reusable Job
+Template — the setup questions + parameters + output shape — so the next one is
+a bind, not a cold start. Templating is YOUR judgment and YOUR call.
+
+Recent recurring job shapes (each line starts with `[slug]` — copy that
+bracketed slug VERBATIM into `evidence_slugs` for the shape you template):
+
+{recurring_jobs}
+
+Job Templates that already exist (name — description):
+
+{existing_jts}
+
+Codify a shape ONLY when it genuinely recurred (~3+ of the same kind, or a
+redo). A one-off is not a template. Prefer IMPROVING an existing JT over a
+near-duplicate. Mark a param `required: true` only for a HARD goal the operator
+must supply; give a `default` for anything that's "their call". Set the output
+shape: `one`, `per-item` over a list param, or `fixed:N`.
+
+Respond ONLY with a fenced ```json ... ``` block:
+
+```json
+{{
+  "codifications": [
+    {{
+      "action": "improve" | "create",
+      "name": "<kebab JT name>",
+      "description": "<one line>",
+      "recurring_shape": "<the pattern that recurred>",
+      "evidence_slugs": ["<objective-slugs showing the recurrence>"],
+      "capability_preferences": ["<soft tags>"],
+      "param_schema": [
+        {{"name": "<param>", "type": "str|int|list[str]|enum|bool", "required": false, "default": null, "prompt": "<question>"}}
+      ],
+      "output": {{"cardinality": "one|per-item|fixed:N", "per": "<param when per-item>", "artifact_kind": "document", "naming": "<template>"}},
+      "interview_body": "<short conversational setup guidance>"
+    }}
+  ]
+}}
+```
+
+Return {{"codifications": []}} when nothing recurred enough to template.
 """

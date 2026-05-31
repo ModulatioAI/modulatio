@@ -140,4 +140,47 @@ def recent(
     return out
 
 
-__all__ = ["KickoffRecord", "objective_slug", "recent", "record"]
+def _consumed_path(project_code: str):
+    return vault.project_dir(project_code) / "lessons" / "_jt_consumed"
+
+
+def consumed_slugs(project_code: str) -> set[str]:
+    """Objective-slugs already codified into a Job Template — so a job shape the
+    Leader already templated isn't proposed again (mirrors the lessons consumed
+    markers; B4)."""
+    p = _consumed_path(project_code)
+    try:
+        if not p.exists():
+            return set()
+        return {ln.strip() for ln in p.read_text().splitlines() if ln.strip()}
+    except OSError:
+        return set()
+
+
+def mark_consumed_slugs(project_code: str, slugs) -> None:
+    """Append objective-slugs to the consumed set (append-only, idempotent)."""
+    fresh = [str(s).strip() for s in slugs if str(s).strip()]
+    if not fresh:
+        return
+    have = consumed_slugs(project_code)
+    new = [s for s in fresh if s not in have]
+    if not new:
+        return
+    p = _consumed_path(project_code)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as fh:
+            for s in new:
+                fh.write(s + "\n")
+    except OSError:
+        pass
+
+
+__all__ = [
+    "KickoffRecord",
+    "consumed_slugs",
+    "mark_consumed_slugs",
+    "objective_slug",
+    "recent",
+    "record",
+]

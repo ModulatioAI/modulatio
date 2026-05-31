@@ -248,7 +248,10 @@ def _make_dispatch_callback(*, stub: bool):
     output). Non-stub mode mirrors ``cli.kickoff``'s real-model wiring,
     pulling default_models from ``config.get_default_models()``.
     """
-    def _dispatch(project_code: str, objective: str) -> str:
+    def _dispatch(
+        project_code: str, objective: str, *,
+        jt_id: str | None = None, jt_params: dict | None = None,
+    ) -> str:
         from modulatio import roster, semantic_router, tools as _tools_mod, vault
         from modulatio.orchestration import Orchestrator
         from modulatio.runners import default_generic_stub_runners, litellm_runner, maybe_build_chat_runner
@@ -361,7 +364,10 @@ def _make_dispatch_callback(*, stub: bool):
                 None if stub else _litellm_runner
             ),
         )
-        summary = orch.kickoff(objective)
+        # B3: a cron-bound Job Template runs HEADLESS — no interview
+        # (ask_operator omitted ⇒ defaults / pre-bound params); the params were
+        # validated at cron add-time.
+        summary = orch.kickoff(objective, bound_jt_name=jt_id, bound_jt_params=jt_params)
         return f"goals={len(summary.goals)} tasks={len(summary.tasks)} drafts={len(summary.drafts)} errors={len(summary.errors)}"
 
     return _dispatch

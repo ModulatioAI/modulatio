@@ -217,12 +217,33 @@ def add(
     description: str = "",
     priority: int = 5,
     enabled: bool = True,
+    jt_id: Optional[str] = None,
+    jt_params: Optional[dict] = None,
 ) -> dict:
     """Add a cron job. Computes initial next_run from schedule. Raises
-    ``ValueError`` if schedule doesn't parse."""
+    ``ValueError`` if the schedule doesn't parse.
+
+    B3 — a cron can run a **bound Job Template** headless: pass ``jt_id`` (+
+    ``jt_params``). The JT is VALIDATED here, at add time, while the operator is
+    present — it must exist and its required params must be satisfied — so a
+    headless 3am dispatch never fails on a missing/under-specified template.
+    A job with no ``jt_id`` runs the raw ``objective`` exactly as before."""
     parsed = parse_schedule(schedule)
     if parsed is None:
         raise ValueError(f"Could not parse schedule: {schedule!r}")
+    if jt_id:
+        # Validate now, never at dispatch — the operator is here to fix it.
+        from modulatio import job_template_library
+        jt = job_template_library.checkout(jt_id, project_code.upper())
+        if not jt.name:
+            raise ValueError(f"Job template {jt_id!r} not found for project {project_code!r}")
+        missing = jt.missing_required(jt_params or {})
+        if missing:
+            raise ValueError(
+                f"Job template {jt_id!r} is missing required parameter(s): "
+                f"{', '.join(missing)}. Bind them so the headless run isn't "
+                f"under-specified."
+            )
     nxt = compute_next_run(parsed)
     job = {
         "id": _new_id(),
@@ -233,6 +254,8 @@ def add(
         "objective": objective,
         "priority": priority,
         "enabled": enabled,
+        "jt_id": jt_id or None,
+        "jt_params": dict(jt_params) if jt_params else None,
         "created": _now_iso(),
         "next_run": nxt.isoformat(timespec="seconds"),
         "last_run": None,
@@ -335,6 +358,8 @@ def dispatch_due(*, now: Optional[datetime] = None) -> list[dict]:
                 objective=job["objective"],
                 priority=job.get("priority", 5),
                 tags=["cron", job.get("name", "")],
+                jt_id=job.get("jt_id"),
+                jt_params=job.get("jt_params"),
             )
         except Exception as e:
             logger.exception("Cron job %s: heartbeat add_task failed", job.get("id"))
@@ -362,6 +387,8 @@ def run_now(job_id: str) -> Optional[dict]:
             objective=job["objective"],
             priority=job.get("priority", 5),
             tags=["cron", "manual", job.get("name", "")],
+            jt_id=job.get("jt_id"),
+            jt_params=job.get("jt_params"),
         )
     except Exception as e:
         update(job_id, last_run=_now_iso(), last_status=f"error:{e}")

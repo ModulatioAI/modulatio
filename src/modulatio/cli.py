@@ -953,7 +953,10 @@ def heartbeat_run_once(
 ) -> None:
     """Run a single heartbeat tick — recover stale tasks + dispatch the
     next pending task. Useful for cron-style external scheduling."""
-    def _dispatch(project_code: str, objective: str) -> str:
+    def _dispatch(
+        project_code: str, objective: str, *,
+        jt_id: str | None = None, jt_params: dict | None = None,
+    ) -> str:
         # Build the same Orchestrator stack kickoff() uses.
         if stub:
             runners = default_generic_stub_runners()
@@ -982,7 +985,7 @@ def heartbeat_run_once(
             wiki_path=str(wiki),
         )
         orch = Orchestrator(project, runners, semantic_matcher=matcher)
-        summary = orch.kickoff(objective)
+        summary = orch.kickoff(objective, bound_jt_name=jt_id, bound_jt_params=jt_params)
         return f"goals={len(summary.goals)} tasks={len(summary.tasks)} drafts={len(summary.drafts)}"
 
     hb = heartbeat.Heartbeat(dispatch_callback=_dispatch)
@@ -1004,8 +1007,25 @@ def cron_add(
     description: str = typer.Option("", help="Optional human-readable description"),
     priority: int = typer.Option(5, help="Heartbeat priority when dispatched (default 5)"),
     disabled: bool = typer.Option(False, "--disabled", help="Add the job in disabled state"),
+    jt: str = typer.Option(None, "--jt", help="Job Template to run headless (a bound JT on a schedule)"),
+    jt_params: str = typer.Option(None, "--jt-params", help="JSON params dict to bind the JT (e.g. '{\"topic\": \"AI\"}')"),
 ) -> None:
-    """Add a scheduled cron job. Computes initial next_run from schedule."""
+    """Add a scheduled cron job. Computes initial next_run from schedule.
+
+    ``--jt`` binds a Job Template (validated now, so a headless 3am run never
+    fails on a missing/under-specified template); ``--jt-params`` supplies its
+    answers. Without ``--jt`` the cron runs the raw objective as before."""
+    _jt_params = None
+    if jt_params:
+        import json as _json
+        try:
+            _jt_params = _json.loads(jt_params)
+        except _json.JSONDecodeError as e:
+            typer.echo(f"--jt-params is not valid JSON: {e}", err=True)
+            raise typer.Exit(code=1)
+        if not isinstance(_jt_params, dict):
+            typer.echo("--jt-params must be a JSON object (dict).", err=True)
+            raise typer.Exit(code=1)
     try:
         job = cron.add(
             name=name,
@@ -1015,6 +1035,8 @@ def cron_add(
             description=description,
             priority=priority,
             enabled=not disabled,
+            jt_id=jt,
+            jt_params=_jt_params,
         )
     except ValueError as e:
         typer.echo(str(e), err=True)

@@ -104,6 +104,8 @@ def add_task(
     every: Optional[str] = None,
     depends_on: Optional[list[str]] = None,
     max_retries: int = 1,
+    jt_id: Optional[str] = None,
+    jt_params: Optional[dict] = None,
 ) -> dict:
     """Queue an objective for the given project.
 
@@ -113,6 +115,10 @@ def add_task(
     ``every`` parses with ``parse_interval`` (e.g. ``"6h"``, ``"30m"``).
     ``depends_on`` is a list of task id suffixes; this task waits until at
     least one done task ends with each suffix.
+
+    ``jt_id`` (+ ``jt_params``) — B3: a bound Job Template to run headless. They
+    ride on the task and are handed to ``kickoff(bound_jt_name=, bound_jt_params=)``
+    by the dispatch callback. ``None`` ⇒ a plain objective run (unchanged).
     """
     from modulatio import vault
 
@@ -141,6 +147,8 @@ def add_task(
             "every": every,
             "next_run": None,
             "depends_on": list(depends_on or []),
+            "jt_id": jt_id or None,
+            "jt_params": dict(jt_params) if jt_params else None,
         }
         tasks.append(task)
         _save_queue(tasks)
@@ -316,6 +324,13 @@ def requeue_recurring(task: dict) -> Optional[dict]:
         every=every,
         depends_on=task.get("depends_on") or [],
         max_retries=task.get("max_retries", 1),
+        # Carry a JT binding across heartbeat-native recurrence (Nemo B3+B4 hull
+        # gap #8): without this, a recurring JT-bound task's 2nd run would
+        # silently go greenfield. (Cron's own recurrence re-enqueues from
+        # cron-config.json, which already preserves these — this seals the
+        # heartbeat-native path.)
+        jt_id=task.get("jt_id"),
+        jt_params=task.get("jt_params"),
     )
     return update_task(new_task["id"], next_run=next_run)
 
@@ -354,12 +369,17 @@ class Heartbeat:
     callers can mock the dispatch layer cleanly in tests AND so a future
     daemon (slice 8) can wrap it with custom semantics (telegram notify,
     backoff, etc.).
+
+    B3: a JT-bound task additionally passes ``jt_id=`` / ``jt_params=`` kwargs —
+    but only when present, so a plain task still calls a 2-arg callback (every
+    existing callback keeps working). A callback that wants the cron-bound
+    template accepts the two optional kwargs.
     """
 
     def __init__(
         self,
         *,
-        dispatch_callback: Callable[[str, str], str],
+        dispatch_callback: Callable[..., str],
         interval_seconds: int = DEFAULT_INTERVAL,
         stale_minutes: int = DEFAULT_STALE_MINUTES,
     ):
@@ -414,7 +434,16 @@ class Heartbeat:
         """Mark running, dispatch, capture result, mark done/failed."""
         update_task(task["id"], status="running", started=_now_iso())
         try:
-            result = self.dispatch_callback(task["project_code"], task["objective"])
+            # B3: a JT-bound task (cron) passes its template through to the
+            # callback. Pass the kwargs ONLY when present so every plain task
+            # still calls a 2-arg callback unchanged (back-compat for all
+            # existing dispatch callbacks + test stubs).
+            jt_extra = {}
+            if task.get("jt_id"):
+                jt_extra = {"jt_id": task["jt_id"], "jt_params": task.get("jt_params")}
+            result = self.dispatch_callback(
+                task["project_code"], task["objective"], **jt_extra,
+            )
         except Exception as e:
             logger.exception("Heartbeat task %s dispatch failed", task["id"])
             retries = int(task.get("retries") or 0) + 1
