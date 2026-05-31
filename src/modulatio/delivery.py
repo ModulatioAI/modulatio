@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,6 +95,33 @@ def human_name_from_markdown(text: str, *, fallback: str) -> str:
     return _sanitize_filename((title or "").strip() or fallback)
 
 
+#: Source extensions that are CODE, not prose. A code deliverable ships as
+#: runnable source — copied verbatim, original filename + extension preserved —
+#: never pandoc-rendered into a DOCX (a Word doc full of Python is useless as
+#: a game). Markdown / plain text still flow through the document-render path.
+#: Live repro 2026-05-30: a Hollow-Knight ``game.py`` (artifact_kind=code) was
+#: headed for a .docx wrapper. Detection is by on-disk extension — the real
+#: signal of "would pandoc-rendering this make sense" — independent of how the
+#: planner tagged it.
+_CODE_SUFFIXES = frozenset({
+    ".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs",
+    ".go", ".java", ".kt", ".kts", ".c", ".h", ".cpp", ".hpp", ".cc",
+    ".cs", ".rb", ".php", ".swift", ".scala", ".sh", ".bash", ".zsh",
+    ".ps1", ".pl", ".lua", ".r", ".sql", ".html", ".htm", ".css", ".scss",
+    ".sass", ".vue", ".svelte", ".json", ".toml", ".yaml", ".yml", ".xml",
+    ".ini", ".cfg", ".dockerfile", ".ipynb", ".gd", ".tscn",
+})
+
+
+def _is_code_source(source: Path) -> bool:
+    """True iff ``source`` is a code/source artifact that should ship verbatim
+    rather than being rendered to a document. Matches on extension; a bare
+    ``Dockerfile`` / ``Makefile`` (no suffix) is treated as code by name."""
+    if source.suffix.lower() in _CODE_SUFFIXES:
+        return True
+    return source.name.lower() in {"dockerfile", "makefile"}
+
+
 def deliver_product(
     source_md: Path,
     *,
@@ -101,26 +129,61 @@ def deliver_product(
     task_id: str,
     fmt: ExportFormat = DEFAULT_DELIVERY_FORMAT,
     fallback_name: str | None = None,
+    pinned_names: "set[str] | None" = None,
+    verbatim: bool = False,
 ) -> DeliveredProduct:
-    """Render one Markdown artifact to ``fmt`` and place it, human-named,
-    under the project's delivery dir. Returns a :class:`DeliveredProduct`
-    (``error`` set on failure)."""
+    """Deliver one finished product under the project's delivery dir.
+
+    Markdown / prose deliverables are rendered to ``fmt`` (DOCX by default),
+    human-named from their H1. CODE deliverables (``.py`` etc., see
+    :data:`_CODE_SUFFIXES`) are copied **verbatim**, keeping their original
+    filename + extension, so a game ships as runnable ``game.py`` — not a Word
+    doc wrapping the source.
+
+    ``verbatim`` forces the copy-as-is path even for non-code (e.g. a
+    ``README.md`` companion in a CODE BUNDLE keeps its name + sits beside the
+    code, instead of becoming a stray ``Some Title.docx``).
+
+    ``pinned_names`` (iteration mode): when a code deliverable's filename is in
+    this set it is an IMPROVED pinned file, so it REPLACES its prior same-named
+    copy in the delivery dir instead of getting a disambiguated duplicate — the
+    user gets one clean ``game.py``, the latest version. Returns a
+    :class:`DeliveredProduct` (``error`` set on failure)."""
     source_md = Path(source_md)
-    text = source_md.read_text(errors="replace")
-    name = human_name_from_markdown(text, fallback=fallback_name or task_id)
     dest_dir = project_delivery_dir(project_code)
-    ext = "md" if fmt == "markdown" else fmt
-    dest = dest_dir / f"{name}.{ext}"
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return DeliveredProduct(task_id, source_md, dest, name, f"mkdir failed: {exc}")
+        return DeliveredProduct(
+            task_id, source_md, dest_dir, source_md.stem, f"mkdir failed: {exc}"
+        )
+    # VERBATIM: ship the file as-is, original name + extension preserved — code
+    # always, plus markdown companions in a code bundle (keep README.md beside
+    # game.py rather than rendering it to a stray .docx).
+    if _is_code_source(source_md) or verbatim:
+        name = source_md.stem
+        dest = dest_dir / source_md.name
+        # Iteration: an improved PINNED file replaces its prior same-named copy
+        # (one clean game.py, latest version). Otherwise don't clobber an
+        # unrelated prior same-named source — disambiguate with the task id.
+        is_pinned = bool(pinned_names) and source_md.name in pinned_names
+        if dest.exists() and not is_pinned:
+            dest = dest_dir / f"{source_md.stem} ({task_id}){source_md.suffix}"
+        try:
+            shutil.copyfile(source_md, dest)
+        except OSError as exc:
+            return DeliveredProduct(task_id, source_md, dest, name, f"copy failed: {exc}")
+        return DeliveredProduct(task_id, source_md, dest, name, None)
+    # PROSE: render through a ``.md`` temp so pandoc always treats the producer's
+    # content as Markdown, regardless of the artifact's on-disk extension
+    # (a deliverable the Leader named ``report.pdf`` is still Markdown text).
+    text = source_md.read_text(errors="replace")
+    name = human_name_from_markdown(text, fallback=fallback_name or task_id)
+    ext = "md" if fmt == "markdown" else fmt
+    dest = dest_dir / f"{name}.{ext}"
     # Don't clobber a same-named prior deliverable — disambiguate with task id.
     if dest.exists():
         dest = dest_dir / f"{name} ({task_id}).{ext}"
-    # Render through a ``.md`` temp so pandoc always treats the producer's
-    # content as Markdown, regardless of the artifact's on-disk extension
-    # (a deliverable the Leader named ``report.pdf`` is still Markdown text).
     try:
         with tempfile.TemporaryDirectory() as td:
             md = Path(td) / "deliverable.md"
@@ -136,22 +199,32 @@ def deliver_finished_products(
     *,
     project_code: str,
     fmt: ExportFormat = DEFAULT_DELIVERY_FORMAT,
+    pinned_names: "set[str] | None" = None,
 ) -> list[DeliveredProduct]:
     """Deliver every finished product.
 
     ``deliverables`` is an iterable of ``(task_id, source_md_path,
     fallback_name)``. Missing source files are skipped (the task may not have
-    produced an artifact). Returns one :class:`DeliveredProduct` per delivered
-    file, in input order."""
+    produced an artifact). ``pinned_names`` is threaded to
+    :func:`deliver_product` so improved iteration files replace their prior
+    copy. Returns one :class:`DeliveredProduct` per delivered file, in input
+    order.
+
+    CODE BUNDLE: if any deliverable is code, markdown/prose companions
+    (``README.md`` etc.) ship VERBATIM beside the code — a coherent runnable
+    folder — instead of being rendered to a stray ``.docx``. A pure-prose run
+    (no code) is unaffected: its deliverables still render to ``fmt``."""
+    present = [(t, Path(s), f) for t, s, f in deliverables if Path(s).exists()]
+    bundle_has_code = any(_is_code_source(s) for _, s, _ in present)
     out: list[DeliveredProduct] = []
-    for task_id, src, fallback in deliverables:
-        src = Path(src)
-        if not src.exists():
-            continue
+    for task_id, src, fallback in present:
+        # markdown companion in a code bundle → keep it verbatim (README.md)
+        verbatim = bundle_has_code and not _is_code_source(src)
         out.append(
             deliver_product(
                 src, project_code=project_code, task_id=task_id,
-                fmt=fmt, fallback_name=fallback,
+                fmt=fmt, fallback_name=fallback, pinned_names=pinned_names,
+                verbatim=verbatim,
             )
         )
     return out
@@ -237,19 +310,22 @@ def deliverables_from_tasks(
     ``artifacts_root``, else the default ``drafts/<task_id>.md``. Tasks are
     duck-typed (``.deliverable`` / ``.id`` / ``.output_path`` / ``.description``)
     so this stays decoupled from the orchestration types. The task description
-    is the fallback name when a deliverable has no Markdown title of its own."""
+    is the fallback name when a deliverable has no Markdown title of its own.
+
+    DEDUP: when several deliverable tasks target the SAME artifact path (the
+    iteration shape — three in-place edits to one ``game.py``), the file is
+    emitted ONCE, keyed to the LAST such task (its on-disk content is the final
+    state). Without this, one improved file shipped as three identical copies."""
     artifacts_root = Path(artifacts_root)
-    out: "list[tuple[str, Path, str | None]]" = []
+    by_path: "dict[Path, tuple[str, Path, str | None]]" = {}
     for t in tasks:
         if not getattr(t, "deliverable", False):
             continue
         rel = getattr(t, "output_path", None) or f"drafts/{getattr(t, 'id')}.md"
-        out.append((
-            getattr(t, "id"),
-            artifacts_root / rel,
-            getattr(t, "description", None),
-        ))
-    return out
+        path = artifacts_root / rel
+        # Last writer wins — later tasks edited the same file after earlier ones.
+        by_path[path] = (getattr(t, "id"), path, getattr(t, "description", None))
+    return list(by_path.values())
 
 
 #: Task states that mean "did not cleanly succeed" — a finished product built

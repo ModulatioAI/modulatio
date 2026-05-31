@@ -6,6 +6,45 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-31
+
+In-place editing: hand Modulatio an existing file and it improves it surgically
+rather than rebuilding from scratch. Plus delivery and verify-goal fixes
+surfaced by the first code-generation tests. Reviewed fresh and signed off by
+two independent reviewers (hull + coherence).
+
+### Added
+
+- **`kickoff --attach <file>`** — pin an existing file into the run and switch
+  on **in-place edit**: the attached file is the starting point, the plan stays
+  in that file (no scatter into orphan modules, no padding the plan with report
+  tasks), and changes are applied **surgically**.
+- **Surgical patch mode** — for an attached file the producer emits exact
+  `SEARCH`/`REPLACE` blocks and the *engine* applies them, keeping every
+  untouched byte. A cheap producer can no longer regenerate a file and silently
+  drop working content — preservation is structural, not a prose request.
+- **Code read-toolkit** — producers can navigate a file with `grep` / `tail` /
+  `wc` and read-only `sed -n 'A,Bp'`, all confined to the run's artifacts dir
+  (every escape / write / exec form rejected).
+
+### Changed
+
+- **Code deliverables ship verbatim** — a `game.py` is delivered as runnable
+  source, not pandoc-rendered into a `.docx`. Markdown companions (README, etc.)
+  ride beside the code in a bundle instead of becoming a stray document.
+- **Delivery dedup + replace** — many edits to one file deliver it once
+  (latest); an improved attached file replaces its prior copy rather than
+  piling up disambiguated duplicates.
+
+### Fixed
+
+- **Verify-goal wall catches the run-it-to-check family** — `test` / `playtest`
+  / `play through` / `smoke test` goals are dropped at planning like other
+  standalone-verify goals (running a finished deliverable is QC's job; a GUI
+  playthrough is impossible for an agent). Closes a path where a "test the game"
+  goal blocked on a capability gap and wedged a finished deliverable behind a
+  CRITICAL ticket.
+
 ## [0.2.0] — 2026-05-30
 
 The QC-thesis arc: cheap producers generate the bulk; the smart QC reviews

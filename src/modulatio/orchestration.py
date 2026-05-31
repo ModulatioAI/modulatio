@@ -86,6 +86,11 @@ class RunSummary:
     #: into the human-addressed "Product Quality Report" that ships beside
     #: the deliverables. Each item: {goal_id, concern, suggestion}.
     recommendations: list[dict] = field(default_factory=list)
+    #: Iteration mode (2026-05-30): artifacts-relative names of files pinned
+    #: via ``--attach`` for in-place improvement. Delivery uses this to ship
+    #: the improved file under its real name, REPLACING the prior copy rather
+    #: than accumulating disambiguated duplicates.
+    pinned_files: list[str] = field(default_factory=list)
 
 
 # ── Core rebuild B3: isolated-worker result + deterministic merge ───────
@@ -760,6 +765,14 @@ _VERIFY_GOAL_RE = re.compile(
     r"(?:re-?)?(?:verif|validat|review|audit|vet\b|"
     r"fact[\s-]?check|proof[\s-]?read|cross[\s-]?check|double[\s-]?check|"
     r"sanity[\s-]?check|quality[\s-]?(?:assur|control|check)|qa\b|"
+    # "test / playtest / play through" is the same anti-pattern as "verify":
+    # running a finished deliverable to confirm it works is QC's job, never a
+    # standalone goal — and for an interactive/GUI artifact no agent can do it
+    # at all (it asks the team to *watch a game play*). Live repro 2026-05-30:
+    # a "Test the game on a clean env" goal blocked on a capability gap and
+    # wedged a finished game behind a CRITICAL human-punt ticket. The
+    # production-verb guard still keeps "write a test suite" / "build tests".
+    r"test|play[\s-]?test|play[\s-]?through|smoke[\s-]?test|"
     r"confirm)\w*\b",
     re.IGNORECASE,
 )
@@ -1175,6 +1188,47 @@ def _parse_diff_blocks(response: str) -> dict[str, str]:
     return blocks
 
 
+#: Increment 3 (2026-05-30): SEARCH/REPLACE patch blocks for in-place iteration.
+#: ``<<<<<<< SEARCH`` / ``=======`` / ``>>>>>>> REPLACE`` (aider-style). The
+#: SEARCH text must match the current file EXACTLY; the engine replaces it and
+#: keeps every other byte. That is what a prose "preserve everything" contract
+#: cannot guarantee — a regen drops untouched code; a patch structurally can't.
+_SEARCH_REPLACE_RE = re.compile(
+    r"<{5,}[ \t]*SEARCH[ \t]*\r?\n(.*?)\r?\n={5,}[ \t]*\r?\n(.*?)\r?\n>{5,}[ \t]*REPLACE",
+    re.DOTALL,
+)
+
+
+def _parse_search_replace_blocks(response: "str | None") -> "list[tuple[str, str]]":
+    """Pull ``(search, replace)`` pairs out of a producer patch response.
+    Empty list when none are present — the caller treats that as "producer
+    returned a full file instead" and falls back to the edit path."""
+    if not response:
+        return []
+    return [(m.group(1), m.group(2)) for m in _SEARCH_REPLACE_RE.finditer(response)]
+
+
+def _apply_search_replace(
+    content: str, blocks: "list[tuple[str, str]]",
+) -> "tuple[str, int, list[str]]":
+    """Apply SEARCH/REPLACE blocks to ``content``, in order. Each SEARCH must
+    occur in the current text; its FIRST occurrence is replaced. Everything not
+    covered by a block is preserved byte-for-byte — the whole point of patch
+    mode. Returns ``(new_content, applied_count, failed_searches)``; a SEARCH
+    that doesn't match is skipped (recorded) rather than corrupting the file."""
+    new = content
+    applied = 0
+    failures: list[str] = []
+    for search, replace in blocks:
+        if search and search in new:
+            new = new.replace(search, replace, 1)
+            applied += 1
+        else:
+            snippet = (search.strip().splitlines()[0] if search.strip() else "")[:60]
+            failures.append(snippet or "(empty SEARCH)")
+    return new, applied, failures
+
+
 def _draft_is_multifile(task: "Task", draft_path: "Path") -> bool:
     """True when the task's artifact should be patched as MULTI-FILE
     (``diff`` mode) rather than a single in-place ``edit``.
@@ -1418,6 +1472,13 @@ class Orchestrator:
         #: within a run, so an instance cache is correct + cheaper.
         self._skill_floor_cache: dict[str, tuple[str, ...]] = {}
         self._domain_floor_cache: dict[str, tuple[str, ...]] = {}
+        #: Iteration mode (2026-05-30): names (artifacts-relative) of files
+        #: pinned into the workspace at kickoff via ``--attach``. Non-empty
+        #: ⇒ this run IMPROVES existing work rather than building greenfield,
+        #: and ``_iteration_contract_block()`` injects the edit-in-place /
+        #: no-scatter / no-over-decompose contract into the decompose,
+        #: task-plan, and producer prompts. Set per kickoff.
+        self._pinned_files: list[str] = []
         #: Per-role context-budget overrides supplied at the dispatcher
         #: entry point (CLI ``--ctx-budget``, daemon, TUI advanced
         #: settings). Keys are budget_role strings; values are
@@ -2132,7 +2193,8 @@ class Orchestrator:
                 standards=_format_standards_block(leader_standards),
                 attachments=_format_kickoff_attachments(doc_only)
                 + "\n\n(Image attachments are included as content blocks "
-                "below — examine them for visual context.)",
+                "below — examine them for visual context.)"
+                + self._iteration_contract_block(),
             )
             response = self._run_multimodal_leader(
                 prompt=prompt, attachments=atts,
@@ -2143,7 +2205,8 @@ class Orchestrator:
                 objective=objective,
                 code=self.project.code,
                 standards=_format_standards_block(leader_standards),
-                attachments=_format_kickoff_attachments(atts),
+                attachments=_format_kickoff_attachments(atts)
+                + self._iteration_contract_block(),
             )
             response = self._run("leader", prompt)
         data = _extract_json(response)
@@ -2233,7 +2296,8 @@ class Orchestrator:
                 [req.model_dump() for req in goal.evidence_required],
                 indent=2,
             ),
-            design_intent=_design_intent.render_for_prompt(self.project.code),
+            design_intent=self._iteration_contract_block()
+            + _design_intent.render_for_prompt(self.project.code),
             available_skills=_format_available_skills(available),
             available_capabilities=_format_available_capabilities(
                 available_capabilities
@@ -2759,7 +2823,10 @@ class Orchestrator:
         # <project>/standards/design-intent.md; neutral marker when
         # absent.
         from modulatio import design_intent as _design_intent
-        design_intent_block = _design_intent.render_for_prompt(self.project.code)
+        design_intent_block = (
+            self._iteration_contract_block()
+            + _design_intent.render_for_prompt(self.project.code)
+        )
         # Slice 1 (#88): per-objective inter-task carry. Producers
         # see Current Focus + Open Blockers + Recent Activity from the
         # state doc Leader-reflect maintains between sub-objectives.
@@ -2796,6 +2863,30 @@ class Orchestrator:
         )
         if specialist_role_for_inbox not in self.runners:
             specialist_role_for_inbox = self.default_producer_role
+
+        # Increment 3 (2026-05-30): iteration PATCH mode. A generate-pass task
+        # that improves a PINNED file emits surgical search/replace blocks; the
+        # engine applies them and keeps every untouched line byte-identical, so
+        # a cheap producer can't silently drop working code (the live regression
+        # where 'raise the jump' rewrote game.py and lost the A/D, W, X + mouse
+        # bindings). QC-reject redos keep the mode _next_producer_mode picked.
+        if (
+            task.producer_mode == "generate"
+            and self._is_iteration_target(task)
+            and path.exists()
+        ):
+            return self._producer_patch(
+                task, path,
+                domain_standards=domain_standards,
+                research_context=research_context,
+                team_memory_context=team_memory_context,
+                team_canvas_block=team_canvas_block,
+                design_intent_block=design_intent_block,
+                team_state_block=team_state_block,
+                repo_map_block=repo_map_block,
+                agent_identity=agent_identity,
+                corrective_notes=corrective_notes,
+            )
 
         # Slice #82 PR-C: diff-mode producer. Single LLM call
         # emits ``=== FILE: <path> ===`` blocks for N files; the
@@ -2964,6 +3055,122 @@ class Orchestrator:
         )
         if abort is not None:
             raise abort
+
+    # ── Producer: patch mode (increment 3 — in-place iteration) ────
+    def _producer_patch(
+        self,
+        task: Task,
+        path: Path,
+        *,
+        domain_standards: Any,
+        research_context: str,
+        team_memory_context: Any,
+        team_canvas_block: str,
+        design_intent_block: str,
+        team_state_block: str,
+        repo_map_block: str,
+        agent_identity: str,
+        corrective_notes: str = "",
+    ) -> tuple[Path, str, int]:
+        """Improve a PINNED file with SURGICAL search/replace edits.
+
+        The producer is shown the current file and asked for
+        ``<<<<<<< SEARCH`` / ``>>>>>>> REPLACE`` blocks. The engine applies them
+        and keeps every untouched byte — so a regen can't silently drop working
+        code (the live regression that lost the A/D · W · X · mouse bindings).
+
+        Fallbacks keep the run moving:
+          - producer returns a FULL FILE (no blocks) → write it (the prior
+            edit-mode behavior; prose-preserve);
+          - blocks present but NONE match the current text (producer
+            hallucinated the existing lines) → leave the file unchanged and let
+            QC reject, rather than writing marker soup.
+
+        Returns ``(path, checksum, token_count)`` like the other producers."""
+        specialist_role = task.assignee_specialist or self.default_producer_role
+        if specialist_role not in self.runners:
+            specialist_role = self.default_producer_role
+        current = path.read_text()
+        prompt = self._prompt("drafter-patch", _DRAFTER_PATCH_PROMPT).format(
+            task_id=task.id,
+            artifact_kind=task.artifact_kind,
+            description=task.description,
+            agent_identity=_format_agent_identity(agent_identity),
+            design_intent=design_intent_block,
+            team_state=team_state_block,
+            standards=_format_standards_block(domain_standards),
+            research_context=_format_research_context(research_context),
+            team_memory_context=_format_team_memory_block(team_memory_context),
+            team_canvas=_format_team_canvas(team_canvas_block),
+            repo_map=repo_map_block,
+            existing_draft=current,
+            corrective_notes=corrective_notes.strip()
+            or "(no specific notes — apply the task's requested changes)",
+            inbox_notes=self._inbox_block_for(
+                specialist_role, target_agent_id=task.assigned_agent_id,
+            ),
+        )
+        raw_response = self._run_agent_call(
+            task.assigned_agent_id, specialist_role, prompt
+        )
+        raw_response = self._extract_producer_proposals(
+            raw_response,
+            source_role=specialist_role,
+            source_agent_id=task.assigned_agent_id,
+            linked_task_id=task.id,
+            linked_goal_id=task.goal_id,
+        )
+        from modulatio import team_state as _team_state
+        body_text, summary_claim = _team_state.parse_summary_for_state_doc(
+            raw_response
+        )
+        if summary_claim is not None:
+            task.summary_for_state_doc = summary_claim
+        cleaned = _strip_thinking(body_text)
+        blocks = _parse_search_replace_blocks(cleaned)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if blocks:
+            new_content, applied, failures = _apply_search_replace(current, blocks)
+            if applied > 0:
+                path.write_text(new_content)
+                self._record_artifact_write(path)
+                if failures:
+                    task.transitions.append(StateTransition(
+                        from_state=task.status.value,
+                        to_state=task.status.value,
+                        actor="producer-patch",
+                        rationale=(
+                            f"patch: applied {applied} block(s); "
+                            f"{len(failures)} SEARCH had no match, skipped: "
+                            + "; ".join(failures[:3])
+                        ),
+                    ))
+                checksum = (
+                    f"sha256:{hashlib.sha256(new_content.encode()).hexdigest()}"
+                )
+                return path, checksum, len(new_content.split())
+            # Blocks present but none matched — don't write marker soup; keep
+            # the file as-is and let QC reject so the redo router recovers.
+            task.transitions.append(StateTransition(
+                from_state=task.status.value,
+                to_state=task.status.value,
+                actor="producer-patch",
+                rationale=(
+                    "patch: no SEARCH block matched the current file; left "
+                    "unchanged for QC to rule on (producer hallucinated lines)"
+                ),
+            ))
+            checksum = f"sha256:{hashlib.sha256(current.encode()).hexdigest()}"
+            return path, checksum, len(current.split())
+
+        # No SEARCH/REPLACE blocks → producer returned a full file. Fall back to
+        # edit-mode behavior: write the cleaned body as the new artifact.
+        path.write_text(cleaned)
+        self._record_artifact_write(path)
+        self._maybe_trip_breaker(specialist_role, raw_response, cleaned)
+        checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
+        return path, checksum, len(cleaned.split())
 
     # ── Producer: diff mode (Slice #82, PR-C) ──────────────────────
     def _producer_diff(
@@ -3418,7 +3625,10 @@ class Orchestrator:
         team_memory_context = self._recall_team_memory(task)
         team_canvas_block = self._build_team_canvas_digest()
         from modulatio import design_intent as _design_intent
-        design_intent_block = _design_intent.render_for_prompt(self.project.code)
+        design_intent_block = (
+            self._iteration_contract_block()
+            + _design_intent.render_for_prompt(self.project.code)
+        )
         from modulatio import team_state as _team_state
         team_state_block = _team_state.render_for_prompt(
             self.project.code, self.project.run_id
@@ -6326,6 +6536,80 @@ class Orchestrator:
             _ctx_budget_module.unbind(ctx_token)
             _tool_sum_module.unbind(ts_token)
 
+    def _pin_attachments(self, attachments: list) -> None:
+        """Copy document attachments into the run's artifacts workspace and
+        record their (artifacts-relative) names as pinned files. This is how
+        an existing file reaches a producer: the producer's ``cat``/``repo_map``
+        are confined to the artifacts dir, so the file must live there. A
+        pinned file flips the run into iteration mode (see
+        :meth:`_iteration_contract_block`). No-op without a run workspace or
+        document attachments — greenfield runs are unaffected."""
+        self._pinned_files = []
+        docs = [a for a in attachments if getattr(a, "kind", None) == "document"]
+        if not docs or self.project.run_id is None:
+            return
+        artifacts_root = self._scope_root() / "artifacts"
+        for a in docs:
+            content = a.content
+            if content is None:
+                try:
+                    content = Path(a.path).read_text()
+                except OSError:
+                    continue
+            try:  # same confinement rule as a producer output_path
+                rel = _validate_output_path(a.name, artifacts_root)
+            except _PlanError:
+                continue
+            dest = artifacts_root / rel
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content)
+            except OSError:
+                continue
+            self._pinned_files.append(rel)
+        if self._pinned_files:
+            self._emit_activity(
+                role="orchestrator", phase="attachments_pinned",
+                agent_id="orchestrator",
+            )
+
+    def _iteration_contract_block(self) -> str:
+        """The ITERATION CONTRACT injected into the decompose / task-plan /
+        producer prompts when this run pins existing file(s). Empty string for
+        a greenfield run (no pins), so greenfield prompts stay byte-identical.
+
+        Engine half of the iteration mode: the trigger is deterministic (a
+        pinned file is present), and the contract bends the LLM toward
+        edit-in-place / stay-in-the-file / small-plan — the exact failure modes
+        a single-file improvement hit live (2026-05-30: a 'higher jump' change
+        landed in an orphan module because the producer scattered a one-file
+        game; three 'fix X' asks ballooned into six implement+report tasks)."""
+        if not self._pinned_files:
+            return ""
+        names = ", ".join(f"`{n}`" for n in self._pinned_files)
+        return (
+            "\n\n# ITERATION — improve existing work (NOT a new build)\n"
+            f"This run IMPROVES file(s) already in the workspace: {names}. They "
+            "are the starting point, not a reference — read before changing.\n"
+            "- EDIT IN PLACE: change the pinned file(s) to satisfy the request "
+            "and preserve everything that already works.\n"
+            "- STAY IN THE FILE: do NOT create new files unless a change "
+            "genuinely cannot live in an existing one. The attached file IS the "
+            "deliverable; a change that lands in a new orphan file is a defect.\n"
+            "- SMALL, FOCUSED PLAN: map the request to the fewest tasks that "
+            "apply the changes. Do NOT add separate 'report', 'assessment', "
+            "'analysis', 'summary', or 'verify' goals/tasks — the improved file "
+            "speaks for itself.\n"
+        )
+
+    def _is_iteration_target(self, task: Task) -> bool:
+        """True iff this task improves a PINNED file (its output_path is one of
+        the --attach'd files). Such a task's first producer pass routes to
+        PATCH mode (surgical search/replace) so untouched code can't be dropped
+        by a regen — increment 3, the engine half of 'preserve everything'."""
+        op = (getattr(task, "output_path", None) or "").strip()
+        return bool(op) and op in self._pinned_files
+
     def _kickoff_inner(
         self,
         objective: str,
@@ -6337,6 +6621,11 @@ class Orchestrator:
         self._emit_activity(
             role="orchestrator", phase="kickoff_started", agent_id="orchestrator",
         )
+        # Iteration: pin any --attach'd files into the workspace BEFORE
+        # decompose so the contract + the files are live for every downstream
+        # prompt (decompose, task-plan, producer).
+        self._pin_attachments(attachments or [])
+        summary.pinned_files = list(self._pinned_files)
 
         # Slice #7e: before decomposing a new objective, resume any
         # previously-blocked goals whose retry budget has refreshed.
@@ -7090,6 +7379,75 @@ summary_for_state_doc, also stripped before save:
        "priority": "P1", "reason": "constraint_discovered",
        "content": "<=280 chars one-liner>"}}]
     ```
+"""
+
+
+_DRAFTER_PATCH_PROMPT = """\
+Task: {task_id}
+Artifact kind: {artifact_kind}
+Description: {description}
+
+{agent_identity}
+
+{design_intent}
+
+{team_state}
+
+{standards}
+
+{research_context}
+
+{team_memory_context}
+
+{inbox_notes}
+
+{team_canvas}
+
+{repo_map}
+
+You are in PATCH mode. You are IMPROVING an existing file in place — NOT
+writing a new one. Make ONLY the change the task asks for and leave every
+other line exactly as it is.
+
+CURRENT FILE (between the markers — this is the live file you are editing):
+
+>>>EXISTING-DRAFT-START<<<
+{existing_draft}
+>>>EXISTING-DRAFT-END<<<
+
+{corrective_notes}
+
+Respond with one or more SEARCH/REPLACE blocks, and NOTHING else before them.
+Each block names an EXACT span of the current file to replace:
+
+<<<<<<< SEARCH
+<exact text copied verbatim from the current file — enough lines to be unique>
+=======
+<the replacement text>
+>>>>>>> REPLACE
+
+Rules — these matter:
+- The SEARCH text must be copied EXACTLY from the current file above
+  (same indentation, same characters). If it isn't an exact match the edit
+  is dropped. Include a few surrounding lines so the match is unique.
+- Emit a separate block for each distinct change. Keep each block small.
+- To DELETE content, leave the REPLACE section empty. To ADD content, SEARCH an
+  existing anchor line and REPLACE it with itself plus the new lines.
+- Do NOT reproduce the whole file. Do NOT touch anything the task didn't ask you
+  to change — preserving the rest is the engine's job, not yours, as long as
+  you only emit blocks for what changes. PRESERVE everything the task did not
+  ask you to change (whatever the file is — code, prose, config, data).
+
+If — and only if — the change is so pervasive that a patch is impractical,
+you may instead output the COMPLETE updated file verbatim (no SEARCH/REPLACE
+markers). Prefer patch blocks.
+
+AFTER the blocks (or full file), add a single trailing block:
+
+    ## summary_for_state_doc
+    <one or two sentences naming the edit you applied>
+
+Read by team-state renderer ONLY. QC does NOT see it.
 """
 
 

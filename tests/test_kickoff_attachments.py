@@ -184,3 +184,180 @@ def test_kickoff_multimodal_user_text_inlines_documents(
     # Image surfaces as a content block, not in the text.
     types = [b["type"] for b in user_content]
     assert "image_url" in types
+
+
+# ── iteration mode (2026-05-30): --attach pins a file to improve in place ──
+
+def test_iteration_contract_empty_for_greenfield(project: Project):
+    orch = Orchestrator(project, _capturing_runners({}))
+    assert orch._pinned_files == []
+    assert orch._iteration_contract_block() == ""
+
+
+def test_iteration_contract_when_pinned(project: Project):
+    orch = Orchestrator(project, _capturing_runners({}))
+    orch._pinned_files = ["game.py"]
+    block = orch._iteration_contract_block()
+    assert "ITERATION" in block
+    assert "`game.py`" in block
+    assert "EDIT IN PLACE" in block
+    assert "STAY IN THE FILE" in block          # no-scatter contract
+    assert "SMALL, FOCUSED PLAN" in block        # no over-decompose / report tasks
+
+
+def test_iteration_contract_reaches_decompose_prompt(project: Project):
+    captured: dict[str, list[str]] = {}
+    orch = Orchestrator(project, _capturing_runners(captured))
+    orch._pinned_files = ["game.py"]  # simulate a pinned file
+    orch._leader_decompose("improve the game", attachments=[])
+    prompt = captured["leader"][0]
+    assert "ITERATION — improve existing work" in prompt
+    assert "`game.py`" in prompt
+
+
+def test_greenfield_decompose_has_no_iteration_contract(project: Project):
+    captured: dict[str, list[str]] = {}
+    orch = Orchestrator(project, _capturing_runners(captured))
+    orch._leader_decompose("build a new game", attachments=[])
+    assert "ITERATION — improve existing work" not in captured["leader"][0]
+
+
+def test_pin_attachments_copies_into_workspace(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(PROJECT_CODE, "iter", "obj")
+    run_id = "20260530T000000Z-iter01"
+    vault.init_run(PROJECT_CODE, run_id, "obj")
+    proj = Project(
+        code=PROJECT_CODE, name="iter", objective="obj", leader_model="stub",
+        wiki_path=str(tmp_path / PROJECT_CODE.lower()), run_id=run_id,
+    )
+    src = tmp_path / "game.py"
+    src.write_text("import pygame\nJUMP = -12\n")
+    att = build_attachment(src, kind="document")
+
+    orch = Orchestrator(proj, _capturing_runners({}))
+    orch._pin_attachments([att])
+
+    assert orch._pinned_files == ["game.py"]
+    pinned = vault.run_dir(PROJECT_CODE, run_id) / "artifacts" / "game.py"
+    assert pinned.exists()
+    assert pinned.read_text() == "import pygame\nJUMP = -12\n"
+    # and the contract now activates
+    assert "EDIT IN PLACE" in orch._iteration_contract_block()
+
+
+def test_pin_attachments_noop_without_run_id(project: Project, tmp_path: Path):
+    src = tmp_path / "game.py"
+    src.write_text("x = 1\n")
+    att = build_attachment(src, kind="document")
+    orch = Orchestrator(project, _capturing_runners({}))  # project has no run_id
+    orch._pin_attachments([att])
+    assert orch._pinned_files == []  # nothing pinned, greenfield stays greenfield
+
+
+# ── increment 3 (2026-05-30): surgical SEARCH/REPLACE patch for iteration ──
+
+from uuid import uuid4  # noqa: E402
+from modulatio.types import Task  # noqa: E402
+from modulatio import orchestration as _orch  # noqa: E402
+
+
+def test_parse_search_replace_blocks():
+    resp = (
+        "<<<<<<< SEARCH\nJUMP = -12\n=======\nJUMP = -20\n>>>>>>> REPLACE\n\n"
+        "<<<<<<< SEARCH\nfoo()\n=======\nbar()\n>>>>>>> REPLACE\n"
+    )
+    blocks = _orch._parse_search_replace_blocks(resp)
+    assert blocks == [("JUMP = -12", "JUMP = -20"), ("foo()", "bar()")]
+    assert _orch._parse_search_replace_blocks("no blocks here") == []
+
+
+def test_apply_search_replace_preserves_untouched():
+    content = "JUMP = -12\nMOVE = 5\nATTACK = 'z'\n"
+    blocks = [("JUMP = -12", "JUMP = -20")]
+    new, applied, fails = _orch._apply_search_replace(content, blocks)
+    assert applied == 1 and not fails
+    assert "JUMP = -20" in new
+    assert "MOVE = 5" in new and "ATTACK = 'z'" in new  # untouched preserved
+
+
+def test_apply_search_replace_skips_nonmatching():
+    content = "x = 1\n"
+    new, applied, fails = _orch._apply_search_replace(content, [("NOPE", "y")])
+    assert applied == 0 and new == content  # file untouched, not corrupted
+    assert fails  # the miss is recorded
+
+
+def test_is_iteration_target(project: Project):
+    orch = Orchestrator(project, _capturing_runners({}))
+    orch._pinned_files = ["game.py"]
+    t_yes = Task(id="X-T-1", project_id=uuid4(), goal_id="X-G-1",
+                 description="d", output_path="game.py")
+    t_no = Task(id="X-T-2", project_id=uuid4(), goal_id="X-G-1",
+                description="d", output_path="other.py")
+    assert orch._is_iteration_target(t_yes) is True
+    assert orch._is_iteration_target(t_no) is False
+
+
+def _patch_orch(project):
+    """Orchestrator with the heavy deps stubbed so _producer_patch's
+    run→parse→apply→write glue can be exercised directly."""
+    orch = Orchestrator(project, _capturing_runners({}))
+    orch._prompt = lambda *a, **k: "P"
+    orch._inbox_block_for = lambda *a, **k: ""
+    orch._extract_producer_proposals = lambda resp, **k: resp
+    orch._record_artifact_write = lambda *a, **k: None
+    orch._maybe_trip_breaker = lambda *a, **k: None
+    return orch
+
+
+_PATCH_KW = dict(
+    domain_standards="", research_context="", team_memory_context="",
+    team_canvas_block="", design_intent_block="", team_state_block="",
+    repo_map_block="", agent_identity="",
+)
+
+
+def test_producer_patch_applies_surgically(project: Project, tmp_path):
+    orch = _patch_orch(project)
+    f = tmp_path / "game.py"
+    f.write_text("JUMP = -12\nMOVE = 5\nATTACK = 'z'\n")
+    orch._run_agent_call = lambda *a, **k: (
+        "<<<<<<< SEARCH\nJUMP = -12\n=======\nJUMP = -20\n>>>>>>> REPLACE"
+    )
+    task = Task(id="X-T-1", project_id=uuid4(), goal_id="X-G-1",
+                description="raise the jump", output_path="game.py",
+                artifact_kind="code")
+    p, checksum, _ = orch._producer_patch(task, f, **_PATCH_KW)
+    out = f.read_text()
+    assert "JUMP = -20" in out                       # change applied
+    assert "MOVE = 5" in out and "ATTACK = 'z'" in out  # rest PRESERVED
+    assert checksum.startswith("sha256:")
+
+
+def test_producer_patch_full_file_fallback(project: Project, tmp_path):
+    """No SEARCH/REPLACE blocks → producer returned a full file → write it."""
+    orch = _patch_orch(project)
+    f = tmp_path / "game.py"
+    f.write_text("old = 1\n")
+    orch._run_agent_call = lambda *a, **k: "brand = 'new file'\nx = 2\n"
+    task = Task(id="X-T-1", project_id=uuid4(), goal_id="X-G-1",
+                description="rewrite", output_path="game.py", artifact_kind="code")
+    orch._producer_patch(task, f, **_PATCH_KW)
+    out = f.read_text()
+    assert "brand = 'new file'" in out and "x = 2" in out
+    assert "old = 1" not in out  # the full file replaced the old one
+
+
+def test_producer_patch_nonmatching_leaves_file_unchanged(project: Project, tmp_path):
+    """Blocks present but none match → don't write marker soup; keep file."""
+    orch = _patch_orch(project)
+    f = tmp_path / "game.py"
+    f.write_text("real = 1\n")
+    orch._run_agent_call = lambda *a, **k: (
+        "<<<<<<< SEARCH\nHALLUCINATED\n=======\nx\n>>>>>>> REPLACE"
+    )
+    task = Task(id="X-T-1", project_id=uuid4(), goal_id="X-G-1",
+                description="d", output_path="game.py", artifact_kind="code")
+    orch._producer_patch(task, f, **_PATCH_KW)
+    assert f.read_text() == "real = 1\n"  # unchanged, not marker soup

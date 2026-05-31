@@ -1516,3 +1516,36 @@ def test_write_artifact_tool_description_documents_path_safety(tmp_path):
         assert needle in desc, (
             f"write_artifact description missing required hint: {needle!r}"
         )
+
+
+# ── 2a (2026-05-30): code-navigation read tools in the passive profile ──
+
+def test_run_shell_passive_allows_code_navigation_reads(tmp_path):
+    """Code iteration needs grep/tail/wc + read-only sed line-ranges,
+    all confined to the artifacts root."""
+    art = _make_artifacts(tmp_path)
+    (art / "game.py").write_text("import pygame\n" + "x=1\n" * 200 + "JUMP = -12\n")
+    rs = tools.make_run_shell(art)
+    assert "JUMP" in rs(cmd="grep -n JUMP game.py", profile="passive")
+    assert rs(cmd="tail -n 5 game.py", profile="passive")
+    assert "game.py" in rs(cmd="wc -l game.py", profile="passive")
+    assert rs(cmd="sed -n '1,3p' game.py", profile="passive")
+
+
+def test_run_shell_passive_read_tools_stay_confined(tmp_path):
+    """The new read tools cannot escape the artifacts root, recurse a tree,
+    write in place, or execute."""
+    art = _make_artifacts(tmp_path)
+    (art / "game.py").write_text("x=1\n")
+    rs = tools.make_run_shell(art)
+    for bad in [
+        "grep -r x .",                 # recursive tree walk
+        "grep -n x game.py -",         # bare - = stdin, not a file
+        "grep -n root /etc/passwd",    # outside root
+        "sed -i s/x/y/ game.py",       # in-place WRITE
+        "sed -n 1e/bin/sh game.py",    # exec via e command
+        "tail -n 5 /etc/passwd",       # outside root
+        "wc -l /etc/passwd",           # outside root
+    ]:
+        with pytest.raises(ValueError, match="not allowed"):
+            rs(cmd=bad, profile="passive")

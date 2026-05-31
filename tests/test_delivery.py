@@ -100,6 +100,48 @@ def test_deliver_product_collision_disambiguates(monkeypatch, tmp_path, _mock_ex
     assert dp.dest.name == "Report (ACME-T-009).docx"  # didn't clobber
 
 
+# ── code deliverables ship verbatim (not pandoc'd to docx) ───────────────
+
+def test_code_source_detection():
+    assert delivery._is_code_source(Path("a/game.py"))
+    assert delivery._is_code_source(Path("a/main.js"))
+    assert delivery._is_code_source(Path("a/lib.rs"))
+    assert delivery._is_code_source(Path("a/Dockerfile"))  # no suffix, by name
+    assert not delivery._is_code_source(Path("a/report.md"))
+    assert not delivery._is_code_source(Path("a/notes.txt"))
+
+
+def test_deliver_code_ships_verbatim(monkeypatch, tmp_path):
+    """A code deliverable is copied byte-for-byte, keeping game.py — never
+    rendered through pandoc into a Word doc. export_artifact must NOT be
+    called for code (assert via a poisoned stub)."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+
+    def _poison(*a, **k):  # pragma: no cover - must not run for code
+        raise AssertionError("export_artifact called for a code deliverable")
+    monkeypatch.setattr(delivery, "export_artifact", _poison)
+
+    src = tmp_path / "game.py"
+    body = "import pygame\n\n\ndef main():\n    pass\n"
+    src.write_text(body)
+    dp = delivery.deliver_product(src, project_code="MOD", task_id="MOD-T-003")
+    assert dp.error is None
+    assert dp.dest == tmp_path / "MOD" / "game.py"  # name + extension preserved
+    assert dp.dest.read_text() == body  # byte-for-byte, runnable
+
+
+def test_deliver_code_collision_keeps_extension(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    (tmp_path / "MOD").mkdir(parents=True)
+    (tmp_path / "MOD" / "game.py").write_text("old")
+    src = tmp_path / "g.py"
+    src.write_text("new source")
+    src = src.rename(tmp_path / "game.py")  # same basename as the existing dest
+    dp = delivery.deliver_product(src, project_code="MOD", task_id="MOD-T-003")
+    assert dp.dest.name == "game (MOD-T-003).py"  # disambiguated, .py kept
+    assert dp.dest.read_text() == "new source"
+
+
 def test_deliver_finished_products_skips_missing(monkeypatch, tmp_path, _mock_export):
     monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
     real = tmp_path / "real.md"
@@ -244,3 +286,92 @@ def test_quality_report_ships_even_with_no_reservations(monkeypatch, tmp_path, _
     monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
     dp = delivery.deliver_product_quality_report([], project_code="ACME")
     assert dp is not None and dp.error is None and dp.dest.exists()
+
+
+# ── 2b (2026-05-30): iteration delivery — dedup one file, replace not pile ──
+
+class _DT:
+    def __init__(self, tid, op):
+        self.deliverable = True
+        self.id = tid
+        self.output_path = op
+        self.description = "d"
+
+
+def test_deliverables_dedup_same_path(tmp_path):
+    """Iteration shape: three tasks edit one game.py → ONE deliverable, keyed
+    to the last (final-state) task — not three identical copies."""
+    tasks = [_DT("T-1", "game.py"), _DT("T-2", "game.py"), _DT("T-3", "game.py")]
+    out = delivery.deliverables_from_tasks(tasks, tmp_path / "art")
+    assert len(out) == 1
+    assert out[0][0] == "T-3"  # last writer wins
+
+
+def test_deliverables_keep_distinct_paths(tmp_path):
+    """Distinct output paths are all kept (dedup only collapses same-path)."""
+    tasks = [_DT("T-1", "game.py"), _DT("T-2", "level.py")]
+    out = delivery.deliverables_from_tasks(tasks, tmp_path / "art")
+    assert {o[0] for o in out} == {"T-1", "T-2"}
+
+
+def test_pinned_code_replaces_prior_copy(tmp_path, monkeypatch):
+    """An improved PINNED file overwrites its prior same-named copy (one clean
+    game.py, latest version) instead of a disambiguated duplicate."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    art = tmp_path / "art"; art.mkdir()
+    (art / "game.py").write_text("JUMP=-20\n")
+    (tmp_path / "MOD").mkdir(parents=True)
+    (tmp_path / "MOD" / "game.py").write_text("JUMP=-12 old\n")
+    dp = delivery.deliver_product(
+        art / "game.py", project_code="MOD", task_id="T-3",
+        pinned_names={"game.py"},
+    )
+    assert dp.dest.name == "game.py"          # replaced, not "game (T-3).py"
+    assert dp.dest.read_text() == "JUMP=-20\n"
+
+
+def test_non_pinned_code_still_disambiguates(tmp_path, monkeypatch):
+    """A non-pinned code collision still disambiguates (don't clobber unrelated
+    prior work)."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    art = tmp_path / "art"; art.mkdir()
+    (art / "util.py").write_text("new\n")
+    (tmp_path / "MOD").mkdir(parents=True)
+    (tmp_path / "MOD" / "util.py").write_text("old\n")
+    dp = delivery.deliver_product(art / "util.py", project_code="MOD", task_id="T-9")
+    assert dp.dest.name == "util (T-9).py"
+    assert (tmp_path / "MOD" / "util.py").read_text() == "old\n"  # preserved
+
+
+# ── README polish: markdown companions ship beside code in a bundle ──
+
+def test_code_bundle_markdown_companion_ships_verbatim(monkeypatch, tmp_path):
+    """game.py + README.md → README.md stays README.md beside the code, NOT a
+    rendered .docx. export_artifact must not run for either."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+
+    def _poison(*a, **k):  # pragma: no cover
+        raise AssertionError("export_artifact called in a code bundle")
+    monkeypatch.setattr(delivery, "export_artifact", _poison)
+
+    art = tmp_path / "art"; art.mkdir()
+    (art / "game.py").write_text("import pygame\n")
+    (art / "README.md").write_text("# Hollow Knight Demo\n\nRun: python game.py\n")
+    out = delivery.deliver_finished_products(
+        [("T-1", art / "game.py", None), ("T-2", art / "README.md", "readme")],
+        project_code="MOD",
+    )
+    names = sorted(d.dest.name for d in out)
+    assert names == ["README.md", "game.py"]  # both verbatim, coherent folder
+    assert (tmp_path / "MOD" / "README.md").read_text().startswith("# Hollow Knight")
+
+
+def test_pure_prose_run_still_renders_docx(monkeypatch, tmp_path, _mock_export):
+    """No code in the batch → markdown deliverables still render to .docx."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    art = tmp_path / "art"; art.mkdir()
+    (art / "paper.md").write_text("# Annual Report\n\nbody")
+    out = delivery.deliver_finished_products(
+        [("T-1", art / "paper.md", None)], project_code="MOD",
+    )
+    assert out[0].dest.name == "Annual Report.docx"  # unchanged behavior
