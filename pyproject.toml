@@ -31,6 +31,7 @@ dependencies = [
     "httpx>=0.27",
     "python-dotenv>=1.0",
     "litellm>=1.50",
+    "ddgs>=9.0",
     # Embedding-fallback routing (MiniLM via fastembed + LanceDB for the
     # agent-skill index). Routing embedder is decoupled from any
     # memory/knowledge stack.

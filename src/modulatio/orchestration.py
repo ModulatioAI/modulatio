@@ -2792,17 +2792,18 @@ class Orchestrator:
             )
             if primary_skill.executor == "tool":
                 return self._tool_execute(task, primary_skill, path)
-            # Phase 2A: executor=llm WITH a non-empty tool_loadout means
-            # the producer should reason WHILE having access to the
-            # declared tools (run_shell, http_get, etc.). Dispatch falls
-            # through to ``_llm_with_tools_execute`` only after the
-            # standard prompt-build path below — same prompt, but a
-            # function-calling loop instead of a single LLM round-trip.
-            if (
-                primary_skill.executor == "llm"
-                and primary_skill.tool_loadout
-            ):
-                return self._llm_with_tools_execute(task, primary_skill, path)
+            # Phase 2A + skill-library brick (2026-05-31): a producer reasons
+            # WHILE holding the tools its TASK needs — the UNION of every
+            # required skill's loadout, not just the primary's. So a task with
+            # required_skills [researcher, web-search] gets http_get + web_search
+            # in one loop, with neither skill bundling both — tools are separate,
+            # composed per task. (First brick of the skill library: capabilities
+            # granted to a producer as needed, no fixed roles.)
+            task_loadout = self._task_tool_loadout(task, primary_skill)
+            if primary_skill.executor == "llm" and task_loadout:
+                return self._llm_with_tools_execute(
+                    task, primary_skill, path, tool_loadout=task_loadout,
+                )
 
         research_context = self._ensure_research(task)
         domain_standards = standards.load(task.artifact_kind, project_code=self.project.code)
@@ -3593,11 +3594,38 @@ class Orchestrator:
                 return sk
         return None
 
+    def _task_tool_loadout(self, task: Task, primary_skill) -> tuple[str, ...]:
+        """The tools a producer holds for THIS task — the union of every
+        required skill's ``tool_loadout``, primary first, de-duplicated in
+        order. First brick of the skill library: capabilities are separate,
+        single-purpose, and composed onto a producer per task (a research task
+        carrying ``[researcher, web-search]`` gets ``http_get`` + ``web_search``
+        without any one skill bundling both). No fixed roles — a producer is
+        whatever skills its task grants it."""
+        loadout: list[str] = list(primary_skill.tool_loadout)
+        seen = set(loadout)
+        for name in task.required_skills:
+            if name == primary_skill.name:
+                continue
+            try:
+                extra = skills.load_with_metadata(
+                    name, project_code=self.project.code,
+                )
+            except Exception:
+                continue
+            for tool in extra.tool_loadout:
+                if tool not in seen:
+                    seen.add(tool)
+                    loadout.append(tool)
+        return tuple(loadout)
+
     def _llm_with_tools_execute(
         self,
         task: Task,
         skill: "skills.Skill",
         path: Path,
+        *,
+        tool_loadout: "tuple[str, ...] | None" = None,
     ) -> tuple[Path, str, int]:
         """Run an LLM-executor skill with a function-calling loop.
 
@@ -3681,7 +3709,10 @@ class Orchestrator:
         transcript_path = artifacts_root / "tool_calls" / f"{task.id.lower()}.jsonl"
         response = self._run_chat_loop(
             prompt=prompt,
-            tool_loadout=tuple(skill.tool_loadout),
+            tool_loadout=(
+                tool_loadout if tool_loadout is not None
+                else tuple(skill.tool_loadout)
+            ),
             role=task.assignee_specialist or self.default_producer_role,
             agent_id=task.assigned_agent_id or self.default_producer_role,
             task_id=task.id,
