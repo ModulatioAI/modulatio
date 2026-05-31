@@ -296,7 +296,7 @@ def _derive_agent_caps(skill_names: list[str], project_code: str) -> tuple[list[
 # roles are Leader + QC; producer + researcher are skill-holders.
 _DEFAULT_ROSTER_TEMPLATE: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("leader", ("leader", "leader-verify", "leader-plan", "leader-plan-approve", "leader-reflect"), "leader", "leader_model"),
-    ("producer", ("drafter", "drafter-edit", "rigorous-sourcing", "web-search"), "producer", "specialist_model"),
+    ("producer", ("drafter", "drafter-edit", "drafter-patch", "rigorous-sourcing", "web-search"), "producer", "specialist_model"),
     ("qc", ("qc",), "qc", "qc_model"),
     ("researcher", ("researcher", "rigorous-sourcing", "web-search"), "producer", "researcher_model"),
 )
