@@ -388,13 +388,17 @@ def _make_two_task_project(tmp_path, monkeypatch):
     )
 
 
-def test_env_var_unset_skips_iterate(tmp_path, monkeypatch) -> None:
-    """MODULATIO_LEADER_ITERATE unset → _leader_iterate never called
-    even across a real two-task kickoff."""
+def test_iterate_skips_when_operator_present_and_env_unset(
+    tmp_path, monkeypatch,
+) -> None:
+    """Brick C: with an operator PRESENT and MODULATIO_LEADER_ITERATE
+    unset, _leader_iterate stays OFF — the human is the live judgment,
+    so the Leader doesn't self-revise under them. (Pre-Brick-C this was
+    the default for ALL runs; now it's the operator-present case only.)"""
     monkeypatch.delenv("MODULATIO_LEADER_ITERATE", raising=False)
     project = _make_two_task_project(tmp_path, monkeypatch)
     runners = _two_task_kickoff_runners()
-    orch = orchestration.Orchestrator(project, runners)
+    orch = orchestration.Orchestrator(project, runners, operator_present=True)
 
     calls: list = []
     real = orch._leader_iterate
@@ -406,6 +410,34 @@ def test_env_var_unset_skips_iterate(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(orch, "_leader_iterate", _spy)
     orch.kickoff("two-task goal")
     assert calls == []
+
+
+def test_iterate_fires_when_autonomous_and_env_unset(
+    tmp_path, monkeypatch,
+) -> None:
+    """Brick C — THE flip: with NO operator (autonomous, the daemon /
+    cron / JT default) and MODULATIO_LEADER_ITERATE unset, _leader_iterate
+    now runs by DEFAULT — the Leader is the only judgment past QC, so its
+    self-correction is on without needing the env var."""
+    monkeypatch.delenv("MODULATIO_LEADER_ITERATE", raising=False)
+    project = _make_two_task_project(tmp_path, monkeypatch)
+    runners = _two_task_kickoff_runners()
+    # operator_present defaults to False (autonomous) — the production
+    # daemon/cron/JT path. No env var set.
+    orch = orchestration.Orchestrator(project, runners)
+    assert orch._autonomous() is True
+
+    calls: list = []
+
+    def _spy(goal, all_tasks, next_task):  # type: ignore[no-untyped-def]
+        calls.append(next_task.id)
+        return None  # parse-fail path → orchestrator default-continues
+
+    monkeypatch.setattr(orch, "_leader_iterate", _spy)
+    orch.kickoff("two-task goal")
+    # 2 tasks → 1 between-task reflection → 1 call, no env var needed.
+    assert len(calls) == 1
+    assert calls[0].endswith("T-002"), f"expected T-002 in {calls!r}"
 
 
 def test_env_var_enabled_fires_iterate_between_tasks(tmp_path, monkeypatch) -> None:

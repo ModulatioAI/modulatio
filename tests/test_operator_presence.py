@@ -149,3 +149,41 @@ def test_verify_prompt_differs_only_in_operator_context(project: Project):
     sentinel = "<<OPERATOR_CONTEXT>>"
     assert auto_prompt.replace(auto_block, sentinel) == \
         present_prompt.replace(present_block, sentinel)
+
+
+# ── Gating truth table (Commit 4 — the behavior flip) ─────────────────────
+#
+# iterate + wave-reflect: run by DEFAULT when autonomous; opt-in (env-only)
+# when an operator is present; env var force-on in EITHER mode.
+
+def _orch(project: Project, *, operator_present: bool) -> Orchestrator:
+    runners = {
+        "leader": lambda p: "", "planner": lambda p: "```json\n[]\n```",
+        "drafter": lambda p: "", "qc": lambda p: "",
+    }
+    return Orchestrator(project, runners, operator_present=operator_present)
+
+
+@pytest.mark.parametrize("gate", ["_iterate_enabled", "_wave_reflect_enabled"])
+class TestPresenceGatingTruthTable:
+    """Both self-correction surfaces share the same env-OR-autonomous gate."""
+
+    _ENV = {"_iterate_enabled": "MODULATIO_LEADER_ITERATE",
+            "_wave_reflect_enabled": "MODULATIO_WAVE_REFLECT"}
+
+    def test_autonomous_enables_by_default(self, project, gate, monkeypatch):
+        monkeypatch.delenv(self._ENV[gate], raising=False)
+        assert getattr(_orch(project, operator_present=False), gate)() is True
+
+    def test_present_disabled_without_env(self, project, gate, monkeypatch):
+        monkeypatch.delenv(self._ENV[gate], raising=False)
+        assert getattr(_orch(project, operator_present=True), gate)() is False
+
+    def test_present_env_forces_on(self, project, gate, monkeypatch):
+        monkeypatch.setenv(self._ENV[gate], "1")
+        assert getattr(_orch(project, operator_present=True), gate)() is True
+
+    def test_autonomous_stays_on_with_env_zero(self, project, gate, monkeypatch):
+        # autonomous wins regardless of an explicit env=0 (env only force-ON).
+        monkeypatch.setenv(self._ENV[gate], "0")
+        assert getattr(_orch(project, operator_present=False), gate)() is True

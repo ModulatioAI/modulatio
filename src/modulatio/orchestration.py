@@ -1703,8 +1703,8 @@ class Orchestrator:
     def _sweep_abandoned_candidates(self) -> None:
         """Run the candidate-abandonment sweep at producer-turn tick.
 
-        Critical for runs where Leader-iterate is OFF
-        (``MODULATIO_LEADER_ITERATE`` unset / 0): without the iterate
+        Critical for runs where Leader-iterate is OFF (operator present
+        AND ``MODULATIO_LEADER_ITERATE`` unset / 0): without the iterate
         path's accept/reject cycle, candidates would otherwise sit in
         ``<run>/inbox_candidates.jsonl`` indefinitely. This sweep is
         the cleanup hook that makes the 3-turn abandonment guarantee
@@ -2566,13 +2566,14 @@ class Orchestrator:
 
         The caller is responsible for applying the decision. ``None``
         defaults the dispatch loop to ``continue`` semantics — the
-        safest fallback per the skill prompt's "bias toward continue"
-        rule.
+        safest no-churn fallback.
 
-        This call is OPT-IN via the ``MODULATIO_LEADER_ITERATE`` env
-        var. Projects that don't set it never see the extra LLM call —
-        same shape as ``MODULATIO_CRASH_DIR`` and other Slice 2 / 90 /
-        88 toggles.
+        Brick C: this call runs by DEFAULT when the run is autonomous
+        (no operator watching) — the Leader is then the only judgment
+        past QC, so its self-correction is on. With an operator present
+        it stays opt-in via ``MODULATIO_LEADER_ITERATE=1`` (the human is
+        the live judgment). See ``_wave_reflect_enabled`` for the
+        mirrored gate on the wave path.
         """
         completed_summary_lines: list[str] = []
         for t in all_tasks:
@@ -4378,15 +4379,32 @@ class Orchestrator:
             return True
         return os.environ.get("MODULATIO_CONCURRENT_WAVES") == "1"
 
-    @staticmethod
-    def _wave_reflect_enabled() -> bool:
-        """#151: wave-boundary reflection is opt-in via
-        ``MODULATIO_WAVE_REFLECT=1`` and ships OFF by default. After a
-        committed wave merge, the Leader may revise/drop ONLY not-yet-
-        dispatched (PENDING) tasks — future-wave edits only, never mid-wave
-        mutation (design decision 5). It rides inside the dark concurrent
-        wave path and stays independently gated until reviewed + tuned."""
-        return os.environ.get("MODULATIO_WAVE_REFLECT") == "1"
+    def _iterate_enabled(self) -> bool:
+        """Brick C: the between-task iterate gate. Runs by DEFAULT when the
+        run is autonomous (the Leader is the only judgment past QC); stays
+        opt-in via ``MODULATIO_LEADER_ITERATE=1`` when an operator is present.
+        The env var is an explicit force-on override in either mode. Mirrors
+        ``_wave_reflect_enabled``."""
+        return (
+            os.environ.get("MODULATIO_LEADER_ITERATE") == "1"
+            or self._autonomous()
+        )
+
+    def _wave_reflect_enabled(self) -> bool:
+        """#151: wave-boundary reflection. After a committed wave merge, the
+        Leader may revise/drop ONLY not-yet-dispatched (PENDING) tasks —
+        future-wave edits only, never mid-wave mutation (design decision 5).
+
+        Brick C: presence-aware default, mirroring the between-task iterate.
+        When autonomous the Leader is the only judgment past QC, so the
+        reflection runs by default; with an operator present it stays opt-in.
+        ``MODULATIO_WAVE_REFLECT=1`` remains an explicit force-on override in
+        either mode. It rides inside the (off-by-default) concurrent-wave
+        path, so its blast radius stays bounded by that flag regardless."""
+        return (
+            os.environ.get("MODULATIO_WAVE_REFLECT") == "1"
+            or self._autonomous()
+        )
 
     def _skill_floor_for(self, skill_name: str) -> tuple[str, ...]:
         """Slice #9b skill capability floor, instance-cached. Shared by the
@@ -7862,9 +7880,7 @@ class Orchestrator:
             run_concurrent = self._concurrent_waves_enabled(self.project)
             if run_concurrent:
                 self._run_task_waves(g, tasks, summary, task_map)
-            iterate_enabled = (
-                os.environ.get("MODULATIO_LEADER_ITERATE") == "1"
-            )
+            iterate_enabled = self._iterate_enabled()
             for idx, t in enumerate(tasks):
                 if run_concurrent:
                     break  # concurrent path already executed all tasks
@@ -7906,10 +7922,11 @@ class Orchestrator:
                 self._run_task_with_redo(t, summary)
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
 
-                # Slice #82 PR-B: between-task leader reflection.
-                # Opt-in via MODULATIO_LEADER_ITERATE. Failures are
-                # swallowed — the loop continues with the next pending
-                # task as originally planned.
+                # Slice #82 PR-B: between-task leader reflection. Brick C:
+                # on by default when autonomous (see _iterate_enabled);
+                # opt-in via MODULATIO_LEADER_ITERATE with an operator
+                # present. Failures are swallowed — the loop continues with
+                # the next pending task as originally planned.
                 if iterate_enabled and idx + 1 < len(tasks):
                     next_pending = next(
                         (
