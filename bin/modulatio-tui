@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Self-locating launcher for the Modulatio dev TUI.
+#
+# The dev vault_root is stored relative ("cliftest") and resolves against the
+# current working directory, so the TUI must run from the repo root or it
+# silently targets the wrong vault. This launcher derives the repo root from
+# THIS script's own real location — so it works when invoked via a symlink on
+# PATH from any directory — pins the cwd, then hands off to the venv entry
+# point. No path is hardcoded: everything is resolved from the script itself.
+set -euo pipefail
+
+SELF="$(readlink -f "$0")"
+REPO="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+cd "$REPO"
+exec "$REPO/.venv/bin/modulatio-tui" "$@"
