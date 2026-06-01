@@ -127,3 +127,6 @@ def test_kickoff_orchestrator_stub_mode_keeps_pre_v21_no_op_shape(
     assert kwargs["summarizer_chat_runner_factory"] is None
     # Empty tool registry too — stub mode = no real tools.
     assert kwargs["tool_registry"] == {}
+    # Brick C: the TUI is the interactive surface → operator_present is True
+    # (the Leader DEFERS), regardless of stub/real mode.
+    assert kwargs["operator_present"] is True

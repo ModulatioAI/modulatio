@@ -489,6 +489,10 @@ def kickoff(
     #  import locally so the lookup happens
     # at call time (lets tests monkeypatch the module).
     from modulatio.runners import litellm_runner as _litellm_runner
+    # Brick C: operator_present stays False (autonomous). A human typed this
+    # command, but `modulatio kickoff` is fire-and-forget — there's no live
+    # channel to defer to mid-run, so the Leader judges. Flip to True here when
+    # a CLI-streaming/ACP surface adds a live operator channel.
     orch = Orchestrator(
         project,
         runners,

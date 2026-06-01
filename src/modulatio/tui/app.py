@@ -113,6 +113,10 @@ def _build_kickoff_orchestrator(
     return Orchestrator(
         project, runners,
         activity_callback=activity_callback,
+        # Brick C: the TUI is the interactive surface — a human is watching, so
+        # the Leader DEFERS (vs JUDGE when headless). The one operator-present
+        # construction site today.
+        operator_present=True,
         agent_runners=agent_runners,
         tool_registry=tool_registry,
         chat_runner=chat_runner,
