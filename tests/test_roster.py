@@ -228,15 +228,15 @@ def test_agent_covers_capabilities_all_or_nothing():
 
 # ── default roster seed (slice #11c) ───────────────────────────────────────
 
-_DEFAULT_ROSTER_IDS = {"leader", "producer", "qc", "researcher"}
+_DEFAULT_ROSTER_IDS = {"leader", "producer", "qc"}
 
 
-def test_seed_default_roster_writes_four_agents_with_expected_shape(project_vault):
-    """Skills-first (#143): a net-new project seeds four agents — Leader +
-    QC structural roles plus producer + researcher skill-holders. No
-    coordinator agent (the role was removed engine-side in; the
-    planner runner uses the Leader's model). Each agent's model binds to
-    its CLI model flag; template-origin marks it as seeded."""
+def test_seed_default_roster_writes_three_agents_with_expected_shape(project_vault):
+    """Skills-first (#143): a net-new project seeds three agents — Leader +
+    QC structural roles plus a producer skill-holder. No coordinator agent
+    and no researcher agent (research is a capability the producer composes;
+    Brick A). Each agent's model binds to its CLI model flag; template-origin
+    marks it as seeded."""
     written = roster.seed_default_roster(
         PROJECT_CODE,
         leader_model="ld/m",
@@ -262,12 +262,6 @@ def test_seed_default_roster_writes_four_agents_with_expected_shape(project_vaul
 
     assert by_id["qc"].model == "qc/m"
     assert by_id["qc"].tier == "qc"
-
-    assert by_id["researcher"].model == "rs/m"
-    # Researcher sits in the producer tier structurally — it isn't QC
-    # and isn't a strategic singleton. Its skill's model_tier
-    # ("tool-using") lives on Agent.model_tier, not Agent.tier.
-    assert by_id["researcher"].tier == "producer"
 
     for agent in written:
         assert agent.template_origin == "default-roster"
@@ -479,7 +473,7 @@ def test_seed_default_roster_falls_back_to_hardcoded_when_no_template(project_va
         qc_model="qc/m",
         researcher_model="rs/m",
     )
-    assert {a.id for a in written} == {"leader", "producer", "qc", "researcher"}
+    assert {a.id for a in written} == {"leader", "producer", "qc"}
     by_id = {a.id: a for a in written}
     assert by_id["leader"].model == "ld/m"
     assert by_id["leader"].template_origin == "default-roster"

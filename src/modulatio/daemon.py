@@ -270,7 +270,7 @@ def _make_dispatch_callback(*, stub: bool):
                 roster.seed_default_roster(
                     project_code,
                     leader_model="stub", coordinator_model="stub",
-                    producer_model="stub", qc_model="stub", researcher_model="stub",
+                    producer_model="stub", qc_model="stub",
                 )
         else:
             # Read default_models from the wizard-persisted defaults.json.
@@ -310,7 +310,8 @@ def _make_dispatch_callback(*, stub: bool):
                 "planner": litellm_runner(planner_model),
                 "drafter": litellm_runner(producer_model),
                 "qc": litellm_runner(defaults.get("qc") or producer_model),
-                "researcher": litellm_runner(defaults.get("researcher") or producer_model),
+                # Research runs on the producer model (Brick A collapse).
+                "researcher": litellm_runner(producer_model),
             }
             embedder = semantic_router.FastEmbedder()
             matcher = semantic_router.default_matcher(project_code, embedder=embedder)
@@ -321,7 +322,6 @@ def _make_dispatch_callback(*, stub: bool):
                     coordinator_model=planner_model,
                     producer_model=producer_model,
                     qc_model=defaults.get("qc"),
-                    researcher_model=defaults.get("researcher"),
                 )
 
         # Per-kickoff run isolation: each daemon-dispatched kickoff
@@ -499,9 +499,8 @@ def _make_runners_for(*, stub: bool):
             "planner": litellm_runner(planner_model),
             "drafter": litellm_runner(producer_model),
             "qc": litellm_runner(defaults.get("qc") or producer_model),
-            "researcher": litellm_runner(
-                defaults.get("researcher") or producer_model
-            ),
+            # Research runs on the producer model (Brick A collapse).
+            "researcher": litellm_runner(producer_model),
         }
     return _runners
 

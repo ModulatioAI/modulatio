@@ -530,8 +530,7 @@ class ModulatioApp(App):
             or producer
         )
         qc = defaults.get("qc") or producer
-        researcher = defaults.get("researcher") or producer
-        if not (leader and planner and producer and qc and researcher):
+        if not (leader and planner and producer and qc):
             return None
         return {
             # Leader reasons (deliberative seat); others stay thinking-OFF.
@@ -539,7 +538,8 @@ class ModulatioApp(App):
             "planner": litellm_runner(planner),
             "drafter": litellm_runner(producer),
             "qc": litellm_runner(qc),
-            "researcher": litellm_runner(researcher),
+            # Research runner-role, bound to the producer model (Brick A).
+            "researcher": litellm_runner(producer),
         }
 
     def _handle_slash_command(self, text: str) -> None:

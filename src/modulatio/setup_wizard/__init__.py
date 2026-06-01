@@ -174,7 +174,6 @@ def _auto_launch_tui(state: dict) -> None:
         coordinator_model=defaults_models.get("planner") or defaults_models.get("coordinator"),
         producer_model=defaults_models.get("producer") or defaults_models.get("specialist"),
         qc_model=defaults_models.get("qc"),
-        researcher_model=defaults_models.get("researcher"),
     )
     theme.success(f"Initialized project '{code}' at {vault.project_dir(code)}")
     print()

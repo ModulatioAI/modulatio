@@ -332,12 +332,13 @@ def _caps_from_model(model_key: str | None) -> tuple[list[str], str | None, str 
 # Skills-first: the fallback roster has NO standalone planner agent —
 # that prior role was removed engine-side, and task planning is the
 # Leader's job (the planner runner uses the Leader's model). Structural
-# roles are Leader + QC; producer + researcher are skill-holders.
+# roles are Leader + QC; the producer is a skill-holder. (Research is a
+# capability the producer composes — its rigorous-sourcing + web-search skills
+# already cover the research/web-search caps — not a separate role; Brick A.)
 _DEFAULT_ROSTER_TEMPLATE: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("leader", ("leader", "leader-verify", "leader-plan", "leader-plan-approve", "leader-reflect"), "leader", "leader_model"),
     ("producer", ("drafter", "drafter-edit", "drafter-patch", "rigorous-sourcing", "web-search"), "producer", "producer_model"),
     ("qc", ("qc",), "qc", "qc_model"),
-    ("researcher", ("researcher", "rigorous-sourcing", "web-search"), "producer", "researcher_model"),
 )
 
 
@@ -449,7 +450,9 @@ def seed_default_roster(
     coordinator_model: str | None,
     producer_model: str | None,
     qc_model: str | None,
-    researcher_model: str | None,
+    # DEPRECATED/ignored — research is a capability a producer composes, not a
+    # role (Brick A); accepted for back-compat (mirrors coordinator_model).
+    researcher_model: str | None = None,
 ) -> list[Agent]:
     """Write the default agent roster to ``<project>/agents/``.
 
@@ -481,7 +484,6 @@ def seed_default_roster(
         coordinator_model=coordinator_model,
         producer_model=producer_model,
         qc_model=qc_model,
-        researcher_model=researcher_model,
     )
 
 
@@ -492,7 +494,9 @@ def _seed_from_default_template(
     coordinator_model: str | None,
     producer_model: str | None,
     qc_model: str | None,
-    researcher_model: str | None,
+    # DEPRECATED/ignored — research is a capability a producer composes, not a
+    # role (Brick A); accepted for back-compat (mirrors coordinator_model).
+    researcher_model: str | None = None,
 ) -> list[Agent]:
     """Seed the hardcoded fallback roster (no wizard team template)."""
     models = {
@@ -500,7 +504,6 @@ def _seed_from_default_template(
         "coordinator_model": coordinator_model,
         "producer_model": producer_model,
         "qc_model": qc_model,
-        "researcher_model": researcher_model,
     }
     agents_dir = project_dir(project_code) / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)

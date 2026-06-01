@@ -234,18 +234,20 @@ def _build_runners(
     leader_model: str | None,
     producer_model: str | None,
     qc_model: str | None,
-    researcher_model: str | None,
+    # DEPRECATED/ignored — research routes by capability (Brick A); accepted
+    # for back-compat with callers passing --researcher-model.
+    researcher_model: str | None = None,
     planner_model: str | None = None,
     coordinator_model: str | None = None,
 ) -> dict[str, Callable[[str], str]]:
     """Assemble the {runner-key: runner} dict the Orchestrator consumes.
 
     Stub mode returns canned runners and ignores model flags. Non-stub
-    mode builds LiteLLM-backed runners; QC and the research producer fall
-    back to ``producer_model`` when their own model is not provided
-    (different minds preferred but not mandatory per quality-architecture.md
-    §5). (Post-keystone there are only producers — the ``drafter`` /
-    ``researcher`` keys below are internal runner slots, not fixed roles.)
+    mode builds LiteLLM-backed runners; QC falls back to ``producer_model``
+    when its own model is not provided (different minds preferred but not
+    mandatory per quality-architecture.md §5). (Post-keystone there are only
+    producers — ``drafter`` is the producer runner slot, not a fixed role;
+    research routes by capability to a producer, not a runner slot.)
 
     Skills-first (#143): the task-planning utility binds to the "planner"
     runner. ``planner_model`` picks the LLM behind it; ``coordinator_model``
@@ -266,7 +268,9 @@ def _build_runners(
         "planner": litellm_runner(planner),
         "drafter": litellm_runner(producer_model),
         "qc": litellm_runner(qc_model or producer_model),
-        "researcher": litellm_runner(researcher_model or producer_model),
+        # Research runner-role, bound to the producer model — no separate
+        # researcher model (research is producer work; Brick A collapse).
+        "researcher": litellm_runner(producer_model),
     }
 
 
@@ -332,11 +336,10 @@ def kickoff(
         ),
     ),
     researcher_model: str = typer.Option(
-        None,
-        help=(
-            "Preset key or raw LiteLLM id for the research producer. "
-            "Defaults to --producer-model. Supply a web-search-equipped "
-            "model here when research quality matters."
+        None, "--researcher-model", hidden=True, help=(
+            "DEPRECATED — research now routes by capability to a producer, not "
+            "a separate role. Accepted but ignored, for back-compat with "
+            "existing scripts/crons."
         ),
     ),
     qc_notes: str = typer.Option(
@@ -365,7 +368,7 @@ def kickoff(
             "Per-role context-budget override. Format: role=int "
             "(e.g. producer=24000). Repeat for multiple roles. Valid "
             "roles: producer, qc, planner, leader-decompose, "
-            "leader-iterate, leader-reflect, leader-chat, researcher. "
+            "leader-iterate, leader-reflect, leader-chat, research. "
             "Above 32K prompts for confirmation; above 48K prompts for "
             "a reason; above 64K is refused."
         ),
@@ -386,12 +389,11 @@ def kickoff(
     if stub:
         leader_model = planner_model = producer_model = "stub"
         qc_model = "stub"
-        researcher_model = "stub"
     elif not (leader_model and producer_model):
         typer.echo(
             "Without --stub, --leader-model and --producer-model are "
-            "required. --planner-model (defaults to --leader-model), "
-            "--qc-model and --researcher-model are optional.",
+            "required. --planner-model (defaults to --leader-model) and "
+            "--qc-model are optional.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -402,7 +404,6 @@ def kickoff(
         planner_model=planner_model,
         producer_model=producer_model,
         qc_model=qc_model,
-        researcher_model=researcher_model,
     )
 
     wiki = project_dir(code)
@@ -415,7 +416,6 @@ def kickoff(
             coordinator_model=coordinator_model,
             producer_model=producer_model,
             qc_model=qc_model,
-            researcher_model=researcher_model,
         )
         typer.echo(f"Initialized project vault at {wiki}")
 
@@ -997,7 +997,7 @@ def heartbeat_run_once(
             roster.seed_default_roster(
                 project_code,
                 leader_model="stub", coordinator_model="stub",
-                producer_model="stub", qc_model="stub", researcher_model="stub",
+                producer_model="stub", qc_model="stub",
             )
         project = Project(
             code=project_code, name=project_code, objective=objective,

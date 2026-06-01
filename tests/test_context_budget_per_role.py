@@ -115,11 +115,15 @@ def test_02_default_table_distinct_per_role():
         ("leader-iterate", 8_000),
         ("leader-reflect", 12_000),
         ("leader-chat", 16_000),
-        ("researcher", 24_000),
+        ("research", 24_000),       # Brick A: capability-named research budget
+        ("researcher", 24_000),     # legacy alias kept for --ctx-budget back-compat
     ]:
         assert cb.EXPERIMENTAL_DEFAULTS[role] == expected, (
             f"{role} default drifted from spec ({expected})"
         )
+    # The research fetch reaches the larger budget via an explicit
+    # budget_role="research" (orchestration), not the old role key.
+    assert cb._budget_role_for_role("research") == "research"
 
 
 # ─── 3. Unknown budget_role falls back to CUSTOM_WORKER_DEFAULT ─────────────

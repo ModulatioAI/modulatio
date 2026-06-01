@@ -26,8 +26,9 @@ def _derive_default_models(structural: list[dict], workers: list[dict]) -> dict[
     defaults. Skills-first (#143): the structural roles are Leader + QC.
     The task-planning utility call (``planner``) uses the Leader's model —
     planning is the Leader's job now that the Coordinator role is gone.
-    ``producer`` falls to the first worker; ``researcher`` uses a
-    producer holding a research skill if any, else falls back to producer.
+    ``producer`` falls to the first worker. (Research is a capability a
+    producer composes — its sourcing/web-search skills — not a separate role,
+    so no ``researcher`` default is written; Brick A.)
     """
     by_tier = {a.get("tier"): a for a in structural}
     out: dict[str, str] = {}
@@ -43,19 +44,6 @@ def _derive_default_models(structural: list[dict], workers: list[dict]) -> dict[
         first_worker_model = workers[0].get("model")
         if first_worker_model:
             out["producer"] = first_worker_model
-        researcher = next(
-            (
-                w for w in workers
-                if w.get("template_origin") == "researcher"
-                or "research" in (w.get("skills") or [])
-                or "researcher" in (w.get("skills") or [])
-            ),
-            None,
-        )
-        if researcher and researcher.get("model"):
-            out["researcher"] = researcher["model"]
-        elif first_worker_model:
-            out["researcher"] = first_worker_model
     return out
 
 

@@ -305,8 +305,9 @@ def test_commit_writes_defaults_and_marks_setup_complete(tmp_path):
     assert on_disk["default_models"]["planner"] == "claude-cli/claude-sonnet-4-6"
     assert "coordinator" not in on_disk["default_models"]
     assert on_disk["default_models"]["producer"] == "ollama_chat/glm-5.1"
-    # No researcher template picked → researcher falls back to first worker
-    assert on_disk["default_models"]["researcher"] == "ollama_chat/glm-5.1"
+    # Research is a capability the producer composes — no researcher default
+    # is written (Brick A).
+    assert "researcher" not in on_disk["default_models"]
 
     # team_template.json written with all 3 agents (Leader + QC + 1 producer)
     assert config.TEAM_TEMPLATE_FILE.exists()
@@ -326,9 +327,10 @@ def test_commit_writes_defaults_and_marks_setup_complete(tmp_path):
         assert (shared / sub).exists()
 
 
-def test_commit_derives_researcher_from_researcher_template(tmp_path):
-    """When a worker has template_origin == 'researcher', that worker's
-    model wins for the researcher role even if it's not the first worker."""
+def test_commit_folds_researcher_template_worker_into_producer_pool(tmp_path):
+    """A worker from the 'researcher' template is just a producer now — its
+    model does NOT get a separate 'researcher' default; research is a
+    capability the producer composes (Brick A)."""
     state = {
         "vault_root": str(tmp_path / "vault"),
         "shared_resources_path": str(tmp_path / "shared"),
@@ -346,7 +348,7 @@ def test_commit_derives_researcher_from_researcher_template(tmp_path):
     finalize.commit(state, version="2.0.0")
     on_disk = json.loads(config.DEFAULTS_FILE.read_text())
     assert on_disk["default_models"]["producer"] == "model-c"  # first worker
-    assert on_disk["default_models"]["researcher"] == "model-d"  # researcher template wins
+    assert "researcher" not in on_disk["default_models"]
     assert on_disk["default_models"]["planner"] == "model-a"  # planner = leader's model
 
 

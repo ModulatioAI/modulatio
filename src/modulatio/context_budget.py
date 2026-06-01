@@ -100,6 +100,10 @@ EXPERIMENTAL_DEFAULTS: dict[str, int] = {
     "leader-iterate":   8_000,
     "leader-reflect":  12_000,
     "leader-chat":     16_000,
+    # Research gets more room than a generic producer. Reached via an explicit
+    # budget_role="research" on the research fetch (Brick A). "researcher" is
+    # kept as a back-compat alias so `--ctx-budget researcher=N` still validates.
+    "research":        24_000,
     "researcher":      24_000,
 }
 
@@ -734,7 +738,8 @@ def _budget_role_for_role(role: str) -> str:
         "leader": "leader-decompose",  # default; iterate/reflect override at call site
         "planner": "planner",
         "qc": "qc",
-        "researcher": "researcher",
+        "research": "research",
+        "researcher": "researcher",  # legacy alias
     }
     if role in known:
         return known[role]

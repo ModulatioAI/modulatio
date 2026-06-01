@@ -56,9 +56,10 @@ def test_build_runners_routes_qc_to_qc_model_when_provided(monkeypatch):
     assert calls == ["leader/A", "coord/B", "drafter/C", "qc/D", "drafter/C"]
 
 
-def test_build_runners_routes_researcher_to_researcher_model_when_provided(monkeypatch):
-    """Researcher runs on its own model when --researcher-model is given,
-    matching the same split pattern as --qc-model."""
+def test_build_runners_ignores_deprecated_researcher_model(monkeypatch):
+    """--researcher-model is deprecated and accepted-but-ignored: research runs
+    on the PRODUCER model (Brick A — research is a capability a producer
+    composes, not a separate role/model)."""
     calls: list[str] = []
 
     def record(model, **kwargs):
@@ -72,10 +73,11 @@ def test_build_runners_routes_researcher_to_researcher_model_when_provided(monke
         coordinator_model="coord/B",
         producer_model="drafter/C",
         qc_model="qc/D",
-        researcher_model="research/E",
+        researcher_model="research/E",  # passed but ignored
     )
-    # Construction order: leader, coordinator, drafter, qc, researcher.
-    assert calls == ["leader/A", "coord/B", "drafter/C", "qc/D", "research/E"]
+    # leader, planner(=coordinator), drafter, qc, researcher — the researcher
+    # runner is bound to the PRODUCER model; research/E is ignored.
+    assert calls == ["leader/A", "coord/B", "drafter/C", "qc/D", "drafter/C"]
 
 
 def test_build_runners_researcher_falls_back_to_specialist_when_omitted(monkeypatch):
@@ -150,7 +152,7 @@ def test_kickoff_seeds_default_roster_on_net_new_project(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
 
     seeded = {a.id: a for a in roster.list_agents("NEW")}
-    assert set(seeded) == {"leader", "producer", "qc", "researcher"}
+    assert set(seeded) == {"leader", "producer", "qc"}
     for agent in seeded.values():
         assert agent.model == "stub"
         assert agent.template_origin == "default-roster"

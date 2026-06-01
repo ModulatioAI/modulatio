@@ -2688,7 +2688,8 @@ class Orchestrator:
         runner. Builds a synthetic, never-persisted Task naming the research
         seat + its capabilities; returns the picked producer, or ``None``
         when none qualifies (caller then falls back to the role-keyed
-        ``runners["researcher"]`` via ``_run_agent_call(None, ...)``)."""
+        ``runners["researcher"]`` — now bound to the producer model, not a
+        separate role)."""
         synthetic = Task(
             id=f"{task.id}-RESEARCH",
             project_id=self.project.id,
@@ -2729,7 +2730,9 @@ class Orchestrator:
             if not picked:
                 # Pick a research-capable producer once, lazily on the first
                 # cache miss (an all-cache-hit pass never touches dispatch).
-                # None → the role-keyed runners["researcher"] fallback.
+                # None → the role-keyed runners["researcher"] fallback (which is
+                # bound to the producer model — research is a capability a
+                # producer composes, not a separate role/model).
                 agent = self._pick_research_agent(task)
                 research_agent_id = agent.id if agent is not None else None
                 picked = True
@@ -2737,8 +2740,16 @@ class Orchestrator:
                 topic=topic,
                 inbox_notes=self._inbox_block_for("researcher"),
             )
+            # Explicit budget_role="research" gives the research fetch the larger
+            # research budget on BOTH the dispatch and fallback paths (per-agent
+            # dispatch would otherwise bucket it as a generic producer). The
+            # "researcher" runner-role is a telemetry label; it runs on the
+            # producer model, not a separate researcher model.
             body = _strip_thinking(
-                self._run_agent_call(research_agent_id, "researcher", prompt)
+                self._run_agent_call(
+                    research_agent_id, "researcher", prompt,
+                    budget_role="research",
+                )
             ).strip()
             # Concurrency (#151/e2e): lock only the shared cache WRITE, not
             # the LLM research call above — concurrent workers caching the
