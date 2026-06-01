@@ -6,6 +6,64 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-31
+
+**Per-job output folders + Job Templates** — the setup-side of the Alfred loop.
+Where v0.4.0 codifies recurring QC *failures* into skills, v0.5.0 codifies
+recurring *setup-gaps and operator redos* into reusable Job Templates, and gives
+every job its own output folder. Reviewed fresh and signed off by two
+independent reviewers (hull + coherence), with the live per-job delivery path
+verified end-to-end on real models.
+
+### Added
+
+- **Per-job output folders.** Each job's deliverables now land in a named
+  subfolder under `~/Documents/Modulatio/<project>/` (`<job slug> <date>`, with
+  a hex tiebreaker only on a same-day name collision) instead of a flat
+  directory where a new run could clobber the last. The Product Quality Report
+  ships inside the same folder. Back-compatible: with no job slug the delivery
+  path is byte-identical to before. The slug is path-traversal-safe (separators,
+  leading dots, and bidi/control characters are stripped) since it can originate
+  from model output.
+- **Job Templates.** A Job Template is the Leader's own self-authored interview
+  script + parameter schema + output contract for a *class* of job — fully
+  domain-agnostic (a single report, an N-piece anthology, a weekly
+  per-competitor brief are the same primitive over a generic output
+  cardinality; the engine branches only on `one` / `per-item` / `fixed:N`,
+  never on the domain). A template binds to a concrete answer set that runs
+  headless. The library is git-versioned with a name-dedup guard, forked from
+  the v0.3.0 skill-library machinery; templates resolve project > shared > seed.
+- **Engine-enforced output contract.** When a template declares one deliverable
+  per item over an N-item list, the engine binds "emit exactly N separate
+  deliverables" deterministically — overriding the planner's batching heuristic
+  rather than hoping a prompt sentence holds under token pressure — and
+  post-validates the plan. A shortfall is reported firmly in the Product Quality
+  Report; it never silently blocks the run.
+- **Cron from a Job Template.** A scheduled job is a bound template: `modulatio
+  cron add --jt <name> --jt-params <json>` validates the bound params against
+  the template's schema **at add-time** (so a misconfigured cron fails when you
+  add it, never at 3am) and dispatches headless with no interview.
+- **Setup-side self-codification.** At end of run the Leader reviews recent job
+  history, and when the same kind of job recurs (≈3×) or an operator redo is
+  detected, it judges whether to codify a Job Template — the setup-side mirror
+  of v0.4.0's skill self-codification. Engine binds the trigger; the Leader
+  judges what to codify. A self-improvement can never add a new hard-required
+  parameter without a default (which would silently break an existing bound
+  cron). Kill-switch: `MODULATIO_JT_CODIFICATION=0`.
+
+### Changed
+
+- The kickoff CLI's producer-model flag is now `--producer-model`; the old
+  `--specialist-model` remains as a hidden, deprecated alias. Post-keystone
+  there are no specialists, only producers.
+
+### Notes
+
+- The live engine smoke (`scripts/smoke/prebeta_engine/engine_smoke.py`) is now
+  gated behind `MODULATIO_ENGINE_SMOKE=1` so blind smoke-glob loops skip it with
+  a clean exit (it runs a real multi-objective cloud workload that takes
+  minutes). Not part of CI, which is offline (`scripts/smoke-test.sh`, `--stub`).
+
 ## [0.4.0] — 2026-05-31
 
 **Autonomous skill self-codification** — the "Alfred loop". The team now learns
