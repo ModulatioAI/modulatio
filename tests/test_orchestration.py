@@ -1531,6 +1531,68 @@ def test_producer_per_agent_runner_still_takes_precedence_over_specialist_role(
     assert researcher_role_calls["n"] == 0
 
 
+def test_dispatch_load_balances_across_goals(project: Project, tmp_path, monkeypatch):
+    """Routing-reality distribution: producer assignments accumulate ACROSS
+    goals within a kickoff, so a single-task-per-goal run spreads work across
+    idle producers instead of piling every goal onto the id-first one. FAILS
+    on the per-goal-reset code (both tasks land on the same producer)."""
+    from modulatio import roster, skills as skills_mod
+
+    shared = tmp_path / "shared_skills"
+    shared.mkdir()
+    (shared / "drafter.md").write_text(
+        "---\nname: drafter\n---\n\n{task_id} {artifact_kind} {description} "
+        "{agent_identity} {standards} {research_context} {corrective_notes}\n"
+    )
+    monkeypatch.setattr(skills_mod, "_SKILLS_ROOT", shared)
+
+    for aid in ("agent-a", "agent-b"):
+        roster.save(
+            roster.Agent(
+                id=aid, name=aid, identity=f"{aid}.", skills=["drafter"],
+                model=None, cost_class="paid-cloud", tier="producer",
+            ),
+            project_code=PROJECT_CODE,
+        )
+
+    def _leader_two_goals(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return _leader_stub(prompt)
+        goals = [
+            {"description": "Goal one", "success_criteria": "x",
+             "evidence_required": [{"kind": "artifact", "description": "f"}]},
+            {"description": "Goal two", "success_criteria": "x",
+             "evidence_required": [{"kind": "artifact", "description": "f"}]},
+        ]
+        return f"```json\n{json.dumps(goals)}\n```"
+
+    def _planner_one_task(prompt: str) -> str:
+        tasks = [{
+            "description": "do the thing",
+            "artifact_kind": "text",
+            "required_skills": ["drafter"],   # non-empty → dispatch fires
+            "evidence_required": [{"kind": "artifact", "description": "f"}],
+        }]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    runners = {
+        "leader": _leader_two_goals,
+        "planner": _planner_one_task,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    orch = Orchestrator(project, runners)
+    orch.kickoff("two goals, one task each")
+
+    tasks = store.list_tasks(PROJECT_CODE)
+    assigned = sorted(t.assigned_agent_id for t in tasks)
+    assert len(tasks) == 2
+    assert assigned == ["agent-a", "agent-b"], (
+        f"two single-task goals did not spread across both producers: {assigned} "
+        "(load did not accumulate across goals)"
+    )
+
+
 # ── Slice #7b: Multi-artifact via expansion ───────────────────────────────
 
 def test_task_default_output_path_is_none():

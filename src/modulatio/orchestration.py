@@ -7601,6 +7601,13 @@ class Orchestrator:
             store.save_goal(self.project.code, g, run_id=self.project.run_id)
             summary.goals.append(g)
 
+        # Brick 1 routing reality (run-level load-balance): producer
+        # assignments accumulate ACROSS goals within this kickoff, so a
+        # single-task-per-goal run spreads work across idle producers instead
+        # of piling every goal onto the id-first one. (A per-goal reset
+        # previously concentrated all such work on one model — caught by the
+        # routing-reality live proof.) Fresh per kickoff (local to this method).
+        assigned_load: dict[str, int] = {}
         for g in goals:
             # Slice #7b: _plan_tasks can raise _PlanError at parse
             # time for bad output_path / malformed artifacts entries.
@@ -7652,10 +7659,10 @@ class Orchestrator:
             # Hint is advisory — dispatch's ``select_agent`` ignores it
             # silently if the hinted agent doesn't qualify.
             id_to_task = {t.id: t for t in tasks}
-            # Brick 3 load-balance: each assignment bumps the picked
-            # producer's load so the next task in this goal prefers a
-            # different, idle producer instead of piling onto one model.
-            assigned_load: dict[str, int] = {}
+            # Each assignment bumps the picked producer's load (run-level map
+            # initialized above) so the next task — in this goal OR a later
+            # one — prefers a different, idle producer instead of piling onto
+            # one model.
             for t in tasks:
                 _propagate_continuity_hint(t, id_to_task)
                 result = dispatch.plan_dispatch(
