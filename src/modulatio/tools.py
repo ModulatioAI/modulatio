@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Tool registry and builtin tools (slice #9e + run_shell phase 1).
 
-Modulatio's "tool-using specialists" are skills whose executor is a
+Modulatio's "tool-using producers" are skills whose executor is a
 Python callable instead of an LLM. The orchestrator resolves a skill's
 declared tool by name from a registry, calls it with the task's
 ``tool_args``, and uses the returned string as the artifact body. QC

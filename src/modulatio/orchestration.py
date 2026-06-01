@@ -459,7 +459,7 @@ def _format_agent_identity(identity: str) -> str:
     required_skills).
 
     Gives custom agents a way to wear their voice — e.g. a
-    ``tuned-specialist`` agent ships a house-style identity string
+    ``tuned-producer`` agent ships a house-style identity string
     that reaches the drafter without code changes.
     """
     body = identity.strip()
@@ -1340,7 +1340,7 @@ class Orchestrator:
     """Drives the GSD loop for one project, one pass.
 
     Not concurrent, not resumable, no heartbeat, no ticketing in v0.
-    Those are follow-on slices. This proves the Leader→plan→Specialist
+    Those are follow-on slices. This proves the Leader→plan→Producer
     flow and evidence gate works end-to-end.
     """
 
@@ -2765,7 +2765,7 @@ class Orchestrator:
             chunks.append(f"Topic: {topic}\n\n{body}")
         return "\n\n---\n\n".join(chunks)
 
-    # ── Specialist: execute task → writes artifact + returns evidence ────
+    # ── Producer: execute task → writes artifact + returns evidence ────
     def _build_team_canvas_digest(self) -> str:
         """Pre-V2 Slice C: build a digest of the run's artifacts/ tree
         for producer prompt injection. Returns the team_canvas module's
@@ -2921,16 +2921,16 @@ class Orchestrator:
             if selected is not None:
                 agent_identity = selected.identity
 
-        #: compute specialist_role early so the inbox layer can
+        #: compute producer_role early so the inbox layer can
         # key role-scoped notes correctly for diff / edit / generate. The
         # downstream dispatch (below) re-checks runner membership and
         # falls back if needed — same logic, just lifted so the inbox
         # block uses the same role the dispatcher will route to.
-        specialist_role_for_inbox = (
+        producer_role_for_inbox = (
             self.default_producer_role
         )
-        if specialist_role_for_inbox not in self.runners:
-            specialist_role_for_inbox = self.default_producer_role
+        if producer_role_for_inbox not in self.runners:
+            producer_role_for_inbox = self.default_producer_role
 
         # Increment 3 (2026-05-30): iteration PATCH mode. A generate-pass task
         # that improves a PINNED file emits surgical search/replace blocks; the
@@ -2996,7 +2996,7 @@ class Orchestrator:
                 existing_draft=existing_draft,
                 corrective_notes=corrective_notes.strip() or "(no specific notes — fix the identified issues above)",
                 inbox_notes=self._inbox_block_for(
-                    specialist_role_for_inbox,
+                    producer_role_for_inbox,
                     target_agent_id=task.assigned_agent_id,
                 ),
             )
@@ -3016,7 +3016,7 @@ class Orchestrator:
                 repo_map=repo_map_block,
                 corrective_notes=_format_corrective_notes(corrective_notes),
                 inbox_notes=self._inbox_block_for(
-                    specialist_role_for_inbox,
+                    producer_role_for_inbox,
                     target_agent_id=task.assigned_agent_id,
                 ),
             )
@@ -3032,9 +3032,9 @@ class Orchestrator:
         # model wired; ``default_producer_role`` is project-specific
         # (MVP-default "drafter"; a crypto harness would pass "analyst",
         # a software shop "engineer", etc — Modulatio is output-agnostic).
-        specialist_role = self.default_producer_role
+        producer_role = self.default_producer_role
         raw_response = self._run_agent_call(
-            task.assigned_agent_id, specialist_role, prompt
+            task.assigned_agent_id, producer_role, prompt
         )
         # (c11): extract producer inbox_proposals BEFORE the
         # summary parser runs. The summary parser takes everything
@@ -3044,7 +3044,7 @@ class Orchestrator:
         # first leaves the summary parser to do its job cleanly.
         raw_response = self._extract_producer_proposals(
             raw_response,
-            source_role=specialist_role,
+            source_role=producer_role,
             source_agent_id=task.assigned_agent_id,
             linked_task_id=task.id,
             linked_goal_id=task.goal_id,
@@ -3084,7 +3084,7 @@ class Orchestrator:
         # default; worker-local + pure so it's merge-safe under concurrent
         # waves. A trip raises DispatchAbort, caught separately by the redo
         # loop and routed to self-heal (NOT the runtime-BLOCKED path).
-        self._maybe_trip_breaker(specialist_role, raw_response, response)
+        self._maybe_trip_breaker(producer_role, raw_response, response)
 
         checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
         # Whitespace-token count; kept as an audit metric, not a quality rule
@@ -3152,7 +3152,7 @@ class Orchestrator:
             QC reject, rather than writing marker soup.
 
         Returns ``(path, checksum, token_count)`` like the other producers."""
-        specialist_role = self.default_producer_role
+        producer_role = self.default_producer_role
         current = path.read_text()
         prompt = self._prompt("drafter-patch", _DRAFTER_PATCH_PROMPT).format(
             task_id=task.id,
@@ -3170,15 +3170,15 @@ class Orchestrator:
             corrective_notes=corrective_notes.strip()
             or "(no specific notes — apply the task's requested changes)",
             inbox_notes=self._inbox_block_for(
-                specialist_role, target_agent_id=task.assigned_agent_id,
+                producer_role, target_agent_id=task.assigned_agent_id,
             ),
         )
         raw_response = self._run_agent_call(
-            task.assigned_agent_id, specialist_role, prompt
+            task.assigned_agent_id, producer_role, prompt
         )
         raw_response = self._extract_producer_proposals(
             raw_response,
-            source_role=specialist_role,
+            source_role=producer_role,
             source_agent_id=task.assigned_agent_id,
             linked_task_id=task.id,
             linked_goal_id=task.goal_id,
@@ -3231,7 +3231,7 @@ class Orchestrator:
         # edit-mode behavior: write the cleaned body as the new artifact.
         path.write_text(cleaned)
         self._record_artifact_write(path)
-        self._maybe_trip_breaker(specialist_role, raw_response, cleaned)
+        self._maybe_trip_breaker(producer_role, raw_response, cleaned)
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
         return path, checksum, len(cleaned.split())
 
@@ -3272,7 +3272,7 @@ class Orchestrator:
         whatever shape the producer emitted and can reject as a
         mechanical defect.
         """
-        specialist_role = self.default_producer_role
+        producer_role = self.default_producer_role
         prompt = self._prompt("coding-diff", _DRAFTER_DIFF_PROMPT).format(
             task_id=task.id,
             artifact_kind=task.artifact_kind,
@@ -3292,19 +3292,19 @@ class Orchestrator:
             ),
             corrective_notes=_format_corrective_notes(corrective_notes),
             inbox_notes=self._inbox_block_for(
-                specialist_role,
+                producer_role,
                 target_agent_id=task.assigned_agent_id,
             ),
         )
         raw_response = self._run_agent_call(
-            task.assigned_agent_id, specialist_role, prompt
+            task.assigned_agent_id, producer_role, prompt
         )
         # (c11): extract producer inbox_proposals FIRST so
         # the JSON shape never gets read as either a summary trailer
         # tail or a `=== FILE: ===` block.
         raw_response = self._extract_producer_proposals(
             raw_response,
-            source_role=specialist_role,
+            source_role=producer_role,
             source_agent_id=task.assigned_agent_id,
             linked_task_id=task.id,
             linked_goal_id=task.goal_id,
@@ -3336,7 +3336,7 @@ class Orchestrator:
             # producer dispatch and Slice 1 routes code/multi-file fixes
             # here — bind it with the breaker too. Contract-miss (no FILE
             # blocks): committed = the body we wrote.
-            self._maybe_trip_breaker(specialist_role, raw_response, cleaned)
+            self._maybe_trip_breaker(producer_role, raw_response, cleaned)
             checksum = (
                 f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
             )
@@ -3410,7 +3410,7 @@ class Orchestrator:
         # valid sidecar-only diff is NOT falsely flagged no-commit just
         # because the primary marker is small (Nemo's explicit caution).
         self._maybe_trip_breaker(
-            specialist_role, raw_response, "".join(written_parts)
+            producer_role, raw_response, "".join(written_parts)
         )
         # Token count over the entire producer response (mirrors the
         # other producer paths' shape — audit metric, not a quality
@@ -3742,7 +3742,7 @@ class Orchestrator:
         #: same role-resolution the chat-loop call site uses
         # below — lifted so the inbox layer keys role-scoped notes
         # identically across tool-using and plain producer paths.
-        specialist_role = self.default_producer_role
+        producer_role = self.default_producer_role
         prompt = self._prompt("drafter", _DRAFTER_EXECUTE_PROMPT).format(
             task_id=task.id,
             artifact_kind=task.artifact_kind,
@@ -3757,7 +3757,7 @@ class Orchestrator:
             repo_map=repo_map_block,
             corrective_notes=_format_corrective_notes(""),
             inbox_notes=self._inbox_block_for(
-                specialist_role,
+                producer_role,
                 target_agent_id=task.assigned_agent_id,
             ),
         )
@@ -3793,7 +3793,7 @@ class Orchestrator:
         # summary parser runs (same ordering as the non-tool path).
         response = self._extract_producer_proposals(
             response,
-            source_role=specialist_role,
+            source_role=producer_role,
             source_agent_id=task.assigned_agent_id,
             linked_task_id=task.id,
             linked_goal_id=task.goal_id,
@@ -3823,7 +3823,7 @@ class Orchestrator:
         # is part of the producer surface — bind it with the same post-hoc
         # circuit breaker as the plain path. ``response`` is the full final
         # body (incl. any thinking); ``cleaned`` is what committed.
-        self._maybe_trip_breaker(specialist_role, response, cleaned)
+        self._maybe_trip_breaker(producer_role, response, cleaned)
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
         token_count = len(cleaned.split())
         return path, checksum, token_count

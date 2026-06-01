@@ -1,6 +1,6 @@
 ---
 name: drafter
-description: Generic producer prompt — render the artifact in the standards-defined format for the artifact_kind, consume team memory + research context. The role-keyed default for any specialist that doesn't override (writer, engineer, etc.). Bundled as canonical drafter prompt; project-local overrides land at <project>/skills/drafter.md.
+description: Generic producer prompt — render the artifact in the standards-defined format for the artifact_kind, consume team memory + research context. The default for any producer that doesn't override (writer, engineer, etc.). Bundled as canonical drafter prompt; project-local overrides land at <project>/skills/drafter.md.
 executor: llm
 capability_tags: writing, code-production, structured-output
 freshness_class: stable

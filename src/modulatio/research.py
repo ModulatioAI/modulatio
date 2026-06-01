@@ -11,7 +11,7 @@ Research entries live in two locations, searched in order:
 
 Research differs from standards in two ways:
 
-- The Researcher specialist **writes** to the cache (standards are
+- The research producer **writes** to the cache (standards are
   human-curated).
 - Entries do not stack — project-local fully replaces the shared entry
   when both exist. A research note is a snapshot of findings; stacking

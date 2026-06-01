@@ -22,7 +22,7 @@ ship in source):
         "default_models": {
             "leader": "<preset-key from model_presets.json>",
             "planner": "<preset-key>",
-            "specialist": "<preset-key>",
+            "producer": "<preset-key>",
             "qc": "<preset-key>",
             "researcher": "<preset-key>"
         }

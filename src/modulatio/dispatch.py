@@ -269,7 +269,7 @@ def schedule_wave(
     """Allocate one concurrent wave's tasks to agents with capacity IN
     selection (core rebuild B2, per Nemo's round-1 correction: a
     post-selection batch limiter would assign five ready tasks that all
-    fit the cheapest specialist to that ONE agent, then serialize them).
+    fit the cheapest producer to that ONE agent, then serialize them).
 
     For each task (deterministic id order): rank the producer pool best-fit
     first (capability floor + best-available fallback — skills don't gate);

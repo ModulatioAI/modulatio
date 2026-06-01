@@ -56,7 +56,7 @@ class Skill:
 
     - ``tool_loadout`` — explicit narrow tool list. Minimizing slack here
       is the core reason skill-based dispatch matters: a one-tool
-      specialist ships ~500 tokens of schema vs ~10K for a swiss-army
+      a single-purpose skill ships ~500 tokens of schema vs ~10K for a swiss-army
       agent. Routing prefers the narrowest loadout that still covers the
       task's needs.
     - ``model_tier`` — which LLM tier serves this skill

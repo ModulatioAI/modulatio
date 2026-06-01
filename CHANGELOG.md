@@ -59,12 +59,27 @@ model — provably impossible before. Reviewed fresh by two independent reviewer
   ran on the role-keyed researcher runner when the agent had no model; it now
   runs on `default_producer_role`. Research routing is preserved via the
   capability path above.
+- **Role-language rename: `specialist` → `producer`, and the `researcher` role
+  collapsed.** Post-keystone there are no "specialists" or "researchers", only
+  producers that compose skills. The persisted `default_models.specialist` key
+  is now `producer`; the `researcher` role-key scaffolding (its CLI flag, its
+  defaults key, its default-roster row) is removed — research is a capability a
+  producer composes (a default producer already holds the sourcing/web-search
+  skills), and it keeps its larger context budget via an explicit
+  `budget_role="research"`. The researcher *skill* and *template* are unchanged.
 
 ### Compatibility
 
 - `Task.assignee_specialist` is retained as a deprecated, emission-excluded
   field so 0.5.0-era task JSON on disk still deserializes; new tasks never write
-  it. Full field removal lands with the role-language rename brick.
+  it.
+- **Old `defaults.json` keeps working.** The legacy `specialist` and
+  `researcher` keys stay readable via read-fallback chains (`producer` →
+  `specialist` → leader), mirroring the proven `coordinator`→`planner` pattern;
+  new wizard runs write `producer` and no `researcher`. `--specialist-model`
+  and `--researcher-model` remain hidden, accepted aliases (the former feeds
+  `--producer-model`; the latter is ignored). `--ctx-budget researcher=N` still
+  validates (kept as an alias of the new `research` bucket).
 
 ## [0.5.0] — 2026-05-31
 

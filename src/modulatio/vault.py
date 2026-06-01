@@ -396,9 +396,9 @@ tags: [modulatio, capacity, {code.lower()}]
 
 # Capacity
 
-Per-specialist availability and forecast. Maintained by the team.
+Per-producer availability and forecast. Maintained by the team.
 
-| Specialist | State | Load | Notes |
+| Producer | State | Load | Notes |
 |-----------|-------|------|-------|
 |           |       |      |       |
 """
