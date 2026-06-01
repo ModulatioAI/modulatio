@@ -469,6 +469,42 @@ def litellm_runner(
     return _run
 
 
+def build_agent_runners(
+    project_code: str,
+    runner_factory: Callable[[str], Callable[[str], str]] | None = None,
+) -> dict[str, Callable[[str], str]]:
+    """Map ``Agent.model`` -> runner for every rostered agent that declares
+    a model, deduped by model so several agents on one model share a runner.
+
+    This is the Layer-2 per-agent pool that
+    ``Orchestrator._run_agent_call`` consults before the role-keyed
+    fallback — i.e. it is what makes the keystone ("a producer is a model
+    endpoint; the dispatched agent's own model runs the task") true on a
+    given execution path. Every executor construction site (CLI, daemon,
+    plan-mode, TUI) must build and pass this, or dispatch's agent
+    selection is cosmetic and all producer work collapses onto the single
+    role-keyed ``runners["drafter"]`` model.
+
+    Callers gate on stub mode: a stub kickoff passes an empty pool so the
+    ``_run_agent_call`` fork short-circuits to the canned role-keyed stub
+    runners (no real model is constructed — stub runs have no creds).
+    ``runner_factory`` lets tests inject a fake so wiring is asserted
+    without touching LiteLLM; it defaults to ``litellm_runner`` resolved at
+    call time (so a monkeypatch of the module symbol takes effect, matching
+    the call-time-import idiom used at the CLI/daemon construction sites).
+    ``roster`` is imported lazily to avoid a module-load cycle (``runners``
+    is imported very early).
+    """
+    from modulatio import roster
+
+    factory = runner_factory or litellm_runner
+    pool: dict[str, Callable[[str], str]] = {}
+    for agent in roster.list_agents(project_code):
+        if agent.model and agent.model not in pool:
+            pool[agent.model] = factory(agent.model)
+    return pool
+
+
 def _try_refresh_for(model_or_preset_key: str) -> str | None:
     """If the entry's strategy supports refresh, attempt one.
     Returns the new access token on success, None otherwise.

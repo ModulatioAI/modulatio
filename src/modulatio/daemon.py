@@ -254,7 +254,7 @@ def _make_dispatch_callback(*, stub: bool):
     ) -> str:
         from modulatio import roster, semantic_router, tools as _tools_mod, vault
         from modulatio.orchestration import Orchestrator
-        from modulatio.runners import default_generic_stub_runners, litellm_runner, maybe_build_chat_runner
+        from modulatio.runners import build_agent_runners, default_generic_stub_runners, litellm_runner, maybe_build_chat_runner
         from modulatio.types import Project
         from modulatio.vault import project_dir
 
@@ -350,9 +350,14 @@ def _make_dispatch_callback(*, stub: bool):
         # + summarizer factory so Layer 1 / Layer 2 gates fire for
         # daemon-driven kickoffs (not just direct CLI kickoffs).
         from modulatio.runners import litellm_runner as _litellm_runner
+        # Layer-2 per-agent model pool — without this the daemon's producer
+        # work collapses onto the single role-keyed runners["drafter"] model
+        # regardless of which agent dispatch picked. Stub → empty pool.
+        agent_runners = build_agent_runners(project_code) if not stub else {}
         orch = Orchestrator(
             project, runners,
             semantic_matcher=matcher,
+            agent_runners=agent_runners,
             qc_history_embedder=embedder,
             team_memory_embedder=embedder,
             tool_registry=tool_registry,

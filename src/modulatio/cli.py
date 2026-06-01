@@ -45,7 +45,7 @@ from modulatio import (  # noqa: E402 — env must load before modulatio imports
 from modulatio import context_budget as _ctx_budget_mod  # noqa: E402
 from modulatio.attachments import build_attachment  # noqa: E402
 from modulatio.orchestration import Orchestrator  # noqa: E402
-from modulatio.runners import default_generic_stub_runners, litellm_runner, maybe_build_chat_runner  # noqa: E402
+from modulatio.runners import build_agent_runners, default_generic_stub_runners, litellm_runner, maybe_build_chat_runner  # noqa: E402
 from modulatio import tools as _tools_mod  # noqa: E402
 from modulatio.types import Project  # noqa: E402
 from modulatio.vault import project_dir  # noqa: E402
@@ -443,11 +443,10 @@ def kickoff(
         None if stub else semantic_router.default_matcher(code, embedder=embedder)
     )
 
-    agent_runners: dict[str, Callable[[str], str]] = {}
-    if not stub:
-        for agent in roster.list_agents(code):
-            if agent.model and agent.model not in agent_runners:
-                agent_runners[agent.model] = litellm_runner(agent.model)
+    # Layer-2 per-agent model pool (see runners.build_agent_runners). Stub
+    # runs pass an empty pool so _run_agent_call falls to the canned role
+    # runners. Same dedup-by-model the inline loop used to do.
+    agent_runners = build_agent_runners(code) if not stub else {}
 
     # Phase 2A: tool registry + chat runner for skills with executor=llm
     # AND a non-empty tool_loadout. Tool registry binds run_shell to the

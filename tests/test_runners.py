@@ -244,3 +244,56 @@ def test_litellm_chat_runner_no_tracker_bound_is_safe(monkeypatch):
     response = runner(messages=[{"role": "user", "content": "hi"}], tools=[])
     assert response.content == "ok"
     assert budget.current_tracker() is None
+
+
+# ── build_agent_runners: the Layer-2 per-agent model pool ──────────────────
+
+def test_build_agent_runners_dedups_by_model_and_skips_model_less(monkeypatch):
+    """The pool is keyed by Agent.model: several agents on one model share a
+    single runner (dedup), and model-less agents are skipped."""
+    from types import SimpleNamespace
+
+    from modulatio import roster, runners
+
+    agents = [
+        SimpleNamespace(model="m1"),
+        SimpleNamespace(model="m1"),   # dup → one entry
+        SimpleNamespace(model="m2"),
+        SimpleNamespace(model=None),   # skipped
+        SimpleNamespace(model=""),     # skipped
+    ]
+    monkeypatch.setattr(roster, "list_agents", lambda code: agents)
+
+    built: dict[str, int] = {}
+
+    def fake_factory(model):
+        built[model] = built.get(model, 0) + 1
+        return lambda prompt: f"ran:{model}"
+
+    pool = runners.build_agent_runners("X", runner_factory=fake_factory)
+
+    assert set(pool) == {"m1", "m2"}
+    assert built == {"m1": 1, "m2": 1}        # one runner built per unique model
+    assert pool["m1"]("p") == "ran:m1"
+
+
+def test_build_agent_runners_default_factory_resolves_litellm_at_call_time(monkeypatch):
+    """Default factory is litellm_runner resolved at CALL time, so a
+    monkeypatch of the module symbol takes effect — and a raw provider/model
+    id passes straight through (no preset normalization)."""
+    from types import SimpleNamespace
+
+    from modulatio import roster, runners
+
+    monkeypatch.setattr(
+        roster, "list_agents", lambda code: [SimpleNamespace(model="prov/model")]
+    )
+    seen: list[str] = []
+    monkeypatch.setattr(
+        runners, "litellm_runner", lambda m, **k: (seen.append(m) or (lambda p: m))
+    )
+
+    pool = runners.build_agent_runners("X")
+
+    assert list(pool) == ["prov/model"]
+    assert seen == ["prov/model"]

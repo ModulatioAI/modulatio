@@ -1716,7 +1716,7 @@ def _make_default_kickoff(
     def _do(sub_objective_text: str, _so: dict) -> Any:
         from modulatio import roster as _roster, tools as _tools, vault as _vault
         from modulatio.orchestration import Orchestrator
-        from modulatio.runners import litellm_runner, maybe_build_chat_runner
+        from modulatio.runners import build_agent_runners, litellm_runner, maybe_build_chat_runner
 
         chat_runners: dict[str, Callable[..., Any]] = {}
         #  also build the parallel
@@ -1728,6 +1728,12 @@ def _make_default_kickoff(
             if runner is not None:
                 chat_runners[agent.id] = runner
                 chat_runner_models[agent.id] = agent.model
+
+        # Layer-2 per-agent model pool (keyed by agent.model) — the
+        # producer-execution counterpart to the chat_runners map above.
+        # Without it, plan-mode sub-objective producer work collapses onto
+        # the single role-keyed runners["drafter"] model.
+        agent_runners = build_agent_runners(project.code)
 
         run_dir = _vault.run_dir(project.code, project.run_id)
         artifacts_root = run_dir / "artifacts"
@@ -1744,6 +1750,7 @@ def _make_default_kickoff(
         orch = Orchestrator(
             project,
             runners,
+            agent_runners=agent_runners,
             tool_registry=tool_registry,
             chat_runners=chat_runners,
             chat_runner_models=chat_runner_models,

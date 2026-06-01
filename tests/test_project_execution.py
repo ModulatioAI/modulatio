@@ -1891,3 +1891,61 @@ def test_start_execution_structured_reflect_fires_compaction(isolated, tmp_path)
         f"got {len(emit_rows)}; rows: "
         f"{[r.get('event') for r in audit_rows if r.get('actor') == 'compression']}"
     )
+
+
+def test_make_default_kickoff_builds_and_passes_agent_runners(isolated, monkeypatch):
+    """Routing-reality regression: the plan-mode sub-objective path must
+    build the Layer-2 per-agent model pool and pass it to the Orchestrator,
+    same as the CLI path. Without it, plan-mode producer work collapses onto
+    the single role-keyed model. FAILS on the pre-fix code."""
+    from types import SimpleNamespace
+
+    import modulatio.orchestration as orch_mod
+    from modulatio import roster, runners
+    from modulatio.types import Project
+
+    # A rostered producer with its own distinct model.
+    roster.save(
+        roster.Agent(
+            id="custom-agent",
+            name="Custom",
+            identity="c.",
+            skills=["drafter"],
+            model="custom/pe-model",
+            cost_class="paid-cloud",
+        ),
+        project_code=PROJECT_CODE,
+    )
+    monkeypatch.setattr(runners, "litellm_runner", lambda m, **k: (lambda p: f"ran:{m}"))
+    monkeypatch.setattr(runners, "maybe_build_chat_runner", lambda *a, **k: None)
+
+    captured: dict = {}
+
+    class _SpyOrch:
+        def __init__(self, project, runners_, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def kickoff(self, *a, **k):
+            return SimpleNamespace(goals=[], tasks=[], drafts=[], errors=[])
+
+    monkeypatch.setattr(orch_mod, "Orchestrator", _SpyOrch)
+
+    run_id = vault.generate_run_id()
+    vault.init_run(PROJECT_CODE, run_id, "obj")
+    proj = Project(
+        code=PROJECT_CODE,
+        name="Test",
+        objective="obj",
+        leader_model="stub",
+        wiki_path=str(isolated / "projects" / PROJECT_CODE),
+        run_id=run_id,
+    )
+
+    kickoff = project_execution._make_default_kickoff(proj, {"drafter": lambda p: "x"})
+    kickoff("a sub objective", {})
+
+    agent_runners = captured["kwargs"].get("agent_runners")
+    assert agent_runners and "custom/pe-model" in agent_runners, (
+        "plan-mode path passed no per-agent pool — the keystone is not wired "
+        "on the sub-objective path"
+    )

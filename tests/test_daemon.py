@@ -152,3 +152,65 @@ def test_telegram_listener_skipped_when_no_chat_id():
     telegram_notify.save_config({"enabled": True, "bot_token": "x", "chat_id": ""})
     listener = daemon._maybe_start_telegram_listener()
     assert listener is None
+
+
+def test_make_dispatch_callback_real_mode_builds_and_passes_agent_runners(
+    tmp_path, monkeypatch
+):
+    """Routing-reality regression: the daemon (headless) path must build the
+    Layer-2 per-agent model pool and pass it to the Orchestrator. Without it
+    (the pre-fix state) dispatch's agent selection is cosmetic and every
+    producer task collapses onto the single role-keyed runners["drafter"]
+    model. FAILS on the pre-fix code (no agent_runners kwarg)."""
+    from types import SimpleNamespace
+
+    import modulatio.orchestration as orch_mod
+    from modulatio import config, roster, runners, semantic_router, vault
+
+    # Pre-create the project + a known custom-model producer so the dispatch
+    # callback sees net_new=False (no default-roster seeding) and the pool is
+    # deterministic: exactly this agent's model.
+    vault.init_project("DT2", "DT2", "obj", exist_ok=True)
+    roster.save(
+        roster.Agent(
+            id="prod",
+            name="Producer",
+            identity="p.",
+            skills=["drafter"],
+            model="custom/daemon-model",
+            cost_class="paid-cloud",
+        ),
+        project_code="DT2",
+    )
+
+    # Real-mode defaults present (leader + specialist are required).
+    monkeypatch.setattr(
+        config, "get_default_models", lambda: {"leader": "L", "specialist": "S"}
+    )
+    # Avoid heavy embedder / real model construction.
+    monkeypatch.setattr(semantic_router, "FastEmbedder", lambda *a, **k: object())
+    monkeypatch.setattr(semantic_router, "default_matcher", lambda *a, **k: None)
+    monkeypatch.setattr(runners, "litellm_runner", lambda m, **k: (lambda p: f"ran:{m}"))
+    monkeypatch.setattr(runners, "maybe_build_chat_runner", lambda *a, **k: None)
+
+    captured: dict = {}
+
+    class _SpyOrch:
+        def __init__(self, project, runners_, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def kickoff(self, *a, **k):
+            return SimpleNamespace(goals=[], tasks=[], drafts=[], errors=[])
+
+    monkeypatch.setattr(orch_mod, "Orchestrator", _SpyOrch)
+
+    cb = daemon._make_dispatch_callback(stub=False)
+    cb("DT2", "an objective")
+
+    agent_runners = captured["kwargs"].get("agent_runners")
+    assert agent_runners, (
+        "daemon path passed no (or empty) agent_runners — the keystone is not "
+        "wired on the headless path; producer work would collapse onto one model"
+    )
+    # The rostered producer's own model is in the per-agent pool.
+    assert "custom/daemon-model" in agent_runners
