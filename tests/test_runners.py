@@ -297,3 +297,29 @@ def test_build_agent_runners_default_factory_resolves_litellm_at_call_time(monke
 
     assert list(pool) == ["prov/model"]
     assert seen == ["prov/model"]
+
+
+def test_build_chat_runners_keys_by_agent_id_skips_model_less_and_unbuildable(monkeypatch):
+    """The tool-using producer pool is keyed by agent.id; agents with no
+    model, or whose model can't drive the tools interface (builder returns
+    None), are skipped → they fall back to the single chat runner."""
+    from types import SimpleNamespace
+
+    from modulatio import roster, runners
+
+    agents = [
+        SimpleNamespace(id="a", model="m1"),
+        SimpleNamespace(id="b", model="m2"),
+        SimpleNamespace(id="c", model=None),    # no model → skipped
+        SimpleNamespace(id="d", model="bad"),   # builder returns None → skipped
+    ]
+    monkeypatch.setattr(roster, "list_agents", lambda code: agents)
+
+    def fake_builder(model):
+        return None if model == "bad" else (lambda **kw: f"chat:{model}")
+
+    chat_runners, models = runners.build_chat_runners("X", builder=fake_builder)
+
+    assert set(chat_runners) == {"a", "b"}        # keyed by agent.id
+    assert models == {"a": "m1", "b": "m2"}
+    assert chat_runners["a"]() == "chat:m1"

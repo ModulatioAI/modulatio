@@ -1713,20 +1713,14 @@ def _make_default_kickoff(
     first use — see TST-6 from the 2026-04-30 stress test.
     """
     def _do(sub_objective_text: str, _so: dict) -> Any:
-        from modulatio import roster as _roster, tools as _tools, vault as _vault
+        from modulatio import tools as _tools, vault as _vault
         from modulatio.orchestration import Orchestrator
-        from modulatio.runners import build_agent_runners, litellm_runner, maybe_build_chat_runner
+        from modulatio.runners import build_agent_runners, build_chat_runners, litellm_runner
 
-        chat_runners: dict[str, Callable[..., Any]] = {}
-        #  also build the parallel
-        # agent_id → model map. _run_chat_loop needs the model id to
-        # activate Layer 1 + Layer 2 gates inside run_llm_with_tools.
-        chat_runner_models: dict[str, str] = {}
-        for agent in _roster.list_agents(project.code):
-            runner = maybe_build_chat_runner(agent.model)
-            if runner is not None:
-                chat_runners[agent.id] = runner
-                chat_runner_models[agent.id] = agent.model
+        # Per-agent chat runners (tool-using producer path) + their models for
+        # the Layer 1/2 gates inside run_llm_with_tools. Shared helper — same
+        # per-agent pool the CLI/daemon/TUI now build.
+        chat_runners, chat_runner_models = build_chat_runners(project.code)
 
         # Layer-2 per-agent model pool (keyed by agent.model) — the
         # producer-execution counterpart to the chat_runners map above.

@@ -191,7 +191,7 @@ def test_make_dispatch_callback_real_mode_builds_and_passes_agent_runners(
     monkeypatch.setattr(semantic_router, "FastEmbedder", lambda *a, **k: object())
     monkeypatch.setattr(semantic_router, "default_matcher", lambda *a, **k: None)
     monkeypatch.setattr(runners, "litellm_runner", lambda m, **k: (lambda p: f"ran:{m}"))
-    monkeypatch.setattr(runners, "maybe_build_chat_runner", lambda *a, **k: None)
+    monkeypatch.setattr(runners, "maybe_build_chat_runner", lambda m, **k: (lambda **kw: m))
 
     captured: dict = {}
 
@@ -214,3 +214,11 @@ def test_make_dispatch_callback_real_mode_builds_and_passes_agent_runners(
     )
     # The rostered producer's own model is in the per-agent pool.
     assert "custom/daemon-model" in agent_runners
+    # ...and the tool-using producer channel (chat runners) is ALSO per-agent —
+    # the primary producer path, since the skill-library builtins put every
+    # producer in a tool-loop.
+    chat_models = captured["kwargs"].get("chat_runner_models") or {}
+    assert chat_models.get("prod") == "custom/daemon-model", (
+        "daemon path did not pass per-agent chat runners — tool-using producers "
+        "would collapse onto a single chat model regardless of dispatch"
+    )

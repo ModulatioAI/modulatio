@@ -1917,7 +1917,7 @@ def test_make_default_kickoff_builds_and_passes_agent_runners(isolated, monkeypa
         project_code=PROJECT_CODE,
     )
     monkeypatch.setattr(runners, "litellm_runner", lambda m, **k: (lambda p: f"ran:{m}"))
-    monkeypatch.setattr(runners, "maybe_build_chat_runner", lambda *a, **k: None)
+    monkeypatch.setattr(runners, "maybe_build_chat_runner", lambda m, **k: (lambda **kw: m))
 
     captured: dict = {}
 
@@ -1949,3 +1949,6 @@ def test_make_default_kickoff_builds_and_passes_agent_runners(isolated, monkeypa
         "plan-mode path passed no per-agent pool — the keystone is not wired "
         "on the sub-objective path"
     )
+    # The tool-using producer channel (chat runners) is also per-agent here.
+    chat_models = captured["kwargs"].get("chat_runner_models") or {}
+    assert chat_models.get("custom-agent") == "custom/pe-model"

@@ -45,7 +45,7 @@ from modulatio import (  # noqa: E402 — env must load before modulatio imports
 from modulatio import context_budget as _ctx_budget_mod  # noqa: E402
 from modulatio.attachments import build_attachment  # noqa: E402
 from modulatio.orchestration import Orchestrator  # noqa: E402
-from modulatio.runners import build_agent_runners, default_generic_stub_runners, litellm_runner, maybe_build_chat_runner  # noqa: E402
+from modulatio.runners import build_agent_runners, build_chat_runners, default_generic_stub_runners, litellm_runner, maybe_build_chat_runner  # noqa: E402
 from modulatio import tools as _tools_mod  # noqa: E402
 from modulatio.types import Project  # noqa: E402
 from modulatio.vault import project_dir  # noqa: E402
@@ -459,6 +459,8 @@ def kickoff(
     # than crashing the kickoff.
     tool_registry: dict = {}
     chat_runner = None
+    chat_runners: dict = {}
+    chat_runner_models: dict = {}
     if not stub:
         # Run-scoped artifacts root: cwd confinement on run_shell now
         # binds to THIS run's folder, not the project root. Cross-run
@@ -478,6 +480,10 @@ def kickoff(
             qc_model or producer_model,
             on_unavailable=lambda msg: typer.echo(f"  (info) {msg}"),
         )
+        # Per-agent chat runners (the tool-using producer path — the PRIMARY
+        # producer channel). Without these, tool-using producers collapse onto
+        # the single chat model above regardless of which agent dispatch picked.
+        chat_runners, chat_runner_models = build_chat_runners(code)
 
     typer.echo(f"Kicking off {code} — {objective}")
     #  import locally so the lookup happens
@@ -494,6 +500,8 @@ def kickoff(
         team_memory_embedder=embedder if memory else None,
         tool_registry=tool_registry,
         chat_runner=chat_runner,
+        chat_runners=chat_runners,
+        chat_runner_models=chat_runner_models,
         #  pass the chat-runner's model so
         # _run_chat_loop can thread it into run_llm_with_tools and
         # the Layer 1 / Layer 2 gates actually fire for direct CLI

@@ -80,7 +80,7 @@ def _build_kickoff_orchestrator(
     contract preserved).
     """
     from modulatio import config, tools as _tools_mod, vault as _vault
-    from modulatio.runners import build_agent_runners, litellm_runner, maybe_build_chat_runner
+    from modulatio.runners import build_agent_runners, build_chat_runners, litellm_runner, maybe_build_chat_runner
 
     tool_registry: dict = {}
     chat_runner = None
@@ -88,6 +88,11 @@ def _build_kickoff_orchestrator(
     # Layer-2 per-agent model pool — stub mode passes an empty pool so the
     # _run_agent_call fork falls to the canned role runners.
     agent_runners = build_agent_runners(project.code) if mode != "stub" else {}
+    # Per-agent chat runners (tool-using producer path — the primary producer
+    # channel); stub mode passes empty dicts → single-runner fallback.
+    chat_runners, chat_runner_models = (
+        build_chat_runners(project.code) if mode != "stub" else ({}, {})
+    )
     if mode != "stub":
         run_workspace = _vault.run_dir(project.code, project.run_id)
         tool_registry = _tools_mod.build_registry(
@@ -111,6 +116,8 @@ def _build_kickoff_orchestrator(
         agent_runners=agent_runners,
         tool_registry=tool_registry,
         chat_runner=chat_runner,
+        chat_runners=chat_runners,
+        chat_runner_models=chat_runner_models,
         chat_runner_default_model=chat_default_model,
         summarizer_chat_runner_factory=(
             None if mode == "stub" else litellm_runner

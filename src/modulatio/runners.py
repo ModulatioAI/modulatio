@@ -505,6 +505,44 @@ def build_agent_runners(
     return pool
 
 
+def build_chat_runners(
+    project_code: str,
+    builder: Callable[[str], Callable[..., ChatResponse] | None] | None = None,
+) -> tuple[dict[str, Callable[..., ChatResponse]], dict[str, str]]:
+    """Per-agent chat runners + their models for the TOOL-USING producer path.
+
+    The tool-loop (``_llm_with_tools_execute`` → ``run_llm_with_tools``) is the
+    PRIMARY producer path: the skill-library builtins put every producer in a
+    tool-loop, so most producer work flows through here, not the plain
+    ``_run_agent_call``/``agent_runners`` path. This is the chat-channel
+    counterpart to ``build_agent_runners`` — without it on a given executor
+    path, tool-using producers collapse onto a single configured chat model
+    regardless of which agent dispatch picked (the routing-reality bug, on the
+    channel that actually carries most producer work).
+
+    Returns ``(chat_runners, chat_runner_models)`` keyed by ``agent.id`` (that
+    is the key ``_resolve_chat_runner`` / ``_resolve_chat_runner_model`` look
+    up). Agents with no model, or whose model can't drive the tools interface
+    (``builder`` returns None), are skipped → they fall back to the single
+    chat runner. ``builder`` defaults to ``maybe_build_chat_runner`` resolved
+    at call time (tests inject a fake). ``roster`` is imported lazily to avoid
+    a module-load cycle.
+    """
+    from modulatio import roster
+
+    build = builder or maybe_build_chat_runner
+    chat_runners: dict[str, Callable[..., ChatResponse]] = {}
+    chat_runner_models: dict[str, str] = {}
+    for agent in roster.list_agents(project_code):
+        if not agent.model:
+            continue
+        runner = build(agent.model)
+        if runner is not None:
+            chat_runners[agent.id] = runner
+            chat_runner_models[agent.id] = agent.model
+    return chat_runners, chat_runner_models
+
+
 def _try_refresh_for(model_or_preset_key: str) -> str | None:
     """If the entry's strategy supports refresh, attempt one.
     Returns the new access token on success, None otherwise.

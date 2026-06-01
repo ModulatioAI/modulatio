@@ -254,7 +254,7 @@ def _make_dispatch_callback(*, stub: bool):
     ) -> str:
         from modulatio import roster, semantic_router, tools as _tools_mod, vault
         from modulatio.orchestration import Orchestrator
-        from modulatio.runners import build_agent_runners, default_generic_stub_runners, litellm_runner, maybe_build_chat_runner
+        from modulatio.runners import build_agent_runners, build_chat_runners, default_generic_stub_runners, litellm_runner, maybe_build_chat_runner
         from modulatio.types import Project
         from modulatio.vault import project_dir
 
@@ -331,6 +331,8 @@ def _make_dispatch_callback(*, stub: bool):
         # graceful skip when the model uses Responses API or is stub.
         tool_registry: dict = {}
         chat_runner = None
+        chat_runners: dict = {}
+        chat_runner_models: dict = {}
         if not stub:
             run_workspace = vault.run_dir(project_code, run_id)
             #  also wire tool_calls_dir so
@@ -345,6 +347,12 @@ def _make_dispatch_callback(*, stub: bool):
                 defaults.get("qc") or defaults["specialist"],
                 on_unavailable=lambda msg: logger.info(msg),
             )
+            # Per-agent chat runners (tool-using producer path — the PRIMARY
+            # producer channel). Without these, tool-using producers collapse
+            # onto the single chat model above regardless of which agent
+            # dispatch picked — the routing-reality bug on the channel that
+            # carries most producer work.
+            chat_runners, chat_runner_models = build_chat_runners(project_code)
 
         #  thread the chat-runner's model
         # + summarizer factory so Layer 1 / Layer 2 gates fire for
@@ -362,6 +370,8 @@ def _make_dispatch_callback(*, stub: bool):
             team_memory_embedder=embedder,
             tool_registry=tool_registry,
             chat_runner=chat_runner,
+            chat_runners=chat_runners,
+            chat_runner_models=chat_runner_models,
             chat_runner_default_model=(
                 None if stub else (defaults.get("qc") or defaults["specialist"])
             ),
