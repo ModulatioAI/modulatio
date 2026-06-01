@@ -6,7 +6,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.6.0] — 2026-05-31
+## [0.6.0] — 2026-06-01
 
 **Routing reality** — the keystone, actually wired everywhere. The promise that
 "a producer is a model endpoint; dispatch routes by availability→capability and
