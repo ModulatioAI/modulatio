@@ -1365,6 +1365,7 @@ class Orchestrator:
         chat_runner_default_model: "str | None" = None,
         summarizer_chat_runner_factory: "Callable[[str], Callable[[str], str]] | None" = None,
         activity_callback: "Callable[[ActivityEvent], None] | None" = None,
+        operator_present: bool = False,
         user_budget_overrides: "dict[str, _ctx_budget_module.BudgetOverride] | None" = None,
     ):
         self.project = project
@@ -1465,6 +1466,16 @@ class Orchestrator:
         #: fire at 6 phases: task_dispatched, task_completed, qc_started,
         #: qc_verdict, leader_verify_started, leader_verify_ended.
         self.activity_callback: Callable[[ActivityEvent], None] | None = activity_callback
+        #: Brick C: standing operator-presence signal — is a human watching
+        #: this whole run? Default False = autonomous/headless (daemon/cron/JT,
+        #: plan-mode); the TUI sets True. Gates the Leader's three decision
+        #: surfaces between JUDGE (autonomous — the Leader is the only check
+        #: past QC) and DEFER (operator present — surface to the human). The
+        #: standing fact; composes with activity_callback (events out) and the
+        #: kickoff ``ask_operator`` callback (questions out — the future
+        #: streaming-TUI/ACP drives the mid-run defer round-trip). See
+        #: ``_autonomous`` / ``_operator_context_block``.
+        self.operator_present: bool = operator_present
         #: Core rebuild B3b: thread-local isolation state. When a task runs
         #: in an isolated worker, ``self._tls.activity_buffer`` is a per-thread
         #: list that ``_emit_activity`` appends to instead of hitting the
@@ -1997,6 +2008,21 @@ class Orchestrator:
             buf.append(event)
             return
         self.activity_callback(event)
+
+    # ── Brick C: operator-presence-aware Leader behavior ──────────────────
+    def _autonomous(self) -> bool:
+        """True when no operator is watching this run (headless/daemon/cron/
+        Job-Templates, plan-mode sub-objectives). The Leader then exercises
+        its judgment — it is the only check past QC. False = an operator is
+        present (the TUI / future ACP) and the Leader should DEFER."""
+        return not self.operator_present
+
+    def _operator_context_block(self) -> str:
+        """The ``{operator_context}`` prompt text for the Leader's decision
+        surfaces, gated on operator presence. Inert for now (Commit 1 of
+        Brick C) — Commit 3 fills in the judge-vs-defer framing. Returns a
+        stable string per mode so the rendered prompt stays deterministic."""
+        return ""
 
     def _next_goal_id(self) -> str:
         self._goal_counter += 1

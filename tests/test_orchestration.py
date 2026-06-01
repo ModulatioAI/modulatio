@@ -1593,6 +1593,24 @@ def test_dispatch_load_balances_across_goals(project: Project, tmp_path, monkeyp
     )
 
 
+def test_operator_present_seam_defaults_autonomous(project: Project):
+    """Brick C: the operator-presence seam defaults to autonomous (False),
+    stores when passed, and _autonomous()/_operator_context_block() reflect it.
+    The block is inert (empty) until the prompt-reframe commit."""
+    runners = {
+        "leader": _leader_stub, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    orch = Orchestrator(project, runners)
+    assert orch.operator_present is False
+    assert orch._autonomous() is True
+    assert orch._operator_context_block() == ""
+
+    present = Orchestrator(project, runners, operator_present=True)
+    assert present.operator_present is True
+    assert present._autonomous() is False
+
+
 # ── Slice #7b: Multi-artifact via expansion ───────────────────────────────
 
 def test_task_default_output_path_is_none():
