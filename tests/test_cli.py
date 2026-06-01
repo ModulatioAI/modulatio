@@ -25,7 +25,7 @@ def test_build_runners_stub_mode_ignores_model_flags(monkeypatch):
         stub=True,
         leader_model=None,
         coordinator_model=None,
-        specialist_model=None,
+        producer_model=None,
         qc_model=None,
         researcher_model=None,
     )
@@ -47,7 +47,7 @@ def test_build_runners_routes_qc_to_qc_model_when_provided(monkeypatch):
         stub=False,
         leader_model="leader/A",
         coordinator_model="coord/B",
-        specialist_model="drafter/C",
+        producer_model="drafter/C",
         qc_model="qc/D",
         researcher_model=None,
     )
@@ -70,7 +70,7 @@ def test_build_runners_routes_researcher_to_researcher_model_when_provided(monke
         stub=False,
         leader_model="leader/A",
         coordinator_model="coord/B",
-        specialist_model="drafter/C",
+        producer_model="drafter/C",
         qc_model="qc/D",
         researcher_model="research/E",
     )
@@ -92,7 +92,7 @@ def test_build_runners_researcher_falls_back_to_specialist_when_omitted(monkeypa
         stub=False,
         leader_model="leader/A",
         coordinator_model="coord/B",
-        specialist_model="drafter/C",
+        producer_model="drafter/C",
         qc_model=None,
         researcher_model=None,
     )
@@ -114,7 +114,7 @@ def test_build_runners_qc_falls_back_to_specialist_when_qc_model_omitted(monkeyp
         stub=False,
         leader_model="leader/A",
         coordinator_model="coord/B",
-        specialist_model="drafter/C",
+        producer_model="drafter/C",
         qc_model=None,
         researcher_model=None,
     )

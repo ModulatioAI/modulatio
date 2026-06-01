@@ -232,18 +232,20 @@ def _build_runners(
     *,
     stub: bool,
     leader_model: str | None,
-    specialist_model: str | None,
+    producer_model: str | None,
     qc_model: str | None,
     researcher_model: str | None,
     planner_model: str | None = None,
     coordinator_model: str | None = None,
 ) -> dict[str, Callable[[str], str]]:
-    """Assemble the {role: runner} dict the Orchestrator consumes.
+    """Assemble the {runner-key: runner} dict the Orchestrator consumes.
 
     Stub mode returns canned runners and ignores model flags. Non-stub
-    mode builds LiteLLM-backed runners; QC and Researcher fall back to
-    ``specialist_model`` when their own model is not provided (different
-    minds preferred but not mandatory per quality-architecture.md §5).
+    mode builds LiteLLM-backed runners; QC and the research producer fall
+    back to ``producer_model`` when their own model is not provided
+    (different minds preferred but not mandatory per quality-architecture.md
+    §5). (Post-keystone there are only producers — the ``drafter`` /
+    ``researcher`` keys below are internal runner slots, not fixed roles.)
 
     Skills-first (#143): the task-planning utility binds to the "planner"
     runner. ``planner_model`` picks the LLM behind it; ``coordinator_model``
@@ -262,9 +264,9 @@ def _build_runners(
     return {
         "leader": litellm_runner(leader_model, disable_thinking=False),
         "planner": litellm_runner(planner),
-        "drafter": litellm_runner(specialist_model),
-        "qc": litellm_runner(qc_model or specialist_model),
-        "researcher": litellm_runner(researcher_model or specialist_model),
+        "drafter": litellm_runner(producer_model),
+        "qc": litellm_runner(qc_model or producer_model),
+        "researcher": litellm_runner(researcher_model or producer_model),
     }
 
 
@@ -305,27 +307,35 @@ def kickoff(
             "back-compat."
         ),
     ),
-    specialist_model: str = typer.Option(
-        None,
+    producer_model: str = typer.Option(
+        None, "--producer-model",
         help=(
-            "Preset key or raw LiteLLM id for Drafter (and Quality "
-            "Control when --qc-model is omitted)."
+            "Preset key or raw LiteLLM id for the producer (and Quality "
+            "Control / research producer when their own model is omitted). "
+            "Post-keystone there are only producers — pick a model good at "
+            "the work."
+        ),
+    ),
+    specialist_model: str = typer.Option(
+        None, "--specialist-model", hidden=True, help=(
+            "DEPRECATED alias for --producer-model (pre-keystone role "
+            "language — there is no 'specialist', only producers). Still "
+            "honored for back-compat with existing scripts/crons."
         ),
     ),
     qc_model: str = typer.Option(
         None,
         help=(
             "Preset key or raw LiteLLM id for Quality Control. Defaults "
-            "to --specialist-model. Architecture prefers a different "
-            "model than the Drafter — supply this to run Quality Control "
-            "on its own mind."
+            "to --producer-model. Architecture prefers a different model "
+            "than the producer — supply this to run QC on its own mind."
         ),
     ),
     researcher_model: str = typer.Option(
         None,
         help=(
-            "Preset key or raw LiteLLM id for the Researcher specialist. "
-            "Defaults to --specialist-model. Supply a web-search-equipped "
+            "Preset key or raw LiteLLM id for the research producer. "
+            "Defaults to --producer-model. Supply a web-search-equipped "
             "model here when research quality matters."
         ),
     ),
@@ -366,17 +376,20 @@ def kickoff(
     pname = name or f"{code}: {objective[:40]}"
     user_budget_overrides = _resolve_ctx_budget_overrides(ctx_budget)
 
-    # Skills-first (#143): --planner-model is the current flag; honor the
-    # deprecated --coordinator-model alias. Planning defaults to the Leader.
+    # --planner-model is the current flag; honor the deprecated
+    # --coordinator-model alias. Planning defaults to the Leader.
     planner_model = planner_model or coordinator_model
+    # --producer-model is the current flag; honor the deprecated
+    # --specialist-model alias (pre-keystone role language).
+    producer_model = producer_model or specialist_model
 
     if stub:
-        leader_model = planner_model = specialist_model = "stub"
+        leader_model = planner_model = producer_model = "stub"
         qc_model = "stub"
         researcher_model = "stub"
-    elif not (leader_model and specialist_model):
+    elif not (leader_model and producer_model):
         typer.echo(
-            "Without --stub, --leader-model and --specialist-model are "
+            "Without --stub, --leader-model and --producer-model are "
             "required. --planner-model (defaults to --leader-model), "
             "--qc-model and --researcher-model are optional.",
             err=True,
@@ -387,7 +400,7 @@ def kickoff(
         stub=stub,
         leader_model=leader_model,
         planner_model=planner_model,
-        specialist_model=specialist_model,
+        producer_model=producer_model,
         qc_model=qc_model,
         researcher_model=researcher_model,
     )
@@ -400,7 +413,7 @@ def kickoff(
             code,
             leader_model=leader_model,
             coordinator_model=coordinator_model,
-            specialist_model=specialist_model,
+            specialist_model=producer_model,
             qc_model=qc_model,
             researcher_model=researcher_model,
         )
@@ -463,7 +476,7 @@ def kickoff(
             project_code=code,
         )
         chat_runner = maybe_build_chat_runner(
-            qc_model or specialist_model,
+            qc_model or producer_model,
             on_unavailable=lambda msg: typer.echo(f"  (info) {msg}"),
         )
 
@@ -487,7 +500,7 @@ def kickoff(
         # the Layer 1 / Layer 2 gates actually fire for direct CLI
         # kickoffs (not just plan-mode kickoffs).
         chat_runner_default_model=(
-            qc_model or specialist_model if not stub else None
+            qc_model or producer_model if not stub else None
         ),
         summarizer_chat_runner_factory=(
             None if stub else _litellm_runner
