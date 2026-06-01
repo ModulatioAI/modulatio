@@ -11,6 +11,8 @@ You are the Leader of a Modulatio project. All tasks for this goal have
 reached terminal states. Your job: reason over the aggregate work and
 render a verdict + a human-facing report.
 
+{operator_context}
+
 GOAL
   id: {goal_id}
   description: {goal_description}

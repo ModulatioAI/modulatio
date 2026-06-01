@@ -2019,10 +2019,27 @@ class Orchestrator:
 
     def _operator_context_block(self) -> str:
         """The ``{operator_context}`` prompt text for the Leader's decision
-        surfaces, gated on operator presence. Inert for now (Commit 1 of
-        Brick C) — Commit 3 fills in the judge-vs-defer framing. Returns a
-        stable string per mode so the rendered prompt stays deterministic."""
-        return ""
+        surfaces, gated on operator presence. One block, two stable modes, so
+        every surface (verify / iterate / wave-reflect) frames the same
+        judge-vs-defer tension consistently and the rendered prompt is
+        deterministic per mode."""
+        if self.operator_present:
+            return (
+                "COLLABORATING — an operator is working this run with you, as "
+                "partners. Surface the calls that matter and your reservations "
+                "to them and let them weigh in rather than deciding "
+                "unilaterally; honor the direction they've set, and run with "
+                "your own judgment where they've left it to you. Lean toward "
+                "continuing and recording concerns over driving a redo on your "
+                "own — your partner is right there to decide with you."
+            )
+        return (
+            "ON YOUR OWN — no operator is collaborating on this run, so you are "
+            "the team's last judgment past QC. Act on your own judgment: decide "
+            "and self-correct as the work genuinely warrants. The engine "
+            "prevents loops, so don't soften a real call for fear of churn — "
+            "there is no partner downstream to catch what you wave through."
+        )
 
     def _next_goal_id(self) -> str:
         self._goal_counter += 1
@@ -2623,6 +2640,7 @@ class Orchestrator:
             repo_map=repo_map_block,
             inbox_notes=self._inbox_block_for("leader", target_agent_id="leader"),
             pending_candidates=candidates_block,
+            operator_context=self._operator_context_block(),
         )
 
         try:
@@ -4800,6 +4818,7 @@ class Orchestrator:
                 objective=self.project.objective,
                 completed=_format_wave_reflect_tasks(completed),
                 pending=_format_wave_reflect_tasks(pending),
+                operator_context=self._operator_context_block(),
             )
             raw = self._run("leader", prompt, budget_role="leader-reflect")
             data = _extract_json(raw)
@@ -5846,6 +5865,7 @@ class Orchestrator:
             artifact_paths="\n\n".join(artifact_blocks) or "(no artifacts)",
             prior_approvals=prior_approvals_block,
             inbox_notes=self._inbox_block_for("leader", target_agent_id="leader"),
+            operator_context=self._operator_context_block(),
         )
 
         # Phase 2A continuation: when ``leader-verify`` skill declares
@@ -7987,6 +8007,8 @@ You are the Leader of a Modulatio project. All tasks for this goal
 have reached terminal states. Your job: reason over the aggregate
 work and render a verdict + a human-facing report.
 
+{operator_context}
+
 GOAL
   id: {goal_id}
   description: {goal_description}
@@ -8266,8 +8288,9 @@ tightened, or should be dropped because what just shipped already
 covered it.
 
 You are NOT re-decomposing the goal. Your job here is fine-grained
-preference imposition on the immediate next task. Bias toward
-`continue` — most reflections SHOULD be continue.
+preference imposition on the immediate next task.
+
+{operator_context}
 
 Project: {code}
 Goal: {goal_id}
@@ -8887,9 +8910,11 @@ COMPLETED SO FAR
 PENDING (not yet dispatched — only these are editable)
 {pending}
 
-Decide per pending task. Bias toward KEEP — only revise/drop when the
-completed results clearly make a pending task wrong, redundant, or
-mis-scoped. Respond with a fenced ```json ... ``` block:
+{operator_context}
+
+Decide per pending task — revise/drop when the completed results make a
+pending task wrong, redundant, or mis-scoped; keep it otherwise. Respond
+with a fenced ```json ... ``` block:
 
     {{
       "edits": [

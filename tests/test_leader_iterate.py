@@ -242,6 +242,7 @@ _ITERATE_RENDER_KWARGS: dict = {
     "repo_map": "## Repo map\n(empty)",
     "inbox_notes": "(no inbox notes this turn)",
     "pending_candidates": "(no pending candidates this turn)",
+    "operator_context": "(operator-context test stub)",
 }
 
 

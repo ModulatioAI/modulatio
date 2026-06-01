@@ -1596,7 +1596,8 @@ def test_dispatch_load_balances_across_goals(project: Project, tmp_path, monkeyp
 def test_operator_present_seam_defaults_autonomous(project: Project):
     """Brick C: the operator-presence seam defaults to autonomous (False),
     stores when passed, and _autonomous()/_operator_context_block() reflect it.
-    The block is inert (empty) until the prompt-reframe commit."""
+    Post prompt-reframe (Commit 3) the block is no longer inert — it carries
+    the judge-vs-defer framing distinct per mode."""
     runners = {
         "leader": _leader_stub, "planner": _planner_stub,
         "drafter": _drafter_stub, "qc": _qc_stub,
@@ -1604,11 +1605,19 @@ def test_operator_present_seam_defaults_autonomous(project: Project):
     orch = Orchestrator(project, runners)
     assert orch.operator_present is False
     assert orch._autonomous() is True
-    assert orch._operator_context_block() == ""
+    autonomous_block = orch._operator_context_block()
+    assert "ON YOUR OWN" in autonomous_block
+    assert "COLLABORATING" not in autonomous_block
 
     present = Orchestrator(project, runners, operator_present=True)
     assert present.operator_present is True
     assert present._autonomous() is False
+    present_block = present._operator_context_block()
+    assert "COLLABORATING" in present_block
+    assert "ON YOUR OWN" not in present_block
+
+    # The two modes must differ — that difference is the whole seam.
+    assert autonomous_block != present_block
 
 
 # ── Slice #7b: Multi-artifact via expansion ───────────────────────────────
