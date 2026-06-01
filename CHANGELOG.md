@@ -12,21 +12,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 "a producer is a model endpoint; dispatch routes by availability→capability and
 never blocks; any producer runs any task" held only on the interactive CLI path.
 This release makes it true on the headless paths too (daemon/cron/Job-Templates,
-plan-mode sub-objectives, TUI), where it had silently been false. Brick 1 of a
-larger role-language arc; the identifier rename and the Leader-behavior reframe
-follow in later bricks. Reviewed fresh by two independent reviewers (hull +
-coherence).
+plan-mode sub-objectives, TUI), where it had silently been false. This is the
+first brick of the v0.6.0 role-language migration; the identifier rename
+(`specialist`→`producer`) and the operator-aware Leader-behavior reframe land in
+later commits of this same release. Proven end-to-end by a real-model live proof
+through the
+daemon path (`scripts/smoke/routing-reality/live_proof.py`): two producers on
+two distinct models now land two tasks on two producers, each running on its own
+model — provably impossible before. Reviewed fresh by two independent reviewers
+(hull + coherence).
 
 ### Fixed
 
-- **Per-agent model routing now fires on every executor path.** The daemon,
-  plan-mode, and TUI Orchestrators were constructed without the per-agent
-  runner pool, so dispatch's agent selection was cosmetic and *every* producer
-  task collapsed onto a single role-keyed model regardless of which agent
-  dispatch picked — i.e. the keystone was inert on exactly the headless
-  surfaces v0.5.0's Job-Template/cron feature runs on. A shared
-  `runners.build_agent_runners` helper is now built and passed at all four
-  construction sites; the dispatched agent's own model runs its task.
+- **Per-agent model routing now fires on every executor path — both producer
+  channels.** The daemon, plan-mode, and TUI Orchestrators were constructed
+  without the per-agent runner pools, so dispatch's agent selection was cosmetic
+  and *every* producer task collapsed onto a single model regardless of which
+  agent dispatch picked — i.e. the keystone was inert on exactly the headless
+  surfaces v0.5.0's Job-Template/cron feature runs on. Producers run through two
+  channels and **both** are now per-agent at every construction site:
+  - the **plain** path (`_run_agent_call` → `runners.build_agent_runners`), and
+  - the **tool-using** path (`_llm_with_tools_execute` →
+    `runners.build_chat_runners`) — the *primary* producer path, since the
+    skill-library builtins put every producer in a tool-loop; it had been
+    per-agent only in plan-mode and a single chat model everywhere else.
+- **Producer load spreads across goals, not just within one.** The dispatch
+  load map was a per-goal local, so a single-task-per-goal run tiebroke every
+  goal to the same producer and left the others idle. It is now a run-level
+  accumulator, so work spreads across idle producers across the whole kickoff
+  (the "availability" half of the keystone).
 
 ### Changed
 
