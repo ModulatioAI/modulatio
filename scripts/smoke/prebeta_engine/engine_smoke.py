@@ -48,13 +48,15 @@ _VAULT_ROOT = _BASE / ".vault"
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 os.environ["MODULATIO_VAULT_ROOT"] = str(_VAULT_ROOT)
 
-# OPENROUTER_API_KEY (gpt-5.5 + nemotron) may live only in a local agent's .env;
+# OPENROUTER_API_KEY (gpt-5.5 + nemotron) may not be in the shell;
 # OLLAMA_API_KEY (kimi) is typically already in the shell. Source the former
-# if absent. Values are never printed.
+# from a local env file pointed at by MODULATIO_EVAL_ENV_FILE if absent.
+# Values are never printed.
 if not os.environ.get("OPENROUTER_API_KEY"):
-    _local_env = Path.home() / ".local" / ".env"
-    if _local_env.exists():
-        for _line in _local_env.read_text().splitlines():
+    _ef = os.environ.get("MODULATIO_EVAL_ENV_FILE")
+    _extra_env = Path(_ef) if _ef else None
+    if _extra_env and _extra_env.exists():
+        for _line in _extra_env.read_text().splitlines():
             _m = re.match(
                 r"\s*(?:export\s+)?OPENROUTER_API_KEY\s*=\s*(.+?)\s*$", _line
             )

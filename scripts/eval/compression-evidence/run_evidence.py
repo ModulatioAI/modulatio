@@ -62,12 +62,14 @@ os.environ["MODULATIO_VAULT_ROOT"] = str(_VAULT_ROOT)
 # cloud presets pass their own api_key per call, overriding this env value.
 os.environ.setdefault("OPENAI_API_KEY", "lm-studio-local-placeholder")
 
-# The OpenRouter key (for the Claude-Haiku QC preset) isn't in the shell
-# env; source it from a local agent's .env. The value is never printed.
+# The OpenRouter key (for the Claude-Haiku QC preset) may not be in the
+# shell env; optionally source it from a local env file pointed at by
+# MODULATIO_EVAL_ENV_FILE. The value is never printed.
 if not os.environ.get("OPENROUTER_API_KEY"):
-    _local_env = Path.home() / ".local" / ".env"
-    if _local_env.exists():
-        for _line in _local_env.read_text().splitlines():
+    _ef = os.environ.get("MODULATIO_EVAL_ENV_FILE")
+    _extra_env = Path(_ef) if _ef else None
+    if _extra_env and _extra_env.exists():
+        for _line in _extra_env.read_text().splitlines():
             _m = re.match(
                 r"\s*(?:export\s+)?OPENROUTER_API_KEY\s*=\s*(.+?)\s*$", _line
             )

@@ -6544,8 +6544,8 @@ class Orchestrator:
         """End-of-run hook (the Alfred loop). The LEADER reviews recent QC
         failures and JUDGES whether any problem recurred enough to codify into a
         skill — recurrence is judgment, not a mechanical count (a live trigger
-        pass proved a QC-emitted tag is unreliable; a prior system and our own memory-v3
-        promotion both leave the call to the model that *reads* the log). The
+        pass proved a QC-emitted tag is unreliable; the call is left to the
+        model that *reads* the log, not an engine counter). The
         Leader's judgment is authoritative — NO QC re-check: QC already voted via
         the repeated fail-verdicts the lesson is built from, and re-verifying a
         skill drafted by the smartest seat with a weaker QC would invert the

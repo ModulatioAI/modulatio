@@ -4,8 +4,8 @@
 
 Skill codification is **judgment, not a mechanical count.** A live trigger pass
 proved a QC-emitted defect tag is unreliable (the model just drops the optional
-field), and our own memory-v3 promotion leaves recurrence-
-judgment to the model that *reads the log* — not to an engine counter or an
+field), so recurrence-judgment is left to the model that *reads the log* —
+not to an engine counter or an
 embedding-cluster. ("Don't over-mechanize judgment — leave judgment to the
 model"; the engine binds invariants.)
 
