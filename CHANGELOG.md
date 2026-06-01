@@ -6,6 +6,52 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-31
+
+**Routing reality** — the keystone, actually wired everywhere. The promise that
+"a producer is a model endpoint; dispatch routes by availability→capability and
+never blocks; any producer runs any task" held only on the interactive CLI path.
+This release makes it true on the headless paths too (daemon/cron/Job-Templates,
+plan-mode sub-objectives, TUI), where it had silently been false. Brick 1 of a
+larger role-language arc; the identifier rename and the Leader-behavior reframe
+follow in later bricks. Reviewed fresh by two independent reviewers (hull +
+coherence).
+
+### Fixed
+
+- **Per-agent model routing now fires on every executor path.** The daemon,
+  plan-mode, and TUI Orchestrators were constructed without the per-agent
+  runner pool, so dispatch's agent selection was cosmetic and *every* producer
+  task collapsed onto a single role-keyed model regardless of which agent
+  dispatch picked — i.e. the keystone was inert on exactly the headless
+  surfaces v0.5.0's Job-Template/cron feature runs on. A shared
+  `runners.build_agent_runners` helper is now built and passed at all four
+  construction sites; the dispatched agent's own model runs its task.
+
+### Changed
+
+- **Research routes by capability.** Research grounding was a hardcoded role
+  call that bypassed dispatch entirely (always one model). It now dispatches
+  through the same availability→capability path as any producer task, so it
+  honors per-agent models. Falls back to the role-keyed researcher runner when
+  no producer qualifies or no model is wired — a strict superset of prior
+  behavior. (The researcher *prompt* is unchanged; that's a later brick.)
+- **`assignee_specialist` removed as a routing axis.** Dispatch already ignored
+  this pre-keystone role pre-assignment field (it routes on
+  `required_skills`/`required_capabilities`); it only steered the post-dispatch
+  fallback. Tasks no longer carry it, and the LLM task schema no longer emits
+  it — tasks route purely on capabilities. **Behavior delta:** a plan that
+  emitted `assignee_specialist: "researcher"` for a *producer* task previously
+  ran on the role-keyed researcher runner when the agent had no model; it now
+  runs on `default_producer_role`. Research routing is preserved via the
+  capability path above.
+
+### Compatibility
+
+- `Task.assignee_specialist` is retained as a deprecated, emission-excluded
+  field so 0.5.0-era task JSON on disk still deserializes; new tasks never write
+  it. Full field removal lands with the role-language rename brick.
+
 ## [0.5.0] — 2026-05-31
 
 **Per-job output folders + Job Templates** — the setup-side of the Alfred loop.
