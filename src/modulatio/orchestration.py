@@ -1318,8 +1318,8 @@ def _extract_iterate_decision(response: str) -> dict | None:
     object) carries an ``outcome`` field whose value is one of
     ``continue`` / ``revise-task`` / ``drop-task``. Returns ``None``
     on any failure path (no JSON, malformed JSON, missing or invalid
-    outcome). Caller treats ``None`` as the safe ``continue`` default
-    per the skill's "bias toward continue" rule.
+    outcome). Caller treats ``None`` as the safe no-churn ``continue``
+    default — an unparseable reflection should never trigger a revision.
     """
     if not response:
         return None

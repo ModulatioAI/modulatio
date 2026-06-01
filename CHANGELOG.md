@@ -12,10 +12,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 "a producer is a model endpoint; dispatch routes by availability→capability and
 never blocks; any producer runs any task" held only on the interactive CLI path.
 This release makes it true on the headless paths too (daemon/cron/Job-Templates,
-plan-mode sub-objectives, TUI), where it had silently been false. This is the
-first brick of the v0.6.0 role-language migration; the identifier rename
-(`specialist`→`producer`) and the operator-aware Leader-behavior reframe land in
-later commits of this same release. Proven end-to-end by a real-model live proof
+plan-mode sub-objectives, TUI), where it had silently been false. It is the
+first of three bricks in the v0.6.0 role-language migration — followed by the
+identifier rename (`specialist`→`producer`, `researcher` collapsed) and the
+operator-presence-aware Leader-behavior reframe (both below). Proven end-to-end
+by a real-model live proof
 through the
 daemon path (`scripts/smoke/routing-reality/live_proof.py`): two producers on
 two distinct models now land two tasks on two producers, each running on its own
@@ -80,6 +81,42 @@ model — provably impossible before. Reviewed fresh by two independent reviewer
   and `--researcher-model` remain hidden, accepted aliases (the former feeds
   `--producer-model`; the latter is ignored). `--ctx-budget researcher=N` still
   validates (kept as an alias of the new `research` bucket).
+
+### Behavior — operator-presence-aware Leader (the role-framing reframe)
+
+- **The Leader's judgment is now gated on operator presence, not blunt-damped
+  globally.** A new `operator_present` engine seam (`Orchestrator.__init__`,
+  default `False` = autonomous) feeds an `{operator_context}` block into the
+  Leader's three judgment surfaces — goal **verify**, between-task **iterate**,
+  wave **reflect**. Two framings replace the old global "bias toward continue"
+  mantra: *COLLABORATING* (operator present — surface the calls + reservations
+  to the partner, lean toward continuing over a unilateral redo) and *ON YOUR
+  OWN* (autonomous — you are the only judgment past QC, decide and self-correct
+  as the work warrants; the engine prevents loops, so don't soften a real call
+  for fear of churn). The load-bearing guardrails stay in both modes (don't
+  invent verification gates the swarm has no tool for; reservations go to the
+  human, never loop or block the run).
+- **Self-correction now ships ON by default when autonomous.** The between-task
+  iterate and wave-reflect surfaces shipped OFF; that suppression is backwards
+  when nobody is watching — the Leader is then the team's only judgment past QC.
+  They now run by default on autonomous runs (daemon / cron / Job-Templates),
+  and stay opt-in (env-gated) when an operator is present.
+  `MODULATIO_LEADER_ITERATE` / `MODULATIO_WAVE_REFLECT` remain explicit force-on
+  overrides in either mode; wave-reflect stays additionally behind the
+  off-by-default concurrent-wave flag. Gated behind a real-model behavioral
+  baseline (`scripts/smoke/operator-presence/live_proof.py`): no new
+  `disappointed` verdicts, no invented gates, no redo thrash — the autonomous
+  framing surfaced more reservations to the human (`on_the_fence`) without
+  triggering rework.
+- **Construction wiring:** the TUI (the one interactive surface with a live
+  channel today) constructs the Leader with `operator_present=True`; daemon,
+  plan-mode, and CLI stay autonomous (`False`) — fire-and-forget paths with no
+  live channel to defer *to*. A documented seam awaits the post-0.6.0 streaming-
+  TUI/ACP work that drives the actual mid-run defer-to-operator round-trip.
+- **Scoped out (deliberate):** the plan-mode macro-loop reflect
+  (`project_execution.py`) is *not* presence-gated in this release — it retains
+  its own "major revisions pause for human ack" escalation, a separate control
+  from the three self-correction surfaces above.
 
 ## [0.5.0] — 2026-05-31
 
