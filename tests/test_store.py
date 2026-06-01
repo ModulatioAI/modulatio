@@ -184,9 +184,32 @@ def test_task_roundtrip_and_filter(project: Path):
             project_id=pid,
             goal_id="TST-G-001",
             description=f"draft essay {i + 1}",
-            assignee_specialist="drafter",
         )
         store.save_task(PROJECT_CODE, t)
     tasks = store.list_tasks(PROJECT_CODE, goal_id="TST-G-001")
     assert len(tasks) == 3
-    assert all(t.assignee_specialist == "drafter" for t in tasks)
+    assert all(t.description.startswith("draft essay") for t in tasks)
+
+
+def test_task_omits_deprecated_assignee_specialist_on_dump():
+    """D2: new tasks never emit assignee_specialist (Field exclude=True)."""
+    import json as _json
+    from uuid import uuid4
+    t = Task(id="X-T-1", project_id=uuid4(), goal_id="X-G-1", description="d")
+    assert "assignee_specialist" not in _json.loads(t.model_dump_json())
+
+
+def test_old_vault_task_json_with_assignee_specialist_still_parses():
+    """D2 back-compat: a 0.5.0-era task record carrying assignee_specialist on
+    disk must still deserialize cleanly (the deprecated field absorbs it)."""
+    from uuid import uuid4
+    data = {
+        "id": "X-T-2",
+        "project_id": str(uuid4()),
+        "goal_id": "X-G-1",
+        "description": "old task",
+        "assignee_specialist": "drafter",  # legacy key
+    }
+    t = Task.model_validate(data)
+    assert t.id == "X-T-2"
+    assert t.description == "old task"

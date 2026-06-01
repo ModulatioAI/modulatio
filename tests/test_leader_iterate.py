@@ -164,7 +164,6 @@ def test_apply_iterate_revise_ignores_routing_fields() -> None:
     asked for vs what the orchestrator honored."""
     task = _make_task()
     original_kind = task.artifact_kind
-    original_assignee = task.assignee_specialist
     decision = {
         "outcome": "revise-task",
         "rationale": "kind shift",
@@ -172,21 +171,18 @@ def test_apply_iterate_revise_ignores_routing_fields() -> None:
             "task_id": task.id,
             "description": "new desc",
             "artifact_kind": "code",
-            "assignee_specialist": "engineer",
         },
     }
     orchestration.Orchestrator._apply_iterate_revise(
         _StubOrchestrator(), decision, task  # type: ignore[arg-type]
     )
-    # Description revised, routing fields untouched.
+    # Description revised, the route-significant artifact_kind untouched.
     assert task.description == "new desc"
     assert task.artifact_kind == original_kind
-    assert task.assignee_specialist == original_assignee
-    # The ignored fields show up in the transition rationale for audit.
+    # The ignored field shows up in the transition rationale for audit.
     rationale = task.transitions[-1].rationale
     assert "ignored route-significant fields" in rationale
     assert "artifact_kind" in rationale
-    assert "assignee_specialist" in rationale
 
 
 def test_apply_iterate_revise_no_op_on_empty_description() -> None:

@@ -714,7 +714,6 @@ def _collect_team_state_inputs(
                 "task_id": task.id,
                 "agent": (
                     getattr(task, "assigned_agent_id", None)
-                    or getattr(task, "assignee_specialist", None)
                     or "unknown"
                 ),
                 "claim": claim_text,

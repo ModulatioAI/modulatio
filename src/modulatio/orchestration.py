@@ -1381,9 +1381,9 @@ class Orchestrator:
         #: → role-keyed fallback, so single-agent-per-role projects and
         #: tests without a pool work unchanged.
         self.agent_runners: dict[str, AgentRunner] = agent_runners or {}
-        #: The role key used when (a) a task doesn't declare
-        #: ``assignee_specialist`` or (b) the named specialist isn't
-        #: wired in ``runners``. Modulatio is a business harness — the
+        #: The role key used as the producer fallback seat when a
+        #: dispatched agent has no per-agent model wired in
+        #: ``agent_runners``. Modulatio is a business harness — the
         #: role name is project-specific (analyst, engineer, writer,
         #: editor — whatever the business calls its producer). The
         #: default here preserves back-compat for the CLI's existing
@@ -2476,10 +2476,6 @@ class Orchestrator:
                     project_id=self.project.id,
                     goal_id=goal.id,
                     description=sub_desc,
-                    # None → orchestrator falls back to the project's
-                    # default_producer_role at dispatch time (#7c).
-                    # Modulatio is output-agnostic; no hardcoded default.
-                    assignee_specialist=item.get("assignee_specialist"),
                     artifact_kind=str(item.get("artifact_kind") or "text"),
                     research_topics=research_topics,
                     required_skills=required_skills,
@@ -2594,7 +2590,7 @@ class Orchestrator:
             next_task_description=next_task.description,
             next_task_artifact_kind=next_task.artifact_kind,
             next_task_assignee=(
-                next_task.assignee_specialist or self.default_producer_role
+                self.default_producer_role
             ),
             remaining_tasks="\n".join(remaining_lines)
                 or "  (none — this is the last task)",
@@ -2639,8 +2635,8 @@ class Orchestrator:
         routing-significant fields here produced silent route/standard
         mismatches. Description-tightening is the safe preference-
         imposition surface; route changes belong to the planning step.
-        Any ``artifact_kind`` / ``assignee_specialist`` entries in the
-        revise_task payload are now ignored (logged via the rationale).
+        Any ``artifact_kind`` entries in the revise_task payload are
+        now ignored (logged via the rationale).
         """
         payload = decision.get("revise_task") or {}
         new_description = (payload.get("description") or "").strip()
@@ -2649,7 +2645,7 @@ class Orchestrator:
         old_description = task.description
         task.description = new_description
         ignored_fields = [
-            k for k in ("artifact_kind", "assignee_specialist")
+            k for k in ("artifact_kind",)
             if (payload.get(k) or "").strip()
         ]
         ignored_note = (
@@ -2920,7 +2916,7 @@ class Orchestrator:
         # falls back if needed — same logic, just lifted so the inbox
         # block uses the same role the dispatcher will route to.
         specialist_role_for_inbox = (
-            task.assignee_specialist or self.default_producer_role
+            self.default_producer_role
         )
         if specialist_role_for_inbox not in self.runners:
             specialist_role_for_inbox = self.default_producer_role
@@ -3019,18 +3015,13 @@ class Orchestrator:
         # simplicity. Slice #7 (multi-artifact) will make it opt-in per
         # artifact kind when the standards file declares a front-matter
         # shape — see `_strip_preamble` docstring for the caveat.
-        # Slice #7c: honor task.assignee_specialist for the role key.
-        # Per-agent runner (slice #6f-B, via Agent.model) still takes
-        # precedence inside _run_agent_call; specialist is the
-        # role-keyed fallback path. Unknown/unwired specialist →
-        # graceful fallback to the project's configured
-        # ``default_producer_role`` (MVP-default "drafter"; crypto
-        # harness would pass "analyst", software shop "engineer",
-        # etc). Modulatio is output-agnostic — the role name is
-        # project-specific, not a semantic category.
-        specialist_role = task.assignee_specialist or self.default_producer_role
-        if specialist_role not in self.runners:
-            specialist_role = self.default_producer_role
+        # The producer runs on the DISPATCHED agent's own model (via
+        # Agent.model → agent_runners, inside _run_agent_call). The role
+        # key below is only the fallback seat for when the agent has no
+        # model wired; ``default_producer_role`` is project-specific
+        # (MVP-default "drafter"; a crypto harness would pass "analyst",
+        # a software shop "engineer", etc — Modulatio is output-agnostic).
+        specialist_role = self.default_producer_role
         raw_response = self._run_agent_call(
             task.assigned_agent_id, specialist_role, prompt
         )
@@ -3150,9 +3141,7 @@ class Orchestrator:
             QC reject, rather than writing marker soup.
 
         Returns ``(path, checksum, token_count)`` like the other producers."""
-        specialist_role = task.assignee_specialist or self.default_producer_role
-        if specialist_role not in self.runners:
-            specialist_role = self.default_producer_role
+        specialist_role = self.default_producer_role
         current = path.read_text()
         prompt = self._prompt("drafter-patch", _DRAFTER_PATCH_PROMPT).format(
             task_id=task.id,
@@ -3272,9 +3261,7 @@ class Orchestrator:
         whatever shape the producer emitted and can reject as a
         mechanical defect.
         """
-        specialist_role = task.assignee_specialist or self.default_producer_role
-        if specialist_role not in self.runners:
-            specialist_role = self.default_producer_role
+        specialist_role = self.default_producer_role
         prompt = self._prompt("coding-diff", _DRAFTER_DIFF_PROMPT).format(
             task_id=task.id,
             artifact_kind=task.artifact_kind,
@@ -3744,9 +3731,7 @@ class Orchestrator:
         #: same role-resolution the chat-loop call site uses
         # below — lifted so the inbox layer keys role-scoped notes
         # identically across tool-using and plain producer paths.
-        specialist_role = task.assignee_specialist or self.default_producer_role
-        if specialist_role not in self.runners:
-            specialist_role = self.default_producer_role
+        specialist_role = self.default_producer_role
         prompt = self._prompt("drafter", _DRAFTER_EXECUTE_PROMPT).format(
             task_id=task.id,
             artifact_kind=task.artifact_kind,
@@ -3784,7 +3769,7 @@ class Orchestrator:
                 tool_loadout if tool_loadout is not None
                 else tuple(skill.tool_loadout)
             ),
-            role=task.assignee_specialist or self.default_producer_role,
+            role=self.default_producer_role,
             agent_id=task.assigned_agent_id or self.default_producer_role,
             task_id=task.id,
             transcript_path=transcript_path,
@@ -4859,7 +4844,7 @@ class Orchestrator:
         last_breaker_abort: Exception | None = None  # QC-as-fixer Slice 2
 
         self._emit_activity(
-            role=t.assignee_specialist or self.default_producer_role,
+            role=self.default_producer_role,
             phase="task_dispatched",
             task_id=t.id,
             agent_id=t.assigned_agent_id,
@@ -4933,7 +4918,7 @@ class Orchestrator:
                     if draft_path not in summary.drafts:
                         summary.drafts.append(draft_path)
                     self._emit_activity(
-                        role=t.assignee_specialist or self.default_producer_role,
+                        role=self.default_producer_role,
                         phase="task_completed",
                         task_id=t.id,
                         agent_id=t.assigned_agent_id,
@@ -4986,7 +4971,7 @@ class Orchestrator:
                 )
                 t.producer_mode = "generate"
                 self._emit_activity(
-                    role=t.assignee_specialist or self.default_producer_role,
+                    role=self.default_producer_role,
                     phase="dispatch_aborted",
                     task_id=t.id,
                     agent_id=t.assigned_agent_id,
@@ -5455,7 +5440,6 @@ class Orchestrator:
                 project_id=t.project_id,
                 goal_id=t.goal_id,
                 description=desc,
-                assignee_specialist=t.assignee_specialist,
                 artifact_kind=t.artifact_kind,
                 required_skills=list(t.required_skills),
                 required_capabilities=list(t.required_capabilities),
@@ -8163,8 +8147,6 @@ Each task fields:
 - description: string — SELF-CONTAINED: NAME the concrete subject; never
   "the three topics" / "the above" / "as discussed". The producer sees only
   this task text, not the goal or objective.
-- assignee_specialist: role that executes (e.g. "drafter",
-  "researcher"). Default "drafter".
 - artifact_kind: product class — selects domain standards. Examples:
   "application", "code", "marketing", "research", "wordpress".
   Default "text" (neutral). Specify real kind so correct standards
@@ -8290,8 +8272,8 @@ when no candidates need action — un-acted candidates auto-abandon
 after 3 turns.
 
 `revise-task` may only change `description`. Routing-significant
-fields (`artifact_kind`, `assignee_specialist`) belong to the
-planning step, not the iterate decision.
+fields (`artifact_kind`) belong to the planning step, not the
+iterate decision.
 
 Failing to produce a parseable JSON block with a valid outcome falls
 back to `continue` (safest default — no churn). The team continues;

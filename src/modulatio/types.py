@@ -169,7 +169,13 @@ class Task(BaseModel):
     project_id: UUID
     goal_id: str
     description: str
-    assignee_specialist: str | None = None
+    # DEPRECATED (Brick 1 / D2): the pre-keystone role-pre-assignment axis.
+    # Routing is now purely capability + availability (required_skills /
+    # required_capabilities → dispatch → the dispatched agent's own model);
+    # nothing sets or reads this anymore. Kept solely so 0.5.0-era task JSON
+    # on disk still parses; excluded from emission so new tasks never carry
+    # it. Full removal lands with the role-language rename brick.
+    assignee_specialist: str | None = Field(default=None, exclude=True)
     # The artifact class this task produces — picks the standards domain
     # (e.g. application, code, marketing, research, wordpress) that producer
     # and QC both consume. Modulatio is output-agnostic; the domain is data.

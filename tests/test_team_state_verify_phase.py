@@ -134,20 +134,21 @@ def test_collect_inputs_handles_summary_without_tasks_attr() -> None:
     assert verdicts == []
 
 
-def test_collect_inputs_falls_back_through_agent_id_fields() -> None:
-    """When assigned_agent_id is None, fall back to assignee_specialist."""
+def test_collect_inputs_falls_back_to_unknown_when_no_agent_id() -> None:
+    """When assigned_agent_id is None, the team-state attribution is
+    "unknown" — assignee_specialist was removed as a routing/attribution
+    axis in Brick 1 / D2."""
     t = Task(
         id="T-X",
         project_id=uuid4(),
         goal_id="G-1",
         description="...",
         assigned_agent_id=None,
-        assignee_specialist="engineer",
         summary_for_state_doc="wrote main.py",
     )
     summary = SimpleNamespace(tasks=[t])
     claims, _ = project_execution._collect_team_state_inputs(summary)
-    assert claims[0]["agent"] == "engineer"
+    assert claims[0]["agent"] == "unknown"
 
 
 # ── _append_audit_entries ─────────────────────────────────────────────────

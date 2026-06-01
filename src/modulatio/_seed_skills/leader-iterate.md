@@ -1,6 +1,6 @@
 ---
 name: leader-iterate
-description: Leader's between-task reflection. Read what just shipped + the goal frame + the remaining task list + the current repo map. Decide whether the next pending task still makes sense as-written, or needs a minor revision (description / artifact_kind / assignee_specialist tighten), or should be dropped because what just shipped already covered it. Mirror leader-reflect's "bias toward continue" — most reflections should end with continue. Slice #82 PR-B; migrated to Leader-keyed in Step 0 (2026-05-15).
+description: Leader's between-task reflection. Read what just shipped + the goal frame + the remaining task list + the current repo map. Decide whether the next pending task still makes sense as-written, or needs a minor revision (description / artifact_kind tighten), or should be dropped because what just shipped already covered it. Mirror leader-reflect's "bias toward continue" — most reflections should end with continue. Slice #82 PR-B; migrated to Leader-keyed in Step 0 (2026-05-15).
 executor: llm
 capability_tags: planning, scope-discipline, structured-output
 freshness_class: stable
@@ -82,7 +82,7 @@ What `revise-task` is NOT for: expressing personal craft preferences over how a 
 }}
 ```
 
-`description` is the **only** field you may revise. Routing-significant fields — `artifact_kind`, `assignee_specialist`, `required_skills`, `required_capabilities` — belong to the planning step: dispatch has already selected an agent and a domain-standards floor before you see the task here, and silently changing routing under the dispatcher produces standards/floor mismatches. If routing needs to change, that is `revise-major` territory and should pause for human ack via the leader-reflect path, not slip through iterate. **In open-ended mode, prefer `continue` even when revise-task seems mildly justified** — only revise when the next task would clearly fail or duplicate under the current plan.
+`description` is the **only** field you may revise. Routing-significant fields — `artifact_kind`, `required_skills`, `required_capabilities` — belong to the planning step: dispatch has already selected an agent and a domain-standards floor before you see the task here, and silently changing routing under the dispatcher produces standards/floor mismatches. If routing needs to change, that is `revise-major` territory and should pause for human ack via the leader-reflect path, not slip through iterate. **In open-ended mode, prefer `continue` even when revise-task seems mildly justified** — only revise when the next task would clearly fail or duplicate under the current plan.
 
 ### `drop-task`
 

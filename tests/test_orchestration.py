@@ -1333,17 +1333,16 @@ def _prepare_exhausted_goal(project: Project, project_code: str):
 
 # ── Slice #7c: assignee_specialist routes producer runner ─────────────────
 
-def test_producer_uses_assignee_specialist_role_key_when_wired(project: Project):
-    """When Coordinator emits assignee_specialist='researcher' AND the
-    runners dict has a 'researcher' key, the producer call routes to
-    that runner — NOT the hardcoded drafter runner. Unlocks per-
-    specialist model wiring (--researcher-model vs --specialist-model)
-    even without custom agents in the roster."""
+def test_stale_assignee_specialist_is_ignored_routes_to_default_producer(project: Project):
+    """D2: assignee_specialist is removed as a routing axis. A plan that
+    still emits a stale assignee_specialist (e.g. a 0.5.0-era coordinator)
+    must be IGNORED — the producer task routes to default_producer_role,
+    never the named role. Proves the field no longer steers routing."""
 
-    def _coord_researcher(prompt: str) -> str:
+    def _coord_stale(prompt: str) -> str:
         tasks = [{
             "description": "research something",
-            "assignee_specialist": "researcher",
+            "assignee_specialist": "researcher",  # stale — must be ignored
             "artifact_kind": "research",
             "evidence_required": [{"kind": "artifact", "description": "file"}],
         }]
@@ -1362,16 +1361,18 @@ def test_producer_uses_assignee_specialist_role_key_when_wired(project: Project)
 
     runners = {
         "leader": _leader_stub,
-        "planner": _coord_researcher,
+        "planner": _coord_stale,
         "drafter": _drafter_counting,
         "qc": _qc_stub,
         "researcher": _researcher_counting,
     }
     orch = Orchestrator(project, runners)
-    orch.kickoff("researcher as producer")
+    orch.kickoff("stale specialist key")
 
-    assert researcher_calls["n"] == 1
-    assert drafter_calls["n"] == 0
+    # Stale key ignored: the producer ran on default_producer_role (drafter),
+    # NOT the named "researcher" role.
+    assert drafter_calls["n"] == 1
+    assert researcher_calls["n"] == 0
 
 
 def test_producer_falls_back_to_drafter_when_specialist_role_not_wired(project: Project):

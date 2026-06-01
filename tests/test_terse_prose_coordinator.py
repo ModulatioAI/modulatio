@@ -32,7 +32,6 @@ def test_template_keeps_required_fields_documentation() -> None:
     body = orchestration._TASK_PLAN_PROMPT
     for field in (
         "description",
-        "assignee_specialist",
         "artifact_kind",
         "required_skills",
         "required_capabilities",
