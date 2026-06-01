@@ -2685,6 +2685,30 @@ class Orchestrator:
         task.status = TaskStatus.ABANDONED
 
     # ── Researcher: Research-First cache-or-fetch ────────────────────────
+    def _pick_research_agent(self, task: Task) -> "roster.Agent | None":
+        """Route a research fetch the same way producer tasks route —
+        availability→capability via ``dispatch.select_agent`` — so research
+        honors per-agent model routing instead of a hardcoded role-keyed
+        runner. Builds a synthetic, never-persisted Task naming the research
+        seat + its capabilities; returns the picked producer, or ``None``
+        when none qualifies (caller then falls back to the role-keyed
+        ``runners["researcher"]`` via ``_run_agent_call(None, ...)``)."""
+        synthetic = Task(
+            id=f"{task.id}-RESEARCH",
+            project_id=self.project.id,
+            goal_id=task.goal_id,
+            description="research topic dispatch",
+            required_skills=["researcher"],
+            required_capabilities=["research", "web-search"],
+            artifact_kind="research",
+        )
+        return dispatch.select_agent(
+            synthetic,
+            roster.list_agents(self.project.code),
+            skill_floor_for=self._skill_floor_for,
+            domain_floor_for=self._domain_floor_for,
+        )
+
     def _ensure_research(self, task: Task) -> str:
         """Gather research context for a task, cache-first.
 
@@ -2699,16 +2723,27 @@ class Orchestrator:
             return ""
 
         chunks: list[str] = []
+        research_agent_id: str | None = None
+        picked = False
         for topic in task.research_topics:
             entry = research.load_with_metadata(topic, project_code=self.project.code)
             if entry.body.strip():
                 chunks.append(f"Topic: {topic}\n\n{entry.body.strip()}")
                 continue
+            if not picked:
+                # Pick a research-capable producer once, lazily on the first
+                # cache miss (an all-cache-hit pass never touches dispatch).
+                # None → the role-keyed runners["researcher"] fallback.
+                agent = self._pick_research_agent(task)
+                research_agent_id = agent.id if agent is not None else None
+                picked = True
             prompt = self._prompt("researcher", _RESEARCHER_FETCH_PROMPT).format(
                 topic=topic,
                 inbox_notes=self._inbox_block_for("researcher"),
             )
-            body = _strip_thinking(self._run("researcher", prompt)).strip()
+            body = _strip_thinking(
+                self._run_agent_call(research_agent_id, "researcher", prompt)
+            ).strip()
             # Concurrency (#151/e2e): lock only the shared cache WRITE, not
             # the LLM research call above — concurrent workers caching the
             # same slug shouldn't corrupt the file.

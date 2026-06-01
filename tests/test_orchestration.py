@@ -698,6 +698,118 @@ def test_researcher_not_called_when_cache_hit(project: Project, tmp_path, monkey
     assert "four-elements model" in captured["drafter_prompt"]
 
 
+def test_research_routes_to_capability_dispatched_agent_model(
+    project: Project, tmp_path, monkeypatch
+):
+    """D1: a research fetch routes through dispatch (availability→capability)
+    to a research-capable producer's OWN model via the per-agent pool — NOT
+    the hardcoded role-keyed runners["researcher"]. Proves research now
+    honors per-agent routing like any producer task."""
+    from modulatio import research, roster
+
+    monkeypatch.setattr(research, "_RESEARCH_ROOT", tmp_path / "shared_research")
+
+    roster.save(
+        roster.Agent(
+            id="research-prod",
+            name="R",
+            identity="r.",
+            skills=["researcher"],
+            model="research/model",
+            capability_tags=["research", "web-search"],
+            cost_class="paid-cloud",
+            tier="producer",
+        ),
+        project_code=PROJECT_CODE,
+    )
+
+    role_calls: list[str] = []
+    agent_calls: list[str] = []
+
+    def _role_researcher(prompt: str) -> str:
+        role_calls.append(prompt)
+        return "ROLE researcher — should NOT fire.\n"
+
+    def _agent_runner(prompt: str) -> str:
+        agent_calls.append(prompt)
+        return "FINDING: dispatched to the agent's own model.\n"
+
+    def _coord(prompt: str) -> str:
+        # No required_skills on the producer task → it runs on the role-keyed
+        # drafter; only the research fetch dispatches by capability.
+        tasks = [{
+            "description": "Describe topic alpha",
+            "research_topics": ["topic alpha"],
+            "evidence_required": [{"kind": "artifact", "description": "file"}],
+        }]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    runners = {
+        "leader": _leader_stub,
+        "planner": _coord,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+        "researcher": _role_researcher,
+    }
+    orch = Orchestrator(project, runners, agent_runners={"research/model": _agent_runner})
+    orch.kickoff("Describe topic alpha")
+
+    assert agent_calls, "research did not route to the dispatched agent's model runner"
+    assert role_calls == [], "role-keyed researcher fired despite a capable agent in the pool"
+
+
+def test_research_falls_back_to_role_runner_when_model_not_in_pool(
+    project: Project, tmp_path, monkeypatch
+):
+    """D1 is a strict superset: when an agent is picked but its model is not
+    in the per-agent pool (e.g. stub / empty pool), the research fetch falls
+    back to the role-keyed runners["researcher"] — identical to today."""
+    from modulatio import research, roster
+
+    monkeypatch.setattr(research, "_RESEARCH_ROOT", tmp_path / "shared_research")
+
+    roster.save(
+        roster.Agent(
+            id="research-prod",
+            name="R",
+            identity="r.",
+            skills=["researcher"],
+            model="research/model",
+            capability_tags=["research", "web-search"],
+            cost_class="paid-cloud",
+            tier="producer",
+        ),
+        project_code=PROJECT_CODE,
+    )
+
+    role_calls: list[str] = []
+
+    def _role_researcher(prompt: str) -> str:
+        role_calls.append(prompt)
+        return "FINDING via role-keyed fallback.\n"
+
+    def _coord(prompt: str) -> str:
+        tasks = [{
+            "description": "Describe topic beta",
+            "research_topics": ["topic beta"],
+            "evidence_required": [{"kind": "artifact", "description": "file"}],
+        }]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    runners = {
+        "leader": _leader_stub,
+        "planner": _coord,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+        "researcher": _role_researcher,
+    }
+    # Empty pool → _run_agent_call's guard short-circuits to the role runner.
+    orch = Orchestrator(project, runners, agent_runners={})
+    orch.kickoff("Describe topic beta")
+
+    assert len(role_calls) == 1, "research fetch did not fall back to the role-keyed runner"
+
+
 def test_task_default_assigned_agent_id_is_none():
     """Regression for slice #6c: Task.assigned_agent_id defaults to None.
     A task that hasn't been dispatched or failed to match any agent
