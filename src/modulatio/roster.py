@@ -335,7 +335,7 @@ def _caps_from_model(model_key: str | None) -> tuple[list[str], str | None, str 
 # roles are Leader + QC; producer + researcher are skill-holders.
 _DEFAULT_ROSTER_TEMPLATE: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("leader", ("leader", "leader-verify", "leader-plan", "leader-plan-approve", "leader-reflect"), "leader", "leader_model"),
-    ("producer", ("drafter", "drafter-edit", "drafter-patch", "rigorous-sourcing", "web-search"), "producer", "specialist_model"),
+    ("producer", ("drafter", "drafter-edit", "drafter-patch", "rigorous-sourcing", "web-search"), "producer", "producer_model"),
     ("qc", ("qc",), "qc", "qc_model"),
     ("researcher", ("researcher", "rigorous-sourcing", "web-search"), "producer", "researcher_model"),
 )
@@ -447,7 +447,7 @@ def seed_default_roster(
     *,
     leader_model: str | None,
     coordinator_model: str | None,
-    specialist_model: str | None,
+    producer_model: str | None,
     qc_model: str | None,
     researcher_model: str | None,
 ) -> list[Agent]:
@@ -479,7 +479,7 @@ def seed_default_roster(
         project_code,
         leader_model=leader_model,
         coordinator_model=coordinator_model,
-        specialist_model=specialist_model,
+        producer_model=producer_model,
         qc_model=qc_model,
         researcher_model=researcher_model,
     )
@@ -490,7 +490,7 @@ def _seed_from_default_template(
     *,
     leader_model: str | None,
     coordinator_model: str | None,
-    specialist_model: str | None,
+    producer_model: str | None,
     qc_model: str | None,
     researcher_model: str | None,
 ) -> list[Agent]:
@@ -498,7 +498,7 @@ def _seed_from_default_template(
     models = {
         "leader_model": leader_model,
         "coordinator_model": coordinator_model,
-        "specialist_model": specialist_model,
+        "producer_model": producer_model,
         "qc_model": qc_model,
         "researcher_model": researcher_model,
     }

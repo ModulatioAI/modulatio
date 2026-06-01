@@ -101,7 +101,7 @@ def _build_kickoff_orchestrator(
         )
         defaults = config.get_default_models() or {}
         chat_default_model = (
-            defaults.get("qc") or defaults.get("specialist")
+            defaults.get("qc") or defaults.get("producer") or defaults.get("specialist")
         )
         chat_runner = maybe_build_chat_runner(
             chat_default_model,
@@ -516,26 +516,28 @@ class ModulatioApp(App):
         defaults = config.get_default_models()
         if not defaults:
             return None
-        leader = defaults.get("leader") or defaults.get("specialist")
-        specialist = defaults.get("specialist") or defaults.get("leader")
+        leader = defaults.get("leader") or defaults.get("producer") or defaults.get("specialist")
+        # Role-language migration: prefer the "producer" key, fall back to the
+        # legacy "specialist" key, then the leader.
+        producer = defaults.get("producer") or defaults.get("specialist") or defaults.get("leader")
         # Skills-first (#143): the planner runner uses the "planner" default
         # model (the Leader's model). Fall back to the legacy "coordinator"
-        # key for pre-defaults.json, then to the leader/specialist.
+        # key for pre-defaults.json, then to the leader/producer.
         planner = (
             defaults.get("planner")
             or defaults.get("coordinator")
             or leader
-            or specialist
+            or producer
         )
-        qc = defaults.get("qc") or specialist
-        researcher = defaults.get("researcher") or specialist
-        if not (leader and planner and specialist and qc and researcher):
+        qc = defaults.get("qc") or producer
+        researcher = defaults.get("researcher") or producer
+        if not (leader and planner and producer and qc and researcher):
             return None
         return {
             # Leader reasons (deliberative seat); others stay thinking-OFF.
             "leader": litellm_runner(leader, disable_thinking=False),
             "planner": litellm_runner(planner),
-            "drafter": litellm_runner(specialist),
+            "drafter": litellm_runner(producer),
             "qc": litellm_runner(qc),
             "researcher": litellm_runner(researcher),
         }

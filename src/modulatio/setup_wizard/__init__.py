@@ -172,7 +172,7 @@ def _auto_launch_tui(state: dict) -> None:
         # accepted-but-unused (no coordinator agent); planner-with-legacy
         # fallback so a future reader doesn't suspect a stale-key leak.
         coordinator_model=defaults_models.get("planner") or defaults_models.get("coordinator"),
-        specialist_model=defaults_models.get("specialist"),
+        producer_model=defaults_models.get("producer") or defaults_models.get("specialist"),
         qc_model=defaults_models.get("qc"),
         researcher_model=defaults_models.get("researcher"),
     )

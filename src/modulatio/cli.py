@@ -413,7 +413,7 @@ def kickoff(
             code,
             leader_model=leader_model,
             coordinator_model=coordinator_model,
-            specialist_model=producer_model,
+            producer_model=producer_model,
             qc_model=qc_model,
             researcher_model=researcher_model,
         )
@@ -997,7 +997,7 @@ def heartbeat_run_once(
             roster.seed_default_roster(
                 project_code,
                 leader_model="stub", coordinator_model="stub",
-                specialist_model="stub", qc_model="stub", researcher_model="stub",
+                producer_model="stub", qc_model="stub", researcher_model="stub",
             )
         project = Project(
             code=project_code, name=project_code, objective=objective,

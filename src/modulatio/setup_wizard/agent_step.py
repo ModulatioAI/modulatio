@@ -80,7 +80,7 @@ def _pick_model(
         )
         return steps.BACK
 
-    role_default = current or default_models.get(role) or default_models.get("specialist")
+    role_default = current or default_models.get(role) or default_models.get("producer") or default_models.get("specialist")
     options: list[tuple[str, str]] = []
     default_idx = 0
     for i, (key, preset) in enumerate(available):

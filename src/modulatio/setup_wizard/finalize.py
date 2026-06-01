@@ -26,8 +26,8 @@ def _derive_default_models(structural: list[dict], workers: list[dict]) -> dict[
     defaults. Skills-first (#143): the structural roles are Leader + QC.
     The task-planning utility call (``planner``) uses the Leader's model —
     planning is the Leader's job now that the Coordinator role is gone.
-    ``specialist`` falls to the first producer; ``researcher`` uses a
-    producer holding a research skill if any, else falls back to specialist.
+    ``producer`` falls to the first worker; ``researcher`` uses a
+    producer holding a research skill if any, else falls back to producer.
     """
     by_tier = {a.get("tier"): a for a in structural}
     out: dict[str, str] = {}
@@ -42,7 +42,7 @@ def _derive_default_models(structural: list[dict], workers: list[dict]) -> dict[
     if workers:
         first_worker_model = workers[0].get("model")
         if first_worker_model:
-            out["specialist"] = first_worker_model
+            out["producer"] = first_worker_model
         researcher = next(
             (
                 w for w in workers

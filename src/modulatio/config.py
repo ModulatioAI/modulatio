@@ -280,14 +280,18 @@ def get_data_file(name: str) -> Path:
 
 # Skills-first (#143): "planner" is the current task-planning role key;
 # "coordinator" is kept for back-compat reads of pre-defaults.json.
-_VALID_ROLES = ("leader", "planner", "coordinator", "specialist", "qc", "researcher")
+# Role-language migration (v0.6.0): "producer" is the current producer-model
+# key; "specialist" is kept for back-compat reads of pre-migration
+# defaults.json. "researcher" likewise stays readable (research now routes by
+# capability to a producer; the key is no longer written for new installs).
+_VALID_ROLES = ("leader", "planner", "producer", "coordinator", "specialist", "qc", "researcher")
 
 
 def get_default_model(role: str) -> Optional[str]:
     """Return the persisted default model for a role, if set.
 
-    Roles: leader, planner, specialist, qc, researcher (legacy "coordinator"
-    still readable for pre-defaults.json).
+    Roles: leader, planner, producer, qc (legacy "coordinator"/"specialist"/
+    "researcher" still readable for pre-migration defaults.json).
     Returns None if no default has been set for that role — caller falls
     back to CLI flag or its own default.
     """

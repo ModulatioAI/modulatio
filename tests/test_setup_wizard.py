@@ -304,7 +304,7 @@ def test_commit_writes_defaults_and_marks_setup_complete(tmp_path):
     # Skills-first (#143): planner uses the Leader's model (no coordinator).
     assert on_disk["default_models"]["planner"] == "claude-cli/claude-sonnet-4-6"
     assert "coordinator" not in on_disk["default_models"]
-    assert on_disk["default_models"]["specialist"] == "ollama_chat/glm-5.1"
+    assert on_disk["default_models"]["producer"] == "ollama_chat/glm-5.1"
     # No researcher template picked → researcher falls back to first worker
     assert on_disk["default_models"]["researcher"] == "ollama_chat/glm-5.1"
 
@@ -345,7 +345,7 @@ def test_commit_derives_researcher_from_researcher_template(tmp_path):
     }
     finalize.commit(state, version="2.0.0")
     on_disk = json.loads(config.DEFAULTS_FILE.read_text())
-    assert on_disk["default_models"]["specialist"] == "model-c"  # first worker
+    assert on_disk["default_models"]["producer"] == "model-c"  # first worker
     assert on_disk["default_models"]["researcher"] == "model-d"  # researcher template wins
     assert on_disk["default_models"]["planner"] == "model-a"  # planner = leader's model
 

@@ -270,19 +270,25 @@ def _make_dispatch_callback(*, stub: bool):
                 roster.seed_default_roster(
                     project_code,
                     leader_model="stub", coordinator_model="stub",
-                    specialist_model="stub", qc_model="stub", researcher_model="stub",
+                    producer_model="stub", qc_model="stub", researcher_model="stub",
                 )
         else:
             # Read default_models from the wizard-persisted defaults.json.
             # If a role is missing, fail loudly — daemon shouldn't silently
             # downgrade to stub for a real-model run.
             defaults = config.get_default_models()
-            for role in ("leader", "specialist"):
-                if not defaults.get(role):
-                    raise RuntimeError(
-                        f"daemon real-model dispatch requires defaults.json default_models[{role}]; "
-                        "run `modulatio setup` to configure."
-                    )
+            # leader + a producer model are required. Role-language migration:
+            # accept the new "producer" key OR the legacy "specialist" key.
+            if not defaults.get("leader"):
+                raise RuntimeError(
+                    "daemon real-model dispatch requires defaults.json "
+                    "default_models[leader]; run `modulatio setup` to configure."
+                )
+            if not (defaults.get("producer") or defaults.get("specialist")):
+                raise RuntimeError(
+                    "daemon real-model dispatch requires defaults.json "
+                    "default_models[producer]; run `modulatio setup` to configure."
+                )
             # Skills-first (#143): the planner runner uses the "planner"
             # default model (the Leader's model). Fall back to the legacy
             # "coordinator" key for pre-defaults.json, then to leader.
@@ -291,13 +297,20 @@ def _make_dispatch_callback(*, stub: bool):
                 or defaults.get("coordinator")
                 or defaults["leader"]
             )
+            # Role-language migration: the producer runner uses the "producer"
+            # default model; fall back to the legacy "specialist" key, then leader.
+            producer_model = (
+                defaults.get("producer")
+                or defaults.get("specialist")
+                or defaults["leader"]
+            )
             runners = {
                 # Leader reasons (deliberative seat); others thinking-OFF.
                 "leader": litellm_runner(defaults["leader"], disable_thinking=False),
                 "planner": litellm_runner(planner_model),
-                "drafter": litellm_runner(defaults["specialist"]),
-                "qc": litellm_runner(defaults.get("qc") or defaults["specialist"]),
-                "researcher": litellm_runner(defaults.get("researcher") or defaults["specialist"]),
+                "drafter": litellm_runner(producer_model),
+                "qc": litellm_runner(defaults.get("qc") or producer_model),
+                "researcher": litellm_runner(defaults.get("researcher") or producer_model),
             }
             embedder = semantic_router.FastEmbedder()
             matcher = semantic_router.default_matcher(project_code, embedder=embedder)
@@ -306,7 +319,7 @@ def _make_dispatch_callback(*, stub: bool):
                     project_code,
                     leader_model=defaults["leader"],
                     coordinator_model=planner_model,
-                    specialist_model=defaults["specialist"],
+                    producer_model=producer_model,
                     qc_model=defaults.get("qc"),
                     researcher_model=defaults.get("researcher"),
                 )
@@ -344,7 +357,7 @@ def _make_dispatch_callback(*, stub: bool):
                 project_code=project_code,
             )
             chat_runner = maybe_build_chat_runner(
-                defaults.get("qc") or defaults["specialist"],
+                defaults.get("qc") or producer_model,
                 on_unavailable=lambda msg: logger.info(msg),
             )
             # Per-agent chat runners (tool-using producer path — the PRIMARY
@@ -373,7 +386,7 @@ def _make_dispatch_callback(*, stub: bool):
             chat_runners=chat_runners,
             chat_runner_models=chat_runner_models,
             chat_runner_default_model=(
-                None if stub else (defaults.get("qc") or defaults["specialist"])
+                None if stub else (defaults.get("qc") or producer_model)
             ),
             summarizer_chat_runner_factory=(
                 None if stub else _litellm_runner
@@ -458,13 +471,16 @@ def _make_runners_for(*, stub: bool):
         if stub:
             return default_generic_stub_runners()
         defaults = config.get_default_models()
-        for role in ("leader", "specialist"):
-            if not defaults.get(role):
-                raise RuntimeError(
-                    f"daemon real-model project-execution requires "
-                    f"defaults.json default_models[{role}]; "
-                    "run `modulatio setup` to configure."
-                )
+        if not defaults.get("leader"):
+            raise RuntimeError(
+                "daemon real-model project-execution requires defaults.json "
+                "default_models[leader]; run `modulatio setup` to configure."
+            )
+        if not (defaults.get("producer") or defaults.get("specialist")):
+            raise RuntimeError(
+                "daemon real-model project-execution requires defaults.json "
+                "default_models[producer]; run `modulatio setup` to configure."
+            )
         # Skills-first (#143): planner uses the "planner" default model,
         # falling back to legacy "coordinator" then the Leader's model.
         planner_model = (
@@ -472,14 +488,19 @@ def _make_runners_for(*, stub: bool):
             or defaults.get("coordinator")
             or defaults["leader"]
         )
+        producer_model = (
+            defaults.get("producer")
+            or defaults.get("specialist")
+            or defaults["leader"]
+        )
         return {
             # Leader reasons (deliberative seat); others thinking-OFF.
             "leader": litellm_runner(defaults["leader"], disable_thinking=False),
             "planner": litellm_runner(planner_model),
-            "drafter": litellm_runner(defaults["specialist"]),
-            "qc": litellm_runner(defaults.get("qc") or defaults["specialist"]),
+            "drafter": litellm_runner(producer_model),
+            "qc": litellm_runner(defaults.get("qc") or producer_model),
             "researcher": litellm_runner(
-                defaults.get("researcher") or defaults["specialist"]
+                defaults.get("researcher") or producer_model
             ),
         }
     return _runners

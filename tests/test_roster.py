@@ -241,7 +241,7 @@ def test_seed_default_roster_writes_four_agents_with_expected_shape(project_vaul
         PROJECT_CODE,
         leader_model="ld/m",
         coordinator_model="cd/m",  # accepted for back-compat; no longer seeds an agent
-        specialist_model="sp/m",
+        producer_model="sp/m",
         qc_model="qc/m",
         researcher_model="rs/m",
     )
@@ -312,7 +312,7 @@ def test_seed_default_roster_capability_union_covers_skill_requirements(
         PROJECT_CODE,
         leader_model="ld/m",
         coordinator_model="cd/m",
-        specialist_model="sp/m",
+        producer_model="sp/m",
         qc_model="qc/m",
         researcher_model="rs/m",
     )
@@ -360,7 +360,7 @@ def test_seed_default_roster_idempotent_skips_existing_agent_files(project_vault
         PROJECT_CODE,
         leader_model="ld/m",
         coordinator_model="cd/m",
-        specialist_model="sp/m",
+        producer_model="sp/m",
         qc_model="qc/m",
         researcher_model="rs/m",
     )
@@ -391,7 +391,7 @@ def test_seed_default_roster_dispatches_to_a_producer(
         PROJECT_CODE,
         leader_model="ld/m",
         coordinator_model="cd/m",
-        specialist_model="sp/m",
+        producer_model="sp/m",
         qc_model="qc/m",
         researcher_model="rs/m",
     )
@@ -453,7 +453,7 @@ def test_seed_default_roster_uses_team_template_when_present(project_vault):
         PROJECT_CODE,
         leader_model="ignored",
         coordinator_model="ignored",
-        specialist_model="ignored",
+        producer_model="ignored",
         qc_model="ignored",
         researcher_model="ignored",
     )
@@ -475,7 +475,7 @@ def test_seed_default_roster_falls_back_to_hardcoded_when_no_template(project_va
         PROJECT_CODE,
         leader_model="ld/m",
         coordinator_model="cd/m",
-        specialist_model="sp/m",
+        producer_model="sp/m",
         qc_model="qc/m",
         researcher_model="rs/m",
     )
@@ -495,7 +495,7 @@ def test_seed_from_team_template_idempotent(project_vault):
     config.reload()
     roster.seed_default_roster(
         PROJECT_CODE,
-        leader_model=None, coordinator_model=None, specialist_model=None,
+        leader_model=None, coordinator_model=None, producer_model=None,
         qc_model=None, researcher_model=None,
     )
     leader_path = project_vault / "agents" / "leader.md"
@@ -508,7 +508,7 @@ def test_seed_from_team_template_idempotent(project_vault):
     config.reload()
     roster.seed_default_roster(
         PROJECT_CODE,
-        leader_model=None, coordinator_model=None, specialist_model=None,
+        leader_model=None, coordinator_model=None, producer_model=None,
         qc_model=None, researcher_model=None,
     )
     # Mtime unchanged → file was not rewritten; original v1 model preserved
@@ -529,7 +529,7 @@ def test_seed_from_team_template_skips_entries_without_id(project_vault):
     config.reload()
     written = roster.seed_default_roster(
         PROJECT_CODE,
-        leader_model=None, coordinator_model=None, specialist_model=None,
+        leader_model=None, coordinator_model=None, producer_model=None,
         qc_model=None, researcher_model=None,
     )
     assert {a.id for a in written} == {"leader", "writer"}
