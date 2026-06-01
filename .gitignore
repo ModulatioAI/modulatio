@@ -9,6 +9,12 @@ __pycache__/
 .ruff_cache/
 .runs/
 scripts/smoke/*/.vault/
+# Reviewer diff scratch (Nemo/Lovecraft/CC review rounds) — transient, not source.
+scripts/smoke/*/review/
+scripts/smoke/*/review-*/
+# uv lockfile — Modulatio ships via its own install flow + pyproject; the lock
+# is a local dev convenience, deliberately not tracked (matches the released state).
+uv.lock
 *.db
 *.sqlite
 *.sqlite3

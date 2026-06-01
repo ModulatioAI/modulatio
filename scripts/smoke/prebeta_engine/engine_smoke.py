@@ -233,6 +233,25 @@ def main() -> int:
                          "retries and QC-as-fixer fires (live test of the fixer)")
     args = ap.parse_args()
 
+    # Opt-in gate. This is a LIVE, real-model, multi-objective orchestration
+    # that legitimately runs for many minutes (I/O-bound on cloud models, so
+    # it sits at ~0% CPU and looks hung). It must NOT run inside a blind
+    # `find scripts/smoke -name '*.py' | python` loop — doing so wedges the
+    # whole sweep (it stalled two separate reviewer sweeps for 40-77 min
+    # before being killed). Require an explicit opt-in so a glob skips it
+    # instantly with a clean exit 0; a human who wants it runs it on purpose.
+    if os.environ.get("MODULATIO_ENGINE_SMOKE") != "1":
+        print(
+            "SKIP: live engine smoke — intentionally excluded from blind smoke "
+            "globs.\n"
+            "      It runs a full multi-objective workload on REAL cloud models "
+            "(minutes to hours).\n"
+            "      To run it: MODULATIO_ENGINE_SMOKE=1 .venv/bin/python "
+            "scripts/smoke/prebeta_engine/engine_smoke.py\n"
+            "      (needs OPENROUTER_API_KEY + OLLAMA_API_KEY in the env)."
+        )
+        return 0
+
     # Leader override (e.g. gpt-5.4 for rate-limit headroom). Mutate the
     # shared map BEFORE roster/Project/runners are built off it.
     ROLE_MODELS["leader"] = args.leader_model
