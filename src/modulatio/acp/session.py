@@ -9,6 +9,8 @@ tool calls → ``session/request_permission`` round-trips, and the JT-interview
 """
 from __future__ import annotations
 
+import threading
+
 
 def _permission_allows(result) -> bool:
     """Map an ACP ``session/request_permission`` response to allow/deny.
@@ -33,6 +35,20 @@ class ACPSession:
         self._server = server
         self.orch = None  # set by the server after construction
         self.cancelled = False
+        # One in-flight prompt per session: converse() shares the persisted
+        # conversation thread + transcript, so overlapping prompts would race.
+        self._prompt_lock = threading.Lock()
+
+    def begin_prompt(self) -> bool:
+        """Try to claim this session for a prompt turn. Returns False if a
+        prompt is already in flight (the caller rejects the new one)."""
+        return self._prompt_lock.acquire(blocking=False)
+
+    def end_prompt(self) -> None:
+        try:
+            self._prompt_lock.release()
+        except RuntimeError:
+            pass  # not held (defensive)
 
     # ── activity → session/update ───────────────────────────────────────
     def on_activity(self, event) -> None:

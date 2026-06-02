@@ -53,8 +53,10 @@ def _parse_prompt(params: dict) -> tuple[str, list]:
                 try:
                     attachments.append(
                         build_attachment(Path(block["path"]), kind=kind))
-                except Exception:
-                    pass  # a bad attachment shouldn't sink the turn
+                except Exception as exc:  # a bad attachment shouldn't sink the turn
+                    import sys
+                    print(f"acp: dropped attachment {block.get('path')!r}: "
+                          f"{type(exc).__name__}", file=sys.stderr)
     return ("\n".join(t for t in text_parts if t), attachments)
 
 
@@ -166,6 +168,12 @@ class ACPServer:
         if session is None:
             self._error(req_id, rpc.INVALID_REQUEST, f"unknown session {sid!r}")
             return
+        # One in-flight prompt per session — reject an overlapping prompt rather
+        # than race two converse() calls on the same conversation thread.
+        if not session.begin_prompt():
+            self._error(req_id, rpc.INVALID_REQUEST,
+                        "session already has an active prompt")
+            return
         session.cancelled = False
         message, attachments = _parse_prompt(params)
         threading.Thread(
@@ -184,6 +192,8 @@ class ACPServer:
             self._respond(req_id, {"stopReason": "end_turn", "reply": reply})
         except Exception as exc:
             self._error(req_id, rpc.INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
+        finally:
+            session.end_prompt()
 
     def _cancel(self, params: dict) -> None:
         session = self._sessions.get(params.get("sessionId"))

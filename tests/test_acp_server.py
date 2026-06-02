@@ -73,13 +73,19 @@ class _Client:
     def start(self) -> None:
         self._thread.start()
 
-    def request(self, method: str, params: dict | None = None, timeout: float = 10):
+    def send(self, method: str, params: dict | None = None):
+        """Send a request without waiting; returns its id."""
         rid = f"c{next(self._ids)}"
-        ev = threading.Event()
-        self.events[rid] = ev
+        self.events[rid] = threading.Event()
         self._push(rpc.make_request(rid, method, params or {}))
-        assert ev.wait(timeout), f"no response to {method}"
+        return rid
+
+    def wait(self, rid, timeout: float = 10):
+        assert self.events[rid].wait(timeout), f"no response to {rid}"
         return self.responses[rid]
+
+    def request(self, method: str, params: dict | None = None, timeout: float = 10):
+        return self.wait(self.send(method, params), timeout)
 
     def close(self) -> None:
         self._inq.put("")  # EOF
@@ -188,6 +194,45 @@ def test_permission_round_trip_denies_tool(vault_root):
         resp = client.request("session/prompt", {"sessionId": sid, "prompt": "go"})
         assert resp["result"]["reply"] == "ok, skipped it"
         assert ran == []                         # the tool never ran
+    finally:
+        client.close()
+
+
+class _BlockingOrch:
+    """A fake Orchestrator whose converse() blocks on a gate — lets a test hold
+    one prompt 'in flight' while it fires a second at the same session."""
+
+    def __init__(self) -> None:
+        self.gate = threading.Event()
+        self.entered = 0
+        self._lock = threading.Lock()
+
+    def converse(self, message, *, attachments=None, permission_callback=None):
+        with self._lock:
+            self.entered += 1
+        self.gate.wait(timeout=10)
+        return "released"
+
+
+def test_overlapping_prompts_rejected(vault_root):
+    """One in-flight prompt per session (Nemo's hull blocker): a second
+    session/prompt while the first is running is rejected, not run concurrently."""
+    orch = _BlockingOrch()
+    client = _Client(lambda session: orch)
+    client.start()
+    try:
+        client.request("initialize", {})
+        sid = client.request("session/new", {})["result"]["sessionId"]
+        # prompt 1 — converse blocks on the gate (worker holds the session)
+        rid1 = client.send("session/prompt", {"sessionId": sid, "prompt": "first"})
+        # prompt 2 while 1 is in flight → rejected (begin_prompt fails)
+        resp2 = client.request("session/prompt", {"sessionId": sid, "prompt": "two"})
+        assert resp2["error"]["code"] == rpc.INVALID_REQUEST
+        assert "active prompt" in resp2["error"]["message"]
+        # release prompt 1; it completes
+        orch.gate.set()
+        assert client.wait(rid1)["result"]["reply"] == "released"
+        assert orch.entered == 1  # converse was entered exactly once
     finally:
         client.close()
 
