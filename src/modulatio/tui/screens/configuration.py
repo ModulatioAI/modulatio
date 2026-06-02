@@ -66,8 +66,8 @@ class ConfigScreen(Vertical):
         yield Static("CONFIGURATION · Models", classes="cfg-title")
         yield Vertical(id="cfg-body")
 
-    def on_mount(self) -> None:
-        self.show_list()
+    async def on_mount(self) -> None:
+        await self.show_list()
 
     def _body(self) -> Vertical:
         return self.query_one("#cfg-body", Vertical)
@@ -83,9 +83,12 @@ class ConfigScreen(Vertical):
 
     # ── the list ────────────────────────────────────────────────────────
 
-    def show_list(self, message: str = "") -> None:
+    async def show_list(self, message: str = "") -> None:
+        # async swap: await the removal before mounting so a returning view's
+        # widgets (e.g. #cfg-status) can't collide with the list's — the same
+        # DuplicateIds guard the rest of the configurator uses.
         body = self._body()
-        body.remove_children()
+        await body.remove_children()
         table = DataTable(id="cfg-models", cursor_type="row")
         table.add_columns("Key", "Model", "Auth", "Status")
         self._fill_table(table)
@@ -122,7 +125,7 @@ class ConfigScreen(Vertical):
         try:
             table = self.query_one("#cfg-models", DataTable)
         except Exception:
-            self.show_list()
+            self.run_worker(self.show_list())
             return
         table.clear()
         self._fill_table(table)
@@ -153,7 +156,7 @@ class ConfigScreen(Vertical):
             await self._swap(ProviderPicker(id="cfg-pp"))
         elif event.button.id == "cfg-cancel":
             # bail out of the add flow / keys manager → back to the list
-            self.show_list("Cancelled.")
+            await self.show_list("Cancelled.")
         elif event.button.id == "cfg-remove":
             key = self._selected_preset_key()
             if not key:
@@ -200,11 +203,12 @@ class ConfigScreen(Vertical):
                 id="cfg-mp",
             ))
 
-    def on_model_picker_model_chosen(
+    async def on_model_picker_model_chosen(
         self, event: ModelPicker.ModelChosen
     ) -> None:
         key = self.register(event.model_id)
-        self.show_list(f"Added '{key}'." if key else "Could not add the model.")
+        await self.show_list(
+            f"Added '{key}'." if key else "Could not add the model.")
 
     # ── key plumbing shared by both managers ────────────────────────────
 
@@ -324,7 +328,7 @@ class ConfigScreen(Vertical):
         body = self._body()
         await body.remove_children()
         if prov is None or base is None:
-            self.show_list()
+            await self.show_list()
             return
         self._prov_id = provider_id
         self._prov_base = base

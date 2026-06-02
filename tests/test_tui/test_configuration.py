@@ -92,7 +92,7 @@ async def test_full_flow_provider_auth_model_registers(tmp_path, monkeypatch):
             if ol.option_count:
                 break
 
-        screen.on_model_picker_model_chosen(
+        await screen.on_model_picker_model_chosen(
             ModelPicker.ModelChosen("ollama_local", "llama3.3:8b"))
         await pilot.pause()
         # back to the list, and the preset is registered
@@ -210,6 +210,31 @@ async def test_provider_key_manager_removes_a_key_and_repoints_pins(
         # …and the model it was pinned to fell back to the shared pool
         assert model_presets.get_preset("orpin")["auth_config"] == {
             "env_var": "OPENROUTER_API_KEY", "pool": True}
+
+
+async def test_back_from_key_manager_returns_to_list(tmp_path, monkeypatch):
+    """Back out of the key manager → the model list, with no DuplicateIds
+    crash (the bug: the manager's #cfg-status collided with the list's when
+    show_list mounted before the old one finished removing)."""
+    from textual.widgets import Button
+
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "p.json")
+    monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
+    monkeypatch.setattr(provider_keys, "PINS_FILE", tmp_path / "pins.json")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k1")
+    app = _Host()
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        await screen._show_provider_keys("openrouter")
+        await pilot.pause()
+        assert app.query("#cfg-provkeylist")
+        # Back (cfg-cancel) → the list
+        await screen.on_button_pressed(
+            Button.Pressed(app.query_one("#cfg-cancel", Button)))
+        await pilot.pause()
+        assert app.query("#cfg-models")        # back on the list
+        assert not app.query("#cfg-provkeylist")  # manager torn down cleanly
 
 
 async def test_remove_deletes_the_selected_preset(tmp_path, monkeypatch):
