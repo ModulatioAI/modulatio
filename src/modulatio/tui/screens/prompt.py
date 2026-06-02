@@ -76,6 +76,11 @@ class PromptScreen(Vertical):
         height: 1;
         color: $text-muted;
     }
+    PromptScreen #chatbox-attachments-list {
+        height: auto;
+        max-height: 1;
+        color: $text-muted;
+    }
     /* TEAM tab: the factory-floor TV on top, the KICK OFF box compact below. */
     PromptScreen .team-tv {
         height: 1fr;
@@ -120,6 +125,13 @@ class PromptScreen(Vertical):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._kickoff_attachments: list[Attachment] = []
+        self._chatbox_attachments: list[Attachment] = []
+
+    @property
+    def chatbox_attachments(self) -> list[Attachment]:
+        """Pending attachments for the next chat message — read by
+        ``_send_message`` and passed to the Leader's ``converse``."""
+        return list(self._chatbox_attachments)
 
     @property
     def kickoff_attachments(self) -> list[Attachment]:
@@ -156,6 +168,9 @@ class PromptScreen(Vertical):
                     yield ChatInput("", id="prompt-input", soft_wrap=True)
                     with Horizontal(id="chatbox-buttons"):
                         yield Button("SEND", id="chat-send", variant="primary")
+                        yield Button("📎", id="chat-attach-doc-btn")
+                        yield Button("🖼", id="chat-attach-image-btn")
+                    yield Static("", id="chatbox-attachments-list")
                     yield Static(
                         "Enter sends a message  ·  "
                         "type /kickoff <objective> to run a job",
@@ -226,6 +241,48 @@ class PromptScreen(Vertical):
         self._kickoff_attachments.clear()
         self._refresh_kickoff_attachment_list()
 
+    # ── Chatbox attachments (docs + images for the Leader conversation) ──
+
+    def attach_chat(self, path: Path, *, kind: AttachmentKind) -> None:
+        """Stage an attachment for the next chat message to the Leader. Public
+        so the 📎/🖼 buttons (via modal callback) and tests can drive it."""
+        try:
+            att = build_attachment(path, kind=kind)
+        except (FileNotFoundError, UnicodeDecodeError) as exc:
+            self.query_one("#prompt-response", Static).update(
+                f"[bold red]Attach failed:[/] {exc}"
+            )
+            return
+        self._chatbox_attachments.append(att)
+        self._refresh_chatbox_attachment_list()
+
+    def clear_chatbox_attachments(self) -> None:
+        self._chatbox_attachments.clear()
+        self._refresh_chatbox_attachment_list()
+
+    def _refresh_chatbox_attachment_list(self) -> None:
+        try:
+            widget = self.query_one("#chatbox-attachments-list", Static)
+        except Exception:
+            return
+        if not self._chatbox_attachments:
+            widget.update("")
+            return
+        names = [
+            f"📎 {att.name}" if att.kind == "document" else f"🖼  {att.name}"
+            for att in self._chatbox_attachments
+        ]
+        widget.update(f"[dim]attached:[/] {'  '.join(names)}")
+
+    def _open_chat_attach_modal(self, kind: AttachmentKind) -> None:
+        from modulatio.tui.widgets.attach_modal import AttachPathModal
+
+        def _on_dismiss(path: Path | None) -> None:
+            if path is not None:
+                self.attach_chat(path, kind=kind)
+
+        self.app.push_screen(AttachPathModal(kind=kind), _on_dismiss)
+
     # ── Conversation: Enter / SEND posts a message to the Leader ────────
 
     def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
@@ -271,15 +328,22 @@ class PromptScreen(Vertical):
                 handler(text)
             return
 
-        # Plain text → a message to the Leader (converse).
+        # Plain text → a message to the Leader (converse), with any staged
+        # attachments. Snapshot + clear so the next message starts clean.
         leader_tv.add_operator_message(text)
+        attachments = self.chatbox_attachments
+        self.clear_chatbox_attachments()
         handler = getattr(self.app, "_operator_message", None)
         if handler is not None:
-            handler(text)
+            handler(text, attachments)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "chat-send":
             self._send_message()
+        elif event.button.id == "chat-attach-doc-btn":
+            self._open_chat_attach_modal("document")
+        elif event.button.id == "chat-attach-image-btn":
+            self._open_chat_attach_modal("image")
         elif event.button.id == "kickoff-attach-doc-btn":
             self._open_kickoff_attach_modal("document")
         elif event.button.id == "kickoff-attach-image-btn":

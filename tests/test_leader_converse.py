@@ -106,6 +106,47 @@ def test_converse_prompt_carries_the_constitution(project: Project):
     assert block in orch._build_converse_prompt([], "hi")
 
 
+def test_converse_inlines_a_document(project: Project, tmp_path: Path):
+    """A document attachment is inlined into the converse prompt so the Leader
+    can read it (the text path keeps full tool-use)."""
+    from modulatio.attachments import build_attachment
+
+    doc = tmp_path / "notes.md"
+    doc.write_text("SECRET DOC CONTENT", encoding="utf-8")
+    att = build_attachment(doc, kind="document")
+    orch = Orchestrator(project, _runners())
+    prompt = orch._build_converse_prompt([], "read this", [att])
+    assert "SECRET DOC CONTENT" in prompt
+
+
+def test_converse_with_image_routes_to_multimodal(
+    project: Project, tmp_path: Path, monkeypatch
+):
+    """An image attachment routes the turn through the multimodal path
+    (carrying the image), not the text tool-loop."""
+    from modulatio.attachments import build_attachment
+
+    img = tmp_path / "pic.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    att = build_attachment(img, kind="image")
+
+    captured: dict = {}
+
+    def fake_multimodal(*, prompt, attachments, chat_completion):
+        captured["attachments"] = attachments
+        return "I can see the image."
+
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": lambda **k: ChatResponse(
+            content="unused", tool_calls=())},
+    )
+    monkeypatch.setattr(orch, "_run_multimodal_leader", fake_multimodal)
+    reply = orch.converse("what's in this?", attachments=[att])
+    assert reply == "I can see the image."
+    assert captured["attachments"][0].kind == "image"
+
+
 def test_pending_approvals_surface_and_decide(project: Project):
     """The Leader sees pending approvals in the prompt and resolves one via the
     decide_approval tool (the conversational-approval path)."""

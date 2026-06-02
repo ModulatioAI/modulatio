@@ -69,6 +69,34 @@ async def test_console_has_leader_and_team_streams(project_with_roster):
         assert ids == ["stream-leader", "stream-team"]
 
 
+async def test_chatbox_attachments_stage_and_clear_on_send(
+    project_with_roster, tmp_path
+):
+    """The LEADER chatbox stages doc/image attachments and clears them on send
+    (they ride with the message into converse)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    doc = tmp_path / "notes.md"
+    doc.write_text("hello", encoding="utf-8")
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # the attach buttons exist on the chatbox
+        assert app.query("#chat-attach-doc-btn")
+        assert app.query("#chat-attach-image-btn")
+
+        screen = app.query_one(PromptScreen)
+        screen.attach_chat(doc, kind="document")
+        assert len(screen.chatbox_attachments) == 1
+
+        screen.query_one("#prompt-input", ChatInput).text = "look at this"
+        screen._send_message()
+        await pilot.pause()
+        assert screen.chatbox_attachments == []  # cleared on send
+
+
 async def test_no_agent_chat_panes_remain(project_with_roster):
     """The retired per-agent chat grid is gone — no AgentPanePanel mounts."""
     from modulatio.tui.app import ModulatioApp

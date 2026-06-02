@@ -662,14 +662,15 @@ class ModulatioApp(App):
         self._conv_orch = orch
         return orch
 
-    def _operator_message(self, text: str) -> None:
-        """Operator sent a chat message → hand it to the Leader's converse
-        function on a worker thread; the reply renders when it returns."""
+    def _operator_message(self, text: str, attachments=None) -> None:
+        """Operator sent a chat message (+ optional attachments) → hand it to
+        the Leader's converse function on a worker thread; the reply renders
+        when it returns."""
         self._set_lane_status("stream-leader-status", "leader_thinking")
-        self._converse_worker(text)
+        self._converse_worker(text, attachments or [])
 
     @work(thread=True, exclusive=True, group="converse")
-    def _converse_worker(self, text: str) -> str:
+    def _converse_worker(self, text: str, attachments=None) -> str:
         if self.stub:
             return (
                 "(I'm in offline --stub mode, so I can't actually think yet. "
@@ -682,7 +683,7 @@ class ModulatioApp(App):
                 "(no models are configured — run `modulatio setup` to wire the "
                 "Leader's model.)"
             )
-        return orch.converse(text)
+        return orch.converse(text, attachments=attachments or [])
 
     def _on_converse_done(self, reply: str) -> None:
         try:

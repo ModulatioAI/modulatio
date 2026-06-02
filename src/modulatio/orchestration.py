@@ -3730,12 +3730,18 @@ class Orchestrator:
             lines.append(f"- `{t.id}` [{t.priority.value}] {t.title}")
         return "\n".join(lines)
 
-    def _build_converse_prompt(self, thread: list[dict], message: str) -> str:
+    def _build_converse_prompt(
+        self, thread: list[dict], message: str, attachments: list | None = None
+    ) -> str:
         lines = []
         for turn in thread:
             who = "Operator" if turn.get("role") == "operator" else "You (Leader)"
             lines.append(f"{who}: {turn.get('content', '')}")
         lines.append(f"Operator: {message}")
+        if attachments:
+            lines.append("")
+            lines.append("(attachments with this message)")
+            lines.append(_format_kickoff_attachments(attachments))
         transcript = "\n\n".join(lines) if lines else "(first message of the conversation)"
         body = self._prompt("leader-converse", _LEADER_CONVERSE_PROMPT)
         return body.format(
@@ -3840,24 +3846,45 @@ class Orchestrator:
             ),
         }
 
-    def converse(self, message: str, *, on_token: "Callable[[str], None] | None" = None) -> str:
+    def converse(
+        self,
+        message: str,
+        *,
+        attachments: list | None = None,
+        on_token: "Callable[[str], None] | None" = None,
+    ) -> str:
         """The Leader's conversational function: reply to the operator as a
         fully-capable partner, tool-using and persistent. Returns the reply
         text; ``on_token`` is reserved for streaming (Phase B). The thread is
         persisted per-project.
 
-        Offline (no leader chat runner wired — e.g. stub mode) returns a plain
-        acknowledgement so the UI flow still works without a model.
+        ``attachments`` (documents + images) ride with the message: documents
+        are inlined into the prompt; an image routes this turn through a single
+        multimodal completion (the tool-loop is text-only, like the
+        kickoff/decompose split). Offline (no leader chat runner wired — e.g.
+        stub mode) returns a plain acknowledgement so the UI flow still works.
         """
+        attachments = attachments or []
         thread = self._load_conversation()
-        prompt = self._build_converse_prompt(thread, message)
-        self._append_conversation("operator", message)
+        prompt = self._build_converse_prompt(thread, message, attachments)
+        op_record = message
+        if attachments:
+            op_record += "  [attached: " + ", ".join(
+                a.name for a in attachments) + "]"
+        self._append_conversation("operator", op_record)
         self._emit_activity(role="leader", phase="leader_thinking", agent_id="leader")
 
+        has_image = any(getattr(a, "kind", None) == "image" for a in attachments)
         if self._resolve_chat_runner("leader") is None:
             reply = (
                 "(offline — no leader model is wired here, so I can't think this "
                 f"through yet. You said: {message})"
+            )
+        elif has_image:
+            # Vision turn: a single multimodal completion (no tool-loop this
+            # turn — content blocks aren't carried through the text tool-loop).
+            reply = self._run_multimodal_leader(
+                prompt=prompt, attachments=attachments, chat_completion=None,
             )
         else:
             from modulatio import vault as _vault
