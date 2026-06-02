@@ -44,6 +44,14 @@ from modulatio.tui.screens.status import build_status_panel
 from modulatio.tui.screens.plans import build_plans_panel
 from modulatio.tui.screens.tickets import build_tickets_panel
 from modulatio.tui.widgets.activity_log import ActivityLog
+from modulatio.tui.widgets.chat_input import ChatInput
+from modulatio.tui.widgets.stream_status import StreamStatus
+from modulatio.tui.widgets.stream_view import (
+    LEADER_ROLES,
+    TEAM_ROLES,
+    StreamView,
+    _humanize,
+)
 from modulatio.types import ActivityEvent, Project, ProjectState
 
 
@@ -138,36 +146,35 @@ class ModulatioApp(App):
     # ``MODULATIO :: PROJECT <CODE> :: <MODE>``.
     TITLE = "MODULATIO"
 
-    # 1980s aerospace / neon-wireframe aesthetic (reference:
-    # ~/Pictures/modulatio aesthetic.png; spec memory:
-    # project_modulatio_aesthetic_spec.md). Override Textual's design-
-    # system variables at the App level so every screen and widget that
-    # uses ``$accent`` / ``$primary`` / ``$success`` / etc. picks up the
-    # palette automatically. Per-screen DEFAULT_CSS rarely hardcodes
-    # raw hex, so this swap cascades broadly without per-file edits.
-    #
-    # Web dashboard build (future) uses the same named tokens for CSS
-    # variables — keep the names in sync there.
+    # 1980s mainframe-terminal aesthetic — IBM-3270 phosphor amber over a
+    # deep-navy CRT, light-blue frames, a single beacon-orange hot accent.
+    # Matches modulatio.ai (see ~/modulatio-site/src/styles/modulatio.css).
+    # Override Textual's design-system tokens at the App level so every
+    # screen/widget that uses $primary / $accent / $text picks up the
+    # palette automatically; per-screen CSS rarely hardcodes raw hex, so
+    # this swap cascades broadly. The web dashboard (future) reuses these
+    # token names — keep them in sync.
     CSS = """
-    /* ── Palette overrides (Textual design tokens → neon-wireframe) ── */
-    /* Note: $panel and $boost are NOT overridden here — Textual's
-       built-in Screen.-maximized-view rule uses $panel in a hatch
-       declaration that expects a percentage, not a color. Override
-       those would crash CSS parsing. We use literal hex values
-       inline where we need our elevated/boost shades. */
-    $background: #0A0E1A;
-    $surface: #0E1424;
+    /* ── Palette: IBM-3270 phosphor amber on deep navy (modulatio.ai) ── */
+    /* $panel / $boost intentionally NOT overridden — Textual's
+       -maximized-view rule uses $panel in a hatch that expects a
+       percentage, not a color; overriding crashes CSS parsing. */
+    $background: #0a1628;   /* deep navy CRT */
+    $surface: #0e1c30;      /* elevated navy */
 
-    $primary: #00E5FF;
-    $secondary: #7A8AB5;
-    $accent: #00E5FF;
-    $success: #00FF7F;
-    $warning: #BB00FF;
-    $error: #FF00AA;
+    $primary: #ffb000;      /* phosphor amber — accents, headings, cursor */
+    $secondary: #b08858;    /* dim amber — secondary text / meta */
+    $accent: #ff6b35;       /* beacon orange — the single hot accent */
+    $success: #ffb000;      /* monochrome phosphor — amber family */
+    $warning: #ff6b35;
+    $error: #ff5555;        /* terminal red — failures only */
 
-    $foreground: #E0E8FF;
-    $text: #E0E8FF;
-    $text-muted: #7A8AB5;
+    $foreground: #e8d8b4;   /* aged-parchment phosphor body */
+    $text: #e8d8b4;
+    $text-muted: #b08858;
+
+    /* $frame / $frame-dim (light-blue chrome) are registered globally in
+       get_css_variables() so they resolve in widget DEFAULT_CSS too. */
 
     /* ── Base app + screen background ── */
     Screen {
@@ -176,90 +183,91 @@ class ModulatioApp(App):
 
     /* ── Header / Footer (the always-visible chrome) ── */
     Header {
-        background: #13192D;
-        color: $accent;
+        background: #0e1c30;
+        color: $primary;
         text-style: bold;
     }
     Footer {
-        background: #13192D;
+        background: #0e1c30;
         color: $text-muted;
     }
 
-    /* ── Buttons: monochrome outlined, no fill, neon edge ── */
+    /* ── Buttons: rounded light-blue frame, no fill, amber on focus.
+          No square corners (Clif: "no square buttons"). ── */
     Button {
         background: transparent;
-        border: tall #2A3450;
+        border: round $frame-dim;
         color: $foreground;
         min-width: 12;
         padding: 0 2;
     }
     Button:hover {
-        background: #13192D;
-        border: tall $accent;
-        color: $accent;
+        background: #0e1c30;
+        border: round $frame;
+        color: $primary;
         text-style: bold;
     }
     Button:focus {
-        border: tall $accent;
-        color: $accent;
+        border: round $primary;
+        color: $primary;
         text-style: bold;
     }
     Button.-primary {
-        border: tall $accent;
-        color: $accent;
+        border: round $primary;
+        color: $primary;
     }
     Button.-success {
-        border: tall $success;
+        border: round $success;
         color: $success;
     }
     Button.-warning {
-        border: tall $warning;
-        color: $warning;
+        border: round $accent;
+        color: $accent;
     }
     Button.-error {
-        border: tall $error;
+        border: round $error;
         color: $error;
     }
     Button:disabled {
-        border: tall #4A5478;
-        color: #4A5478;
+        border: round $frame-dim;
+        color: #5e4828;
     }
 
-    /* ── DataTable: aerospace-grid feel ── */
+    /* ── DataTable: phosphor grid ── */
     DataTable {
         background: $surface;
     }
     DataTable > .datatable--header {
-        background: #13192D;
-        color: $accent;
+        background: #0e1c30;
+        color: $primary;
         text-style: bold;
     }
     DataTable > .datatable--cursor {
-        background: #1A2138;
-        color: $accent;
+        background: #14263c;
+        color: $primary;
     }
     DataTable > .datatable--hover {
-        background: #1A2138;
+        background: #14263c;
     }
 
-    /* ── Inputs / TextArea ── */
+    /* ── Inputs / TextArea: rounded light-blue frame, amber on focus ── */
     Input {
         background: $surface;
-        border: tall #2A3450;
+        border: round $frame-dim;
         color: $foreground;
     }
     Input:focus {
-        border: tall $accent;
+        border: round $primary;
     }
     TextArea {
         background: $surface;
-        border: tall #2A3450;
+        border: round $frame-dim;
     }
     TextArea:focus {
-        border: tall $accent;
+        border: round $primary;
     }
 
-    /* ── Tabs: active = neon cyan underline ── */
+    /* ── Tabs: active = phosphor amber ── */
     Tabs {
         background: $background;
     }
@@ -268,7 +276,7 @@ class ModulatioApp(App):
         padding: 0 2;
     }
     Tab.-active {
-        color: $accent;
+        color: $primary;
         text-style: bold;
     }
     TabbedContent ContentSwitcher {
@@ -283,20 +291,19 @@ class ModulatioApp(App):
     COMMANDS = App.COMMANDS | {ModulatioCommands}
 
     BINDINGS = [
-        ("q", "quit", "Quit"),
-        # F1-F9 toggle focus on agents 1-9 in the Prompt tab. Bound at
-        # app level so the focus chain doesn't matter — pressing F-keys
-        # works regardless of which child widget currently holds focus.
-        # The "show commands" modal (#27) will pick a different key.
-        ("f1", "prompt_focus(0)", "F1"),
-        ("f2", "prompt_focus(1)", "F2"),
-        ("f3", "prompt_focus(2)", "F3"),
-        ("f4", "prompt_focus(3)", "F4"),
-        ("f5", "prompt_focus(4)", "F5"),
-        ("f6", "prompt_focus(5)", "F6"),
-        ("f7", "prompt_focus(6)", "F7"),
-        ("f8", "prompt_focus(7)", "F8"),
-        ("f9", "prompt_focus(8)", "F9"),
+        # QUIT takes a modifier (Alt+Q) so a stray "q" never closes the TUI.
+        ("alt+q", "quit", "QUIT"),
+        ("ctrl+q", "quit", "QUIT"),
+        # Conversation-first keymap. The old F1–F9 per-agent chat-focus
+        # bindings are retired (we no longer chat with producers/QC — the
+        # Leader works with them on the operator's behalf) and recycled:
+        ("f2", "flip_stream", "LEADER/TEAM"),
+        ("f3", "focus_jobdrop", "COMPOSE"),
+        # KICK OFF is the deliberate, separated job-launch — never Enter.
+        ("f5", "kickoff", "KICK OFF"),
+        # Select text in a TV stream (drag), then Ctrl+C to copy it — paste
+        # into the chatbox with Ctrl+V. (Quit is Alt+Q / Ctrl+Q.)
+        ("ctrl+c", "copy_text", "COPY"),
     ]
 
     def __init__(self, *, project_code: str = "TUI", stub: bool = True):
@@ -312,13 +319,22 @@ class ModulatioApp(App):
         #: Status-tab widgets (slice #21) that might mirror it.
         self.last_summary_text: str = ""
 
+    def get_css_variables(self) -> dict[str, str]:
+        """Register Modulatio's custom CSS variables globally so they resolve
+        in widget DEFAULT_CSS as well as the App stylesheet. The light-blue
+        frame chrome ($frame / $frame-dim) pairs with the amber phosphor."""
+        variables = super().get_css_variables()
+        variables.setdefault("frame", "#6cb6e4")
+        variables.setdefault("frame-dim", "#3f6d8c")
+        return variables
+
     def compose(self) -> ComposeResult:
         # Aesthetic spec: ALL-CAPS labels for system-level chrome.
         # Tab IDs stay lowercase (they're identifiers, not UI text);
         # only the visible label flips to uppercase.
         yield Header()
-        with TabbedContent(initial="tab-prompt"):
-            with TabPane("PROMPT", id="tab-prompt"):
+        with TabbedContent(initial="tab-prompt", id="app-tabs"):
+            with TabPane("CONSOLE", id="tab-prompt"):
                 yield build_prompt_panel()
             with TabPane("PLANS", id="tab-plans"):
                 yield build_plans_panel()
@@ -349,21 +365,26 @@ class ModulatioApp(App):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "prompt-kickoff":
-            self._run_kickoff()
+            self._run_kickoff(self._kickoff_objective_text())
 
-    def _run_kickoff(self) -> None:
+    def _kickoff_objective_text(self) -> str:
+        """Read the objective from the KICK OFF box on the TEAM floor."""
         from textual.widgets import TextArea
-        inp = self.query_one("#prompt-input", TextArea)
-        objective = inp.text.strip()
-        if not objective:
-            self._set_response("(type an objective first, then click Kick off)")
-            return
+        try:
+            return self.query_one("#kickoff-objective", TextArea).text.strip()
+        except NoMatches:
+            return ""
 
-        # Slice 5: slash-command routing. `/help`, `/setup`, `/memory`, etc.
-        # take the same input and run before falling through to objective
-        # kickoff.
-        if objective.startswith("/"):
-            self._handle_slash_command(objective)
+    def _run_kickoff(self, objective: str) -> None:
+        """Launch a job — the Leader's orchestrate function. ``objective`` comes
+        from the TEAM KICK OFF box (button / F5) or from a `/kickoff` message on
+        the LEADER chat. The producer team streams into the TEAM floor; the
+        Leader reports the verdict back on the LEADER tab."""
+        objective = (objective or "").strip()
+        if not objective:
+            self._set_kickoff_status(
+                "(type a job objective first, then KICK OFF / F5)"
+            )
             return
 
         project = self._ensure_project()
@@ -373,12 +394,15 @@ class ModulatioApp(App):
         else:
             runners = self._build_real_runners()
             if runners is None:
-                self._set_response(
+                self._set_kickoff_status(
                     "(no models configured — run `modulatio setup` or "
                     "`modulatio models add` to register models, then retry)"
                 )
                 return
             mode = "real"
+
+        # Flip to the factory floor so the launch and the work are on one tab.
+        self._show_team_floor()
 
         # Disable the Kick off button so a second click can't double-fire
         # while the worker is running.
@@ -388,16 +412,17 @@ class ModulatioApp(App):
         except NoMatches:
             pass
 
-        # Track elapsed time so the response panel shows progress instead
-        # of staying frozen on the user's last message. ``set_interval``
-        # repaints once per second from the main thread.
+        # Track elapsed time so the status line shows progress instead of
+        # staying frozen. ``set_interval`` repaints once per second from the
+        # main thread.
         import time as _time
         self._kickoff_started_at = _time.monotonic()
         self._kickoff_mode = mode
-        self._set_response(
-            f"Running ({mode} mode)... 0s elapsed. Switch to the Status tab "
-            "for live activity, or wait here for the summary."
+        self._set_kickoff_status(
+            f"Running ({mode} mode)… watch the team work on the floor."
         )
+        # Immediate feedback before the first engine event lands.
+        self._set_lane_status("stream-team-status", "modulating")
         self._kickoff_tick = self.set_interval(1.0, self._update_kickoff_progress)
 
         # Snapshot any kickoff-bar attachments + clear so the next run
@@ -411,6 +436,13 @@ class ModulatioApp(App):
             screen.clear_kickoff_attachments()
         except Exception:
             attachments = []
+
+        # Clear the objective box so the next job starts from a clean slate.
+        try:
+            from textual.widgets import TextArea
+            self.query_one("#kickoff-objective", TextArea).text = ""
+        except Exception:
+            pass
 
         # Schedule the kickoff in a background thread. Activity events still
         # fire via ``_record_activity`` (which uses call_from_thread to
@@ -463,20 +495,24 @@ class ModulatioApp(App):
         elapsed = int(_time.monotonic() - self._kickoff_started_at)
         mins, secs = divmod(elapsed, 60)
         elapsed_str = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
-        self._set_response(
+        self._set_kickoff_status(
             f"Running ({self._kickoff_mode} mode)... {elapsed_str} elapsed. "
-            "Switch to the Status tab for live activity, or wait here for the summary."
+            "Watch the floor, or flip to LEADER — he'll report back there when done."
         )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Handle kickoff worker completion / failure. Re-enables the
         Kick off button and renders the result or error."""
-        if event.worker.group != "kickoff":
-            return
-        if event.state == WorkerState.SUCCESS:
-            self._on_kickoff_done(event.worker.result, None)
-        elif event.state == WorkerState.ERROR:
-            self._on_kickoff_done(None, event.worker.error)
+        if event.worker.group == "kickoff":
+            if event.state == WorkerState.SUCCESS:
+                self._on_kickoff_done(event.worker.result, None)
+            elif event.state == WorkerState.ERROR:
+                self._on_kickoff_done(None, event.worker.error)
+        elif event.worker.group == "converse":
+            if event.state == WorkerState.SUCCESS:
+                self._on_converse_done(event.worker.result)
+            elif event.state == WorkerState.ERROR:
+                self._on_converse_done(f"(error talking to the Leader: {event.worker.error})")
 
     def _on_kickoff_done(self, result: dict | None, error: BaseException | None) -> None:
         """Restore the UI after a kickoff worker finishes (success or fail)."""
@@ -494,17 +530,52 @@ class ModulatioApp(App):
             btn.disabled = False
         except NoMatches:
             pass
-        # Render result or error.
+        # Settle the team floor's status line — that's where the work ran.
+        team_status = self._lane_status("stream-team-status")
         if error is not None:
-            self._set_response(f"Kickoff failed: {error}")
+            if team_status is not None:
+                team_status.set_error(str(error)[:80])
         else:
-            self._set_response(
+            if team_status is not None:
+                team_status.set_done()
+        # Render the result on the floor's status line …
+        if error is not None:
+            self._set_kickoff_status(f"Kickoff failed: {error}")
+        else:
+            self._set_kickoff_status(
                 f"Completed {result['mode']} kickoff — "
                 f"goals: {result['goals']}, "
                 f"tasks: {result['tasks']}, "
                 f"drafts: {result['drafts']}, "
                 f"errors: {result['errors']}"
             )
+        # … and the Leader reports the verdict back on the LEADER tab — his
+        # voice, where you talk to him.
+        self._post_leader_verdict(result, error)
+        # The run is done — the Leader has a summary for you. Light the amber
+        # lamp ("talk to me") so it reads even from the factory floor.
+        self._signal_msg()
+
+    def _post_leader_verdict(
+        self, result: dict | None, error: BaseException | None
+    ) -> None:
+        """After a job, the Leader speaks his verdict into the LEADER TV — so
+        the conversation tab is where he always reports, work or talk."""
+        try:
+            tv = self.query_one("#stream-leader", StreamView)
+        except NoMatches:
+            return
+        if error is not None:
+            tv.add_leader_message(
+                f"That job hit a wall — {error}. Want me to take another run at it?"
+            )
+            return
+        msg = (
+            f"Job's done — {result['goals']} goal(s), {result['tasks']} task(s), "
+            f"{result['drafts']} draft(s), {result['errors']} error(s). "
+            "Deliverables are in. Ask me anything about it."
+        )
+        tv.add_leader_message(msg)
 
     def _build_real_runners(self) -> dict | None:
         """Build the {role: runner} dict for real-model dispatch.
@@ -546,6 +617,82 @@ class ModulatioApp(App):
             "researcher": litellm_runner(producer),
         }
 
+    # ── Conversation: the Leader's converse function ────────────────────
+
+    def _conversation_orchestrator(self):
+        """Lazily build + cache a persistent Orchestrator for the Leader's
+        converse function. Unlike per-run kickoff, it lives across messages so
+        the conversation thread + tool state persist. Returns None in real
+        mode with no models configured."""
+        orch = getattr(self, "_conv_orch", None)
+        if orch is not None:
+            return orch
+        from modulatio import tools as _tools, vault as _vault
+        project = self._ensure_project()
+        if self.stub:
+            runners = default_generic_stub_runners()
+            chat_runners: dict = {}
+            chat_runner_models: dict = {}
+            registry: dict = {}
+        else:
+            runners = self._build_real_runners()
+            if runners is None:
+                return None
+            from modulatio import config
+            from modulatio.runners import litellm_chat_runner
+            leader_model = (config.get_default_models() or {}).get("leader")
+            if leader_model:
+                chat_runners = {"leader": litellm_chat_runner(leader_model)}
+                chat_runner_models = {"leader": leader_model}
+            else:
+                chat_runners = {}
+                chat_runner_models = {}
+            registry = _tools.build_registry(
+                artifacts_root=_vault.project_dir(self.project_code) / "artifacts",
+                project_code=self.project_code,
+            )
+        orch = Orchestrator(
+            project, runners,
+            activity_callback=self._record_activity,
+            operator_present=True,
+            chat_runners=chat_runners,
+            chat_runner_models=chat_runner_models,
+            tool_registry=registry,
+        )
+        self._conv_orch = orch
+        return orch
+
+    def _operator_message(self, text: str) -> None:
+        """Operator sent a chat message → hand it to the Leader's converse
+        function on a worker thread; the reply renders when it returns."""
+        self._set_lane_status("stream-leader-status", "leader_thinking")
+        self._converse_worker(text)
+
+    @work(thread=True, exclusive=True, group="converse")
+    def _converse_worker(self, text: str) -> str:
+        if self.stub:
+            return (
+                "(I'm in offline --stub mode, so I can't actually think yet. "
+                "Relaunch without --stub to talk to the real Leader:  "
+                f"modulatio-tui --code {self.project_code})"
+            )
+        orch = self._conversation_orchestrator()
+        if orch is None:
+            return (
+                "(no models are configured — run `modulatio setup` to wire the "
+                "Leader's model.)"
+            )
+        return orch.converse(text)
+
+    def _on_converse_done(self, reply: str) -> None:
+        try:
+            self.query_one("#stream-leader", StreamView).add_leader_message(reply)
+        except NoMatches:
+            pass
+        status = self._lane_status("stream-leader-status")
+        if status is not None:
+            status.set_idle()
+
     def _handle_slash_command(self, text: str) -> None:
         """Route a `/cmd args` input to the commands.py dispatcher and apply
         any side-effect (clear, switch_tab, etc.). Slice 5."""
@@ -572,7 +719,7 @@ class ModulatioApp(App):
             tab_short = parts[1]  # e.g. "memory"
             tab_id = f"tab-{tab_short}"
             try:
-                tabbed = self.query_one(TabbedContent)
+                tabbed = self.query_one("#app-tabs", TabbedContent)
                 tabbed.active = tab_id
             except Exception:
                 return
@@ -619,14 +766,47 @@ class ModulatioApp(App):
 
         Slice #21. Every ``ActivityLog`` in the tree gets the event;
         each widget filters by its own ``filter_role`` (the team log
-        has no filter, role panels filter to their role).
+        has no filter, role panels filter to their role). The Console's
+        ``StreamView`` lanes (LEADER / TEAM) likewise self-filter.
         """
         for log in self.query(ActivityLog):
             log.add_event(event)
+        for stream in self.query(StreamView):
+            stream.add_event(event)
+        # Live status lines: the leader-lane phase drives the LEADER status;
+        # team-lane phases the TEAM status, named by the worker.
+        if event.role in LEADER_ROLES:
+            self._set_lane_status("stream-leader-status", event.phase)
+        elif event.role in TEAM_ROLES:
+            actor = self._agent_name(event.agent_id or event.role) or _humanize(
+                event.agent_id or event.role
+            )
+            self._set_lane_status("stream-team-status", event.phase, actor)
+        # A logged ticket is a problem the Leader will relay — light the
+        # orange lamp so the operator notices even from the factory floor.
+        if event.phase == "ticket_opened":
+            self._signal_problem()
 
     def _set_response(self, text: str) -> None:
         self.last_summary_text = text
         self.query_one("#prompt-response", Static).update(text)
+
+    def _set_kickoff_status(self, text: str) -> None:
+        """Update the KICK OFF box's status line on the TEAM floor."""
+        self.last_summary_text = text
+        try:
+            self.query_one("#kickoff-response", Static).update(text)
+        except NoMatches:
+            pass
+
+    def _show_team_floor(self) -> None:
+        """Flip the console flip to the TEAM factory floor."""
+        try:
+            self.query_one("#console-streams", TabbedContent).active = (
+                "stream-team-pane"
+            )
+        except Exception:
+            pass
 
     def _ensure_project(self) -> Project:
         if self._project is None:
@@ -674,18 +854,107 @@ class ModulatioApp(App):
         except Exception:
             pass
 
-    # ── F-key dispatch to the Prompt tab ────────────────────────────────
+    # ── Console keymap actions ──────────────────────────────────────────
 
-    def action_prompt_focus(self, agent_index: int) -> None:
-        """F1-F9 → toggle focus on the n-th agent of the Prompt tab.
-        No-op when the Prompt tab isn't active or the roster has fewer
-        than ``agent_index+1`` agents."""
+    def action_flip_stream(self) -> None:
+        """F2 → flip the Console's LEADER ↔ TEAM stream tabs."""
         from modulatio.tui.screens.prompt import PromptScreen
         try:
-            screen = self.query_one(PromptScreen)
+            self.query_one(PromptScreen).flip_stream()
         except Exception:
-            return
-        screen.action_toggle_focus(agent_index)
+            pass
+
+    def action_kickoff(self) -> None:
+        """F5 → deliberately launch the job in the TEAM KICK OFF box. Enter
+        never does this; only F5 or the KICK OFF button reaches here."""
+        self._run_kickoff(self._kickoff_objective_text())
+
+    def action_copy_text(self) -> None:
+        """Ctrl+C → copy the current text selection (drag in a TV stream) to
+        the system clipboard, so you can paste it into the chatbox (Ctrl+V)."""
+        try:
+            text = self.screen.get_selected_text()
+        except Exception:
+            text = None
+        if text:
+            self.copy_to_clipboard(text)
+            try:
+                self.notify("Copied to clipboard", timeout=1.5)
+            except Exception:
+                pass
+
+    def action_focus_jobdrop(self) -> None:
+        """F3 → jump to the CONSOLE/LEADER chatbox so you can type a message."""
+        try:
+            self.query_one("#app-tabs", TabbedContent).active = "tab-prompt"
+            self.query_one("#console-streams", TabbedContent).active = (
+                "stream-leader-pane"
+            )
+            self.query_one("#prompt-input", ChatInput).focus()
+        except Exception:
+            pass
+
+    def _agent_name(self, token: str) -> str:
+        """Resolve an event's agent_id (or role) to the agent's USER-GIVEN
+        name for display — never a raw id, role-key, or number. Cached per
+        run; falls back to a humanized token when no roster match exists."""
+        cache = getattr(self, "_agent_name_cache", None)
+        if cache is None:
+            cache = {}
+            try:
+                from modulatio import roster
+                for ag in roster.list_agents(self.project_code):
+                    if ag.name:
+                        cache[ag.id] = ag.name
+            except Exception:
+                pass
+            self._agent_name_cache = cache
+        return cache.get(token, "")
+
+    # ── Attention lamps (the Leader getting the operator's eye) ──────────
+
+    def _indicator_panel(self):
+        from modulatio.tui.widgets.indicator_panel import IndicatorPanel
+        try:
+            return self.query_one(IndicatorPanel)
+        except Exception:
+            return None
+
+    def _signal_msg(self) -> None:
+        """Amber lamp — the Leader has something for you."""
+        panel = self._indicator_panel()
+        if panel is not None:
+            panel.signal_msg()
+
+    def _signal_problem(self) -> None:
+        """Orange lamp — a problem was logged."""
+        panel = self._indicator_panel()
+        if panel is not None:
+            panel.signal_problem()
+
+    def _set_lane_status(
+        self, status_id: str, phase: str, actor: str | None = None,
+    ) -> None:
+        try:
+            self.query_one(f"#{status_id}", StreamStatus).set_activity(phase, actor)
+        except Exception:
+            pass
+
+    def _lane_status(self, status_id: str):
+        try:
+            return self.query_one(f"#{status_id}", StreamStatus)
+        except Exception:
+            return None
+
+    def on_tabbed_content_tab_activated(
+        self, event: TabbedContent.TabActivated,
+    ) -> None:
+        """When the operator views the LEADER stream they've seen the Leader's
+        messages → clear the attention lamps."""
+        if event.tabbed_content.active == "stream-leader-pane":
+            panel = self._indicator_panel()
+            if panel is not None:
+                panel.clear_all()
 
 
 def run() -> None:

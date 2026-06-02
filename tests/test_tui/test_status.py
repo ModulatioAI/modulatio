@@ -108,7 +108,7 @@ async def test_stub_kickoff_populates_team_log_with_six_phase_events(tui_vault):
     all 6 phases (task_dispatched, qc_started, qc_verdict, task_completed,
     leader_verify_started, leader_verify_ended), all of which land on the
     team log."""
-    from textual.widgets import TextArea
+    from textual.widgets import TabbedContent, TextArea
 
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.widgets.activity_log import ActivityLog
@@ -116,7 +116,10 @@ async def test_stub_kickoff_populates_team_log_with_six_phase_events(tui_vault):
     app = ModulatioApp(project_code="TST", stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.query_one("#prompt-input", TextArea).text = "stub objective"
+        # KICK OFF lives on the TEAM floor — flip there, drop the objective.
+        app.query_one("#console-streams", TabbedContent).active = "stream-team-pane"
+        await pilot.pause()
+        app.query_one("#kickoff-objective", TextArea).text = "stub objective"
         await pilot.click("#prompt-kickoff")
         await pilot.pause()
 
@@ -138,7 +141,7 @@ async def test_stub_kickoff_routes_events_to_matching_role_log(tui_vault):
     """Leader events only land on the leader role log; qc events only
     on the qc role log; drafter events only on the drafter role log.
     Events for a role whose panel doesn't exist are silently dropped."""
-    from textual.widgets import TextArea
+    from textual.widgets import TabbedContent, TextArea
 
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.widgets.activity_log import ActivityLog
@@ -146,7 +149,9 @@ async def test_stub_kickoff_routes_events_to_matching_role_log(tui_vault):
     app = ModulatioApp(project_code="TST", stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.query_one("#prompt-input", TextArea).text = "stub objective"
+        app.query_one("#console-streams", TabbedContent).active = "stream-team-pane"
+        await pilot.pause()
+        app.query_one("#kickoff-objective", TextArea).text = "stub objective"
         await pilot.click("#prompt-kickoff")
         await pilot.pause()
 

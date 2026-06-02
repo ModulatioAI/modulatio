@@ -1,25 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Prompt tab — multi-pane per-agent chat layout (slice #31a).
+"""Console tab — the LEADER / TEAM streams, with talk on LEADER, work on TEAM.
 
-Replaces the single-pane ChatPanel with one ``AgentPanePanel`` per
-roster agent + an existing kickoff bar at the top. F-key bindings
-toggle focus on each agent in tier order:
+The conversation-first overhaul, split by function:
+  - **LEADER** tab — the Leader's stream (the "TV", big) on top, and the
+    **chatbox** below it (roomy text entry, compact chrome). This is where you
+    *talk* to the Leader: your messages, his replies, his verdicts. Enter
+    sends a message. To launch a job from here, prefix it: ``/kickoff <obj>``.
+  - **TEAM** tab — the factory floor: the workers' stream (big) on top, and a
+    **KICK OFF box** below it (objective + optional docs/images + the KICK OFF
+    button). This is where you *command the team* directly — drop a job and
+    watch it run on the same tab. No conversation here; you don't chat with
+    producers.
+  - A two-lamp **IndicatorPanel** sits above the flip so the Leader can catch
+    your eye (amber = "talk to me"; orange = "we have a problem") while you're
+    on the factory floor.
 
-  F1 — Leader
-  F2 — Quality Control
-  F3+ — Producers (skill-holders), sorted alphabetically by id (cap at F9)
-
-Pressing the same F-key again returns to the paned grid view (toggle
-behavior).
-
-Phase A scope: layout + F-keys + per-pane local-echo Input. The chat
-backend (per-agent LLM dispatch + memory persistence) lands in #31b;
-attachments + multimodal kickoff land in #31c.
-
-The kickoff bar at the top preserves ``#prompt-input`` and
-``#prompt-kickoff`` IDs so the existing app.py kickoff handler keeps
-working. Replacing it with a richer kickoff UI is #31d.
+KICK OFF lives on the TEAM floor (where you watch the work), never beside SEND
+— so a job launch is impossible to fat-finger mid-conversation. The Leader can
+also run a job himself from the chat (``/kickoff`` → his orchestrate function);
+either way the team streams into TEAM and he reports back on LEADER.
 """
 from __future__ import annotations
 
@@ -27,86 +27,98 @@ from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Static, TextArea
+from textual.widgets import Button, Static, TabbedContent, TabPane, TextArea
 
-from modulatio import roster
 from modulatio.attachments import Attachment, AttachmentKind, build_attachment
-from modulatio.roster import Agent
-from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
-
-
-# Skills-first: Leader (F1) + QC (F2) are the structural roles; everything
-# else is a producer (skill-holder), F3+. A prior "coordinator" tier was
-# removed engine-side and no longer appears in this order.
-_TIER_ORDER = ("leader", "qc")
-
-
-def _sort_for_fkeys(agents: list[Agent]) -> list[Agent]:
-    """Order agents for F-key assignment: Leader (F1), Quality Control (F2),
-    then producers (skill-holders) alphabetically by id."""
-    def key(a: Agent) -> tuple[int, str]:
-        try:
-            tier_index = _TIER_ORDER.index(a.tier)
-            return (tier_index, "")
-        except ValueError:
-            return (len(_TIER_ORDER), a.id)
-    return sorted(agents, key=key)
+from modulatio.tui.widgets.chat_input import ChatInput
+from modulatio.tui.widgets.indicator_panel import IndicatorPanel
+from modulatio.tui.widgets.stream_status import StreamStatus
+from modulatio.tui.widgets.stream_view import (
+    LEADER_ROLES,
+    TEAM_ROLES,
+    StreamView,
+)
 
 
 class PromptScreen(Vertical):
-    """Multi-pane Prompt tab — kickoff bar + agent grid."""
+    """Console tab — status lamps + LEADER (TV+chat) / TEAM (full TV) flip."""
 
     DEFAULT_CSS = """
     PromptScreen {
         padding: 1;
     }
-    PromptScreen #kickoff-bar {
+    /* The flip fills the screen under the lamps. */
+    PromptScreen #console-streams {
+        height: 1fr;
+    }
+    /* LEADER tab: the TV takes the bulk, chatbox is compact below it. */
+    PromptScreen .leader-tv {
+        height: 1fr;
+        border: round $frame-dim;
+    }
+    PromptScreen #chatbox {
         height: auto;
-        margin-bottom: 1;
-        padding: 1;
-        background: $surface;
-        border: solid $accent;
+        margin-top: 1;
+        padding: 0 1;
+        border: round $frame;
     }
-    PromptScreen #kickoff-bar.hidden {
-        display: none;
-    }
+    /* Roomy text entry — comfortable to compose without scrolling. */
     PromptScreen #prompt-input {
         height: 6;
-        margin-bottom: 1;
     }
-    PromptScreen #kickoff-buttons {
+    PromptScreen #chatbox-buttons {
         height: 3;
     }
-    PromptScreen #kickoff-bar Button {
+    PromptScreen #chatbox-buttons Button {
         margin-right: 1;
+    }
+    PromptScreen #prompt-response {
+        height: 1;
+        color: $text-muted;
+    }
+    /* TEAM tab: the factory-floor TV on top, the KICK OFF box compact below. */
+    PromptScreen .team-tv {
+        height: 1fr;
+        border: round $frame-dim;
+    }
+    /* The job-drop lives on the floor, framed in beacon-orange. */
+    PromptScreen #kickoff-box {
+        height: auto;
+        margin-top: 1;
+        padding: 0 1;
+        border: round $accent;
+    }
+    PromptScreen #kickoff-objective {
+        height: 4;
+    }
+    PromptScreen #kickoff-box-buttons {
+        height: 3;
+    }
+    PromptScreen #kickoff-box-buttons Button {
+        margin-right: 1;
+    }
+    /* KICK OFF wears the beacon-orange of a deliberate, heavy action. */
+    PromptScreen #prompt-kickoff {
+        border: round $accent;
+        color: $accent;
+    }
+    /* Compact icon buttons for attachments — minimal chrome. */
+    PromptScreen #kickoff-attach-doc-btn,
+    PromptScreen #kickoff-attach-image-btn {
+        min-width: 5;
     }
     PromptScreen #kickoff-attachments-list {
         height: auto;
-        max-height: 2;
+        max-height: 1;
     }
-    PromptScreen #prompt-response {
-        height: auto;
-        max-height: 5;
-        padding: 0 1;
+    PromptScreen #kickoff-response {
+        height: 1;
         color: $text-muted;
-    }
-    PromptScreen #agent-grid {
-        layout: grid;
-        grid-gutter: 1;
-        height: 1fr;
-    }
-    PromptScreen #agent-grid.focused {
-        layout: vertical;
     }
     """
 
-    # F-key bindings live on ModulatioApp (see app.py BINDINGS) so they
-    # fire regardless of focus-chain position. The App routes each
-    # F-key to ``action_toggle_focus`` below.
-
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._focused_id: str | None = None
         self._kickoff_attachments: list[Attachment] = []
 
     @property
@@ -118,149 +130,157 @@ class PromptScreen(Vertical):
     @property
     def kickoff_attachments_summary(self) -> str:
         """Plain-text rendering of the staged kickoff attachments.
-        Public for tests and for the on-screen attached-files row.
-        Empty string when nothing is attached."""
+        Public for tests + the on-screen attached-files row."""
         if not self._kickoff_attachments:
             return ""
         return "  ".join(att.name for att in self._kickoff_attachments)
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="kickoff-bar"):
-            yield TextArea(
-                "",
-                id="prompt-input",
-                soft_wrap=True,
-            )
-            with Horizontal(id="kickoff-buttons"):
-                yield Button(
-                    "Kick off", id="prompt-kickoff", variant="primary"
+        # ── Status lamps (visible from both tabs) ──
+        yield IndicatorPanel(id="indicators")
+        # ── The LEADER / TEAM flip ──
+        with TabbedContent(initial="stream-leader-pane", id="console-streams"):
+            with TabPane("LEADER", id="stream-leader-pane"):
+                # TV on top (big) …
+                yield StreamView(
+                    lane_roles=LEADER_ROLES, id="stream-leader",
+                    classes="leader-tv",
                 )
-                yield Button(
-                    "📎 Attach Doc", id="kickoff-attach-doc-btn"
+                # … a live status line (what the Leader is doing) …
+                yield StreamStatus(lane="leader", id="stream-leader-status")
+                # … the chatbox below: pure conversation. Enter SENDS a
+                # message to the Leader. To launch a job from here, prefix
+                # it — `/kickoff <objective>`. There is NO kick-off button
+                # on this tab; that lives on the TEAM floor.
+                with Vertical(id="chatbox"):
+                    yield ChatInput("", id="prompt-input", soft_wrap=True)
+                    with Horizontal(id="chatbox-buttons"):
+                        yield Button("SEND", id="chat-send", variant="primary")
+                    yield Static(
+                        "Enter sends a message  ·  "
+                        "type /kickoff <objective> to run a job",
+                        id="prompt-response",
+                    )
+            with TabPane("TEAM", id="stream-team-pane"):
+                # The factory floor — the workers' TV (big) on top …
+                yield StreamView(
+                    lane_roles=TEAM_ROLES, id="stream-team",
+                    classes="team-tv",
                 )
-                yield Button(
-                    "🖼  Attach Image", id="kickoff-attach-image-btn"
-                )
-            yield Static("", id="kickoff-attachments-list")
-            yield Static(
-                "(the orchestrator's summary will appear here after you kick off)",
-                id="prompt-response",
-            )
-        yield Horizontal(id="agent-grid")  # populated in on_mount
+                yield StreamStatus(lane="team", id="stream-team-status")
+                # … and the KICK OFF box below: drop a job (objective +
+                # optional docs/images) and launch it right here, where you
+                # watch it run. F5 or the KICK OFF button fires — never Enter.
+                with Vertical(id="kickoff-box"):
+                    yield TextArea("", id="kickoff-objective", soft_wrap=True)
+                    with Horizontal(id="kickoff-box-buttons"):
+                        yield Button("F5 ▸ KICK OFF", id="prompt-kickoff")
+                        yield Button("📎", id="kickoff-attach-doc-btn")
+                        yield Button("🖼", id="kickoff-attach-image-btn")
+                    yield Static("", id="kickoff-attachments-list")
+                    yield Static(
+                        "type an objective, then F5 / KICK OFF — "
+                        "the team runs it here",
+                        id="kickoff-response",
+                    )
 
     def on_mount(self) -> None:
-        self._populate_grid()
+        # Wire the agent-name resolver from the app so streams show agents
+        # by their user-given name, never internal ids.
+        resolver = getattr(self.app, "_agent_name", None)
+        if resolver is not None:
+            for stream in self.query(StreamView):
+                stream._name_resolver = resolver
 
-    def on_show(self) -> None:
-        """Reload roster when tab becomes visible — picks up agents
-        added via the Agents tab wizard while this tab was hidden."""
-        # Skip when grid already has children — covers both the
-        # populated-roster case (panes) and the empty-roster case
-        # (placeholder Static). Re-population on roster changes is
-        # deferred to a later slice; for now on_mount handles initial
-        # render and on_show is a no-op once populated.
-        grid = self.query_one("#agent-grid", Horizontal)
-        if not grid.children:
-            self._populate_grid()
-
-    # ── Roster + grid population ────────────────────────────────────────
-
-    def sorted_agents(self) -> list[Agent]:
-        """Public for tests: roster sorted into F-key assignment order."""
+    def flip_stream(self) -> None:
+        """Toggle the LEADER/TEAM stream tabs (bound to a key in app.py)."""
         try:
-            project_code = self.app.project_code  # type: ignore[attr-defined]
-        except AttributeError:
-            return []
-        agents = roster.list_agents(project_code)
-        return _sort_for_fkeys(agents)
-
-    def _populate_grid(self) -> None:
-        grid = self.query_one("#agent-grid", Horizontal)
-        # Wipe existing panes (idempotent across on_show calls).
-        for child in list(grid.children):
-            child.remove()
-        agents = self.sorted_agents()
-        if not agents:
-            grid.mount(Static(
-                "[dim]No agents in roster. Add one via the Agents tab.[/]",
-                id="prompt-empty-roster",
-            ))
-            return
-        # Sqrt-square sizing, matching v1.3.1's grid feel.
-        import math
-        n = len(agents)
-        cols = max(1, math.ceil(math.sqrt(n)))
-        rows = max(1, math.ceil(n / cols))
-        grid.styles.grid_size_columns = cols
-        grid.styles.grid_size_rows = rows
-        for agent in agents:
-            grid.mount(AgentPanePanel(agent, id=f"agent-pane-{agent.id}"))
-
-    # ── F-key actions ───────────────────────────────────────────────────
-
-    def action_toggle_focus(self, agent_index: int) -> None:
-        agents = self.sorted_agents()
-        if agent_index >= len(agents):
-            return
-        target_id = agents[agent_index].id
-        if self._focused_id == target_id:
-            self._unfocus_all()
-        else:
-            self._focus_agent(target_id)
-
-    def _focus_agent(self, agent_id: str) -> None:
-        grid = self.query_one("#agent-grid", Horizontal)
-        grid.add_class("focused")
-        for pane in self.query(AgentPanePanel):
-            is_target = pane.agent_id == agent_id
-            pane.display = is_target
-            pane.set_focused(is_target)
-        self._focused_id = agent_id
-        # Hide the kickoff bar in focused mode — the user is in chat
-        # mode with a single agent, the project-level kickoff
-        # affordances aren't relevant. Reclaims ~14 lines of vertical
-        # space for the chat history + response.
-        try:
-            self.query_one("#kickoff-bar").add_class("hidden")
+            tabbed = self.query_one("#console-streams", TabbedContent)
         except Exception:
-            pass
-
-    def _unfocus_all(self) -> None:
-        grid = self.query_one("#agent-grid", Horizontal)
-        grid.remove_class("focused")
-        for pane in self.query(AgentPanePanel):
-            pane.display = True
-            pane.set_focused(False)
-        self._focused_id = None
-        # Restore the kickoff bar when returning to the grid view.
-        try:
-            self.query_one("#kickoff-bar").remove_class("hidden")
-        except Exception:
-            pass
+            return
+        tabbed.active = (
+            "stream-team-pane"
+            if tabbed.active == "stream-leader-pane"
+            else "stream-leader-pane"
+        )
 
     # ── Kickoff-bar attachments ─────────────────────────────────────────
 
     def attach_kickoff(self, path: Path, *, kind: AttachmentKind) -> None:
-        """Add an attachment for the next kickoff. Public so
-        Attach-Doc/Image buttons (via modal callback) AND tests can
-        drive it without modal interaction."""
+        """Add an attachment for the next kickoff. Public so the
+        Attach-Doc/Image buttons (via modal callback) AND tests can drive
+        it without modal interaction."""
         try:
             att = build_attachment(path, kind=kind)
         except (FileNotFoundError, UnicodeDecodeError) as exc:
-            response = self.query_one("#prompt-response", Static)
-            response.update(f"[bold red]Attach failed:[/] {exc}")
+            self.query_one("#prompt-response", Static).update(
+                f"[bold red]Attach failed:[/] {exc}"
+            )
             return
         self._kickoff_attachments.append(att)
         self._refresh_kickoff_attachment_list()
 
     def clear_kickoff_attachments(self) -> None:
-        """Drop all pending kickoff attachments — called by app.py
-        after a kickoff fires so the next run starts clean."""
+        """Drop all pending kickoff attachments — called by app.py after a
+        kickoff fires so the next run starts clean."""
         self._kickoff_attachments.clear()
         self._refresh_kickoff_attachment_list()
 
+    # ── Conversation: Enter / SEND posts a message to the Leader ────────
+
+    def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
+        """Enter in the composer → send (never a kickoff)."""
+        self._send_message()
+
+    def _send_message(self) -> None:
+        """Route the chatbox text. `/kickoff <obj>` launches a job (the Leader's
+        orchestrate function); any other `/cmd` runs a slash command; plain text
+        is a message to the Leader (his converse function). The reply / verdict
+        renders in the LEADER TV."""
+        inp = self.query_one("#prompt-input", ChatInput)
+        text = inp.text.strip()
+        if not text:
+            return
+        inp.text = ""
+        leader_tv = self.query_one("#stream-leader", StreamView)
+
+        # `/kickoff <objective>` — launch a job from the conversation. Text
+        # only; for docs/images use the KICK OFF box on the TEAM floor.
+        low = text.lower()
+        if low == "/kickoff" or low.startswith("/kickoff "):
+            objective = text[len("/kickoff"):].strip()
+            leader_tv.add_operator_message(text)
+            if not objective:
+                leader_tv.add_leader_message(
+                    "(give me something to run — `/kickoff <objective>`)"
+                )
+                return
+            leader_tv.add_leader_message(
+                "On it — running that job. Watch the TEAM floor; "
+                "I'll report back here when it's done."
+            )
+            runner = getattr(self.app, "_run_kickoff", None)
+            if runner is not None:
+                runner(objective)
+            return
+
+        # Any other `/cmd` → the slash-command dispatcher.
+        if text.startswith("/"):
+            handler = getattr(self.app, "_handle_slash_command", None)
+            if handler is not None:
+                handler(text)
+            return
+
+        # Plain text → a message to the Leader (converse).
+        leader_tv.add_operator_message(text)
+        handler = getattr(self.app, "_operator_message", None)
+        if handler is not None:
+            handler(text)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "kickoff-attach-doc-btn":
+        if event.button.id == "chat-send":
+            self._send_message()
+        elif event.button.id == "kickoff-attach-doc-btn":
             self._open_kickoff_attach_modal("document")
         elif event.button.id == "kickoff-attach-image-btn":
             self._open_kickoff_attach_modal("image")
@@ -283,17 +303,14 @@ class PromptScreen(Vertical):
             widget.update("")
             return
         names = [
-            f"📎 {att.name}" if att.kind == "document"
-            else f"🖼  {att.name}"
+            f"📎 {att.name}" if att.kind == "document" else f"🖼  {att.name}"
             for att in self._kickoff_attachments
         ]
-        widget.update(
-            f"[dim]attached for kickoff:[/] {'  '.join(names)}"
-        )
+        widget.update(f"[dim]attached for kickoff:[/] {'  '.join(names)}")
 
 
 def build_prompt_panel() -> PromptScreen:
-    """Return the Prompt-tab's root widget."""
+    """Return the Console-tab's root widget."""
     return PromptScreen()
 
 

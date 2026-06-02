@@ -1,23 +1,22 @@
-"""Tests for #31a — multi-pane Prompt screen + F-key focus toggle.
+"""Tests for the Console tab — job-drop bar + LEADER/TEAM streams.
 
-Phase A scope (this slice): layout primitive + F-key bindings + QC
-display rename. No chat backend yet; per-pane Inputs echo locally.
-
-F-key mapping (deterministic by tier; skills-first — Leader + QC are the
-only structural roles, everything else is a producer/skill-holder. The
-legacy "coordinator" tier was removed engine-side in, so a
-coordinator-tier agent now sorts among the producers):
-    F1 — Leader
-    F2 — Quality Control
-    F3+ — Producers (skill-holders), sorted alphabetically by id
+The conversation-first overhaul retired the per-agent chat grid (we no
+longer chat with producers/QC). What remains on this screen:
+  - the kickoff bar (job-drop): ``#prompt-input`` / ``#prompt-kickoff``
+    + the attachment surface (preserved ids so app.py's handler works);
+  - two ``StreamView`` lanes — LEADER (leader/planner) and TEAM
+    (drafter/qc/researcher) — fed from the shared activity feed, showing
+    agents by their user-given name.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from modulatio import roster, vault
+from modulatio.types import ActivityEvent
 
 
 PROJECT_CODE = "PRP"
@@ -25,10 +24,10 @@ PROJECT_CODE = "PRP"
 
 @pytest.fixture
 def project_with_roster(tmp_path: Path, monkeypatch):
-    """Pre-seed a 5-agent roster: Leader / Coordinator / Quality Control
-    / Researcher / Writer — the canonical Modulatio team."""
+    """Pre-seed a 5-agent roster with distinct user-given names so the
+    by-name display can be asserted."""
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
-    vault.init_project(PROJECT_CODE, "Prompt-screen fixture", "obj")
+    vault.init_project(PROJECT_CODE, "Console fixture", "obj")
 
     roster.add_agent(
         project_code=PROJECT_CODE, agent_id="leader",
@@ -36,459 +35,120 @@ def project_with_roster(tmp_path: Path, monkeypatch):
         skills=["leader"], model="stub", tier="leader",
     )
     roster.add_agent(
-        project_code=PROJECT_CODE, agent_id="coordinator",
-        name="Coordinator", identity="You are the Coordinator.",
-        skills=["coordinator"], model="stub", tier="coordinator",
-    )
-    roster.add_agent(
         project_code=PROJECT_CODE, agent_id="qc",
         name="Quality Control", identity="You are Quality Control.",
         skills=["qc"], model="stub", tier="qc",
     )
     roster.add_agent(
-        project_code=PROJECT_CODE, agent_id="researcher",
-        name="Researcher", identity="You are the Researcher.",
-        skills=["researcher"], model="stub", tier="producer",
-    )
-    roster.add_agent(
         project_code=PROJECT_CODE, agent_id="writer",
-        name="Writer", identity="You are the Writer.",
+        name="Marlow", identity="You are the Writer.",
         skills=["drafter"], model="stub", tier="producer",
     )
     return tmp_path
 
 
-# ─── Layout: one pane per agent ─────────────────────────────────────────────
+def _ev(role, phase, agent_id=None, task_id=None):
+    return ActivityEvent(
+        agent_id=agent_id or role, role=role, phase=phase,
+        task_id=task_id, timestamp=datetime.now(timezone.utc),
+    )
 
 
-async def test_prompt_screen_renders_pane_per_agent(project_with_roster):
-    """5-agent roster → 5 AgentPanePanel widgets rendered in the grid."""
+# ─── Console layout: the two streams ────────────────────────────────────────
+
+
+async def test_console_has_leader_and_team_streams(project_with_roster):
+    """The Console renders exactly two StreamView lanes: LEADER + TEAM."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ids = sorted(s.id for s in app.query(StreamView))
+        assert ids == ["stream-leader", "stream-team"]
+
+
+async def test_no_agent_chat_panes_remain(project_with_roster):
+    """The retired per-agent chat grid is gone — no AgentPanePanel mounts."""
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        panes = app.query(AgentPanePanel)
-        assert len(panes) == 5
+        assert len(app.query(AgentPanePanel)) == 0
 
 
-async def test_pane_displays_quality_control_name(project_with_roster):
-    """The QC-tier agent renders 'Quality Control' in its header,
-    NOT the abbreviation 'QC'. Per user direction: display name is the
-    function name; abbreviation is for internal id only."""
+async def test_events_split_into_leader_and_team_lanes(project_with_roster):
+    """leader/planner events route to LEADER; drafter/qc/researcher to TEAM."""
     from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
+    from modulatio.tui.widgets.stream_view import StreamView
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        qc_pane = app.query_one("#agent-pane-qc", AgentPanePanel)
-        assert "Quality Control" in qc_pane.header_text
+        for e in [
+            _ev("leader", "leader_decompose_ended"),
+            _ev("planner", "task_dispatched", task_id="T-001"),
+            _ev("drafter", "task_completed", agent_id="writer", task_id="T-001"),
+            _ev("qc", "qc_verdict"),
+        ]:
+            app._record_activity_impl(e)
+        await pilot.pause()
+        streams = {s.id: s for s in app.query(StreamView)}
+        leader_roles = [e.role for e in streams["stream-leader"].events]
+        team_roles = [e.role for e in streams["stream-team"].events]
+        assert leader_roles == ["leader", "planner"]
+        assert team_roles == ["drafter", "qc"]
 
 
-# ─── F-key tier order ───────────────────────────────────────────────────────
+async def test_flip_stream_toggles_lanes(project_with_roster):
+    """F2 / flip_stream toggles the active LEADER↔TEAM tab."""
+    from textual.widgets import TabbedContent
 
-
-async def test_fkey_assignment_follows_tier_order(project_with_roster):
-    """F1=Leader, F2=Quality Control, then producers alphabetically by id.
-    The legacy coordinator-tier agent is no longer a structural role, so it
-    sorts among the producers (coordinator < researcher < writer)."""
     from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.screens.prompt import PromptScreen
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        screen = app.query_one(PromptScreen)
-        order = [a.id for a in screen.sorted_agents()]
-        assert order == ["leader", "qc", "coordinator", "researcher", "writer"]
+        inner = app.query_one("#console-streams", TabbedContent)
+        assert inner.active == "stream-leader-pane"
+        app.action_flip_stream()
+        await pilot.pause()
+        assert inner.active == "stream-team-pane"
 
 
-# ─── F-key toggle: focus / unfocus ──────────────────────────────────────────
+# ─── Agents shown by user-given name, never raw id ──────────────────────────
 
 
-async def test_f1_focuses_leader_pane(project_with_roster):
-    """F1 → Leader pane visible, all others hidden (focused mode)."""
+async def test_agent_name_resolves_user_given_name(project_with_roster):
+    """The app's resolver maps an agent_id to the roster's user-given name;
+    unknown ids resolve empty (StreamView then humanizes, never a raw id)."""
     from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
+    from modulatio.tui.widgets.stream_view import StreamView
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        await pilot.press("f1")
-        await pilot.pause()
-        leader_pane = app.query_one("#agent-pane-leader", AgentPanePanel)
-        coordinator_pane = app.query_one("#agent-pane-coordinator", AgentPanePanel)
-        assert leader_pane.display is True
-        assert coordinator_pane.display is False
+        assert app._agent_name("writer") == "Marlow"
+        assert app._agent_name("qc") == "Quality Control"
+        assert app._agent_name("ghost-id") == ""
 
+        stream = app.query_one("#stream-team", StreamView)
+        # with a resolver, the raw id never shows
+        assert stream._display_name("writer", "drafter") == "Marlow"
+        # no roster match → humanized, still never the bare id
+        assert stream._display_name("prod-kimi", "drafter") == "Prod Kimi"
 
-async def test_f1_again_returns_to_paned_mode(project_with_roster):
-    """F1 with leader already focused → unfocus, all panes visible."""
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
 
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("f1")
-        await pilot.pause()
-        await pilot.press("f1")
-        await pilot.pause()
-        for pane_id in ("leader", "coordinator", "qc", "researcher", "writer"):
-            pane = app.query_one(f"#agent-pane-{pane_id}", AgentPanePanel)
-            assert pane.display is True, f"{pane_id} should be visible after unfocus"
-
-
-async def test_f2_focuses_quality_control(project_with_roster):
-    """F2 → Quality Control pane visible, others hidden (QC is the second
-    structural role now that coordinator is gone)."""
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("f2")
-        await pilot.pause()
-        qc_pane = app.query_one("#agent-pane-qc", AgentPanePanel)
-        assert qc_pane.display is True
-        leader_pane = app.query_one("#agent-pane-leader", AgentPanePanel)
-        assert leader_pane.display is False
-
-
-# ─── Identity (system prompt) visibility ────────────────────────────────────
-
-
-async def test_identity_visible_only_in_focused_mode(project_with_roster):
-    """In paned mode the identity stays hidden — too much vertical real
-    estate to show 5 system prompts at once. Focused mode shows the
-    identity for the focused agent only."""
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        leader_pane = app.query_one("#agent-pane-leader", AgentPanePanel)
-        # Paned mode: identity hidden.
-        assert leader_pane.identity_visible is False
-        # Focus leader.
-        await pilot.press("f1")
-        await pilot.pause()
-        assert leader_pane.identity_visible is True
-        # Unfocus.
-        await pilot.press("f1")
-        await pilot.pause()
-        assert leader_pane.identity_visible is False
-
-
-# ─── #31b chat backend: pane Input → agent's runner ────────────────────────
-
-
-async def test_pane_chat_dispatches_to_runner(project_with_roster):
-    """Submitting a message in the leader pane's Input calls the runner
-    with the constructed prompt and stores user/assistant turns in
-    history. Threading via Textual @work — wait for workers before
-    asserting."""
-    from textual.widgets import TextArea
-
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
-
-    captured_prompts: list[str] = []
-
-    def stub_factory(model: str):
-        def runner(prompt: str) -> str:
-            captured_prompts.append(prompt)
-            return f"stub-reply-from-{model}"
-        return runner
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        # Override the chat factory before submission.
-        app.chat_runner_factory = stub_factory  # type: ignore[method-assign]
-
-        leader_pane = app.query_one("#agent-pane-leader", AgentPanePanel)
-        inp = app.query_one("#pane-input-leader", TextArea)
-        inp.focus()
-        inp.text = "hello leader"
-        await pilot.pause()
-        await pilot.press("ctrl+s")
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-
-    assert len(captured_prompts) == 1
-    assert "hello leader" in captured_prompts[0]
-    assert leader_pane.history == [
-        ("user", "hello leader"),
-        ("assistant", "stub-reply-from-stub"),
-    ]
-
-
-async def test_pane_chat_history_accumulates_across_turns(project_with_roster):
-    """Second turn's prompt includes the first turn's exchange so the
-    agent has multi-turn context."""
-    from textual.widgets import TextArea
-
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
-
-    captured_prompts: list[str] = []
-    counter = {"n": 0}
-
-    def stub_factory(model: str):
-        def runner(prompt: str) -> str:
-            captured_prompts.append(prompt)
-            counter["n"] += 1
-            return f"reply-{counter['n']}"
-        return runner
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.chat_runner_factory = stub_factory  # type: ignore[method-assign]
-
-        leader_pane = app.query_one("#agent-pane-leader", AgentPanePanel)
-        inp = app.query_one("#pane-input-leader", TextArea)
-        inp.focus()
-        inp.text = "first"
-        await pilot.pause()
-        await pilot.press("ctrl+s")
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-
-        inp.text = "second"
-        await pilot.pause()
-        await pilot.press("ctrl+s")
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-
-    # Second prompt should reference the first turn.
-    assert "first" in captured_prompts[1]
-    assert "reply-1" in captured_prompts[1]
-    assert "second" in captured_prompts[1]
-    assert leader_pane.history[-2:] == [
-        ("user", "second"),
-        ("assistant", "reply-2"),
-    ]
-
-
-async def test_pane_chat_persists_episodic_memory(project_with_roster, monkeypatch):
-    """After each chat exchange the panel writes an episodic-memory
-    entry tagged 'chat' so the next session can recall it."""
-    from textual.widgets import TextArea
-
-    from modulatio.tui.app import ModulatioApp
-
-    recorded: list[dict] = []
-    def fake_add_episodic(agent_id, content, **kwargs):
-        recorded.append(dict(agent_id=agent_id, content=content, **kwargs))
-        return None
-
-    from modulatio.memory import agent_memory
-    monkeypatch.setattr(agent_memory, "add_episodic", fake_add_episodic)
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.chat_runner_factory = lambda m: (lambda p: "ack")  # type: ignore[method-assign]
-
-        inp = app.query_one("#pane-input-leader", TextArea)
-        inp.focus()
-        inp.text = "remember this"
-        await pilot.pause()
-        await pilot.press("ctrl+s")
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-
-    assert len(recorded) == 1
-    assert recorded[0]["agent_id"] == "leader"
-    assert "remember this" in recorded[0]["content"]
-    assert "ack" in recorded[0]["content"]
-    assert "chat" in (recorded[0].get("tags") or [])
-
-
-async def test_ctrl_m_writes_semantic_memory(project_with_roster, monkeypatch):
-    """Ctrl+M while typing in a pane Input writes the current input text
-    to the agent's standing/semantic memory and clears the input. This
-    is the train-the-agent affordance — bypasses chat dispatch entirely."""
-    from textual.widgets import TextArea
-
-    from modulatio.tui.app import ModulatioApp
-
-    recorded: list[dict] = []
-    def fake_add_semantic(agent_id, content, **kwargs):
-        recorded.append(dict(agent_id=agent_id, content=content, **kwargs))
-        return None
-
-    from modulatio.memory import agent_memory
-    monkeypatch.setattr(agent_memory, "add_semantic", fake_add_semantic)
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        inp = app.query_one("#pane-input-leader", TextArea)
-        inp.focus()
-        inp.text = "always cite sources before drafting"
-        await pilot.pause()
-        await pilot.press("alt+t")
-        await pilot.pause()
-
-        # Input is cleared after training (assertion inside the
-        # first context — outside it the app has torn down).
-        assert inp.text == ""
-
-    assert len(recorded) == 1
-    assert recorded[0]["agent_id"] == "leader"
-    assert recorded[0]["content"] == "always cite sources before drafting"
-    assert "user_training" in (recorded[0].get("tags") or [])
-
-
-# ─── #31c attachments: per-pane attach + dispatch ──────────────────────────
-
-
-async def test_pane_attach_adds_document_to_list(project_with_roster, tmp_path):
-    """The panel's public ``attach`` method adds a built Attachment to
-    the per-pane list. Used by the Ctrl+I/Ctrl+D modal callback."""
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
-
-    notes = tmp_path / "notes.md"
-    notes.write_text("Important context.")
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        leader_pane = app.query_one("#agent-pane-leader", AgentPanePanel)
-        leader_pane.attach(notes, kind="document")
-        await pilot.pause()
-
-        assert len(leader_pane.attachments) == 1
-        assert leader_pane.attachments[0].name == "notes.md"
-        assert "Important context" in (leader_pane.attachments[0].content or "")
-
-
-async def test_pane_attach_failure_writes_error_not_attachment(project_with_roster, tmp_path):
-    """A missing path doesn't crash; the error surfaces in the pane log
-    and the attachment list stays empty."""
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        leader_pane = app.query_one("#agent-pane-leader", AgentPanePanel)
-        leader_pane.attach(tmp_path / "missing.md", kind="document")
-        await pilot.pause()
-        assert leader_pane.attachments == []
-
-
-async def test_pane_chat_includes_attachments_in_prompt(project_with_roster, tmp_path):
-    """Submitting chat with an attached document → runner gets a prompt
-    that quotes the document content inline."""
-    from textual.widgets import TextArea
-
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
-
-    spec = tmp_path / "spec.md"
-    spec.write_text("BUDGET: under 5K\nDEADLINE: end of month\n")
-
-    captured: list[str] = []
-    def stub_factory(model: str):
-        return lambda p: captured.append(p) or "ack"
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.chat_runner_factory = stub_factory  # type: ignore[method-assign]
-        leader_pane = app.query_one("#agent-pane-leader", AgentPanePanel)
-        leader_pane.attach(spec, kind="document")
-        await pilot.pause()
-
-        inp = app.query_one("#pane-input-leader", TextArea)
-        inp.focus()
-        inp.text = "review the spec"
-        await pilot.pause()
-        await pilot.press("ctrl+s")
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-
-    assert len(captured) == 1
-    assert "BUDGET: under 5K" in captured[0]
-    assert "DEADLINE: end of month" in captured[0]
-    assert "review the spec" in captured[0]
-
-
-async def test_pane_attachments_clear_after_send(project_with_roster, tmp_path):
-    """Attachments are per-message — sending clears the list so the
-    next message doesn't double-attach the same files."""
-    from textual.widgets import TextArea
-
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
-
-    notes = tmp_path / "n.md"
-    notes.write_text("data")
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.chat_runner_factory = lambda m: (lambda p: "ack")  # type: ignore[method-assign]
-        leader_pane = app.query_one("#agent-pane-leader", AgentPanePanel)
-        leader_pane.attach(notes, kind="document")
-        assert len(leader_pane.attachments) == 1
-
-        inp = app.query_one("#pane-input-leader", TextArea)
-        inp.focus()
-        inp.text = "x"
-        await pilot.pause()
-        await pilot.press("ctrl+s")
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-
-        assert leader_pane.attachments == []
-
-
-async def test_pane_ctrl_i_pushes_attach_image_modal(project_with_roster):
-    """Ctrl+I action pushes the AttachPathModal with kind='image'.
-    Tests the binding path without exercising the full modal flow."""
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.agent_pane_panel import AgentPanePanel
-    from modulatio.tui.widgets.attach_modal import AttachPathModal
-
-    pushed: list = []
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        leader_pane = app.query_one("#agent-pane-leader", AgentPanePanel)
-        # Stub push_screen so we capture the modal without driving it.
-        original_push = app.push_screen
-        def fake_push(screen, callback=None):
-            pushed.append(screen)
-            return None
-        app.push_screen = fake_push  # type: ignore[method-assign]
-        try:
-            leader_pane.action_attach_image()
-        finally:
-            app.push_screen = original_push  # type: ignore[method-assign]
-
-    assert len(pushed) == 1
-    assert isinstance(pushed[0], AttachPathModal)
-    assert pushed[0]._kind == "image"
-
-
-# ─── #31d kickoff bar attachments ──────────────────────────────────────────
+# ─── Kickoff bar (job-drop) — preserved ─────────────────────────────────────
 
 
 async def test_kickoff_attach_adds_document_to_screen_list(
     project_with_roster, tmp_path,
 ):
-    """The kickoff bar's attach surface adds to a screen-level list
-    distinct from per-pane attachments."""
+    """The kickoff bar's attach surface stages a document for the run."""
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.screens.prompt import PromptScreen
 
@@ -563,8 +223,7 @@ async def test_kickoff_attach_image_button_pushes_modal(project_with_roster):
 async def test_kickoff_attach_failure_writes_error(
     project_with_roster, tmp_path,
 ):
-    """A missing path doesn't crash the screen; the kickoff list
-    stays empty."""
+    """A missing path doesn't crash the screen; the kickoff list stays empty."""
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.screens.prompt import PromptScreen
 
@@ -580,8 +239,7 @@ async def test_kickoff_attach_failure_writes_error(
 async def test_kickoff_attachment_panel_displays_filenames(
     project_with_roster, tmp_path,
 ):
-    """When attachments are pending, the kickoff bar shows their
-    filenames so the user knows what they've staged."""
+    """When attachments are pending, the kickoff bar shows their filenames."""
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.screens.prompt import PromptScreen
 
@@ -603,21 +261,292 @@ async def test_kickoff_attachment_panel_displays_filenames(
         assert "wireframe.png" in summary
 
 
-# ─── Backward-compat: existing kickoff bar still works ──────────────────────
-
-
 async def test_kickoff_input_and_button_still_present(project_with_roster):
     """app.py's kickoff flow queries #prompt-input + #prompt-kickoff —
-    PromptScreen must keep these IDs at the top so the existing
+    the Console must keep these ids at the top so the existing
     on_button_pressed handler doesn't break."""
-    from textual.widgets import Button
+    from textual.widgets import Button, TextArea
 
     from modulatio.tui.app import ModulatioApp
 
-    from textual.widgets import TextArea
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        # Both must exist.
         app.query_one("#prompt-input", TextArea)
         app.query_one("#prompt-kickoff", Button)
+
+
+# ─── Reshape: chatbox lives on LEADER, factory floor is chatbox-free ─────────
+
+
+async def test_chat_on_leader_kickoff_on_team(project_with_roster):
+    """Split by function: the conversation chatbox (#prompt-input) lives in the
+    LEADER pane; the KICK OFF box (#kickoff-objective) lives in the TEAM pane.
+    Neither bleeds into the other tab."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        leader_pane = screen.query_one("#stream-leader-pane")
+        team_pane = screen.query_one("#stream-team-pane")
+        # the conversation box is on LEADER, never on the floor
+        assert leader_pane.query("#prompt-input")
+        assert not team_pane.query("#prompt-input")
+        # the job-drop is on TEAM, never beside the chat
+        assert team_pane.query("#kickoff-objective")
+        assert not leader_pane.query("#kickoff-objective")
+
+
+# ─── Indicator bulbs ────────────────────────────────────────────────────────
+
+
+async def test_indicator_panel_has_two_bulbs(project_with_roster):
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.indicator_panel import Bulb, IndicatorPanel
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query(IndicatorPanel)
+        ids = sorted(b.id for b in app.query(Bulb))
+        assert ids == ["bulb-msg", "bulb-problem"]
+        # idle on first paint
+        assert not app.query_one("#bulb-msg", Bulb).is_lit
+        assert not app.query_one("#bulb-problem", Bulb).is_lit
+
+
+async def test_ticket_lights_problem_bulb_then_clears_on_leader(
+    project_with_roster,
+):
+    """A ticket_opened event lights the orange lamp; viewing the LEADER tab
+    clears it."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.indicator_panel import Bulb
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_flip_stream()  # go to TEAM so it isn't auto-cleared
+        await pilot.pause()
+        app._record_activity_impl(
+            _ev("leader", "ticket_opened"),
+        )
+        await pilot.pause()
+        assert app.query_one("#bulb-problem", Bulb).is_lit
+        app.action_flip_stream()  # back to LEADER
+        await pilot.pause()
+        assert not app.query_one("#bulb-problem", Bulb).is_lit
+
+
+async def test_signal_msg_lights_amber_bulb(project_with_roster):
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.indicator_panel import Bulb
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_flip_stream()  # TEAM
+        await pilot.pause()
+        app._signal_msg()
+        await pilot.pause()
+        assert app.query_one("#bulb-msg", Bulb).is_lit
+
+
+# ─── Conversation vs kickoff: Enter sends, F5 launches ──────────────────────
+
+
+async def test_composer_is_chat_input(project_with_roster):
+    """The composer is a ChatInput (Enter sends), not a plain TextArea."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.query_one("#prompt-input"), ChatInput)
+
+
+async def test_send_posts_message_and_does_not_kickoff(project_with_roster):
+    """Sending a message renders it in the LEADER conversation, clears the
+    composer, and crucially does NOT launch a job."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        inp = app.query_one("#prompt-input", ChatInput)
+        leader = app.query_one("#stream-leader", StreamView)
+
+        inp.text = "let's build a skill, no job needed"
+        screen._send_message()
+        await pilot.pause()
+
+        assert inp.text == ""                       # composer cleared
+        assert leader.lines and len(leader.lines)   # message landed in LEADER
+        assert not hasattr(app, "_kickoff_started_at")  # no run launched
+
+
+async def test_slash_kickoff_from_chat_launches_a_job(project_with_roster):
+    """A `/kickoff <objective>` message in the LEADER chatbox launches a job
+    (the Leader's orchestrate function) instead of conversing — the run starts
+    and the floor flips into view."""
+    from textual.widgets import TabbedContent
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        app.query_one("#prompt-input", ChatInput).text = (
+            "/kickoff write a stub note on herbs"
+        )
+        screen._send_message()
+        await pilot.pause()
+
+        # a job ran (the stub completes fast; the status reflects it) …
+        assert app.last_summary_text.startswith(("Running", "Completed"))
+        # … and the view flipped to the TEAM floor to watch it run.
+        assert (
+            app.query_one("#console-streams", TabbedContent).active
+            == "stream-team-pane"
+        )
+
+
+async def test_bare_slash_kickoff_asks_for_an_objective(project_with_roster):
+    """`/kickoff` with no objective doesn't launch — the Leader asks for one."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        app.query_one("#prompt-input", ChatInput).text = "/kickoff"
+        screen._send_message()
+        await pilot.pause()
+        assert not hasattr(app, "_kickoff_started_at")  # nothing launched
+
+
+async def test_f5_action_launches_kickoff(project_with_roster):
+    """F5 (action_kickoff) deliberately launches a job from the TEAM KICK OFF
+    box text — reads #kickoff-objective regardless of the active tab."""
+    from textual.widgets import TextArea
+
+    from modulatio.tui.app import ModulatioApp
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#kickoff-objective", TextArea).text = "Write a haiku."
+        app.action_kickoff()
+        await pilot.pause()
+        assert app.last_summary_text.startswith(("Running", "Completed"))
+
+
+async def test_kickoff_separated_from_send_by_tab(project_with_roster):
+    """SEND lives on the LEADER chatbox; KICK OFF lives on the TEAM floor —
+    different tabs entirely, so a job launch can't be fat-fingered beside send."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        leader_pane = screen.query_one("#stream-leader-pane")
+        team_pane = screen.query_one("#stream-team-pane")
+        # SEND on LEADER, not on the floor
+        assert leader_pane.query("#chat-send")
+        assert not team_pane.query("#chat-send")
+        # KICK OFF on TEAM, not beside the chat
+        assert team_pane.query("#prompt-kickoff")
+        assert not leader_pane.query("#prompt-kickoff")
+
+
+# ─── Live status lines + quit safety ────────────────────────────────────────
+
+
+async def test_status_lines_present_and_drive_from_events(project_with_roster):
+    """Each lane has a StreamStatus that moves off standby when its lane's
+    activity fires (named by the worker on the TEAM lane)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_status import StreamStatus
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ids = sorted(s.id for s in app.query(StreamStatus))
+        assert ids == ["stream-leader-status", "stream-team-status"]
+        # idle to start
+        assert app.query_one("#stream-leader-status", StreamStatus)._verb is None
+
+        app._record_activity_impl(_ev("leader", "leader_decompose_started"))
+        app._record_activity_impl(
+            _ev("drafter", "drafting", agent_id="writer"),
+        )
+        await pilot.pause()
+        leader = app.query_one("#stream-leader-status", StreamStatus)
+        team = app.query_one("#stream-team-status", StreamStatus)
+        assert leader._verb == "decomposing the objective"
+        assert team._verb == "writing"
+        assert team._actor == "Marlow"   # by user-given name, not "writer"
+
+
+def test_quit_takes_a_modifier():
+    """Plain 'q' no longer quits (fat-finger safety); Alt+Q / Ctrl+Q do."""
+    from modulatio.tui.app import ModulatioApp
+
+    keys = [b[0] for b in ModulatioApp.BINDINGS]
+    assert "q" not in keys
+    assert "alt+q" in keys
+    assert "ctrl+q" in keys
+
+
+def test_modulating_easter_egg_in_verb_map():
+    """The brand wink: a run spins up as 'modulating'."""
+    from modulatio.tui.widgets.stream_status import _verb_for
+
+    assert _verb_for("kickoff_started") == "modulating"
+    assert _verb_for("modulating") == "modulating"
+
+
+# ─── Conversation: send → the Leader replies in the LEADER TV ────────────────
+
+
+async def test_sending_a_message_gets_a_leader_reply(project_with_roster):
+    """Typing + sending posts the operator message AND drives the Leader's
+    converse function, whose reply renders in the LEADER TV (offline-stubbed
+    here — no job is launched)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt-input", ChatInput).text = "hey Leader, can we just talk?"
+        app.query_one(PromptScreen)._send_message()
+
+        leader = app.query_one("#stream-leader", StreamView)
+        for _ in range(60):
+            await pilot.pause(0.1)
+            if len(leader.lines) >= 2:
+                break
+
+        text = "\n".join(str(line) for line in leader.lines)
+        assert "can we just talk" in text          # operator message
+        assert "Leader" in text                      # the Leader's reply marker
+        assert app.query_one("#prompt-input", ChatInput).text == ""  # cleared
+        assert not hasattr(app, "_kickoff_started_at")  # NO job launched
