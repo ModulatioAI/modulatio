@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from textual.app import App, ComposeResult
-from textual.widgets import OptionList
+from textual.widgets import DataTable, OptionList
 
 from modulatio import model_presets
 from modulatio import provider_catalog as pc
@@ -94,3 +94,32 @@ async def test_full_flow_provider_auth_model_registers(tmp_path, monkeypatch):
         assert app.query("#cfg-models")
         presets = model_presets.load_presets()
         assert any(p["model"] == "llama3.3:8b" for p in presets.values())
+
+
+async def test_remove_deletes_the_selected_preset(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "p.json")
+    model_presets.add_preset(
+        "op_free", label="x", base_url="https://openrouter.ai/api/v1",
+        api_format="openai", auth_type="api_key", model="openrouter/free",
+        auth_config={"env_var": "OPENROUTER_API_KEY"},
+    )
+    model_presets.add_preset(
+        "dead_one", label="y", base_url="https://ollama.com/v1",
+        api_format="openai", auth_type="api_key",
+        model="deepseek-v4-pro:cloud",  # the stale local-suffix kind
+        auth_config={"env_var": "OLLAMA_API_KEY"},
+    )
+    app = _Host()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        table = app.query_one("#cfg-models", DataTable)
+        # presets sorted by key: dead_one, op_free → row 0 is dead_one
+        table.move_cursor(row=0)
+        await pilot.pause()
+        assert screen._selected_preset_key() == "dead_one"
+        await pilot.click("#cfg-remove")
+        await pilot.pause()
+        assert model_presets.get_preset("dead_one") is None
+        assert model_presets.get_preset("op_free") is not None
+        assert app.query_one("#cfg-models", DataTable).row_count == 1

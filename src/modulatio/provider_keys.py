@@ -97,6 +97,19 @@ def add_key(
     return KeySlot(index=index, env_var=ev, label=label, is_set=True)
 
 
+def remove_key(env_var: str) -> bool:
+    """Remove a key entirely — its value from the vault .env (+ os.environ) and
+    its label from the registry. Returns True if anything was removed. Presets
+    that referenced it will read as needs-setup until repointed."""
+    removed = config.remove_env_secret(env_var)
+    labels = _load_labels()
+    if env_var in labels:
+        del labels[env_var]
+        _save_labels(labels)
+        removed = True
+    return removed
+
+
 def default_env_var(base_env_var: str) -> str:
     """The default key's env var — always #1 (the base var)."""
     return base_env_var
@@ -108,5 +121,6 @@ __all__ = [
     "env_var_for",
     "list_keys",
     "add_key",
+    "remove_key",
     "default_env_var",
 ]

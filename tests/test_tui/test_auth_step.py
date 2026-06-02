@@ -120,6 +120,25 @@ async def test_multi_key_uses_selected_default_when_no_new_key(monkeypatch):
         assert app.configured == [("google", "api_key", "GEMINI_API_KEY", None)]
 
 
+async def test_remove_selected_key_button(monkeypatch):
+    removed: list = []
+    monkeypatch.setattr(provider_keys, "list_keys", lambda b: [
+        {"index": 1, "env_var": "GEMINI_API_KEY", "label": "text", "is_set": True},
+        {"index": 2, "env_var": "GEMINI_API_KEY_2", "label": "images",
+         "is_set": True},
+    ])
+    monkeypatch.setattr(
+        provider_keys, "remove_key", lambda ev: removed.append(ev) or True
+    )
+    app = _Host(pc.GOOGLE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query("#auth-removekey")  # shown when keys exist
+        await pilot.click("#auth-removekey")
+        await pilot.pause()
+        assert removed == ["GEMINI_API_KEY"]  # the selected (#1 default) key
+
+
 async def test_oauth_not_signed_in_blocks_with_hint(monkeypatch):
     # force the Anthropic OAuth option to report not-ready
     monkeypatch.setattr(pc, "auth_status", lambda a, **k: (False, "run `claude login`"))

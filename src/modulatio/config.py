@@ -206,6 +206,28 @@ def set_env_secret(name: str, value: str) -> Path:
     return env_path
 
 
+def remove_env_secret(name: str) -> bool:
+    """Remove a secret from the vault ``.env`` and ``os.environ``. Returns True
+    if it was present. Backs the Configuration tab's "remove key"."""
+    removed = False
+    env_path = get_vault_root() / ".env"
+    if env_path.exists():
+        kept: list[str] = []
+        for line in env_path.read_text().splitlines():
+            stripped = line.strip()
+            if (stripped and not stripped.startswith("#") and "=" in stripped
+                    and stripped.split("=", 1)[0].strip() == name):
+                removed = True
+                continue
+            kept.append(line)
+        if removed:
+            write_secret_file(env_path, "\n".join(kept) + ("\n" if kept else ""))
+    if name in os.environ:
+        del os.environ[name]
+        removed = True
+    return removed
+
+
 def save_defaults(defaults: dict) -> None:
     """Persist defaults to disk + invalidate cache."""
     global _cached_defaults

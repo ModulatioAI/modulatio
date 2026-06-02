@@ -73,19 +73,19 @@ class AuthStep(Vertical):
         yield Button("Continue", id="auth-continue", variant="primary")
         yield Static("", id="auth-status")
 
-    def on_mount(self) -> None:
-        self._render_body()
+    async def on_mount(self) -> None:
+        await self._render_body()
 
-    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+    async def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
         # only the auth-method radio drives a re-render; ignore the key picker's
         if event.radio_set.id != "auth-method":
             return
         self._selected = self.provider.auth_options[event.radio_set.pressed_index]
-        self._render_body()
+        await self._render_body()
 
-    def _render_body(self) -> None:
+    async def _render_body(self) -> None:
         body = self.query_one("#auth-body", Vertical)
-        body.remove_children()
+        await body.remove_children()
         a = self._selected
         is_custom = self.provider.models_source.kind == "custom"
         if is_custom:
@@ -120,6 +120,11 @@ class AuthStep(Vertical):
                     else f"paste your API key  →  saved as {a.env_var}"
                 )
                 body.mount(Input(password=True, placeholder=hint, id="auth-key"))
+                if slots:  # let the operator prune a stale/extra key
+                    body.mount(Button(
+                        "Remove selected key", id="auth-removekey",
+                        variant="warning",
+                    ))
             if self.provider.signup_url:
                 body.mount(Static(f"Need one? {self.provider.signup_url}"))
         elif a.auth_type.startswith("oauth"):
@@ -132,7 +137,22 @@ class AuthStep(Vertical):
     def _status(self, text: str) -> None:
         self.query_one("#auth-status", Static).update(text)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def _remove_selected_key(self) -> None:
+        a = self._selected
+        if a.env_var is None:
+            return
+        try:
+            env_var = self.query_one("#auth-keysel", KeySelector).chosen_env_var
+        except Exception:
+            env_var = a.env_var  # only one key → the base var
+        provider_keys.remove_key(env_var)
+        await self._render_body()
+        self._status(f"Removed key '{env_var}'.")
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "auth-removekey":
+            await self._remove_selected_key()
+            return
         if event.button.id != "auth-continue":
             return
         a = self._selected

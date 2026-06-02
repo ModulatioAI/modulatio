@@ -22,7 +22,15 @@ import re
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Input, OptionList, Static
+from textual.widgets import (
+    Button,
+    DataTable,
+    Input,
+    OptionList,
+    RadioButton,
+    RadioSet,
+    Static,
+)
 from textual.widgets.option_list import Option
 
 from modulatio import model_presets, roster
@@ -89,8 +97,8 @@ class AgentBuilderScreen(Vertical):
             )
         buttons = Horizontal(
             Button("Change model", id="agt-change", variant="primary"),
-            Button("+ Producer", id="agt-add"),
-            Button("Remove producer", id="agt-remove", variant="warning"),
+            Button("+ Agent", id="agt-add"),
+            Button("Remove", id="agt-remove", variant="warning"),
             id="agt-buttons",
         )
         await body.mount(table, buttons, Static(message, id="agt-status"))
@@ -117,13 +125,22 @@ class AgentBuilderScreen(Vertical):
             Button("Cancel", id="agt-cancel"),
         )
 
-    async def _show_add_producer(self) -> None:
+    _ROLES = ("producer", "leader", "qc")
+
+    async def _show_add_agent(self) -> None:
         self._flow = "add"
         body = self._body()
         await body.remove_children()
         await body.mount(
-            Static("New producer:"),
+            Static("New agent:"),
             Input(placeholder="name, e.g. Marlow", id="agt-newname"),
+            Static("role:"),
+            RadioSet(
+                RadioButton("Producer", value=True),
+                RadioButton("Leader"),
+                RadioButton("QC"),
+                id="agt-role",
+            ),
             Static("pick its model:"),
             self._preset_list(),
             Static("", id="agt-status"),
@@ -137,7 +154,7 @@ class AgentBuilderScreen(Vertical):
             if agent_id:
                 await self._show_change_model(agent_id)
         elif bid == "agt-add":
-            await self._show_add_producer()
+            await self._show_add_agent()
         elif bid == "agt-remove":
             await self._remove_selected()
         elif bid == "agt-cancel":
@@ -156,37 +173,50 @@ class AgentBuilderScreen(Vertical):
             )
             await self.show_list(f"Assigned '{preset}' to {self._target_agent}.")
         elif self._flow == "add":
-            await self._add_producer(preset)
+            await self._add_agent(preset)
 
-    async def _add_producer(self, preset: str) -> None:
+    def _selected_role(self) -> str:
+        try:
+            idx = self.query_one("#agt-role", RadioSet).pressed_index
+        except Exception:
+            idx = 0
+        return self._ROLES[idx if 0 <= idx < len(self._ROLES) else 0]
+
+    async def _add_agent(self, preset: str) -> None:
         name = self.query_one("#agt-newname", Input).value.strip()
         if not name:
-            self.query_one("#agt-status", Static).update("Name the producer first.")
+            self.query_one("#agt-status", Static).update("Name the agent first.")
             return
-        agent_id = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "producer"
+        tier = self._selected_role()
         existing = {a.id for a in roster.list_agents(self.project_code)}
-        base, n = agent_id, 2
-        while agent_id in existing:
-            agent_id = f"{base}_{n}"
-            n += 1
+        if tier in ("leader", "qc"):
+            # Leader / QC are singletons keyed by the role itself.
+            agent_id = tier
+            if agent_id in existing:
+                self.query_one("#agt-status", Static).update(
+                    f"A {tier} already exists — remove it first, then re-add."
+                )
+                return
+            identity = f"{name}, the {tier}."
+        else:
+            agent_id = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "producer"
+            base, n = agent_id, 2
+            while agent_id in existing:
+                agent_id = f"{base}_{n}"
+                n += 1
+            identity = f"{name}, a producer."
         roster.add_agent(
             project_code=self.project_code, agent_id=agent_id, name=name,
-            identity=f"{name}, a producer.", skills=[], model=preset,
-            tier="producer",
+            identity=identity, skills=[], model=preset, tier=tier,
         )
-        await self.show_list(f"Added producer '{name}'.")
+        await self.show_list(f"Added {tier} '{name}'.")
 
     async def _remove_selected(self) -> None:
+        # Any agent is removable now — Leader and QC included (remove + re-add).
         agent_id = self._selected_agent_id()
         if not agent_id:
             return
-        agent = roster.load(agent_id, self.project_code)
-        if agent is None:
-            return
-        if agent.tier != "producer":
-            self.query_one("#agt-status", Static).update(
-                "Only producers can be removed (Leader + QC are fixed roles)."
-            )
+        if roster.load(agent_id, self.project_code) is None:
             return
         roster.remove_agent(project_code=self.project_code, agent_id=agent_id)
         await self.show_list(f"Removed '{agent_id}'.")

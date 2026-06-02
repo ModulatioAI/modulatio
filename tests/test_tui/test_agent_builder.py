@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import DataTable, Input, OptionList
+from textual.widgets import DataTable, Input, OptionList, RadioSet
 
 from modulatio import model_presets, roster, vault
 from modulatio.tui.screens.agent_builder import AgentBuilderScreen
@@ -72,7 +72,7 @@ async def test_add_producer_creates_an_agent(project):
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.query_one(AgentBuilderScreen)
-        await screen._show_add_producer()
+        await screen._show_add_agent()  # default role = Producer
         await pilot.pause()
         app.query_one("#agt-newname", Input).value = "Kurtz"
         ol = app.query_one("#agt-presets", OptionList)
@@ -100,15 +100,35 @@ async def test_remove_producer(project):
         assert "marlow" not in {a.id for a in roster.list_agents(project)}
 
 
-async def test_remove_refuses_leader_and_qc(project):
+async def test_remove_and_readd_the_leader(project):
     app = _Host(project)
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.query_one(AgentBuilderScreen)
         table = app.query_one("#agt-table", DataTable)
-        table.move_cursor(row=0)  # leader
+        # roster sorted by id: leader, marlow, qc → leader is row 0
+        table.move_cursor(row=0)
         await pilot.pause()
-        await screen._remove_selected()
+        assert screen._selected_agent_id() == "leader"
+        await screen._remove_selected()  # Leader IS removable now
         await pilot.pause()
-        # leader survives
-        assert "leader" in {a.id for a in roster.list_agents(project)}
+        assert roster.load("leader", project) is None
+
+        # re-add a Leader via the role picker
+        await screen._show_add_agent()
+        await pilot.pause()
+        app.query_one("#agt-newname", Input).value = "NewBoss"
+        rs = app.query_one("#agt-role", RadioSet)
+        rs.focus()
+        await pilot.press("down")   # highlight "Leader" (index 1)
+        await pilot.press("enter")  # select it
+        await pilot.pause()
+        ol = app.query_one("#agt-presets", OptionList)
+        ol.focus()
+        ol.highlighted = 0
+        await pilot.press("enter")
+        await pilot.pause()
+        leader = roster.load("leader", project)
+        assert leader is not None
+        assert leader.tier == "leader"
+        assert leader.name == "NewBoss"

@@ -15,7 +15,7 @@ status. The AGENTS side (assign Leader/QC, producers) is a sibling screen.
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Static
 
 from modulatio import model_presets
@@ -66,17 +66,50 @@ class ConfigScreen(Vertical):
         body.remove_children()
         table = DataTable(id="cfg-models", cursor_type="row")
         table.add_columns("Key", "Model", "Auth", "Status")
+        self._fill_table(table)
+        body.mount(table)
+        body.mount(Horizontal(
+            Button("+ Add model", id="cfg-add", variant="primary"),
+            Button("Remove", id="cfg-remove", variant="warning"),
+            id="cfg-buttons",
+        ))
+        body.mount(Static(message, id="cfg-status"))
+
+    def _fill_table(self, table: DataTable) -> None:
+        """(Re)populate the preset rows — row key = the preset key."""
         for key, preset in sorted(model_presets.load_presets().items()):
             ready = model_presets.is_available(key)
             table.add_row(
-                key,
-                preset.get("model", ""),
-                preset.get("auth_type", ""),
-                "ready ✓" if ready else "needs setup",
+                key, preset.get("model", ""), preset.get("auth_type", ""),
+                "ready ✓" if ready else "needs setup", key=key,
             )
-        body.mount(table)
-        body.mount(Button("+ Add model", id="cfg-add", variant="primary"))
-        body.mount(Static(message, id="cfg-status"))
+
+    def _refresh_table(self) -> None:
+        """Reuse the existing table (clear + refill) — avoids a remount race."""
+        try:
+            table = self.query_one("#cfg-models", DataTable)
+        except Exception:
+            self.show_list()
+            return
+        table.clear()
+        self._fill_table(table)
+
+    def _selected_preset_key(self) -> str | None:
+        try:
+            table = self.query_one("#cfg-models", DataTable)
+            if table.row_count == 0:
+                return None
+            return table.coordinate_to_cell_key(
+                table.cursor_coordinate
+            ).row_key.value
+        except Exception:
+            return None
+
+    def _set_status(self, text: str) -> None:
+        try:
+            self.query_one("#cfg-status", Static).update(text)
+        except Exception:
+            pass
 
     # ── flow transitions (messages bubble up from the step widgets) ─────
 
@@ -85,6 +118,14 @@ class ConfigScreen(Vertical):
             self._provider_id = self._auth_type = None
             self._env_var = self._base_url = None
             self._swap(ProviderPicker(id="cfg-pp"))
+        elif event.button.id == "cfg-remove":
+            key = self._selected_preset_key()
+            if not key:
+                self._set_status("Select a model row first, then Remove.")
+                return
+            model_presets.remove_preset(key)
+            self._refresh_table()
+            self._set_status(f"Removed '{key}'.")
 
     def on_provider_picker_provider_chosen(
         self, event: ProviderPicker.ProviderChosen
