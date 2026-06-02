@@ -7,10 +7,10 @@ The conversation-first overhaul, split by function:
     **chatbox** below it (roomy text entry, compact chrome). This is where you
     *talk* to the Leader: your messages, his replies, his verdicts. Enter
     sends a message. To launch a job from here, prefix it: ``/kickoff <obj>``.
-  - **TEAM** tab — the factory floor: the workers' stream (big) on top, and a
-    **KICK OFF box** below it (objective + optional docs/images + the KICK OFF
-    button). This is where you *command the team* directly — drop a job and
-    watch it run on the same tab. No conversation here; you don't chat with
+  - **MOD SQUAD** tab — the factory floor: the workers' stream (big) on top,
+    and a **KICK OFF box** below it (objective + optional docs/images + the KICK
+    OFF button). This is where you *command the Mod Squad* directly — drop a job
+    and watch it run on the same tab. No conversation here; you don't chat with
     producers.
   - A two-lamp **IndicatorPanel** sits above the flip so the Leader can catch
     your eye (amber = "talk to me"; orange = "we have a problem") while you're
@@ -19,7 +19,7 @@ The conversation-first overhaul, split by function:
 KICK OFF lives on the TEAM floor (where you watch the work), never beside SEND
 — so a job launch is impossible to fat-finger mid-conversation. The Leader can
 also run a job himself from the chat (``/kickoff`` → his orchestrate function);
-either way the team streams into TEAM and he reports back on LEADER.
+either way the Mod Squad streams into MOD SQUAD and he reports back on LEADER.
 """
 from __future__ import annotations
 
@@ -161,7 +161,7 @@ class PromptScreen(Vertical):
                         "type /kickoff <objective> to run a job",
                         id="prompt-response",
                     )
-            with TabPane("TEAM", id="stream-team-pane"):
+            with TabPane("MOD SQUAD", id="stream-team-pane"):
                 # The factory floor — the workers' TV (big) on top …
                 yield StreamView(
                     lane_roles=TEAM_ROLES, id="stream-team",
@@ -180,7 +180,7 @@ class PromptScreen(Vertical):
                     yield Static("", id="kickoff-attachments-list")
                     yield Static(
                         "type an objective, then F5 / KICK OFF — "
-                        "the team runs it here",
+                        "the Mod Squad runs it here",
                         id="kickoff-response",
                     )
 

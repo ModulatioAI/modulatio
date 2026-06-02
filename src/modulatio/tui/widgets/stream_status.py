@@ -36,7 +36,7 @@ _VERB: dict[str, str] = {
     "leader_decompose_ended": "creating goals",
     "task_planning_started": "planning the work",
     "task_planning_ended": "plan ready",
-    "task_dispatched": "handing off to the team",
+    "task_dispatched": "handing off to the Mod Squad",
     "leader_verify_started": "looking over the product",
     "leader_verify_ended": "rendering a verdict",
     "ticket_opened": "logging a problem",

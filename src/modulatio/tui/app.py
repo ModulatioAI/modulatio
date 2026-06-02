@@ -422,7 +422,7 @@ class ModulatioApp(App):
         self._kickoff_started_at = _time.monotonic()
         self._kickoff_mode = mode
         self._set_kickoff_status(
-            f"Running ({mode} mode)… watch the team work on the floor."
+            f"Running ({mode} mode)… watch the Mod Squad work on the floor."
         )
         # Immediate feedback before the first engine event lands.
         self._set_lane_status("stream-team-status", "modulating")
