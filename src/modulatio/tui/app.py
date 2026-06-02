@@ -40,7 +40,7 @@ from modulatio.tui.screens.memory import build_memory_panel
 from modulatio.tui.screens.prompt import build_prompt_panel
 from modulatio.tui.screens.skills import build_skills_panel
 from modulatio.tui.screens.status import build_status_panel
-from modulatio.tui.screens.plans import build_plans_panel
+from modulatio.tui.screens.jt_library import build_jt_library_panel
 from modulatio.tui.screens.tickets import build_tickets_panel
 from modulatio.tui.widgets.activity_log import ActivityLog
 from modulatio.tui.widgets.chat_input import ChatInput
@@ -342,8 +342,8 @@ class ModulatioApp(App):
                         yield ConfigScreen(id="config-models-screen")
                     with TabPane("AGENTS", id="config-agents"):
                         yield AgentBuilderScreen(id="config-agents-screen")
-            with TabPane("PLANS", id="tab-plans"):
-                yield build_plans_panel()
+            with TabPane("JT LIBRARY", id="tab-jt-library"):
+                yield build_jt_library_panel()
             with TabPane("TICKETS", id="tab-tickets"):
                 yield build_tickets_panel()
             with TabPane("ARTIFACTS", id="tab-artifacts"):

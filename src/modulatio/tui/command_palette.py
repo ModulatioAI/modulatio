@@ -23,10 +23,10 @@ from textual.command import Hits, Provider
 _TAB_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("Switch to Prompt tab", "tab-prompt",
      "Multi-pane per-agent chat + kickoff bar"),
-    ("Switch to Plans tab", "tab-plans",
-     "Leader's plans + execution progress + reflection log"),
+    ("Switch to JT Library tab", "tab-jt-library",
+     "Browse the Job-Template library"),
     ("Switch to Tickets tab", "tab-tickets",
-     "Approval-required tickets and decision history"),
+     "Ticket audit log + decision history"),
     ("Switch to Artifacts tab", "tab-artifacts",
      "Producer outputs by domain"),
     ("Switch to Config tab", "tab-config",
