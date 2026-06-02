@@ -26,6 +26,8 @@ from textual.widgets import Button, Input, RadioButton, RadioSet, Static
 
 from modulatio import config
 from modulatio import provider_catalog as pc
+from modulatio import provider_keys
+from modulatio.tui.widgets.key_selector import KeySelector
 
 
 class AuthStep(Vertical):
@@ -75,6 +77,9 @@ class AuthStep(Vertical):
         self._render_body()
 
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        # only the auth-method radio drives a re-render; ignore the key picker's
+        if event.radio_set.id != "auth-method":
+            return
         self._selected = self.provider.auth_options[event.radio_set.pressed_index]
         self._render_body()
 
@@ -88,21 +93,33 @@ class AuthStep(Vertical):
                 placeholder="base_url, e.g. https://host/v1", id="auth-baseurl",
             ))
         if a.auth_type == "api_key":
-            ready, _ = pc.auth_status(a)
-            if ready:
-                body.mount(Static(f"✓ {a.env_var} is already set — using it. "
-                                  "Enter a new key only to replace it."))
-            if a.env_var is None:  # custom: also name the env var
+            if a.env_var is None:  # custom — name the env var + enter the key
                 body.mount(Input(
                     placeholder="env var name, e.g. MYPROVIDER_API_KEY",
-                    id="auth-envvar",
-                ))
-            tail = f"saved as {a.env_var}" if a.env_var else "saved to your .env"
-            body.mount(Input(
-                password=True,
-                placeholder=f"paste your API key  →  {tail}",
-                id="auth-key",
-            ))
+                    id="auth-envvar"))
+                body.mount(Input(
+                    password=True, placeholder="paste your API key",
+                    id="auth-key"))
+            else:
+                slots = provider_keys.list_keys(a.env_var)
+                if len(slots) > 1:  # pick which of N keys (redacted)
+                    body.mount(Static("Which key?"))
+                    body.mount(KeySelector(a.env_var, id="auth-keysel"))
+                elif slots:
+                    body.mount(Static(
+                        f"✓ a key is set ({a.env_var}). Use it, or add "
+                        "another below."))
+                # add a key — optional when one exists, required when none.
+                # A label lets you track it (e.g. text / images / web search).
+                body.mount(Input(
+                    placeholder="label this key (optional), e.g. images",
+                    id="auth-keylabel"))
+                hint = (
+                    "paste a NEW API key, or leave blank to use the selected key"
+                    if slots
+                    else f"paste your API key  →  saved as {a.env_var}"
+                )
+                body.mount(Input(password=True, placeholder=hint, id="auth-key"))
             if self.provider.signup_url:
                 body.mount(Static(f"Need one? {self.provider.signup_url}"))
         elif a.auth_type.startswith("oauth"):
@@ -122,17 +139,31 @@ class AuthStep(Vertical):
         env_var = a.env_var
         if a.auth_type == "api_key":
             key = self.query_one("#auth-key", Input).value.strip()
-            if env_var is None:  # custom — the operator named the env var
+            if a.env_var is None:  # custom — operator-named env var
                 env_var = self.query_one("#auth-envvar", Input).value.strip() or None
-            ready, _ = pc.auth_status(a)
-            if not key and not ready:
-                self._status("Enter your API key to continue.")
-                return
-            if key and not env_var:
-                self._status("Name the env var to store the key under.")
-                return
-            if key and env_var:
+                if not key:
+                    self._status("Enter your API key to continue.")
+                    return
+                if not env_var:
+                    self._status("Name the env var to store the key under.")
+                    return
                 config.set_env_secret(env_var, key)
+            else:
+                slots = provider_keys.list_keys(a.env_var)
+                if key:  # store as a new numbered key (with its label)
+                    label = self.query_one("#auth-keylabel", Input).value.strip()
+                    slot = provider_keys.add_key(a.env_var, key, label or None)
+                    env_var = slot["env_var"]
+                elif slots:  # use the selected existing key
+                    try:
+                        env_var = self.query_one(
+                            "#auth-keysel", KeySelector
+                        ).chosen_env_var
+                    except Exception:
+                        env_var = a.env_var  # only one key → no picker
+                else:
+                    self._status("Enter your API key to continue.")
+                    return
         elif a.auth_type.startswith("oauth"):
             ready, hint = pc.auth_status(a)
             if not ready:

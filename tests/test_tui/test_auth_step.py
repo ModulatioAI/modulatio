@@ -6,6 +6,7 @@ from textual.widgets import Input
 
 from modulatio import config
 from modulatio import provider_catalog as pc
+from modulatio import provider_keys
 from modulatio.tui.widgets.auth_step import AuthStep
 
 
@@ -81,6 +82,42 @@ async def test_custom_blocks_without_a_base_url():
         await pilot.click("#auth-continue")
         await pilot.pause()
         assert app.configured == []  # base_url missing → blocked
+
+
+async def test_api_key_adds_a_labeled_numbered_key(monkeypatch):
+    monkeypatch.setattr(provider_keys, "list_keys", lambda b: [])  # none yet
+    added: dict = {}
+
+    def fake_add(base, value, label=None):
+        added.update(base=base, value=value, label=label)
+        return {"index": 1, "env_var": base, "label": label, "is_set": True}
+
+    monkeypatch.setattr(provider_keys, "add_key", fake_add)
+    app = _Host(pc.GOOGLE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#auth-keylabel", Input).value = "images"
+        app.query_one("#auth-key", Input).value = "AIza-secret"
+        await pilot.click("#auth-continue")
+        await pilot.pause()
+        assert added == {"base": "GEMINI_API_KEY", "value": "AIza-secret",
+                         "label": "images"}
+        assert app.configured == [("google", "api_key", "GEMINI_API_KEY", None)]
+
+
+async def test_multi_key_uses_selected_default_when_no_new_key(monkeypatch):
+    monkeypatch.setattr(provider_keys, "list_keys", lambda b: [
+        {"index": 1, "env_var": "GEMINI_API_KEY", "label": "text", "is_set": True},
+        {"index": 2, "env_var": "GEMINI_API_KEY_2", "label": "images",
+         "is_set": True},
+    ])
+    app = _Host(pc.GOOGLE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query("#auth-keysel")  # picker shown for 2 keys
+        await pilot.click("#auth-continue")  # blank key → use selected (#1)
+        await pilot.pause()
+        assert app.configured == [("google", "api_key", "GEMINI_API_KEY", None)]
 
 
 async def test_oauth_not_signed_in_blocks_with_hint(monkeypatch):
