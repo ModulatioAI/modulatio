@@ -274,6 +274,25 @@ def _build_runners(
     }
 
 
+# === modulatio acp (Agent Client Protocol server over stdio) ===
+
+@app.command(name="acp")
+def acp(
+    code: str = typer.Option(..., "--code", help="3-letter project code to drive."),
+    stub: bool = typer.Option(
+        False, "--stub", help="Use canned stub runners (offline)."),
+) -> None:
+    """Run an Agent Client Protocol (ACP) server over stdio.
+
+    Speaks JSON-RPC-on-stdio so an external client (e.g. an editor) can drive
+    the conversational Leader: prompt turns, live activity, and client-approved
+    tool calls. stdout is JSON-RPC only — all logs go to stderr.
+    """
+    import sys
+    from modulatio.acp import run_acp_server
+    run_acp_server(project_code=code, stub=stub, stdin=sys.stdin, stdout=sys.stdout)
+
+
 # === modulatio kickoff (v2's primary work verb) ===
 
 @app.command()
