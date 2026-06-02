@@ -272,6 +272,15 @@ def _resolve_model_call_args(
 
     auth_type = preset.get("auth_type", "none")
     auth_config = preset.get("auth_config") or {}
+    # Key pool: a preset flagged ``pool`` rotates across the provider's numbered
+    # keys (load-balancing). Each resolve advances the round-robin cursor, so
+    # concurrent producers spread over the pool and a 429 retry lands on the
+    # next key (see litellm_runner's RateLimitError handler).
+    if (auth_type == "api_key" and auth_config.get("pool")
+            and auth_config.get("env_var")):
+        from modulatio import provider_keys
+        rotated = provider_keys.next_pool_env_var(auth_config["env_var"])
+        auth_config = {"env_var": rotated}
     try:
         strategy = auth_strategies.build_strategy(auth_type, auth_config)
     except ValueError:
@@ -285,6 +294,18 @@ def _resolve_model_call_args(
     kwargs.update(strategy.attribution_kwargs())
 
     return litellm_model, kwargs
+
+
+def _pool_size(model: str) -> int:
+    """How many keys the preset's pool has (0 if the preset isn't pooled).
+    Bounds the key-pool 429 failover."""
+    from modulatio import model_presets, provider_keys
+
+    preset = model_presets.get_preset(model)
+    auth_config = (preset or {}).get("auth_config") or {}
+    if auth_config.get("pool") and auth_config.get("env_var"):
+        return len(provider_keys.pool_env_vars(auth_config["env_var"]))
+    return 0
 
 
 def _record_call_usage(resp, model: str) -> None:
@@ -373,7 +394,7 @@ def litellm_runner(
 
     def _run(prompt: str) -> str:
         from litellm import completion, responses
-        from litellm.exceptions import AuthenticationError
+        from litellm.exceptions import AuthenticationError, RateLimitError
         from modulatio import context_budget as _ctx_budget
 
         body = f"/no_think\n\n{prompt}" if disable_thinking else prompt
@@ -435,6 +456,26 @@ def litellm_runner(
 
         try:
             resp = completion(model=litellm_model, messages=msgs, **kwargs)
+        except RateLimitError:
+            # Key-pool failover: rotate to the next key and retry, bounded by
+            # the pool size. No pool / single key → nothing to fail over to.
+            pooled = _pool_size(model)
+            if pooled <= 1:
+                raise
+            resp = None
+            last_err = None
+            for _ in range(pooled):
+                rl_model, rl_kwargs = _resolve_model_call_args(model)  # next key
+                rl_call = {"timeout": timeout, **rl_kwargs}
+                if api_base is not None:
+                    rl_call["api_base"] = api_base
+                try:
+                    resp = completion(model=rl_model, messages=msgs, **rl_call)
+                    break
+                except RateLimitError as e:
+                    last_err = e
+            if resp is None:
+                raise last_err
         except AuthenticationError as e:
             new_token = _try_refresh_for(model)
             if new_token is not None:

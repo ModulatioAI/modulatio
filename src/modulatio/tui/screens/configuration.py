@@ -43,6 +43,7 @@ class ConfigScreen(Vertical):
         self._auth_type: str | None = None
         self._env_var: str | None = None
         self._base_url: str | None = None
+        self._pool: bool = False
 
     def compose(self) -> ComposeResult:
         yield Static("CONFIGURATION · Models", classes="cfg-title")
@@ -141,6 +142,7 @@ class ConfigScreen(Vertical):
         self._auth_type = event.auth_type
         self._env_var = event.env_var
         self._base_url = event.base_url
+        self._pool = event.pool
         provider = pc.get_provider(event.provider_id)
         if provider is not None:
             self._swap(ModelPicker(
@@ -167,7 +169,7 @@ class ConfigScreen(Vertical):
         auth = pc.AuthOption(
             auth_type=self._auth_type, label="", env_var=self._env_var,
         )
-        kwargs = pc.preset_kwargs(provider, model, auth)
+        kwargs = pc.preset_kwargs(provider, model, auth, pool=self._pool)
         if self._base_url:  # custom endpoint override
             kwargs["base_url"] = self._base_url
         key = kwargs.pop("key")

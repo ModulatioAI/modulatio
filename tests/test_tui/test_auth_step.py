@@ -27,6 +27,7 @@ class _Host(App):
 
     def on_auth_step_auth_configured(self, e: AuthStep.AuthConfigured) -> None:
         self.configured.append((e.provider_id, e.auth_type, e.env_var, e.base_url))
+        self.last_event = e
 
 
 async def test_api_key_saves_to_env_and_advances(monkeypatch):
@@ -112,12 +113,30 @@ async def test_multi_key_uses_selected_default_when_no_new_key(monkeypatch):
          "is_set": True},
     ])
     app = _Host(pc.GOOGLE)
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(110, 44)) as pilot:
         await pilot.pause()
         assert app.query("#auth-keysel")  # picker shown for 2 keys
         await pilot.click("#auth-continue")  # blank key → use selected (#1)
         await pilot.pause()
         assert app.configured == [("google", "api_key", "GEMINI_API_KEY", None)]
+
+
+async def test_pool_checkbox_sets_pool_on_auth_configured(monkeypatch):
+    from textual.widgets import Checkbox
+    monkeypatch.setattr(provider_keys, "list_keys", lambda b: [
+        {"index": 1, "env_var": "GEMINI_API_KEY", "label": "text", "is_set": True},
+        {"index": 2, "env_var": "GEMINI_API_KEY_2", "label": "images",
+         "is_set": True},
+    ])
+    app = _Host(pc.GOOGLE)
+    async with app.run_test(size=(110, 44)) as pilot:
+        await pilot.pause()
+        app.query_one("#auth-pool", Checkbox).value = True  # pool all keys
+        await pilot.click("#auth-continue")
+        await pilot.pause()
+        # pooled → env_var is the base var, pool flag set
+        assert app.last_event.env_var == "GEMINI_API_KEY"
+        assert app.last_event.pool is True
 
 
 async def test_remove_selected_key_button(monkeypatch):

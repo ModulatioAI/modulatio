@@ -591,6 +591,7 @@ def preset_kwargs(
     auth: AuthOption,
     *,
     key: Optional[str] = None,
+    pool: bool = False,
     capability_tags: Optional[list[str]] = None,
     model_tier: Optional[str] = None,
     cost_class: Optional[str] = None,
@@ -609,6 +610,8 @@ def preset_kwargs(
     auth_config: Optional[dict] = None
     if auth.auth_type == "api_key" and auth.env_var:
         auth_config = {"env_var": auth.env_var}
+        if pool:  # rotate across the provider's numbered keys at call time
+            auth_config["pool"] = True
     kwargs = dict(
         key=key or _slug(provider, model),
         label=model.name,

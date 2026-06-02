@@ -404,6 +404,15 @@ def test_extended_family_table_infers_new_families():
     assert mc.infer("ministral-3:8b")[0] == "budget"
 
 
+def test_preset_kwargs_pool_flag():
+    p = pc.OPENROUTER
+    model = pc.CatalogModel(id="x/y", name="Y", provider_id="openrouter")
+    base = pc.preset_kwargs(p, model, p.auth_options[0])
+    assert "pool" not in base["auth_config"]
+    pooled = pc.preset_kwargs(p, model, p.auth_options[0], pool=True)
+    assert pooled["auth_config"] == {"env_var": "OPENROUTER_API_KEY", "pool": True}
+
+
 def test_preset_kwargs_can_override_inferred_caps():
     p = pc.OPENROUTER
     model = pc.CatalogModel(id="x/y", name="Y", provider_id="openrouter")

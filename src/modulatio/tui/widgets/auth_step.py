@@ -22,7 +22,14 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
-from textual.widgets import Button, Input, RadioButton, RadioSet, Static
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Input,
+    RadioButton,
+    RadioSet,
+    Static,
+)
 
 from modulatio import config
 from modulatio import provider_catalog as pc
@@ -50,11 +57,13 @@ class AuthStep(Vertical):
             auth_type: str,
             env_var: str | None = None,
             base_url: str | None = None,
+            pool: bool = False,
         ) -> None:
             self.provider_id = provider_id
             self.auth_type = auth_type
             self.env_var = env_var
             self.base_url = base_url
+            self.pool = pool
             super().__init__()
 
     def __init__(self, provider: pc.Provider, **kwargs) -> None:
@@ -105,6 +114,9 @@ class AuthStep(Vertical):
                 if len(slots) > 1:  # pick which of N keys (redacted)
                     body.mount(Static("Which key?"))
                     body.mount(KeySelector(a.env_var, id="auth-keysel"))
+                    body.mount(Checkbox(
+                        "Pool all keys — rotate + 429 failover", id="auth-pool",
+                    ))
                 elif slots:
                     body.mount(Static(
                         f"✓ a key is set ({a.env_var}). Use it, or add "
@@ -157,6 +169,7 @@ class AuthStep(Vertical):
             return
         a = self._selected
         env_var = a.env_var
+        pool = False
         if a.auth_type == "api_key":
             key = self.query_one("#auth-key", Input).value.strip()
             if a.env_var is None:  # custom — operator-named env var
@@ -170,7 +183,13 @@ class AuthStep(Vertical):
                 config.set_env_secret(env_var, key)
             else:
                 slots = provider_keys.list_keys(a.env_var)
-                if key:  # store as a new numbered key (with its label)
+                try:
+                    pool = self.query_one("#auth-pool", Checkbox).value
+                except Exception:
+                    pool = False
+                if pool:  # use ALL keys; the runner rotates the base var's pool
+                    env_var = a.env_var
+                elif key:  # store as a new numbered key (with its label)
                     label = self.query_one("#auth-keylabel", Input).value.strip()
                     slot = provider_keys.add_key(a.env_var, key, label or None)
                     env_var = slot["env_var"]
@@ -196,7 +215,7 @@ class AuthStep(Vertical):
                 self._status("Enter a base_url for the custom provider.")
                 return
         self.post_message(self.AuthConfigured(
-            self.provider.id, a.auth_type, env_var, base_url,
+            self.provider.id, a.auth_type, env_var, base_url, pool,
         ))
 
 

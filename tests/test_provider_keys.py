@@ -88,6 +88,22 @@ def test_config_remove_env_secret_roundtrip(tmp_path, monkeypatch):
     assert config.remove_env_secret("TESTREMOVE_KEY") is False  # already gone
 
 
+def test_pool_round_robins_across_set_keys(keys):
+    keys.add_key(BASE, "k1", "a")
+    keys.add_key(BASE, "k2", "b")
+    keys.add_key(BASE, "k3", "c")
+    keys._pool_cursor.clear()
+    assert keys.pool_env_vars(BASE) == [BASE, f"{BASE}_2", f"{BASE}_3"]
+    picks = [keys.next_pool_env_var(BASE) for _ in range(4)]
+    assert picks == [BASE, f"{BASE}_2", f"{BASE}_3", BASE]  # wraps around
+
+
+def test_pool_empty_falls_back_to_base(keys):
+    keys._pool_cursor.clear()
+    assert keys.pool_env_vars(BASE) == []
+    assert keys.next_pool_env_var(BASE) == BASE  # nothing set → the base var
+
+
 def test_unregistered_env_key_is_still_discovered(keys, monkeypatch):
     # a key set in the env without going through add_key still shows up
     monkeypatch.setenv(BASE, "manual")

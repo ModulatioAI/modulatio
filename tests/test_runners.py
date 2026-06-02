@@ -153,6 +153,88 @@ def test_litellm_chat_runner_records_usage_to_active_tracker(monkeypatch):
     assert tracker.cost_usd_used == 0.0
 
 
+def _pooled_preset(env_var, pool):
+    return {
+        "label": "Pooled", "base_url": "https://integrate.api.nvidia.com/v1",
+        "api_format": "openai", "auth_type": "api_key",
+        "auth_config": {"env_var": env_var, **({"pool": True} if pool else {})},
+        "model": "meta/llama-3.1",
+    }
+
+
+def test_pooled_preset_rotates_the_api_key(tmp_path, monkeypatch):
+    """A pooled preset spreads requests across the provider's numbered keys —
+    each resolve lands on the next key (load balancing)."""
+    from modulatio import provider_keys
+    from modulatio.runners import _resolve_model_call_args
+
+    monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
+    provider_keys._pool_cursor.clear()
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {"pooled": _pooled_preset("TESTPOOL_KEY", pool=True)},
+    )
+    monkeypatch.setenv("TESTPOOL_KEY", "key-1")
+    monkeypatch.setenv("TESTPOOL_KEY_2", "key-2")
+    monkeypatch.setenv("TESTPOOL_KEY_3", "key-3")
+    used = [_resolve_model_call_args("pooled")[1]["api_key"] for _ in range(4)]
+    assert used == ["key-1", "key-2", "key-3", "key-1"]
+
+
+def test_non_pooled_preset_uses_a_single_key(tmp_path, monkeypatch):
+    from modulatio import provider_keys
+    from modulatio.runners import _resolve_model_call_args
+
+    monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {"single": _pooled_preset("TESTPOOL_KEY", pool=False)},
+    )
+    monkeypatch.setenv("TESTPOOL_KEY", "key-1")
+    monkeypatch.setenv("TESTPOOL_KEY_2", "key-2")
+    used = [_resolve_model_call_args("single")[1]["api_key"] for _ in range(3)]
+    assert used == ["key-1", "key-1", "key-1"]  # no rotation without the flag
+
+
+def test_pool_429_failover_retries_with_the_next_key(tmp_path, monkeypatch):
+    """When the first key 429s, the pool rotates to the next key and retries —
+    so one rate-limited producer doesn't stall; another key picks it up."""
+    import litellm
+    from litellm.exceptions import RateLimitError
+
+    from modulatio import provider_keys
+    from modulatio.runners import litellm_runner
+
+    monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
+    provider_keys._pool_cursor.clear()
+    preset = _pooled_preset("TESTPOOL_KEY", pool=True)
+    monkeypatch.setattr("modulatio.model_presets.load_presets",
+                        lambda: {"pooled": preset})
+    monkeypatch.setattr("modulatio.model_presets.get_preset",
+                        lambda k: preset)  # _pool_size
+    monkeypatch.setenv("TESTPOOL_KEY", "key-1")
+    monkeypatch.setenv("TESTPOOL_KEY_2", "key-2")
+
+    keys_seen: list = []
+    fake_resp = _fake_chat_completion_response(content="ok")
+
+    def fake_completion(**kw):
+        keys_seen.append(kw.get("api_key"))
+        if len(keys_seen) == 1:  # first key is rate-limited
+            raise RateLimitError(
+                message="429", llm_provider="nvidia", model="m",
+            )
+        return fake_resp
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+
+    out = litellm_runner("pooled")("hi")
+    assert out == "ok"
+    assert keys_seen[0] == "key-1"          # first try, rate-limited
+    assert "key-2" in keys_seen[1:]         # failed over to the next key
+
+
 def test_resolve_merges_preset_default_params(monkeypatch):
     """A preset carrying ``default_params`` (the reasoning-control gap fix)
     surfaces those kwargs in the resolved completion args — so a producer

@@ -97,6 +97,28 @@ def add_key(
     return KeySlot(index=index, env_var=ev, label=label, is_set=True)
 
 
+_pool_cursor: dict[str, int] = {}
+
+
+def pool_env_vars(base_env_var: str) -> list[str]:
+    """The env vars of the *set* keys for this provider — the rotation pool
+    (#1 first). A model preset flagged ``pool`` spreads requests across these,
+    so e.g. six producers ride three keys instead of one rate-limited key."""
+    return [s["env_var"] for s in list_keys(base_env_var) if s["is_set"]]
+
+
+def next_pool_env_var(base_env_var: str) -> str:
+    """Round-robin the next set key's env var (per-request load balancing).
+    Falls back to the base var when the pool is empty. Advances a per-provider
+    cursor each call."""
+    pool = pool_env_vars(base_env_var)
+    if not pool:
+        return base_env_var
+    i = _pool_cursor.get(base_env_var, 0) % len(pool)
+    _pool_cursor[base_env_var] = i + 1
+    return pool[i]
+
+
 def remove_key(env_var: str) -> bool:
     """Remove a key entirely — its value from the vault .env (+ os.environ) and
     its label from the registry. Returns True if anything was removed. Presets
@@ -123,4 +145,6 @@ __all__ = [
     "add_key",
     "remove_key",
     "default_env_var",
+    "pool_env_vars",
+    "next_pool_env_var",
 ]
