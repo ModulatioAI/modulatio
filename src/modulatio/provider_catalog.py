@@ -325,9 +325,11 @@ CUSTOM = Provider(
     name="Custom / Other",
     base_url="",  # the operator supplies it
     api_format="openai",
+    # Default to no-auth (many custom endpoints are local/keyless); the operator
+    # can switch to a key and name its env var.
     auth_options=[
-        AuthOption(auth_type="api_key", label="API key"),
         AuthOption(auth_type="none", label="No auth"),
+        AuthOption(auth_type="api_key", label="API key"),
     ],
     # No catalog to list — the operator types the model id directly.
     models_source=ModelsSource(kind="custom"),

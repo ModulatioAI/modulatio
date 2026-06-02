@@ -182,6 +182,30 @@ def write_secret_file(path: Path, content: str) -> None:
         raise
 
 
+def set_env_secret(name: str, value: str) -> Path:
+    """Set/update a single secret (e.g. an API key) in the vault ``.env``,
+    0600, and load it into ``os.environ`` so it's usable immediately.
+
+    Used by the Configuration tab when the operator enters an API key — the
+    key persists across sessions (loaded by ``load_modulatio_env``) and is live
+    this session. Existing lines are preserved; the named key is updated or
+    appended. Returns the env file path."""
+    env_path = get_vault_root() / ".env"
+    existing: dict[str, str] = {}
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                existing[k.strip()] = v.strip()
+    existing[name] = value
+    write_secret_file(
+        env_path, "\n".join(f"{k}={v}" for k, v in existing.items()) + "\n"
+    )
+    os.environ[name] = value
+    return env_path
+
+
 def save_defaults(defaults: dict) -> None:
     """Persist defaults to disk + invalidate cache."""
     global _cached_defaults
