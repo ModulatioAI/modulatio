@@ -173,6 +173,18 @@ def test_preview_renders_denied_banner():
     assert "✗ DECLINED" in out
 
 
+def test_awaiting_preview_points_to_the_leader_tab():
+    """An undecided approval tells the operator HOW to resolve it now that the
+    buttons are gone — by talking to the Leader (discoverability polish)."""
+    from modulatio.tui.screens.tickets import _format_preview
+
+    t = _make_ticket(approval_required=True)  # no decision yet → awaiting
+    out = _format_preview(t)
+    assert "Awaiting decision" in out
+    assert "LEADER" in out
+    assert "approve" in out.lower()
+
+
 # ─── Preview pane ───────────────────────────────────────────────────────────
 
 

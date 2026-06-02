@@ -173,6 +173,9 @@ def _format_preview(t: Ticket) -> str:
         lines.extend([
             "## ⏳ Awaiting decision",
             "",
+            f"_To resolve: tell the Leader in the **LEADER** tab — e.g._ "
+            f"`approve {t.id}` _or_ `decline {t.id}`.",
+            "",
         ])
 
     lines.extend([
