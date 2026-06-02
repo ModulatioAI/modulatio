@@ -389,7 +389,7 @@ async def test_send_posts_message_and_does_not_kickoff(project_with_roster):
         await pilot.pause()
 
         assert inp.text == ""                       # composer cleared
-        assert leader.lines and len(leader.lines)   # message landed in LEADER
+        assert leader.messages and len(leader.messages)  # message landed in LEADER
         assert not hasattr(app, "_kickoff_started_at")  # no run launched
 
 
@@ -436,6 +436,77 @@ async def test_bare_slash_kickoff_asks_for_an_objective(project_with_roster):
         screen._send_message()
         await pilot.pause()
         assert not hasattr(app, "_kickoff_started_at")  # nothing launched
+
+
+# ─── Copy out of the TV → paste into the chatbox ────────────────────────────
+
+
+async def test_tv_partial_drag_select_copies_only_the_snippet(project_with_roster):
+    """Drag-selecting *part* of a Leader reply copies exactly that snippet —
+    not the whole message. (RichLog could only ever select the whole widget;
+    the Static-line rebuild gives real partial selection.)"""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+        tv = app.query_one("#stream-leader", StreamView)
+        tv.add_leader_message(
+            "The dosage detail you want is RIGHT-HERE in the middle of a reply."
+        )
+        await pilot.pause()
+        static = tv.query(".stream-line").first()
+        col = tv.messages[-1].index("RIGHT-HERE")
+        await pilot.mouse_down(static, offset=(col, 0))
+        await pilot.mouse_up(static, offset=(col + 10, 0))
+        await pilot.pause()
+        app.action_copy_text()
+        await pilot.pause()
+        # exactly the dragged snippet — not the whole line
+        assert app.clipboard.strip() == "RIGHT-HERE"
+        assert "dosage" not in app.clipboard
+
+
+async def test_ctrl_c_with_no_selection_copies_last_leader_message(
+    project_with_roster,
+):
+    """Never a dead key: Ctrl+C with nothing selected copies the Leader's last
+    message (one message — not the whole transcript)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        tv = app.query_one("#stream-leader", StreamView)
+        tv.add_operator_message("hey")
+        tv.add_leader_message("the latest thing I said")
+        await pilot.pause()
+        app.action_copy_text()
+        await pilot.pause()
+        assert app.clipboard == "the latest thing I said"
+
+
+async def test_copied_snippet_pastes_into_the_chatbox(project_with_roster):
+    """The full round-trip: copy from the TV, paste into the Leader chatbox."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.chat_input import ChatInput
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        tv = app.query_one("#stream-leader", StreamView)
+        tv.add_leader_message("quote me on this")
+        await pilot.pause()
+        app.action_copy_text()                       # no selection → last message
+        inp = app.query_one("#prompt-input", ChatInput)
+        inp.focus()
+        await pilot.pause()
+        inp.action_paste()
+        await pilot.pause()
+        assert inp.text == "quote me on this"
 
 
 async def test_f5_action_launches_kickoff(project_with_roster):
@@ -542,10 +613,10 @@ async def test_sending_a_message_gets_a_leader_reply(project_with_roster):
         leader = app.query_one("#stream-leader", StreamView)
         for _ in range(60):
             await pilot.pause(0.1)
-            if len(leader.lines) >= 2:
+            if len(leader.messages) >= 2:
                 break
 
-        text = "\n".join(str(line) for line in leader.lines)
+        text = "\n".join(leader.messages)
         assert "can we just talk" in text          # operator message
         assert "Leader" in text                      # the Leader's reply marker
         assert app.query_one("#prompt-input", ChatInput).text == ""  # cleared

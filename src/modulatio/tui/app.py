@@ -870,18 +870,33 @@ class ModulatioApp(App):
         self._run_kickoff(self._kickoff_objective_text())
 
     def action_copy_text(self) -> None:
-        """Ctrl+C → copy the current text selection (drag in a TV stream) to
-        the system clipboard, so you can paste it into the chatbox (Ctrl+V)."""
+        """Ctrl+C → copy text from a TV to the clipboard so you can paste it
+        into the chatbox (Ctrl+V).
+
+        Prefers a drag/double-click selection; with nothing selected it falls
+        back to the Leader's last message, so Ctrl+C is never a dead key."""
         try:
             text = self.screen.get_selected_text()
         except Exception:
             text = None
+        note = "Copied selection"
+        if not text:
+            text = self._last_leader_text()
+            note = "Copied the Leader's last message"
         if text:
             self.copy_to_clipboard(text)
             try:
-                self.notify("Copied to clipboard", timeout=1.5)
+                self.notify(f"{note} — paste with Ctrl+V", timeout=1.5)
             except Exception:
                 pass
+
+    def _last_leader_text(self) -> str:
+        """The Leader's most recent reply (Ctrl+C fallback when nothing is
+        selected)."""
+        try:
+            return self.query_one("#stream-leader", StreamView).last_leader_text
+        except Exception:
+            return ""
 
     def action_focus_jobdrop(self) -> None:
         """F3 → jump to the CONSOLE/LEADER chatbox so you can type a message."""
