@@ -6,6 +6,48 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-06-02
+
+**Conversation-first: you resolve work by talking to the Leader.** This batch
+moves Modulatio further toward its conversation-first shape — the LEADER tab is
+where work gets resolved, so the dedicated approve/deny surfaces retire and the
+Leader handles approvals in conversation. Plus a Job-Template library, chat
+attachments, a Leader constitution, and built-in bug reporting. Reviewed fresh
+by two independent reviewers (hull + coherence).
+
+### Changed
+
+- **Approvals move into the Leader conversation.** The Tickets tab is now a
+  read-only audit log — its approve/decline buttons, `a`/`d` keybinds, and note
+  input are gone. You approve by telling the Leader ("approve the budget",
+  "yes, go ahead"); he carries it out via a new `decide_approval` tool, and
+  pending approvals surface in his prompt. The orange PROBLEM lamp still fires
+  when something needs attention, and an awaiting ticket's preview points you to
+  the LEADER tab.
+- **The PLANS tab is now the JT Library** — a searchable browser for the
+  Job-Template library (each template's parameters, output contract, and
+  interview). Plan objects still live in the engine; their old read-only TUI
+  surface is retired.
+- **The QUEUE tab is removed** (a dead viewer). The Heartbeat queue engine is
+  untouched.
+
+### Added
+
+- **Attachments + image upload in the Leader chat.** 📎/🖼 on the chatbox: hand
+  the Leader a document (inlined into the conversation) or an image (he sees it
+  via the multimodal path), the same way the KICK OFF box already took
+  attachments.
+- **A constitution for the conversational Leader.** A user-editable values
+  document (honesty / diligence / harm-avoidance / respect) that shapes how the
+  Leader talks and partners with you — `constitution.md` (project > shared >
+  seed), injected *only* into the conversational persona, not the producer/QC or
+  decompose/verify prompts. A sensible default ships; copy it and make it yours.
+- **Built-in bug reporting (`/bug`).** A form that files a GitHub issue with a
+  **redacted** diagnostics bundle (version, runtime, models with auth-type +
+  availability — never a key value, toggles as set/unset, recent crash-log
+  names). Direct submission when `MODULATIO_GITHUB_TOKEN` is set; otherwise it
+  opens a prefilled new-issue URL (no account needed).
+
 ## [0.7.1] — 2026-06-02
 
 **The key model, corrected — and the team gets a name.** v0.7.0 shipped the
