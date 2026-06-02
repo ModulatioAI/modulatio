@@ -336,12 +336,6 @@ class ModulatioApp(App):
         with TabbedContent(initial="tab-prompt", id="app-tabs"):
             with TabPane("CONSOLE", id="tab-prompt"):
                 yield build_prompt_panel()
-            with TabPane("PLANS", id="tab-plans"):
-                yield build_plans_panel()
-            with TabPane("TICKETS", id="tab-tickets"):
-                yield build_tickets_panel()
-            with TabPane("ARTIFACTS", id="tab-artifacts"):
-                yield build_artifacts_panel()
             with TabPane("CONFIG", id="tab-config"):
                 # The configurator: models + agents, a sub-flip like LEADER/TEAM.
                 with TabbedContent(initial="config-models", id="config-flip"):
@@ -349,6 +343,12 @@ class ModulatioApp(App):
                         yield ConfigScreen(id="config-models-screen")
                     with TabPane("AGENTS", id="config-agents"):
                         yield AgentBuilderScreen(id="config-agents-screen")
+            with TabPane("PLANS", id="tab-plans"):
+                yield build_plans_panel()
+            with TabPane("TICKETS", id="tab-tickets"):
+                yield build_tickets_panel()
+            with TabPane("ARTIFACTS", id="tab-artifacts"):
+                yield build_artifacts_panel()
             with TabPane("SKILLS", id="tab-skills"):
                 yield build_skills_panel()
             with TabPane("MEMORY", id="tab-memory"):
