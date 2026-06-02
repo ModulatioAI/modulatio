@@ -110,7 +110,13 @@ async def test_remove_and_readd_the_leader(project):
         table.move_cursor(row=0)
         await pilot.pause()
         assert screen._selected_agent_id() == "leader"
-        await screen._remove_selected()  # Leader IS removable now
+        # Leader IS removable now, but it's a two-step confirm (Nemo, hull):
+        # the first Remove warns, the second confirms.
+        await screen._remove_selected()
+        await pilot.pause()
+        assert roster.load("leader", project) is not None  # warned, not yet gone
+        assert screen._pending_remove == "leader"  # awaiting confirm
+        await screen._remove_selected()  # confirm
         await pilot.pause()
         assert roster.load("leader", project) is None
 

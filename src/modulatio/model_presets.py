@@ -129,6 +129,24 @@ def add_preset(
             f"default_params must be a dict of completion kwargs, got "
             f"{type(default_params).__name__}"
         )
+    if auth_config is not None:
+        if not isinstance(auth_config, dict):
+            raise ValueError(
+                f"auth_config must be a dict, got {type(auth_config).__name__}"
+            )
+        # Security keel (Nemo, hull 2026-06-02): a preset stores an env-var
+        # *reference* (`env_var`), never a secret value. Reject any field that
+        # looks like a raw key/token/secret so a stray value can't get
+        # persisted into model_presets.json (chmod 600, but still never values).
+        _SECRET_FIELDS = {"key", "api_key", "apikey", "token", "secret",
+                          "password", "access_token", "refresh_token"}
+        leaked = sorted(f for f in auth_config if f.lower() in _SECRET_FIELDS)
+        if leaked:
+            raise ValueError(
+                f"auth_config may not carry raw secret value(s) {leaked} — "
+                f"store the secret in the vault and reference it via "
+                f"'env_var'. Presets keep references, never values."
+            )
 
     presets = load_presets()
     if key in presets:

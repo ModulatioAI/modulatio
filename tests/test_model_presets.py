@@ -79,6 +79,20 @@ def test_add_preset_rejects_invalid_api_format():
         )
 
 
+@pytest.mark.parametrize("field", ["key", "api_key", "token", "secret",
+                                   "password", "refresh_token"])
+def test_add_preset_rejects_raw_secret_in_auth_config(field):
+    """Security keel (Nemo, hull): a preset stores an env-var REFERENCE, never
+    a secret value. add_preset must reject any raw-secret field outright."""
+    with pytest.raises(ValueError, match="raw secret"):
+        model_presets.add_preset(
+            "k", label="L", base_url="u", api_format="openai",
+            auth_type="api_key", model="m",
+            auth_config={"env_var": "X_API_KEY", field: "sk-leaked-value"},
+        )
+    assert model_presets.load_presets() == {}  # nothing persisted
+
+
 def test_add_preset_rejects_invalid_auth_type():
     with pytest.raises(ValueError, match="auth_type"):
         model_presets.add_preset(

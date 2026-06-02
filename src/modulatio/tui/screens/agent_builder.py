@@ -56,6 +56,7 @@ class AgentBuilderScreen(Vertical):
         super().__init__(**kwargs)
         self._flow: str | None = None  # "change" | "add"
         self._target_agent: str | None = None
+        self._pending_remove: str | None = None  # leader/qc confirm-once guard
 
     def compose(self) -> ComposeResult:
         yield Static("CONFIGURATION · Agents", classes="cfg-title")
@@ -83,7 +84,7 @@ class AgentBuilderScreen(Vertical):
     # ── the roster list ─────────────────────────────────────────────────
 
     async def show_list(self, message: str = "") -> None:
-        self._flow = self._target_agent = None
+        self._flow = self._target_agent = self._pending_remove = None
         body = self._body()
         await body.remove_children()
         table = DataTable(id="agt-table", cursor_type="row")
@@ -216,8 +217,22 @@ class AgentBuilderScreen(Vertical):
         agent_id = self._selected_agent_id()
         if not agent_id:
             return
-        if roster.load(agent_id, self.project_code) is None:
+        agent = roster.load(agent_id, self.project_code)
+        if agent is None:
             return
+        # Removing the Leader or QC is load-bearing: with no Leader a kickoff
+        # has no orchestrator; with no QC nothing reviews producer output. Make
+        # it a deliberate two-step (Nemo, hull 2026-06-02) — first Remove warns,
+        # a second confirms. Producers remove in one step (unchanged).
+        if agent.tier in ("leader", "qc") and self._pending_remove != agent_id:
+            self._pending_remove = agent_id
+            role = agent.tier.upper()
+            self.query_one("#agt-status", Static).update(
+                f"⚠ Removing the {role} leaves no {role} — kickoffs will degrade "
+                f"until you re-add one. Press Remove again to confirm."
+            )
+            return
+        self._pending_remove = None
         roster.remove_agent(project_code=self.project_code, agent_id=agent_id)
         await self.show_list(f"Removed '{agent_id}'.")
 

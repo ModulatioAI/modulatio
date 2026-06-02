@@ -24,10 +24,13 @@ be churn for no benefit on the non-tool paths.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Callable, Mapping
 from uuid import uuid4
 
+
+_log = logging.getLogger("modulatio.runners")
 
 _LITELLM_QUIETED = False
 
@@ -272,15 +275,10 @@ def _resolve_model_call_args(
 
     auth_type = preset.get("auth_type", "none")
     auth_config = preset.get("auth_config") or {}
-    # Key pool: a preset flagged ``pool`` rotates across the provider's numbered
-    # keys (load-balancing). Each resolve advances the round-robin cursor, so
-    # concurrent producers spread over the pool and a 429 retry lands on the
-    # next key (see litellm_runner's RateLimitError handler).
-    if (auth_type == "api_key" and auth_config.get("pool")
-            and auth_config.get("env_var")):
-        from modulatio import provider_keys
-        rotated = provider_keys.next_pool_env_var(auth_config["env_var"])
-        auth_config = {"env_var": rotated}
+    # NOTE: a pooled preset (auth_config.pool) resolves to its BASE key here.
+    # Rotation is NOT done at resolve time — the runners are built once and
+    # reused, so rotating here would pin one key forever (Nemo, hull 2026-06-02).
+    # The runners call `_rotated_pool_key(_pool_base(model))` PER request.
     try:
         strategy = auth_strategies.build_strategy(auth_type, auth_config)
     except ValueError:
@@ -296,16 +294,37 @@ def _resolve_model_call_args(
     return litellm_model, kwargs
 
 
-def _pool_size(model: str) -> int:
-    """How many keys the preset's pool has (0 if the preset isn't pooled).
-    Bounds the key-pool 429 failover."""
-    from modulatio import model_presets, provider_keys
+def _pool_base(model: str) -> str | None:
+    """The base env var of a pooled preset (else None). A pooled preset must
+    pick a DIFFERENT key on each request (load balancing) — but the runner is
+    built once and reused, so resolution at construction would pin one key.
+    The runners call this + ``_rotated_pool_key`` per request instead."""
+    from modulatio import model_presets
 
     preset = model_presets.get_preset(model)
     auth_config = (preset or {}).get("auth_config") or {}
     if auth_config.get("pool") and auth_config.get("env_var"):
-        return len(provider_keys.pool_env_vars(auth_config["env_var"]))
-    return 0
+        return auth_config["env_var"]
+    return None
+
+
+def _rotated_pool_key(pool_base: str | None) -> str | None:
+    """The next pooled key's VALUE (round-robin), or None when not pooled /
+    the key is unset. Called once per request by the runners."""
+    if pool_base is None:
+        return None
+    import os
+
+    from modulatio import provider_keys
+    return os.environ.get(provider_keys.next_pool_env_var(pool_base))
+
+
+def _pool_count(pool_base: str | None) -> int:
+    """How many keys are in the pool (bounds the 429 failover)."""
+    if pool_base is None:
+        return 0
+    from modulatio import provider_keys
+    return len(provider_keys.pool_env_vars(pool_base))
 
 
 def _record_call_usage(resp, model: str) -> None:
@@ -380,6 +399,11 @@ def litellm_runner(
     if api_key is not None:
         kwargs["api_key"] = api_key
 
+    # Pooled presets rotate the key PER request (the runner is built once and
+    # reused, so resolving once would pin one key). A caller-supplied api_key
+    # (raw-id path) wins → no rotation.
+    pool_base = _pool_base(model) if api_key is None else None
+
     # Alert/refresh accounting uses the preset key directly (None when raw
     # id was used — alerts then key by the raw id, which is fine since the
     # CLI flag path is interactive-only).
@@ -425,10 +449,16 @@ def litellm_runner(
                 config=ctx_cfg,
             )
 
+        # Pooled presets rotate the key for THIS request (no-op when not pooled).
+        call_kwargs = dict(kwargs)
+        rotated = _rotated_pool_key(pool_base)
+        if rotated is not None:
+            call_kwargs["api_key"] = rotated
+
         # ── Responses API path ───────────────────────────────────────
         if endpoint == "responses":
             try:
-                resp = responses(model=litellm_model, input=body, **kwargs)
+                resp = responses(model=litellm_model, input=body, **call_kwargs)
             except AuthenticationError as e:
                 _fire_auth_alert(model, str(e), provider_id_for_alerts)
                 raise
@@ -455,22 +485,21 @@ def litellm_runner(
         msgs = [{"role": "user", "content": body}]
 
         try:
-            resp = completion(model=litellm_model, messages=msgs, **kwargs)
+            resp = completion(model=litellm_model, messages=msgs, **call_kwargs)
         except RateLimitError:
             # Key-pool failover: rotate to the next key and retry, bounded by
             # the pool size. No pool / single key → nothing to fail over to.
-            pooled = _pool_size(model)
-            if pooled <= 1:
+            if _pool_count(pool_base) <= 1:
                 raise
             resp = None
             last_err = None
-            for _ in range(pooled):
-                rl_model, rl_kwargs = _resolve_model_call_args(model)  # next key
-                rl_call = {"timeout": timeout, **rl_kwargs}
-                if api_base is not None:
-                    rl_call["api_base"] = api_base
+            for _ in range(_pool_count(pool_base)):
+                retry_kwargs = dict(kwargs)
+                rk = _rotated_pool_key(pool_base)  # next key
+                if rk is not None:
+                    retry_kwargs["api_key"] = rk
                 try:
-                    resp = completion(model=rl_model, messages=msgs, **rl_call)
+                    resp = completion(model=litellm_model, messages=msgs, **retry_kwargs)
                     break
                 except RateLimitError as e:
                     last_err = e
@@ -479,18 +508,12 @@ def litellm_runner(
         except AuthenticationError as e:
             new_token = _try_refresh_for(model)
             if new_token is not None:
-                # Re-resolve to pick up the rotated token, then retry once.
-                _, retry_kwargs = _resolve_model_call_args(model)
-                retry_call_kwargs = {"timeout": timeout, **retry_kwargs}
-                if api_base is not None:
-                    retry_call_kwargs["api_base"] = api_base
-                # Deliberately do NOT re-apply caller's api_key here: we
-                # only reach this branch if `_try_refresh_for` succeeded,
-                # which means the caller's stored api_key was the stale
-                # token that just got refreshed. retry_kwargs from the
-                # re-resolve already carries the rotated token; layering
-                # the stale caller-supplied key back on top would silently
-                # undo the refresh.
+                # Use the REFRESHED token directly. xAI's refresh is in-memory
+                # (it does NOT rewrite the Grok CLI creds file), so a disk
+                # re-resolve would read the STALE token (Nemo, 2026-06-02). The
+                # fresh token is authoritative for every provider.
+                retry_call_kwargs = dict(call_kwargs)
+                retry_call_kwargs["api_key"] = new_token
                 try:
                     resp = completion(model=litellm_model, messages=msgs, **retry_call_kwargs)
                 except AuthenticationError as e2:
@@ -542,8 +565,39 @@ def build_agent_runners(
     pool: dict[str, Callable[[str], str]] = {}
     for agent in roster.list_agents(project_code):
         if agent.model and agent.model not in pool:
+            _warn_if_dangling_preset(agent.model, _agent_label(agent))
             pool[agent.model] = factory(agent.model)
     return pool
+
+
+def _agent_label(agent: object) -> str:
+    """A human label for an agent in diagnostics — name, else id, else model."""
+    return (getattr(agent, "name", None)
+            or getattr(agent, "id", None)
+            or getattr(agent, "model", "?"))
+
+
+def _warn_if_dangling_preset(model: str, who: str) -> None:
+    """Surface a CLEAR signal when an agent points at a preset that was
+    removed (Nemo, hull 2026-06-02). A registered preset key is a bare slug
+    (e.g. ``google-gemini-pool``); a raw model id carries a provider prefix
+    (``openrouter/auto``). So a bare slug that is NOT in the registry is almost
+    certainly a deleted preset — without this, the value falls through to
+    LiteLLM as a raw model and dies with a cryptic 'LLM Provider NOT provided'.
+    We warn (not raise) so a kickoff degrades gracefully rather than crashing —
+    dispatch routes around the broken agent; the operator re-points it."""
+    if "/" in model or ":" in model:
+        return  # looks like a raw provider/model id, not a preset reference
+    from modulatio import model_presets
+
+    if model in model_presets.load_presets():
+        return
+    _log.warning(
+        "Agent %r references model preset %r, which is not registered — it was "
+        "likely removed. Re-point this agent at a current model in the "
+        "Configuration tab (MODELS), or its calls will fail auth.",
+        who, model,
+    )
 
 
 def build_chat_runners(
@@ -577,6 +631,7 @@ def build_chat_runners(
     for agent in roster.list_agents(project_code):
         if not agent.model:
             continue
+        _warn_if_dangling_preset(agent.model, _agent_label(agent))
         runner = build(agent.model)
         if runner is not None:
             chat_runners[agent.id] = runner
@@ -980,6 +1035,10 @@ def litellm_chat_runner(
     if api_key is not None:
         kwargs["api_key"] = api_key
 
+    # Pooled presets rotate the key per request on the tool-loop path too — the
+    # runner is built once and reused (Nemo, hull 2026-06-02).
+    pool_base = _pool_base(model) if api_key is None else None
+
     from modulatio import model_presets
     presets = model_presets.load_presets()
     endpoint = (presets.get(model, {}) or {}).get("endpoint", "chat")
@@ -995,15 +1054,38 @@ def litellm_chat_runner(
         tool_choice: "dict | str | None" = None,
     ) -> ChatResponse:
         from litellm import completion
-        call_kwargs = dict(kwargs)
-        if tools:
-            call_kwargs["tools"] = tools
-        # Forced tool_choice (e.g. emit_state for Leader-reflect) makes a
-        # structured emission mandatory rather than hoping the model
-        # picks the tool over free text — the model-agnostic guarantee.
-        if tool_choice is not None:
-            call_kwargs["tool_choice"] = tool_choice
-        resp = completion(model=litellm_model, messages=messages, **call_kwargs)
+        from litellm.exceptions import RateLimitError
+
+        def _call():
+            ck = dict(kwargs)
+            rk = _rotated_pool_key(pool_base)  # rotate per call (no-op if not pooled)
+            if rk is not None:
+                ck["api_key"] = rk
+            if tools:
+                ck["tools"] = tools
+            # Forced tool_choice (e.g. emit_state for Leader-reflect) makes a
+            # structured emission mandatory rather than hoping the model picks
+            # the tool over free text — the model-agnostic guarantee.
+            if tool_choice is not None:
+                ck["tool_choice"] = tool_choice
+            return completion(model=litellm_model, messages=messages, **ck)
+
+        try:
+            resp = _call()
+        except RateLimitError:
+            # Key-pool failover on the tool-loop path: rotate + retry, bounded.
+            if _pool_count(pool_base) <= 1:
+                raise
+            resp = None
+            last_err = None
+            for _ in range(_pool_count(pool_base)):
+                try:
+                    resp = _call()
+                    break
+                except RateLimitError as e:
+                    last_err = e
+            if resp is None:
+                raise last_err
         # Same usage-tracking seam as litellm_runner. Tool-using skills
         # (QC's code-review with run_shell, future agentic loops) loop
         # multiple completions per task — each iteration's tokens +

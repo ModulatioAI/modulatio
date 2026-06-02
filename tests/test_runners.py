@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from modulatio.runners import (
     _article_stub_runners_for_tests,
     default_generic_stub_runners,
@@ -162,38 +164,122 @@ def _pooled_preset(env_var, pool):
     }
 
 
-def test_pooled_preset_rotates_the_api_key(tmp_path, monkeypatch):
-    """A pooled preset spreads requests across the provider's numbered keys —
-    each resolve lands on the next key (load balancing)."""
+def _setup_pool(tmp_path, monkeypatch, *, pool, keys, preset_key="pooled"):
+    """Mock a pooled preset + env keys + litellm.completion, returning the
+    captured-api_key list. Exercises the REAL runner-call seam (Nemo, hull)."""
+    import litellm
+
     from modulatio import provider_keys
-    from modulatio.runners import _resolve_model_call_args
 
     monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
     provider_keys._pool_cursor.clear()
-    monkeypatch.setattr(
-        "modulatio.model_presets.load_presets",
-        lambda: {"pooled": _pooled_preset("TESTPOOL_KEY", pool=True)},
-    )
-    monkeypatch.setenv("TESTPOOL_KEY", "key-1")
-    monkeypatch.setenv("TESTPOOL_KEY_2", "key-2")
-    monkeypatch.setenv("TESTPOOL_KEY_3", "key-3")
-    used = [_resolve_model_call_args("pooled")[1]["api_key"] for _ in range(4)]
-    assert used == ["key-1", "key-2", "key-3", "key-1"]
+    preset = _pooled_preset("TESTPOOL_KEY", pool=pool)
+    monkeypatch.setattr("modulatio.model_presets.load_presets",
+                        lambda: {preset_key: preset})
+    monkeypatch.setattr("modulatio.model_presets.get_preset",
+                        lambda k: preset if k == preset_key else None)
+    for i, v in enumerate(keys):
+        monkeypatch.setenv("TESTPOOL_KEY" if i == 0 else f"TESTPOOL_KEY_{i+1}", v)
+    seen: list = []
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+    return seen
 
 
-def test_non_pooled_preset_uses_a_single_key(tmp_path, monkeypatch):
-    from modulatio import provider_keys
-    from modulatio.runners import _resolve_model_call_args
+def test_pooled_runner_rotates_per_call(tmp_path, monkeypatch):
+    """THE real seam Nemo flagged: ONE constructed runner, called repeatedly,
+    rotates the actual completion api_key across the pool — not just the
+    resolver in isolation."""
+    import litellm
 
-    monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
-    monkeypatch.setattr(
-        "modulatio.model_presets.load_presets",
-        lambda: {"single": _pooled_preset("TESTPOOL_KEY", pool=False)},
-    )
-    monkeypatch.setenv("TESTPOOL_KEY", "key-1")
-    monkeypatch.setenv("TESTPOOL_KEY_2", "key-2")
-    used = [_resolve_model_call_args("single")[1]["api_key"] for _ in range(3)]
-    assert used == ["key-1", "key-1", "key-1"]  # no rotation without the flag
+    from modulatio.runners import litellm_runner
+
+    seen = _setup_pool(tmp_path, monkeypatch, pool=True,
+                       keys=["key-1", "key-2", "key-3"])
+    monkeypatch.setattr(litellm, "completion",
+                        lambda **kw: seen.append(kw.get("api_key"))
+                        or _fake_chat_completion_response(content="ok"))
+    run = litellm_runner("pooled")  # built ONCE, reused
+    for _ in range(4):
+        run("hi")
+    assert seen == ["key-1", "key-2", "key-3", "key-1"]
+
+
+def test_non_pooled_runner_uses_a_single_key(tmp_path, monkeypatch):
+    import litellm
+
+    from modulatio.runners import litellm_runner
+
+    seen = _setup_pool(tmp_path, monkeypatch, pool=False, keys=["key-1", "key-2"],
+                       preset_key="single")
+    monkeypatch.setattr(litellm, "completion",
+                        lambda **kw: seen.append(kw.get("api_key"))
+                        or _fake_chat_completion_response(content="ok"))
+    run = litellm_runner("single")
+    for _ in range(3):
+        run("hi")
+    assert seen == ["key-1", "key-1", "key-1"]  # no rotation without the flag
+
+
+def test_pooled_chat_runner_rotates_per_call(tmp_path, monkeypatch):
+    """The tool-loop path rotates per call too (Nemo's required chat-seam test)."""
+    import litellm
+
+    from modulatio.runners import litellm_chat_runner
+
+    seen = _setup_pool(tmp_path, monkeypatch, pool=True, keys=["key-1", "key-2"])
+    monkeypatch.setattr(litellm, "completion",
+                        lambda **kw: seen.append(kw.get("api_key"))
+                        or _fake_chat_completion_response(content="ok"))
+    run = litellm_chat_runner("pooled")  # built ONCE
+    for _ in range(3):
+        run(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert seen == ["key-1", "key-2", "key-1"]
+
+
+def test_dangling_preset_reference_warns(monkeypatch, caplog):
+    """An agent pointing at a REMOVED preset (a bare slug not in the registry)
+    gets a clear warning, not a cryptic LiteLLM failure (Nemo, hull)."""
+    import logging
+
+    from modulatio.runners import _warn_if_dangling_preset
+
+    monkeypatch.setattr("modulatio.model_presets.load_presets", lambda: {})
+    with caplog.at_level(logging.WARNING, logger="modulatio.runners"):
+        _warn_if_dangling_preset("google-gemini-pool", "Gemma")
+    assert "google-gemini-pool" in caplog.text
+    assert "likely removed" in caplog.text
+
+
+def test_raw_model_id_is_not_flagged_as_dangling(monkeypatch, caplog):
+    """A raw provider/model id (has a '/') is legitimate, never flagged."""
+    import logging
+
+    from modulatio.runners import _warn_if_dangling_preset
+
+    monkeypatch.setattr("modulatio.model_presets.load_presets", lambda: {})
+    with caplog.at_level(logging.WARNING, logger="modulatio.runners"):
+        _warn_if_dangling_preset("openrouter/auto", "Scout")
+    assert caplog.text == ""  # provider-prefixed id → not a preset reference
+
+
+def test_single_key_pool_429_re_raises_without_retry(tmp_path, monkeypatch):
+    """A pooled preset with only ONE key has nothing to fail over to — the 429
+    re-raises immediately, no retry."""
+    import litellm
+    from litellm.exceptions import RateLimitError
+
+    from modulatio.runners import litellm_runner
+
+    seen = _setup_pool(tmp_path, monkeypatch, pool=True, keys=["key-1"])
+
+    def boom(**kw):
+        seen.append(kw.get("api_key"))
+        raise RateLimitError(message="429", llm_provider="x", model="m")
+
+    monkeypatch.setattr(litellm, "completion", boom)
+    with pytest.raises(RateLimitError):
+        litellm_runner("pooled")("hi")
+    assert len(seen) == 1  # no retry on a single-key pool
 
 
 def test_pool_429_failover_retries_with_the_next_key(tmp_path, monkeypatch):
@@ -233,6 +319,27 @@ def test_pool_429_failover_retries_with_the_next_key(tmp_path, monkeypatch):
     assert out == "ok"
     assert keys_seen[0] == "key-1"          # first try, rate-limited
     assert "key-2" in keys_seen[1:]         # failed over to the next key
+
+
+def test_pool_429_exhausted_raises_after_bounded_attempts(tmp_path, monkeypatch):
+    """When EVERY key in the pool 429s, the failover loop is bounded and
+    re-raises the rate-limit error — no infinite loop, no None 'success'."""
+    import litellm
+    from litellm.exceptions import RateLimitError
+
+    from modulatio.runners import litellm_runner
+
+    seen = _setup_pool(tmp_path, monkeypatch, pool=True, keys=["key-1", "key-2"])
+
+    def always_429(**kw):
+        seen.append(kw.get("api_key"))
+        raise RateLimitError(message="429", llm_provider="x", model="m")
+
+    monkeypatch.setattr(litellm, "completion", always_429)
+    with pytest.raises(RateLimitError):
+        litellm_runner("pooled")("hi")
+    # initial attempt + range(pool_count) retries → bounded, not unbounded
+    assert 2 <= len(seen) <= 3
 
 
 def test_resolve_merges_preset_default_params(monkeypatch):
