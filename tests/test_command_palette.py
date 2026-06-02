@@ -29,7 +29,6 @@ def test_tab_commands_covers_every_real_v2_tab():
     assert "tab-skills" in tab_ids
     assert "tab-memory" in tab_ids
     assert "tab-cron" in tab_ids
-    assert "tab-status" in tab_ids
 
 
 def test_tab_commands_have_label_and_help():

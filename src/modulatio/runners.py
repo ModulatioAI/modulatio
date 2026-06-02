@@ -822,6 +822,7 @@ def run_llm_with_tools(
     on_tool_call: Callable[[str, dict, str], None] | None = None,
     summarizer_chat_runner_factory: Callable[[str], Callable[..., str]] | None = None,
     model: str | None = None,
+    permission_callback: Callable[[str, dict], bool] | None = None,
 ) -> str:
     """Run a function-calling loop. Returns the model's final text.
 
@@ -954,6 +955,16 @@ def run_llm_with_tools(
                 result = (
                     f"ERROR: tool {call.name!r} is not available. "
                     f"Allowed tools for this skill: {list(tool_loadout)!r}."
+                )
+            elif (
+                permission_callback is not None
+                and not permission_callback(call.name, dict(call.args))
+            ):
+                # The operator (via an ACP client) declined this tool. Feed the
+                # denial back as the tool result so the model can re-plan — same
+                # contract as an error string. Fail-closed: the tool never runs.
+                result = (
+                    f"DENIED: the operator declined to run tool {call.name!r}."
                 )
             else:
                 try:

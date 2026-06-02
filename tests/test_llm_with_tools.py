@@ -546,3 +546,64 @@ def test_maybe_build_chat_runner_handles_responses_api_endpoint(monkeypatch, tmp
     out = runners.maybe_build_chat_runner("my_grok", on_unavailable=log.append)
     assert out is None
     assert log and "responses" in log[0].lower()
+
+
+# ── permission_callback: client-approved tool calls (ACP) ───────────────────
+
+def test_permission_callback_denies_tool_execution():
+    """When permission_callback returns False the tool is NOT executed; a
+    DENIED result feeds back to the model (which then finishes)."""
+    ran = {"n": 0}
+
+    def echo(**k):
+        ran["n"] += 1
+        return "executed"
+
+    registry = {"echo": tools.Tool(name="echo", description="echo", call=echo)}
+    scripted = [
+        ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c1", name="echo", args={"x": "hi"}),)),
+        ChatResponse(content="done", tool_calls=()),
+    ]
+    runner = runners.stub_chat_runner(scripted)
+    seen = []
+    out = runners.run_llm_with_tools(
+        chat_runner=runner,
+        prompt="go",
+        tool_loadout=("echo",),
+        tool_registry=registry,
+        max_iters=5,
+        permission_callback=lambda name, args: seen.append((name, dict(args))) or False,
+    )
+    assert out == "done"
+    assert ran["n"] == 0                       # the tool never ran
+    assert seen == [("echo", {"x": "hi"})]     # the gate saw the call + args
+    # the DENIED result was fed back to the model
+    second_call_msgs = runner.calls[1]["messages"]
+    assert any("DENIED" in str(m.get("content", "")) for m in second_call_msgs)
+
+
+def test_permission_callback_allows_tool_execution():
+    """When permission_callback returns True the tool runs normally."""
+    ran = {"n": 0}
+
+    def echo(**k):
+        ran["n"] += 1
+        return "executed"
+
+    registry = {"echo": tools.Tool(name="echo", description="echo", call=echo)}
+    scripted = [
+        ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c1", name="echo", args={"x": "hi"}),)),
+        ChatResponse(content="done", tool_calls=()),
+    ]
+    out = runners.run_llm_with_tools(
+        chat_runner=runners.stub_chat_runner(scripted),
+        prompt="go",
+        tool_loadout=("echo",),
+        tool_registry=registry,
+        max_iters=5,
+        permission_callback=lambda name, args: True,
+    )
+    assert out == "done"
+    assert ran["n"] == 1                        # the tool ran

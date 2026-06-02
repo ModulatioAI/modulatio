@@ -89,7 +89,6 @@ async def test_app_exposes_expected_workspace_tabs(tui_vault):
             "tab-config",  # unified models + agents configurator
             "tab-skills",
             "tab-artifacts",
-            "tab-status",
         }
         for tab_id in expected:
             assert app.query(f"#{tab_id}"), f"missing tab {tab_id!r}"
@@ -108,7 +107,7 @@ async def test_other_tabs_render_placeholders_without_crashing(tui_vault):
         await pilot.pause()
         # Navigate to each non-prompt tab — no exception on focus.
         for tab_id in ("tab-tickets", "tab-config", "tab-skills",
-                       "tab-artifacts", "tab-status"):
+                       "tab-artifacts"):
             tab = app.query_one(f"#{tab_id}")
             assert tab is not None
 

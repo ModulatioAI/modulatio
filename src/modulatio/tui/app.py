@@ -39,7 +39,6 @@ from modulatio.tui.screens.cron import build_cron_panel
 from modulatio.tui.screens.memory import build_memory_panel
 from modulatio.tui.screens.prompt import build_prompt_panel
 from modulatio.tui.screens.skills import build_skills_panel
-from modulatio.tui.screens.status import build_status_panel
 from modulatio.tui.screens.jt_library import build_jt_library_panel
 from modulatio.tui.screens.tickets import build_tickets_panel
 from modulatio.tui.widgets.activity_log import ActivityLog
@@ -357,8 +356,6 @@ class ModulatioApp(App):
             for tab_id, label, coming_in in _PLACEHOLDER_TABS:
                 with TabPane(label.upper(), id=tab_id):
                     yield Label(f"{label} — coming in {coming_in}")
-            with TabPane("STATUS", id="tab-status"):
-                yield build_status_panel()
         yield Footer()
 
     # ── Kickoff flow ────────────────────────────────────────────────────

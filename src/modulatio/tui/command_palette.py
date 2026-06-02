@@ -37,8 +37,6 @@ _TAB_COMMANDS: tuple[tuple[str, str, str], ...] = (
      "Per-agent memory + team-shared QC pool"),
     ("Switch to Cron tab", "tab-cron",
      "Scheduled jobs"),
-    ("Switch to Status tab", "tab-status",
-     "Live activity log + health"),
 )
 
 

@@ -3546,6 +3546,7 @@ class Orchestrator:
         pass_env: tuple[str, ...] = (),
         budget_role: str | None = None,
         goal_id: str | None = None,
+        permission_callback: "Callable[[str, dict], bool] | None" = None,
     ) -> str:
         """Shared helper: run the function-calling loop with a JSONL
         transcript sidecar and per-call activity events. Returns the
@@ -3657,6 +3658,7 @@ class Orchestrator:
                 summarizer_chat_runner_factory=(
                     self.summarizer_chat_runner_factory
                 ),
+                permission_callback=permission_callback,
             )
 
     # ── Leader: the CONVERSE function (the conversational partner) ───────
@@ -3852,6 +3854,7 @@ class Orchestrator:
         *,
         attachments: list | None = None,
         on_token: "Callable[[str], None] | None" = None,
+        permission_callback: "Callable[[str, dict], bool] | None" = None,
     ) -> str:
         """The Leader's conversational function: reply to the operator as a
         fully-capable partner, tool-using and persistent. Returns the reply
@@ -3910,6 +3913,7 @@ class Orchestrator:
                     skill_name="leader-converse",
                     needs_network=True,
                     budget_role="leader-chat",
+                    permission_callback=permission_callback,
                 )
             finally:
                 self._tls.tool_registry_override = None
