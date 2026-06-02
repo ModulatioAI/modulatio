@@ -6,6 +6,65 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-06-02
+
+**The key model, corrected — and the team gets a name.** v0.7.0 shipped the
+key-pool as an opt-in checkbox with per-purpose keys pinned by number. In use
+that was backwards: it forced a choice on the simple path and couldn't isolate
+a budget cleanly. v0.7.1 flips it — **a key belongs to the provider and lives
+in its shared floating pool by default; pinning is the one optional lever.**
+Plus a batch of Configuration-tab fixes and a bit of flavor: the agent team is
+now **The Mod Squad**. Reviewed fresh by two independent reviewers (hull +
+coherence).
+
+### Changed
+
+- **Keys are a per-provider shared pool by default; pinning is optional.** A
+  key is in the provider's shared floating pool (rotate + 429 failover) unless
+  you pin it. Pin a key to one or more models and it serves *only* those models
+  **and leaves the pool** — so its spend stays isolated for metering (pin a key
+  to your image model and the vendor's meter on that key *is* your image
+  budget). The simple path needs no thought; pinning is the one advanced lever.
+  Adding a model no longer prompts for a key when the provider already has one
+  — it just uses the pool.
+- **The agent team is The Mod Squad.** The factory-floor tab is now
+  `LEADER` / `MOD SQUAD` (the boss and the crew); the floor's status copy
+  follows. Flavor only — the engine is unchanged.
+- **The CONFIG tab sits next to CONSOLE** (was after ARTIFACTS) — setup lives
+  where you start.
+
+### Added
+
+- **A standalone Providers & keys manager** on the MODELS screen: pick a
+  provider, drill into its keys (shown by number + label, never the value), and
+  add or remove a key — no model required. Removing a key purges it from
+  Modulatio entirely (vault `.env` + environment + label + pins); a removed key
+  that was pinned repoints its models back to the shared pool, never leaving one
+  dangling.
+- **A Pin key lever** on a selected model — pin a key to it, or put it back on
+  the pool.
+- **Cancel / Back on every Configuration step** — bail out of the add-model
+  flow or the key manager and return to the list at any point.
+
+### Fixed
+
+- **A pooled model can never borrow a pinned key (the metering keel).** Caught
+  in hull review: with every key on a provider pinned, the empty-pool fallback
+  could resolve the pinned base key for a pooled model — spending a key that was
+  isolated for another model's budget. A pooled model now draws its key *only*
+  from the shared (unpinned) pool and refuses to dispatch (a clear needs-setup
+  error) when the pool is empty, rather than borrowing a pinned key.
+- **Backing out of the key manager no longer crashes.** A `DuplicateIds` error
+  (a synchronous view swap remounting a shared widget id before the old one
+  finished removing) dumped you to the CONSOLE tab; the Configuration swaps are
+  now async and await teardown before remount.
+
+### Security
+
+- Key **pins** live in `key_pins.json` as `{env_var: [model_key]}` — model
+  references only, never a secret. Labels and pins never carry a key value; the
+  value lives in the vault and is read from the environment at call time.
+
 ## [0.7.0] — 2026-06-02
 
 **Talk to the Leader; wire the team without leaving the TUI.** Two arcs land
