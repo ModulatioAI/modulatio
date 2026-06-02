@@ -54,6 +54,7 @@ from modulatio import config, theme
 from modulatio.setup_wizard import (
     agent_step,
     budget_step,
+    clipboard_step,
     embedded_llm_step,
     finalize,
     first_project_step,
@@ -71,6 +72,7 @@ WIZARD_VERSION = "2.0.0"
 
 _STEP_TITLES = {
     "pandoc": "1. Check pandoc",
+    "clipboard": "1a. Check clipboard backend",
     "vault_path": "2. Vault paths",
     "models": "3. Configure models",
     "agents": "4. Provision agents (triad + workers)",
@@ -84,6 +86,8 @@ _STEP_TITLES = {
 def _dispatch(step_name: str, state: dict) -> Any:
     if step_name == "pandoc":
         return pandoc_step.run(state)
+    if step_name == "clipboard":
+        return clipboard_step.run(state)
     if step_name == "vault_path":
         return vault_path_step.run(state)
     if step_name == "models":
@@ -113,6 +117,7 @@ def _pop_state(step_name: str, state: dict) -> None:
     """
     keys_per_step = {
         "pandoc": ["pandoc_installed", "pandoc_skipped"],
+        "clipboard": ["clipboard_backend_installed", "clipboard_skipped"],
         "vault_path": ["vault_root", "shared_resources_path"],
         "models": ["staged_api_keys", "configured_models"],
         "agents": ["triad_agents", "worker_agents"],
@@ -201,6 +206,7 @@ def _run_setup_body() -> bool:
 
     step_order = [
         "pandoc",
+        "clipboard",
         "vault_path",
         "models",
         "agents",

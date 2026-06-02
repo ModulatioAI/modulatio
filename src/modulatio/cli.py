@@ -859,6 +859,21 @@ def doctor() -> None:
             "inside a confined namespace."
         )
 
+    # Clipboard backend (TUI copy/paste reaches the OS clipboard via pyperclip;
+    # Linux needs xclip/wl-clipboard, which `modulatio setup` ensures).
+    from modulatio import clipboard as _clipboard
+    typer.echo("\nClipboard (TUI copy/paste):")
+    if _clipboard.is_backend_installed():
+        backend = _clipboard.detect_backend() or "native"
+        typer.echo(f"  ✓ {backend} — Ctrl+C / Ctrl+V use the OS clipboard.")
+    else:
+        typer.echo(
+            "  ✗ No clipboard backend (xclip / wl-clipboard not installed). "
+            "Ctrl+C still copies via OSC 52 (terminal-dependent); OS-clipboard "
+            "paste needs a backend. Install: `sudo apt install xclip` (or "
+            "`wl-clipboard` on Wayland), or run `modulatio setup`."
+        )
+
     # Engine calibration (v0.1.0 Beta — what the engine is and isn't
     # tested for; sets correct expectations on first contact).
     typer.echo("\nEngine calibration (v0.1.0 Beta):")

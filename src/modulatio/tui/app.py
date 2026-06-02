@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from textual import work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.widgets import (
     Button,
     Footer,
@@ -299,9 +300,14 @@ class ModulatioApp(App):
         ("f3", "focus_jobdrop", "COMPOSE"),
         # KICK OFF is the deliberate, separated job-launch — never Enter.
         ("f5", "kickoff", "KICK OFF"),
-        # Select text in a TV stream (drag), then Ctrl+C to copy it — paste
-        # into the chatbox with Ctrl+V. (Quit is Alt+Q / Ctrl+Q.)
+        # Select text in a TV stream (drag), then Ctrl+C to copy it to the OS
+        # clipboard; Ctrl+V pastes the OS clipboard into the focused text field.
+        # (Quit is Alt+Q / Ctrl+Q.)
         ("ctrl+c", "copy_text", "COPY"),
+        # priority=True so Ctrl+V runs the OS-clipboard paste BEFORE a focused
+        # Input/TextArea's native paste (which only sees Textual's internal
+        # clipboard, not the OS one).
+        Binding("ctrl+v", "paste", "PASTE", priority=True),
     ]
 
     def __init__(self, *, project_code: str = "TUI", stub: bool = True):
@@ -886,11 +892,38 @@ class ModulatioApp(App):
             text = self._last_leader_text()
             note = "Copied the Leader's last message"
         if text:
+            # OS clipboard via pyperclip (the reliable path), plus OSC 52 as a
+            # belt-and-suspenders fallback for terminals that honor it.
+            from modulatio import clipboard as _clip
+            to_os = _clip.copy(text)
             self.copy_to_clipboard(text)
+            where = "clipboard" if to_os else "terminal (run `modulatio doctor` for OS-clipboard setup)"
             try:
-                self.notify(f"{note} — paste with Ctrl+V", timeout=1.5)
+                self.notify(f"{note} → {where}", timeout=1.5)
             except Exception:
                 pass
+
+    def action_paste(self) -> None:
+        """Ctrl+V → paste the OS clipboard into the focused text field. Reads via
+        pyperclip (xclip/wl-paste/native), the reliable path — a focused
+        Input/TextArea's native Ctrl+V only sees Textual's internal clipboard."""
+        from textual.widgets import Input, TextArea
+
+        from modulatio import clipboard as _clip
+        text = _clip.paste()
+        if not text:
+            try:
+                self.notify(
+                    "No OS clipboard backend — run `modulatio setup` (or install "
+                    "xclip) to paste from outside Modulatio.", timeout=2.5)
+            except Exception:
+                pass
+            return
+        widget = self.focused
+        if isinstance(widget, TextArea):
+            widget.insert(text)
+        elif isinstance(widget, Input):
+            widget.insert_text_at_cursor(text)
 
     def _last_leader_text(self) -> str:
         """The Leader's most recent reply (Ctrl+C fallback when nothing is
