@@ -822,6 +822,47 @@ def _goal_emits_artifact(item: dict) -> bool:
     )
 
 
+# Size-floor parsing (#size-floor) — a deliverable's expected size is a
+# deterministically checkable invariant, so the engine binds it (QC gate)
+# rather than leaving "is this substantial enough" to the model's judgment.
+# Artifact-AGNOSTIC by design: the engine measures every deliverable in the
+# same unit it already emits as MetricEvidence — ``token_count`` (a
+# whitespace-split count of the body, ``len(body.split())``) — and compares it
+# against a declared token floor. It knows nothing about words, pages, chapters,
+# or document structure; "code for tokens and context, not for a book." The
+# planner (belt) translates whatever size the operator stated into this floor
+# (``token_count >= N``); ``word_count`` is accepted as a synonym because the
+# count is whitespace-split (≈ words for prose, but the same number for any
+# artifact class). We only ever read a floor the spec actually stated — never
+# invent one — so a task with no declared size is judged by QC on the usual axes.
+_SIZE_FLOOR_BETWEEN_RE = re.compile(
+    r"(?:token|word)_count\s+between\s+([\d,]+)\s+and\s+([\d,]+)", re.IGNORECASE
+)
+_SIZE_FLOOR_RE = re.compile(
+    r"(?:token|word)_count\s*(?:>=|≥|=|of\s+at\s+least|at\s+least|min(?:imum)?\s*:?)\s*([\d,]+)",
+    re.IGNORECASE,
+)
+
+
+def _token_floor(task: "Task") -> int | None:
+    """The minimum output size (in the engine's whitespace ``token_count``
+    unit) a task's deliverable must meet, or ``None`` when no explicit floor is
+    declared. Read from a ``metric`` evidence_required target the planner
+    emits — ``token_count >= N`` / ``token_count between N and M`` → N
+    (``word_count`` accepted as a synonym). Metric-only, so the gate stays
+    artifact-agnostic — no prose/page parsing, no document assumptions."""
+    for req in getattr(task, "evidence_required", None) or []:
+        if str(getattr(req, "kind", "") or "").strip().lower() != "metric":
+            continue
+        target = str(getattr(req, "target", "") or "")
+        if "count" not in target.lower():
+            continue
+        m = _SIZE_FLOOR_BETWEEN_RE.search(target) or _SIZE_FLOOR_RE.search(target)
+        if m:
+            return int(m.group(1).replace(",", ""))
+    return None
+
+
 #: Slice #9c sentinels for ``_run_escalation_attempt`` return values.
 #: The helper already wrote the terminal StateTransition + status, so
 #: the caller just needs to early-return without duplicating settlement.
@@ -4169,7 +4210,33 @@ class Orchestrator:
         - ``None`` — verdict passed, or legacy QC that didn't classify
           (the orchestrator defaults absent classification to substantive).
         """
-        del token_count  # metric is emitted as evidence elsewhere; QC reasons over body
+        # Size-floor gate (engine binds): when the task carries an EXPLICIT
+        # token floor and the draft is under it, that's a deterministic
+        # defect — short-circuit to a fail verdict and route the redo to
+        # expand, without spending a QC model call on an obviously
+        # under-size draft. Fires ONLY when a real floor is declared, so a
+        # task with no stated size is still judged by QC on the usual axes
+        # (we enforce a spec, never invent one — over-mechanizing judgment is
+        # the opposite failure). Artifact-agnostic: compares the engine's
+        # token_count against the declared token floor, no document assumptions.
+        floor = _token_floor(task)
+        if floor is not None and token_count < floor:
+            verdict = AssertionEvidence(
+                producer="qc",
+                primary=False,
+                check=f"size floor: {token_count} tokens < required {floor}",
+                passed=False,
+            )
+            notes = (
+                f"The deliverable is {token_count} tokens; the task's required "
+                f"floor is {floor}. Expand it to meet the target by developing "
+                f"real content — more depth, detail, and fuller treatment "
+                f"consistent with the established structure and the standards. "
+                f"Do NOT pad with filler, repetition, or restated material."
+            )
+            return verdict, notes, "substantive"
+
+        del token_count  # past the floor gate, QC reasons over the body
         body = draft_path.read_text()
         domain_standards = standards.load(task.artifact_kind, project_code=self.project.code)
         history_hits: list[tuple[qc_history.VerdictRecord, float]] = []
@@ -8574,6 +8641,18 @@ Each task fields:
 
 STRICT: `kind` in evidence_required MUST be exactly one of:
 "artifact", "metric", "assertion", "report". Any other value rejects.
+
+Size floors — when the objective/goal states a size (a token/word
+budget or a page count), carry it DOWN onto each producing task:
+- the size in the task `description`, AND
+- a `metric` evidence floor {{kind:"metric", description:"size",
+  target:"token_count >= 3500"}} — the engine measures the deliverable
+  in tokens and rejects an under-floor draft at QC, so give a real
+  number from the spec (~1 token/word; pages ×~300).
+- multi-file (`artifacts` array): floor the parent; sub-tasks inherit.
+- NEVER anchor a unit's size on an already-produced unit — anchor each
+  on the spec's own number, independently, or shortfalls compound.
+Omit only when no size was given — never invent one.
 """
 
 # Emergency fallback. Production loads the seed body at

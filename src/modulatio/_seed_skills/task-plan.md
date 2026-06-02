@@ -137,3 +137,15 @@ Each task fields:
 
 STRICT: `kind` in evidence_required MUST be exactly one of:
 "artifact", "metric", "assertion", "report". Any other value rejects.
+
+Size floors — when the objective/goal states a size (a token/word
+budget or a page count), carry it DOWN onto each producing task:
+- the size in the task `description`, AND
+- a `metric` evidence floor `{{kind:"metric", description:"size",
+  target:"token_count >= 3500"}}` — the engine measures the deliverable
+  in tokens and rejects an under-floor draft at QC, so give a real
+  number from the spec (~1 token/word; pages ×~300).
+- multi-file (`artifacts` array): floor the parent; sub-tasks inherit.
+- NEVER anchor a unit's size on an already-produced unit — anchor each
+  on the spec's own number, independently, or shortfalls compound.
+Omit only when no size was given — never invent one.

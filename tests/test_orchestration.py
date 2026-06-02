@@ -7520,3 +7520,99 @@ def test_decompose_keeps_verify_verb_goal_that_produces_an_artifact(project: Pro
     assert any("Validate the dataset schema" in d for d in descs)   # KEPT — emits artifact
     assert not any(d.startswith("Verify that") for d in descs)      # dropped — report-only
     assert len(goals) == 1
+
+
+# ── Size-floor enforcement (#size-floor) ─────────────────────────────────────
+# A deliverable's expected size is deterministically checkable, so the engine
+# binds it: QC mechanically rejects an under-floor draft and routes the redo to
+# expand. Artifact-AGNOSTIC — the engine compares its own token_count against a
+# declared token floor; no words/pages/document assumptions. Fires ONLY when a
+# real floor is declared — never invents one.
+
+def _task_with(description="deliverable", *, evidence_required=None):
+    from uuid import uuid4
+    from modulatio.types import Task
+    return Task(
+        id="SZ-T-001", project_id=uuid4(), goal_id="SZ-G-001",
+        description=description, evidence_required=list(evidence_required or []),
+    )
+
+
+def _floor_metric(target):
+    from modulatio.types import EvidenceRequirement
+    return EvidenceRequirement(kind="metric", description="size", target=target)
+
+
+def test_token_floor_reads_metric_target():
+    from modulatio.orchestration import _token_floor
+    assert _token_floor(_task_with(evidence_required=[
+        _floor_metric("token_count >= 3500")])) == 3500
+    assert _token_floor(_task_with(evidence_required=[
+        _floor_metric("token_count between 3,500 and 4,500")])) == 3500
+    # word_count accepted as a synonym (same whitespace count)
+    assert _token_floor(_task_with(evidence_required=[
+        _floor_metric("word_count >= 3000")])) == 3000
+
+
+def test_token_floor_none_when_no_explicit_metric():
+    from modulatio.orchestration import _token_floor
+    # plain title, no metric → no floor (engine must not invent one)
+    assert _token_floor(_task_with("Story 01 — The Last Library")) is None
+    # a non-size metric target is ignored
+    assert _token_floor(_task_with("a task", evidence_required=[
+        _floor_metric("exit code 0")])) is None
+    # size stated only in prose (not a metric) does NOT gate — the planner is
+    # responsible for emitting the structured token floor (stays agnostic; no
+    # document/page parsing in the engine)
+    assert _token_floor(_task_with("~3,500–4,500 words")) is None
+    assert _token_floor(_task_with("12-15 pages")) is None
+
+
+def test_qc_review_short_circuits_under_floor_without_calling_qc(project, tmp_path):
+    """An under-floor draft is a deterministic defect: QC returns a failing
+    'substantive' verdict that names the shortfall — and never spends a QC
+    model call on a draft that's obviously too small."""
+    qc_calls: list[str] = []
+
+    def _qc_spy(prompt: str) -> str:
+        qc_calls.append(prompt)
+        return '```json\n{"check": "ok", "passed": true}\n```'
+
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_spy,
+    })
+    draft = tmp_path / "deliverable.md"
+    draft.write_text("# Short\n\nthis deliverable is far too small\n")
+    task = _task_with("Unit 02", evidence_required=[_floor_metric("token_count >= 3500")])
+    task.artifact_kind = "text"
+
+    verdict, notes, defect = orch._qc_review(task, draft, "deadbeef", token_count=846)
+
+    assert verdict.passed is False
+    assert defect == "substantive"
+    assert "3500" in notes and "846" in notes
+    assert "pad" in notes.lower()           # tells the producer to expand, not pad
+    assert qc_calls == []                    # the QC model was NOT called
+
+
+def test_qc_review_passes_through_when_floor_met(project, tmp_path):
+    """At or above the floor, QC runs normally — the gate only catches the
+    shortfall, it doesn't replace the review."""
+    qc_calls: list[str] = []
+
+    def _qc_spy(prompt: str) -> str:
+        qc_calls.append(prompt)
+        return '```json\n{"check": "ok", "passed": true}\n```'
+
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_spy,
+    })
+    draft = tmp_path / "deliverable.md"
+    draft.write_text("# Full size\n\nplenty of content here\n")
+    task = _task_with("Unit 02", evidence_required=[_floor_metric("token_count >= 3500")])
+    task.artifact_kind = "text"
+
+    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef", token_count=4000)
+
+    assert verdict.passed is True
+    assert len(qc_calls) == 1                 # floor met → normal QC ran
