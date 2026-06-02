@@ -3694,6 +3694,42 @@ class Orchestrator:
                 "ts": datetime.now(timezone.utc).isoformat(),
             }) + "\n")
 
+    def _constitution_block(self) -> str:
+        """The Leader's constitution (values), injected ONLY into the
+        conversational prompt — not decompose/verify/producers. Empty string
+        when no constitution resolves (the seed ships one, so effectively
+        never)."""
+        from modulatio import constitution as _constitution
+        return _constitution.load_constitution(self.project.code)
+
+    def _converse_run_scope(self) -> "str | None":
+        """Which run's tickets the conversational Leader sees + decides on —
+        the active run if set, else the latest (matches the Tickets tab)."""
+        from modulatio import vault as _vault
+        return self.project.run_id or _vault.latest_run(self.project.code)
+
+    def _pending_approvals_block(self) -> str:
+        """Open approvals awaiting the operator's decision, rendered for the
+        converse prompt so the Leader can surface them and resolve them via the
+        ``decide_approval`` tool. Empty string when nothing is pending."""
+        pending = store.list_pending_approvals(
+            self.project.code, run_id=self._converse_run_scope()
+        )
+        if not pending:
+            return ""
+        lines = [
+            "## Pending approvals",
+            "",
+            "The operator has these awaiting a decision. When they tell you to "
+            "approve or decline one (\"approve the budget\", \"yes, go ahead\", "
+            "\"no, redo it\"), call `decide_approval` with the ticket id. Don't "
+            "decide on your own — it's their call; you carry it out.",
+            "",
+        ]
+        for t in pending:
+            lines.append(f"- `{t.id}` [{t.priority.value}] {t.title}")
+        return "\n".join(lines)
+
     def _build_converse_prompt(self, thread: list[dict], message: str) -> str:
         lines = []
         for turn in thread:
@@ -3704,6 +3740,8 @@ class Orchestrator:
         body = self._prompt("leader-converse", _LEADER_CONVERSE_PROMPT)
         return body.format(
             operator_context=self._operator_context_block(),
+            constitution=self._constitution_block(),
+            pending_approvals=self._pending_approvals_block(),
             conversation=transcript,
         )
 
@@ -3731,6 +3769,31 @@ class Orchestrator:
             names = _jt.list_job_templates(self.project.code)
             return "Job templates: " + (", ".join(names) if names else "(none yet)")
 
+        def decide_approval(
+            ticket_id: str, decision: str, note: str = "", **_: object
+        ) -> str:
+            """Carry out the operator's approve/deny on a pending approval."""
+            decision = str(decision).strip().lower()
+            if decision in ("approve", "approved", "yes", "ok"):
+                decision = "approved"
+            elif decision in ("deny", "denied", "decline", "declined", "no", "reject"):
+                decision = "denied"
+            else:
+                return (
+                    f"Couldn't read decision {decision!r} — use 'approved' or "
+                    "'denied'."
+                )
+            try:
+                store.update_ticket_approval(
+                    self.project.code, str(ticket_id),
+                    decision=decision, decided_by="operator",
+                    note=(str(note).strip() or None),
+                    run_id=self._converse_run_scope(),
+                )
+            except (ValueError, FileNotFoundError) as exc:
+                return f"Couldn't decide {ticket_id}: {exc}"
+            return f"Ticket {ticket_id} {decision} on the operator's behalf."
+
         return {
             "run_job": tools.Tool(
                 name="run_job",
@@ -3751,6 +3814,29 @@ class Orchestrator:
                 name="list_job_templates",
                 description="List the saved job templates for this project.",
                 call=list_job_templates,
+            ),
+            "decide_approval": tools.Tool(
+                name="decide_approval",
+                description=(
+                    "Carry out the operator's decision on a pending approval "
+                    "ticket. Call ONLY when the operator has told you to approve "
+                    "or decline it — you execute their call, you don't decide. "
+                    "Pass the ticket id, decision ('approved' or 'denied'), and "
+                    "an optional note capturing their reasoning."
+                ),
+                call=decide_approval,
+                params_schema={
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": {"type": "string"},
+                        "decision": {
+                            "type": "string",
+                            "enum": ["approved", "denied"],
+                        },
+                        "note": {"type": "string"},
+                    },
+                    "required": ["ticket_id", "decision"],
+                },
             ),
         }
 
@@ -8175,6 +8261,10 @@ team via ``run_job`` for work that wants scale. You are never a job-intake
 form; never say "I only run jobs."
 
 {operator_context}
+
+{constitution}
+
+{pending_approvals}
 
 ## The conversation so far
 {conversation}

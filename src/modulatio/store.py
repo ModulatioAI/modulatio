@@ -364,6 +364,19 @@ def list_tickets(
     return results
 
 
+def list_pending_approvals(
+    project_code: str, *, run_id: str | None = None
+) -> list[Ticket]:
+    """Tickets awaiting an operator decision — ``approval_required`` with no
+    ``approval_decision`` yet. Ordered like :func:`list_tickets` (blocker /
+    critical first). This is what the conversational Leader surfaces and what
+    its ``decide_approval`` tool resolves."""
+    return [
+        t for t in list_tickets(project_code, run_id=run_id)
+        if t.approval_required and t.approval_decision is None
+    ]
+
+
 def find_pending_approval_ticket_for_plan(
     project_code: str,
     plan_id: str,

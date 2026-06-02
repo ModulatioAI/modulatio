@@ -97,6 +97,52 @@ def test_converse_prompt_carries_operator_context(project: Project):
     assert "COLLABORATING" in prompt
 
 
+def test_converse_prompt_carries_the_constitution(project: Project):
+    """The {constitution} slot renders the Leader's values (the seed ships a
+    default) into the conversational prompt."""
+    orch = Orchestrator(project, _runners())
+    block = orch._constitution_block()
+    assert block  # the seed default is always present
+    assert block in orch._build_converse_prompt([], "hi")
+
+
+def test_pending_approvals_surface_and_decide(project: Project):
+    """The Leader sees pending approvals in the prompt and resolves one via the
+    decide_approval tool (the conversational-approval path)."""
+    from uuid import uuid4
+
+    from modulatio import store
+    from modulatio.types import TicketPriority
+
+    run_id = "20260602T000000Z-aaaa"
+    vault.init_run(PROJECT_CODE, run_id, "scope")
+    project.run_id = run_id
+    t = store.create_ticket(
+        project_id=uuid4(), project_code=PROJECT_CODE,
+        priority=TicketPriority.CRITICAL, title="Approve the budget",
+        body="continue?", approval_required=True, run_id=run_id,
+    )
+    orch = Orchestrator(project, _runners())
+
+    # surfaced in the prompt
+    block = orch._pending_approvals_block()
+    assert t.id in block and "Approve the budget" in block
+    assert "Pending approvals" in orch._build_converse_prompt([], "hi")
+
+    # the Leader carries out the operator's decision via the tool
+    tool = orch._leader_function_tools()["decide_approval"]
+    out = tool.call(ticket_id=t.id, decision="approved", note="looks good")
+    assert "approved" in out.lower()
+    updated = store.get_ticket(PROJECT_CODE, t.id, run_id=run_id)
+    assert updated is not None
+    assert updated.approval_decision == "approved"
+    assert updated.approval_decided_by == "operator"
+    assert updated.approval_note == "looks good"
+
+    # nothing pending now → the block disappears
+    assert orch._pending_approvals_block() == ""
+
+
 def test_leader_can_command_the_team(project: Project):
     """The converse loop offers the Leader his orchestrate function as tools:
     run_job (command the producer swarm) + list_job_templates."""
