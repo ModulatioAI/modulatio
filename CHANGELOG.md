@@ -6,6 +6,38 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-06-02
+
+**Talk to the Leader from your editor.** Modulatio gains an **Agent Client
+Protocol (ACP) server** — the conversational Leader is now reachable from outside
+the TUI by any ACP client (a Zed-class editor) over JSON-RPC-on-stdio: prompt
+turns, live activity, and **client-approved tool calls**. Validated live against
+a real model (a conversation + a `run_job` kickoff end-to-end over ACP). Reviewed
+fresh by two independent reviewers (hull + coherence).
+
+### Added
+
+- **`modulatio acp --code <project>` — an ACP server over stdio.** Point an
+  editor at it and you get the same conversational Leader you'd talk to in the
+  TUI: `initialize` → `session/new` → `session/prompt` (→ the Leader's full
+  reply) → `session/update` (live activity) → `session/cancel`. The same mind:
+  the per-project conversation thread is shared, so a turn over ACP and a turn in
+  the TUI continue one conversation.
+- **Client-approved tool calls.** Before the Leader runs any tool, the server
+  sends `session/request_permission` and **blocks for your approval** — reject it
+  and the Leader gets a `DENIED` result and re-plans. The approval is the
+  operator's call carried out by the Leader, the same contract as the in-TUI
+  conversational approval. Fail-closed: no tool runs without an explicit allow.
+- **A tool permission seam in the engine.** `runners.run_llm_with_tools` gains an
+  optional `permission_callback` (threaded through `converse`); it gates each
+  tool call. Default off — every existing path is unchanged.
+
+### Removed
+
+- **The STATUS tab** — the conversation-first TUI already streams the same
+  activity onto the LEADER / MOD SQUAD "TV", so the standalone activity-log
+  dashboard was redundant. (The activity engine is untouched.)
+
 ## [0.7.2] — 2026-06-02
 
 **Conversation-first: you resolve work by talking to the Leader.** This batch
