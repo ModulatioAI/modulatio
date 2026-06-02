@@ -17,7 +17,6 @@ v1.3.1 slash-commands carried (where the v2 backend exists):
 
 v1.3.1 slash-commands DEFERRED (no v2 backend yet — placeholder handlers
 return a friendly "not yet" message):
-  /queue /heartbeat — slice 6 (heartbeat)
   /cron              — slice 7 (cron — also pending design discussion)
   /daemon /telegram  — slice 8
 
@@ -157,19 +156,6 @@ def _handle_version(args: list[str]) -> CommandResult:
     return CommandResult(output=f"Modulatio {v}")
 
 
-def _handle_queue(args: list[str]) -> CommandResult:
-    """Switch to the Queue tab. Optional first arg = status filter."""
-    if args:
-        return CommandResult(
-            output=f"Switching to Queue tab (status filter: {args[0]}).",
-            side_effect=f"switch_tab:queue:{args[0]}",
-        )
-    return CommandResult(
-        output="Switching to Queue tab.",
-        side_effect="switch_tab:queue",
-    )
-
-
 def _handle_cron(args: list[str]) -> CommandResult:
     """Switch to the Cron tab. Optional arg = project code filter."""
     if args:
@@ -283,14 +269,6 @@ COMMANDS: tuple[Command, ...] = (
         description="Print Modulatio version.",
         category="System",
         handler=_handle_version,
-    ),
-    # Deferred — surface a clear "not yet" instead of "unknown"
-    Command(
-        shortcut="/queue",
-        name="Open Queue tab",
-        description="Switch to Queue tab (or `/queue <status>` to filter).",
-        category="Navigation",
-        handler=_handle_queue,
     ),
     Command(
         shortcut="/cron",

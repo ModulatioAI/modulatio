@@ -28,7 +28,6 @@ def test_tab_commands_covers_every_real_v2_tab():
     assert "tab-config" in tab_ids  # unified models + agents configurator
     assert "tab-skills" in tab_ids
     assert "tab-memory" in tab_ids
-    assert "tab-queue" in tab_ids
     assert "tab-cron" in tab_ids
     assert "tab-status" in tab_ids
 

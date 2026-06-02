@@ -104,13 +104,6 @@ def test_version_returns_modulatio_string():
 
 # === Deferred slash-commands ===
 
-def test_queue_active_in_slice_6():
-    """Slice 6 promoted /queue from deferred placeholder to active handler."""
-    result = cmd_mod.dispatch("/queue")
-    assert result.handled is True
-    assert result.ok is True
-    assert result.side_effect == "switch_tab:queue"
-
 
 def test_cron_active_in_slice_7():
     """Slice 7 promoted /cron from deferred placeholder to active handler."""
@@ -138,7 +131,6 @@ def test_list_commands_includes_deferred():
     cmds = cmd_mod.list_commands()
     shortcuts = {c.shortcut for c in cmds}
     assert "/help" in shortcuts
-    assert "/queue" in shortcuts  # deferred but listed
     assert "/cron" in shortcuts
 
 

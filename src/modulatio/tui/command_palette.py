@@ -35,8 +35,6 @@ _TAB_COMMANDS: tuple[tuple[str, str, str], ...] = (
      "Skill registry and capability tags"),
     ("Switch to Memory tab", "tab-memory",
      "Per-agent memory + team-shared QC pool"),
-    ("Switch to Queue tab", "tab-queue",
-     "Heartbeat-backed task queue"),
     ("Switch to Cron tab", "tab-cron",
      "Scheduled jobs"),
     ("Switch to Status tab", "tab-status",

@@ -1,32 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Tickets tab — slice #22 + tickets-preview-pane.
+"""Tickets tab — a read-only audit log.
 
 Layout:
   ┌─ Tickets ─────────────────────────────────────┐
   │ DataTable (left, ~55%)        │ Preview pane │
   │  ID / Priority / Status / …   │ Markdown     │
   │  ───────────────────────────  │ — body       │
-  │                               │ — frontmatter│
+  │                               │ — decision   │
   │                               │ — transitions│
-  │                               │ ┌─ note ───┐ │
-  │                               │ │ Input    │ │
-  │                               │ └──────────┘ │
-  │                               │ [Approve]    │
-  │                               │ [Decline]    │
   └───────────────────────────────────────────────┘
 
-Keybinds (when this container has focus):
-  a — approve current row's ticket
-  d — deny current row's ticket
+Keybind (when this container has focus):
   r — refresh the list
 
-Approve/deny — via either keybind or button click — persist via
-``store.update_ticket_approval`` (slice #16). Buttons read the optional
-note from the Input widget; keybinds submit with note=None. The note
-becomes part of the team-visible audit trail (transition log + the
-``approval_note`` field) and is read by Leader's prior-approval context
-and the orchestrator's mid-run polling (step 6).
+Tickets are a LOG: they record what happened (creation, decisions, state
+transitions) for audit. Issues are resolved by talking to the Leader in the
+LEADER tab — approvals flow through ``converse()``'s ``decide_approval`` tool,
+which writes via ``store.update_ticket_approval`` and shows up here in the
+preview's decision banner and transition log. This screen no longer decides
+anything itself.
 """
 from __future__ import annotations
 
@@ -34,7 +27,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, DataTable, Input, Markdown
+from textual.widgets import DataTable, Markdown
 
 from modulatio import store, vault
 from modulatio.tui.widgets.ticket_row import ticket_row
@@ -45,8 +38,6 @@ class TicketsScreen(Vertical):
     """Tickets tab content — list + preview pane + decision controls."""
 
     BINDINGS = [
-        Binding("a", "approve", "Approve", show=True),
-        Binding("d", "deny", "Deny", show=True),
         Binding("r", "refresh", "Refresh", show=True),
     ]
 
@@ -68,17 +59,6 @@ class TicketsScreen(Vertical):
     TicketsScreen #ticket-preview {
         height: 1fr;
     }
-    TicketsScreen #ticket-note-input {
-        margin-top: 1;
-    }
-    TicketsScreen #ticket-decision-buttons {
-        height: 3;
-        align-horizontal: center;
-        margin-top: 1;
-    }
-    TicketsScreen #ticket-decision-buttons Button {
-        margin: 0 1;
-    }
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -97,17 +77,6 @@ class TicketsScreen(Vertical):
                     yield Markdown(
                         "_Select a ticket to preview._",
                         id="ticket-preview-md",
-                    )
-                yield Input(
-                    placeholder="optional decision note (visible to the team)",
-                    id="ticket-note-input",
-                )
-                with Horizontal(id="ticket-decision-buttons"):
-                    yield Button(
-                        "✓ Approve", variant="success", id="ticket-approve-btn"
-                    )
-                    yield Button(
-                        "✗ Decline", variant="error", id="ticket-decline-btn"
                     )
 
     def on_mount(self) -> None:
@@ -143,75 +112,8 @@ class TicketsScreen(Vertical):
 
     # ── Bindings ────────────────────────────────────────────────────────
 
-    def action_approve(self) -> None:
-        self._decide("approved")
-
-    def action_deny(self) -> None:
-        self._decide("denied")
-
     def action_refresh(self) -> None:
         self.refresh_tickets()
-
-    # ── Buttons ─────────────────────────────────────────────────────────
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "ticket-approve-btn":
-            self._decide("approved")
-        elif event.button.id == "ticket-decline-btn":
-            self._decide("denied")
-
-    # ── Decision write path ─────────────────────────────────────────────
-
-    def _decide(self, decision: str) -> None:
-        table = self.query_one("#tickets-table", DataTable)
-        if table.row_count == 0:
-            return
-        try:
-            cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
-            ticket_id = cell_key.row_key.value
-        except Exception:
-            return
-        if not ticket_id:
-            return
-
-        # Pull the optional note from the Input widget if present. Keybinds
-        # work even when the Input isn't mounted (e.g. legacy tests that
-        # invoke this screen in isolation), so we tolerate a missing widget.
-        note: str | None = None
-        try:
-            note_widget = self.query_one("#ticket-note-input", Input)
-            text = (note_widget.value or "").strip()
-            note = text or None
-        except Exception:
-            note_widget = None  # type: ignore[assignment]
-
-        code = self.app.project_code  # type: ignore[attr-defined]
-        try:
-            store.update_ticket_approval(
-                code, ticket_id,
-                decision=decision, decided_by="user", note=note,
-                run_id=self._scope_run_id(code),
-            )
-        except ValueError as exc:
-            # One-time-decision guard — store refuses to re-decide an
-            # already-resolved ticket. Surface the reason as a toast.
-            self.app.notify(str(exc), severity="warning")
-            self.refresh_tickets()
-            self._render_preview(ticket_id)
-            return
-
-        verb = "approved" if decision == "approved" else "declined"
-        self.app.notify(
-            f"Ticket {ticket_id} {verb}.",
-            severity="information",
-        )
-
-        # Clear the note so it doesn't leak into the next decision.
-        if note_widget is not None:
-            note_widget.value = ""
-
-        self.refresh_tickets()
-        self._render_preview(ticket_id)
 
     # ── Preview pane ────────────────────────────────────────────────────
 

@@ -1,9 +1,10 @@
-"""Tests for slice #22 — Tickets tab + approval flow.
+"""Tests for the Tickets tab — a read-only audit log.
 
-Consumes slice #16's approval fields. The Tickets tab renders every
-ticket under the current project in a DataTable with an approval
-badge column; keybinds ``a`` (approve) and ``d`` (deny) persist a
-decision via ``store.update_ticket_approval`` and refresh the row.
+The Tickets tab renders every ticket under the current project in a DataTable
+with an approval badge column + a preview pane. Decisions are NOT made here
+anymore — they flow through conversational approval in the LEADER tab and show
+up in the preview's banner / transition log. These tests cover the rendering
+(badges, preview banners, awaiting marker) and run-scoped listing.
 """
 from __future__ import annotations
 
@@ -147,128 +148,32 @@ async def test_tickets_tab_shows_pre_seeded_tickets(project_with_tickets):
         assert table.row_count == 2
 
 
-# ─── Approve / Decline buttons + note input ─────────────────────────────────
+# ─── Decision banners are display-only now (decisions are made in the LEADER
+#     tab via conversational approval; this screen just renders the audit) ────
 
 
-async def test_approve_button_persists_decision_with_note(project_with_tickets):
-    """Type a note, click the Approve button → decision + note land in the vault."""
-    from textual.widgets import Button, DataTable, Input, TabbedContent
+def test_preview_renders_approved_banner():
+    """A ticket already decided 'approved' renders the ✓ APPROVED banner."""
+    from modulatio.tui.screens.tickets import _format_preview
 
-    from modulatio.tui.app import ModulatioApp
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        tabs = app.query_one(TabbedContent)
-        tabs.active = "tab-tickets"
-        await pilot.pause()
-        table = app.query_one("#tickets-table", DataTable)
-        table.focus()
-        await pilot.pause()
-        first_ticket_id = list(table.rows.keys())[0].value
-
-        note_input = app.query_one("#ticket-note-input", Input)
-        note_input.value = "schema is correct; ship as draft"
-        await pilot.pause()
-        approve_btn = app.query_one("#ticket-approve-btn", Button)
-        approve_btn.action_press()
-        await pilot.pause()
-
-    updated = store.get_ticket(PROJECT_CODE, first_ticket_id)
-    assert updated is not None
-    assert updated.approval_decision == "approved"
-    assert updated.approval_note == "schema is correct; ship as draft"
+    t = _make_ticket(approval_required=True, approval_decision="approved",
+                     approval_decided_by="user")
+    out = _format_preview(t)
+    assert "✓ APPROVED" in out
+    assert "user" in out
 
 
-async def test_decline_button_persists_denial_with_note(project_with_tickets):
-    """Symmetric: Decline button stores 'denied' decision plus the note."""
-    from textual.widgets import Button, DataTable, Input, TabbedContent
+def test_preview_renders_denied_banner():
+    """Symmetric: a 'denied' ticket renders the ✗ DECLINED banner."""
+    from modulatio.tui.screens.tickets import _format_preview
 
-    from modulatio.tui.app import ModulatioApp
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        tabs = app.query_one(TabbedContent)
-        tabs.active = "tab-tickets"
-        await pilot.pause()
-        table = app.query_one("#tickets-table", DataTable)
-        table.focus()
-        await pilot.pause()
-        first_ticket_id = list(table.rows.keys())[0].value
-
-        note_input = app.query_one("#ticket-note-input", Input)
-        note_input.value = "scope is too broad; redo with constraints"
-        await pilot.pause()
-        decline_btn = app.query_one("#ticket-decline-btn", Button)
-        decline_btn.action_press()
-        await pilot.pause()
-
-    updated = store.get_ticket(PROJECT_CODE, first_ticket_id)
-    assert updated is not None
-    assert updated.approval_decision == "denied"
-    assert updated.approval_note == "scope is too broad; redo with constraints"
+    t = _make_ticket(approval_required=True, approval_decision="denied",
+                     approval_decided_by="user")
+    out = _format_preview(t)
+    assert "✗ DECLINED" in out
 
 
-async def test_note_input_clears_after_decision(project_with_tickets):
-    """Submitting a decision empties the note input so the next decision
-    on a different ticket doesn't accidentally inherit stale text."""
-    from textual.widgets import Button, DataTable, Input, TabbedContent
-
-    from modulatio.tui.app import ModulatioApp
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        tabs = app.query_one(TabbedContent)
-        tabs.active = "tab-tickets"
-        await pilot.pause()
-        table = app.query_one("#tickets-table", DataTable)
-        table.focus()
-        await pilot.pause()
-
-        note_input = app.query_one("#ticket-note-input", Input)
-        note_input.value = "first decision"
-        await pilot.pause()
-        app.query_one("#ticket-approve-btn", Button).action_press()
-        await pilot.pause()
-
-        assert note_input.value == ""
-
-
-# ─── Approve / deny keybinds persist decisions ──────────────────────────────
-
-
-async def test_approve_keybind_persists_decision(project_with_tickets):
-    """Switch to Tickets tab, press `a`, first row's ticket gets
-    approval_decision='approved' stored in the vault file."""
-    from textual.widgets import DataTable, TabbedContent
-
-    from modulatio.tui.app import ModulatioApp
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        # Activate Tickets tab so the DataTable holds focus.
-        tabs = app.query_one(TabbedContent)
-        tabs.active = "tab-tickets"
-        await pilot.pause()
-        table = app.query_one("#tickets-table", DataTable)
-        table.focus()
-        await pilot.pause()
-        # CRITICAL/approval-required ticket is first by priority sort.
-        first_ticket_id = list(table.rows.keys())[0].value
-        await pilot.press("a")
-        await pilot.pause()
-
-    # Vault file reflects the decision.
-    updated = store.get_ticket(PROJECT_CODE, first_ticket_id)
-    assert updated is not None
-    assert updated.approval_decision == "approved"
-    assert updated.approval_decided_by == "user"
-
-
-# ─── Preview pane (this slice) ──────────────────────────────────────────────
+# ─── Preview pane ───────────────────────────────────────────────────────────
 
 
 async def test_preview_pane_shows_selected_ticket_body(project_with_tickets):
@@ -297,55 +202,6 @@ async def test_preview_pane_shows_selected_ticket_body(project_with_tickets):
         screen = app.query_one(TicketsScreen)
         assert "Leader asks for budget continuation approval" in screen.preview_source
         assert "CRITICAL" in screen.preview_source.upper() or "critical" in screen.preview_source
-
-
-async def test_preview_pane_shows_approved_banner(project_with_tickets):
-    """After approval the preview shows a prominent ✓ APPROVED banner
-    at the top — the visible feedback users wanted when clicking
-    Approve on notification-only tickets."""
-    from textual.widgets import DataTable, TabbedContent
-
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.screens.tickets import TicketsScreen
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        tabs = app.query_one(TabbedContent)
-        tabs.active = "tab-tickets"
-        await pilot.pause()
-        table = app.query_one("#tickets-table", DataTable)
-        table.focus()
-        await pilot.pause()
-        await pilot.press("a")  # approve
-        await pilot.pause()
-
-        screen = app.query_one(TicketsScreen)
-        assert "✓ APPROVED" in screen.preview_source
-        assert "user" in screen.preview_source
-
-
-async def test_preview_pane_shows_denied_banner(project_with_tickets):
-    """Symmetric: ✗ DECLINED banner after a deny."""
-    from textual.widgets import DataTable, TabbedContent
-
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.screens.tickets import TicketsScreen
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        tabs = app.query_one(TabbedContent)
-        tabs.active = "tab-tickets"
-        await pilot.pause()
-        table = app.query_one("#tickets-table", DataTable)
-        table.focus()
-        await pilot.pause()
-        await pilot.press("d")  # deny
-        await pilot.pause()
-
-        screen = app.query_one(TicketsScreen)
-        assert "✗ DECLINED" in screen.preview_source
 
 
 async def test_preview_pane_shows_awaiting_for_pending_approval(project_with_tickets):
@@ -392,31 +248,6 @@ async def test_preview_pane_updates_on_cursor_move(project_with_tickets):
         table.move_cursor(row=1)
         await pilot.pause()
         assert "Informational notification" in screen.preview_source
-
-
-async def test_deny_keybind_persists_decision(project_with_tickets):
-    """Symmetric test — press `d`, ticket stored as denied."""
-    from textual.widgets import DataTable, TabbedContent
-
-    from modulatio.tui.app import ModulatioApp
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        tabs = app.query_one(TabbedContent)
-        tabs.active = "tab-tickets"
-        await pilot.pause()
-        table = app.query_one("#tickets-table", DataTable)
-        table.focus()
-        await pilot.pause()
-        first_ticket_id = list(table.rows.keys())[0].value
-        await pilot.press("d")
-        await pilot.pause()
-
-    updated = store.get_ticket(PROJECT_CODE, first_ticket_id)
-    assert updated is not None
-    assert updated.approval_decision == "denied"
-    assert updated.approval_decided_by == "user"
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -561,42 +392,3 @@ async def test_tickets_tab_uses_lex_latest_run_when_multiple_exist(tui_vault):
         assert table.row_count == 1
 
 
-async def test_tickets_decision_persists_to_correct_run(tui_vault):
-    """Approve flow must call ``update_ticket_approval`` with the
-    same run_id used for listing — otherwise the decision writes to
-    the wrong path (or raises FileNotFoundError)."""
-    from textual.widgets import DataTable, TabbedContent
-    from uuid import uuid4
-
-    from modulatio.tui.app import ModulatioApp
-
-    project_id = uuid4()
-    run_id = "20260428T150000Z-bbbb"
-    vault.init_run(PROJECT_CODE, run_id, "scope")
-    ticket = store.create_ticket(
-        project_id=project_id,
-        project_code=PROJECT_CODE,
-        priority=TicketPriority.CRITICAL,
-        title="Approve me",
-        body="awaiting",
-        approval_required=True,
-        run_id=run_id,
-    )
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test(size=(200, 60)) as pilot:
-        await pilot.pause()
-        app.query_one(TabbedContent).active = "tab-tickets"
-        await pilot.pause()
-        table = app.query_one("#tickets-table", DataTable)
-        assert table.row_count == 1
-        # Press 'a' to approve.
-        table.focus()
-        await pilot.pause()
-        await pilot.press("a")
-        await pilot.pause()
-
-    # Decision persisted to the run-scoped ticket file.
-    updated = store.get_ticket(PROJECT_CODE, ticket.id, run_id=run_id)
-    assert updated is not None
-    assert updated.approval_decision == "approved"

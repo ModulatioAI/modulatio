@@ -38,7 +38,6 @@ from modulatio.tui.screens.configuration import ConfigScreen
 from modulatio.tui.screens.cron import build_cron_panel
 from modulatio.tui.screens.memory import build_memory_panel
 from modulatio.tui.screens.prompt import build_prompt_panel
-from modulatio.tui.screens.queue import build_queue_panel
 from modulatio.tui.screens.skills import build_skills_panel
 from modulatio.tui.screens.status import build_status_panel
 from modulatio.tui.screens.plans import build_plans_panel
@@ -353,8 +352,6 @@ class ModulatioApp(App):
                 yield build_skills_panel()
             with TabPane("MEMORY", id="tab-memory"):
                 yield build_memory_panel()
-            with TabPane("QUEUE", id="tab-queue"):
-                yield build_queue_panel()
             with TabPane("CRON", id="tab-cron"):
                 yield build_cron_panel()
             for tab_id, label, coming_in in _PLACEHOLDER_TABS:
