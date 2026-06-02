@@ -32,11 +32,11 @@ from modulatio import setup_state, vault
 from modulatio.orchestration import Orchestrator
 from modulatio.runners import default_generic_stub_runners, litellm_runner
 from modulatio.tui import commands as commands_mod
-from modulatio.tui.screens.agents import build_agents_panel
+from modulatio.tui.screens.agent_builder import AgentBuilderScreen
 from modulatio.tui.screens.artifacts import build_artifacts_panel
+from modulatio.tui.screens.configuration import ConfigScreen
 from modulatio.tui.screens.cron import build_cron_panel
 from modulatio.tui.screens.memory import build_memory_panel
-from modulatio.tui.screens.models import build_models_panel
 from modulatio.tui.screens.prompt import build_prompt_panel
 from modulatio.tui.screens.queue import build_queue_panel
 from modulatio.tui.screens.skills import build_skills_panel
@@ -342,12 +342,15 @@ class ModulatioApp(App):
                 yield build_tickets_panel()
             with TabPane("ARTIFACTS", id="tab-artifacts"):
                 yield build_artifacts_panel()
-            with TabPane("AGENTS", id="tab-agents"):
-                yield build_agents_panel()
+            with TabPane("CONFIG", id="tab-config"):
+                # The configurator: models + agents, a sub-flip like LEADER/TEAM.
+                with TabbedContent(initial="config-models", id="config-flip"):
+                    with TabPane("MODELS", id="config-models"):
+                        yield ConfigScreen(id="config-models-screen")
+                    with TabPane("AGENTS", id="config-agents"):
+                        yield AgentBuilderScreen(id="config-agents-screen")
             with TabPane("SKILLS", id="tab-skills"):
                 yield build_skills_panel()
-            with TabPane("MODELS", id="tab-models"):
-                yield build_models_panel()
             with TabPane("MEMORY", id="tab-memory"):
                 yield build_memory_panel()
             with TabPane("QUEUE", id="tab-queue"):

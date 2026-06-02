@@ -75,9 +75,9 @@ async def test_app_launches_in_stub_mode(tui_vault):
     # No exception → pass.
 
 
-async def test_app_exposes_seven_expected_tabs(tui_vault):
-    """The shell's tab taxonomy is locked to the 7 workspace tabs from
-    the v1.2 spec. Missing or extra tabs = design regression."""
+async def test_app_exposes_expected_workspace_tabs(tui_vault):
+    """The shell's core workspace tabs. Models + Agents are now the unified
+    CONFIG configurator. Missing tabs = design regression."""
     from modulatio.tui.app import ModulatioApp
 
     app = ModulatioApp(project_code="TST", stub=True)
@@ -86,14 +86,16 @@ async def test_app_exposes_seven_expected_tabs(tui_vault):
         expected = {
             "tab-prompt",
             "tab-tickets",
-            "tab-agents",
+            "tab-config",  # unified models + agents configurator
             "tab-skills",
-            "tab-models",
             "tab-artifacts",
             "tab-status",
         }
         for tab_id in expected:
             assert app.query(f"#{tab_id}"), f"missing tab {tab_id!r}"
+        # the old standalone Models/Agents tabs are retired
+        assert not app.query("#tab-models")
+        assert not app.query("#tab-agents")
 
 
 async def test_other_tabs_render_placeholders_without_crashing(tui_vault):
@@ -105,8 +107,8 @@ async def test_other_tabs_render_placeholders_without_crashing(tui_vault):
     async with app.run_test() as pilot:
         await pilot.pause()
         # Navigate to each non-prompt tab — no exception on focus.
-        for tab_id in ("tab-tickets", "tab-agents", "tab-skills",
-                       "tab-models", "tab-artifacts", "tab-status"):
+        for tab_id in ("tab-tickets", "tab-config", "tab-skills",
+                       "tab-artifacts", "tab-status"):
             tab = app.query_one(f"#{tab_id}")
             assert tab is not None
 

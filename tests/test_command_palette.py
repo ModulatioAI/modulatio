@@ -25,9 +25,8 @@ def test_tab_commands_covers_every_real_v2_tab():
     assert "tab-prompt" in tab_ids
     assert "tab-tickets" in tab_ids
     assert "tab-artifacts" in tab_ids
-    assert "tab-agents" in tab_ids
+    assert "tab-config" in tab_ids  # unified models + agents configurator
     assert "tab-skills" in tab_ids
-    assert "tab-models" in tab_ids
     assert "tab-memory" in tab_ids
     assert "tab-queue" in tab_ids
     assert "tab-cron" in tab_ids
