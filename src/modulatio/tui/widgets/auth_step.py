@@ -5,9 +5,11 @@
 After a provider is chosen, this collects whatever auth it needs and nothing
 more — the operator types only the key:
 
-  - **api_key**   → a masked key field (saved to the vault .env as the
-    provider's env var), with the signup URL to get one. Skipped if the key is
-    already set.
+  - **api_key**   → the model uses the provider's shared key pool. If the pool
+    already has a key, nothing to enter — just Continue; you can optionally add
+    another key to the pool. If the provider has no key yet, a masked field
+    collects the first one (with the signup URL). Pinning a key to a specific
+    model is a separate, optional action in the Keys manager.
   - **oauth**     → a readiness line (``signed in ✓`` or the setup hint, e.g.
     "run `claude login`") + a Recheck button. Beta options say so.
   - **none**      → local server, nothing to enter.
@@ -24,7 +26,6 @@ from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import (
     Button,
-    Checkbox,
     Input,
     RadioButton,
     RadioSet,
@@ -34,7 +35,6 @@ from textual.widgets import (
 from modulatio import config
 from modulatio import provider_catalog as pc
 from modulatio import provider_keys
-from modulatio.tui.widgets.key_selector import KeySelector
 
 
 class AuthStep(Vertical):
@@ -110,33 +110,32 @@ class AuthStep(Vertical):
                     password=True, placeholder="paste your API key",
                     id="auth-key"))
             else:
-                slots = provider_keys.list_keys(a.env_var)
-                if len(slots) > 1:  # pick which of N keys (redacted)
-                    body.mount(Static("Which key?"))
-                    body.mount(KeySelector(a.env_var, id="auth-keysel"))
-                    body.mount(Checkbox(
-                        "Pool all keys — rotate + 429 failover", id="auth-pool",
-                    ))
-                elif slots:
+                # The model draws from the provider's SHARED POOL (rotate +
+                # 429 failover). The pool = the provider's set, unpinned keys.
+                pool = [s for s in provider_keys.list_keys(a.env_var)
+                        if s["is_set"] and not s["pinned_to"]]
+                if pool:
                     body.mount(Static(
-                        f"✓ a key is set ({a.env_var}). Use it, or add "
-                        "another below."))
-                # add a key — optional when one exists, required when none.
-                # A label lets you track it (e.g. text / images / web search).
+                        f"✓ {len(pool)} key(s) in this provider's shared pool — "
+                        "this model uses them (rotate + failover). Just "
+                        "Continue, or add another key below."))
+                else:
+                    any_keys = bool(provider_keys.list_keys(a.env_var))
+                    body.mount(Static(
+                        "This provider's keys are all pinned to other models — "
+                        "add a key for the shared pool:" if any_keys else
+                        f"Add an API key for this provider  →  saved as "
+                        f"{a.env_var}:"))
+                # add a key — optional when the pool has one, required when not.
                 body.mount(Input(
-                    placeholder="label this key (optional), e.g. images",
+                    placeholder="label this key (optional), e.g. backup",
                     id="auth-keylabel"))
                 hint = (
-                    "paste a NEW API key, or leave blank to use the selected key"
-                    if slots
+                    "paste a NEW key to add to the pool, or leave blank to use it"
+                    if pool
                     else f"paste your API key  →  saved as {a.env_var}"
                 )
                 body.mount(Input(password=True, placeholder=hint, id="auth-key"))
-                if slots:  # let the operator prune a stale/extra key
-                    body.mount(Button(
-                        "Remove selected key", id="auth-removekey",
-                        variant="warning",
-                    ))
             if self.provider.signup_url:
                 body.mount(Static(f"Need one? {self.provider.signup_url}"))
         elif a.auth_type.startswith("oauth"):
@@ -149,22 +148,7 @@ class AuthStep(Vertical):
     def _status(self, text: str) -> None:
         self.query_one("#auth-status", Static).update(text)
 
-    async def _remove_selected_key(self) -> None:
-        a = self._selected
-        if a.env_var is None:
-            return
-        try:
-            env_var = self.query_one("#auth-keysel", KeySelector).chosen_env_var
-        except Exception:
-            env_var = a.env_var  # only one key → the base var
-        provider_keys.remove_key(env_var)
-        await self._render_body()
-        self._status(f"Removed key '{env_var}'.")
-
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "auth-removekey":
-            await self._remove_selected_key()
-            return
         if event.button.id != "auth-continue":
             return
         a = self._selected
@@ -182,27 +166,18 @@ class AuthStep(Vertical):
                     return
                 config.set_env_secret(env_var, key)
             else:
-                slots = provider_keys.list_keys(a.env_var)
-                try:
-                    pool = self.query_one("#auth-pool", Checkbox).value
-                except Exception:
-                    pool = False
-                if pool:  # use ALL keys; the runner rotates the base var's pool
-                    env_var = a.env_var
-                elif key:  # store as a new numbered key (with its label)
+                # The model uses the provider's SHARED POOL. Adding a key here
+                # just grows that pool; a blank field means "use what's there".
+                pool_now = [s for s in provider_keys.list_keys(a.env_var)
+                            if s["is_set"] and not s["pinned_to"]]
+                if key:  # add a new key to the pool (optional label)
                     label = self.query_one("#auth-keylabel", Input).value.strip()
-                    slot = provider_keys.add_key(a.env_var, key, label or None)
-                    env_var = slot["env_var"]
-                elif slots:  # use the selected existing key
-                    try:
-                        env_var = self.query_one(
-                            "#auth-keysel", KeySelector
-                        ).chosen_env_var
-                    except Exception:
-                        env_var = a.env_var  # only one key → no picker
-                else:
-                    self._status("Enter your API key to continue.")
+                    provider_keys.add_key(a.env_var, key, label or None)
+                elif not pool_now:
+                    self._status("Add an API key to continue.")
                     return
+                env_var = a.env_var  # the base var anchors the provider's pool
+                pool = True
         elif a.auth_type.startswith("oauth"):
             ready, hint = pc.auth_status(a)
             if not ready:

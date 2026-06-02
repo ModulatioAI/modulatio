@@ -1,4 +1,10 @@
-"""Tests for the Configuration tab's AuthStep (add-model flow, step 2)."""
+"""Tests for the Configuration tab's AuthStep (add-model flow, step 2).
+
+Post-pool-default: an api_key model uses the provider's SHARED POOL. If the
+pool already has a key, you just Continue (no key prompt — the original gripe);
+if it's empty you add the first key. Pinning a key to a model is a separate
+action in the Keys manager (tested in test_configuration.py), not here.
+"""
 from __future__ import annotations
 
 from textual.app import App, ComposeResult
@@ -30,7 +36,13 @@ class _Host(App):
         self.last_event = e
 
 
-async def test_api_key_saves_to_env_and_advances(monkeypatch):
+def _isolate_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
+    monkeypatch.setattr(provider_keys, "PINS_FILE", tmp_path / "pins.json")
+
+
+async def test_first_api_key_adds_to_the_pool_and_advances(tmp_path, monkeypatch):
+    _isolate_keys(tmp_path, monkeypatch)
     saved: dict[str, str] = {}
     monkeypatch.setattr(config, "set_env_secret", lambda n, v: saved.update({n: v}))
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -40,20 +52,62 @@ async def test_api_key_saves_to_env_and_advances(monkeypatch):
         app.query_one("#auth-key", Input).value = "sk-test"
         await pilot.click("#auth-continue")
         await pilot.pause()
+        # the first key is saved as the base var; the model uses the pool
         assert saved == {"OPENROUTER_API_KEY": "sk-test"}
         assert app.configured == [
             ("openrouter", "api_key", "OPENROUTER_API_KEY", None)
         ]
+        assert app.last_event.pool is True
 
 
-async def test_api_key_blocks_when_missing_and_not_set(monkeypatch):
+async def test_existing_pool_advances_with_no_new_key(tmp_path, monkeypatch):
+    """The original gripe, fixed: a key already exists → no prompt, just use it."""
+    _isolate_keys(tmp_path, monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "already-here")
+    app = _Host(pc.GOOGLE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # leave the key field blank — the provider already has a pooled key
+        await pilot.click("#auth-continue")
+        await pilot.pause()
+        assert app.configured == [("google", "api_key", "GEMINI_API_KEY", None)]
+        assert app.last_event.pool is True
+
+
+async def test_api_key_blocks_when_pool_empty_and_no_key(tmp_path, monkeypatch):
+    _isolate_keys(tmp_path, monkeypatch)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     app = _Host(pc.OPENROUTER)
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.click("#auth-continue")
         await pilot.pause()
-        assert app.configured == []  # no key, not already set → blocked
+        assert app.configured == []  # empty pool, no key → blocked
+
+
+async def test_adding_a_key_to_an_existing_pool_grows_it(tmp_path, monkeypatch):
+    _isolate_keys(tmp_path, monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "key-1")  # pool already has one
+    added: dict = {}
+    monkeypatch.setattr(
+        provider_keys, "add_key",
+        lambda base, value, label=None: added.update(
+            base=base, value=value, label=label)
+        or {"index": 2, "env_var": f"{base}_2", "label": label, "is_set": True,
+            "pinned_to": []},
+    )
+    app = _Host(pc.GOOGLE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#auth-keylabel", Input).value = "backup"
+        app.query_one("#auth-key", Input).value = "key-2"
+        await pilot.click("#auth-continue")
+        await pilot.pause()
+        assert added == {"base": "GEMINI_API_KEY", "value": "key-2",
+                         "label": "backup"}
+        # still a pool model anchored on the base var
+        assert app.configured == [("google", "api_key", "GEMINI_API_KEY", None)]
+        assert app.last_event.pool is True
 
 
 async def test_local_none_advances_with_no_input():
@@ -83,79 +137,6 @@ async def test_custom_blocks_without_a_base_url():
         await pilot.click("#auth-continue")
         await pilot.pause()
         assert app.configured == []  # base_url missing → blocked
-
-
-async def test_api_key_adds_a_labeled_numbered_key(monkeypatch):
-    monkeypatch.setattr(provider_keys, "list_keys", lambda b: [])  # none yet
-    added: dict = {}
-
-    def fake_add(base, value, label=None):
-        added.update(base=base, value=value, label=label)
-        return {"index": 1, "env_var": base, "label": label, "is_set": True}
-
-    monkeypatch.setattr(provider_keys, "add_key", fake_add)
-    app = _Host(pc.GOOGLE)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.query_one("#auth-keylabel", Input).value = "images"
-        app.query_one("#auth-key", Input).value = "AIza-secret"
-        await pilot.click("#auth-continue")
-        await pilot.pause()
-        assert added == {"base": "GEMINI_API_KEY", "value": "AIza-secret",
-                         "label": "images"}
-        assert app.configured == [("google", "api_key", "GEMINI_API_KEY", None)]
-
-
-async def test_multi_key_uses_selected_default_when_no_new_key(monkeypatch):
-    monkeypatch.setattr(provider_keys, "list_keys", lambda b: [
-        {"index": 1, "env_var": "GEMINI_API_KEY", "label": "text", "is_set": True},
-        {"index": 2, "env_var": "GEMINI_API_KEY_2", "label": "images",
-         "is_set": True},
-    ])
-    app = _Host(pc.GOOGLE)
-    async with app.run_test(size=(110, 44)) as pilot:
-        await pilot.pause()
-        assert app.query("#auth-keysel")  # picker shown for 2 keys
-        await pilot.click("#auth-continue")  # blank key → use selected (#1)
-        await pilot.pause()
-        assert app.configured == [("google", "api_key", "GEMINI_API_KEY", None)]
-
-
-async def test_pool_checkbox_sets_pool_on_auth_configured(monkeypatch):
-    from textual.widgets import Checkbox
-    monkeypatch.setattr(provider_keys, "list_keys", lambda b: [
-        {"index": 1, "env_var": "GEMINI_API_KEY", "label": "text", "is_set": True},
-        {"index": 2, "env_var": "GEMINI_API_KEY_2", "label": "images",
-         "is_set": True},
-    ])
-    app = _Host(pc.GOOGLE)
-    async with app.run_test(size=(110, 44)) as pilot:
-        await pilot.pause()
-        app.query_one("#auth-pool", Checkbox).value = True  # pool all keys
-        await pilot.click("#auth-continue")
-        await pilot.pause()
-        # pooled → env_var is the base var, pool flag set
-        assert app.last_event.env_var == "GEMINI_API_KEY"
-        assert app.last_event.pool is True
-
-
-async def test_remove_selected_key_button(monkeypatch):
-    removed: list = []
-    monkeypatch.setattr(provider_keys, "list_keys", lambda b: [
-        {"index": 1, "env_var": "GEMINI_API_KEY", "label": "text", "is_set": True},
-        {"index": 2, "env_var": "GEMINI_API_KEY_2", "label": "images",
-         "is_set": True},
-    ])
-    monkeypatch.setattr(
-        provider_keys, "remove_key", lambda ev: removed.append(ev) or True
-    )
-    app = _Host(pc.GOOGLE)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        assert app.query("#auth-removekey")  # shown when keys exist
-        await pilot.click("#auth-removekey")
-        await pilot.pause()
-        assert removed == ["GEMINI_API_KEY"]  # the selected (#1 default) key
 
 
 async def test_oauth_not_signed_in_blocks_with_hint(monkeypatch):

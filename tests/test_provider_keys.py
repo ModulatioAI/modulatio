@@ -13,6 +13,7 @@ BASE = "TESTPROV_KEY"
 @pytest.fixture
 def keys(tmp_path, monkeypatch):
     monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
+    monkeypatch.setattr(provider_keys, "PINS_FILE", tmp_path / "pins.json")
 
     def fake_set(name, value):  # store the value in env, cleaned by monkeypatch
         monkeypatch.setenv(name, value)
@@ -111,3 +112,49 @@ def test_unregistered_env_key_is_still_discovered(keys, monkeypatch):
     listed = keys.list_keys(BASE)
     assert [k["index"] for k in listed] == [1, 2]
     assert all(k["is_set"] for k in listed)
+
+
+# ── pinning: the optional metering lever ────────────────────────────────────
+
+def test_pinned_key_leaves_the_pool(keys):
+    keys.add_key(BASE, "k1")
+    keys.add_key(BASE, "k2")
+    keys.add_key(BASE, "k3")
+    keys._pool_cursor.clear()
+    keys.pin_key(f"{BASE}_2", "image-model")
+    # #2 is out of the rotation; the others still float
+    assert keys.pool_env_vars(BASE) == [BASE, f"{BASE}_3"]
+    slot = next(s for s in keys.list_keys(BASE) if s["index"] == 2)
+    assert slot["pinned_to"] == ["image-model"]
+    assert keys.pinned_env_var_for("image-model", BASE) == f"{BASE}_2"
+
+
+def test_pin_to_multiple_models_then_unpin_one(keys):
+    keys.add_key(BASE, "k1")
+    keys.pin_key(BASE, "model-a")
+    keys.pin_key(BASE, "model-b")
+    assert sorted(keys.list_keys(BASE)[0]["pinned_to"]) == ["model-a", "model-b"]
+    assert keys.pool_env_vars(BASE) == []  # the only key is pinned
+    keys.unpin_key(BASE, "model-a")
+    assert keys.list_keys(BASE)[0]["pinned_to"] == ["model-b"]
+    keys.unpin_key(BASE, "model-b")  # last binding gone → rejoins the pool
+    assert keys.list_keys(BASE)[0]["pinned_to"] == []
+    assert keys.pool_env_vars(BASE) == [BASE]
+
+
+def test_unpin_model_releases_all_its_keys(keys):
+    keys.add_key(BASE, "k1")
+    keys.add_key(BASE, "k2")
+    keys.pin_key(BASE, "gone")
+    keys.pin_key(f"{BASE}_2", "gone")
+    assert keys.pool_env_vars(BASE) == []
+    keys.unpin_model("gone")  # e.g. the model was removed
+    assert keys.pool_env_vars(BASE) == [BASE, f"{BASE}_2"]
+
+
+def test_remove_pinned_key_also_clears_its_pin(keys):
+    keys.add_key(BASE, "k1")
+    keys.pin_key(BASE, "m")
+    keys.remove_key(BASE)
+    assert keys.list_keys(BASE) == []
+    assert keys.pinned_env_var_for("m", BASE) is None

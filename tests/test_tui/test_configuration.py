@@ -6,6 +6,7 @@ from textual.widgets import DataTable, OptionList
 
 from modulatio import model_presets
 from modulatio import provider_catalog as pc
+from modulatio import provider_keys
 from modulatio.tui.screens.configuration import ConfigScreen
 from modulatio.tui.widgets.auth_step import AuthStep
 from modulatio.tui.widgets.model_picker import ModelPicker
@@ -122,6 +123,48 @@ async def test_cancel_returns_to_the_list_mid_flow(tmp_path, monkeypatch):
         assert app.query("#cfg-models")
         assert not app.query("#cfg-auth")
         assert not app.query("#cfg-cancel")
+
+
+async def test_pin_key_to_model_removes_it_from_the_pool(tmp_path, monkeypatch):
+    """The optional lever: pin a key to a model → the preset points at that one
+    key (no pool flag) and the key leaves the shared pool. 'Use pool' reverts."""
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "p.json")
+    monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
+    monkeypatch.setattr(provider_keys, "PINS_FILE", tmp_path / "pins.json")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k1")
+    monkeypatch.setenv("OPENROUTER_API_KEY_2", "k2")
+    model_presets.add_preset(
+        "orfree", label="x", base_url="https://openrouter.ai/api/v1",
+        api_format="openai", auth_type="api_key", model="openrouter/free",
+        auth_config={"env_var": "OPENROUTER_API_KEY", "pool": True},
+    )
+    app = _Host()
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        app.query_one("#cfg-models", DataTable).move_cursor(row=0)
+        await pilot.pause()
+        await pilot.click("#cfg-keys")
+        await pilot.pause()
+        assert app.query("#cfg-keylist")  # the key manager opened
+
+        # pin key #2 to this model
+        screen._km_selected_key = "OPENROUTER_API_KEY_2"
+        await screen._pin_selected_to_model()
+        await pilot.pause()
+        preset = model_presets.get_preset("orfree")
+        assert preset["auth_config"] == {"env_var": "OPENROUTER_API_KEY_2"}
+        assert provider_keys.pool_env_vars("OPENROUTER_API_KEY") == [
+            "OPENROUTER_API_KEY"]  # #2 left the pool
+
+        # revert to the shared pool
+        await screen._use_pool_for_model()
+        await pilot.pause()
+        preset = model_presets.get_preset("orfree")
+        assert preset["auth_config"] == {
+            "env_var": "OPENROUTER_API_KEY", "pool": True}
+        assert provider_keys.pool_env_vars("OPENROUTER_API_KEY") == [
+            "OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"]  # #2 back in the pool
 
 
 async def test_remove_deletes_the_selected_preset(tmp_path, monkeypatch):
