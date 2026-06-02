@@ -6,6 +6,112 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-02
+
+**Talk to the Leader; wire the team without leaving the TUI.** Two arcs land
+together. First, the **conversational Leader**: the same Leader who decomposes,
+plans, and verifies now has a second function — `converse()` — so you talk to
+him directly, the way you'd talk to any capable agent. He can answer, analyze,
+fetch the web, author a skill, draft a Job Template, or *run a job* (switch from
+converse to orchestrate and command the producer swarm), all in one LEADER lane.
+Second, a **Configuration tab**: a menu-driven, in-TUI way to set up providers,
+models, API keys, and agents — no config-file spelunking. On top of it sits the
+**key-pool**: put several of your *own* API keys behind one model so work spreads
+across them (throughput) and survives a rate-limit (resilience). Reviewed fresh
+by two independent reviewers (hull + coherence).
+
+### Added
+
+- **Conversational Leader (`Orchestrator.converse`).** A new function beside
+  `kickoff()` on the same Leader — not a new agent or identity. He runs the full
+  tool registry (shell, web, artifacts, skills) plus his own functions exposed
+  as tools (`run_job`, `create_skill`/`improve_skill`, `create_job_template`),
+  over a persistent conversation thread (`<project>/leader_conversation.jsonl`)
+  that survives across turns and sessions. A new `leader-converse` seed gives
+  him the conversational persona: the smartest agent on the team and a partner to
+  the operator, who commands the cheap swarm for scale and never says "I only
+  run jobs."
+- **Conversation-first TUI.** The TUI is reshelled around a big LEADER window
+  with LEADER / TEAM tabs (amber-phosphor, light-blue frames). KICK OFF moved to
+  the TEAM floor; you can also launch a job from the LEADER chat with a
+  `/kickoff <objective>` prefix, or just *ask* the Leader to run something. Token
+  streaming threads the reply into the LEADER window live. Drag-select
+  copy/paste on the transcript.
+- **Configuration tab — providers, models, keys, agents (add *and* remove).**
+  A new CONFIG tab with a MODELS / AGENTS flip (retires the old read-only Models
+  and Agents tabs). MODELS: pick a provider → authenticate → search the model
+  list → register a ready preset; plus remove a preset. AGENTS: change a role's
+  model, add an agent with a role picker, and remove any agent — Leader and QC
+  included (a two-step confirm, since removing either degrades a kickoff).
+- **Provider catalog (`provider_catalog.py`) — the data layer.** Eleven
+  providers (OpenRouter, Ollama Cloud, xAI, Anthropic, OpenAI, NVIDIA, Google,
+  three locals, custom) modeled richly enough that the configurator does the
+  setup *for* you: pick a provider and a model and base_url / api_format / auth /
+  model-id auto-fill — **you type only a key.** Free models carry a truthful
+  rate-limit caveat (never presented as unlimited); modality (text / image /
+  video / audio / embedding) is classified so role assignment only ever sees
+  text. Capability routing stays automatic for known model families. xAI OAuth
+  is included but flagged **beta** (built to the standard flow, not yet
+  exercised live).
+- **Multiple API keys per provider (`provider_keys.py`).** N numbered env vars
+  per provider (`GEMINI_API_KEY`, `_2`, `_3`, … — no cap), each with an optional
+  human label (`#1 · text`, `#2 · images`). A redacted picker shows the slots
+  and labels, never the values. Labels live in `key_labels.json`; the keys
+  themselves stay in the vault.
+- **Key-pool — rotation + 429 failover over your own keys.** A model preset can
+  be flagged `pool`: each request rotates to the next of the provider's numbered
+  keys (round-robin — spreads load so six producers don't all hammer one 40-RPM
+  key), and a rate-limit (`429`) fails over to the next key and retries, bounded
+  by the pool size. Single-key and non-pooled presets are unchanged. **Why this
+  shape:** Modulatio deliberately does *not* meter cost/tokens in the router —
+  the provider is the authoritative meter for each key, so distinct keys are the
+  accounting (text vs. image vs. search spend split where the vendor already
+  tracks them); rotation buys throughput, failover buys resilience, both reuse
+  the one multi-key foundation. The ethics line: pool your *own* legitimately
+  obtained keys — Modulatio does not help multiply throwaway accounts to dodge a
+  provider's limits (that violates their terms and gets you banned). See the
+  [key-pool doc](https://modulatio.ai/architecture/key-pool/) for the full how
+  and why.
+
+### Fixed
+
+- **Key-pool rotation now fires per request, on the real runner-call seam.**
+  As first built, `litellm_runner` and `litellm_chat_runner` resolved the
+  `api_key` once at runner construction and reused it for every subsequent
+  completion — and since per-model runners are built once and reused, a pooled
+  preset pinned the first key forever in steady state. Rotation now happens
+  per call in both runners (single-shot *and* the tool-loop chat path), via
+  `_pool_base` / `_rotated_pool_key` / `_pool_count`. The 429 failover loop runs
+  at the same real seam, bounded by the pool size, re-raising the rate-limit
+  error when the whole pool is exhausted; a single-key pool re-raises
+  immediately with no retry. (Caught in review — the original unit test
+  exercised the auth resolver in isolation, not the constructed-runner seam the
+  engine actually uses.)
+- **xAI OAuth token refresh applies on retry.** The auth-refresh retry branch
+  now uses the freshly refreshed in-memory token directly instead of
+  re-resolving from disk — xAI's refresh helper writes the new credential only
+  in memory (it won't clobber the Grok CLI's file), so the prior re-read picked
+  up the stale token. (Anthropic/OpenAI were unaffected; their refresh writes
+  the credential file.) xAI OAuth remains beta.
+
+### Security
+
+- **Presets store key *references*, never values.** `model_presets.add_preset`
+  now rejects any `auth_config` field that looks like a raw secret
+  (`key` / `api_key` / `token` / `secret` / `password` / `access_token` /
+  `refresh_token`) — a preset carries only an `env_var` reference; the secret
+  lives in the vault and is read from the environment at call time. The
+  Configuration-tab path was already clean; this enforces the keel for any
+  caller. Key labels (`key_labels.json`) are labels only.
+
+### Changed
+
+- **Clearer signal when an agent points at a removed preset.** Building the
+  per-agent runner pools now logs a clear warning when an agent references a
+  preset key that is no longer registered (almost certainly a deleted preset),
+  instead of letting the value fall through to a cryptic provider-resolution
+  error. Re-point the agent in the Configuration tab.
+
 ## [0.6.0] — 2026-06-01
 
 **Routing reality** — the keystone, actually wired everywhere. The promise that
