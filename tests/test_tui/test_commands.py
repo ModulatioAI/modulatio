@@ -102,6 +102,13 @@ def test_version_returns_modulatio_string():
     assert "Modulatio" in result.output
 
 
+def test_bug_opens_the_report_form():
+    """/bug routes to the bug-report modal via a side-effect."""
+    result = cmd_mod.dispatch("/bug")
+    assert result.handled is True
+    assert result.side_effect == "open_bug_report"
+
+
 # === Deferred slash-commands ===
 
 

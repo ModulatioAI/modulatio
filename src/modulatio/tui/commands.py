@@ -169,6 +169,14 @@ def _handle_cron(args: list[str]) -> CommandResult:
     )
 
 
+def _handle_bug(args: list[str]) -> CommandResult:
+    """Open the bug-report form."""
+    return CommandResult(
+        output="Opening the bug-report form…",
+        side_effect="open_bug_report",
+    )
+
+
 def _handle_daemon_deferred(args: list[str]) -> CommandResult:
     return CommandResult(
         output="/daemon requires slice 8 (daemon module). Not yet implemented.",
@@ -290,6 +298,13 @@ COMMANDS: tuple[Command, ...] = (
         description="Slice 8 — pending telegram modules.",
         category="Deferred",
         handler=_handle_telegram_deferred,
+    ),
+    Command(
+        shortcut="/bug",
+        name="Report a bug",
+        description="Open the bug-report form (files a GitHub issue).",
+        category="Help",
+        handler=_handle_bug,
     ),
 )
 

@@ -733,6 +733,10 @@ class ModulatioApp(App):
                 except Exception:
                     pass
             return
+        if side_effect == "open_bug_report":
+            from modulatio.tui.widgets.bug_report_modal import BugReportModal
+            self.push_screen(BugReportModal())
+            return
         if side_effect == "refresh_all_tabs":
             # Best-effort: trigger on_show on every screen with that hook.
             for screen in self.query("Screen"):
