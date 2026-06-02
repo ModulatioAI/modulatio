@@ -1,9 +1,12 @@
 """Tests for the Configuration tab's ConfigScreen (add-model flow, slice 4)."""
 from __future__ import annotations
 
+import os
+
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, OptionList
 
+from modulatio import config
 from modulatio import model_presets
 from modulatio import provider_catalog as pc
 from modulatio import provider_keys
@@ -144,9 +147,9 @@ async def test_pin_key_to_model_removes_it_from_the_pool(tmp_path, monkeypatch):
         screen = app.query_one(ConfigScreen)
         app.query_one("#cfg-models", DataTable).move_cursor(row=0)
         await pilot.pause()
-        await pilot.click("#cfg-keys")
+        await pilot.click("#cfg-pinkey")
         await pilot.pause()
-        assert app.query("#cfg-keylist")  # the key manager opened
+        assert app.query("#cfg-pinlist")  # the pin manager opened
 
         # pin key #2 to this model
         screen._km_selected_key = "OPENROUTER_API_KEY_2"
@@ -165,6 +168,48 @@ async def test_pin_key_to_model_removes_it_from_the_pool(tmp_path, monkeypatch):
             "env_var": "OPENROUTER_API_KEY", "pool": True}
         assert provider_keys.pool_env_vars("OPENROUTER_API_KEY") == [
             "OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"]  # #2 back in the pool
+
+
+async def test_provider_key_manager_removes_a_key_and_repoints_pins(
+    tmp_path, monkeypatch
+):
+    """The standalone key manager (no model needed): drill into a provider,
+    remove a key. A pinned key's model is repointed to the pool, never left
+    dangling on a dead var."""
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "p.json")
+    monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
+    monkeypatch.setattr(provider_keys, "PINS_FILE", tmp_path / "pins.json")
+    monkeypatch.setattr(
+        config, "remove_env_secret",
+        lambda n: os.environ.pop(n, None) is not None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k1")
+    monkeypatch.setenv("OPENROUTER_API_KEY_2", "k2")
+    # a model pinned to key #2
+    model_presets.add_preset(
+        "orpin", label="x", base_url="https://openrouter.ai/api/v1",
+        api_format="openai", auth_type="api_key", model="openrouter/free",
+        auth_config={"env_var": "OPENROUTER_API_KEY_2"},
+    )
+    provider_keys.pin_key("OPENROUTER_API_KEY_2", "orpin")
+    app = _Host()
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        assert app.query("#cfg-provlist")  # the manager section is on the list
+        await screen._show_provider_keys("openrouter")  # drill in
+        await pilot.pause()
+        assert app.query("#cfg-provkeylist")
+
+        screen._prov_selected_key = "OPENROUTER_API_KEY_2"
+        await screen._remove_provider_key()
+        await pilot.pause()
+        # the key is gone from Modulatio entirely…
+        assert "OPENROUTER_API_KEY_2" not in os.environ
+        assert provider_keys.pool_env_vars("OPENROUTER_API_KEY") == [
+            "OPENROUTER_API_KEY"]
+        # …and the model it was pinned to fell back to the shared pool
+        assert model_presets.get_preset("orpin")["auth_config"] == {
+            "env_var": "OPENROUTER_API_KEY", "pool": True}
 
 
 async def test_remove_deletes_the_selected_preset(tmp_path, monkeypatch):

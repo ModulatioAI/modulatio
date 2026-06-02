@@ -35,8 +35,13 @@ class ConfigScreen(Vertical):
     DEFAULT_CSS = """
     ConfigScreen { padding: 1; }
     ConfigScreen .cfg-title { text-style: bold; color: $primary; }
+    ConfigScreen .cfg-section { text-style: bold; color: $secondary; height: auto; }
     ConfigScreen #cfg-body { height: 1fr; }
-    ConfigScreen #cfg-models { height: 1fr; border: round $frame-dim; }
+    ConfigScreen #cfg-models { height: 2fr; border: round $frame-dim; }
+    ConfigScreen #cfg-provlist, ConfigScreen #cfg-provkeylist,
+    ConfigScreen #cfg-pinlist {
+        height: 1fr; border: round $frame-dim;
+    }
     ConfigScreen #cfg-status { color: $text-muted; height: auto; }
     ConfigScreen Button { margin: 1 0; }
     """
@@ -48,10 +53,14 @@ class ConfigScreen(Vertical):
         self._env_var: str | None = None
         self._base_url: str | None = None
         self._pool: bool = False
-        # Keys-manager flow state (the optional pin lever)
+        # Pin-manager state (the optional model-context lever)
         self._km_model: str | None = None
         self._km_base: str | None = None
         self._km_selected_key: str | None = None
+        # Provider key-manager state (standalone add/remove, no model needed)
+        self._prov_id: str | None = None
+        self._prov_base: str | None = None
+        self._prov_selected_key: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("CONFIGURATION · Models", classes="cfg-title")
@@ -83,11 +92,21 @@ class ConfigScreen(Vertical):
         body.mount(table)
         body.mount(Horizontal(
             Button("+ Add model", id="cfg-add", variant="primary"),
-            Button("Keys", id="cfg-keys"),
+            Button("Pin key", id="cfg-pinkey"),
             Button("Remove", id="cfg-remove", variant="warning"),
             id="cfg-buttons",
         ))
         body.mount(Static(message, id="cfg-status"))
+        # ── Providers & keys: a standalone key manager (no model needed) ──
+        body.mount(Static("PROVIDERS & KEYS — select a provider to manage its "
+                          "keys", classes="cfg-section"))
+        provlist = OptionList(id="cfg-provlist")
+        for prov in self._api_key_providers():
+            base = self._provider_base(prov)
+            n = len([s for s in provider_keys.list_keys(base) if s["is_set"]])
+            provlist.add_option(Option(
+                f"{prov.name:20}  {n} key(s)", id=prov.id))
+        body.mount(provlist)
 
     def _fill_table(self, table: DataTable) -> None:
         """(Re)populate the preset rows — row key = the preset key."""
@@ -144,20 +163,20 @@ class ConfigScreen(Vertical):
             provider_keys.unpin_model(key)  # its keys rejoin the pool
             self._refresh_table()
             self._set_status(f"Removed '{key}'.")
-        elif event.button.id == "cfg-keys":
+        elif event.button.id == "cfg-pinkey":
             key = self._selected_preset_key()
             if not key:
-                self._set_status("Select a model row first, then Keys.")
+                self._set_status("Select a model row first, then Pin key.")
                 return
-            await self._show_key_manager(key)
+            await self._show_pin_manager(key)
         elif event.button.id == "cfg-pin":
             await self._pin_selected_to_model()
         elif event.button.id == "cfg-usepool":
             await self._use_pool_for_model()
-        elif event.button.id == "cfg-addpoolkey":
-            await self._add_pool_key()
+        elif event.button.id == "cfg-addkey":
+            await self._add_provider_key()
         elif event.button.id == "cfg-rmkey":
-            await self._remove_km_key()
+            await self._remove_provider_key()
 
     async def on_provider_picker_provider_chosen(
         self, event: ProviderPicker.ProviderChosen
@@ -187,12 +206,12 @@ class ConfigScreen(Vertical):
         key = self.register(event.model_id)
         self.show_list(f"Added '{key}'." if key else "Could not add the model.")
 
-    # ── keys manager: the shared pool + the optional pin lever ──────────
+    # ── key plumbing shared by both managers ────────────────────────────
 
     def _base_env_var_for(self, model_key: str) -> str | None:
         """The provider's BASE key env var for a model (or None if it doesn't
-        use API keys). A pooled model already references the base; a pinned
-        model references ``<base>_N`` — strip the numbered suffix back to base."""
+        use API keys). A pooled model references the base; a pinned model
+        references ``<base>_N`` — strip the numbered suffix back to base."""
         preset = model_presets.get_preset(model_key) or {}
         if preset.get("auth_type") != "api_key":
             return None
@@ -201,7 +220,22 @@ class ConfigScreen(Vertical):
             return None
         return re.sub(r"_\d+$", "", ev)
 
-    def _key_row_label(self, slot: dict, model_key: str) -> str:
+    def _api_key_providers(self) -> list:
+        """Catalog providers that authenticate with a named API key env var —
+        the ones whose keys this manager can list / add / remove."""
+        out = []
+        for prov in pc.list_providers():
+            if self._provider_base(prov):
+                out.append(prov)
+        return out
+
+    def _provider_base(self, provider) -> str | None:
+        for a in provider.auth_options:
+            if a.auth_type == "api_key" and a.env_var:
+                return a.env_var
+        return None
+
+    def _key_row_label(self, slot: dict, model_key: str = "") -> str:
         bits = [f"#{slot['index']}"]
         if slot["label"]:
             bits.append(slot["label"])
@@ -214,7 +248,13 @@ class ConfigScreen(Vertical):
             bits.append("[shared pool]")
         return "  ".join(bits)
 
-    async def _show_key_manager(self, model_key: str) -> None:
+    def _slot_for(self, base: str, env_var: str) -> dict | None:
+        return next((s for s in provider_keys.list_keys(base)
+                     if s["env_var"] == env_var), None)
+
+    # ── pin manager (model context — the optional metering lever) ───────
+
+    async def _show_pin_manager(self, model_key: str) -> None:
         self._km_model = model_key
         self._km_selected_key = None
         base = self._base_env_var_for(model_key)
@@ -222,48 +262,32 @@ class ConfigScreen(Vertical):
         await body.remove_children()
         if base is None:
             await body.mount(
-                Static(f"'{model_key}' doesn't use API keys — nothing to manage."),
-                Button("Cancel", id="cfg-cancel"),
+                Static(f"'{model_key}' doesn't use API keys — nothing to pin."),
+                Button("Back", id="cfg-cancel"),
             )
             return
         self._km_base = base
-        keylist = OptionList(id="cfg-keylist")
-        for slot in provider_keys.list_keys(base):
+        slots = provider_keys.list_keys(base)
+        keylist = OptionList(id="cfg-pinlist")
+        for slot in slots:
             keylist.add_option(
                 Option(self._key_row_label(slot, model_key), id=slot["env_var"]))
+        intro = (
+            f"Pin a key to '{model_key}' to isolate its spend (a pinned key "
+            "leaves the shared pool), or put it back on the pool. Add keys for "
+            f"{base} in PROVIDERS & KEYS."
+            if slots else
+            f"{base} has no keys yet — add one in PROVIDERS & KEYS first.")
         await body.mount(
-            Static(
-                f"Keys for {base} — by default '{model_key}' uses the shared "
-                "pool. Pin one to this model to isolate its spend (a pinned key "
-                "leaves the pool)."),
+            Static(intro),
             keylist,
-            Input(password=True, placeholder="paste a NEW key to add to the pool",
-                  id="cfg-newkey"),
-            Input(placeholder="label (optional)", id="cfg-newkeylabel"),
             Horizontal(
                 Button("Pin to model", id="cfg-pin", variant="primary"),
                 Button("Use pool", id="cfg-usepool"),
-                Button("Add to pool", id="cfg-addpoolkey"),
-                Button("Remove key", id="cfg-rmkey", variant="warning"),
-                id="cfg-km-buttons",
+                id="cfg-pin-buttons",
             ),
             Static("", id="cfg-status"),
-            Button("Cancel", id="cfg-cancel"),
-        )
-
-    def on_option_list_option_selected(
-        self, event: OptionList.OptionSelected
-    ) -> None:
-        # only the keys-manager list feeds the pin/remove target; the provider
-        # and model pickers post their own messages.
-        if event.option_list.id == "cfg-keylist":
-            self._km_selected_key = event.option.id
-
-    def _km_slot(self, env_var: str) -> dict | None:
-        return next(
-            (s for s in provider_keys.list_keys(self._km_base or "")
-             if s["env_var"] == env_var),
-            None,
+            Button("Back", id="cfg-cancel"),
         )
 
     async def _pin_selected_to_model(self) -> None:
@@ -271,7 +295,7 @@ class ConfigScreen(Vertical):
             self._set_status("Pick a key from the list first.")
             return
         ev = self._km_selected_key
-        slot = self._km_slot(ev)
+        slot = self._slot_for(self._km_base or "", ev)
         if slot and not slot["is_set"]:
             self._set_status("That key has no value yet — add it first.")
             return
@@ -279,7 +303,7 @@ class ConfigScreen(Vertical):
         # the model now uses ONLY this key (no pool flag)
         model_presets.update_preset(self._km_model, auth_config={"env_var": ev})
         model = self._km_model
-        await self._show_key_manager(model)
+        await self._show_pin_manager(model)
         self._set_status(f"Pinned {ev} to '{model}' — it left the shared pool.")
 
     async def _use_pool_for_model(self) -> None:
@@ -289,31 +313,79 @@ class ConfigScreen(Vertical):
         model_presets.update_preset(
             self._km_model, auth_config={"env_var": self._km_base, "pool": True})
         model = self._km_model
-        await self._show_key_manager(model)
+        await self._show_pin_manager(model)
         self._set_status(f"'{model}' now uses the shared pool.")
 
-    async def _add_pool_key(self) -> None:
-        if not self._km_base or not self._km_model:
+    # ── provider key manager (no model needed — add / remove keys) ──────
+
+    async def _show_provider_keys(self, provider_id: str) -> None:
+        prov = pc.get_provider(provider_id)
+        base = self._provider_base(prov) if prov else None
+        body = self._body()
+        await body.remove_children()
+        if prov is None or base is None:
+            self.show_list()
+            return
+        self._prov_id = provider_id
+        self._prov_base = base
+        self._prov_selected_key = None
+        keylist = OptionList(id="cfg-provkeylist")
+        for slot in provider_keys.list_keys(base):
+            keylist.add_option(Option(self._key_row_label(slot), id=slot["env_var"]))
+        await body.mount(
+            Static(f"Keys · {prov.name}  ({base}) — labels only, never the value:"),
+            keylist,
+            Input(password=True, placeholder="paste a NEW key", id="cfg-newkey"),
+            Input(placeholder="label (optional), e.g. backup", id="cfg-newkeylabel"),
+            Horizontal(
+                Button("Add key", id="cfg-addkey", variant="primary"),
+                Button("Remove key", id="cfg-rmkey", variant="warning"),
+                id="cfg-provkey-buttons",
+            ),
+            Static("", id="cfg-status"),
+            Button("Back", id="cfg-cancel"),
+        )
+
+    async def _add_provider_key(self) -> None:
+        if not self._prov_base or not self._prov_id:
             return
         val = self.query_one("#cfg-newkey", Input).value.strip()
         if not val:
             self._set_status("Paste a key to add.")
             return
         label = self.query_one("#cfg-newkeylabel", Input).value.strip()
-        provider_keys.add_key(self._km_base, val, label or None)
-        model = self._km_model
-        await self._show_key_manager(model)
+        provider_keys.add_key(self._prov_base, val, label or None)
+        await self._show_provider_keys(self._prov_id)
         self._set_status("Added a key to the shared pool.")
 
-    async def _remove_km_key(self) -> None:
-        if not self._km_selected_key or not self._km_model:
+    async def _remove_provider_key(self) -> None:
+        if not self._prov_selected_key or not self._prov_id:
             self._set_status("Pick a key from the list first.")
             return
-        ev = self._km_selected_key
+        ev = self._prov_selected_key
+        base = self._prov_base or ""
+        # repoint any models pinned to this key back to the shared pool so a
+        # removal never leaves a model dangling on a dead env var.
+        slot = self._slot_for(base, ev)
+        for model_key in (slot["pinned_to"] if slot else []):
+            if model_presets.get_preset(model_key):
+                model_presets.update_preset(
+                    model_key, auth_config={"env_var": base, "pool": True})
         provider_keys.remove_key(ev)
-        model = self._km_model
-        await self._show_key_manager(model)
-        self._set_status(f"Removed {ev}.")
+        await self._show_provider_keys(self._prov_id)
+        self._set_status(f"Removed {ev} from Modulatio.")
+
+    async def on_option_list_option_selected(
+        self, event: OptionList.OptionSelected
+    ) -> None:
+        # route by list id; the provider/model pickers post their own messages.
+        lid = event.option_list.id
+        if lid == "cfg-provlist":          # drill into a provider's keys
+            await self._show_provider_keys(event.option.id)
+        elif lid == "cfg-pinlist":         # pin-manager key selection
+            self._km_selected_key = event.option.id
+        elif lid == "cfg-provkeylist":     # provider-manager key selection
+            self._prov_selected_key = event.option.id
 
     # ── register → the existing model_presets backend ───────────────────
 
