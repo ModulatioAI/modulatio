@@ -63,9 +63,16 @@ _FAMILY_TABLE: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...] = (
      ("reasoning-heavy", "long-context", "structured-output", "vision")),
     (("gpt-4", "gpt4"), "generalist", "paid-cloud",
      ("long-context", "structured-output", "vision")),
+    # OpenAI open-weights (gpt-oss) — must precede nothing else it collides
+    # with; matched on the distinct "gpt-oss" substring.
+    (("gpt-oss",), "generalist", "paid-cloud",
+     ("reasoning-heavy", "structured-output")),
     # xAI
     (("grok",), "reasoning-heavy", "paid-cloud",
      ("reasoning-heavy", "long-context", "web-search")),
+    # NVIDIA Nemotron
+    (("nemotron",), "reasoning-heavy", "paid-cloud",
+     ("reasoning-heavy", "structured-output")),
     # DeepSeek
     (("deepseek",), "reasoning-heavy", "paid-cloud",
      ("reasoning-heavy", "code-production")),
@@ -84,7 +91,12 @@ _FAMILY_TABLE: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...] = (
     (("gemma",), "budget", "free-local", ("fast",)),
     # Meta Llama
     (("llama",), "generalist", "free-local", ()),
-    # Mistral
+    # MiniMax
+    (("minimax",), "generalist", "paid-cloud",
+     ("code-production", "long-context")),
+    # Mistral / Ministral — "ministral" before "mistral" so the lighter line
+    # wins its own substring (neither contains the other, but keep them paired).
+    (("ministral",), "budget", "paid-cloud", ("fast",)),
     (("mixtral", "mistral"), "generalist", "paid-cloud", ("structured-output",)),
 )
 

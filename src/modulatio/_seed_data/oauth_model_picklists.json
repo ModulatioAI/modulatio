@@ -1,14 +1,12 @@
 {
   "_doc": "Curated model lists shown by the setup wizard's OAuth provider step (provider_step.py). OAuth flows for these vendors don't expose a /v1/models endpoint, so the wizard ships a snapshot list rather than free-text. Refresh when the vendor publishes a new model. Kept as data here so updates don't require a code edit.",
   "anthropic": [
-    "claude-haiku-4-5",
-    "claude-opus-4-7",
-    "claude-sonnet-4-6"
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5"
   ],
   "openai": [
-    "gpt-4o",
-    "gpt-4o-mini",
-    "o1",
-    "o1-mini"
+    "gpt-5.5",
+    "gpt-5.4"
   ]
 }
