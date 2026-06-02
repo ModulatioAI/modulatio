@@ -282,6 +282,50 @@ GOOGLE = Provider(
     notes="Gemini via the OpenAI-compatible endpoint. Free AI Studio tier (quota-limited).",
 )
 
+_LOCAL_FREE_NOTE = (
+    "Runs on your machine — no API cost or rate limit; bounded by your VRAM."
+)
+
+
+def _local(id_: str, name: str, port: int) -> Provider:
+    base = f"http://localhost:{port}/v1"
+    return Provider(
+        id=id_,
+        name=name,
+        base_url=base,
+        api_format="openai",
+        auth_options=[AuthOption(auth_type="none", label="No auth (local)")],
+        # Probe the running server for whatever the user has loaded/pulled.
+        models_source=ModelsSource(
+            kind="local_probe", probe_url=f"{base}/models", modality="text"
+        ),
+        free_detect="all",
+        free_note=_LOCAL_FREE_NOTE,
+        notes=f"Local {name} server (OpenAI-compatible). Lists loaded models.",
+    )
+
+
+OLLAMA_LOCAL = _local("ollama_local", "Ollama (local)", 11434)
+LM_STUDIO = _local("lm_studio", "LM Studio (local)", 1234)
+LLAMA_CPP = _local("llama_cpp", "llama.cpp (local)", 8080)
+
+CUSTOM = Provider(
+    id="custom",
+    name="Custom / Other",
+    base_url="",  # the operator supplies it
+    api_format="openai",
+    auth_options=[
+        AuthOption(auth_type="api_key", label="API key"),
+        AuthOption(auth_type="none", label="No auth"),
+    ],
+    # No catalog to list — the operator types the model id directly.
+    models_source=ModelsSource(kind="custom"),
+    notes=(
+        "Any OpenAI- or Anthropic-compatible endpoint — you provide the "
+        "base_url, model id, and key."
+    ),
+)
+
 PROVIDERS: dict[str, Provider] = {
     OPENROUTER.id: OPENROUTER,
     OLLAMA_CLOUD.id: OLLAMA_CLOUD,
@@ -290,6 +334,10 @@ PROVIDERS: dict[str, Provider] = {
     OPENAI.id: OPENAI,
     NVIDIA.id: NVIDIA,
     GOOGLE.id: GOOGLE,
+    OLLAMA_LOCAL.id: OLLAMA_LOCAL,
+    LM_STUDIO.id: LM_STUDIO,
+    LLAMA_CPP.id: LLAMA_CPP,
+    CUSTOM.id: CUSTOM,
 }
 
 # Flagship model-family stems that always surface in the curated default view,
@@ -421,7 +469,34 @@ def _fetch_source(
         ids = _load_picklist(src.picklist_key)
         payload = {"data": [{"id": i} for i in ids]}
         return parse_models(provider, payload, modality=src.modality)
-    return []
+    if src.kind == "local_probe":
+        url = src.probe_url or (provider.base_url.rstrip("/") + "/models")
+        try:
+            payload = _http_get_json(url, {}, min(timeout, 5.0))
+        except Exception:
+            return []  # local server not running / unreachable — empty, no error
+        return parse_models(provider, payload, modality=src.modality)
+    return []  # custom: no listing — the operator enters the model id
+
+
+def auth_status(
+    auth: AuthOption, *, extra_env: Optional[dict[str, str]] = None
+) -> tuple[bool, str]:
+    """Is this auth option ready, and if not, how to set it up?
+
+    Ties the catalog's auth options to the engine's auth strategies — so the
+    configurator can show "OAuth ready ✓" or the setup hint ("run `claude
+    login`" / "set OPENROUTER_API_KEY"). Returns ``(available, hint)``; hint is
+    empty when ready."""
+    from modulatio import auth_strategies
+
+    cfg = {"env_var": auth.env_var} if auth.env_var else None
+    try:
+        strat = auth_strategies.build_strategy(auth.auth_type, cfg)
+    except Exception:
+        return False, auth.oauth_hint or ""
+    ok = strat.is_available(extra_env)
+    return ok, ("" if ok else strat.fix_hint())
 
 
 def fetch_models(
@@ -552,6 +627,10 @@ __all__ = [
     "OPENAI",
     "NVIDIA",
     "GOOGLE",
+    "OLLAMA_LOCAL",
+    "LM_STUDIO",
+    "LLAMA_CPP",
+    "CUSTOM",
     "Modality",
     "classify_modality",
     "get_provider",
@@ -559,6 +638,7 @@ __all__ = [
     "parse_models",
     "apply_pinned",
     "fetch_models",
+    "auth_status",
     "of_modality",
     "free_models",
     "curated_default",

@@ -366,6 +366,70 @@ def test_preset_kwargs_can_override_inferred_caps():
     assert over["model_tier"] == "strategic"
 
 
+# ── Locals (Ollama-local / LM Studio / llama.cpp) + custom ──────────────────
+
+
+def test_locals_are_localhost_no_auth_probe_sources():
+    for pid, port in [("ollama_local", 11434), ("lm_studio", 1234),
+                      ("llama_cpp", 8080)]:
+        p = pc.get_provider(pid)
+        assert p is not None
+        assert p.base_url == f"http://localhost:{port}/v1"
+        assert p.auth_options[0].auth_type == "none"
+        assert p.models_source.kind == "local_probe"
+        assert p.free_detect == "all"
+
+
+def test_local_probe_empty_when_server_down(monkeypatch):
+    # unreachable local server → empty list, never an error
+    def boom(url, headers, timeout):
+        raise OSError("connection refused")
+    monkeypatch.setattr(pc, "_http_get_json", boom)
+    assert pc.fetch_models(pc.OLLAMA_LOCAL) == []
+
+
+def test_local_probe_lists_loaded_models(monkeypatch):
+    payload = {"data": [{"id": "llama3.3:70b", "object": "model"},
+                        {"id": "qwen3:32b", "object": "model"}]}
+    monkeypatch.setattr(pc, "_http_get_json", lambda u, h, t: payload)
+    models = pc.fetch_models(pc.LM_STUDIO)
+    assert {m.id for m in models} == {"llama3.3:70b", "qwen3:32b"}
+    assert all(m.is_free for m in models)
+
+
+def test_custom_provider_lists_nothing_user_fills_it():
+    p = pc.get_provider("custom")
+    assert p is not None
+    assert p.base_url == ""  # operator supplies it
+    assert p.models_source.kind == "custom"
+    assert pc.fetch_models(p) == []  # no listing — model id is typed in
+
+
+# ── OAuth / key setup status (ties to the engine's auth strategies) ──────────
+
+
+def test_auth_status_api_key_ready_when_env_set(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    ok, hint = pc.auth_status(pc.OPENROUTER.auth_options[0])
+    assert ok and hint == ""
+
+
+def test_auth_status_api_key_gives_setup_hint_when_missing(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    ok, hint = pc.auth_status(pc.OPENROUTER.auth_options[0])
+    assert not ok and hint  # tells the operator how to set it up
+
+
+def test_auth_status_oauth_reports_login_hint(monkeypatch):
+    # Anthropic OAuth option → status reflects whether `claude login` is done
+    oauth = pc.ANTHROPIC.auth_options[0]
+    assert oauth.auth_type == "oauth_anthropic"
+    ok, hint = pc.auth_status(oauth)
+    assert isinstance(ok, bool)
+    if not ok:
+        assert hint  # a real setup hint, e.g. "run `claude login`"
+
+
 def test_catalog_pick_registers_a_real_preset(tmp_path, monkeypatch):
     """The end-to-end wiring: a catalog pick becomes a model_presets entry via
     the existing add_preset backend — no reimplementation."""
