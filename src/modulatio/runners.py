@@ -309,14 +309,35 @@ def _pool_base(model: str) -> str | None:
 
 
 def _rotated_pool_key(pool_base: str | None) -> str | None:
-    """The next pooled key's VALUE (round-robin), or None when not pooled /
-    the key is unset. Called once per request by the runners."""
+    """The next pooled key's VALUE (round-robin over the SET, UNPINNED keys),
+    or None when not pooled / the pool is empty. Crucially, an empty pool
+    returns None rather than falling back to the base var — the base var may be
+    SET but PINNED, and a pooled model must never borrow a key that was pinned
+    for isolated metering (Nemo, hull 2026-06-02)."""
     if pool_base is None:
         return None
     import os
 
     from modulatio import provider_keys
+    if not provider_keys.pool_env_vars(pool_base):
+        return None  # no unpinned key — do NOT fall back to the (maybe pinned) base
     return os.environ.get(provider_keys.next_pool_env_var(pool_base))
+
+
+def _pooled_call_key(pool_base: str, model: str) -> str:
+    """The pooled key VALUE for THIS request, or a clear needs-setup error when
+    the pool has no unpinned key. This is the metering keel: a pooled model
+    draws ONLY from the shared (unpinned) pool and refuses to dispatch rather
+    than spend a key pinned to another model."""
+    key = _rotated_pool_key(pool_base)
+    if key is None:
+        raise RuntimeError(
+            f"Pooled model {model!r}: provider env {pool_base!r} has no unpinned "
+            f"key in its shared pool (every key is pinned to a specific model, "
+            f"or none is set). Add a key to the pool, or un-pin one — refusing "
+            f"to borrow a pinned key."
+        )
+    return key
 
 
 def _pool_count(pool_base: str | None) -> int:
@@ -449,11 +470,12 @@ def litellm_runner(
                 config=ctx_cfg,
             )
 
-        # Pooled presets rotate the key for THIS request (no-op when not pooled).
+        # Pooled presets draw the key ONLY from the shared (unpinned) pool for
+        # THIS request — never the construction-resolved base key (which may be
+        # pinned). Empty pool ⇒ a clear needs-setup error, never a borrowed key.
         call_kwargs = dict(kwargs)
-        rotated = _rotated_pool_key(pool_base)
-        if rotated is not None:
-            call_kwargs["api_key"] = rotated
+        if pool_base is not None:
+            call_kwargs["api_key"] = _pooled_call_key(pool_base, model)
 
         # ── Responses API path ───────────────────────────────────────
         if endpoint == "responses":
@@ -1058,9 +1080,8 @@ def litellm_chat_runner(
 
         def _call():
             ck = dict(kwargs)
-            rk = _rotated_pool_key(pool_base)  # rotate per call (no-op if not pooled)
-            if rk is not None:
-                ck["api_key"] = rk
+            if pool_base is not None:  # draw ONLY from the unpinned pool; raise
+                ck["api_key"] = _pooled_call_key(pool_base, model)  # if empty
             if tools:
                 ck["tools"] = tools
             # Forced tool_choice (e.g. emit_state for Leader-reflect) makes a

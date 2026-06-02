@@ -321,6 +321,40 @@ def test_pool_429_failover_retries_with_the_next_key(tmp_path, monkeypatch):
     assert "key-2" in keys_seen[1:]         # failed over to the next key
 
 
+def test_pooled_model_refuses_to_borrow_a_pinned_base_key(tmp_path, monkeypatch):
+    """The metering keel (Nemo, hull): if every key in a provider's pool is
+    pinned — including the BASE key — a pooled model must NOT dispatch with the
+    pinned base key. It raises a clear needs-setup error instead of borrowing
+    the key that was pinned for isolated metering."""
+    import litellm
+
+    from modulatio import provider_keys
+    from modulatio.runners import litellm_runner
+
+    monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
+    monkeypatch.setattr(provider_keys, "PINS_FILE", tmp_path / "pins.json")
+    provider_keys._pool_cursor.clear()
+    preset = _pooled_preset("TESTPOOL_KEY", pool=True)
+    monkeypatch.setattr("modulatio.model_presets.load_presets",
+                        lambda: {"pooled": preset})
+    monkeypatch.setattr("modulatio.model_presets.get_preset",
+                        lambda k: preset if k == "pooled" else None)
+    monkeypatch.setenv("TESTPOOL_KEY", "pinned-base-secret")
+    provider_keys.pin_key("TESTPOOL_KEY", "image-model")  # the ONLY key is pinned
+    assert provider_keys.pool_env_vars("TESTPOOL_KEY") == []  # pool now empty
+
+    seen: list = []
+    monkeypatch.setattr(litellm, "completion",
+                        lambda **kw: seen.append(kw.get("api_key"))
+                        or _fake_chat_completion_response(content="ok"))
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+
+    run = litellm_runner("pooled")
+    with pytest.raises(RuntimeError, match="no unpinned key"):
+        run("hi")
+    assert seen == []  # never dispatched — the pinned base key was not borrowed
+
+
 def test_pool_429_exhausted_raises_after_bounded_attempts(tmp_path, monkeypatch):
     """When EVERY key in the pool 429s, the failover loop is bounded and
     re-raises the rate-limit error — no infinite loop, no None 'success'."""
