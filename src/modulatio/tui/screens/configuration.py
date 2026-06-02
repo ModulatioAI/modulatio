@@ -55,10 +55,14 @@ class ConfigScreen(Vertical):
     def _body(self) -> Vertical:
         return self.query_one("#cfg-body", Vertical)
 
-    def _swap(self, widget) -> None:
+    async def _swap(self, widget) -> None:
+        """Swap the body to a flow step, with a Cancel that bails back to the
+        list. Async (await the removal before mounting) so the shared
+        ``cfg-cancel`` id never collides across consecutive steps — the same
+        DuplicateIds guard the AGENTS side uses."""
         body = self._body()
-        body.remove_children()
-        body.mount(widget)
+        await body.remove_children()
+        await body.mount(widget, Button("Cancel", id="cfg-cancel"))
 
     # ── the list ────────────────────────────────────────────────────────
 
@@ -114,11 +118,14 @@ class ConfigScreen(Vertical):
 
     # ── flow transitions (messages bubble up from the step widgets) ─────
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cfg-add":
             self._provider_id = self._auth_type = None
             self._env_var = self._base_url = None
-            self._swap(ProviderPicker(id="cfg-pp"))
+            await self._swap(ProviderPicker(id="cfg-pp"))
+        elif event.button.id == "cfg-cancel":
+            # bail out of the add flow at any step → back to the list
+            self.show_list("Cancelled.")
         elif event.button.id == "cfg-remove":
             key = self._selected_preset_key()
             if not key:
@@ -128,15 +135,15 @@ class ConfigScreen(Vertical):
             self._refresh_table()
             self._set_status(f"Removed '{key}'.")
 
-    def on_provider_picker_provider_chosen(
+    async def on_provider_picker_provider_chosen(
         self, event: ProviderPicker.ProviderChosen
     ) -> None:
         self._provider_id = event.provider_id
         provider = pc.get_provider(event.provider_id)
         if provider is not None:
-            self._swap(AuthStep(provider, id="cfg-auth"))
+            await self._swap(AuthStep(provider, id="cfg-auth"))
 
-    def on_auth_step_auth_configured(
+    async def on_auth_step_auth_configured(
         self, event: AuthStep.AuthConfigured
     ) -> None:
         self._auth_type = event.auth_type
@@ -145,7 +152,7 @@ class ConfigScreen(Vertical):
         self._pool = event.pool
         provider = pc.get_provider(event.provider_id)
         if provider is not None:
-            self._swap(ModelPicker(
+            await self._swap(ModelPicker(
                 provider, env_var=event.env_var, base_url=event.base_url,
                 id="cfg-mp",
             ))

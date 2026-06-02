@@ -72,12 +72,13 @@ async def test_full_flow_provider_auth_model_registers(tmp_path, monkeypatch):
         await pilot.pause()
         assert app.query("#cfg-pp")  # ProviderPicker
 
-        screen.on_provider_picker_provider_chosen(
+        await screen.on_provider_picker_provider_chosen(
             ProviderPicker.ProviderChosen("ollama_local"))
         await pilot.pause()
         assert app.query("#cfg-auth")  # AuthStep
+        assert app.query("#cfg-cancel")  # Cancel is offered at each step
 
-        screen.on_auth_step_auth_configured(
+        await screen.on_auth_step_auth_configured(
             AuthStep.AuthConfigured("ollama_local", "none", None, None))
         await pilot.pause()
         assert app.query("#cfg-mp")  # ModelPicker
@@ -94,6 +95,33 @@ async def test_full_flow_provider_auth_model_registers(tmp_path, monkeypatch):
         assert app.query("#cfg-models")
         presets = model_presets.load_presets()
         assert any(p["model"] == "llama3.3:8b" for p in presets.values())
+
+
+async def test_cancel_returns_to_the_list_mid_flow(tmp_path, monkeypatch):
+    """Cancel at any add-model step bails back to the model list."""
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "p.json")
+    app = _Host()
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+
+        await pilot.click("#cfg-add")
+        await pilot.pause()
+        assert app.query("#cfg-pp")      # in the flow (ProviderPicker)
+        assert app.query("#cfg-cancel")  # Cancel offered
+
+        # advance a step, then cancel
+        await screen.on_provider_picker_provider_chosen(
+            ProviderPicker.ProviderChosen("openrouter"))
+        await pilot.pause()
+        assert app.query("#cfg-auth")
+
+        await pilot.click("#cfg-cancel")
+        await pilot.pause()
+        # back to the list; the flow widgets are gone
+        assert app.query("#cfg-models")
+        assert not app.query("#cfg-auth")
+        assert not app.query("#cfg-cancel")
 
 
 async def test_remove_deletes_the_selected_preset(tmp_path, monkeypatch):
