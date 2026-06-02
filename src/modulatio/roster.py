@@ -443,6 +443,16 @@ def clear_model(
     return updated
 
 
+def remove_agent(*, project_code: str, agent_id: str) -> bool:
+    """Delete an agent from the roster. Returns True if removed, False if it
+    didn't exist. Backs the configurator's agent builder (drop a producer)."""
+    path = project_dir(project_code) / "agents" / f"{agent_id}.md"
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+
+
 def seed_default_roster(
     project_code: str,
     *,
