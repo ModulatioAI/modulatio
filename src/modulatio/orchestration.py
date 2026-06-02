@@ -3777,6 +3777,69 @@ class Orchestrator:
             names = _jt.list_job_templates(self.project.code)
             return "Job templates: " + (", ".join(names) if names else "(none yet)")
 
+        def create_job_template(
+            name: str, description: str, interview: str, **_: object
+        ) -> str:
+            """Codify a recurring job as a reusable Job Template (project-local).
+            ``interview`` is the prose the Leader uses to gather the job's params
+            when the template is run."""
+            try:
+                _jt.create_job_template(
+                    name=str(name), description=str(description),
+                    interview_body=str(interview),
+                    project_code=self.project.code,
+                )
+            except FileExistsError:
+                return (f"A job template named {name!r} already exists — pick a "
+                        "different name, or improve the existing one.")
+            except Exception as exc:
+                return f"Couldn't create the template: {type(exc).__name__}: {exc}"
+            return f"Created job template {name!r} for this project."
+
+        def create_skill(
+            name: str, description: str, prompt: str, **_: object
+        ) -> str:
+            """Teach the team a new durable skill (shared library)."""
+            from modulatio import skills as _skills
+            try:
+                _skills.create_skill(
+                    name=str(name), description=str(description),
+                    prompt_template=str(prompt), project_code=None,
+                )
+            except FileExistsError:
+                return (f"A skill named {name!r} already exists — use improve_skill "
+                        "to refine it.")
+            except Exception as exc:
+                return f"Couldn't create the skill: {type(exc).__name__}: {exc}"
+            return f"Created skill {name!r} in the shared library."
+
+        def improve_skill(name: str, guidance: str, **_: object) -> str:
+            """Refine an existing skill by appending learned guidance + bumping
+            its version (the same shape the self-codification loop uses)."""
+            from modulatio import skills as _skills
+            try:
+                base = _skills.load_with_metadata(str(name))
+            except Exception:
+                base = None
+            if base is None or not base.prompt_template:
+                return f"No skill named {name!r} to improve — create_skill first."
+            try:
+                next_v = str(int(base.version) + 1) if base.version else "2"
+            except ValueError:
+                next_v = "2"
+            improved = _skills.Skill(
+                name=base.name, description=base.description,
+                prompt_template=base.prompt_template.rstrip()
+                + f"\n\n## Learned\n\n{guidance}\n",
+                tool_loadout=base.tool_loadout,
+                standards_domain=base.standards_domain, model_tier=base.model_tier,
+                cost_class=base.cost_class, capability_tags=base.capability_tags,
+                required_capabilities=base.required_capabilities,
+                executor=base.executor, version=next_v,
+            )
+            _skills.save(improved, project_code=None)
+            return f"Improved skill {name!r} → v{next_v}."
+
         def decide_approval(
             ticket_id: str, decision: str, note: str = "", **_: object
         ) -> str:
@@ -3822,6 +3885,60 @@ class Orchestrator:
                 name="list_job_templates",
                 description="List the saved job templates for this project.",
                 call=list_job_templates,
+            ),
+            "create_job_template": tools.Tool(
+                name="create_job_template",
+                description=(
+                    "Codify a recurring kind of job as a reusable Job Template. "
+                    "Pass a 'name' (hyphen-case), a one-line 'description', and "
+                    "an 'interview' — the prose you'd use to gather the job's "
+                    "parameters when it's run. Use when the operator does the "
+                    "same class of work repeatedly."
+                ),
+                call=create_job_template,
+                params_schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "interview": {"type": "string"},
+                    },
+                    "required": ["name", "description", "interview"],
+                },
+            ),
+            "create_skill": tools.Tool(
+                name="create_skill",
+                description=(
+                    "Teach the team a new durable skill (shared library). Pass a "
+                    "'name' (hyphen-case), a one-line 'description', and the "
+                    "'prompt' (the instruction template the skill runs)."
+                ),
+                call=create_skill,
+                params_schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "prompt": {"type": "string"},
+                    },
+                    "required": ["name", "description", "prompt"],
+                },
+            ),
+            "improve_skill": tools.Tool(
+                name="improve_skill",
+                description=(
+                    "Refine an existing skill by appending learned 'guidance' "
+                    "(bumps its version). Pass the skill 'name' and the guidance."
+                ),
+                call=improve_skill,
+                params_schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "guidance": {"type": "string"},
+                    },
+                    "required": ["name", "guidance"],
+                },
             ),
             "decide_approval": tools.Tool(
                 name="decide_approval",

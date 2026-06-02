@@ -147,6 +147,31 @@ def test_converse_with_image_routes_to_multimodal(
     assert captured["attachments"][0].kind == "image"
 
 
+def test_leader_has_the_authoring_tools(project: Project):
+    """The leader-converse seed promises create_job_template / create_skill /
+    improve_skill — they must actually be in the converse loadout."""
+    orch = Orchestrator(project, _runners())
+    names = set(orch._leader_function_tools())
+    assert {"create_job_template", "create_skill", "improve_skill"} <= names
+
+
+def test_create_job_template_tool_writes_and_lists(project: Project):
+    """The Leader's create_job_template tool actually writes a template that
+    then shows up in list_job_templates (the reported bug: it was promised but
+    not wired)."""
+    from modulatio import job_templates
+
+    orch = Orchestrator(project, _runners())
+    out = orch._leader_function_tools()["create_job_template"].call(
+        name="daily-brief", description="A daily brief", interview="Ask the topic.")
+    assert "Created" in out
+    assert "daily-brief" in job_templates.list_job_templates(PROJECT_CODE)
+    # idempotency guard: a second create on the same name is reported, not raised
+    again = orch._leader_function_tools()["create_job_template"].call(
+        name="daily-brief", description="dup", interview="x")
+    assert "already exists" in again
+
+
 def test_pending_approvals_surface_and_decide(project: Project):
     """The Leader sees pending approvals in the prompt and resolves one via the
     decide_approval tool (the conversational-approval path)."""
