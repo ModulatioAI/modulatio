@@ -258,6 +258,50 @@ class OAuthOpenAIStrategy:
         )
 
 
+class OAuthXaiStrategy:
+    """OAuth via the official Grok CLI's credentials file
+    (``~/.grok/auth.json``). Refresh delegates to
+    ``oauth_refresh.refresh_xai_token`` (in-memory only).
+
+    BETA — built to spec against the standard OIDC flow; pending live
+    validation by a SuperGrok / X Premium+ account. Token rides the same
+    ``api.x.ai/v1`` endpoint as the API key, so no runner changes.
+    """
+
+    name = "oauth_xai"
+
+    def __init__(self, config: dict | None = None) -> None:
+        del config
+
+    def load_token(self) -> str | None:
+        from modulatio import oauth_helpers
+        return oauth_helpers.read_xai_token()
+
+    def refresh_if_possible(self) -> str | None:
+        from modulatio import oauth_refresh
+        try:
+            return oauth_refresh.refresh_xai_token()
+        except oauth_refresh.RefreshError:
+            return None
+
+    def attribution_kwargs(self) -> dict[str, Any]:
+        return {}
+
+    def is_available(self, extra_env: dict[str, str] | None = None) -> bool:
+        del extra_env  # OAuth doesn't use staged env
+        from modulatio import oauth_helpers
+        return oauth_helpers.has_xai_credentials()
+
+    def fix_hint(self) -> str:
+        return (
+            "Sign in with the official Grok CLI (install: "
+            "`curl -fsSL https://x.ai/cli/install.sh | bash`, then launch it "
+            "once and log in with a SuperGrok / X Premium+ account). OAuth is "
+            "beta; if it's unavailable for your tier, switch this provider to "
+            "api_key with an xAI API key."
+        )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────
 
 
@@ -266,6 +310,7 @@ _STRATEGY_FACTORIES: dict[str, Callable[[dict | None], AuthStrategy]] = {
     "api_key": ApiKeyStrategy,
     "oauth_anthropic": OAuthAnthropicStrategy,
     "oauth_openai": OAuthOpenAIStrategy,
+    "oauth_xai": OAuthXaiStrategy,
 }
 
 

@@ -57,10 +57,11 @@ def valid_auth_types() -> tuple[str, ...]:
     return auth_strategies.registered_auth_types()
 
 
-# Back-compat alias — module-level constant kept for callers that
-# imported it directly. New code should call ``valid_auth_types()``
-# so dynamically-registered strategies are picked up.
-VALID_AUTH_TYPES = ("none", "api_key", "oauth_anthropic", "oauth_openai")
+# Back-compat alias — module-level constant kept for callers that imported it
+# directly. Derived from the registry at import so it reflects the built-in
+# strategies (incl. oauth_xai); new code should still call ``valid_auth_types()``
+# to also pick up strategies registered dynamically after import.
+VALID_AUTH_TYPES = valid_auth_types()
 
 
 # === Persistence ===

@@ -66,6 +66,11 @@ _ANTHROPIC_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude CLI publ
 _OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
 _OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # Codex CLI public client
 
+# xAI resolves its token endpoint via OIDC discovery; the client id is the Grok
+# CLI's public PKCE client (not a secret). BETA / pending live validation.
+_XAI_OAUTH_DISCOVERY_URL = "https://auth.x.ai/.well-known/openid-configuration"
+_XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"  # Grok CLI public client
+
 
 class RefreshError(Exception):
     """Raised when a token refresh attempt fails (network, expired refresh
@@ -224,11 +229,61 @@ def try_refresh(auth_type: str) -> str | None:
     return None
 
 
+def refresh_xai_token(*, timeout: float = 30.0) -> str:
+    """Exchange the stored Grok refresh token for a fresh access token.
+
+    BETA / PENDING LIVE VALIDATION — built to the standard OIDC refresh flow
+    without a SuperGrok account to test against. Reads the refresh token from
+    ``~/.grok/auth.json``, resolves the token endpoint via xAI's OIDC discovery,
+    posts a ``refresh_token`` grant, and returns the new access token **in
+    memory** — it deliberately does NOT write back into the Grok CLI's
+    credentials file (we won't clobber another tool's creds in a format we
+    haven't confirmed). Raises RefreshError on any failure."""
+    refresh_token = oauth_helpers.read_xai_refresh_token()
+    if not refresh_token:
+        raise RefreshError(
+            "no xAI Grok refresh token found — sign in with the Grok CLI"
+        )
+    try:
+        disc = httpx.get(_XAI_OAUTH_DISCOVERY_URL, timeout=timeout)
+        token_endpoint = disc.json().get("token_endpoint")
+    except (httpx.HTTPError, ValueError) as e:
+        raise RefreshError(f"xAI OIDC discovery failed: {e}") from e
+    if not isinstance(token_endpoint, str) or not token_endpoint:
+        raise RefreshError("xAI discovery response missing token_endpoint")
+    try:
+        response = httpx.post(
+            token_endpoint,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": _XAI_OAUTH_CLIENT_ID,
+            },
+            timeout=timeout,
+        )
+    except httpx.HTTPError as e:
+        raise RefreshError(f"xAI refresh request failed: {e}") from e
+    if response.status_code != 200:
+        raise RefreshError(
+            f"xAI refresh rejected (HTTP {response.status_code}): "
+            f"{_redact_secrets(response.text[:200])}"
+        )
+    try:
+        payload = response.json()
+    except ValueError as e:
+        raise RefreshError(f"xAI refresh response not JSON: {e}") from e
+    new_access = payload.get("access_token")
+    if not isinstance(new_access, str) or not new_access:
+        raise RefreshError("xAI refresh response missing access_token")
+    return new_access
+
+
 __all__ = [
     "EXPIRY_BUFFER_SEC",
     "RefreshError",
     "anthropic_needs_refresh",
     "refresh_anthropic_token",
     "refresh_openai_token",
+    "refresh_xai_token",
     "try_refresh",
 ]

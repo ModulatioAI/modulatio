@@ -221,6 +221,57 @@ def test_role_assignment_filters_to_text_models(monkeypatch):
     assert {m.id for m in text} == {"grok-4.3", "grok-build-0.1"}
 
 
+# ── xAI Grok OAuth (beta — reads the Grok CLI's ~/.grok/auth.json) ───────────
+
+
+def test_xai_offers_both_api_key_and_beta_oauth():
+    p = pc.get_provider("xai")
+    assert [a.auth_type for a in p.auth_options] == ["api_key", "oauth_xai"]
+    oauth = p.auth_options[1]
+    assert oauth.beta is True  # surfaced as "(beta)" in the picker
+
+
+def test_oauth_xai_strategy_is_registered():
+    from modulatio import auth_strategies
+    assert "oauth_xai" in auth_strategies.registered_auth_types()
+
+
+def test_xai_oauth_reads_grok_cli_creds(tmp_path, monkeypatch):
+    from modulatio import oauth_helpers
+    cred = tmp_path / "auth.json"
+    cred.write_text('{"access_token": "xai-tok", "refresh_token": "xai-ref"}')
+    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
+    assert oauth_helpers.has_xai_credentials()
+    assert oauth_helpers.read_xai_token() == "xai-tok"
+    assert oauth_helpers.read_xai_refresh_token() == "xai-ref"
+
+
+def test_xai_oauth_reads_tokens_nested_under_a_wrapper(tmp_path, monkeypatch):
+    # defensive: format unconfirmed, so accept nested layout too
+    from modulatio import oauth_helpers
+    cred = tmp_path / "auth.json"
+    cred.write_text('{"tokens": {"access_token": "nested-tok"}}')
+    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
+    assert oauth_helpers.read_xai_token() == "nested-tok"
+
+
+def test_xai_oauth_auth_status_reflects_grok_login(tmp_path, monkeypatch):
+    from modulatio import oauth_helpers
+    oauth = pc.get_provider("xai").auth_options[1]
+    # not logged in → not ready, with a Grok-CLI setup hint
+    monkeypatch.setattr(
+        oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", tmp_path / "absent.json"
+    )
+    ok, hint = pc.auth_status(oauth)
+    assert not ok and "Grok CLI" in hint
+    # logged in → ready
+    cred = tmp_path / "auth.json"
+    cred.write_text('{"access_token": "t"}')
+    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
+    ok, hint = pc.auth_status(oauth)
+    assert ok and hint == ""
+
+
 def test_existing_providers_default_to_text_modality():
     models = pc.parse_models(pc.OPENROUTER, PAYLOAD)
     assert all(m.modality == "text" for m in models)

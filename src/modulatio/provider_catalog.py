@@ -37,10 +37,13 @@ class AuthOption(BaseModel):
     """One way to authenticate to a provider. A provider may offer several
     (e.g. OpenAI/Anthropic carry *both* their OAuth method and a plain key)."""
 
-    auth_type: Literal["api_key", "oauth_anthropic", "oauth_openai", "none"]
+    auth_type: Literal[
+        "api_key", "oauth_anthropic", "oauth_openai", "oauth_xai", "none"
+    ]
     label: str  # "API key", "Sign in with Claude (OAuth)", "No auth (local)"
     env_var: Optional[str] = None  # for api_key: the env var the key lands in
     oauth_hint: Optional[str] = None  # for oauth: e.g. "run `claude login`"
+    beta: bool = False  # surfaced as "(beta)" in the picker
 
 
 Modality = Literal["text", "image", "video", "audio", "embedding"]
@@ -163,7 +166,15 @@ XAI = Provider(
     base_url="https://api.x.ai/v1",
     api_format="openai",
     auth_options=[
-        AuthOption(auth_type="api_key", label="API key", env_var="XAI_API_KEY")
+        AuthOption(auth_type="api_key", label="API key", env_var="XAI_API_KEY"),
+        # Grok OAuth (SuperGrok / X Premium+) via the official Grok CLI's
+        # ~/.grok/auth.json. Beta — pending live validation.
+        AuthOption(
+            auth_type="oauth_xai",
+            label="Sign in with Grok (OAuth)",
+            oauth_hint="install + log in with the Grok CLI (x.ai/cli)",
+            beta=True,
+        ),
     ],
     # xAI splits modalities across endpoints; listing any of them needs the key.
     models_source=ModelsSource(

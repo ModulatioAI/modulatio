@@ -24,6 +24,11 @@ from modulatio import config
 # Override these in tests; defaults match the official CLI tools.
 ANTHROPIC_CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 OPENAI_CODEX_CREDENTIALS_FILE = Path.home() / ".codex" / "auth.json"
+# Written by the official Grok CLI's OAuth login (curl -fsSL https://x.ai/cli/
+# install.sh | bash). PENDING LIVE VALIDATION: built to the standard OIDC token
+# shape; the exact field layout is read defensively because we have no SuperGrok
+# account to confirm it against.
+XAI_GROK_CREDENTIALS_FILE = Path.home() / ".grok" / "auth.json"
 
 
 # === Anthropic ===
@@ -135,9 +140,68 @@ def write_openai_credentials(updated: dict[str, Any]) -> None:
     )
 
 
+# === xAI Grok ===
+#
+# Tokens come from the official Grok CLI's OAuth login (~/.grok/auth.json),
+# read like the Claude/Codex creds above. Field names are read DEFENSIVELY —
+# top level or nested one level under a wrapper — because this is built to spec
+# without a SuperGrok account to confirm the exact layout. We never write back
+# into the Grok CLI's file (refresh is in-memory; see oauth_refresh).
+
+
+def has_xai_credentials() -> bool:
+    """True if the Grok CLI OAuth credentials file exists and is readable."""
+    return (
+        XAI_GROK_CREDENTIALS_FILE.exists()
+        and os.access(XAI_GROK_CREDENTIALS_FILE, os.R_OK)
+    )
+
+
+def read_xai_credentials() -> dict[str, Any] | None:
+    """Parse ~/.grok/auth.json → the dict holding the OAuth tokens.
+
+    Accepts the tokens at the top level or nested one level under a common
+    wrapper key (``tokens``/``oauth``/``credentials``/``auth``). Returns None on
+    missing/malformed/wrong-shape input."""
+    if not has_xai_credentials():
+        return None
+    try:
+        data = json.loads(XAI_GROK_CREDENTIALS_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("access_token"), str):
+        return data
+    for wrapper in ("tokens", "oauth", "credentials", "auth"):
+        inner = data.get(wrapper)
+        if isinstance(inner, dict) and isinstance(inner.get("access_token"), str):
+            return inner
+    return None
+
+
+def read_xai_token() -> str | None:
+    """Return the current xAI Grok OAuth access token, or None if absent."""
+    creds = read_xai_credentials()
+    if not creds:
+        return None
+    token = creds.get("access_token")
+    return token if isinstance(token, str) and token else None
+
+
+def read_xai_refresh_token() -> str | None:
+    """Return the stored refresh token, or None — used by oauth_refresh."""
+    creds = read_xai_credentials()
+    if not creds:
+        return None
+    token = creds.get("refresh_token")
+    return token if isinstance(token, str) and token else None
+
+
 __all__ = [
     "ANTHROPIC_CREDENTIALS_FILE",
     "OPENAI_CODEX_CREDENTIALS_FILE",
+    "XAI_GROK_CREDENTIALS_FILE",
     "has_anthropic_credentials",
     "read_anthropic_credentials",
     "read_anthropic_token",
@@ -147,4 +211,8 @@ __all__ = [
     "read_openai_credentials",
     "read_openai_token",
     "write_openai_credentials",
+    "has_xai_credentials",
+    "read_xai_credentials",
+    "read_xai_token",
+    "read_xai_refresh_token",
 ]

@@ -24,11 +24,12 @@ from modulatio.setup_wizard.provider_step import (
 
 
 def test_anthropic_oauth_models_includes_current_haiku_sonnet_opus():
-    """Anthropic curated list covers the live Claude 4 family the user
-    is most likely to pick. Refresh when new models ship."""
-    assert "claude-haiku-4-5" in ANTHROPIC_OAUTH_MODELS
-    assert "claude-sonnet-4-6" in ANTHROPIC_OAUTH_MODELS
-    assert "claude-opus-4-7" in ANTHROPIC_OAUTH_MODELS
+    """Anthropic curated list covers the live Claude family the user is most
+    likely to pick. Matched by family prefix so a version bump doesn't break
+    the test (refresh the seed when new models ship)."""
+    assert any(m.startswith("claude-haiku") for m in ANTHROPIC_OAUTH_MODELS)
+    assert any(m.startswith("claude-sonnet") for m in ANTHROPIC_OAUTH_MODELS)
+    assert any(m.startswith("claude-opus") for m in ANTHROPIC_OAUTH_MODELS)
 
 
 def test_anthropic_oauth_models_is_sorted_for_stable_picker_order():
@@ -36,11 +37,11 @@ def test_anthropic_oauth_models_is_sorted_for_stable_picker_order():
     assert list(ANTHROPIC_OAUTH_MODELS) == sorted(ANTHROPIC_OAUTH_MODELS)
 
 
-def test_openai_oauth_models_includes_common_gpt_and_o_models():
-    """OpenAI curated list covers the common GPT and reasoning lines."""
-    # Match by prefix so a future minor-version bump doesn't break the test.
-    assert any(m.startswith("gpt-4o") for m in OPENAI_OAUTH_MODELS)
-    assert any(m.startswith("o1") for m in OPENAI_OAUTH_MODELS)
+def test_openai_oauth_models_includes_current_gpt_line():
+    """OpenAI curated list covers the current GPT line (gpt-5 folded the
+    o-series reasoning in). Matched by prefix so a minor-version bump doesn't
+    break the test (refresh the seed when new models ship)."""
+    assert any(m.startswith("gpt-5") for m in OPENAI_OAUTH_MODELS)
 
 
 # ─── Env-var smart default ──────────────────────────────────────────────────
