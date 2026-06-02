@@ -3659,6 +3659,152 @@ class Orchestrator:
                 ),
             )
 
+    # ── Leader: the CONVERSE function (the conversational partner) ───────
+    #
+    # The same Leader who decomposes/plans/verifies, in his conversational
+    # function: he talks to the operator as a fully-capable partner, does what
+    # he can directly, and switches to his orchestrate function (``run_job`` →
+    # kickoff) to command the producer swarm for work that wants scale. Reuses
+    # the existing tool-loop (``_run_chat_loop``); the conversation thread
+    # persists per-project so the dialogue survives across turns and sessions.
+
+    def _conversation_path(self) -> Path:
+        from modulatio import vault as _vault
+        return _vault.project_dir(self.project.code) / "leader_conversation.jsonl"
+
+    def _load_conversation(self) -> list[dict]:
+        path = self._conversation_path()
+        if not path.exists():
+            return []
+        turns: list[dict] = []
+        for line in path.read_text().splitlines():
+            try:
+                turns.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return turns
+
+    def _append_conversation(self, role: str, content: str) -> None:
+        path = self._conversation_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write(json.dumps({
+                "role": role,
+                "content": content,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }) + "\n")
+
+    def _build_converse_prompt(self, thread: list[dict], message: str) -> str:
+        lines = []
+        for turn in thread:
+            who = "Operator" if turn.get("role") == "operator" else "You (Leader)"
+            lines.append(f"{who}: {turn.get('content', '')}")
+        lines.append(f"Operator: {message}")
+        transcript = "\n\n".join(lines) if lines else "(first message of the conversation)"
+        body = self._prompt("leader-converse", _LEADER_CONVERSE_PROMPT)
+        return body.format(
+            operator_context=self._operator_context_block(),
+            conversation=transcript,
+        )
+
+    def _leader_function_tools(self) -> "dict[str, tools.Tool]":
+        """The Leader's own functions, exposed as tools his converse loop can
+        call. ``run_job`` is the orchestrate function — he switches from
+        conversing to commanding the producer swarm (a full kickoff, streamed
+        into LEADER/TEAM). The thread is the same Leader doing the work."""
+        from modulatio import job_templates as _jt
+        from modulatio import vault as _vault
+
+        def run_job(objective: str, **_: object) -> str:
+            run_id = _vault.generate_run_id()
+            _vault.init_run(self.project.code, run_id, str(objective))
+            self.project.run_id = run_id
+            summary = self.kickoff(str(objective))
+            return (
+                f"Job done — {len(summary.goals)} goal(s), "
+                f"{len(summary.tasks)} task(s), {len(summary.drafts)} draft(s), "
+                f"{len(summary.errors)} error(s). The deliverables are in the "
+                "run's output folder."
+            )
+
+        def list_job_templates(**_: object) -> str:
+            names = _jt.list_job_templates(self.project.code)
+            return "Job templates: " + (", ".join(names) if names else "(none yet)")
+
+        return {
+            "run_job": tools.Tool(
+                name="run_job",
+                description=(
+                    "Hand a job to the producer team — decompose into goals, "
+                    "dispatch to producers, QC reviews, you verify. Use for big, "
+                    "repetitive, or many-piece work; not for things you can just "
+                    "answer or do yourself. Pass a clear 'objective'."
+                ),
+                call=run_job,
+                params_schema={
+                    "type": "object",
+                    "properties": {"objective": {"type": "string"}},
+                    "required": ["objective"],
+                },
+            ),
+            "list_job_templates": tools.Tool(
+                name="list_job_templates",
+                description="List the saved job templates for this project.",
+                call=list_job_templates,
+            ),
+        }
+
+    def converse(self, message: str, *, on_token: "Callable[[str], None] | None" = None) -> str:
+        """The Leader's conversational function: reply to the operator as a
+        fully-capable partner, tool-using and persistent. Returns the reply
+        text; ``on_token`` is reserved for streaming (Phase B). The thread is
+        persisted per-project.
+
+        Offline (no leader chat runner wired — e.g. stub mode) returns a plain
+        acknowledgement so the UI flow still works without a model.
+        """
+        thread = self._load_conversation()
+        prompt = self._build_converse_prompt(thread, message)
+        self._append_conversation("operator", message)
+        self._emit_activity(role="leader", phase="leader_thinking", agent_id="leader")
+
+        if self._resolve_chat_runner("leader") is None:
+            reply = (
+                "(offline — no leader model is wired here, so I can't think this "
+                f"through yet. You said: {message})"
+            )
+        else:
+            from modulatio import vault as _vault
+            transcript = (
+                _vault.project_dir(self.project.code)
+                / "tool_calls" / "leader_converse.jsonl"
+            )
+            # Augment the registry with the Leader's own functions (run_job,
+            # …) for the duration of the loop. _run_chat_loop reads the
+            # registry through _active_tool_registry(), which honors this
+            # thread-local override.
+            augmented = dict(self._active_tool_registry())
+            augmented.update(self._leader_function_tools())
+            self._tls.tool_registry_override = augmented
+            try:
+                reply = self._run_chat_loop(
+                    prompt=prompt,
+                    tool_loadout=tuple(augmented.keys()),
+                    role="leader",
+                    agent_id="leader",
+                    task_id="conversation",
+                    transcript_path=transcript,
+                    skill_name="leader-converse",
+                    needs_network=True,
+                    budget_role="leader-chat",
+                )
+            finally:
+                self._tls.tool_registry_override = None
+
+        self._append_conversation("leader", reply)
+        self._emit_activity(role="leader", phase="leader_answered", agent_id="leader")
+        return reply
+
     def _leader_verify_tool_loadout_skill(self) -> "skills.Skill | None":
         """Return the ``leader-verify`` skill if it declares a non-empty
         ``tool_loadout`` AND ``executor=llm``. Used by
@@ -8016,6 +8162,27 @@ class Orchestrator:
 
 
 # ─── Prompt templates ───────────────────────────────────────────────────────
+
+# Fallback for the leader-converse seed (the conversational Leader). The
+# bundled _seed_skills/leader-converse.md is the source of truth; this keeps
+# fresh clones / tests working when the seed isn't on disk.
+_LEADER_CONVERSE_PROMPT = """\
+You are the Leader of this Modulatio project, talking with the operator as a
+fully-capable partner — the smartest agent on the team. You can do anything
+asked directly (think, analyze, read/write files, run a shell command, search
+the web, build a skill, draft a job template), and you command the producer
+team via ``run_job`` for work that wants scale. You are never a job-intake
+form; never say "I only run jobs."
+
+{operator_context}
+
+## The conversation so far
+{conversation}
+
+## Now
+Reply to the operator's latest message as yourself — directly, plainly,
+usefully. Use tools as the work requires. Keep it conversational.
+"""
 
 _LEADER_VERIFY_PROMPT = """\
 LEADER GOAL VERIFICATION
