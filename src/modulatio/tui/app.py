@@ -632,6 +632,9 @@ class ModulatioApp(App):
             return orch
         from modulatio import tools as _tools, vault as _vault
         project = self._ensure_project()
+        agent_runners: dict = {}
+        chat_runner = None
+        chat_default_model: str | None = None
         if self.stub:
             runners = default_generic_stub_runners()
             chat_runners: dict = {}
@@ -642,14 +645,23 @@ class ModulatioApp(App):
             if runners is None:
                 return None
             from modulatio import config
-            from modulatio.runners import litellm_chat_runner
-            leader_model = (config.get_default_models() or {}).get("leader")
-            if leader_model:
-                chat_runners = {"leader": litellm_chat_runner(leader_model)}
-                chat_runner_models = {"leader": leader_model}
-            else:
-                chat_runners = {}
-                chat_runner_models = {}
+            from modulatio.runners import build_agent_runners, build_chat_runners, maybe_build_chat_runner
+            # Wire EVERY agent's chat runner, not just the Leader's. When the
+            # Leader runs a job (free-form run_job or a bound job template), he
+            # dispatches tasks to producers whose skills declare a tool_loadout
+            # — those need a per-agent chat_runner or they raise on dispatch.
+            # The leader-only wiring left producers with no runner (the
+            # routing-reality gap, on the converse→run_job lane); mirror the
+            # kickoff path so producers get their own runners + a shared
+            # fallback. build_chat_runners covers the Leader too (he's in the
+            # roster), so converse keeps working.
+            agent_runners = build_agent_runners(self.project_code)
+            chat_runners, chat_runner_models = build_chat_runners(self.project_code)
+            defaults = config.get_default_models() or {}
+            chat_default_model = (
+                defaults.get("qc") or defaults.get("producer") or defaults.get("specialist")
+            )
+            chat_runner = maybe_build_chat_runner(chat_default_model)
             registry = _tools.build_registry(
                 artifacts_root=_vault.project_dir(self.project_code) / "artifacts",
                 project_code=self.project_code,
@@ -658,8 +670,11 @@ class ModulatioApp(App):
             project, runners,
             activity_callback=self._record_activity,
             operator_present=True,
+            agent_runners=agent_runners,
+            chat_runner=chat_runner,
             chat_runners=chat_runners,
             chat_runner_models=chat_runner_models,
+            chat_runner_default_model=chat_default_model,
             tool_registry=registry,
         )
         self._conv_orch = orch
