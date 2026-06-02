@@ -266,6 +266,82 @@ def test_openai_lists_gpt_models_from_picklist():
     assert all(not m.is_free and m.modality == "text" for m in models)
 
 
+# ── NVIDIA (public listing, free catalog tier @ 40 RPM) ─────────────────────
+
+NVIDIA_PAYLOAD = {"data": [
+    {"id": "meta/llama-3.1-70b-instruct", "object": "model",
+     "created": 1700000000, "owned_by": "meta"},
+    {"id": "nvidia/nemotron-4-340b-instruct", "object": "model",
+     "created": 1700000001, "owned_by": "nvidia"},
+    {"id": "mistralai/mixtral-8x22b-instruct", "object": "model",
+     "created": 1700000002, "owned_by": "mistralai"},
+]}
+
+
+def test_nvidia_public_listing_free_tier_rate_limited():
+    p = pc.get_provider("nvidia")
+    assert p is not None
+    assert p.base_url == "https://integrate.api.nvidia.com/v1"
+    assert p.auth_options[0].env_var == "NVIDIA_API_KEY"
+    assert p.models_source.auth_required is False  # listing is public
+    assert p.free_detect == "all"
+    assert "40" in p.free_note  # the 40-RPM caveat is surfaced
+
+
+def test_nvidia_models_flagged_free(monkeypatch):
+    monkeypatch.setattr(pc, "_http_get_json", lambda url, h, t: NVIDIA_PAYLOAD)
+    models = pc.fetch_models(pc.NVIDIA)
+    assert len(models) == 3
+    assert all(m.is_free for m in models)
+    assert all(m.modality == "text" for m in models)
+
+
+def test_google_gemini_openai_compat_key_gated_free_tier():
+    p = pc.get_provider("google")
+    assert p is not None
+    assert p.base_url == "https://generativelanguage.googleapis.com/v1beta/openai"
+    assert p.api_format == "openai"  # Gemini's OpenAI-compat endpoint
+    assert p.auth_options[0].env_var == "GEMINI_API_KEY"
+    assert p.models_source.auth_required is True  # key needed to list
+    assert p.free_detect == "all"
+    assert p.signup_url
+
+
+def test_google_models_fetched_strips_models_prefix(monkeypatch):
+    # Gemini lists "models/gemini-…"; the bare id is what the chat endpoint wants
+    payload = {"data": [
+        {"id": "models/gemini-3-flash", "object": "model"},
+        {"id": "models/gemini-3-pro", "object": "model"},
+    ]}
+    monkeypatch.setattr(pc, "_http_get_json", lambda u, h, t: payload)
+    models = pc.fetch_models(pc.GOOGLE, api_key="x")
+    assert {m.id for m in models} == {"gemini-3-flash", "gemini-3-pro"}
+    assert all(m.is_free for m in models)
+    # gemini auto-infers caps from the family table
+    from modulatio import model_capabilities as mc
+    assert mc.infer("gemini-3-pro")[2]
+
+
+def test_google_classifies_mixed_modalities_from_one_list(monkeypatch):
+    payload = {"data": [
+        {"id": "models/gemini-3-pro", "object": "model"},
+        {"id": "models/gemini-2.5-flash-preview-tts", "object": "model"},
+        {"id": "models/gemini-3-pro-image", "object": "model"},
+        {"id": "models/veo-3", "object": "model"},
+        {"id": "models/text-embedding-004", "object": "model"},
+    ]}
+    monkeypatch.setattr(pc, "_http_get_json", lambda u, h, t: payload)
+    models = pc.fetch_models(pc.GOOGLE, api_key="x")
+    mod = {m.id: m.modality for m in models}
+    assert mod["gemini-3-pro"] == "text"
+    assert mod["gemini-2.5-flash-preview-tts"] == "audio"
+    assert mod["gemini-3-pro-image"] == "image"
+    assert mod["veo-3"] == "video"
+    assert mod["text-embedding-004"] == "embedding"
+    # role assignment (text) excludes the non-chat ones
+    assert [m.id for m in pc.of_modality(models, "text")] == ["gemini-3-pro"]
+
+
 def test_extended_family_table_infers_new_families():
     from modulatio import model_capabilities as mc
     # families we just catalogued now infer non-empty caps (were neutral before)

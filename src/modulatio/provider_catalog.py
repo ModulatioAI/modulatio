@@ -43,7 +43,24 @@ class AuthOption(BaseModel):
     oauth_hint: Optional[str] = None  # for oauth: e.g. "run `claude login`"
 
 
-Modality = Literal["text", "image", "video", "audio"]
+Modality = Literal["text", "image", "video", "audio", "embedding"]
+
+
+def classify_modality(model_id: str) -> Modality:
+    """Infer a model's modality from its id — for providers that mix modalities
+    in one /models list (Google returns chat, image, video, tts, embedding all
+    together). Role assignment filters to ``text``; the rest are catalogued in
+    their own sections."""
+    i = model_id.lower()
+    if "tts" in i:
+        return "audio"
+    if "veo" in i:
+        return "video"
+    if "image" in i or "imagen" in i:
+        return "image"
+    if "embed" in i:
+        return "embedding"
+    return "text"
 
 
 class ModelsSource(BaseModel):
@@ -76,6 +93,12 @@ class Provider(BaseModel):
     # ever get the numbers).
     free_note: Optional[str] = None
     pinned_models: list[str] = Field(default_factory=list)  # always shown first
+    # Some providers' /models list ids with a prefix the chat endpoint rejects
+    # (Gemini returns "models/gemini-2.5-flash" but wants "gemini-2.5-flash").
+    id_prefix_strip: Optional[str] = None
+    # Providers that return mixed modalities in one list (Google) classify each
+    # model's modality from its id instead of trusting the source's tag.
+    infer_modality_by_id: bool = False
     venv_wrapper: Optional[str] = None
     notes: Optional[str] = None
 
@@ -212,12 +235,61 @@ OPENAI = Provider(
     notes="GPT models (text). ChatGPT/Codex OAuth or API key. No free tier.",
 )
 
+NVIDIA = Provider(
+    id="nvidia",
+    name="NVIDIA",
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_format="openai",
+    auth_options=[
+        AuthOption(auth_type="api_key", label="API key", env_var="NVIDIA_API_KEY")
+    ],
+    # The API-catalog /models list is public; using a model needs the key.
+    models_source=ModelsSource(
+        kind="api", endpoint="/models", auth_required=False, modality="text"
+    ),
+    signup_url="https://build.nvidia.com",
+    # NVIDIA's catalog tier is free across the board, but tightly throttled.
+    free_detect="all",
+    free_note="Free via the NVIDIA API catalog — rate-limited to 40 requests/min.",
+    notes="NVIDIA-hosted open models (OpenAI-compatible). Free catalog tier, 40 RPM.",
+)
+
+GOOGLE = Provider(
+    id="google",
+    name="Google (Gemini)",
+    # The OpenAI-compatible Gemini endpoint — Bearer auth, standard /models.
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+    api_format="openai",
+    auth_options=[
+        AuthOption(auth_type="api_key", label="API key", env_var="GEMINI_API_KEY")
+    ],
+    models_source=ModelsSource(
+        kind="api", endpoint="/models", auth_required=True, modality="text"
+    ),
+    signup_url="https://aistudio.google.com/apikey",
+    # Gemini's /models lists "models/gemini-…" but the chat endpoint wants the
+    # bare id — strip the prefix so registered presets actually resolve.
+    id_prefix_strip="models/",
+    # One list mixes chat / image / video / tts / embedding — classify per id.
+    infer_modality_by_id=True,
+    # AI Studio has a real free tier, but quotas vary by model and some models
+    # can require billing — the caveat carries the honesty the feed can't.
+    free_detect="all",
+    free_note=(
+        "Free tier — daily request/token quotas that vary by model (flash most "
+        "generous); some models may require billing."
+    ),
+    notes="Gemini via the OpenAI-compatible endpoint. Free AI Studio tier (quota-limited).",
+)
+
 PROVIDERS: dict[str, Provider] = {
     OPENROUTER.id: OPENROUTER,
     OLLAMA_CLOUD.id: OLLAMA_CLOUD,
     XAI.id: XAI,
     ANTHROPIC.id: ANTHROPIC,
     OPENAI.id: OPENAI,
+    NVIDIA.id: NVIDIA,
+    GOOGLE.id: GOOGLE,
 }
 
 # Flagship model-family stems that always surface in the curated default view,
@@ -280,16 +352,20 @@ def parse_models(
     else:
         raw = payload
     out: list[CatalogModel] = []
+    strip = provider.id_prefix_strip
     for m in raw or []:
         mid = m.get("id")
         if not mid:
             continue
+        if strip and mid.startswith(strip):
+            mid = mid[len(strip):]
+        mod = classify_modality(mid) if provider.infer_modality_by_id else modality
         out.append(
             CatalogModel(
                 id=mid,
                 name=m.get("name") or mid,
                 provider_id=provider.id,
-                modality=modality,
+                modality=mod,
                 context_length=m.get("context_length"),
                 is_free=_is_free(m, provider.free_detect),
                 created=m.get("created"),
@@ -474,7 +550,10 @@ __all__ = [
     "XAI",
     "ANTHROPIC",
     "OPENAI",
+    "NVIDIA",
+    "GOOGLE",
     "Modality",
+    "classify_modality",
     "get_provider",
     "list_providers",
     "parse_models",
