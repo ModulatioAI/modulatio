@@ -8387,7 +8387,7 @@ def test_format_team_capacity_sizes_fanout_to_producer_count():
            _a("l", "Leader", tier="leader")]
     out = _format_team_capacity(two)
     assert "2 producers" in out and "Hal 9000" in out and "Larry" in out
-    assert "AT LEAST 2 parallel" in out
+    assert "all 2 can run at once" in out  # layer-neutral: use the whole team
 
     one = [_a("p1", "Solo"), _a("l", "Leader", tier="leader")]
     out1 = _format_team_capacity(one)
@@ -8439,3 +8439,20 @@ def test_kickoff_clears_stale_abort_at_start(project: Project):
     assert not any("stopped by the operator" in e for e in summary.errors)
     assert not orch.abort_event.is_set()
     assert len(summary.tasks) == 3
+
+
+def test_decompose_prompt_has_goal_layer_parallel_deliverables_rule():
+    """Fix D: the goal-decomposition prompt — BOTH the in-code constant and the
+    canonical `leader.md` seed (the override-able source of truth) — carries the
+    rule to keep N independent same-kind deliverables in ONE goal (so they
+    parallelize) plus the producer-count slot. Without the seed copy, the live
+    run uses the un-nudged prompt (which is what split 6 stories into 6 goals)."""
+    from modulatio.orchestration import _LEADER_DECOMPOSE_PROMPT
+    from modulatio import skills
+    for label, body in (("constant", _LEADER_DECOMPOSE_PROMPT),
+                        ("seed", skills.load("leader"))):
+        norm = " ".join(body.split())  # normalize line wraps
+        assert "PARALLEL DELIVERABLES" in norm, f"{label} missing the rule"
+        assert "put them in ONE goal" in norm, f"{label} missing the one-goal rule"
+        assert "NOT N separate goals" in norm, f"{label} missing the anti-split rule"
+        assert "{team_capacity}" in body, f"{label} missing the producer-count slot"

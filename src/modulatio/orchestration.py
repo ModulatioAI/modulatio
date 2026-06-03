@@ -543,28 +543,29 @@ def _format_available_skills(names: list[str]) -> str:
 
 
 def _format_team_capacity(agents: list) -> str:
-    """Tell the planner how many PRODUCERS the roster has, so it sizes a
-    PARALLEL-DELIVERABLES fan-out to the team (Fix A, 2026-06-03). The Leader is
-    team-aware (§4); the planner should be too at fan-out time — idle producers
-    are wasted parallelism. ``agents`` is the project roster."""
+    """State how many PRODUCERS the roster has, so both planning layers size their
+    fan-out to the team (Fix A at the task layer, Fix D at the goal layer). The
+    Leader is team-aware (§4); planning should be too — idle producers are wasted
+    parallelism. Layer-neutral: the surrounding PARALLEL-DELIVERABLES prose gives
+    the layer-specific instruction (one goal / one artifacts[] item)."""
     producers = [
         a for a in agents
         if str(getattr(a, "tier", "producer") or "producer") == "producer"
     ]
     n = len(producers)
     if n <= 1:
-        # 1 producer → nothing to parallelize; don't push a wide fan that just
-        # serializes on the one producer anyway.
+        # 1 producer → nothing to parallelize; still split for right-sized work,
+        # but don't inflate the count chasing parallelism that isn't there.
         return (
             "Your team has 1 producer, so parallelism isn't available — still "
-            "fan independent deliverables one-per-item (right-sized tasks beat "
-            "one over-stuffed task), but don't inflate the count for parallelism."
+            "split independent deliverables for right-sized work, but don't "
+            "inflate the count for parallelism."
         )
     names = ", ".join(str(getattr(a, "name", a.id)) for a in producers[:6])
     return (
-        f"Your team has {n} producers ({names}) — when the work splits into "
-        f"independent deliverables, fan it into AT LEAST {n} parallel tasks so "
-        f"the whole team works at once; idle producers are wasted parallelism."
+        f"Your team has {n} producers ({names}) — structure the work so all {n} "
+        f"can run at once (keep independent deliverables in ONE goal, fanned into "
+        f"parallel tasks); idle producers are wasted parallelism."
     )
 
 
@@ -2465,6 +2466,9 @@ class Orchestrator:
                 objective=objective,
                 code=self.project.code,
                 standards=_format_standards_block(leader_standards),
+                team_capacity=_format_team_capacity(
+                    roster.list_agents(self.project.code)
+                ),
                 attachments=_format_kickoff_attachments(doc_only)
                 + "\n\n(Image attachments are included as content blocks "
                 "below — examine them for visual context.)"
@@ -2480,6 +2484,9 @@ class Orchestrator:
                 objective=objective,
                 code=self.project.code,
                 standards=_format_standards_block(leader_standards),
+                team_capacity=_format_team_capacity(
+                    roster.list_agents(self.project.code)
+                ),
                 attachments=_format_kickoff_attachments(atts)
                 + self._iteration_contract_block()
                 + self._job_template_block(),
@@ -9350,6 +9357,17 @@ to the breadth of words in the objective.
   multiple distinct deliverables.
 - When in doubt, fewer goals. The team can open follow-on work later;
   it can't easily un-decompose an over-planned project mid-run.
+
+PARALLEL DELIVERABLES (load-balance): when the objective enumerates N
+deliverables of the SAME KIND that are independent of each other (6 stories,
+a profile of each of 8 founders, one section per chapter), put them in ONE
+goal — list the N artifacts in that goal's evidence — NOT N separate goals.
+Same-kind independent deliverables in one goal run IN PARALLEL across your
+producers (the task planner fans them into a wave); N separate goals run one
+at a time, serially, leaving producers idle. Reserve SEPARATE goals for
+deliverables of DIFFERENT kinds or with real dependencies (research → draft,
+or write-the-pieces → assemble-the-whole — the assembly is its own goal that
+depends on the pieces goal). {team_capacity}
 
 SELF-CONTAINMENT (critical): each goal must NAME its concrete subject
 matter — never refer to it symbolically. A goal is executed by producers

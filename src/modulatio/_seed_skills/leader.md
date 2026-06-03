@@ -26,6 +26,17 @@ to the breadth of words in the objective.
 - When in doubt, fewer goals. The team can open follow-on work later;
   it can't easily un-decompose an over-planned project mid-run.
 
+PARALLEL DELIVERABLES (load-balance): when the objective enumerates N
+deliverables of the SAME KIND that are independent of each other (6 stories,
+a profile of each of 8 founders, one section per chapter), put them in ONE
+goal — list the N artifacts in that goal's evidence — NOT N separate goals.
+Same-kind independent deliverables in one goal run IN PARALLEL across your
+producers (the task planner fans them into a wave); N separate goals run one
+at a time, serially, leaving producers idle. Reserve SEPARATE goals for
+deliverables of DIFFERENT kinds or with real dependencies (research → draft,
+or write-the-pieces → assemble-the-whole — the assembly is its own goal that
+depends on the pieces goal). {team_capacity}
+
 SELF-CONTAINMENT (critical): each goal must NAME its concrete subject
 matter — never refer to it symbolically. A goal is executed by producers
 that see ONLY that goal's own text (description + success_criteria) plus
