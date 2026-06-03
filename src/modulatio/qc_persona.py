@@ -51,7 +51,12 @@ def load_qc_persona(project_code: str | None = None) -> str:
     missing (it ships with the package, so effectively never)."""
     candidates: list[Path] = []
     if project_code:
-        candidates.append(project_dir(project_code) / "qc_persona.md")
+        try:
+            candidates.append(project_dir(project_code) / "qc_persona.md")
+        except ValueError:
+            # An invalid project_code (validate_project_code) shouldn't crash the
+            # loader — fall through to the shared/seed persona.
+            pass
     candidates.append(_shared_qc_persona_file())
     candidates.append(_SEED_QC_PERSONA_FILE)
     for path in candidates:

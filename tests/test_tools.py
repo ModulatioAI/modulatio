@@ -1717,3 +1717,12 @@ def test_resolve_under_roots_rejects_nul_byte(tmp_path):
     root = tmp_path / "artifacts"
     root.mkdir()
     assert tools.resolve_under_roots("a\x00/etc/passwd", [root]) is None
+
+
+def test_resolve_under_roots_overlong_path_returns_none(tmp_path):
+    """Contract: returns None on anything unsafe, never raises — an overlong
+    path (ENAMETOOLONG from the is_file stat) must be caught, not propagated."""
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    overlong = "a/" * 5000 + "x.md"
+    assert tools.resolve_under_roots(overlong, [root]) is None

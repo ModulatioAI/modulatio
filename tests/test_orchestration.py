@@ -8299,3 +8299,77 @@ def test_read_deliverable_rejects_oversize_file(tmp_path, monkeypatch):
     big.write_bytes(b"x" * 8_000_001)  # just over the 8 MB ceiling
     out = orch._leader_function_tools()["read_deliverable"].call(path="huge.md")
     assert "too large" in out
+
+
+# ── Security sweep fixes (post-§5 merge) ─────────────────────────────────────
+
+def test_open_budget_ticket_defers_store_write_in_isolated_worker(tmp_path, monkeypatch):
+    """Security sweep MAJOR fix: the Comptroller-deny ticket is reachable from a
+    wave worker (QC-reject → escalation → deny), so its store write must DEFER to
+    the main-thread merge, not write the shared store from the worker."""
+    from datetime import datetime, timezone
+    from modulatio import vault, store
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Project
+    from modulatio.comptroller import Authorization
+    from modulatio.roster import Agent
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("BGT", "budget", "obj")
+    vault.init_run("BGT", "run-1", "obj")
+    proj = Project(code="BGT", name="B", objective="obj", leader_model="stub",
+                   wiki_path=str(tmp_path / "bgt"), run_id="run-1")
+    orch = Orchestrator(proj, {"leader": _leader_stub})
+    task = _wave_task("BGT-T-001")
+    denied = Agent(id="a-hi", name="Hi", model="m", model_tier="reasoning-heavy",
+                   cost_class="premium-cloud")
+    auth = Authorization(allowed=False,
+                         refresh_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                         reason="daily cap hit")
+    summary = RunSummary(project=proj)
+
+    # In a worker (deferred_writes buffer present): NOT written to the store.
+    buf: list = []
+    orch._tls.deferred_writes = buf
+    orch._open_budget_ticket(task, denied, auth, summary)
+    orch._tls.deferred_writes = None
+    assert store.list_tickets("BGT", run_id="run-1") == [], "no worker-side write"
+    assert len(buf) == 1
+    # Main thread runs the deferred write → ticket lands.
+    buf[0]()
+    assert len(store.list_tickets("BGT", run_id="run-1")) == 1
+
+
+def test_concurrent_waves_kill_switch_tolerates_whitespace(monkeypatch):
+    """Security sweep MINOR: the kill-switch is the safety valve now that
+    concurrency is default-on — a padded ' 0 ' must still force sequential."""
+    f = Orchestrator._concurrent_waves_enabled
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", " 0 ")
+    assert f(None) is False
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "0\n")
+    assert f(None) is False
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", " 1 ")
+    assert f(None) is True
+
+
+def test_wave_pool_ceiling_bounds_threads(monkeypatch):
+    """Security sweep MINOR: the worker pool is bounded so a very wide fan-out
+    wave can't spawn an unbounded thread count."""
+    monkeypatch.delenv("MODULATIO_WAVE_POOL_CEILING", raising=False)
+    assert Orchestrator._wave_pool_ceiling() == 32  # sane default
+    monkeypatch.setenv("MODULATIO_WAVE_POOL_CEILING", "8")
+    assert Orchestrator._wave_pool_ceiling() == 8
+    monkeypatch.setenv("MODULATIO_WAVE_POOL_CEILING", "999999")
+    assert Orchestrator._wave_pool_ceiling() == 1024  # upper clamp
+    monkeypatch.setenv("MODULATIO_WAVE_POOL_CEILING", "garbage")
+    assert Orchestrator._wave_pool_ceiling() == 32  # bad → default
+
+
+def test_wave_global_cap_clamps_both_ends(monkeypatch):
+    """Security sweep NIT: the global cap is clamped (a 0 would stall a wave; an
+    absurd value is meaningless)."""
+    monkeypatch.setenv("MODULATIO_WAVE_GLOBAL_CAP", "0")
+    assert Orchestrator._wave_global_cap() == 1
+    monkeypatch.setenv("MODULATIO_WAVE_GLOBAL_CAP", "99999999")
+    assert Orchestrator._wave_global_cap() == 1024
+    monkeypatch.setenv("MODULATIO_WAVE_GLOBAL_CAP", "  ")
+    assert Orchestrator._wave_global_cap() is None

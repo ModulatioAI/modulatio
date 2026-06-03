@@ -442,10 +442,13 @@ def resolve_under_roots(arg: str, roots: "list[Path]") -> "Path | None":
             root_r = root.resolve()
             candidate = (root_r / arg).resolve()
             candidate.relative_to(root_r)  # raises if a symlink escaped the root
+            # is_file() (an os.stat) must stay inside the guard — an overlong
+            # path raises OSError(ENAMETOOLONG), and the contract is "None on
+            # anything unsafe", never a raise.
+            if candidate.is_file():
+                return candidate
         except (ValueError, OSError):
             continue
-        if candidate.is_file():
-            return candidate
     return None
 
 

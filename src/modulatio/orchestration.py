@@ -5177,7 +5177,9 @@ class Orchestrator:
 
         ``project=None`` falls back to env/default-ON (back-compat for any caller
         without a project in hand)."""
-        env = os.environ.get("MODULATIO_CONCURRENT_WAVES")
+        # .strip() so a padded value (" 0 ", a trailing newline) still trips the
+        # kill-switch — it's the safety valve now that concurrency is default-on.
+        env = (os.environ.get("MODULATIO_CONCURRENT_WAVES") or "").strip()
         if env == "0":
             return False  # kill-switch
         if env == "1":
@@ -5471,12 +5473,28 @@ class Orchestrator:
     @staticmethod
     def _wave_global_cap() -> "int | None":
         raw = os.environ.get("MODULATIO_WAVE_GLOBAL_CAP")
-        if not raw:
+        if not raw or not raw.strip():
             return None
         try:
-            return max(1, int(raw))
+            # Clamp both ends — a cap of 0 would stall the wave, and an absurd
+            # value is meaningless (the pool ceiling bounds threads anyway).
+            return max(1, min(int(raw), 1024))
         except ValueError:
             return None
+
+    @staticmethod
+    def _wave_pool_ceiling() -> int:
+        """Hard ceiling on concurrent worker THREADS per wave (§5). Bounds a very
+        wide fan-out wave from spawning an unbounded pool now that concurrency is
+        default-on; tasks above the ceiling queue and run as slots free.
+        ``MODULATIO_WAVE_POOL_CEILING`` overrides; default 32."""
+        raw = (os.environ.get("MODULATIO_WAVE_POOL_CEILING") or "").strip()
+        if raw:
+            try:
+                return max(1, min(int(raw), 1024))
+            except ValueError:
+                pass
+        return 32
 
     def _run_task_waves(
         self, g: Goal, tasks: list[Task], summary: RunSummary,
@@ -5586,9 +5604,15 @@ class Orchestrator:
                 break
 
             # 4. Run the wave in parallel; collect results (no shared
-            #    mutation in the workers).
+            #    mutation in the workers). §5: cap the pool so a very wide
+            #    fan-out wave (plan-time bounding over N items) can't spawn an
+            #    unbounded thread count now that concurrency is default-on — the
+            #    scheduler already bounds to_run by Σ capacity_cap, but a roster
+            #    with large caps + no MODULATIO_WAVE_GLOBAL_CAP could still be
+            #    huge. All tasks still run; excess just queues in the pool.
             done: dict[str, TaskExecutionResult] = {}
-            with ThreadPoolExecutor(max_workers=len(to_run)) as ex:
+            pool_size = max(1, min(len(to_run), self._wave_pool_ceiling()))
+            with ThreadPoolExecutor(max_workers=pool_size) as ex:
                 futures = {
                     ex.submit(self._execute_task_isolated, t): t.id
                     for t in to_run
@@ -7256,46 +7280,57 @@ class Orchestrator:
                 f"must be set on a denied authorization (task {task.id})"
             )
         refresh_at = authorization.refresh_at
-        ticket = store.create_ticket(
-            project_id=self.project.id,
-            project_code=self.project.code,
-            run_id=self.project.run_id,
-            priority=TicketPriority.BLOCKER,
-            title=f"Escalation budget exhausted for task {task.id}",
-            body=(
-                f"Comptroller denied a producer escalation for task "
-                f"**{task.id}** because the daily "
-                f"**{denied_pick.cost_class}** escalation budget is "
-                f"exhausted.\n\n"
-                f"Task description: {task.description}\n\n"
-                f"Would-be escalation target: `{denied_pick.id}` "
-                f"(model_tier: {denied_pick.model_tier}, "
-                f"cost_class: {denied_pick.cost_class}).\n\n"
-                f"Comptroller reason: {authorization.reason}\n\n"
-                f"Budget refreshes at: {refresh_at.isoformat()}\n\n"
-                f"The orchestrator ran a same-agent last-ditch attempt "
-                f"in place of the tier escalation — see the task "
-                f"transitions for the outcome.\n\n"
-                f"Human options:\n"
-                f"- **Wait for refresh** (default): next kickoff past "
-                f"the refresh time auto-resumes tasks with fresh budget.\n"
-                f"- **Raise the cap**: edit `comptroller.md` in the "
-                f"project vault and re-run.\n"
-                f"- **Route to a different cost tier**: add a lower-cost "
-                f"higher-tier agent to the roster.\n"
-            ),
-            affected_task_id=task.id,
-            actor="comptroller",
-        )
-        ticket.refresh_at = refresh_at
-        from modulatio.store import _ticket_path, _write_entity
-        _write_entity(_ticket_path(self.project.code, ticket.id), ticket, ticket.body)
-        self._emit_ticket_opened(ticket, role="comptroller")
-        summary.errors.append(
-            f"{task.id}: escalation budget exhausted "
-            f"({denied_pick.cost_class}) — ticket {ticket.id} opened "
-            f"(auto-resumes after {refresh_at.isoformat()})"
-        )
+
+        # §5 isolation: this runs inside a wave worker (QC-reject exhaustion →
+        # escalation → Comptroller deny), so the ticket create + persist must NOT
+        # write the shared store from the worker thread — defer it to the
+        # deterministic main-thread merge, exactly like _block_for_environmental /
+        # _block_for_context_budget. (Sequential path runs it immediately.)
+        def _open_deny_ticket() -> None:
+            ticket = store.create_ticket(
+                project_id=self.project.id,
+                project_code=self.project.code,
+                run_id=self.project.run_id,
+                priority=TicketPriority.BLOCKER,
+                title=f"Escalation budget exhausted for task {task.id}",
+                body=(
+                    f"Comptroller denied a producer escalation for task "
+                    f"**{task.id}** because the daily "
+                    f"**{denied_pick.cost_class}** escalation budget is "
+                    f"exhausted.\n\n"
+                    f"Task description: {task.description}\n\n"
+                    f"Would-be escalation target: `{denied_pick.id}` "
+                    f"(model_tier: {denied_pick.model_tier}, "
+                    f"cost_class: {denied_pick.cost_class}).\n\n"
+                    f"Comptroller reason: {authorization.reason}\n\n"
+                    f"Budget refreshes at: {refresh_at.isoformat()}\n\n"
+                    f"The orchestrator ran a same-agent last-ditch attempt "
+                    f"in place of the tier escalation — see the task "
+                    f"transitions for the outcome.\n\n"
+                    f"Human options:\n"
+                    f"- **Wait for refresh** (default): next kickoff past "
+                    f"the refresh time auto-resumes tasks with fresh budget.\n"
+                    f"- **Raise the cap**: edit `comptroller.md` in the "
+                    f"project vault and re-run.\n"
+                    f"- **Route to a different cost tier**: add a lower-cost "
+                    f"higher-tier agent to the roster.\n"
+                ),
+                affected_task_id=task.id,
+                actor="comptroller",
+            )
+            ticket.refresh_at = refresh_at
+            from modulatio.store import _ticket_path, _write_entity
+            _write_entity(
+                _ticket_path(self.project.code, ticket.id), ticket, ticket.body
+            )
+            self._emit_ticket_opened(ticket, role="comptroller")
+            summary.errors.append(
+                f"{task.id}: escalation budget exhausted "
+                f"({denied_pick.cost_class}) — ticket {ticket.id} opened "
+                f"(auto-resumes after {refresh_at.isoformat()})"
+            )
+
+        self._store_write_deferrable(_open_deny_ticket)
 
     # ── Capability tickets (slice #6d) ──────────────────────────────────
     # ── Brick 4: autonomous self-codification (the Alfred loop) ──────────
