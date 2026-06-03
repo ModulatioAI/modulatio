@@ -8008,3 +8008,99 @@ def test_goal_deliverable_fingerprint_tracks_content_changes(tmp_path, monkeypat
     (art / "d.md").write_text("# Draft\n\na substantially revised second version.\n")
     fp2 = orch._goal_deliverable_fingerprint([task])
     assert fp2 != fp1, "fingerprint must change when the deliverable changes"
+
+
+# ── §4: Leader team-observability (team_status + read_deliverable) ────────────
+
+def test_team_status_no_run_yet(tmp_path, monkeypatch):
+    """With no run on disk, team_status says so plainly rather than erroring."""
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("TSX", "team status", "obj")
+    project = Project(code="TSX", name="Team Status", objective="obj",
+                      leader_model="stub", wiki_path=str(tmp_path / "tsx"))
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    out = orch._leader_function_tools()["team_status"].call()
+    assert "No job has run yet" in out
+
+
+def test_team_status_reports_live_state(tmp_path, monkeypatch):
+    """team_status surfaces goals/tasks/artifacts/delivery folder + run liveness
+    so the Leader can answer 'where are we?' himself."""
+    from uuid import uuid4
+    from modulatio.types import Goal, GoalStatus, Task, TaskStatus
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_stub, code="TSY")
+    store.save_goal(orch.project.code, Goal(
+        id="TSY-G-001", project_id=uuid4(), description="write the report",
+        success_criteria="a report", status=GoalStatus.COMPLETED), run_id="run-1")
+    t = Task(id="TSY-T-001", project_id=uuid4(), goal_id="TSY-G-001",
+             description="draft it", depends_on=[])
+    t.status = TaskStatus.COMPLETED
+    t.deliverable = True
+    t.output_path = "report.md"
+    store.save_task(orch.project.code, t, run_id="run-1")
+    art = orch._run_artifacts_root("run-1")
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "report.md").write_text("# Report\n\n" + " ".join(["w"] * 50) + "\n")
+
+    out = orch._leader_function_tools()["team_status"].call()
+    assert "TSY-G-001" in out and "completed" in out
+    assert "TSY-T-001" in out and "(deliverable)" in out
+    assert "report.md" in out
+    assert "Delivery folder:" in out
+    assert "idle" in out  # not running
+
+
+def test_team_status_reports_running_liveness(tmp_path, monkeypatch):
+    """The liveness flag makes team_status say a job is RUNNING mid-flight, so
+    the Leader never reports a half-finished run as done."""
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_stub, code="TSZ")
+    orch._kickoff_active = True
+    out = orch._leader_function_tools()["team_status"].call()
+    assert "RUNNING" in out
+
+
+def test_read_deliverable_reads_artifact(tmp_path, monkeypatch):
+    """read_deliverable returns a produced file's full content for the Leader to
+    judge."""
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_stub, code="RDA")
+    art = orch._run_artifacts_root("run-1")
+    (art / "drafts").mkdir(parents=True, exist_ok=True)
+    (art / "drafts" / "rda-t-001.md").write_text("# Title\n\nthe real content.\n")
+    out = orch._leader_function_tools()["read_deliverable"].call(
+        path="drafts/rda-t-001.md")
+    assert "the real content." in out
+
+
+def test_read_deliverable_rejects_traversal(tmp_path, monkeypatch):
+    """read_deliverable refuses paths that escape the run's outputs."""
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_stub, code="RDB")
+    (tmp_path / "secret.txt").write_text("nope")
+    out = orch._leader_function_tools()["read_deliverable"].call(
+        path="../../../secret.txt")
+    assert "Can't read" in out and "nope" not in out
+
+
+def test_read_deliverable_binary_points_to_md(tmp_path, monkeypatch):
+    """A binary file (rendered .docx) isn't dumped as garbage — the Leader is
+    told to read the .md source instead."""
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_stub, code="RDC")
+    art = orch._run_artifacts_root("run-1")
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "out.docx").write_bytes(b"PK\x03\x04\x00\x01\x02\xff\xfe binary")
+    out = orch._leader_function_tools()["read_deliverable"].call(path="out.docx")
+    assert "binary" in out and ".md source" in out
+
+
+def test_read_deliverable_rejects_oversize_file(tmp_path, monkeypatch):
+    """A producer-written huge artifact is stat-gated, not slurped into memory
+    (the OOM guard) — read_deliverable points at the folder instead."""
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_stub, code="RDD")
+    art = orch._run_artifacts_root("run-1")
+    art.mkdir(parents=True, exist_ok=True)
+    big = art / "huge.md"
+    big.write_bytes(b"x" * 8_000_001)  # just over the 8 MB ceiling
+    out = orch._leader_function_tools()["read_deliverable"].call(path="huge.md")
+    assert "too large" in out

@@ -1499,6 +1499,14 @@ class Orchestrator:
         #: opt in. This is what makes delivery path-independent (the conversational
         #: Leader's run_job previously produced .md but never rendered .docx).
         self._deliver_products = deliver_products
+        #: §4 team_status liveness: True while kickoff() is driving the swarm.
+        #: Today's synchronous converse→run_job→kickoff path blocks the tool-loop
+        #: for the whole run, so team_status reads False (the run is genuinely
+        #: done by the time the loop can call it again). The flag is the seam for
+        #: the streaming-TUI vision, where converse + a run share one Orchestrator
+        #: concurrently — there it keeps team_status from reporting "done"
+        #: mid-flight. GIL-atomic bool; no lock needed for the single read/write.
+        self._kickoff_active = False
         #: §3 auto-redo loop-breaker: fingerprint of a goal's deliverable
         #: artifacts captured the moment a redo is dispatched. If the next
         #: disappointed verdict sees the SAME fingerprint, the redo reproduced
@@ -4000,6 +4008,115 @@ class Orchestrator:
                 return f"Couldn't decide {ticket_id}: {exc}"
             return f"Ticket {ticket_id} {decision} on the operator's behalf."
 
+        def team_status(**_: object) -> str:
+            """The live picture of the team's work — so the Leader can answer
+            'where are we / are the deliverables there / any good?' himself
+            instead of punting it to the operator."""
+            from collections import Counter
+            from modulatio import delivery as _delivery
+            run_id = self._converse_run_scope()
+            if not run_id:
+                return ("No job has run yet for this project — there's nothing for "
+                        "the team to show. Use run_job to start one.")
+            goals = store.list_goals(self.project.code, run_id=run_id)
+            tasks = store.list_tasks(self.project.code, run_id=run_id)
+            live = self._kickoff_active
+            lines = [
+                f"Run {run_id} — "
+                + ("a job is RUNNING right now (state below is mid-flight)."
+                   if live else "idle (no job in flight).")
+            ]
+            if goals:
+                lines.append("")
+                lines.append("Goals:")
+                for g in goals:
+                    lines.append(f"  - {g.id} [{g.status.value}] {g.description[:80]}")
+            if tasks:
+                counts = Counter(t.status.value for t in tasks)
+                lines.append("")
+                lines.append("Tasks: "
+                             + ", ".join(f"{n} {s}" for s, n in sorted(counts.items())))
+                for t in tasks:
+                    tag = " (deliverable)" if getattr(t, "deliverable", False) else ""
+                    who = f" — agent {t.assigned_agent_id}" if t.assigned_agent_id else ""
+                    lines.append(
+                        f"  - {t.id} [{t.status.value}]{tag}{who}: {t.description[:70]}"
+                    )
+            inventory = self._artifact_inventory(self._run_artifacts_root(run_id))
+            lines.append("")
+            if inventory:
+                lines.append("Produced artifacts (path — tokens):")
+                for rel, toks in inventory:
+                    lines.append(f"  - {rel} ({toks} tokens)")
+                lines.append("Call read_deliverable with a path to read one in full.")
+            else:
+                lines.append("Produced artifacts: (none on disk yet)")
+            job_out = _delivery.job_dir(
+                self.project.code, run_id=run_id,
+                fallback=self.project.name or self.project.objective or "",
+            )
+            lines.append("")
+            lines.append(f"Delivery folder: {job_out}")
+            tickets = store.list_tickets(self.project.code, run_id=run_id)
+            open_t = [
+                t for t in tickets
+                if str(getattr(t, "status", "")).split(".")[-1].lower() == "open"
+            ]
+            if open_t:
+                lines.append("")
+                lines.append("Open tickets:")
+                for t in open_t[:10]:
+                    lines.append(f"  - {t.id} [{t.priority.value}] {t.title}")
+            return "\n".join(lines)
+
+        def read_deliverable(path: str, **_: object) -> str:
+            """Read one of the team's produced files in full (read-only). The
+            path is validated against THIS run's artifacts + delivery folder
+            only — no traversal, no symlink escape, no other project/run."""
+            from modulatio import delivery as _delivery
+            run_id = self._converse_run_scope()
+            if not run_id:
+                return "No job has run yet — there's nothing to read."
+            job_out = _delivery.job_dir(
+                self.project.code, run_id=run_id,
+                fallback=self.project.name or self.project.objective or "",
+            )
+            roots = [self._run_artifacts_root(run_id)]
+            # Only add the delivery folder when it's a RUN-scoped subfolder; when
+            # job_dir falls back to the bare project dir (no slug/name), it holds
+            # EVERY run's deliverables, so excluding it keeps read scope to this run.
+            if job_out != _delivery.project_delivery_dir(self.project.code):
+                roots.append(job_out)
+            resolved = tools.resolve_under_roots(str(path), roots)
+            if resolved is None:
+                return (f"Can't read {path!r}: not a readable file inside this run's "
+                        "outputs. Pass a path exactly as team_status lists it.")
+            # Stat-gate BEFORE reading: artifacts are producer-controlled, so a
+            # huge file must not be slurped into memory (the http_get read-ceiling
+            # lesson). Over the ceiling → point at the folder instead of OOMing.
+            _READ_CEILING = 8_000_000
+            try:
+                size = resolved.stat().st_size
+            except OSError as exc:
+                return f"Couldn't read {path!r}: {exc}"
+            if size > _READ_CEILING:
+                return (f"{path!r} is {size:,} bytes — too large to read inline. It's "
+                        "in the delivery folder; open it there or have the team "
+                        "summarize it.")
+            try:
+                raw = resolved.read_bytes()
+            except OSError as exc:
+                return f"Couldn't read {path!r}: {exc}"
+            cap = 200_000
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return (f"{path!r} is {len(raw):,} bytes of binary (likely a rendered "
+                        ".docx/.pdf) — read the .md source instead for its content.")
+            if len(text) > cap:
+                text = text[:cap] + f"\n\n... [truncated at {cap:,} chars]"
+            return f"--- {path} ---\n{text}"
+
         return {
             "run_job": tools.Tool(
                 name="run_job",
@@ -4096,6 +4213,35 @@ class Orchestrator:
                         "note": {"type": "string"},
                     },
                     "required": ["ticket_id", "decision"],
+                },
+            ),
+            "team_status": tools.Tool(
+                name="team_status",
+                description=(
+                    "See the live state of your team's work — goals, tasks and "
+                    "their states, the artifacts they've produced (with sizes), "
+                    "the delivery folder, and open tickets. Pull this BEFORE "
+                    "telling the operator where things stand or whether the "
+                    "deliverables are there — don't guess or punt it back to them. "
+                    "It reports whether a job is running right now, so you never "
+                    "say 'done' mid-flight."
+                ),
+                call=team_status,
+                params_schema={"type": "object", "properties": {}},
+            ),
+            "read_deliverable": tools.Tool(
+                name="read_deliverable",
+                description=(
+                    "Read one of your team's produced files in full, so you can "
+                    "judge the work yourself before answering the operator. Pass "
+                    "a 'path' exactly as team_status lists it. Read-only and "
+                    "scoped to THIS run's outputs."
+                ),
+                call=read_deliverable,
+                params_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
                 },
             ),
         }
@@ -6842,6 +6988,48 @@ class Orchestrator:
         except OSError:
             return None
 
+    # ── §4: Leader team-observability read helpers ──────────────────────────
+    def _run_artifacts_root(self, run_id: "str | None") -> Path:
+        """The artifacts tree for a SPECIFIC run (team_status reports on the run
+        scope it was asked about, which may differ from ``self.project.run_id``).
+        Falls back to the project root layout when ``run_id`` is None."""
+        base = _vault_run_dir(self.project.code, run_id) if run_id else project_dir(
+            self.project.code
+        )
+        return base / "artifacts"
+
+    def _artifact_inventory(self, artifacts_root: Path) -> "list[tuple[str, int]]":
+        """``(relative_path, token_count)`` for every file under ``artifacts_root``
+        (sorted), so the Leader can see what the team produced and how big it is.
+        Token count is the engine's whitespace unit; binary/unreadable files
+        report 0. Read-only, best-effort — never raises."""
+        out: list[tuple[str, int]] = []
+        try:
+            if not artifacts_root.exists():
+                return out
+            for p in sorted(artifacts_root.rglob("*")):
+                if not p.is_file():
+                    continue
+                try:
+                    rel = str(p.relative_to(artifacts_root))
+                except ValueError:
+                    continue
+                # Stat-gate before reading: a producer-written huge artifact must
+                # not be slurped to count tokens (would MemoryError, which the
+                # broad excepts below don't catch). Over the cap → report 0 tokens
+                # rather than read it; read_deliverable handles the close look.
+                try:
+                    if p.stat().st_size > 4_000_000:
+                        out.append((rel, 0))
+                        continue
+                    toks = len(p.read_text(encoding="utf-8").split())
+                except (OSError, UnicodeDecodeError, MemoryError):
+                    toks = 0
+                out.append((rel, toks))
+        except OSError:
+            return out
+        return out
+
     def _goal_deliverables_complete(self, tasks: "list[Task]") -> bool:
         """True iff every deliverable-tagged task already has a present artifact
         above the near-empty backstop (§1's ``_token_band`` — a tenth of the
@@ -8216,15 +8404,22 @@ class Orchestrator:
         # the first audit pass caught. Bind only when run_id is set
         # (i.e., a real run workspace exists); test stubs without a
         # run_id keep their pre-binding behavior.
-        with self._with_working_memory_configs():
-            return self._kickoff_inner(
-                objective,
-                attachments=attachments,
-                chat_completion=chat_completion,
-                bound_jt_name=bound_jt_name,
-                bound_jt_params=bound_jt_params,
-                ask_operator=ask_operator,
-            )
+        # §4 liveness: flag the run as in-flight so a concurrent team_status
+        # (background kickoff + converse on another thread) never says "done"
+        # mid-run. try/finally so the flag always clears, even on error.
+        self._kickoff_active = True
+        try:
+            with self._with_working_memory_configs():
+                return self._kickoff_inner(
+                    objective,
+                    attachments=attachments,
+                    chat_completion=chat_completion,
+                    bound_jt_name=bound_jt_name,
+                    bound_jt_params=bound_jt_params,
+                    ask_operator=ask_operator,
+                )
+        finally:
+            self._kickoff_active = False
 
     @contextmanager
     def _with_working_memory_configs(self):
@@ -8850,7 +9045,10 @@ form; never say "I only run jobs."
 
 ## Now
 Reply to the operator's latest message as yourself — directly, plainly,
-usefully. Use tools as the work requires. Keep it conversational.
+usefully. Use tools as the work requires. When they ask where things stand or
+whether the deliverables are any good, pull ``team_status`` and
+``read_deliverable`` and see for yourself before answering — don't guess or
+punt it back. Keep it conversational.
 """
 
 _LEADER_VERIFY_PROMPT = """\

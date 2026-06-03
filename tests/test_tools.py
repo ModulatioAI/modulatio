@@ -1625,3 +1625,95 @@ def test_low_credibility_domains_env_extensible(monkeypatch):
     assert tools._is_low_credibility("https://made-up-farm.example/x")
     assert tools._is_low_credibility("https://sub.another.test/y")  # subdomain too
     assert tools._is_low_credibility("https://grokipedia.com/z")    # seed still applies
+
+
+# ── §4: resolve_under_roots — the read-only Leader access choke point ─────────
+
+def test_resolve_under_roots_accepts_file_in_root(tmp_path):
+    root = tmp_path / "artifacts"
+    (root / "sub").mkdir(parents=True)
+    f = root / "sub" / "story.md"
+    f.write_text("hi")
+    assert tools.resolve_under_roots("sub/story.md", [root]) == f.resolve()
+
+
+def test_resolve_under_roots_accepts_file_in_second_root(tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (b / "out.docx").write_text("x")
+    got = tools.resolve_under_roots("out.docx", [a, b])
+    assert got == (b / "out.docx").resolve()
+
+
+def test_resolve_under_roots_rejects_absolute(tmp_path):
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    (root / "f.md").write_text("x")
+    assert tools.resolve_under_roots(str(root / "f.md"), [root]) is None
+    assert tools.resolve_under_roots("/etc/passwd", [root]) is None
+
+
+def test_resolve_under_roots_rejects_traversal(tmp_path):
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("nope")
+    assert tools.resolve_under_roots("../secret.txt", [root]) is None
+    assert tools.resolve_under_roots("sub/../../secret.txt", [root]) is None
+
+
+def test_resolve_under_roots_rejects_dotfile_and_dash(tmp_path):
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    (root / ".hidden").write_text("x")
+    assert tools.resolve_under_roots(".hidden", [root]) is None
+    assert tools.resolve_under_roots("-", [root]) is None
+    assert tools.resolve_under_roots("", [root]) is None
+
+
+def test_resolve_under_roots_rejects_symlink_escape(tmp_path):
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("nope")
+    link = root / "escape.md"
+    try:
+        link.symlink_to(secret)
+    except OSError:
+        import pytest
+        pytest.skip("symlinks unavailable on this platform")
+    # The symlink resolves OUTSIDE root → rejected even though it sits inside it.
+    assert tools.resolve_under_roots("escape.md", [root]) is None
+
+
+def test_resolve_under_roots_rejects_dir_and_missing(tmp_path):
+    root = tmp_path / "artifacts"
+    (root / "sub").mkdir(parents=True)
+    assert tools.resolve_under_roots("sub", [root]) is None        # a directory
+    assert tools.resolve_under_roots("nope.md", [root]) is None    # missing
+
+
+def test_resolve_under_roots_rejects_special_file_via_symlink(tmp_path):
+    """Defense against an infinite-read DoS: a symlink to a non-regular file
+    (a device/FIFO) must be rejected — is_file() is False for it."""
+    import os
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    fifo = tmp_path / "pipe"
+    try:
+        os.mkfifo(fifo)
+    except (AttributeError, OSError):
+        import pytest
+        pytest.skip("mkfifo unavailable on this platform")
+    link = root / "p.md"
+    link.symlink_to(fifo)
+    assert tools.resolve_under_roots("p.md", [root]) is None
+
+
+def test_resolve_under_roots_rejects_nul_byte(tmp_path):
+    """A NUL byte in the arg can't smuggle a path past the resolver."""
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    assert tools.resolve_under_roots("a\x00/etc/passwd", [root]) is None

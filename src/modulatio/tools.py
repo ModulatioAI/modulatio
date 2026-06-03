@@ -416,6 +416,39 @@ def _is_safe_file_arg(arg: str, root: Path | None) -> bool:
     return _is_safe_relative_file_arg(arg)
 
 
+def resolve_under_roots(arg: str, roots: "list[Path]") -> "Path | None":
+    """Resolve a caller-supplied relative path and return it ONLY if it lands on
+    a real FILE inside one of ``roots`` (after following symlinks). Returns
+    ``None`` on anything unsafe: empty / ``-`` / absolute / traversal (``..``) /
+    dotfile component / symlink escape / missing / not-a-file.
+
+    This is the security choke point for read-only Leader access to its team's
+    outputs (§4 ``read_deliverable``). It is deliberately NOT a widening of the
+    ``run_shell`` sandbox: a single, unit-tested, file-only, read-only resolver
+    over a fixed set of run-scoped roots is a far smaller attack surface than
+    threading a second read root through the whole shell-confinement path. The
+    ``relative_to`` check runs AFTER ``resolve()`` so a symlink inside a root
+    pointing outside it is rejected (its resolved target is not under the root).
+    """
+    if not arg or arg == "-":
+        return None
+    if arg.startswith("/") or arg.startswith("\\"):
+        return None
+    parts = arg.replace("\\", "/").split("/")
+    if any((not p) or p.startswith(".") or p == ".." for p in parts):
+        return None
+    for root in roots:
+        try:
+            root_r = root.resolve()
+            candidate = (root_r / arg).resolve()
+            candidate.relative_to(root_r)  # raises if a symlink escaped the root
+        except (ValueError, OSError):
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _check_passive(argv: list[str], root: Path | None = None) -> bool:
     """True iff ``argv`` is genuinely no-execution for the passive profile.
 

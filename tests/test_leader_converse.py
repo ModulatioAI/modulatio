@@ -149,10 +149,14 @@ def test_converse_with_image_routes_to_multimodal(
 
 def test_leader_has_the_authoring_tools(project: Project):
     """The leader-converse seed promises create_job_template / create_skill /
-    improve_skill — they must actually be in the converse loadout."""
+    improve_skill (and §4's team_status / read_deliverable) — they must actually
+    be in the converse loadout."""
     orch = Orchestrator(project, _runners())
     names = set(orch._leader_function_tools())
-    assert {"create_job_template", "create_skill", "improve_skill"} <= names
+    assert {
+        "create_job_template", "create_skill", "improve_skill",
+        "team_status", "read_deliverable",
+    } <= names
 
 
 def test_create_job_template_tool_writes_and_lists(project: Project):
