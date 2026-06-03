@@ -22,6 +22,8 @@ modulatio setup
 
 Full install with troubleshooting at <https://modulatio.ai/getting-started/install/>.
 
+> **Linux clipboard.** The TUI's copy/paste (Ctrl+C / Ctrl+V) reaches the OS clipboard through a system backend — `xclip` or `wl-clipboard`. `modulatio setup` detects it and offers to install it; or `sudo apt install xclip` (Debian/Ubuntu) / `wl-clipboard` (Wayland). macOS and Windows work out of the box. Without a backend, Ctrl+C still copies via OSC 52 (terminal-dependent) and Ctrl+V paste is unavailable.
+
 > **Why 3.12+?** One of the dependencies (`lancedb`, `fastembed`, or `litellm` depending on platform) hasn't published a wheel for older Pythons and falls back to a source build that often fails. If your `python3` is 3.11 or older, point the venv at `/usr/bin/python3.12` explicitly.
 
 ---

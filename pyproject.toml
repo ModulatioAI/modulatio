@@ -40,6 +40,9 @@ dependencies = [
     # Memory layer: team_memory uses pyarrow schemas for the LanceDB
     # index (same pattern as qc_history).
     "pyarrow>=15.0",
+    # OS clipboard for the TUI's copy/paste (native on macOS/Windows; drives
+    # xclip/xsel/wl-clipboard on Linux, which the setup wizard ensures).
+    "pyperclip>=1.8",
 ]
 
 [project.urls]

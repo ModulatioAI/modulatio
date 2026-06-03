@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from textual import work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.widgets import (
     Button,
     Footer,
@@ -299,9 +300,14 @@ class ModulatioApp(App):
         ("f3", "focus_jobdrop", "COMPOSE"),
         # KICK OFF is the deliberate, separated job-launch — never Enter.
         ("f5", "kickoff", "KICK OFF"),
-        # Select text in a TV stream (drag), then Ctrl+C to copy it — paste
-        # into the chatbox with Ctrl+V. (Quit is Alt+Q / Ctrl+Q.)
+        # Select text in a TV stream (drag), then Ctrl+C to copy it to the OS
+        # clipboard; Ctrl+V pastes the OS clipboard into the focused text field.
+        # (Quit is Alt+Q / Ctrl+Q.)
         ("ctrl+c", "copy_text", "COPY"),
+        # priority=True so Ctrl+V runs the OS-clipboard paste BEFORE a focused
+        # Input/TextArea's native paste (which only sees Textual's internal
+        # clipboard, not the OS one).
+        Binding("ctrl+v", "paste", "PASTE", priority=True),
     ]
 
     def __init__(self, *, project_code: str = "TUI", stub: bool = True):
@@ -626,6 +632,9 @@ class ModulatioApp(App):
             return orch
         from modulatio import tools as _tools, vault as _vault
         project = self._ensure_project()
+        agent_runners: dict = {}
+        chat_runner = None
+        chat_default_model: str | None = None
         if self.stub:
             runners = default_generic_stub_runners()
             chat_runners: dict = {}
@@ -636,14 +645,23 @@ class ModulatioApp(App):
             if runners is None:
                 return None
             from modulatio import config
-            from modulatio.runners import litellm_chat_runner
-            leader_model = (config.get_default_models() or {}).get("leader")
-            if leader_model:
-                chat_runners = {"leader": litellm_chat_runner(leader_model)}
-                chat_runner_models = {"leader": leader_model}
-            else:
-                chat_runners = {}
-                chat_runner_models = {}
+            from modulatio.runners import build_agent_runners, build_chat_runners, maybe_build_chat_runner
+            # Wire EVERY agent's chat runner, not just the Leader's. When the
+            # Leader runs a job (free-form run_job or a bound job template), he
+            # dispatches tasks to producers whose skills declare a tool_loadout
+            # — those need a per-agent chat_runner or they raise on dispatch.
+            # The leader-only wiring left producers with no runner (the
+            # routing-reality gap, on the converse→run_job lane); mirror the
+            # kickoff path so producers get their own runners + a shared
+            # fallback. build_chat_runners covers the Leader too (he's in the
+            # roster), so converse keeps working.
+            agent_runners = build_agent_runners(self.project_code)
+            chat_runners, chat_runner_models = build_chat_runners(self.project_code)
+            defaults = config.get_default_models() or {}
+            chat_default_model = (
+                defaults.get("qc") or defaults.get("producer") or defaults.get("specialist")
+            )
+            chat_runner = maybe_build_chat_runner(chat_default_model)
             registry = _tools.build_registry(
                 artifacts_root=_vault.project_dir(self.project_code) / "artifacts",
                 project_code=self.project_code,
@@ -652,8 +670,11 @@ class ModulatioApp(App):
             project, runners,
             activity_callback=self._record_activity,
             operator_present=True,
+            agent_runners=agent_runners,
+            chat_runner=chat_runner,
             chat_runners=chat_runners,
             chat_runner_models=chat_runner_models,
+            chat_runner_default_model=chat_default_model,
             tool_registry=registry,
         )
         self._conv_orch = orch
@@ -886,11 +907,38 @@ class ModulatioApp(App):
             text = self._last_leader_text()
             note = "Copied the Leader's last message"
         if text:
+            # OS clipboard via pyperclip (the reliable path), plus OSC 52 as a
+            # belt-and-suspenders fallback for terminals that honor it.
+            from modulatio import clipboard as _clip
+            to_os = _clip.copy(text)
             self.copy_to_clipboard(text)
+            where = "clipboard" if to_os else "terminal (run `modulatio doctor` for OS-clipboard setup)"
             try:
-                self.notify(f"{note} — paste with Ctrl+V", timeout=1.5)
+                self.notify(f"{note} → {where}", timeout=1.5)
             except Exception:
                 pass
+
+    def action_paste(self) -> None:
+        """Ctrl+V → paste the OS clipboard into the focused text field. Reads via
+        pyperclip (xclip/wl-paste/native), the reliable path — a focused
+        Input/TextArea's native Ctrl+V only sees Textual's internal clipboard."""
+        from textual.widgets import Input, TextArea
+
+        from modulatio import clipboard as _clip
+        text = _clip.paste()
+        if not text:
+            try:
+                self.notify(
+                    "No OS clipboard backend — run `modulatio setup` (or install "
+                    "xclip) to paste from outside Modulatio.", timeout=2.5)
+            except Exception:
+                pass
+            return
+        widget = self.focused
+        if isinstance(widget, TextArea):
+            widget.insert(text)
+        elif isinstance(widget, Input):
+            widget.insert_text_at_cursor(text)
 
     def _last_leader_text(self) -> str:
         """The Leader's most recent reply (Ctrl+C fallback when nothing is

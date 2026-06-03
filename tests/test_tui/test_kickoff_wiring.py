@@ -102,6 +102,79 @@ def test_kickoff_orchestrator_threads_model_summarizer_and_tool_calls_dir(
     assert orch is not None
 
 
+def test_conversation_orchestrator_wires_producer_chat_runners(
+    project_with_run, monkeypatch,
+):
+    """Routing-reality: the Leader's conversation Orchestrator must wire a
+    chat_runner for EVERY agent (via build_chat_runners) plus a shared
+    fallback — not just the Leader. When the Leader runs a job (free-form
+    run_job or a bound job template) he dispatches to producers whose skills
+    declare a tool_loadout; those need a per-agent chat_runner or they raise
+    'no chat_runner is configured for agent ...' on dispatch and the task
+    lands blocked. The pre-fix leader-only wiring left producers with none.
+    """
+    captured: dict = {}
+
+    class _FakeOrchestrator:
+        def __init__(self, project, runners, **kwargs):
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(tui_app, "Orchestrator", _FakeOrchestrator)
+    # Roster has a producer ("hal_9000") alongside the leader — build_chat_runners
+    # must surface BOTH on the conversation path.
+    monkeypatch.setattr(
+        "modulatio.runners.build_chat_runners",
+        lambda code: (
+            {"leader": lambda *a, **k: None, "hal_9000": lambda *a, **k: None},
+            {"leader": "m-leader", "hal_9000": "m-producer"},
+        ),
+    )
+    monkeypatch.setattr(
+        "modulatio.runners.build_agent_runners",
+        lambda code: {"hal_9000": lambda *a, **k: ""},
+    )
+    _fallback = object()
+    monkeypatch.setattr(
+        "modulatio.runners.maybe_build_chat_runner", lambda *a, **k: _fallback
+    )
+    monkeypatch.setattr(
+        "modulatio.config.get_default_models",
+        lambda: {"qc": "openrouter/test-qc-model", "leader": "m-leader"},
+    )
+    monkeypatch.setattr(
+        "modulatio.tools.build_registry", lambda **k: {"sentinel": "registry"}
+    )
+
+    # Minimal stand-in for the app instance — only the attributes the method
+    # touches, so we exercise the wiring without a Textual context.
+    class _FakeApp:
+        stub = False
+        project_code = PROJECT_CODE
+        _conv_orch = None
+
+        def _ensure_project(self):
+            return project_with_run
+
+        def _build_real_runners(self):
+            return {"leader": lambda *a, **k: "", "drafter": lambda *a, **k: ""}
+
+        def _record_activity(self, evt):
+            pass
+
+    tui_app.ModulatioApp._conversation_orchestrator(_FakeApp())
+
+    kwargs = captured["kwargs"]
+    # The core fix: producers are wired, not just the leader.
+    assert "hal_9000" in kwargs["chat_runners"], (
+        "producer chat_runner missing — run_job would raise on dispatch"
+    )
+    assert "leader" in kwargs["chat_runners"], "leader must still be wired for converse"
+    # Shared fallback + per-agent runners + default model all threaded through.
+    assert kwargs["chat_runner"] is _fallback
+    assert "hal_9000" in kwargs["agent_runners"]
+    assert kwargs["chat_runner_default_model"] == "openrouter/test-qc-model"
+
+
 def test_kickoff_orchestrator_stub_mode_keeps_pre_v21_no_op_shape(
     project_with_run, monkeypatch,
 ):

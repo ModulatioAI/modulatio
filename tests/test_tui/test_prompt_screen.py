@@ -97,6 +97,44 @@ async def test_chatbox_attachments_stage_and_clear_on_send(
         assert screen.chatbox_attachments == []  # cleared on send
 
 
+async def test_ctrl_v_pastes_os_clipboard_into_focused_field(
+    project_with_roster, monkeypatch
+):
+    """Ctrl+V reads the OS clipboard (via modulatio.clipboard) and inserts it
+    into the focused text field — the reliable OS-clipboard paste."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    monkeypatch.setattr("modulatio.clipboard.paste", lambda: "FROM-OS-CLIPBOARD")
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.query_one("#prompt-input", ChatInput)
+        inp.focus()
+        await pilot.pause()
+        await pilot.press("ctrl+v")   # priority binding beats native paste
+        await pilot.pause()
+        assert "FROM-OS-CLIPBOARD" in inp.text
+
+
+async def test_ctrl_c_copies_through_os_clipboard(project_with_roster, monkeypatch):
+    """Ctrl+C routes the copied text through the OS clipboard helper."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    copied = {}
+    monkeypatch.setattr("modulatio.clipboard.copy",
+                        lambda t: copied.__setitem__("t", t) or True)
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#stream-leader", StreamView).add_leader_message("copy me out")
+        await pilot.pause()
+        app.action_copy_text()   # no selection → last leader message
+        await pilot.pause()
+        assert copied.get("t") == "copy me out"
+
+
 async def test_no_agent_chat_panes_remain(project_with_roster):
     """The retired per-agent chat grid is gone — no AgentPanePanel mounts."""
     from modulatio.tui.app import ModulatioApp
@@ -606,7 +644,8 @@ def test_quit_takes_a_modifier():
     """Plain 'q' no longer quits (fat-finger safety); Alt+Q / Ctrl+Q do."""
     from modulatio.tui.app import ModulatioApp
 
-    keys = [b[0] for b in ModulatioApp.BINDINGS]
+    # BINDINGS mixes tuples and Binding objects — normalize to the key string.
+    keys = [b[0] if isinstance(b, tuple) else b.key for b in ModulatioApp.BINDINGS]
     assert "q" not in keys
     assert "alt+q" in keys
     assert "ctrl+q" in keys
