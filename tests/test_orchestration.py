@@ -6624,16 +6624,14 @@ def test_execute_task_isolated_carries_decompose_children_back(
     assert getattr(orch._tls, "child_tasks", None) is None
 
 
-def test_merge_task_result_flushes_activity_in_order(project: Project):
-    from modulatio.orchestration import (
-        RunSummary, TaskExecutionResult, _merge_task_result,
-    )
-    res = TaskExecutionResult(task=_wave_task("M-T-001"),
-                              activity_events=["ev1", "ev2", "ev3"])
-    flushed: list = []
-    _merge_task_result(res, RunSummary(project=project),
-                       emit_activity=flushed.append)
-    assert flushed == ["ev1", "ev2", "ev3"]
+def test_merge_task_result_does_not_replay_activity(project: Project):
+    """Fix B: the merge no longer replays activity events — workers stream them
+    live, so _merge_task_result has no emit_activity hook at all (only store +
+    summary folding remain)."""
+    import inspect
+    from modulatio.orchestration import _merge_task_result
+    params = inspect.signature(_merge_task_result).parameters
+    assert "emit_activity" not in params, "merge must not carry an activity hook"
 
 
 def test_merge_task_result_idempotent_by_task_id(project: Project):
@@ -6677,11 +6675,11 @@ def test_merge_task_result_runs_deferred_writes_in_order(project: Project):
 # ── Core rebuild B3b: isolated task execution ───────────────────────────
 
 
-def test_execute_task_isolated_buffers_activity_off_shared_callback(project: Project):
-    """B3b isolation contract: _execute_task_isolated runs a task to
-    completion but its activity events land on the RESULT (buffered via the
-    thread-local), NOT the shared callback, and drafts/errors land in a
-    per-task local summary — so a concurrent worker touches no shared state."""
+def test_execute_task_isolated_streams_activity_live(project: Project):
+    """Fix B: a wave worker streams its activity events LIVE to the shared
+    callback (under the activity lock) — NOT buffered til merge — so the operator
+    watches producers work in parallel as it happens. Drafts/errors still ride
+    back on the result (store/correctness stays deterministic)."""
     from modulatio.types import Task, TaskStatus, EvidenceRequirement
     from modulatio.orchestration import Orchestrator, TaskExecutionResult
 
@@ -6709,13 +6707,13 @@ def test_execute_task_isolated_buffers_activity_off_shared_callback(project: Pro
 
     assert isinstance(result, TaskExecutionResult)
     assert result.task.status is TaskStatus.COMPLETED
-    # Activity buffered on the result...
-    phases = [e.phase for e in result.activity_events]
+    # Activity reached the shared callback LIVE during the isolated run.
+    phases = [e.phase for e in shared_events]
     assert "task_dispatched" in phases
     assert "task_completed" in phases
-    # ...and NOT leaked to the shared callback during the isolated run.
-    assert shared_events == []
-    # Draft captured in the per-task local summary, rode back on the result.
+    # Nothing carried back on the result for replay (the field is gone).
+    assert not hasattr(result, "activity_events") or not getattr(result, "activity_events", None)
+    # Draft still captured in the per-task local summary, rode back on the result.
     assert len(result.drafts) == 1
 
 

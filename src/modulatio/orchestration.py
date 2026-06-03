@@ -125,11 +125,11 @@ class TaskExecutionResult:
 
     The worker owns its ``task`` (a per-task object) and collects the
     side-effects it WANTS rather than applying them to shared state:
-    ``drafts`` / ``errors`` fold into the shared ``RunSummary``;
-    ``activity_events`` are re-emitted in order at merge; ``deferred_writes``
+    ``drafts`` / ``errors`` fold into the shared ``RunSummary``; ``deferred_writes``
     are 0-arg callables that perform shared-store writes (ticket creates +
     task saves from the rare block paths, standards-proposal saves) — the
     MAIN THREAD runs them at merge so worker threads never write the store.
+    (Activity events are NOT carried here — workers stream them live, Fix B.)
 
     Isolation contract (Nemo impl-sweep B3): the worker does not mutate
     shared orchestrator/run state. The ONE exception is the locked
@@ -139,7 +139,8 @@ class TaskExecutionResult:
     task: "Task"
     drafts: list[Path] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
-    activity_events: list = field(default_factory=list)
+    # (Fix B) activity events no longer ride back — workers stream them LIVE
+    # under the activity lock, so there's nothing to replay at merge.
     deferred_writes: list = field(default_factory=list)
     #: QC-as-fixer Slice 3: task ids the worker completed via a QC-authored
     #: fix. Must ride back so the surfacing isn't dropped under concurrency.
@@ -166,7 +167,6 @@ def _merge_task_result(
     result: TaskExecutionResult,
     summary: RunSummary,
     *,
-    emit_activity: "Callable[[Any], None] | None" = None,
     save_task: "Callable[[Task], None] | None" = None,
     merged_ids: set | None = None,
 ) -> None:
@@ -179,10 +179,10 @@ def _merge_task_result(
     completion order.
 
     Side-effect application order within a result: persist the task →
-    summary fold (tasks/drafts/errors) → flush buffered activity events →
-    run deferred shared-store writes (ticket creates + proposal saves the
-    worker buffered). ``emit_activity`` / ``save_task`` are injected
-    (None ⇒ skip) so the merge is testable without a live store/callback.
+    summary fold (tasks/drafts/errors) → run deferred shared-store writes
+    (ticket creates + proposal saves the worker buffered). ``save_task`` is
+    injected (None ⇒ skip) so the merge is testable without a live store.
+    Activity events are NOT replayed here — workers stream them live (Fix B).
     Deferred writes are best-effort (a failed ticket create must not crash
     the merge), matching the worker-side try/except they replace.
     """
@@ -214,9 +214,6 @@ def _merge_task_result(
     for tid in result.qc_authored_fixes:
         if tid not in summary.qc_authored_fixes:
             summary.qc_authored_fixes.append(tid)
-    if emit_activity is not None:
-        for ev in result.activity_events:
-            emit_activity(ev)
     for write in result.deferred_writes:
         try:
             write()
@@ -1673,10 +1670,11 @@ class Orchestrator:
         #: streaming-TUI/ACP drives the mid-run defer round-trip). See
         #: ``_autonomous`` / ``_operator_context_block``.
         self.operator_present: bool = operator_present
-        #: Core rebuild B3b: thread-local isolation state. When a task runs
-        #: in an isolated worker, ``self._tls.activity_buffer`` is a per-thread
-        #: list that ``_emit_activity`` appends to instead of hitting the
-        #: shared callback — so concurrent workers (B4) never race it.
+        #: Core rebuild B3b: thread-local isolation state for a wave worker —
+        #: ``deferred_writes`` (shared-store writes run at merge), ``child_tasks``
+        #: (decompose children carried back), ``artifact_writes`` + ``staging_root``
+        #: (per-task staging tree), ``tool_registry_override``. Activity events are
+        #: NOT buffered here (Fix B streams them live under ``_activity_lock``).
         self._tls = threading.local()
         #: Core rebuild B4: serializes the per-task SHARED store writes that
         #: happen inside an isolated worker (qc-history append; rare
@@ -1685,6 +1683,14 @@ class Orchestrator:
         #: LLM/producer/QC work — so it doesn't serialize the parallel
         #: window. Uncontended (≈free) on the sequential path.
         self._store_lock = threading.Lock()
+        #: Fix B (2026-06-03): serializes the activity_callback so concurrent wave
+        #: workers can fire ActivityEvents LIVE (not buffer-til-merge) without
+        #: racing a non-thread-safe subscriber — the operator sees producers work
+        #: in parallel as it happens. Held only for the quick callback enqueue
+        #: (the TUI marshals via call_from_thread); uncontended on the sequential
+        #: path. Display events stream live; STORE/artifact writes still buffer
+        #: for the deterministic merge (correctness needs order; the TV needs now).
+        self._activity_lock = threading.Lock()
         #: Capability-floor caches (slice #9b) — instance-scoped so the
         #: plan-dispatch loop AND the concurrent wave scheduler share one
         #: floor lookup (Nemo impl-sweep B2: the wave scheduler must apply
@@ -2185,15 +2191,16 @@ class Orchestrator:
         ``agent_id`` defaults to the role key when the caller doesn't have
         a more specific identifier on hand.
 
-        Core rebuild B3b: when an isolated task worker is running on this
-        thread (``self._tls.activity_buffer`` is set), the event is BUFFERED
-        into that per-thread list instead of hitting the shared callback —
-        the main thread re-emits buffered events in deterministic order at
-        merge. Thread-local, so concurrent workers never race the callback.
+        Fix B (2026-06-03): activity events stream LIVE, even from a concurrent
+        wave worker — so the operator watches producers work in parallel as it
+        happens, not as a burst at merge (the §5 default-on buffering left the
+        TEAM TV dark while workers ran). The callback fires under
+        ``self._activity_lock`` so concurrent workers can't race a non-thread-safe
+        subscriber. (STORE/artifact writes still buffer for the deterministic
+        merge — correctness needs order; the TV needs liveness.)
         """
-        buf = getattr(self._tls, "activity_buffer", None)
-        if buf is None and self.activity_callback is None:
-            return  # nobody listening + not buffering — cheap exit
+        if self.activity_callback is None:
+            return  # nobody listening — cheap exit
         event = ActivityEvent(
             agent_id=agent_id or role,
             role=role,
@@ -2201,10 +2208,8 @@ class Orchestrator:
             task_id=task_id,
             timestamp=datetime.now(timezone.utc),
         )
-        if buf is not None:
-            buf.append(event)
-            return
-        self.activity_callback(event)
+        with self._activity_lock:
+            self.activity_callback(event)
 
     # ── Brick C: operator-presence-aware Leader behavior ──────────────────
     def _autonomous(self) -> bool:
@@ -5126,7 +5131,8 @@ class Orchestrator:
 
         Isolation contract (Nemo + Lovecraft):
         - drafts/errors land in a PER-TASK local ``RunSummary``, ride back;
-        - activity events buffer into ``self._tls.activity_buffer``;
+        - activity events stream LIVE under ``self._activity_lock`` (Fix B) so
+          the operator sees the producers work in parallel — NOT buffered;
         - shared-store writes (block-path ticket creates + task saves,
           standards-proposal saves) buffer into ``self._tls.deferred_writes``
           and the MAIN THREAD runs them at merge — no worker store writes;
@@ -5138,7 +5144,6 @@ class Orchestrator:
         (a best-effort precedent log held under ``self._store_lock``).
         """
         local_summary = RunSummary(project=self.project)
-        buffer: list = []
         deferred: list = []
         artifact_writes: list[str] = []
         child_tasks: list = []  # §5: decompose children created in isolation
@@ -5150,7 +5155,6 @@ class Orchestrator:
         shared_artifacts = self._scope_root() / "artifacts"
         staging = self._scope_root() / ".staging" / t.id
         self._seed_staging(shared_artifacts, staging)
-        self._tls.activity_buffer = buffer
         self._tls.deferred_writes = deferred
         self._tls.artifact_writes = artifact_writes
         self._tls.child_tasks = child_tasks
@@ -5160,16 +5164,15 @@ class Orchestrator:
             self._run_task_with_redo(t, local_summary, initial_corrective_notes)
             # §5: on the concurrent path a terminal-FAILED task emits no
             # ``task_completed``, so the TV's "N producers working" indicator
-            # would keep counting it. Emit a terminal ``task_settled`` (buffered,
-            # replayed at merge) so the producer leaves the board. Success
-            # already emitted ``task_completed`` — don't double up.
+            # would keep counting it. Emit a terminal ``task_settled`` (live, Fix
+            # B) so the producer leaves the board. Success already emitted
+            # ``task_completed`` — don't double up.
             if t.status != TaskStatus.COMPLETED:
                 self._emit_activity(
                     role=self.default_producer_role, phase="task_settled",
                     task_id=t.id, agent_id=t.assigned_agent_id,
                 )
         finally:
-            self._tls.activity_buffer = None
             self._tls.deferred_writes = None
             self._tls.artifact_writes = None
             self._tls.child_tasks = None
@@ -5179,7 +5182,6 @@ class Orchestrator:
             task=t,
             drafts=list(local_summary.drafts),
             errors=list(local_summary.errors),
-            activity_events=buffer,
             deferred_writes=deferred,
             qc_authored_fixes=list(local_summary.qc_authored_fixes),
             staging_root=staging,
@@ -5657,7 +5659,6 @@ class Orchestrator:
             for tid in sorted(done):
                 _merge_task_result(
                     done[tid], summary,
-                    emit_activity=self.activity_callback,
                     save_task=_save,
                     merged_ids=merged_ids,
                 )
