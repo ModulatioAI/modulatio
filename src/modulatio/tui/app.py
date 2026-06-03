@@ -719,6 +719,12 @@ class ModulatioApp(App):
         status = self._lane_status("stream-leader-status")
         if status is not None:
             status.set_idle()
+        # Belt: once the converse worker returns, any job it ran (run_job) is
+        # over, so the TEAM spinner must not read "running". kickoff_ended
+        # normally settles it; this covers an error path that never emitted it.
+        team_status = self._lane_status("stream-team-status")
+        if team_status is not None:
+            team_status.set_done()
 
     def _handle_slash_command(self, text: str) -> None:
         """Route a `/cmd args` input to the commands.py dispatcher and apply
@@ -811,6 +817,16 @@ class ModulatioApp(App):
         # kickoff events don't reach the TEAM lane's own tracker).
         if team_stream is not None and event.phase in ("kickoff_started", "kickoff_ended"):
             team_stream.active_tasks.clear()
+        # Fix: when a run ENDS — normal completion OR an F8 stop, both via the
+        # engine's role="orchestrator" kickoff_ended — reset the TEAM spinner to
+        # 'done'. Without this it sticks on the last producer phase and the Mod
+        # Squad tab reads "running" forever. The orchestrator role is in neither
+        # lane's role set, so this is the only place that fires for BOTH the
+        # direct-kickoff and the converse→run_job paths.
+        if event.phase == "kickoff_ended":
+            status = self._lane_status("stream-team-status")
+            if status is not None:
+                status.set_done()
         # Live status lines: the leader-lane phase drives the LEADER status;
         # team-lane phases the TEAM status, named by the worker. §5: when more
         # than one producer is in flight, surface the parallel count so the

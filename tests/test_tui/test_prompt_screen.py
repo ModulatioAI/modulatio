@@ -257,6 +257,29 @@ async def test_team_stream_one_agent_two_tasks_counts_one_producer(project_with_
         assert team.active_producer_names() == []
 
 
+async def test_kickoff_ended_settles_team_status(project_with_roster):
+    """A finished run (orchestrator-role kickoff_ended — fired on normal
+    completion AND on an F8 stop) resets the TEAM spinner to 'done', so the Mod
+    Squad tab can't read 'running' forever (the converse→run_job path never reset
+    it before)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_status import StreamStatus
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # a producer is working → the TEAM spinner shows live activity
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        await pilot.pause()
+        team = app.query_one("#stream-team-status", StreamStatus)
+        assert team._done is False
+        # the run ends (orchestrator role — in neither lane's role set)
+        app._record_activity_impl(_ev("orchestrator", "kickoff_ended"))
+        await pilot.pause()
+        assert team._done is True, "TEAM spinner must settle to done when a run ends"
+
+
 async def test_f8_stop_job_signals_abort_on_running_orch(project_with_roster):
     """Fix C: F8 / action_stop_job sets the running job's abort_event — but only
     when a job is actually in flight (_kickoff_active), so a stray F8 is a no-op."""
