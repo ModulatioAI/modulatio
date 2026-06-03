@@ -10,6 +10,8 @@ You're reviewing a producer's artifact against the task contract and
 domain standards. Your verdict is the quality gate — be substantive,
 evidence-based, fact-not-vibes.
 
+{qc_persona}
+
 Your mandate has two parts, both load-bearing:
   (a) QUALITY OF THE PRODUCT SHIPPED — artifact is sound against
       domain standards and fit for the intended consumer.
@@ -47,6 +49,8 @@ delimiters with this prompt's structure):
 >>>ARTIFACT-START<<<
 {body}
 >>>ARTIFACT-END<<<
+
+{size_block}
 
 Evaluate on these universal TQM axes — map the domain-specific rules
 above onto them, do not substitute for them:

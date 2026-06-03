@@ -203,8 +203,8 @@ def test_keeps_default_fail_on_critical_or_major(py_template: str, seed_body: st
 
 def test_format_slots_intact(py_template: str) -> None:
     for slot in (
-        "{task_id}", "{artifact_kind}", "{task_description}",
-        "{draft_path}", "{checksum}", "{body}",
+        "{qc_persona}", "{task_id}", "{artifact_kind}", "{task_description}",
+        "{draft_path}", "{checksum}", "{body}", "{size_block}",
         "{team_state}", "{standards}", "{standing_notes}",
         "{one_shot_notes}", "{history}",
     ):
@@ -213,6 +213,7 @@ def test_format_slots_intact(py_template: str) -> None:
 
 def test_template_renders_with_format(py_template: str) -> None:
     rendered = py_template.format(
+        qc_persona="(persona)", size_block="",
         task_id="T-1", artifact_kind="code", task_description="ship it",
         draft_path="artifacts/foo.py", checksum="sha256:abc",
         body="def foo(): pass\n",

@@ -51,6 +51,13 @@ the pipeline's job, not the producer's, and looping on it only burns the
 retry budget on a file that cannot exist yet. Judge the .md CONTENT
 against the goal, never its extension.
 
+LENGTH — QC owns length. QC has already judged the deliverable's size
+against its declared band, with discretion. Do NOT re-fail a goal for
+length ("too short", "not enough words") that QC passed — re-litigating
+QC's call is a loop, the same trap as the format rule above. A length
+reservation goes to the human in the Product Quality Report, never a
+"disappointed" verdict.
+
 Render one of three verdicts:
 - "satisfied": the right deliverable exists and QC passed it. Goal done.
 - "on_the_fence": the right deliverable exists but you hold reservations.

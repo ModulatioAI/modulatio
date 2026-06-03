@@ -7522,12 +7522,11 @@ def test_decompose_keeps_verify_verb_goal_that_produces_an_artifact(project: Pro
     assert len(goals) == 1
 
 
-# ── Size-floor enforcement (#size-floor) ─────────────────────────────────────
-# A deliverable's expected size is deterministically checkable, so the engine
-# binds it: QC mechanically rejects an under-floor draft and routes the redo to
-# expand. Artifact-AGNOSTIC — the engine compares its own token_count against a
-# declared token floor; no words/pages/document assumptions. Fires ONLY when a
-# real floor is declared — never invents one.
+# ── QC-judges-with-tolerance (#size-floor → QC-judges) ───────────────────────
+# Size adequacy is a JUDGMENT, not a mechanical gate. The engine MEASURES the
+# declared band + tolerance and surfaces them to QC; QC judges length itself.
+# The engine binds ONLY the genuine invariant — a near-empty / non-deliverable.
+# Artifact-AGNOSTIC (whitespace token_count); the band is never invented.
 
 def _task_with(description="deliverable", *, evidence_required=None):
     from uuid import uuid4
@@ -7543,96 +7542,148 @@ def _floor_metric(target, description="size"):
     return EvidenceRequirement(kind="metric", description=description, target=target)
 
 
-def test_token_floor_reads_metric_target():
-    from modulatio.orchestration import _token_floor
-    # canonical form from the prompt
-    assert _token_floor(_task_with(evidence_required=[
-        _floor_metric("token_count >= 3500")])) == 3500
-    assert _token_floor(_task_with(evidence_required=[
-        _floor_metric("token_count between 3,500 and 4,500")])) == 3500
+def _qc_spy():
+    calls: list[str] = []
+
+    def runner(prompt: str) -> str:
+        calls.append(prompt)
+        return '```json\n{"check": "ok", "passed": true}\n```'
+    return runner, calls
+
+
+def test_token_band_reads_metric_target():
+    from modulatio.orchestration import _token_band
+    assert _token_band(_task_with(evidence_required=[
+        _floor_metric("token_count >= 3500")])) == (3500, None)
+    assert _token_band(_task_with(evidence_required=[
+        _floor_metric("token_count between 3,500 and 4,500")])) == (3500, 4500)
     # word_count accepted as a synonym (same whitespace count)
-    assert _token_floor(_task_with(evidence_required=[
-        _floor_metric("word_count >= 3000")])) == 3000
+    assert _token_band(_task_with(evidence_required=[
+        _floor_metric("word_count >= 3000")])) == (3000, None)
 
 
-def test_token_floor_reads_real_planner_format():
-    """Live repro (run 7c476b): the planner emits a size metric as a bare
-    range in the target with the dimension named in the description, e.g.
-    {description: "Word count of story-01.docx", target: "3500-4500"}. The
-    parser must read THAT (low end of the range = floor), not just the
-    idealized "token_count >= N" string — engine binds what the LLM produces."""
-    from modulatio.orchestration import _token_floor
+def test_token_band_real_planner_format():
+    """Live repro (run 7c476b): the planner emits a size metric as a bare range
+    with the dimension in the description, e.g. {description: "Word count of
+    story-01.docx", target: "3500-4500"}. The parser reads BOTH ends from THAT,
+    not just the idealized "token_count >= N" string."""
+    from modulatio.orchestration import _token_band, _token_floor
     real = _floor_metric("3500-4500", description="Word count of story-01.docx")
+    assert _token_band(_task_with("Story 01", evidence_required=[real])) == (3500, 4500)
+    # the thin floor wrapper returns the band's low end
     assert _token_floor(_task_with("Story 01", evidence_required=[real])) == 3500
-    # en-dash range + "words" suffix, description carries the dimension
     rng = _floor_metric("3,500–4,500 words", description="length")
-    assert _token_floor(_task_with(evidence_required=[rng])) == 3500
+    assert _token_band(_task_with(evidence_required=[rng])) == (3500, 4500)
 
 
-def test_token_floor_none_when_no_explicit_metric():
-    from modulatio.orchestration import _token_floor
-    # plain title, no metric → no floor (engine must not invent one)
+def test_token_band_none_when_no_explicit_metric():
+    from modulatio.orchestration import _token_band, _token_floor
+    assert _token_band(_task_with("Story 01 — The Last Library")) is None
     assert _token_floor(_task_with("Story 01 — The Last Library")) is None
     # a non-size metric (no token/word dimension) is ignored, even with digits
-    assert _token_floor(_task_with("a task", evidence_required=[
+    assert _token_band(_task_with("a task", evidence_required=[
         _floor_metric("exit code 0", description="exit status")])) is None
-    assert _token_floor(_task_with("a task", evidence_required=[
+    assert _token_band(_task_with("a task", evidence_required=[
         _floor_metric("3-5", description="number of sections")])) is None
-    # size stated only in prose (not a metric) does NOT gate — the planner is
-    # responsible for emitting the structured floor (stays agnostic; no
-    # document/page parsing in the engine)
-    assert _token_floor(_task_with("~3,500–4,500 words")) is None
-    assert _token_floor(_task_with("12-15 pages")) is None
+    # size stated only in prose (not a metric) does NOT count — agnostic, no
+    # document/page parsing in the engine
+    assert _token_band(_task_with("~3,500–4,500 words")) is None
+    assert _token_band(_task_with("12-15 pages")) is None
 
 
-def test_qc_review_short_circuits_under_floor_without_calling_qc(project, tmp_path):
-    """An under-floor draft is a deterministic defect: QC returns a failing
-    'substantive' verdict that names the shortfall — and never spends a QC
-    model call on a draft that's obviously too small."""
-    qc_calls: list[str] = []
+def test_size_tolerance_env(monkeypatch):
+    from modulatio.orchestration import _size_tolerance, _SIZE_TOLERANCE
+    monkeypatch.delenv("MODULATIO_SIZE_TOLERANCE", raising=False)
+    assert _size_tolerance() == _SIZE_TOLERANCE == 0.10
+    monkeypatch.setenv("MODULATIO_SIZE_TOLERANCE", "0.2")
+    assert _size_tolerance() == 0.2
+    monkeypatch.setenv("MODULATIO_SIZE_TOLERANCE", "5")      # clamped to 0.5
+    assert _size_tolerance() == 0.5
+    monkeypatch.setenv("MODULATIO_SIZE_TOLERANCE", "junk")   # falls back
+    assert _size_tolerance() == 0.10
 
-    def _qc_spy(prompt: str) -> str:
-        qc_calls.append(prompt)
-        return '```json\n{"check": "ok", "passed": true}\n```'
 
+def test_qc_review_judges_short_draft_not_mechanical_bounce(project, tmp_path):
+    """A short-but-real draft (846 vs a 3,500 band, above the near-empty
+    backstop) is NOT mechanically failed — QC IS consulted, with the band +
+    tolerance + persona injected so the smart model judges length itself. This
+    is the redesign: no rigid gate, QC decides (here the stub passes it)."""
+    runner, qc_calls = _qc_spy()
     orch = Orchestrator(project, {
-        "leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_spy,
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": runner,
     })
     draft = tmp_path / "deliverable.md"
-    draft.write_text("# Short\n\nthis deliverable is far too small\n")
-    task = _task_with("Unit 02", evidence_required=[_floor_metric("token_count >= 3500")])
+    draft.write_text("# Short\n\nthis is a short but real draft\n")
+    task = _task_with("Unit", evidence_required=[_floor_metric("token_count >= 3500")])
     task.artifact_kind = "text"
 
-    verdict, notes, defect = orch._qc_review(task, draft, "deadbeef", token_count=846)
+    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef", token_count=846)
 
-    assert verdict.passed is False
+    assert verdict.passed is True            # QC's call, not a mechanical bounce
+    assert len(qc_calls) == 1                # the QC model WAS consulted
+    p = qc_calls[0]
+    assert "3500" in p and "846" in p        # band + count surfaced to QC
+    assert "tolerance" in p.lower()          # tolerance surfaced
+    assert "senior editor" in p.lower()      # constructive persona injected
+
+
+def test_qc_review_near_empty_backstop_fails_without_qc(project, tmp_path):
+    """The engine still binds the genuine invariant: a near-empty artifact (well
+    below floor*0.1) is a missing/truncated deliverable — deterministically
+    failed WITHOUT a QC call (the 0-byte-tombstone case)."""
+    runner, qc_calls = _qc_spy()
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": runner,
+    })
+    draft = tmp_path / "deliverable.md"
+    draft.write_text("stub\n")
+    task = _task_with("Unit", evidence_required=[_floor_metric("token_count >= 3500")])
+    task.artifact_kind = "text"
+
+    verdict, notes, defect = orch._qc_review(task, draft, "deadbeef", token_count=12)
+
+    assert verdict.passed is False           # 12 < max(1, 3500*0.1=350)
     assert defect == "substantive"
-    assert "3500" in notes and "846" in notes
-    assert "pad" in notes.lower()           # tells the producer to expand, not pad
-    assert qc_calls == []                    # the QC model was NOT called
+    assert "near-empty" in notes.lower()
+    assert qc_calls == []                    # no QC call on a non-deliverable
 
 
-def test_qc_review_passes_through_when_floor_met(project, tmp_path):
-    """At or above the floor, QC runs normally — the gate only catches the
-    shortfall, it doesn't replace the review."""
-    qc_calls: list[str] = []
-
-    def _qc_spy(prompt: str) -> str:
-        qc_calls.append(prompt)
-        return '```json\n{"check": "ok", "passed": true}\n```'
-
+def test_qc_review_small_band_not_backstopped(project, tmp_path):
+    """The backstop is proportional (floor*0.1), so a COMPLETE small-band
+    deliverable (e.g. a 30-token artifact for a 20-40 band) is NOT mechanically
+    failed — QC judges it. (Regression for the flat-50 false-fail.)"""
+    runner, qc_calls = _qc_spy()
     orch = Orchestrator(project, {
-        "leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_spy,
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": runner,
     })
     draft = tmp_path / "deliverable.md"
-    draft.write_text("# Full size\n\nplenty of content here\n")
-    task = _task_with("Unit 02", evidence_required=[_floor_metric("token_count >= 3500")])
+    draft.write_text("a complete short deliverable\n")
+    task = _task_with("Headline", evidence_required=[_floor_metric("word_count 20-40")])
     task.artifact_kind = "text"
 
-    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef", token_count=4000)
+    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef", token_count=30)
+
+    assert verdict.passed is True            # 30 > max(1, 20*0.1=2) → QC judges
+    assert len(qc_calls) == 1                # QC consulted, not backstopped
+
+
+def test_qc_review_no_band_runs_qc_without_size_block(project, tmp_path):
+    """No size metric → QC runs normally and NO size guidance is injected (QC
+    judges on the usual axes; the engine never invents a size constraint)."""
+    runner, qc_calls = _qc_spy()
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": runner,
+    })
+    draft = tmp_path / "deliverable.md"
+    draft.write_text("# Doc\n\nplenty of content here\n")
+    task = _task_with("Unit")  # no evidence metric
+    task.artifact_kind = "text"
+
+    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef", token_count=500)
 
     assert verdict.passed is True
-    assert len(qc_calls) == 1                 # floor met → normal QC ran
+    assert len(qc_calls) == 1
+    assert "SIZE — the task declares" not in qc_calls[0]   # no size block
 
 
 # ── Render-format deliverable normalization (#docx-redo-loop) ─────────────────

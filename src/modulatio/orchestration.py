@@ -846,26 +846,27 @@ def _goal_emits_artifact(item: dict) -> bool:
     )
 
 
-# Size-floor parsing (#size-floor) — a deliverable's expected size is a
-# deterministically checkable invariant, so the engine binds it (QC gate)
-# rather than leaving "is this substantial enough" to the model's judgment.
-# Artifact-AGNOSTIC by design: the engine measures every deliverable in the
-# same unit it already emits as MetricEvidence — ``token_count`` (a
-# whitespace-split count of the body, ``len(body.split())``) — and compares it
-# against a declared floor. It knows nothing about pages, chapters, or document
-# structure; "code for tokens and context, not for a book."
+# Size-band parsing (#size-floor → QC-judges-with-tolerance) — a deliverable's
+# expected size is a JUDGMENT call ("is this complete at this length?"), not a
+# deterministic truth, so the engine MEASURES + surfaces it and QC JUDGES within
+# a tolerance band — it does NOT mechanically gate. (Live 2026-06-02: a rigid
+# `token_count < floor` gate flogged producers into shrink-spirals — a 0-byte
+# tombstone, a 5,767w overshoot — because length adequacy is exactly the kind of
+# judgment "prose bends, engine binds" says to leave to the model.) The engine
+# still binds the genuine invariant: a near-empty / non-deliverable.
 #
-# The floor is read from a ``metric`` evidence_required the planner emits. We
-# parse what the LLM ACTUALLY produces, not an idealized format string — live,
-# the planner writes a size metric as e.g. {description:"Word count of X",
-# target:"3500-4500"} or {description:"size", target:"token_count >= 3500"}. So
-# a metric counts as a size floor when its description/target names a token or
-# word dimension (the two units that map ~1:1 to the whitespace token_count);
-# the floor number is then pulled from the target — the low end of a range, an
-# explicit ``>=`` / "at least", else the first integer. We only ever read a
-# floor the spec actually stated — never invent one — so a task with no declared
-# size metric is judged by QC on the usual axes.
+# Artifact-AGNOSTIC: measured in the same unit emitted as MetricEvidence —
+# ``token_count`` (whitespace ``len(body.split())``), ~1:1 with words for prose.
+# The band is read from a ``metric`` evidence_required the planner emits; we parse
+# what the LLM ACTUALLY produces (e.g. {description:"Word count of X",
+# target:"3500-4500"} or {target:"token_count >= 3500"}). A metric counts as a
+# size band when its description/target names a token/word dimension; the band is
+# the range (low,high), or (floor, None) for an open ``>=``. Never invented — a
+# task with no size metric is judged by QC on the usual axes only.
 _SIZE_DIMENSION_RE = re.compile(r"token|word", re.IGNORECASE)
+_SIZE_BETWEEN_RE = re.compile(
+    r"between\s+([\d,]{2,})\s+and\s+([\d,]{2,})", re.IGNORECASE
+)
 _SIZE_RANGE_RE = re.compile(r"([\d,]{2,})\s*(?:-|–|—|to)\s*([\d,]{2,})")
 _SIZE_ATLEAST_RE = re.compile(
     r"(?:>=|≥|of\s+at\s+least|at\s+least|min(?:imum)?(?:\s+of)?\s*:?)\s*([\d,]{2,})",
@@ -873,15 +874,32 @@ _SIZE_ATLEAST_RE = re.compile(
 )
 _SIZE_FIRST_INT_RE = re.compile(r"([\d,]{2,})")
 
+#: Default fractional discretion margin QC may exercise around a declared size
+#: band before it must act (Clif's calibration, 2026-06-02). Env-overridable.
+_SIZE_TOLERANCE = 0.10
 
-def _token_floor(task: "Task") -> int | None:
-    """The minimum output size (in the engine's whitespace ``token_count``
-    unit) a task's deliverable must meet, or ``None`` when no explicit floor is
-    declared. Read from a ``metric`` evidence_required whose description/target
-    names a token/word size dimension; the floor is the low end of a range
-    (``3500-4500`` → 3500), an explicit ``>=`` / "at least", else the first
-    number in the target. Artifact-agnostic — compares against token_count, no
-    page/document parsing."""
+
+def _size_tolerance() -> float:
+    """The size discretion margin (``MODULATIO_SIZE_TOLERANCE``, default
+    ``_SIZE_TOLERANCE``), clamped to ``[0.0, 0.5]``. The single calibration knob:
+    within ±this of the band QC may pass complete-but-off work with a note;
+    substantially outside it, QC must act."""
+    raw = os.environ.get("MODULATIO_SIZE_TOLERANCE")
+    if raw:
+        try:
+            return min(0.5, max(0.0, float(raw)))
+        except ValueError:
+            pass
+    return _SIZE_TOLERANCE
+
+
+def _token_band(task: "Task") -> "tuple[int, int | None] | None":
+    """The declared size band ``(floor, ceiling)`` for a task's deliverable, in
+    the engine's whitespace ``token_count`` unit, or ``None`` when no explicit
+    size metric is declared. A range ``3500-4500`` → ``(3500, 4500)``; an open
+    ``>= N`` / "at least N" / bare first int → ``(N, None)`` (no ceiling).
+    Read from a ``metric`` evidence_required whose description/target names a
+    token/word dimension. Artifact-agnostic — no page/document parsing."""
     def _int(s: str) -> int:
         return int(s.replace(",", ""))
 
@@ -894,15 +912,25 @@ def _token_floor(task: "Task") -> int | None:
         # this excludes item-count metrics (post_count, file_count, exit code).
         if not _SIZE_DIMENSION_RE.search(f"{description} {target}"):
             continue
-        # Pull the floor from the TARGET (the description may carry stray digits
-        # like "story-01"). Low end of a range, else >=/at-least, else first int.
-        m = _SIZE_RANGE_RE.search(target)
+        # Pull from the TARGET (the description may carry stray digits like
+        # "story-01"). A range gives both ends; >=/at-least/first-int gives floor.
+        m = _SIZE_BETWEEN_RE.search(target) or _SIZE_RANGE_RE.search(target)
         if m:
-            return min(_int(m.group(1)), _int(m.group(2)))
+            lo, hi = _int(m.group(1)), _int(m.group(2))
+            return (min(lo, hi), max(lo, hi))
         m = _SIZE_ATLEAST_RE.search(target) or _SIZE_FIRST_INT_RE.search(target)
         if m:
-            return _int(m.group(1))
+            return (_int(m.group(1)), None)
     return None
+
+
+def _token_floor(task: "Task") -> int | None:
+    """The declared minimum size (whitespace ``token_count``) for a task's
+    deliverable, or ``None``. Thin wrapper over :func:`_token_band` (the band's
+    low end), for size-aware guards that need only the floor (the §3 auto-redo
+    completeness check)."""
+    band = _token_band(task)
+    return band[0] if band else None
 
 
 #: Slice #9c sentinels for ``_run_escalation_attempt`` return values.
@@ -4252,34 +4280,58 @@ class Orchestrator:
         - ``None`` — verdict passed, or legacy QC that didn't classify
           (the orchestrator defaults absent classification to substantive).
         """
-        # Size-floor gate (engine binds): when the task carries an EXPLICIT
-        # token floor and the draft is under it, that's a deterministic
-        # defect — short-circuit to a fail verdict and route the redo to
-        # expand, without spending a QC model call on an obviously
-        # under-size draft. Fires ONLY when a real floor is declared, so a
-        # task with no stated size is still judged by QC on the usual axes
-        # (we enforce a spec, never invent one — over-mechanizing judgment is
-        # the opposite failure). Artifact-agnostic: compares the engine's
-        # token_count against the declared token floor, no document assumptions.
-        floor = _token_floor(task)
-        if floor is not None and token_count < floor:
+        body = draft_path.read_text()
+        band = _token_band(task)
+
+        # NEAR-EMPTY BACKSTOP (engine binds the genuine invariant only). Size
+        # adequacy is QC's JUDGMENT — but when the planner DECLARED a size band,
+        # an artifact far below it is a *missing/truncated deliverable*, not a
+        # short one, and that IS a deterministic defect (caught the 0-byte
+        # tombstone + a 0-word decompose-child live). Threshold is a TENTH of the
+        # floor (≥1, so a 0-token artifact is always caught) — proportional, so it
+        # never false-fails a complete small-band deliverable (a headline, an
+        # abstract); QC owns everything from "thin draft" upward. We do NOT
+        # re-introduce the rigid gate. With NO declared band the engine invents
+        # nothing: QC judges all sizes, including empties.
+        if band is not None and token_count < max(1, int(band[0] * 0.10)):
             verdict = AssertionEvidence(
-                producer="qc",
-                primary=False,
-                check=f"size floor: {token_count} tokens < required {floor}",
+                producer="qc", primary=False,
+                check=f"non-deliverable: {token_count} tokens (near-empty)",
                 passed=False,
             )
             notes = (
-                f"The deliverable is {token_count} tokens; the task's required "
-                f"floor is {floor}. Expand it to meet the target by developing "
-                f"real content — more depth, detail, and fuller treatment "
-                f"consistent with the established structure and the standards. "
-                f"Do NOT pad with filler, repetition, or restated material."
+                f"The artifact is near-empty ({token_count} tokens) — this reads "
+                f"as a missing or truncated deliverable, not merely a short one. "
+                f"Produce the actual content the task asks for."
             )
             return verdict, notes, "substantive"
 
-        del token_count  # past the floor gate, QC reasons over the body
-        body = draft_path.read_text()
+        # SIZE GUIDANCE for QC's judgment — populated ONLY when the task declares
+        # a size band; QC then judges length within the tolerance margin (it is
+        # NOT a mechanical gate). Empty otherwise → QC judges on the usual axes.
+        size_block = ""
+        if band is not None:
+            _f, _c = band
+            _tol = _size_tolerance()
+            _band_str = f"{_f}–{_c}" if _c else f"≥ {_f}"
+            size_block = (
+                f"SIZE — the task declares a target band of {_band_str} tokens "
+                f"(this draft: {token_count}; engine whitespace count, ~1 "
+                f"token/word). Tolerance ±{int(round(_tol * 100))}%. Judge "
+                f"size as part of fitness, with discretion:\n"
+                f"  - Within tolerance of the band AND complete/on-quality → "
+                f"PASS (you MAY note the minor deviation; do not fail for it).\n"
+                f"  - Substantially SHORT (well below the floor) and clearly thin "
+                f"→ send back (passed=false, substantive) to expand toward "
+                f"~{_f} by developing real content, never padding.\n"
+                f"  - Egregiously OVER the ceiling → you MAY note or ask to "
+                f"trim, but over-length is NOT a hard fail.\n"
+                f"  - If a prior redo already pushed expansion and the producer is "
+                f"at its ceiling but the work is COMPLETE → PASS. Do not spiral."
+            )
+
+        from modulatio import qc_persona as _qc_persona
+        persona_block = _qc_persona.load_qc_persona(self.project.code)
         domain_standards = standards.load(task.artifact_kind, project_code=self.project.code)
         history_hits: list[tuple[qc_history.VerdictRecord, float]] = []
         if self.qc_history_embedder is not None:
@@ -4304,12 +4356,14 @@ class Orchestrator:
             self.project.code, self.project.run_id
         )
         prompt = self._prompt("qc", _QC_REVIEW_PROMPT).format(
+            qc_persona=persona_block,
             task_id=task.id,
             artifact_kind=task.artifact_kind,
             task_description=task.description,
             draft_path=str(draft_path),
             checksum=checksum,
             body=body,
+            size_block=size_block,
             team_state=team_state_block_for_qc,
             standards=_format_standards_block(domain_standards),
             standing_notes=_format_standing_notes(standing_notes_raw),
@@ -8461,6 +8515,13 @@ the pipeline's job, not the producer's, and looping on it only burns the
 retry budget on a file that cannot exist yet. Judge the .md CONTENT
 against the goal, never its extension.
 
+LENGTH — QC owns length. QC has already judged the deliverable's size
+against its declared band, with discretion. Do NOT re-fail a goal for
+length ("too short", "not enough words") that QC passed — re-litigating
+QC's call is a loop, the same trap as the format rule above. A length
+reservation goes to the human in the Product Quality Report, never a
+"disappointed" verdict.
+
 Render one of three verdicts:
 - "satisfied": the right deliverable exists and QC passed it. Goal done.
 - "on_the_fence": the right deliverable exists but you hold reservations.
@@ -9107,6 +9168,8 @@ You're reviewing a producer's artifact against the task contract and
 domain standards. Your verdict is the quality gate — be substantive,
 evidence-based, fact-not-vibes.
 
+{qc_persona}
+
 Your mandate has two parts, both load-bearing:
   (a) QUALITY OF THE PRODUCT SHIPPED — artifact is sound against
       domain standards and fit for the intended consumer.
@@ -9144,6 +9207,8 @@ delimiters with this prompt's structure):
 >>>ARTIFACT-START<<<
 {body}
 >>>ARTIFACT-END<<<
+
+{size_block}
 
 Evaluate on these universal TQM axes — map the domain-specific rules
 above onto them, do not substitute for them:
