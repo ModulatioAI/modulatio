@@ -301,6 +301,9 @@ class ModulatioApp(App):
         ("f3", "focus_jobdrop", "COMPOSE"),
         # KICK OFF is the deliberate, separated job-launch — never Enter.
         ("f5", "kickoff", "KICK OFF"),
+        # STOP the running job — the operator's kill-switch (Fix C). Cooperative:
+        # the run halts at the next safe point, finishing the current step.
+        ("f8", "stop_job", "STOP"),
         # Select text in a TV stream (drag), then Ctrl+C to copy it to the OS
         # clipboard; Ctrl+V pastes the OS clipboard into the focused text field.
         # (Quit is Alt+Q / Ctrl+Q.)
@@ -482,6 +485,9 @@ class ModulatioApp(App):
             mode=mode,
             activity_callback=self._record_activity,
         )
+        # Fix C: expose this run's orchestrator so the STOP key (action_stop_job)
+        # can signal its abort_event from the main thread while we run here.
+        self._kickoff_orch = orch
         summary = orch.kickoff(objective, attachments=attachments)
         return {
             "mode": mode,
@@ -908,6 +914,31 @@ class ModulatioApp(App):
         """F5 → deliberately launch the job in the TEAM KICK OFF box. Enter
         never does this; only F5 or the KICK OFF button reaches here."""
         self._run_kickoff(self._kickoff_objective_text())
+
+    def _running_job_orchestrator(self):
+        """Fix C: the Orchestrator of the job running right now (via converse
+        run_job OR a direct kickoff), or None when nothing is in flight. The
+        engine's ``_kickoff_active`` flag is True for exactly the kickoff's
+        duration, so it's the reliable 'a job is running' signal."""
+        for orch in (getattr(self, "_conv_orch", None),
+                     getattr(self, "_kickoff_orch", None)):
+            if orch is not None and getattr(orch, "_kickoff_active", False):
+                return orch
+        return None
+
+    def action_stop_job(self) -> None:
+        """F8 → the operator's kill-switch. Signal the running job to stop; it
+        halts at the next safe point (finishing the current in-flight step, then
+        launching no new work) and returns a clean partial result. No-op when
+        nothing is running, so a stray F8 can't hurt."""
+        orch = self._running_job_orchestrator()
+        if orch is None:
+            return
+        orch.abort_event.set()  # thread-safe; the worker's kickoff loop reads it
+        self._set_kickoff_status(
+            "Stopping the run… finishing the current step, then halting. "
+            "The Leader will report what landed."
+        )
 
     def action_copy_text(self) -> None:
         """Ctrl+C → copy text from a TV to the clipboard so you can paste it

@@ -1691,6 +1691,13 @@ class Orchestrator:
         #: path. Display events stream live; STORE/artifact writes still buffer
         #: for the deterministic merge (correctness needs order; the TV needs now).
         self._activity_lock = threading.Lock()
+        #: Fix C (2026-06-03): the operator's kill-switch. The TUI (or any caller)
+        #: sets this from another thread to STOP a running job; the kickoff loops
+        #: check it at safe points (top of the goal loop, the wave loop, before a
+        #: sequential dispatch) and bail cleanly with a partial summary. In-flight
+        #: model calls finish (a blocking HTTP call can't be cut mid-stream) — no
+        #: NEW work launches. A fresh, unset Event per Orchestrator.
+        self.abort_event = threading.Event()
         #: Capability-floor caches (slice #9b) — instance-scoped so the
         #: plan-dispatch loop AND the concurrent wave scheduler share one
         #: floor lookup (Nemo impl-sweep B2: the wave scheduler must apply
@@ -5499,6 +5506,14 @@ class Orchestrator:
         )
         self._emit_ticket_opened(ticket, role="planner")
 
+    def _record_abort(self, summary: RunSummary) -> None:
+        """Fix C: record (once) that the operator stopped the run, so the partial
+        summary + the Leader's report make the halt explicit rather than reading
+        as a silent early finish."""
+        msg = "run stopped by the operator — remaining work not started"
+        if not any(msg in e for e in summary.errors):
+            summary.errors.append(msg)
+
     @staticmethod
     def _wave_global_cap() -> "int | None":
         raw = os.environ.get("MODULATIO_WAVE_GLOBAL_CAP")
@@ -5556,6 +5571,12 @@ class Orchestrator:
             store.save_task(self.project.code, task, run_id=self.project.run_id)
 
         while True:
+            # Fix C: operator kill-switch — stop launching new waves. The current
+            # wave's in-flight tasks already finished (we only reach the top of
+            # the loop between waves); remaining tasks stay PENDING.
+            if self.abort_event.is_set():
+                self._record_abort(summary)
+                break
             # 1. Cascade dep-failures: block any runnable task whose dep
             #    reached a terminal-fail state (no producer call burned).
             for t in tasks:
@@ -8541,6 +8562,10 @@ class Orchestrator:
         # the first audit pass caught. Bind only when run_id is set
         # (i.e., a real run workspace exists); test stubs without a
         # run_id keep their pre-binding behavior.
+        # Fix C: each run starts with a CLEAR abort state — the conversational
+        # orchestrator is reused across turns, so a stop from a prior run must not
+        # carry over and kill this one before it begins.
+        self.abort_event.clear()
         # §4 liveness: flag the run as in-flight so a concurrent team_status
         # (background kickoff + converse on another thread) never says "done"
         # mid-run. try/finally so the flag always clears, even on error.
@@ -8822,6 +8847,12 @@ class Orchestrator:
         # routing-reality live proof.) Fresh per kickoff (local to this method).
         assigned_load: dict[str, int] = {}
         for g in goals:
+            # Fix C: operator kill-switch. Stop launching new goals the moment
+            # the abort is set — in-flight work already finished, the rest stays
+            # PENDING, and the run returns a clean partial summary.
+            if self.abort_event.is_set():
+                self._record_abort(summary)
+                break
             # Slice #7b: _plan_tasks can raise _PlanError at parse
             # time for bad output_path / malformed artifacts entries.
             # No Task objects constructed in that case — ticket fires
@@ -9022,6 +9053,9 @@ class Orchestrator:
             for idx, t in enumerate(tasks):
                 if run_concurrent:
                     break  # concurrent path already executed all tasks
+                if self.abort_event.is_set():
+                    self._record_abort(summary)
+                    break  # Fix C: operator stopped the run — no new dispatch
                 if t.status is TaskStatus.BLOCKED:
                     # Already BLOCKED by capability ticket (#6d) — no
                     # producer call. Human resolves.
@@ -9101,7 +9135,13 @@ class Orchestrator:
             # verdict + human-facing report (slice #7d). Skipped when
             # no task completed — the existing capability + QC-reject
             # tickets already tell the human the goal didn't ship.
-            if any(t.status == TaskStatus.COMPLETED for t in tasks):
+            # Fix C: also skipped when the operator stopped the run — verify can
+            # render "disappointed" and trigger a from-scratch REDO (more
+            # producer calls), which would defeat the kill-switch.
+            if (
+                any(t.status == TaskStatus.COMPLETED for t in tasks)
+                and not self.abort_event.is_set()
+            ):
                 self._leader_verify_goal(g, tasks, summary)
             store.save_goal(self.project.code, g, run_id=self.project.run_id)
 
@@ -9115,8 +9155,9 @@ class Orchestrator:
         # Step 6 wind-down loop: drain pending decisions and re-execute
         # any goals reopened by decline. Bounded by ``_max_drain_iterations``
         # to prevent ping-pong if the user keeps declining; remaining
-        # undecided tickets carry to the next kickoff.
-        for _ in range(self._max_drain_iterations):
+        # undecided tickets carry to the next kickoff. Fix C: the operator's
+        # stop also halts the wind-down — no re-execution of reopened goals.
+        for _ in range(0 if self.abort_event.is_set() else self._max_drain_iterations):
             redo_goal_ids = self._drain_decided_tickets(summary)
             if not redo_goal_ids:
                 break

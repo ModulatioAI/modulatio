@@ -257,6 +257,34 @@ async def test_team_stream_one_agent_two_tasks_counts_one_producer(project_with_
         assert team.active_producer_names() == []
 
 
+async def test_f8_stop_job_signals_abort_on_running_orch(project_with_roster):
+    """Fix C: F8 / action_stop_job sets the running job's abort_event — but only
+    when a job is actually in flight (_kickoff_active), so a stray F8 is a no-op."""
+    import threading
+    from modulatio.tui.app import ModulatioApp
+
+    class _FakeOrch:
+        def __init__(self, active: bool):
+            self.abort_event = threading.Event()
+            self._kickoff_active = active
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Nothing running → no-op, no crash.
+        app.action_stop_job()
+        # A job in flight → abort is signalled.
+        running = _FakeOrch(active=True)
+        app._conv_orch = running
+        app.action_stop_job()
+        assert running.abort_event.is_set()
+        # An idle (cached) orch with no job → NOT signalled.
+        idle = _FakeOrch(active=False)
+        app._conv_orch = idle
+        app.action_stop_job()
+        assert not idle.abort_event.is_set()
+
+
 async def test_flip_stream_toggles_lanes(project_with_roster):
     """F2 / flip_stream toggles the active LEADER↔TEAM tab."""
     from textual.widgets import TabbedContent

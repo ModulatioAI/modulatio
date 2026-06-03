@@ -8392,3 +8392,50 @@ def test_format_team_capacity_sizes_fanout_to_producer_count():
     one = [_a("p1", "Solo"), _a("l", "Leader", tier="leader")]
     out1 = _format_team_capacity(one)
     assert "1 producer" in out1 and "parallelism isn't available" in out1
+
+
+# ── Fix C: operator kill-switch (cooperative abort) ──────────────────────────
+
+def test_kickoff_abort_event_stops_the_run_cleanly(project: Project):
+    """Fix C: setting orch.abort_event mid-run stops it at the next safe point —
+    no new tasks dispatch, the run returns a clean partial summary, and the halt
+    is recorded (not a silent early finish)."""
+    calls = {"n": 0}
+    holder: dict = {}
+
+    def drafter(prompt: str) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            holder["orch"].abort_event.set()  # operator hits STOP after task 1
+        return _drafter_stub(prompt)
+
+    runners = {
+        "leader": _leader_stub,
+        "planner": _planner_stub,   # makes 3 essay tasks
+        "drafter": drafter,
+        "qc": _qc_stub,
+    }
+    orch = Orchestrator(project, runners)
+    holder["orch"] = orch
+    summary = orch.kickoff("Draft 3 essays on a chosen theme")
+
+    # Stopped after the first task — not all three drafted.
+    assert calls["n"] < 3, f"abort should halt dispatch; drafted {calls['n']}"
+    # The halt is explicit in the summary.
+    assert any("stopped by the operator" in e for e in summary.errors)
+
+
+def test_kickoff_clears_stale_abort_at_start(project: Project):
+    """Fix C: the conversational orchestrator is reused across turns, so a stop
+    from a PRIOR run must not carry over — kickoff clears the abort at the start
+    and the new run completes normally."""
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    orch.abort_event.set()  # leftover from a prior (stopped) run
+    summary = orch.kickoff("Draft 3 essays on a chosen theme")
+    # Cleared at start → ran to completion, no abort note.
+    assert not any("stopped by the operator" in e for e in summary.errors)
+    assert not orch.abort_event.is_set()
+    assert len(summary.tasks) == 3
