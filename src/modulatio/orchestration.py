@@ -828,38 +828,56 @@ def _goal_emits_artifact(item: dict) -> bool:
 # Artifact-AGNOSTIC by design: the engine measures every deliverable in the
 # same unit it already emits as MetricEvidence — ``token_count`` (a
 # whitespace-split count of the body, ``len(body.split())``) — and compares it
-# against a declared token floor. It knows nothing about words, pages, chapters,
-# or document structure; "code for tokens and context, not for a book." The
-# planner (belt) translates whatever size the operator stated into this floor
-# (``token_count >= N``); ``word_count`` is accepted as a synonym because the
-# count is whitespace-split (≈ words for prose, but the same number for any
-# artifact class). We only ever read a floor the spec actually stated — never
-# invent one — so a task with no declared size is judged by QC on the usual axes.
-_SIZE_FLOOR_BETWEEN_RE = re.compile(
-    r"(?:token|word)_count\s+between\s+([\d,]+)\s+and\s+([\d,]+)", re.IGNORECASE
-)
-_SIZE_FLOOR_RE = re.compile(
-    r"(?:token|word)_count\s*(?:>=|≥|=|of\s+at\s+least|at\s+least|min(?:imum)?\s*:?)\s*([\d,]+)",
+# against a declared floor. It knows nothing about pages, chapters, or document
+# structure; "code for tokens and context, not for a book."
+#
+# The floor is read from a ``metric`` evidence_required the planner emits. We
+# parse what the LLM ACTUALLY produces, not an idealized format string — live,
+# the planner writes a size metric as e.g. {description:"Word count of X",
+# target:"3500-4500"} or {description:"size", target:"token_count >= 3500"}. So
+# a metric counts as a size floor when its description/target names a token or
+# word dimension (the two units that map ~1:1 to the whitespace token_count);
+# the floor number is then pulled from the target — the low end of a range, an
+# explicit ``>=`` / "at least", else the first integer. We only ever read a
+# floor the spec actually stated — never invent one — so a task with no declared
+# size metric is judged by QC on the usual axes.
+_SIZE_DIMENSION_RE = re.compile(r"token|word", re.IGNORECASE)
+_SIZE_RANGE_RE = re.compile(r"([\d,]{2,})\s*(?:-|–|—|to)\s*([\d,]{2,})")
+_SIZE_ATLEAST_RE = re.compile(
+    r"(?:>=|≥|of\s+at\s+least|at\s+least|min(?:imum)?(?:\s+of)?\s*:?)\s*([\d,]{2,})",
     re.IGNORECASE,
 )
+_SIZE_FIRST_INT_RE = re.compile(r"([\d,]{2,})")
 
 
 def _token_floor(task: "Task") -> int | None:
     """The minimum output size (in the engine's whitespace ``token_count``
     unit) a task's deliverable must meet, or ``None`` when no explicit floor is
-    declared. Read from a ``metric`` evidence_required target the planner
-    emits — ``token_count >= N`` / ``token_count between N and M`` → N
-    (``word_count`` accepted as a synonym). Metric-only, so the gate stays
-    artifact-agnostic — no prose/page parsing, no document assumptions."""
+    declared. Read from a ``metric`` evidence_required whose description/target
+    names a token/word size dimension; the floor is the low end of a range
+    (``3500-4500`` → 3500), an explicit ``>=`` / "at least", else the first
+    number in the target. Artifact-agnostic — compares against token_count, no
+    page/document parsing."""
+    def _int(s: str) -> int:
+        return int(s.replace(",", ""))
+
     for req in getattr(task, "evidence_required", None) or []:
         if str(getattr(req, "kind", "") or "").strip().lower() != "metric":
             continue
+        description = str(getattr(req, "description", "") or "")
         target = str(getattr(req, "target", "") or "")
-        if "count" not in target.lower():
+        # Size metric? description OR target must name a token/word dimension —
+        # this excludes item-count metrics (post_count, file_count, exit code).
+        if not _SIZE_DIMENSION_RE.search(f"{description} {target}"):
             continue
-        m = _SIZE_FLOOR_BETWEEN_RE.search(target) or _SIZE_FLOOR_RE.search(target)
+        # Pull the floor from the TARGET (the description may carry stray digits
+        # like "story-01"). Low end of a range, else >=/at-least, else first int.
+        m = _SIZE_RANGE_RE.search(target)
         if m:
-            return int(m.group(1).replace(",", ""))
+            return min(_int(m.group(1)), _int(m.group(2)))
+        m = _SIZE_ATLEAST_RE.search(target) or _SIZE_FIRST_INT_RE.search(target)
+        if m:
+            return _int(m.group(1))
     return None
 
 

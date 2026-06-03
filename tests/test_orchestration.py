@@ -7538,13 +7538,14 @@ def _task_with(description="deliverable", *, evidence_required=None):
     )
 
 
-def _floor_metric(target):
+def _floor_metric(target, description="size"):
     from modulatio.types import EvidenceRequirement
-    return EvidenceRequirement(kind="metric", description="size", target=target)
+    return EvidenceRequirement(kind="metric", description=description, target=target)
 
 
 def test_token_floor_reads_metric_target():
     from modulatio.orchestration import _token_floor
+    # canonical form from the prompt
     assert _token_floor(_task_with(evidence_required=[
         _floor_metric("token_count >= 3500")])) == 3500
     assert _token_floor(_task_with(evidence_required=[
@@ -7554,15 +7555,31 @@ def test_token_floor_reads_metric_target():
         _floor_metric("word_count >= 3000")])) == 3000
 
 
+def test_token_floor_reads_real_planner_format():
+    """Live repro (run 7c476b): the planner emits a size metric as a bare
+    range in the target with the dimension named in the description, e.g.
+    {description: "Word count of story-01.docx", target: "3500-4500"}. The
+    parser must read THAT (low end of the range = floor), not just the
+    idealized "token_count >= N" string — engine binds what the LLM produces."""
+    from modulatio.orchestration import _token_floor
+    real = _floor_metric("3500-4500", description="Word count of story-01.docx")
+    assert _token_floor(_task_with("Story 01", evidence_required=[real])) == 3500
+    # en-dash range + "words" suffix, description carries the dimension
+    rng = _floor_metric("3,500–4,500 words", description="length")
+    assert _token_floor(_task_with(evidence_required=[rng])) == 3500
+
+
 def test_token_floor_none_when_no_explicit_metric():
     from modulatio.orchestration import _token_floor
     # plain title, no metric → no floor (engine must not invent one)
     assert _token_floor(_task_with("Story 01 — The Last Library")) is None
-    # a non-size metric target is ignored
+    # a non-size metric (no token/word dimension) is ignored, even with digits
     assert _token_floor(_task_with("a task", evidence_required=[
-        _floor_metric("exit code 0")])) is None
+        _floor_metric("exit code 0", description="exit status")])) is None
+    assert _token_floor(_task_with("a task", evidence_required=[
+        _floor_metric("3-5", description="number of sections")])) is None
     # size stated only in prose (not a metric) does NOT gate — the planner is
-    # responsible for emitting the structured token floor (stays agnostic; no
+    # responsible for emitting the structured floor (stays agnostic; no
     # document/page parsing in the engine)
     assert _token_floor(_task_with("~3,500–4,500 words")) is None
     assert _token_floor(_task_with("12-15 pages")) is None
