@@ -545,6 +545,32 @@ def _format_available_skills(names: list[str]) -> str:
     )
 
 
+def _format_team_capacity(agents: list) -> str:
+    """Tell the planner how many PRODUCERS the roster has, so it sizes a
+    PARALLEL-DELIVERABLES fan-out to the team (Fix A, 2026-06-03). The Leader is
+    team-aware (§4); the planner should be too at fan-out time — idle producers
+    are wasted parallelism. ``agents`` is the project roster."""
+    producers = [
+        a for a in agents
+        if str(getattr(a, "tier", "producer") or "producer") == "producer"
+    ]
+    n = len(producers)
+    if n <= 1:
+        # 1 producer → nothing to parallelize; don't push a wide fan that just
+        # serializes on the one producer anyway.
+        return (
+            "Your team has 1 producer, so parallelism isn't available — still "
+            "fan independent deliverables one-per-item (right-sized tasks beat "
+            "one over-stuffed task), but don't inflate the count for parallelism."
+        )
+    names = ", ".join(str(getattr(a, "name", a.id)) for a in producers[:6])
+    return (
+        f"Your team has {n} producers ({names}) — when the work splits into "
+        f"independent deliverables, fan it into AT LEAST {n} parallel tasks so "
+        f"the whole team works at once; idle producers are wasted parallelism."
+    )
+
+
 def _format_available_capabilities(tags: list[str]) -> str:
     """Render the set of capability tags declared across the project
     roster for injection into the task-plan prompt. Capability tags
@@ -2541,6 +2567,7 @@ class Orchestrator:
             available_capabilities=_format_available_capabilities(
                 available_capabilities
             ),
+            team_capacity=_format_team_capacity(roster_agents),
             inbox_notes=self._inbox_block_for("leader", target_agent_id="leader"),
         )
         response = self._run("planner", prompt)
@@ -9365,7 +9392,22 @@ combines their artifacts. Signals: "all/each/every/top N",
 → cover a bounded BATCH now, name the rest as a deferred PHASE. Items
 not named yet ("the current SOTA in X") → a cheap SCOUT task enumerates
 them first, then the batch tasks build on it. Never one task that both
-discovers AND deep-dives the whole set.
+discovers AND deep-dives the whole set. (Grouping is for size-bounded
+GATHER work — for independent GENERATIVE deliverables, fan wide; see
+PARALLEL DELIVERABLES.)
+
+PARALLEL DELIVERABLES — when the goal yields N INDEPENDENT, substantial
+GENERATIVE deliverables (N stories, chapters, sections, profiles, per-item
+write-ups — each a STANDALONE output, not pieces of one document), do NOT
+write them as one task: that pins the whole set on a single producer,
+serializes it, and busts that producer's context. Emit ONE plan item with
+an `artifacts` array — ONE entry per deliverable — and the engine fans it
+into N INDEPENDENT tasks the producers run IN PARALLEL. Set the per-item
+size floor on the parent; sub-tasks inherit it. {team_capacity} Opposite of
+SWEEP grouping: SWEEP batches size-bounded gather items into a few tasks;
+PARALLEL DELIVERABLES fans independent generative outputs one-per-item so
+the whole team works at once. Signals: an enumerable list of deliverables
+each worth its own file ("write 6 stories", "a profile of each founder").
 
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
 events, any real-world factual claim): set the PRIMARY (first)

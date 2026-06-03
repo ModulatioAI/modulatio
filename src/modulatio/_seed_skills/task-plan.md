@@ -40,7 +40,23 @@ combines their artifacts. Signals: "all/each/every/top N",
 → cover a bounded BATCH now, name the rest as a deferred PHASE. Items
 not named yet ("the current SOTA in X") → a cheap SCOUT task enumerates
 them first, then the batch tasks build on it. Never one task that both
-discovers AND deep-dives the whole set.
+discovers AND deep-dives the whole set. (Grouping is for size-bounded
+GATHER work — for independent GENERATIVE deliverables, fan wide instead;
+see PARALLEL DELIVERABLES.)
+
+PARALLEL DELIVERABLES — when the goal yields N INDEPENDENT, substantial
+GENERATIVE deliverables (N stories, chapters, sections, profiles, per-item
+write-ups — each a STANDALONE output, not pieces of one document), do NOT
+write them as one task: that pins the whole set on a single producer,
+serializes it, and busts that producer's context. Emit ONE plan item with
+an `artifacts` array — ONE entry per deliverable — and the engine fans it
+into N INDEPENDENT tasks the producers run IN PARALLEL. Set the per-item
+size floor on the parent; the sub-tasks inherit it. {team_capacity} This
+is the opposite of SWEEP grouping: SWEEP batches size-bounded gather items
+into a few tasks; PARALLEL DELIVERABLES fans independent generative outputs
+one-per-item so the whole team works at once. Signals: an enumerable list
+of deliverables each worth its own file ("write 6 stories", "a profile of
+each of the 8 founders", "one section per chapter").
 
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
 events, any real-world factual claim): set the PRIMARY (first)

@@ -8373,3 +8373,24 @@ def test_wave_global_cap_clamps_both_ends(monkeypatch):
     assert Orchestrator._wave_global_cap() == 1024
     monkeypatch.setenv("MODULATIO_WAVE_GLOBAL_CAP", "  ")
     assert Orchestrator._wave_global_cap() is None
+
+
+def test_format_team_capacity_sizes_fanout_to_producer_count():
+    """Fix A: the planner is told the producer count so it fans independent
+    deliverables wide enough to use the whole team (idle producers = wasted
+    parallelism). 1 producer → no parallelism push."""
+    from modulatio.orchestration import _format_team_capacity
+    from modulatio.roster import Agent
+
+    def _a(aid, name, tier="producer"):
+        return Agent(id=aid, name=name, model="m", tier=tier)
+
+    two = [_a("p1", "Hal 9000"), _a("p2", "Larry"), _a("q", "QC", tier="qc"),
+           _a("l", "Leader", tier="leader")]
+    out = _format_team_capacity(two)
+    assert "2 producers" in out and "Hal 9000" in out and "Larry" in out
+    assert "AT LEAST 2 parallel" in out
+
+    one = [_a("p1", "Solo"), _a("l", "Leader", tier="leader")]
+    out1 = _format_team_capacity(one)
+    assert "1 producer" in out1 and "parallelism isn't available" in out1

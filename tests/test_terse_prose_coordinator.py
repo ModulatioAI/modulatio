@@ -118,18 +118,21 @@ def test_template_is_under_post_terse_threshold() -> None:
     the primary-vs-capability skill composition rule), and the SIZE-FLOOR
     rule (~690 chars — when the spec states a size, the planner stamps a
     `token_count >= N` metric floor on each unit so the engine's QC gate
-    rejects under-size drafts; artifact-agnostic, tokens not words). Each is
-    contract the planner must honor, not prose. Keep new additions justified
-    by contract; the cap catches padding regressions.
+    rejects under-size drafts; artifact-agnostic, tokens not words), and the
+    PARALLEL-DELIVERABLES rule (~870 chars, Fix A — fan N independent generative
+    deliverables into an `artifacts:[]` list so the engine expands them into
+    parallel tasks sized to the producer count, instead of one serial mega-task).
+    Each is contract the planner must honor, not prose. Keep new additions
+    justified by contract; the cap catches padding regressions.
 
     When a future PR applies terse-prose to Leader-reflect / Producer
     / QC, replicate this pattern with their respective baselines.
     """
     char_count = len(orchestration._TASK_PLAN_PROMPT)
-    assert char_count < 7300, (
+    assert char_count < 8300, (
         f"_TASK_PLAN_PROMPT is {char_count} chars — should stay under "
-        f"7,300 (terse baseline + sweep + rigorous-sourcing + web-search "
-        f"+ size-floor contracts)."
+        f"8,300 (terse baseline + sweep + rigorous-sourcing + web-search "
+        f"+ size-floor + parallel-deliverables contracts)."
     )
     # Lower bound too — a vacuous trim that drops the contract is
     # worse than no trim. 2,500 chars is a sanity floor.
@@ -155,6 +158,7 @@ def test_template_format_slots_intact() -> None:
         "{design_intent}",
         "{available_skills}",
         "{available_capabilities}",
+        "{team_capacity}",
     ):
         assert slot in body, f"missing format slot: {slot}"
 
@@ -170,6 +174,7 @@ def test_template_renders_with_format() -> None:
         design_intent="(no design intent)",
         available_skills="(no skills)",
         available_capabilities="(no caps)",
+        team_capacity="(2 producers)",
         inbox_notes="(no inbox notes this turn)",
     )
     assert "tst" in rendered

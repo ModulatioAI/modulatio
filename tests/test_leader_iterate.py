@@ -299,6 +299,7 @@ def test_plan_prompt_seed_body_renders() -> None:
         design_intent="(none)",
         available_skills="(none)",
         available_capabilities="(none)",
+        team_capacity="(2 producers)",
         inbox_notes="(no inbox notes this turn)",
     )
     # Decision schema + scope discipline rules present.
