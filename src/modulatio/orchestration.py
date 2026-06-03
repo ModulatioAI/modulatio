@@ -224,12 +224,36 @@ def _opt_str(v) -> str | None:
     return v if isinstance(v, str) else str(v)
 
 
+# Document deliverables are authored as Markdown; the export pipeline renders
+# .docx/.pdf/.pptx/etc. from the .md at DELIVERY — producers never emit binary
+# Office formats (task-plan: "NEVER ask a producer to emit PDF/DOCX directly").
+# So a goal/evidence path naming a render format points at a file that does NOT
+# exist during the run; live (run 6b3234) that made the Leader reject QC-passed
+# .md work and loop the goal to its retry cap. Normalize render-format
+# deliverable PATHS to their .md source so the run-time contract matches what
+# the team actually produces. Code/data artifacts (.py/.csv/.json/...) are
+# authored directly and are deliberately NOT touched.
+_RENDER_DELIVERABLE_RE = re.compile(
+    r"(\S+?)\.(?:docx|pdf|pptx|odt|rtf|epub)\b", re.IGNORECASE
+)
+
+
+def _normalize_render_paths(text: str | None) -> str | None:
+    """Rewrite document render-format deliverable paths (``X.docx`` → ``X.md``)
+    so a goal/task contract names the Markdown source the team authors, not the
+    rendered artifact that only exists post-delivery. None-safe; bare mentions
+    with no path stem ("a .docx file") are left for the Leader-verify rule."""
+    if not text:
+        return text
+    return _RENDER_DELIVERABLE_RE.sub(lambda m: f"{m.group(1)}.md", text)
+
+
 def _build_requirement(raw: dict) -> EvidenceRequirement:
     return EvidenceRequirement(
         kind=_coerce_evidence_kind(raw.get("kind", "report")),
         description=_opt_str(raw.get("description")) or "",
-        target=_opt_str(raw.get("target")),
-        source=_opt_str(raw.get("source")),
+        target=_normalize_render_paths(_opt_str(raw.get("target"))),
+        source=_normalize_render_paths(_opt_str(raw.get("source"))),
     )
 
 
@@ -2374,8 +2398,8 @@ class Orchestrator:
             g = Goal(
                 id=gid,
                 project_id=self.project.id,
-                description=item["description"],
-                success_criteria=item["success_criteria"],
+                description=_normalize_render_paths(item["description"]),
+                success_criteria=_normalize_render_paths(item["success_criteria"]),
                 evidence_required=[
                     _build_requirement(req)
                     for req in item.get("evidence_required", [])
@@ -8427,6 +8451,15 @@ verified each artifact against the domain standards and repaired what it
 could. Do NOT invent verification gates (plagiarism scans, sign-offs,
 "ready for review", approval signals) — the swarm has no such tools and
 they are not your job.
+
+FORMAT — deliverables are authored as Markdown; the engine renders
+.docx / .pdf / .pptx / etc. from the .md at DELIVERY, after the run. A
+present .md source file SATISFIES a goal that asks for a rendered format.
+NEVER render "disappointed" because a .docx/.pdf is "missing", or because
+the team produced .md instead of a binary Office file — emitting those is
+the pipeline's job, not the producer's, and looping on it only burns the
+retry budget on a file that cannot exist yet. Judge the .md CONTENT
+against the goal, never its extension.
 
 Render one of three verdicts:
 - "satisfied": the right deliverable exists and QC passed it. Goal done.

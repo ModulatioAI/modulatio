@@ -7633,3 +7633,48 @@ def test_qc_review_passes_through_when_floor_met(project, tmp_path):
 
     assert verdict.passed is True
     assert len(qc_calls) == 1                 # floor met → normal QC ran
+
+
+# ── Render-format deliverable normalization (#docx-redo-loop) ─────────────────
+# Producers author Markdown; the engine renders .docx/.pdf/etc. at delivery. A
+# goal whose evidence demands a .docx file therefore names a file that doesn't
+# exist during the run — live (run 6b3234) that made the Leader reject QC-passed
+# .md work and loop the goal to its retry cap. Normalize render-format paths to
+# their .md source at goal/evidence construction so the contract matches reality.
+
+def test_normalize_render_paths_rewrites_only_render_formats():
+    from modulatio.orchestration import _normalize_render_paths
+    # document render formats → .md
+    assert _normalize_render_paths("out/intro.docx") == "out/intro.md"
+    assert _normalize_render_paths("reports/Q3.pdf") == "reports/Q3.md"
+    assert _normalize_render_paths("deck.pptx") == "deck.md"
+    # code/data authored directly → untouched
+    assert _normalize_render_paths("src/app.py") == "src/app.py"
+    assert _normalize_render_paths("data/out.csv") == "data/out.csv"
+    # bare mention with no path stem → left for the Leader-verify rule
+    assert _normalize_render_paths("deliver as a .docx file") == "deliver as a .docx file"
+    # None-safe
+    assert _normalize_render_paths(None) is None
+
+
+def test_build_requirement_normalizes_docx_target():
+    from modulatio.orchestration import _build_requirement
+    # the exact shape that wedged run 6b3234
+    req = _build_requirement({
+        "kind": "artifact",
+        "description": "Front matter introduction .docx file",
+        "target": "scifi-anthology/00_Front_Matter_Introduction.docx",
+        "source": "Word count extracted from the .docx file",
+    })
+    assert req.target == "scifi-anthology/00_Front_Matter_Introduction.md"
+    # bare ".docx file" in source has no stem → untouched (verify rule covers it)
+    assert req.source == "Word count extracted from the .docx file"
+
+
+def test_leader_verify_prompt_carries_the_md_satisfies_render_rule():
+    """The behavioral backstop: even if a render-format demand survives into the
+    goal, the verify prompt tells the Leader a present .md satisfies it."""
+    from modulatio import orchestration
+    body = orchestration._LEADER_VERIFY_PROMPT.lower()
+    assert ".md" in body and "render" in body
+    assert "satisfies" in body
