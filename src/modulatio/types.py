@@ -434,18 +434,15 @@ class Project(BaseModel):
     #: breaker's hard backstop derives from the soft cap, so this is the one
     #: knob an operator turns. Bound-checked at construction.
     output_budgets: dict[str, int] = Field(default_factory=dict)
-    #: Core-rebuild B4 / concurrent-waves eval (2026-05-29): make the
-    #: concurrent wave executor config-addressable so the A/B harness can
-    #: vary it as a dimension (previously env-only via
-    #: ``MODULATIO_CONCURRENT_WAVES``). Semantics in
-    #: ``Orchestrator._concurrent_waves_enabled`` are config-OR-env: EITHER
-    #: this field being True OR the env var == "1" turns concurrency ON, so
-    #: the env override is preserved and config is an independent on-switch.
-    #: Default ``False`` — the sequential loop stays the production default;
-    #: flipping this default ON is a SEPARATE, eval-gated decision
-    #: (build != flip), pending the wave-path quality eval + reviewer
-    #: sign-off.
-    concurrent_waves_enabled: bool = False
+    #: §5 (2026-06-03): the concurrent wave executor is ON by default —
+    #: parallelism is the point of a swarm. This field is the per-project
+    #: switch the A/B harness still varies as a dimension: when the
+    #: ``MODULATIO_CONCURRENT_WAVES`` env var is unset, this field decides
+    #: (True → concurrent, False → sequential), so a harness arm can force a
+    #: sequential run by setting it False. The env var overrides the field in
+    #: both directions (``=0`` is the absolute kill-switch, ``=1`` forces on).
+    #: See ``Orchestrator._concurrent_waves_enabled``.
+    concurrent_waves_enabled: bool = True
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

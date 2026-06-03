@@ -93,6 +93,7 @@ class StreamStatus(Static):
         self._done = False
         self._frame = 0
         self._started_at = 0.0
+        self._working = 1          # §5: producers in flight (TEAM lane)
 
     def on_mount(self) -> None:
         # 0.1s drives the spinner; the elapsed counter reads a monotonic clock.
@@ -103,13 +104,18 @@ class StreamStatus(Static):
         self._frame = (self._frame + 1) % len(_SPINNER)
         self._render_status()
 
-    def set_activity(self, phase: str, actor: str | None = None) -> None:
+    def set_activity(
+        self, phase: str, actor: str | None = None, *, working: int = 1,
+    ) -> None:
         """Show the verb for the current phase, spinner running. ``actor`` is
-        the worker's user-given name (used on the TEAM lane)."""
+        the worker's user-given name (used on the TEAM lane). ``working`` is the
+        number of producers in flight — when > 1 the TEAM lane shows the parallel
+        count so the operator can see the concurrency (§5)."""
         if self._verb is None or self._error is not None or self._done:
             self._started_at = time.monotonic()
         self._verb = _verb_for(phase)
         self._actor = actor
+        self._working = max(1, working)
         self._error = None
         self._done = False
         self._render_status()
@@ -144,6 +150,11 @@ class StreamStatus(Static):
             if self._lane == "team" and self._actor:
                 phrase = f"{self._actor} is {self._verb}"
             text.append(f"{phrase}…", style="#ffb000")
+            # §5: surface parallelism — N producers working at once.
+            if self._lane == "team" and self._working > 1:
+                text.append(
+                    f"  · {self._working} producers working", style="bold #ff6b35",
+                )
             elapsed = time.monotonic() - self._started_at
             if elapsed >= _ELAPSED_AFTER:
                 text.append(f"  ({int(elapsed)}s)", style="#b08858")

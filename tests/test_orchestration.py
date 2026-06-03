@@ -6526,6 +6526,104 @@ def test_merge_task_result_folds_qc_authored_fixes(project: Project):
     assert summary.qc_authored_fixes.count("M-T-009") == 1
 
 
+def test_merge_task_result_persists_decompose_children(project: Project):
+    """§5: a worker that decomposed a context-overflowing task creates child
+    tasks in isolation; they must ride back and get persisted + folded into
+    summary.tasks on the main thread (else a child built under a concurrent wave
+    is invisible to the run)."""
+    from modulatio.orchestration import (
+        RunSummary, TaskExecutionResult, _merge_task_result,
+    )
+    summary = RunSummary(project=project)
+    parent = _wave_task("M-T-001")
+    c1 = _wave_task("M-T-001-a")
+    c2 = _wave_task("M-T-001-b")
+    res = TaskExecutionResult(task=parent, child_tasks=[c1, c2])
+    saved: list = []
+    merged: set = set()
+    _merge_task_result(res, summary, save_task=saved.append, merged_ids=merged)
+    # parent + both children persisted and summarized
+    assert saved == [parent, c1, c2]
+    assert parent in summary.tasks and c1 in summary.tasks and c2 in summary.tasks
+    # idempotent — re-merge doesn't double the children
+    _merge_task_result(res, summary, save_task=saved.append, merged_ids=merged)
+    assert saved == [parent, c1, c2]
+    assert summary.tasks.count(c1) == 1
+
+
+def test_persist_child_task_defers_in_isolated_worker(project: Project, tmp_path, monkeypatch):
+    """§5: _persist_child_task buffers the child for the main-thread merge when a
+    worker is active (no worker-side store write), and saves immediately on the
+    sequential path."""
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("CHD", "child", "obj")
+    from modulatio.types import Project as _P
+    proj = _P(code="CHD", name="Child", objective="obj", leader_model="stub",
+              wiki_path=str(tmp_path / "chd"))
+    orch = Orchestrator(proj, {"leader": _leader_stub})
+    child = _wave_task("CHD-T-001-a")
+
+    # In a worker (child_tasks buffer present): buffered, NOT written to store.
+    orch._tls.child_tasks = []
+    orch._persist_child_task(child)
+    assert orch._tls.child_tasks == [child]
+    assert vault_task_missing(orch, "CHD-T-001-a")
+    # Calling again coalesces (last-state-wins by id), still one entry.
+    orch._persist_child_task(child)
+    assert orch._tls.child_tasks == [child]
+    orch._tls.child_tasks = None
+
+    # Sequential path (no buffer): persisted immediately.
+    orch._persist_child_task(child)
+    from modulatio import store
+    assert store.get_task("CHD", "CHD-T-001-a") is not None
+
+
+def vault_task_missing(orch, task_id) -> bool:
+    from modulatio import store
+    return store.get_task(orch.project.code, task_id) is None
+
+
+def test_execute_task_isolated_carries_decompose_children_back(
+    project: Project, tmp_path, monkeypatch,
+):
+    """§5 end-to-end wiring: a worker that creates decompose children buffers
+    them (no worker-side store write) and rides them back in
+    result.child_tasks — proving the seed→drain→result path, not just the merge
+    fold."""
+    from modulatio import vault, store
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project as _P, TaskStatus
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("WCH", "worker child", "obj")
+    vault.init_run("WCH", "run-1", "obj")
+    proj = _P(code="WCH", name="WC", objective="obj", leader_model="stub",
+              wiki_path=str(tmp_path / "wch"), run_id="run-1")
+    orch = Orchestrator(proj, {
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    children = [_wave_task("WCH-T-001-a"), _wave_task("WCH-T-001-b")]
+
+    def fake_redo(self, t, summary, initial_corrective_notes=""):
+        # simulate the context-overflow decompose path persisting children
+        # from inside the worker via the real helper.
+        for c in children:
+            self._persist_child_task(c)
+        t.status = TaskStatus.COMPLETED
+
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo", fake_redo)
+    result = orch._execute_task_isolated(_wave_task("WCH-T-001"))
+
+    assert [c.id for c in result.child_tasks] == ["WCH-T-001-a", "WCH-T-001-b"]
+    # the worker did NOT write the children to the shared store (deferred)
+    assert store.get_task("WCH", "WCH-T-001-a") is None
+    assert store.get_task("WCH", "WCH-T-001-b") is None
+    # the buffer was torn down cleanly
+    assert getattr(orch._tls, "child_tasks", None) is None
+
+
 def test_merge_task_result_flushes_activity_in_order(project: Project):
     from modulatio.orchestration import (
         RunSummary, TaskExecutionResult, _merge_task_result,
@@ -6658,34 +6756,32 @@ def test_concurrent_waves_runs_independent_tasks(project: Project, monkeypatch):
     )
 
 
-def test_concurrent_waves_enabled_config_or_env(project: Project, monkeypatch):
-    """Config-OR-env (2026-05-29): the wave executor is enabled when EITHER
-    ``project.concurrent_waves_enabled`` is True OR
-    ``MODULATIO_CONCURRENT_WAVES=1``. Default is OFF (sequential stays the
-    production default); the env var is an independent override; ``None``
-    falls back to env-only. This is the config-addressability the A/B harness
-    relies on to vary concurrency as a dimension."""
-    monkeypatch.delenv("MODULATIO_CONCURRENT_WAVES", raising=False)
+def test_concurrent_waves_enabled_defaults_on_with_kill_switch(project: Project, monkeypatch):
+    """§5: the wave executor is ON BY DEFAULT (parallelism is the point of a
+    swarm). With the env unset the project field decides (default True), so the
+    A/B harness can force a sequential arm with field=False;
+    ``MODULATIO_CONCURRENT_WAVES=0`` is the absolute kill-switch; ``=1`` forces on."""
     f = Orchestrator._concurrent_waves_enabled
-    proj_off = project  # fixture carries the field's default
-    proj_on = project.model_copy(update={"concurrent_waves_enabled": True})
+    proj_on = project  # field defaults True now
+    proj_off = project.model_copy(update={"concurrent_waves_enabled": False})
 
-    assert proj_off.concurrent_waves_enabled is False  # field default OFF
+    assert proj_on.concurrent_waves_enabled is True  # field default ON
 
-    # env unset → config decides
-    assert f(None) is False
-    assert f(proj_off) is False
-    assert f(proj_on) is True             # config on-switch
+    # env unset → the field decides (harness dimension)
+    monkeypatch.delenv("MODULATIO_CONCURRENT_WAVES", raising=False)
+    assert f(None) is True                 # no project → default ON
+    assert f(proj_on) is True              # field on
+    assert f(proj_off) is False            # harness sequential arm
 
-    # env=1 → on regardless of config (independent override)
+    # env=1 → explicit on (overrides a field-off arm)
     monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "1")
     assert f(proj_off) is True
     assert f(None) is True
 
-    # only "1" means on; env="0" is not a force-OFF, so config still turns it on
+    # env=0 → kill-switch, absolute (forces sequential even with the field on)
     monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "0")
-    assert f(proj_on) is True
-    assert f(proj_off) is False
+    assert f(proj_on) is False
+    assert f(None) is False
 
 
 def test_concurrent_waves_blocks_artifact_path_conflict(project: Project, monkeypatch):

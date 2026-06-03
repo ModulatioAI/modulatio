@@ -796,17 +796,32 @@ class ModulatioApp(App):
         """
         for log in self.query(ActivityLog):
             log.add_event(event)
+        team_stream = None
         for stream in self.query(StreamView):
             stream.add_event(event)
+            if stream.lane_roles == TEAM_ROLES:
+                team_stream = stream
+        # §5: a new run starts with a clean concurrency board (the leader-role
+        # kickoff events don't reach the TEAM lane's own tracker).
+        if team_stream is not None and event.phase in ("kickoff_started", "kickoff_ended"):
+            team_stream.active_tasks.clear()
         # Live status lines: the leader-lane phase drives the LEADER status;
-        # team-lane phases the TEAM status, named by the worker.
+        # team-lane phases the TEAM status, named by the worker. §5: when more
+        # than one producer is in flight, surface the parallel count so the
+        # operator can SEE the concurrency (invisible parallelism isn't shippable).
         if event.role in LEADER_ROLES:
             self._set_lane_status("stream-leader-status", event.phase)
         elif event.role in TEAM_ROLES:
             actor = self._agent_name(event.agent_id or event.role) or _humanize(
                 event.agent_id or event.role
             )
-            self._set_lane_status("stream-team-status", event.phase, actor)
+            working = (
+                len(team_stream.active_producer_names())
+                if team_stream is not None else 1
+            )
+            self._set_lane_status(
+                "stream-team-status", event.phase, actor, working=working,
+            )
         # A logged ticket is a problem the Leader will relay — light the
         # orange lamp so the operator notices even from the factory floor.
         if event.phase == "ticket_opened":
@@ -1001,9 +1016,12 @@ class ModulatioApp(App):
 
     def _set_lane_status(
         self, status_id: str, phase: str, actor: str | None = None,
+        *, working: int = 1,
     ) -> None:
         try:
-            self.query_one(f"#{status_id}", StreamStatus).set_activity(phase, actor)
+            self.query_one(f"#{status_id}", StreamStatus).set_activity(
+                phase, actor, working=working,
+            )
         except Exception:
             pass
 

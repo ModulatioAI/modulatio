@@ -52,6 +52,7 @@ _PHASE: dict[str, tuple[str, str]] = {
     "qc_started": ("○", "is reviewing"),
     "qc_verdict": ("✓", "returned a QC verdict"),
     "task_completed": ("✓", "finished a task"),
+    "task_settled": ("■", "wrapped up a task"),
     "ticket_opened": ("!", "opened a ticket"),
     "scope_drift_warning": ("!", "flagged scope drift"),
 }
@@ -101,6 +102,15 @@ class StreamView(VerticalScroll):
         #: the Leader's most recent reply, kept so Ctrl+C can copy it even when
         #: nothing is drag-selected (a never-a-dead-key fallback).
         self.last_leader_text: str = ""
+        #: §5 — tasks in flight on THIS lane (task_id → (agent_id, display name)),
+        #: so the TV can show parallelism the operator would otherwise not see
+        #: ("3 producers working: …"). Keyed by TASK so a multi-capacity agent
+        #: running two tasks doesn't collapse to one and vanish early; the
+        #: producer COUNT dedupes by agent_id. A task is in flight from
+        #: ``task_dispatched`` to its terminal event (``task_completed`` on
+        #: success, ``task_settled`` on a worker-path failure); the run-boundary
+        #: reset (in the app) clears the board. Insertion order = dispatch order.
+        self.active_tasks: dict[str, tuple[str, str]] = {}
 
     # ── line plumbing ───────────────────────────────────────────────────
 
@@ -145,11 +155,50 @@ class StreamView(VerticalScroll):
         self._append(line)
         self.last_leader_text = text
 
+    def _track_concurrency(self, event: ActivityEvent) -> None:
+        """Keep ``active_tasks`` current so the lane can report how many
+        producers are working at once (§5 — visible parallelism). Dispatch puts
+        a task on the board; its terminal event (``task_completed`` success /
+        ``task_settled`` failure) takes it off. Keyed by task_id so two tasks on
+        one agent stay distinct and a terminal-failed task never lingers. (The
+        run-boundary reset lives in the app, which sees the leader-role kickoff
+        events this lane filters out.)"""
+        if not event.task_id:
+            return
+        if event.phase == "task_dispatched":
+            self.active_tasks[event.task_id] = (
+                event.agent_id or event.role,
+                self._display_name(event.agent_id, event.role),
+            )
+        elif event.phase in ("task_completed", "task_settled"):
+            self.active_tasks.pop(event.task_id, None)
+
+    def active_producer_names(self) -> list[str]:
+        """Display names of the DISTINCT producers in flight on this lane (an
+        agent running two tasks counts once), dispatch order — the data behind
+        the 'N producers working' indicator."""
+        names: list[str] = []
+        seen: set[str] = set()
+        for agent_id, name in self.active_tasks.values():
+            if agent_id not in seen:
+                seen.add(agent_id)
+                names.append(name)
+        return names
+
+    def concurrency_label(self) -> str:
+        """A one-line 'N producers working: a, b, c' when more than one producer
+        is in flight, else '' (no parallelism to surface)."""
+        names = self.active_producer_names()
+        if len(names) <= 1:
+            return ""
+        return f"{len(names)} producers working: " + ", ".join(names)
+
     def add_event(self, event: ActivityEvent) -> None:
         """Record + render an event when it belongs to this lane."""
         if event.role not in self.lane_roles:
             return
         self.events.append(event)
+        self._track_concurrency(event)
         glyph, verb = _PHASE.get(event.phase, ("·", event.phase))
         name = self._display_name(event.agent_id, event.role)
         line = Text()

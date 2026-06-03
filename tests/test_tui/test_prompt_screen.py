@@ -169,6 +169,94 @@ async def test_events_split_into_leader_and_team_lanes(project_with_roster):
         assert team_roles == ["drafter", "qc"]
 
 
+async def test_team_stream_surfaces_parallel_producers(project_with_roster):
+    """§5: when more than one producer is in flight, the TEAM lane reports the
+    parallel count so the operator can SEE the concurrency (invisible
+    parallelism isn't shippable)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+    from modulatio.tui.widgets.stream_status import StreamStatus
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # two producers pick up tasks at the same time
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="scribe", task_id="T-2"))
+        await pilot.pause()
+        team = {s.id: s for s in app.query(StreamView)}["stream-team"]
+        assert len(team.active_producer_names()) == 2
+        assert "2 producers working" in team.concurrency_label()
+        status = app.query_one("#stream-team-status", StreamStatus)
+        assert status._working == 2
+
+        # one finishes → a single worker, no parallel banner
+        app._record_activity_impl(
+            _ev("drafter", "task_completed", agent_id="writer", task_id="T-1"))
+        await pilot.pause()
+        assert len(team.active_producer_names()) == 1
+        assert team.concurrency_label() == ""
+
+        # a new run clears the board (leader-role kickoff event)
+        app._record_activity_impl(_ev("leader", "kickoff_started"))
+        await pilot.pause()
+        assert team.active_producer_names() == []
+
+
+async def test_team_stream_clears_terminal_failed_task(project_with_roster):
+    """§5 (review fix): a task that ends in a worker-path FAILURE emits
+    ``task_settled`` (not ``task_completed``), so its producer must leave the
+    'N working' board rather than linger and over-count."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="scribe", task_id="T-2"))
+        await pilot.pause()
+        team = {s.id: s for s in app.query(StreamView)}["stream-team"]
+        assert len(team.active_producer_names()) == 2
+        # T-1 terminal-fails (settled, never completed) → its producer leaves
+        app._record_activity_impl(
+            _ev("drafter", "task_settled", agent_id="writer", task_id="T-1"))
+        await pilot.pause()
+        assert len(team.active_producer_names()) == 1  # writer gone, scribe stays
+        assert team.concurrency_label() == ""
+
+
+async def test_team_stream_one_agent_two_tasks_counts_one_producer(project_with_roster):
+    """§5 (review fix): a single agent running two tasks (capacity_cap≥2) counts
+    as ONE producer and doesn't vanish when only its first task finishes."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-2"))
+        await pilot.pause()
+        team = {s.id: s for s in app.query(StreamView)}["stream-team"]
+        assert len(team.active_producer_names()) == 1  # one producer, two tasks
+        # first task done — the agent is still working the second, not gone
+        app._record_activity_impl(
+            _ev("drafter", "task_completed", agent_id="writer", task_id="T-1"))
+        await pilot.pause()
+        assert len(team.active_producer_names()) == 1
+        app._record_activity_impl(
+            _ev("drafter", "task_completed", agent_id="writer", task_id="T-2"))
+        await pilot.pause()
+        assert team.active_producer_names() == []
+
+
 async def test_flip_stream_toggles_lanes(project_with_roster):
     """F2 / flip_stream toggles the active LEADER↔TEAM tab."""
     from textual.widgets import TabbedContent

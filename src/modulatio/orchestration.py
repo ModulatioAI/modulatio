@@ -155,6 +155,11 @@ class TaskExecutionResult:
     #: plan-order conflict policy (NOT scheduler order). Excludes incidental
     #: run_shell byproducts (pycache, test scratch) — only declared artifacts.
     artifact_writes: list[str] = field(default_factory=list)
+    #: §5: decompose children a worker created (context-overflow → split inline).
+    #: A worker must not write the shared store, so children ride back here for
+    #: the MAIN THREAD to persist + fold into ``summary.tasks`` at merge — else a
+    #: child built under a concurrent wave would be invisible to the run summary.
+    child_tasks: "list[Task]" = field(default_factory=list)
 
 
 def _merge_task_result(
@@ -190,6 +195,18 @@ def _merge_task_result(
         save_task(result.task)
     if result.task not in summary.tasks:
         summary.tasks.append(result.task)
+    # §5: persist + summarize decompose children the worker created in
+    # isolation (the worker deferred their store writes to here). Deterministic
+    # — children ride in the result, merged in the same task-id order as parents.
+    for child in result.child_tasks:
+        if merged_ids is not None and child.id in merged_ids:
+            continue
+        if merged_ids is not None:
+            merged_ids.add(child.id)
+        if save_task is not None:
+            save_task(child)
+        if child not in summary.tasks:
+            summary.tasks.append(child)
     for d in result.drafts:
         if d not in summary.drafts:
             summary.drafts.append(d)
@@ -5057,6 +5074,22 @@ class Orchestrator:
             return
         store.save_task(self.project.code, task, run_id=self.project.run_id)
 
+    def _persist_child_task(self, child: Task) -> None:
+        """Persist a decompose child (§5). In an isolated worker, buffer it for
+        the main-thread merge (which saves it + folds it into ``summary.tasks``)
+        so the worker never writes the shared store; on the sequential path,
+        save immediately (unchanged). Last-state-wins by child id in the buffer,
+        so the pre-run and post-run calls coalesce to one final entry."""
+        buf = getattr(self._tls, "child_tasks", None)
+        if buf is None:
+            store.save_task(self.project.code, child, run_id=self.project.run_id)
+            return
+        for i, c in enumerate(buf):
+            if c.id == child.id:
+                buf[i] = child
+                return
+        buf.append(child)
+
     def _execute_task_isolated(
         self, t: Task, initial_corrective_notes: str = "",
     ) -> TaskExecutionResult:
@@ -5081,6 +5114,7 @@ class Orchestrator:
         buffer: list = []
         deferred: list = []
         artifact_writes: list[str] = []
+        child_tasks: list = []  # §5: decompose children created in isolation
         # #151/e2e Blocker 2: isolate this worker's artifact writes to a
         # per-task staging tree (seeded with the already-merged shared tree
         # so the producer keeps prior context and QC can run cross-file).
@@ -5092,14 +5126,26 @@ class Orchestrator:
         self._tls.activity_buffer = buffer
         self._tls.deferred_writes = deferred
         self._tls.artifact_writes = artifact_writes
+        self._tls.child_tasks = child_tasks
         self._tls.staging_root = staging
         self._tls.tool_registry_override = self._staging_tool_registry(staging)
         try:
             self._run_task_with_redo(t, local_summary, initial_corrective_notes)
+            # §5: on the concurrent path a terminal-FAILED task emits no
+            # ``task_completed``, so the TV's "N producers working" indicator
+            # would keep counting it. Emit a terminal ``task_settled`` (buffered,
+            # replayed at merge) so the producer leaves the board. Success
+            # already emitted ``task_completed`` — don't double up.
+            if t.status != TaskStatus.COMPLETED:
+                self._emit_activity(
+                    role=self.default_producer_role, phase="task_settled",
+                    task_id=t.id, agent_id=t.assigned_agent_id,
+                )
         finally:
             self._tls.activity_buffer = None
             self._tls.deferred_writes = None
             self._tls.artifact_writes = None
+            self._tls.child_tasks = None
             self._tls.staging_root = None
             self._tls.tool_registry_override = None
         return TaskExecutionResult(
@@ -5111,25 +5157,34 @@ class Orchestrator:
             qc_authored_fixes=list(local_summary.qc_authored_fixes),
             staging_root=staging,
             artifact_writes=artifact_writes,
+            child_tasks=child_tasks,
         )
 
     @staticmethod
     def _concurrent_waves_enabled(project: "Project | None" = None) -> bool:
-        """Core rebuild B4: the concurrent wave executor is opt-in and ships
-        OFF by default — the sequential loop stays the production path while
-        concurrency is hardened (full store-write deferral on the rare block
-        paths + capability-floor in wave re-allocation are the pre-default
-        work).
+        """§5 (2026-06-03): the concurrent wave executor is now ON BY DEFAULT —
+        parallelism is the point of a swarm. The isolation/deferral/deterministic-
+        merge machinery is hardened (per-task staging + main-thread merge, every
+        worker-path store write deferred incl. decompose children), so the
+        parallel path is the production path.
 
-        Config-OR-env (concurrent-waves eval, 2026-05-29): concurrency is
-        enabled when EITHER ``project.concurrent_waves_enabled`` is True OR
-        ``MODULATIO_CONCURRENT_WAVES=1``. The config field lets the A/B
-        harness vary concurrency as a dimension; the env var is preserved as
-        an independent override. ``project=None`` falls back to env-only
-        (back-compat for any caller without a project in hand)."""
-        if project is not None and project.concurrent_waves_enabled:
+        Precedence:
+        - ``MODULATIO_CONCURRENT_WAVES=0`` → OFF (the kill-switch; force sequential
+          for debugging or a known-bad model). Absolute — overrides the field.
+        - ``MODULATIO_CONCURRENT_WAVES=1`` → ON (explicit).
+        - env unset → the project field decides (default True = ON). The A/B
+          harness varies this field to get a sequential arm (field False).
+
+        ``project=None`` falls back to env/default-ON (back-compat for any caller
+        without a project in hand)."""
+        env = os.environ.get("MODULATIO_CONCURRENT_WAVES")
+        if env == "0":
+            return False  # kill-switch
+        if env == "1":
             return True
-        return os.environ.get("MODULATIO_CONCURRENT_WAVES") == "1"
+        if project is not None:
+            return project.concurrent_waves_enabled  # default True
+        return True  # no project → default ON
 
     def _iterate_enabled(self) -> bool:
         """Brick C: the between-task iterate gate. Runs by DEFAULT when the
@@ -6300,9 +6355,9 @@ class Orchestrator:
         )
         all_ok = True
         for child in children:
-            store.save_task(self.project.code, child, run_id=self.project.run_id)
+            self._persist_child_task(child)  # §5: deferral-aware (worker-safe)
             self._run_task_with_redo(child, summary)
-            store.save_task(self.project.code, child, run_id=self.project.run_id)
+            self._persist_child_task(child)
             if child.status is not TaskStatus.COMPLETED:
                 all_ok = False
         if all_ok:
