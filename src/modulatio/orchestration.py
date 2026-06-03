@@ -1499,6 +1499,12 @@ class Orchestrator:
         #: opt in. This is what makes delivery path-independent (the conversational
         #: Leader's run_job previously produced .md but never rendered .docx).
         self._deliver_products = deliver_products
+        #: §3 auto-redo loop-breaker: fingerprint of a goal's deliverable
+        #: artifacts captured the moment a redo is dispatched. If the next
+        #: disappointed verdict sees the SAME fingerprint, the redo reproduced
+        #: identical output the Leader still rejects → futile, bow out. Keyed by
+        #: goal id; lives for the run.
+        self._goal_redo_fingerprints: dict[str, str] = {}
         #: Embedding-fallback matcher (slice #6e). None → dispatch runs
         #: deterministic-only and opens ROSTER_GAP tickets on no-cover
         #: (the #6d behavior). Supply a matcher to get the semantic
@@ -6570,13 +6576,86 @@ class Orchestrator:
                 getattr(t, "qc_authored_fix", False) for t in tasks
             )
             deadlocked = qc_authored_round and goal.retry_count >= 1
-            if goal.retry_count < goal.max_retries and not deadlocked:
+            # COMPLETENESS GUARD (§3, 2026-06-02): redo destroys completed tasks
+            # and regenerates from scratch. When every deliverable is already
+            # present + substantial on disk, that's the bug (a book run burned
+            # ~80 min re-running two complete goals) — the Leader's
+            # dissatisfaction is a quality JUDGMENT that belongs in the
+            # human-facing reservation, NOT in flogging the team. Redo is a
+            # gap-filler: it stays available only for absent/stub deliverables.
+            complete = self._goal_deliverables_complete(tasks)
+            # LOOP-BREAKER (§3): a redo that left the deliverables UNCHANGED only
+            # reproduces the same output the Leader rejects — futile. Compare the
+            # current artifacts against the fingerprint captured when we last
+            # dispatched a redo for this goal. ONLY engages when the goal actually
+            # has deliverable tasks — a goal with none has no artifacts to compare
+            # (an empty fingerprint is constant), so it keeps the existing
+            # retry-budget/deadlock behavior untouched.
+            has_deliverables = any(getattr(t, "deliverable", False) for t in tasks)
+            fingerprint = (
+                self._goal_deliverable_fingerprint(tasks) if has_deliverables else None
+            )
+            # Note: a PERSISTENTLY-ABSENT deliverable hashes to the same empty
+            # fingerprint across rounds, so it too stalls after one redo — a
+            # producer that wrote nothing on the redo won't write it on the next.
+            # That's intended (a futile gap is still a futile redo), and `complete`
+            # never fires for it, so it never ships as "complete" — only as a stall.
+            stalled = (
+                has_deliverables
+                and goal.retry_count >= 1
+                and self._goal_redo_fingerprints.get(goal.id) == fingerprint
+            )
+            can_redo = (
+                goal.retry_count < goal.max_retries
+                and not complete
+                and not stalled
+                and not deadlocked
+            )
+            if can_redo:
+                # Remember what we're handing the producers, so a no-progress
+                # redo is caught next round (only meaningful with deliverables).
+                if has_deliverables:
+                    self._goal_redo_fingerprints[goal.id] = fingerprint
                 self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
                 self._leader_auto_redo(
                     goal, tasks, rationale, report_path, summary,
                 )
                 return
-            if deadlocked:
+            if complete:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        "The deliverables are complete and on disk, but the "
+                        "Leader was not fully satisfied with them."
+                    ),
+                    "suggestion": (
+                        f"Review this deliverable before relying on it — "
+                        f"{rationale}"
+                    ),
+                })
+                rationale_text = (
+                    f"leader: shipped complete deliverables with a reservation "
+                    f"(redo withheld — present, substantial output is not "
+                    f"flogged): {rationale} | report {report_path.name}"
+                )
+            elif stalled:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        "Repeated redo attempts stopped changing the deliverable "
+                        "— the team converged on output the Leader still flagged."
+                    ),
+                    "suggestion": (
+                        f"Review this deliverable closely before relying on it — "
+                        f"{rationale}"
+                    ),
+                })
+                rationale_text = (
+                    f"leader: shipped with reservations — redo stalled "
+                    f"(unchanged deliverables) after {goal.retry_count} "
+                    f"attempt(s): {rationale} | report {report_path.name}"
+                )
+            elif deadlocked:
                 summary.recommendations.append({
                     "goal_id": goal.id,
                     "concern": (
@@ -6736,6 +6815,78 @@ class Orchestrator:
         # budget-exhausted-BLOCKER.
         if any(t.status == TaskStatus.COMPLETED for t in tasks):
             self._leader_verify_goal(goal, tasks, summary)
+
+    def _read_task_artifact(self, task: "Task") -> "str | None":
+        """Locate and read a task's produced artifact with the same two-tier
+        discovery leader-verify uses (declared ``output_path`` first, then the
+        ``drafts/<task-id>.md`` convention). Returns the text, or ``None`` when
+        no artifact is on disk."""
+        # Use _artifacts_root() (not _scope_root()/artifacts directly) so the
+        # helper honors a wave worker's per-task staging override if it is ever
+        # called off the main thread; at verify/merge time staging is unset and
+        # the two resolve identically.
+        artifacts_root = self._artifacts_root()
+        candidate = None
+        if task.output_path:
+            primary = artifacts_root / task.output_path
+            if primary.exists():
+                candidate = primary
+        if candidate is None:
+            fallback = artifacts_root / "drafts" / f"{task.id.lower()}.md"
+            if fallback.exists():
+                candidate = fallback
+        if candidate is None:
+            return None
+        try:
+            return candidate.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def _goal_deliverables_complete(self, tasks: "list[Task]") -> bool:
+        """True iff every deliverable-tagged task already has a present artifact
+        above the near-empty backstop (§1's ``_token_band`` — a tenth of the
+        declared floor, or merely non-empty when no band is declared).
+
+        Why this gates the redo (§3, 2026-06-02 book run): ``_leader_auto_redo``
+        DESTROYS the goal's completed tasks and regenerates from scratch. When
+        the deliverables are already present and substantial, that destruction
+        is the bug — one run burned ~80 min re-running two already-complete
+        goals. Redo is a GAP-FILLER (absent/stub deliverables); a present,
+        substantial deliverable the Leader is unhappy with is a quality JUDGMENT
+        that belongs in the human-facing reservation, not in flogging the team
+        to rewrite real output. Returns ``False`` when there are NO deliverable
+        tasks (nothing to protect → let the normal redo path run)."""
+        deliverable_tasks = [t for t in tasks if getattr(t, "deliverable", False)]
+        if not deliverable_tasks:
+            return False
+        for t in deliverable_tasks:
+            body = self._read_task_artifact(t)
+            if body is None:
+                return False  # absent → a real gap the redo can fill
+            token_count = len(body.split())
+            band = _token_band(t)
+            if band is not None:
+                if token_count < max(1, int(band[0] * 0.10)):
+                    return False  # stub vs a declared band → redo is legitimate
+            elif token_count == 0:
+                return False  # no band, but truly empty → redo is legitimate
+        return True
+
+    def _goal_deliverable_fingerprint(self, tasks: "list[Task]") -> str:
+        """A stable hash of the goal's deliverable artifacts, for the auto-redo
+        loop-breaker: if a redo round leaves the deliverables UNCHANGED, another
+        pass will only reproduce the same output the Leader already rejects."""
+        h = hashlib.sha256()
+        for t in sorted(
+            (t for t in tasks if getattr(t, "deliverable", False)),
+            key=lambda t: t.id,
+        ):
+            body = self._read_task_artifact(t) or ""
+            h.update(t.id.encode())
+            h.update(b"\0")
+            h.update(body.encode("utf-8", "replace"))
+            h.update(b"\0")
+        return h.hexdigest()
 
     def _open_budget_exhausted_ticket(
         self,
@@ -8755,6 +8906,16 @@ length ("too short", "not enough words") that QC passed — re-litigating
 QC's call is a loop, the same trap as the format rule above. A length
 reservation goes to the human in the Product Quality Report, never a
 "disappointed" verdict.
+
+COMPLETE WORK IS REAL OUTPUT — don't flog it. A "disappointed" verdict
+makes the team DESTROY the finished work and rewrite it from scratch, so
+it is reserved for a genuinely MISSING or STUB deliverable. When the
+substantial deliverable is already on disk and merely isn't how you'd have
+done it, that is a JUDGMENT, not a gap — it ships, and your concern goes to
+the human as a reservation. The engine will not rerun the team over present,
+substantial output (it withholds the redo and records your rationale as a
+reservation), so spend "disappointed" only where a from-scratch redo can
+actually add the missing thing.
 
 Render one of three verdicts:
 - "satisfied": the right deliverable exists and QC passed it. Goal done.

@@ -7852,3 +7852,159 @@ def test_deliver_products_flag_defaults_off(project):
         "leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_stub,
     })
     assert orch._deliver_products is False
+
+
+# ── §3: auto-redo guard — don't flog a complete deliverable ──────────────────
+
+def _redo_orch(tmp_path, monkeypatch, leader, *, code="RDO"):
+    """An Orchestrator wired to a real vault under tmp_path, for exercising the
+    §3 deliverable-completeness guard / loop-breaker directly via verify."""
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(code, "redo test", "obj")
+    vault.init_run(code, "run-1", "obj")
+    project = Project(code=code, name="Redo Test", objective="obj",
+                      leader_model="stub", wiki_path=str(tmp_path / code.lower()),
+                      run_id="run-1")
+    return Orchestrator(
+        project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub},
+    )
+
+
+def _deliverable_task(code, *, output, floor=None):
+    """A COMPLETED, deliverable-tagged task, optionally carrying a size band so
+    the near-empty backstop can tell substantial output from a stub."""
+    from uuid import uuid4
+    from modulatio.types import EvidenceRequirement, Task, TaskStatus
+    ev = []
+    if floor is not None:
+        ev = [EvidenceRequirement(kind="metric", description="word count",
+                                  target=f"word_count >= {floor}")]
+    t = Task(id=f"{code}-T-001", project_id=uuid4(), goal_id=f"{code}-G-001",
+             description="produce the deliverable", depends_on=[],
+             evidence_required=ev)
+    t.status = TaskStatus.COMPLETED
+    t.deliverable = True
+    t.output_path = output
+    return t
+
+
+def test_goal_deliverables_complete_present_absent_stub(tmp_path, monkeypatch):
+    """The completeness helper: present+substantial → True; absent → False;
+    present-but-below-band (stub) → False; no deliverable tasks → False."""
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_stub)
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "full.md").write_text("# Full\n\n" + " ".join(["w"] * 300) + "\n")
+    (art / "stub.md").write_text("# Stub\n\nthree words only.\n")
+
+    present = _deliverable_task("RDO", output="full.md")
+    assert orch._goal_deliverables_complete([present]) is True
+
+    absent = _deliverable_task("RDO", output="missing.md")
+    assert orch._goal_deliverables_complete([absent]) is False
+
+    stub = _deliverable_task("RDO", output="stub.md", floor=3000)  # backstop 300
+    assert orch._goal_deliverables_complete([stub]) is False
+
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    non_deliverable = Task(id="RDO-T-002", project_id=uuid4(), goal_id="RDO-G-001",
+                           description="not a deliverable", depends_on=[])
+    non_deliverable.status = TaskStatus.COMPLETED
+    assert orch._goal_deliverables_complete([non_deliverable]) is False
+
+
+def test_leader_disappointed_complete_deliverable_not_flogged(tmp_path, monkeypatch):
+    """The §3 headline: a 'disappointed' verdict over a present, substantial
+    deliverable does NOT trigger a from-scratch redo (the 80-min book-run bug).
+    The goal ships COMPLETED and the Leader's dissatisfaction is recorded as a
+    reservation for the human."""
+    from modulatio.types import Goal, GoalStatus
+    from modulatio.orchestration import RunSummary
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("disappointed"))
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "story.md").write_text("# A Complete Story\n\n" + " ".join(["w"] * 400) + "\n")
+    from uuid import uuid4
+    goal = Goal(id="RDO-G-001", project_id=uuid4(), description="write a story",
+                success_criteria="a finished story", status=GoalStatus.IN_PROGRESS)
+    task = _deliverable_task("RDO", output="story.md")
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert goal.retry_count == 0, "complete deliverable must not be redone"
+    assert goal.status == GoalStatus.COMPLETED
+    assert any(
+        "not fully satisfied" in str(r.get("concern", "")).lower()
+        for r in summary.recommendations
+    ), "the Leader's reservation should reach the Product Quality Report"
+
+
+def test_leader_redo_loop_breaker_stops_unchanged_deliverable(tmp_path, monkeypatch):
+    """The §3 loop-breaker: once a redo has run (retry_count >= 1) and the
+    deliverable artifacts are UNCHANGED from when that redo was dispatched, a
+    fresh 'disappointed' bows out instead of grinding the budget on identical
+    output. A present-but-stub deliverable keeps the completeness guard OFF, so
+    only the loop-breaker can stop it."""
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import Goal, GoalStatus
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("disappointed"))
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "stub.md").write_text("# Stub\n\ntoo short to be complete.\n")
+    from uuid import uuid4
+    goal = Goal(id="RDO-G-001", project_id=uuid4(), description="write",
+                success_criteria="full output", status=GoalStatus.IN_PROGRESS)
+    task = _deliverable_task("RDO", output="stub.md", floor=3000)  # stub < backstop
+    # Simulate "one redo already dispatched, leaving these very artifacts".
+    goal.retry_count = 1
+    orch._goal_redo_fingerprints[goal.id] = orch._goal_deliverable_fingerprint([task])
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    # No further redo — the unchanged stub is recognized as a stall.
+    assert goal.retry_count == 1
+    assert goal.status == GoalStatus.COMPLETED
+    assert any(
+        "stopped changing" in str(r.get("concern", "")).lower()
+        for r in summary.recommendations
+    ), "the loop-breaker should record a stall reservation"
+
+
+def test_leader_disappointed_absent_deliverable_still_redoes(tmp_path, monkeypatch):
+    """Guardrail on the guard: an ABSENT deliverable is a real gap, so the redo
+    path must still fire (the completeness guard does NOT mask a missing
+    deliverable). Verified via the helper + that can_redo's `not complete` holds
+    when the artifact is missing."""
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("disappointed"))
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    absent = _deliverable_task("RDO", output="never_written.md")
+    # Absent → not complete → redo remains available (the gap-filler path).
+    assert orch._goal_deliverables_complete([absent]) is False
+
+
+def test_goal_deliverable_fingerprint_tracks_content_changes(tmp_path, monkeypatch):
+    """The loop-breaker only stalls on UNCHANGED artifacts, so the fingerprint
+    must move when the deliverable's content changes (the false-positive
+    direction: a redo that DID make progress must not be mistaken for a stall)
+    and stay put when it doesn't."""
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_stub)
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    task = _deliverable_task("RDO", output="d.md")
+
+    (art / "d.md").write_text("# Draft\n\nfirst version of the content.\n")
+    fp1 = orch._goal_deliverable_fingerprint([task])
+    assert fp1 == orch._goal_deliverable_fingerprint([task]), "stable when unchanged"
+
+    (art / "d.md").write_text("# Draft\n\na substantially revised second version.\n")
+    fp2 = orch._goal_deliverable_fingerprint([task])
+    assert fp2 != fp1, "fingerprint must change when the deliverable changes"
