@@ -7729,3 +7729,126 @@ def test_leader_verify_prompt_carries_the_md_satisfies_render_rule():
     body = orchestration._LEADER_VERIFY_PROMPT.lower()
     assert ".md" in body and "render" in body
     assert "satisfies" in body
+
+
+# ── §2: deliverable render in the ENGINE (every run path delivers) ───────────
+
+def test_engine_renders_grounded_deliverables_partial(tmp_path, monkeypatch):
+    """The engine renders completed deliverables at end of kickoff (so the
+    converse/ACP/daemon paths deliver, not just the CLI command), and ships
+    INDEPENDENT completed work even when a sibling is blocked — withholding only
+    deliverables that are downstream of blocked work (the "confident and wrong"
+    guard, made per-deliverable instead of all-or-nothing)."""
+    from uuid import uuid4
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Project, Task, TaskStatus
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "deliver"))
+    vault.init_project("DLV", "delivery test", "obj")
+    vault.init_run("DLV", "run-1", "obj")
+    project = Project(code="DLV", name="Delivery Test", objective="obj",
+                      leader_model="stub", wiki_path=str(tmp_path / "dlv"), run_id="run-1")
+    orch = Orchestrator(
+        project, {"leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_stub},
+        deliver_products=True,
+    )
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "good.md").write_text("# A Good Product\n\nplenty of real content here.\n")
+    (art / "dep.md").write_text("# Dependent\n\ndownstream of the blocked work.\n")
+
+    def _t(tid, *, status, deliverable=False, output=None, deps=()):
+        t = Task(id=tid, project_id=uuid4(), goal_id="DLV-G-001",
+                 description=tid, depends_on=list(deps))
+        t.status = status
+        t.deliverable = deliverable
+        t.output_path = output
+        return t
+
+    summary = RunSummary(project=project)
+    summary.tasks = [
+        _t("T-good", status=TaskStatus.COMPLETED, deliverable=True, output="good.md"),
+        _t("T-blocked", status=TaskStatus.BLOCKED),
+        _t("T-dep", status=TaskStatus.COMPLETED, deliverable=True, output="dep.md",
+           deps=["T-blocked"]),
+    ]
+    orch._deliver_finished_products(summary)
+
+    # the independent completed deliverable shipped (rendered to the tmp dir)
+    assert summary.rendered_deliverables, "independent completed product should ship"
+    assert all(d.error is None for d in summary.rendered_deliverables)
+    assert "T-good" not in summary.withheld_deliverables
+    # the deliverable downstream of blocked work was withheld
+    assert "T-dep" in summary.withheld_deliverables
+    # the PQR always ships
+    assert summary.product_quality_report is not None
+
+
+def test_deliver_blocked_goal_withheld_and_cross_goal_advisory(tmp_path, monkeypatch):
+    """The off-topic-paper guard (2026-05-30): a deliverable in a BLOCKED goal is
+    withheld even with no task-dep edge (a rejected task-plan produces zero tasks).
+    An independent goal's deliverable still ships — but because goals model no
+    cross-goal deps, the engine flags the unverifiable link in the PQR rather than
+    silently shipping or reverting to all-or-nothing."""
+    from uuid import uuid4
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project, Task, TaskStatus
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "deliver"))
+    vault.init_project("DLV2", "delivery test", "obj")
+    vault.init_run("DLV2", "run-1", "obj")
+    project = Project(code="DLV2", name="Delivery Test 2", objective="obj",
+                      leader_model="stub", wiki_path=str(tmp_path / "dlv2"), run_id="run-1")
+    orch = Orchestrator(
+        project, {"leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_stub},
+        deliver_products=True,
+    )
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "indep.md").write_text("# Independent Story\n\nplenty of real content.\n")
+    (art / "inblocked.md").write_text("# In A Blocked Goal\n\nungrounded output.\n")
+
+    def _t(tid, goal_id, *, status, deliverable=False, output=None):
+        t = Task(id=tid, project_id=uuid4(), goal_id=goal_id,
+                 description=tid, depends_on=[])
+        t.status = status
+        t.deliverable = deliverable
+        t.output_path = output
+        return t
+
+    summary = RunSummary(project=project)
+    summary.goals = [
+        Goal(id="DLV2-G-001", project_id=uuid4(), description="independent",
+             success_criteria="ships", status=GoalStatus.COMPLETED),
+        Goal(id="DLV2-G-002", project_id=uuid4(), description="blocked research",
+             success_criteria="grounded", status=GoalStatus.BLOCKED),
+    ]
+    summary.tasks = [
+        _t("T-indep", "DLV2-G-001", status=TaskStatus.COMPLETED,
+           deliverable=True, output="indep.md"),
+        _t("T-inblocked", "DLV2-G-002", status=TaskStatus.COMPLETED,
+           deliverable=True, output="inblocked.md"),
+    ]
+    orch._deliver_finished_products(summary)
+
+    # the independent goal's deliverable shipped; the blocked goal's is withheld
+    shipped = {d.name.lower() for d in summary.rendered_deliverables}
+    assert "T-indep" not in summary.withheld_deliverables
+    assert "T-inblocked" in summary.withheld_deliverables
+    assert any("independent" in s for s in shipped)
+    # the cross-goal advisory landed in the PQR recommendations
+    assert any(
+        "blocked" in str(r.get("concern", "")).lower() for r in summary.recommendations
+    ), "cross-goal advisory should be recorded when a sibling goal blocks"
+
+
+def test_deliver_products_flag_defaults_off(project):
+    """Default deliver_products=False — a stub/test kickoff never touches the
+    real delivery dir (the gate that keeps the 2,600+ kickoff tests safe)."""
+    from modulatio.orchestration import Orchestrator
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    assert orch._deliver_products is False

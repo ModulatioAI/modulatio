@@ -515,6 +515,7 @@ def kickoff(
     orch = Orchestrator(
         project,
         runners,
+        deliver_products=not stub,  # §2: the engine renders finished products
         semantic_matcher=semantic_matcher,
         agent_runners=agent_runners,
         qc_history_embedder=embedder,
@@ -563,67 +564,32 @@ def kickoff(
         typer.echo(f"  Goal reports: {len(summary.goal_reports)}")
         for p in summary.goal_reports:
             typer.echo(f"    - {p}")
-    # Finished products: render Leader-tagged deliverables to real documents
-    # (DOCX) and place them, human-named, under ~/Documents/Modulatio/<code>/.
-    # Only on real runs — ``artifacts_root`` is unset under --stub.
+    # Finished products are rendered by the ENGINE now (§2 — Orchestrator.kickoff
+    # with deliver_products=True), so EVERY run path delivers, not just this CLI
+    # command. The CLI is a thin reporter of what the engine shipped.
     if not stub:
-        from modulatio import delivery as _delivery
-        # Each job gets its OWN aptly-named output folder so a new run never
-        # lands in (or clobbers) the last one's products. None slug → flat dir.
-        _job_out = _delivery.job_dir(
-            code, summary.job_slug,
-            run_id=summary.project.run_id, fallback=name or objective,
-        )
-        _deliverables = _delivery.deliverables_from_tasks(summary.tasks, artifacts_root)
-        _blocked = _delivery.blocked_task_ids(summary.tasks)
-        # Cross-goal guard: a goal whose plan was REJECTED produces zero tasks
-        # (just a BLOCKED goal + ticket), so it is invisible to the task-level
-        # check above. Without this, a blocked research goal lets a downstream
-        # draft goal ship an ungrounded, off-topic product (observed 2026-05-30).
-        _blocked_goals = _delivery.blocked_goal_ids(summary.goals)
-        if _deliverables and (_blocked or _blocked_goals):
-            # Don't hand over a polished product built on unresolved blocked
-            # work (the "confident, formatted, and wrong" trap). Withhold
-            # until the blocks resolve.
-            _parts = []
-            if _blocked:
-                _parts.append(
-                    f"{len(_blocked)} task(s) blocked ("
-                    + ", ".join(_blocked[:5]) + ("…" if len(_blocked) > 5 else "") + ")"
-                )
-            if _blocked_goals:
-                _parts.append(
-                    f"{len(_blocked_goals)} goal(s) blocked ("
-                    + ", ".join(_blocked_goals[:5])
-                    + ("…" if len(_blocked_goals) > 5 else "") + ")"
-                )
+        # Folder echo: the job dir is the same for deliverables and the PQR, so
+        # derive it from whichever shipped (a pure-research run ships only a PQR).
+        _qr = summary.product_quality_report
+        _job_out = None
+        if summary.rendered_deliverables:
+            _job_out = summary.rendered_deliverables[0].dest.parent
+        elif _qr is not None and not _qr.error:
+            _job_out = _qr.dest.parent
+        if _job_out is not None:
+            typer.echo(f"  Finished products → {_job_out}:")
+        for d in summary.rendered_deliverables:
+            if d.error:
+                typer.echo(f"    ! {d.name}: {d.error}")
+            else:
+                typer.echo(f"    ✓ {d.dest.name}")
+        if summary.withheld_deliverables:
+            _w = summary.withheld_deliverables
             typer.echo(
-                f"  Finished products WITHHELD — {'; '.join(_parts)}. Downstream "
-                f"products may be built on this unresolved work; resolve it before "
-                f"shipping. Drafts remain in artifacts/."
+                f"  Withheld {len(_w)} product(s) built on unresolved/blocked work ("
+                + ", ".join(_w[:5]) + ("…" if len(_w) > 5 else "")
+                + ") — independent completed products shipped; resolve the blocks."
             )
-        elif _deliverables:
-            _delivered = _delivery.deliver_finished_products(
-                _deliverables, project_code=code,
-                pinned_names=set(summary.pinned_files),
-                dest_override=_job_out,
-            )
-            if _delivered:
-                typer.echo(
-                    f"  Finished products → {_job_out}:"
-                )
-                for d in _delivered:
-                    if d.error:
-                        typer.echo(f"    ! {d.name}: {d.error}")
-                    else:
-                        typer.echo(f"    ✓ {d.dest.name}")
-        # The Leader's Product Quality Report ALWAYS ships beside the work
-        # (DOCX) — its assessment + the checks it recommends the human run.
-        # Advisory: it never blocked or held back the product.
-        _qr = _delivery.deliver_product_quality_report(
-            summary.recommendations, project_code=code,
-            dest_override=_job_out,
-        )
         if _qr is not None:
             if _qr.error:
                 typer.echo(f"  Product Quality Report: ! {_qr.error}")

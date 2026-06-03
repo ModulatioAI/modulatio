@@ -124,6 +124,7 @@ def _build_kickoff_orchestrator(
         # the Leader DEFERS (vs JUDGE when headless). The one operator-present
         # construction site today.
         operator_present=True,
+        deliver_products=(mode != "stub"),  # §2: render products on real runs
         agent_runners=agent_runners,
         tool_registry=tool_registry,
         chat_runner=chat_runner,
@@ -670,6 +671,7 @@ class ModulatioApp(App):
             project, runners,
             activity_callback=self._record_activity,
             operator_present=True,
+            deliver_products=not self.stub,  # §2: render products on real runs
             agent_runners=agent_runners,
             chat_runner=chat_runner,
             chat_runners=chat_runners,

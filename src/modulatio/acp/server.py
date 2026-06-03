@@ -246,6 +246,7 @@ class ACPServer:
             project, runners,
             activity_callback=session.on_activity,
             operator_present=True,
+            deliver_products=not self.stub,  # §2: render products on real runs
             chat_runners=chat_runners,
             chat_runner_models=chat_runner_models,
             tool_registry=registry,

@@ -99,6 +99,16 @@ class RunSummary:
     #: interview/decompose) fills it authoritatively, until then it stays None
     #: and delivery falls back to a slug of the project name/objective.
     job_slug: str | None = None
+    #: §2 — deliverables the ENGINE rendered to the project delivery folder at
+    #: end of kickoff (so EVERY run path — CLI, converse, ACP, daemon — delivers,
+    #: not just the CLI command). The CLI is now a thin reporter of these.
+    rendered_deliverables: list = field(default_factory=list)
+    #: §2 — deliverable task ids withheld because they (transitively) depend on
+    #: blocked/rejected work, or sit in a blocked goal — never shipped downstream
+    #: of unresolved work, but independent completed deliverables still ship.
+    withheld_deliverables: list[str] = field(default_factory=list)
+    #: §2 — the rendered Product Quality Report (always ships, advisory), or None.
+    product_quality_report: object = None
 
 
 # ── Core rebuild B3: isolated-worker result + deterministic merge ───────
@@ -1478,9 +1488,17 @@ class Orchestrator:
         activity_callback: "Callable[[ActivityEvent], None] | None" = None,
         operator_present: bool = False,
         user_budget_overrides: "dict[str, _ctx_budget_module.BudgetOverride] | None" = None,
+        deliver_products: bool = False,
     ):
         self.project = project
         self.runners = runners
+        #: §2 — render finished products (DOCX) to ~/Documents/Modulatio/<proj>/
+        #: at the end of EVERY kickoff this orchestrator drives. Default OFF so
+        #: stub/test kickoffs never write to the real delivery dir or invoke
+        #: pandoc; the real run paths (CLI, TUI kickoff, converse, ACP, daemon)
+        #: opt in. This is what makes delivery path-independent (the conversational
+        #: Leader's run_job previously produced .md but never rendered .docx).
+        self._deliver_products = deliver_products
         #: Embedding-fallback matcher (slice #6e). None → dispatch runs
         #: deterministic-only and opens ROSTER_GAP tickets on no-cover
         #: (the #6d behavior). Supply a matcher to get the semantic
@@ -7934,6 +7952,100 @@ class Orchestrator:
                 self._leader_verify_goal(goal, tasks, summary)
             store.save_goal(self.project.code, goal, run_id=self.project.run_id)
 
+    # ── §2: deliverable render lives in the ENGINE (every run path delivers) ──
+    def _deliver_finished_products(self, summary: RunSummary) -> None:
+        """Render the run's grounded, completed deliverables to the project
+        delivery folder + the Product Quality Report, at the END of kickoff.
+
+        This moves delivery out of the ``modulatio kickoff`` CLI command and into
+        the engine, so EVERY run path — CLI, conversational ``run_job``, ACP,
+        daemon — delivers (previously only the CLI command did, so a book run via
+        the conversational Leader produced ``.md`` artifacts but never rendered
+        ``.docx``).
+
+        Partial + grounded (§2): a completed deliverable ships UNLESS it
+        transitively depends on a blocked/rejected task, or sits in a blocked
+        goal — so independent completed work (e.g. 11 of 12 anthology stories)
+        ships even if a sibling deliverable blocked, while never handing over a
+        product built downstream of unresolved work (the "confident and wrong"
+        trap the old all-or-nothing WITHHELD guarded). The PQR always ships
+        (advisory). Best-effort: never raises into the run.
+        """
+        from modulatio import delivery as _delivery
+        try:
+            artifacts_root = self._artifacts_root()
+            job_out = _delivery.job_dir(
+                self.project.code, summary.job_slug,
+                run_id=self.project.run_id,
+                fallback=self.project.name or self.project.objective or "",
+            )
+            all_delivs = _delivery.deliverables_from_tasks(summary.tasks, artifacts_root)
+            blocked = set(_delivery.blocked_task_ids(summary.tasks))
+            blocked_goals = set(_delivery.blocked_goal_ids(summary.goals))
+            by_id = {t.id: t for t in summary.tasks}
+
+            def _grounded(task_id: str) -> bool:
+                # An id absent from the task set (the top-level deliverable, or an
+                # unknown transitive dep) is treated as benign — deliverable ids come
+                # from deliverables_from_tasks (always present), and a missing dep edge
+                # is rare and not, on its own, evidence of blocked upstream work.
+                t = by_id.get(task_id)
+                if t is None:
+                    return True
+                if getattr(t, "goal_id", None) in blocked_goals:
+                    return False
+                seen: set[str] = set()
+                stack = list(getattr(t, "depends_on", None) or [])
+                while stack:
+                    dep = stack.pop()
+                    if dep in seen:
+                        continue
+                    seen.add(dep)
+                    if dep in blocked:
+                        return False
+                    dt = by_id.get(dep)
+                    if dt is not None:
+                        stack.extend(getattr(dt, "depends_on", None) or [])
+                return True
+
+            grounded = [(tid, p, f) for (tid, p, f) in all_delivs if _grounded(tid)]
+            summary.withheld_deliverables = [
+                tid for (tid, _p, _f) in all_delivs if tid not in {g[0] for g in grounded}
+            ]
+            # Cross-goal grounding advisory: goals have no explicit dep model, so
+            # per-task grounding can't see an IMPLICIT reliance (a shipped goal that
+            # read a blocked goal's work via team_canvas with no task edge). Rather
+            # than revert to the old all-or-nothing WITHHELD (which would withhold
+            # 11 good stories when 1 sibling blocks — the partial-delivery feature),
+            # ship the independent work but FLAG the unverifiable cross-goal link in
+            # the PQR so the human audits it. Belt: engine ships; suspenders: human told.
+            if blocked_goals and grounded:
+                _bg = ", ".join(sorted(blocked_goals)[:5])
+                summary.recommendations.append({
+                    "concern": "Completed products shipped while other goals were blocked",
+                    "suggestion": (
+                        f"Goal(s) {_bg} did not finish. The shipped deliverables are "
+                        "independent by task-dependency, but goals don't model cross-goal "
+                        "links — if any shipped product drew on a blocked goal's work "
+                        "(e.g. via shared research), verify its grounding before relying on it."
+                    ),
+                })
+            if grounded:
+                summary.rendered_deliverables.extend(
+                    _delivery.deliver_finished_products(
+                        grounded, project_code=self.project.code,
+                        pinned_names=set(summary.pinned_files),
+                        dest_override=job_out,
+                    )
+                )
+            # The Leader's Product Quality Report always ships beside the work.
+            summary.product_quality_report = _delivery.deliver_product_quality_report(
+                summary.recommendations, project_code=self.project.code,
+                dest_override=job_out,
+            )
+        except Exception as exc:  # noqa: BLE001 — delivery must never break a run
+            summary.errors.append(f"deliverable render failed: {type(exc).__name__}: {exc}")
+
     # ── Drive the whole loop ────────────────────────────────────────────
     def kickoff(
         self,
@@ -8552,6 +8664,11 @@ class Orchestrator:
         # Brick B4: the setup-side loop — recurring JOBS become Job Templates.
         # Reads the kickoff-history record just written above. Best-effort.
         self._post_run_jt_codification(summary)
+        # §2: render finished products in the ENGINE (so every run path delivers,
+        # not just the CLI command). Gated so stub/test kickoffs never touch the
+        # real delivery dir; the real run paths construct with deliver_products=True.
+        if self._deliver_products:
+            self._deliver_finished_products(summary)
         self._emit_activity(
             role="orchestrator", phase="kickoff_ended", agent_id="orchestrator",
         )
