@@ -458,9 +458,11 @@ def test_qc_mechanical_defect_switches_next_retry_to_edit_mode(project: Project)
     assert "EXISTING DRAFT" not in drafter_prompts[0]
 
 
-def test_qc_substantive_defect_keeps_next_retry_in_generate_mode(project: Project):
-    """Substantive defects (argument miss, wrong register) require full
-    regeneration — editing won't fix a bad argument. Mode stays 'generate'."""
+def test_qc_substantive_defect_revises_in_place(project: Project):
+    """§3b: a substantive defect (argument miss, wrong register) no longer
+    regenerates from scratch — it REVISES the existing draft with the critique as
+    the instruction (never throw the work away). Mode switches to 'revise' and
+    the retry prompt carries the existing draft."""
 
     drafter_prompts: list[str] = []
 
@@ -476,7 +478,7 @@ def test_qc_substantive_defect_keeps_next_retry_in_generate_mode(project: Projec
             payload = {
                 "check": "CRITICAL: conformance miss — topic not addressed",
                 "passed": False,
-                "notes": "The argument never engages the requested topic; rewrite from the ground up.",
+                "notes": "The argument never engages the requested topic; refocus it.",
                 "defect_type": "substantive",
             }
             return f"```json\n{json.dumps(payload)}\n```"
@@ -501,16 +503,17 @@ def test_qc_substantive_defect_keeps_next_retry_in_generate_mode(project: Projec
 
     tasks = store.list_tasks(PROJECT_CODE)
     assert tasks[0].status == TaskStatus.COMPLETED
-    assert tasks[0].producer_mode == "generate"  # never switched
-    # Both prompts are generate-mode (no existing-draft section).
+    assert tasks[0].producer_mode == "revise"  # switched to revise, not generate
+    # First prompt is generate (no draft yet); the retry builds on the draft.
     assert len(drafter_prompts) == 2
-    assert all("EXISTING DRAFT" not in p for p in drafter_prompts)
+    assert "EXISTING DRAFT" not in drafter_prompts[0]
+    assert "REVISE mode" in drafter_prompts[1] and "EXISTING DRAFT" in drafter_prompts[1]
 
 
-def test_qc_missing_defect_type_defaults_to_generate_mode(project: Project, monkeypatch):
-    """Legacy QC stubs that don't emit defect_type must not break the
-    orchestrator — absent classification is treated as substantive (safe
-    default), keeping generate-mode as the retry path."""
+def test_qc_missing_defect_type_revises_in_place(project: Project, monkeypatch):
+    """§3b: a QC reject with no defect_type (legacy stub) is non-mechanical, so
+    with a draft on disk it REVISES rather than regenerating — neither QC nor the
+    Leader throws the prior work away."""
     monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the redo/reject path
 
     def _qc_reject_no_classification(prompt: str) -> str:
@@ -527,10 +530,10 @@ def test_qc_missing_defect_type_defaults_to_generate_mode(project: Project, monk
     orch.kickoff("Draft 3 essays on a chosen theme")
 
     tasks = store.list_tasks(PROJECT_CODE)
-    # All terminal qc_rejected (no defect_type → stays in generate, QC always rejects).
+    # All terminal qc_rejected (QC always rejects), but the retry mode is REVISE —
+    # the draft is kept and built on, not regenerated from scratch.
     assert all(t.status == TaskStatus.QC_REJECTED for t in tasks)
-    # producer_mode never switched to edit since defect_type was absent.
-    assert all(t.producer_mode == "generate" for t in tasks)
+    assert all(t.producer_mode == "revise" for t in tasks)
 
 
 def test_edit_mode_prompt_carries_existing_draft_and_corrective_notes(project: Project):
@@ -6873,45 +6876,54 @@ def test_next_producer_mode_prior_diff_stays_diff(tmp_path):
     assert _next_producer_mode(task, "mechanical", "fix it", draft) == "diff"
 
 
-def test_next_producer_mode_substantive_generate(tmp_path):
-    """Substantive defect → regenerate (not surgically patchable)."""
+def test_next_producer_mode_substantive_revises(tmp_path):
+    """§3b: a substantive defect builds on the draft instead of regenerating —
+    REVISE for a single-file (prose) artifact, DIFF for multi-file code (so the
+    single-file revise write can't flatten siblings). Never throw work away."""
     from modulatio.orchestration import _next_producer_mode
 
     draft = tmp_path / "x-t-001.md"
     draft.write_text("draft body")
-    task = _qcfix_task(artifact_kind="code")  # even code regenerates if substantive
-    assert _next_producer_mode(task, "substantive", "the argument is wrong", draft) == "generate"
+    prose = _qcfix_task(artifact_kind="essay")
+    assert _next_producer_mode(prose, "substantive", "the argument is wrong", draft) == "revise"
+    code = _qcfix_task(artifact_kind="code")
+    assert _next_producer_mode(code, "substantive", "the argument is wrong", draft) == "diff"
 
 
-def test_next_producer_mode_unclassified_generate(tmp_path):
-    """Absent/None defect classification → safe generate."""
+def test_next_producer_mode_unclassified_revises(tmp_path):
+    """§3b: an unclassified (non-mechanical) defect with a draft on disk → revise,
+    not a clean regenerate."""
     from modulatio.orchestration import _next_producer_mode
 
     draft = tmp_path / "x-t-001.md"
     draft.write_text("draft body")
     task = _qcfix_task()
-    assert _next_producer_mode(task, None, "some notes", draft) == "generate"
+    assert _next_producer_mode(task, None, "some notes", draft) == "revise"
 
 
 def test_next_producer_mode_missing_draft_generate(tmp_path):
-    """No usable draft → generate; never edit/diff a file that isn't there."""
+    """No usable draft → generate; never edit/diff/revise a file that isn't there
+    (the ONE legitimate regenerate — nothing to build on)."""
     from modulatio.orchestration import _next_producer_mode
 
     missing = tmp_path / "does-not-exist.md"
     task = _qcfix_task(artifact_kind="code")
     assert _next_producer_mode(task, "mechanical", "fix", missing) == "generate"
     assert _next_producer_mode(task, "mechanical", "fix", None) == "generate"
+    assert _next_producer_mode(task, "substantive", "off-topic", missing) == "generate"
 
 
-def test_next_producer_mode_mechanical_empty_notes_generate(tmp_path):
-    """Mechanical but QC named nothing locatable → regenerate, not patch blind."""
+def test_next_producer_mode_mechanical_empty_notes_revises(tmp_path):
+    """§3b: mechanical but QC named nothing locatable → revise the draft (keep the
+    work), no longer a blind regenerate. A locatable note still routes to surgical
+    edit/diff; only the no-locator case falls back to revise."""
     from modulatio.orchestration import _next_producer_mode
 
     draft = tmp_path / "x-t-001.md"
     draft.write_text("draft body")
     task = _qcfix_task()
-    assert _next_producer_mode(task, "mechanical", "", draft) == "generate"
-    assert _next_producer_mode(task, "mechanical", "   ", draft) == "generate"
+    assert _next_producer_mode(task, "mechanical", "", draft) == "revise"
+    assert _next_producer_mode(task, "mechanical", "   ", draft) == "revise"
 
 
 # ── QC-as-fixer Slice 2: circuit-breaker redo-loop integration ───────────
@@ -7891,66 +7903,113 @@ def _deliverable_task(code, *, output, floor=None):
     return t
 
 
-def test_goal_deliverables_complete_present_absent_stub(tmp_path, monkeypatch):
-    """The completeness helper: present+substantial → True; absent → False;
-    present-but-below-band (stub) → False; no deliverable tasks → False."""
-    orch = _redo_orch(tmp_path, monkeypatch, _leader_stub)
-    art = orch._artifacts_root()
-    art.mkdir(parents=True, exist_ok=True)
-    (art / "full.md").write_text("# Full\n\n" + " ".join(["w"] * 300) + "\n")
-    (art / "stub.md").write_text("# Stub\n\nthree words only.\n")
-
-    present = _deliverable_task("RDO", output="full.md")
-    assert orch._goal_deliverables_complete([present]) is True
-
-    absent = _deliverable_task("RDO", output="missing.md")
-    assert orch._goal_deliverables_complete([absent]) is False
-
-    stub = _deliverable_task("RDO", output="stub.md", floor=3000)  # backstop 300
-    assert orch._goal_deliverables_complete([stub]) is False
-
+def test_next_producer_mode_revises_substantive_not_regenerate(tmp_path):
+    """§3b: the QC retry router never throws the draft away. A SUBSTANTIVE defect
+    (or a mechanical one with no locatable notes) → revise (build on the draft);
+    a locatable mechanical defect → surgical edit/diff; only a genuinely-absent
+    draft → generate."""
+    from modulatio.orchestration import _next_producer_mode
     from modulatio.types import Task, TaskStatus
     from uuid import uuid4
-    non_deliverable = Task(id="RDO-T-002", project_id=uuid4(), goal_id="RDO-G-001",
-                           description="not a deliverable", depends_on=[])
-    non_deliverable.status = TaskStatus.COMPLETED
-    assert orch._goal_deliverables_complete([non_deliverable]) is False
+    draft = tmp_path / "d.md"
+    draft.write_text("# Draft\n\nsome real content here.\n")
+
+    def _t(kind="essay"):
+        t = Task(id="X-T-001", project_id=uuid4(), goal_id="X-G-001",
+                 description="d", depends_on=[], artifact_kind=kind)
+        t.status = TaskStatus.AWAITING_QC
+        return t
+
+    # Substantive defect → revise (was "generate" before §3b).
+    assert _next_producer_mode(_t(), "substantive", "the whole thing is off-topic", draft) == "revise"
+    # Mechanical + locatable notes, single file → surgical edit.
+    assert _next_producer_mode(_t(), "mechanical", "fix the frontmatter key", draft) == "edit"
+    # Mechanical but NO locatable notes → revise (keep the draft), not generate.
+    assert _next_producer_mode(_t(), "mechanical", "", draft) == "revise"
+    # No draft on disk → the one legitimate regenerate.
+    assert _next_producer_mode(_t(), "substantive", "off-topic", tmp_path / "missing.md") == "generate"
 
 
-def test_leader_disappointed_complete_deliverable_not_flogged(tmp_path, monkeypatch):
-    """The §3 headline: a 'disappointed' verdict over a present, substantial
-    deliverable does NOT trigger a from-scratch redo (the 80-min book-run bug).
-    The goal ships COMPLETED and the Leader's dissatisfaction is recorded as a
-    reservation for the human."""
-    from modulatio.types import Goal, GoalStatus
+def test_leader_redo_revises_in_place_not_from_scratch(tmp_path, monkeypatch):
+    """§3b headline: a 'disappointed' verdict over a present deliverable makes the
+    producer REVISE the existing draft (the Leader's rationale as the
+    instruction), never regenerate from a blank page. Verified by capturing the
+    producer prompt on the redo pass — it's the revise prompt, with the existing
+    draft embedded."""
     from modulatio.orchestration import RunSummary
-    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("disappointed"))
+    from modulatio.types import Goal, GoalStatus
+    from uuid import uuid4
+    seq = iter(["disappointed", "satisfied"])
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            v = next(seq, "satisfied")
+            payload = {"verdict": v, "rationale": "refocus this on the asked-for topic",
+                       "report_body": "r"}
+            return f"```json\n{json.dumps(payload)}\n```"
+        return _leader_stub(prompt)
+
+    seen_prompts = []
+
+    def drafter(prompt):
+        seen_prompts.append(prompt)
+        return _drafter_stub(prompt)
+
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("RVS", "revise", "obj")
+    vault.init_run("RVS", "run-1", "obj")
+    project = Project(code="RVS", name="Revise", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "rvs"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": leader, "drafter": drafter, "qc": _qc_stub})
     art = orch._artifacts_root()
     art.mkdir(parents=True, exist_ok=True)
-    (art / "story.md").write_text("# A Complete Story\n\n" + " ".join(["w"] * 400) + "\n")
-    from uuid import uuid4
-    goal = Goal(id="RDO-G-001", project_id=uuid4(), description="write a story",
-                success_criteria="a finished story", status=GoalStatus.IN_PROGRESS)
-    task = _deliverable_task("RDO", output="story.md")
+    (art / "story.md").write_text("# Draft Story\n\n" + " ".join(["w"] * 200) + "\n")
+    goal = Goal(id="RVS-G-001", project_id=uuid4(), description="write a story",
+                success_criteria="on-topic story", status=GoalStatus.IN_PROGRESS)
+    task = _deliverable_task("RVS", output="story.md")
     summary = RunSummary(project=orch.project)
     summary.tasks = [task]
 
     orch._leader_verify_goal(goal, [task], summary)
 
-    assert goal.retry_count == 0, "complete deliverable must not be redone"
     assert goal.status == GoalStatus.COMPLETED
-    assert any(
-        "not fully satisfied" in str(r.get("concern", "")).lower()
-        for r in summary.recommendations
-    ), "the Leader's reservation should reach the Product Quality Report"
+    assert goal.retry_count == 1, "one revise pass happened"
+    assert any("REVISE mode" in p and "EXISTING DRAFT" in p for p in seen_prompts), \
+        "the redo must revise the existing draft, not regenerate from scratch"
+    # The artifact was never deleted — it's still on disk.
+    assert (art / "story.md").exists()
+
+
+def test_leader_auto_redo_absent_artifact_uses_generate(tmp_path, monkeypatch):
+    """The one legitimate regenerate: a deliverable task with NO draft on disk is
+    set to generate mode by the Leader-redo (nothing to build on)."""
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("satisfied"), code="GEN")
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import Goal, GoalStatus
+    from uuid import uuid4
+    goal = Goal(id="GEN-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    task = _deliverable_task("GEN", output="never_written.md")
+    # No artifact on disk → _task_artifact_path is None → generate.
+    assert orch._task_artifact_path(task) is None
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+    # Drive one redo directly; with no draft the task is set to generate mode.
+    report_path = orch._scope_root() / "reports" / "GEN-G-001.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("report")
+    orch._leader_auto_redo(goal, [task], "redo it", report_path, summary)
+    assert task.producer_mode == "generate"
 
 
 def test_leader_redo_loop_breaker_stops_unchanged_deliverable(tmp_path, monkeypatch):
-    """The §3 loop-breaker: once a redo has run (retry_count >= 1) and the
+    """The loop-breaker: once a redo has run (retry_count >= 1) and the
     deliverable artifacts are UNCHANGED from when that redo was dispatched, a
     fresh 'disappointed' bows out instead of grinding the budget on identical
-    output. A present-but-stub deliverable keeps the completeness guard OFF, so
-    only the loop-breaker can stop it."""
+    output — even though revise keeps trying, an unchanged result is futile."""
     from modulatio.orchestration import RunSummary
     from modulatio.types import Goal, GoalStatus
     orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("disappointed"))
@@ -7960,7 +8019,7 @@ def test_leader_redo_loop_breaker_stops_unchanged_deliverable(tmp_path, monkeypa
     from uuid import uuid4
     goal = Goal(id="RDO-G-001", project_id=uuid4(), description="write",
                 success_criteria="full output", status=GoalStatus.IN_PROGRESS)
-    task = _deliverable_task("RDO", output="stub.md", floor=3000)  # stub < backstop
+    task = _deliverable_task("RDO", output="stub.md", floor=3000)
     # Simulate "one redo already dispatched, leaving these very artifacts".
     goal.retry_count = 1
     orch._goal_redo_fingerprints[goal.id] = orch._goal_deliverable_fingerprint([task])
@@ -7978,17 +8037,57 @@ def test_leader_redo_loop_breaker_stops_unchanged_deliverable(tmp_path, monkeypa
     ), "the loop-breaker should record a stall reservation"
 
 
-def test_leader_disappointed_absent_deliverable_still_redoes(tmp_path, monkeypatch):
-    """Guardrail on the guard: an ABSENT deliverable is a real gap, so the redo
-    path must still fire (the completeness guard does NOT mask a missing
-    deliverable). Verified via the helper + that can_redo's `not complete` holds
-    when the artifact is missing."""
-    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("disappointed"))
+def test_leader_redo_revise_exhausts_budget_and_terminates(tmp_path, monkeypatch):
+    """§3b termination invariant for the NEW path: when revise keeps CHANGING the
+    artifact every pass (so the loop-breaker can't fire), the goal must still
+    terminate — bounded by the absolute retry budget — and ship with the
+    budget-exhausted reservation. This is the case only the retry_count backstop
+    can stop."""
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+    from modulatio import vault
+    from uuid import uuid4
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            payload = {"verdict": "disappointed", "rationale": "still not right",
+                       "report_body": "r"}
+            return f"```json\n{json.dumps(payload)}\n```"
+        return _leader_stub(prompt)
+
+    calls = {"n": 0}
+
+    def drafter(prompt):
+        # Vary output every pass so the artifact fingerprint always changes →
+        # the loop-breaker never fires; only the budget can stop the loop.
+        calls["n"] += 1
+        return (f"---\ntitle: v{calls['n']}\n---\n\n# Draft v{calls['n']}\n\n"
+                + " ".join([f"w{calls['n']}"] * 60) + "\n")
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("EXB", "exhaust", "obj")
+    vault.init_run("EXB", "run-1", "obj")
+    project = Project(code="EXB", name="Exhaust", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "exb"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": leader, "drafter": drafter, "qc": _qc_stub})
     art = orch._artifacts_root()
     art.mkdir(parents=True, exist_ok=True)
-    absent = _deliverable_task("RDO", output="never_written.md")
-    # Absent → not complete → redo remains available (the gap-filler path).
-    assert orch._goal_deliverables_complete([absent]) is False
+    (art / "story.md").write_text("# Seed draft\n\n" + " ".join(["w"] * 60) + "\n")
+    goal = Goal(id="EXB-G-001", project_id=uuid4(), description="write",
+                success_criteria="right", status=GoalStatus.IN_PROGRESS)
+    task = _deliverable_task("EXB", output="story.md")
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    # Terminated at the absolute budget — never an infinite loop — and shipped.
+    assert goal.retry_count == goal.max_retries
+    assert goal.status == GoalStatus.COMPLETED
+    assert any(
+        "attempts" in str(r.get("concern", "")).lower()
+        for r in summary.recommendations
+    ), "budget-exhausted reservation should be recorded"
 
 
 def test_goal_deliverable_fingerprint_tracks_content_changes(tmp_path, monkeypatch):

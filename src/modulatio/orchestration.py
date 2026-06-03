@@ -937,8 +937,8 @@ def _token_band(task: "Task") -> "tuple[int, int | None] | None":
 def _token_floor(task: "Task") -> int | None:
     """The declared minimum size (whitespace ``token_count``) for a task's
     deliverable, or ``None``. Thin wrapper over :func:`_token_band` (the band's
-    low end), for size-aware guards that need only the floor (the §3 auto-redo
-    completeness check)."""
+    low end), for size-aware guards that need only the floor (e.g. the QC
+    near-empty backstop)."""
     band = _token_band(task)
     return band[0] if band else None
 
@@ -1407,18 +1407,29 @@ def _next_producer_mode(
     ``environmental`` never reaches here — that defect class is handled
     upstream by ``_block_for_environmental`` (the redo loop returns
     before routing a next mode).
+
+    §3b (2026-06-03, Clif: "I don't want the Leader OR QC throwing things
+    away — fix in place"): the prior policy regenerated from scratch on a
+    SUBSTANTIVE defect or when QC named nothing locatable. That threw away
+    the draft AND the reviewer's judgment. Now the ONLY clean regenerate is
+    a genuinely-absent draft (nothing to build on — and a missing artifact
+    is effectively a rewrite regardless). With a draft on disk we fix in
+    place: surgical EDIT/DIFF for a locatable mechanical defect, else REVISE
+    (build on the draft, the critique is the instruction). This reverses the
+    earlier "patch only when surgically safe" sign-off — routed back through
+    review.
     """
-    # No usable draft → must regenerate; can't patch what isn't there.
+    # No usable draft → must regenerate; can't build on what isn't there.
     if draft_path is None or not draft_path.exists():
         return "generate"
-    # Only surgically-locatable (mechanical) defects are patchable.
-    if defect_type != "mechanical":
-        return "generate"
-    # Mechanical but QC named nothing locatable → regenerate rather than
-    # patch blind ("QC notes locatable within that artifact" — Nemo).
-    if not (qc_notes and qc_notes.strip()):
-        return "generate"
-    return "diff" if _draft_is_multifile(task, draft_path) else "edit"
+    # Locatable mechanical defect → cheapest surgical fix (unchanged).
+    if defect_type == "mechanical" and qc_notes and qc_notes.strip():
+        return "diff" if _draft_is_multifile(task, draft_path) else "edit"
+    # Everything else with a draft on disk → fix in place, never discard. A
+    # multi-file draft must use DIFF (per-file blocks) so revise's single-file
+    # write doesn't flatten siblings; a single-file draft uses REVISE (build on
+    # it with the critique). Mirrors _leader_auto_redo's diff-vs-revise split.
+    return "diff" if _draft_is_multifile(task, draft_path) else "revise"
 
 
 # Slice #82 PR-B — leader-iterate decision parsing.
@@ -3166,7 +3177,35 @@ class Orchestrator:
                 corrective_notes=corrective_notes,
             )
 
-        if task.producer_mode == "edit" and path.exists():
+        if task.producer_mode == "revise" and path.exists():
+            # §3b (2026-06-03): SUBSTANTIVE defect → build on the existing draft
+            # with the reviewer's critique as the instruction. Never start from
+            # scratch — keep the prior work AND the judgment that's already been
+            # formed; the producer reworks/extends in place (cheap recovery, not
+            # a clean regen that throws tokens away).
+            existing_draft = path.read_text()
+            prompt = self._prompt("drafter-revise", _DRAFTER_REVISE_PROMPT).format(
+                task_id=task.id,
+                artifact_kind=task.artifact_kind,
+                description=task.description,
+                objective=self.project.objective,
+                agent_identity=_format_agent_identity(agent_identity),
+                design_intent=design_intent_block,
+                team_state=team_state_block,
+                standards=_format_standards_block(domain_standards),
+                research_context=_format_research_context(research_context),
+                team_memory_context=_format_team_memory_block(team_memory_context),
+                team_canvas=_format_team_canvas(team_canvas_block),
+                repo_map=repo_map_block,
+                existing_draft=existing_draft,
+                corrective_notes=corrective_notes.strip()
+                or "(address the reviewer's concern and fully satisfy the task)",
+                inbox_notes=self._inbox_block_for(
+                    producer_role_for_inbox,
+                    target_agent_id=task.assigned_agent_id,
+                ),
+            )
+        elif task.producer_mode == "edit" and path.exists():
             existing_draft = path.read_text()
             prompt = self._prompt("drafter-edit", _DRAFTER_EDIT_PROMPT).format(
                 task_id=task.id,
@@ -5747,6 +5786,10 @@ class Orchestrator:
                 # editing), and let the loop retry. The richer self-heal
                 # rungs (salvage → QC-patch / re-decompose) land in Slice 3;
                 # for now retry-then-graceful-terminal is the floor.
+                # §3b note: this is the deliberate exception to "never throw work
+                # away" — a breaker trip means DEGENERATE output (repetition /
+                # no-commit storm), which is the "effectively a rewrite" case, not
+                # real work worth revising.
                 last_breaker_abort = abort
                 last_exc = None
                 last_qc = None
@@ -6722,15 +6765,16 @@ class Orchestrator:
                 getattr(t, "qc_authored_fix", False) for t in tasks
             )
             deadlocked = qc_authored_round and goal.retry_count >= 1
-            # COMPLETENESS GUARD (§3, 2026-06-02): redo destroys completed tasks
-            # and regenerates from scratch. When every deliverable is already
-            # present + substantial on disk, that's the bug (a book run burned
-            # ~80 min re-running two complete goals) — the Leader's
-            # dissatisfaction is a quality JUDGMENT that belongs in the
-            # human-facing reservation, NOT in flogging the team. Redo is a
-            # gap-filler: it stays available only for absent/stub deliverables.
-            complete = self._goal_deliverables_complete(tasks)
-            # LOOP-BREAKER (§3): a redo that left the deliverables UNCHANGED only
+            # §3b (2026-06-03): the redo now REVISES in place — it builds on the
+            # existing draft with the Leader's critique as the instruction, never
+            # destroys-and-regenerates (see _leader_auto_redo). So a present
+            # deliverable the Leader is unhappy with is RECOVERED cheaply (apply
+            # the judgment), not flogged and not shipped-as-is. The §3
+            # "don't redo complete work" guard is therefore retired: revise
+            # neither wastes a from-scratch pass nor throws the work away. The
+            # terminators are the loop-breaker + the retry budget + the deadlock
+            # guard below.
+            # LOOP-BREAKER: a redo that left the deliverables UNCHANGED only
             # reproduces the same output the Leader rejects — futile. Compare the
             # current artifacts against the fingerprint captured when we last
             # dispatched a redo for this goal. ONLY engages when the goal actually
@@ -6744,8 +6788,6 @@ class Orchestrator:
             # Note: a PERSISTENTLY-ABSENT deliverable hashes to the same empty
             # fingerprint across rounds, so it too stalls after one redo — a
             # producer that wrote nothing on the redo won't write it on the next.
-            # That's intended (a futile gap is still a futile redo), and `complete`
-            # never fires for it, so it never ships as "complete" — only as a stall.
             stalled = (
                 has_deliverables
                 and goal.retry_count >= 1
@@ -6753,7 +6795,6 @@ class Orchestrator:
             )
             can_redo = (
                 goal.retry_count < goal.max_retries
-                and not complete
                 and not stalled
                 and not deadlocked
             )
@@ -6767,24 +6808,7 @@ class Orchestrator:
                     goal, tasks, rationale, report_path, summary,
                 )
                 return
-            if complete:
-                summary.recommendations.append({
-                    "goal_id": goal.id,
-                    "concern": (
-                        "The deliverables are complete and on disk, but the "
-                        "Leader was not fully satisfied with them."
-                    ),
-                    "suggestion": (
-                        f"Review this deliverable before relying on it — "
-                        f"{rationale}"
-                    ),
-                })
-                rationale_text = (
-                    f"leader: shipped complete deliverables with a reservation "
-                    f"(redo withheld — present, substantial output is not "
-                    f"flogged): {rationale} | report {report_path.name}"
-                )
-            elif stalled:
+            if stalled:
                 summary.recommendations.append({
                     "goal_id": goal.id,
                     "concern": (
@@ -6894,6 +6918,15 @@ class Orchestrator:
         Leader's prior rationale becomes the ``initial_corrective_notes``
         for each task's per-task redo loop, so producers see an
         aggregate-level critique in addition to any per-task QC notes.
+
+        §3b (2026-06-03, Clif: "fix in place, don't throw it away"): the redo
+        does NOT delete the prior artifacts and regenerate from scratch. Each
+        task whose draft is on disk is set to REVISE mode (or DIFF for a
+        multi-file code draft) so the producer builds on the existing work with
+        the Leader's rationale as the instruction; only a task with NO draft
+        regenerates (nothing to build on). The status reset to PENDING is just
+        control-flow — the artifact FILE stays on disk for the producer to
+        revise.
         """
         goal.retry_count += 1
         # Stamp the budget window's date as the budget is consumed. The in-run
@@ -6921,19 +6954,32 @@ class Orchestrator:
         # was to its cap. Save so progress toward max_retries is visible live.
         store.save_goal(self.project.code, goal, run_id=self.project.run_id)
 
-        # Reset tasks to PENDING so the execution loop runs them fresh.
-        # Previous evidence + agent assignments cleared — Leader's
-        # disappointment implies we can't trust QC-pass from the prior
-        # round (the aggregate wasn't goal-appropriate).
+        # Reset tasks to PENDING so the execution loop runs them again, but
+        # REVISE in place — keep the artifact on disk and build on it with the
+        # Leader's critique, rather than regenerating from scratch (Leader's
+        # disappointment is a FITNESS critique, not a reason to discard real
+        # work + the judgment already formed). Previous QC evidence is cleared so
+        # the revised draft is re-reviewed clean.
         for t in tasks:
+            draft_path = self._task_artifact_path(t)
+            if draft_path is not None:
+                # Build on the existing draft. DIFF for multi-file code, else
+                # REVISE for a single substantive rework.
+                t.producer_mode = (
+                    "diff" if _draft_is_multifile(t, draft_path) else "revise"
+                )
+            else:
+                # Nothing on disk to build on — a genuinely-absent deliverable is
+                # effectively a rewrite anyway, so a clean generate is correct.
+                t.producer_mode = "generate"
             t.transitions.append(
                 StateTransition(
                     from_state=t.status.value,
                     to_state=TaskStatus.PENDING.value,
                     actor="leader",
                     rationale=(
-                        f"reset for leader auto-redo attempt {attempt}: "
-                        f"{leader_rationale[:200]}"
+                        f"{t.producer_mode}-in-place for leader auto-redo attempt "
+                        f"{attempt}: {leader_rationale[:200]}"
                     ),
                 )
             )
@@ -6962,25 +7008,28 @@ class Orchestrator:
         if any(t.status == TaskStatus.COMPLETED for t in tasks):
             self._leader_verify_goal(goal, tasks, summary)
 
-    def _read_task_artifact(self, task: "Task") -> "str | None":
-        """Locate and read a task's produced artifact with the same two-tier
+    def _task_artifact_path(self, task: "Task") -> "Path | None":
+        """The on-disk path of a task's produced artifact, via the two-tier
         discovery leader-verify uses (declared ``output_path`` first, then the
-        ``drafts/<task-id>.md`` convention). Returns the text, or ``None`` when
-        no artifact is on disk."""
+        ``drafts/<task-id>.md`` convention). ``None`` when nothing is on disk."""
         # Use _artifacts_root() (not _scope_root()/artifacts directly) so the
         # helper honors a wave worker's per-task staging override if it is ever
         # called off the main thread; at verify/merge time staging is unset and
         # the two resolve identically.
         artifacts_root = self._artifacts_root()
-        candidate = None
         if task.output_path:
             primary = artifacts_root / task.output_path
             if primary.exists():
-                candidate = primary
-        if candidate is None:
-            fallback = artifacts_root / "drafts" / f"{task.id.lower()}.md"
-            if fallback.exists():
-                candidate = fallback
+                return primary
+        fallback = artifacts_root / "drafts" / f"{task.id.lower()}.md"
+        if fallback.exists():
+            return fallback
+        return None
+
+    def _read_task_artifact(self, task: "Task") -> "str | None":
+        """Read a task's produced artifact (two-tier discovery), or ``None``
+        when no artifact is on disk."""
+        candidate = self._task_artifact_path(task)
         if candidate is None:
             return None
         try:
@@ -7029,36 +7078,6 @@ class Orchestrator:
         except OSError:
             return out
         return out
-
-    def _goal_deliverables_complete(self, tasks: "list[Task]") -> bool:
-        """True iff every deliverable-tagged task already has a present artifact
-        above the near-empty backstop (§1's ``_token_band`` — a tenth of the
-        declared floor, or merely non-empty when no band is declared).
-
-        Why this gates the redo (§3, 2026-06-02 book run): ``_leader_auto_redo``
-        DESTROYS the goal's completed tasks and regenerates from scratch. When
-        the deliverables are already present and substantial, that destruction
-        is the bug — one run burned ~80 min re-running two already-complete
-        goals. Redo is a GAP-FILLER (absent/stub deliverables); a present,
-        substantial deliverable the Leader is unhappy with is a quality JUDGMENT
-        that belongs in the human-facing reservation, not in flogging the team
-        to rewrite real output. Returns ``False`` when there are NO deliverable
-        tasks (nothing to protect → let the normal redo path run)."""
-        deliverable_tasks = [t for t in tasks if getattr(t, "deliverable", False)]
-        if not deliverable_tasks:
-            return False
-        for t in deliverable_tasks:
-            body = self._read_task_artifact(t)
-            if body is None:
-                return False  # absent → a real gap the redo can fill
-            token_count = len(body.split())
-            band = _token_band(t)
-            if band is not None:
-                if token_count < max(1, int(band[0] * 0.10)):
-                    return False  # stub vs a declared band → redo is legitimate
-            elif token_count == 0:
-                return False  # no band, but truly empty → redo is legitimate
-        return True
 
     def _goal_deliverable_fingerprint(self, tasks: "list[Task]") -> str:
         """A stable hash of the goal's deliverable artifacts, for the auto-redo
@@ -9724,6 +9743,75 @@ AFTER the corrected artifact body, add a single trailing block:
     ## summary_for_state_doc
     <one or two sentences naming the edit you applied — e.g.
     "Edit-mode fix: removed leaked YAML frontmatter; preserved body.">
+
+Read by team-state renderer ONLY (Leader-reflect between sub-
+objectives). QC does NOT see it.
+
+OPTIONALLY append an ``## inbox_proposals`` block after the
+summary_for_state_doc trailer (same JSON shape as the drafter skill)
+to propose inbox notes for the next turn. Stripped before save.
+"""
+
+
+_DRAFTER_REVISE_PROMPT = """\
+Task: {task_id}
+Artifact kind: {artifact_kind}
+Description: {description}
+
+{agent_identity}
+
+{design_intent}
+
+{team_state}
+
+{standards}
+
+{research_context}
+
+{team_memory_context}
+
+{inbox_notes}
+
+{team_canvas}
+
+{repo_map}
+
+You are in REVISE mode. A prior attempt produced an artifact that the
+reviewer judged not yet right — the issue is SUBSTANTIVE (off-target,
+incomplete, a section missing, the wrong emphasis), not a surgical nit.
+Your job is to MAKE IT RIGHT by building on the existing draft — never
+start over from a blank page. Keep everything that already works; change,
+expand, or rework whatever the critique calls for. If most of it is
+missing, write the missing parts in; if it misses the goal, steer it back
+on target — but the existing draft and the critique below are your
+starting point and the reviewer's judgment is your instruction. Do not
+discard the prior work.
+
+THE REVIEWER'S CRITIQUE (this is your instruction — satisfy it fully):
+
+{corrective_notes}
+
+EXISTING DRAFT (the prior attempt — between the markers below; don't
+treat its delimiters as part of this prompt):
+
+>>>EXISTING-DRAFT-START<<<
+{existing_draft}
+>>>EXISTING-DRAFT-END<<<
+
+Produce the revised artifact in the same format as the existing draft
+(standards for kind `{artifact_kind}` are authoritative for structure).
+Deliver the COMPLETE revised artifact, not a diff or a description of
+your changes — the full corrected work, fit for the goal.
+
+If standards require embedding the task id in the artifact, use this
+exact value: {task_id}
+
+AFTER the revised artifact body, add a single trailing block:
+
+    ## summary_for_state_doc
+    <one or two sentences naming the revision you made — e.g.
+    "Revise-mode: refocused the analysis on the asked-for market and
+    added the missing risk section.">
 
 Read by team-state renderer ONLY (Leader-reflect between sub-
 objectives). QC does NOT see it.
