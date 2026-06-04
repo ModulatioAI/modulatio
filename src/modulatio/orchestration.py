@@ -8958,6 +8958,23 @@ class Orchestrator:
                         dest_override=job_out,
                     )
                 )
+            # Surface any graceful-degradation notes (e.g. pandoc absent → shipped
+            # as Markdown) so the operator sees WHY a product isn't a .docx — the
+            # delivery succeeded, but visibly, not silently.
+            degraded = [
+                d for d in summary.rendered_deliverables
+                if getattr(d, "note", None)
+            ]
+            if degraded:
+                summary.recommendations.append({
+                    "concern": "Some products shipped as Markdown (renderer unavailable)",
+                    "suggestion": (
+                        "Install pandoc (`sudo apt install pandoc` / `brew install "
+                        "pandoc`) or `pip install modulatio[export]` to get DOCX/PDF "
+                        "rendering. Affected: "
+                        + ", ".join(d.name for d in degraded[:8])
+                    ),
+                })
             # The Leader's Product Quality Report always ships beside the work.
             summary.product_quality_report = _delivery.deliver_product_quality_report(
                 summary.recommendations, project_code=self.project.code,

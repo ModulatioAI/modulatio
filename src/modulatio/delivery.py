@@ -44,12 +44,15 @@ class DeliveredProduct:
     """Outcome of delivering one finished product.
 
     ``error`` is None on success; on a render/copy failure it carries the
-    message and ``dest`` is the path we tried to write."""
+    message and ``dest`` is the path we tried to write. ``note`` carries a
+    non-failure advisory (e.g. the renderer was unavailable so the product
+    shipped as Markdown instead of DOCX) — delivery still SUCCEEDED."""
     task_id: str
     source: Path
     dest: Path
     name: str
     error: str | None
+    note: str | None = None
 
 
 def delivery_root() -> Path:
@@ -285,7 +288,22 @@ def deliver_product(
             md.write_text(text)
             result = export_artifact(md, dest, fmt)
     except ExportError as exc:
-        return DeliveredProduct(task_id, source_md, dest, name, str(exc))
+        # The renderer (pandoc/pypandoc) isn't installed. A missing OPTIONAL
+        # renderer must not mean "no delivery" — degrade gracefully and ship the
+        # product as Markdown so the operator still gets their content, with a
+        # visible note (delivery SUCCEEDED, just not in the requested format).
+        md_dest = dest_dir / f"{name}.md"
+        if md_dest.exists():
+            md_dest = dest_dir / f"{name} ({task_id}).md"
+        try:
+            md_dest.write_text(text)
+        except OSError as werr:
+            return DeliveredProduct(task_id, source_md, dest, name, f"copy failed: {werr}")
+        note = (
+            f"renderer unavailable — shipped as Markdown instead of {fmt.upper()} "
+            f"({str(exc).splitlines()[0]})"
+        )
+        return DeliveredProduct(task_id, source_md, md_dest, name, None, note)
     return DeliveredProduct(task_id, source_md, dest, name, result.error)
 
 

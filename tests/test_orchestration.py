@@ -7891,6 +7891,52 @@ def test_engine_renders_grounded_deliverables_partial(tmp_path, monkeypatch):
     assert summary.product_quality_report is not None
 
 
+def test_deliver_degrades_to_markdown_when_renderer_absent(tmp_path, monkeypatch):
+    """A missing OPTIONAL renderer (pandoc absent — the install-smoke CI case)
+    must NOT mean zero delivery: the product ships as Markdown with error=None and
+    a visible note, and the operator gets a recommendation to install pandoc.
+    Regression for the green-LOCAL-≠-green-CI render dependency."""
+    from uuid import uuid4
+    from modulatio import vault, export
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Project, Task, TaskStatus
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "deliver"))
+    # Simulate a box with NO renderer at all (neither pypandoc nor system pandoc).
+    monkeypatch.setattr(export, "_has_pypandoc", lambda: False)
+    monkeypatch.setattr(export, "_has_system_pandoc", lambda: False)
+    vault.init_project("DLR", "render test", "obj")
+    vault.init_run("DLR", "run-1", "obj")
+    project = Project(code="DLR", name="Render Test", objective="obj",
+                      leader_model="stub", wiki_path=str(tmp_path / "dlr"), run_id="run-1")
+    orch = Orchestrator(
+        project, {"leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_stub},
+        deliver_products=True,
+    )
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "story.md").write_text("# A Fine Story\n\nreal prose content here.\n")
+
+    t = Task(id="T-1", project_id=uuid4(), goal_id="DLR-G-001", description="t",
+             depends_on=[])
+    t.status = TaskStatus.COMPLETED
+    t.deliverable = True
+    t.output_path = "story.md"
+    summary = RunSummary(project=project)
+    summary.tasks = [t]
+    orch._deliver_finished_products(summary)
+
+    assert summary.rendered_deliverables, "product must still ship without a renderer"
+    d = summary.rendered_deliverables[0]
+    assert d.error is None  # delivery SUCCEEDED (degraded, not failed)
+    assert d.dest.suffix == ".md" and d.dest.is_file()
+    assert d.note and "Markdown" in d.note
+    # the operator is told why + how to get DOCX/PDF
+    assert any("renderer unavailable" in (r.get("concern", "") + r.get("suggestion", "")).lower()
+               or "Markdown" in r.get("concern", "")
+               for r in summary.recommendations)
+
+
 def test_deliver_blocked_goal_withheld_and_cross_goal_advisory(tmp_path, monkeypatch):
     """The off-topic-paper guard (2026-05-30): a deliverable in a BLOCKED goal is
     withheld even with no task-dep edge (a rejected task-plan produces zero tasks).
