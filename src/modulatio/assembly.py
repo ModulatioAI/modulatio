@@ -44,6 +44,7 @@ caller's business; this module only concatenates bytes in the named order.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import re
@@ -226,7 +227,9 @@ def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
     if title_page.strip():
         blocks.append(title_page.rstrip("\n"))
 
+    sep_bytes = len(separator.encode())
     total = framing_bytes
+    over_cap = False
     for name in manifest["units"]:
         path = _safe_unit_path(name, artifacts_root)
         if path is None:
@@ -248,11 +251,15 @@ def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
             )
             missing.append(name)
             continue
-        if total + size > _MAX_TOTAL_BYTES:
+        # Count the SEPARATOR that will precede this block, not just the body —
+        # a huge separator × N blocks must not slip past the cap (Nemo hull #1).
+        added = size + (sep_bytes if blocks else 0)
+        if total + added > _MAX_TOTAL_BYTES:
             errors.append(
                 f"total assembled size would exceed {_MAX_TOTAL_BYTES} bytes; "
                 f"stopped before {name!r}"
             )
+            over_cap = True
             break
         try:
             body = path.read_text()
@@ -262,16 +269,19 @@ def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
             continue
         blocks.append(body.strip("\n"))
         used.append(name)
-        total += size
+        total += added
 
     if trailer.strip():
         blocks.append(trailer.strip("\n"))
 
     content = separator.join(blocks)
-    # Final belt: the separator repeated across N blocks (also producer-authored)
-    # can push the joined output past the cap even when each piece was in-bounds.
-    if len(content.encode()) > _MAX_TOTAL_BYTES:
-        errors.append(f"assembled output exceeds {_MAX_TOTAL_BYTES} bytes")
+    # Hard belt: NEVER return over-cap content for writing (Nemo hull #1 — the
+    # old "final check" only logged an error but still returned the bytes). An
+    # over-cap assembly is incomplete → fail-closed to a full review.
+    if over_cap or len(content.encode()) > _MAX_TOTAL_BYTES:
+        if not over_cap:
+            errors.append(f"assembled output exceeds {_MAX_TOTAL_BYTES} bytes")
+        content = ""
     return AssemblyResult(
         content=content, units_used=used, missing=missing, errors=errors,
     )
@@ -380,14 +390,28 @@ def _assemble_data(manifest: dict, artifacts_root: Path) -> AssemblyResult:
     )
 
 
+def _capped(content: str, errors: list[str], what: str) -> tuple[str, list[str]]:
+    """Enforce the final-output cap on a merged dataset (Nemo hull #2 —
+    serialization/quoting can expand a near-cap input past the cap). Over → fail
+    closed (empty content + error → incomplete → full review)."""
+    if len(content.encode()) > _MAX_TOTAL_BYTES:
+        return "", errors + [f"merged {what} exceeds {_MAX_TOTAL_BYTES} bytes"]
+    return content, errors
+
+
+def _dedupe_key(text: str) -> str:
+    """Bounded dedupe key — a short hash, so the `seen` set can't grow to the
+    full serialized size of a huge dataset (Nemo hull #2 memory bound)."""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def _merge_json(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[str]]:
     merged: list = []
     errors: list[str] = []
     for name, text in items:
-        # Untrusted producer/unit content: a ValueError is bad JSON; a
-        # RecursionError is deeply-nested JSON (NOT a ValueError) — both must be
-        # caught here so the unit is recorded as an error (→ assembly incomplete →
-        # fail-closed to a full review) instead of escaping the merge.
+        # Untrusted unit content: ValueError = bad JSON; RecursionError =
+        # deeply-nested JSON (NOT a ValueError). Both caught → unit recorded as an
+        # error (→ incomplete → full review), never escaping the merge.
         try:
             obj = json.loads(text)
         except (ValueError, RecursionError) as exc:
@@ -399,7 +423,7 @@ def _merge_json(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[s
         out: list = []
         for el in merged:
             try:
-                key = json.dumps(el, sort_keys=True)
+                key = _dedupe_key(json.dumps(el, sort_keys=True))
             except (ValueError, RecursionError):
                 out.append(el)  # un-dedupable element; the final serialize rules
                 continue
@@ -407,30 +431,28 @@ def _merge_json(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[s
                 seen.add(key)
                 out.append(el)
         merged = out
-    # Serializing a deeply-nested merged structure can RecursionError even when
-    # every unit parsed fine — catch it so a deep dataset fails closed (recorded
-    # error → incomplete → full review) rather than escaping the merge.
     try:
-        return json.dumps(merged, indent=2) + "\n", errors
+        content = json.dumps(merged, indent=2) + "\n"
     except (ValueError, RecursionError) as exc:
         return "", errors + [f"merged JSON not serializable ({type(exc).__name__})"]
+    return _capped(content, errors, "JSON")
 
 
 def _merge_csv(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[str]]:
-    """Stack CSV units under ONE header. Uses the ``csv`` module so quoted fields
-    with embedded newlines/commas parse correctly (naive line-splitting corrupts
-    them). Header MISMATCH is a real error — recorded so the assembly is marked
-    incomplete (fail-closed), never silently merging mismatched schemas."""
+    """Stack CSV units under ONE header. ``strict=True`` so malformed quoting is a
+    real ``csv.Error`` (not silently normalized — Nemo hull #3). Header mismatch
+    AND row-arity mismatch are recorded errors → the assembly is incomplete
+    (fail-closed), never silently merging mismatched/garbage schemas."""
+    csv.field_size_limit(_MAX_UNIT_BYTES)
     header: list[str] | None = None
     rows: list[list[str]] = []
     errors: list[str] = []
     for name, text in items:
         try:
-            parsed = list(csv.reader(io.StringIO(text)))
+            parsed = [r for r in csv.reader(io.StringIO(text), strict=True) if r]
         except (csv.Error, ValueError) as exc:
             errors.append(f"{name}: invalid CSV ({exc})")
             continue
-        parsed = [r for r in parsed if r]  # drop blank rows
         if not parsed:
             continue
         if header is None:
@@ -438,12 +460,17 @@ def _merge_csv(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[st
         elif parsed[0] != header:
             errors.append(f"{name}: CSV header mismatch (expected {header})")
             continue
-        rows.extend(parsed[1:])
+        width = len(header)
+        for row in parsed[1:]:
+            if len(row) != width:
+                errors.append(f"{name}: CSV row arity {len(row)} != header {width}")
+                continue
+            rows.append(row)
     if dedupe:
-        seen: set[tuple] = set()
+        seen: set[str] = set()
         out: list[list[str]] = []
         for r in rows:
-            key = tuple(r)
+            key = _dedupe_key("\x00".join(r))
             if key not in seen:
                 seen.add(key)
                 out.append(r)
@@ -454,7 +481,7 @@ def _merge_csv(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[st
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(header)
     writer.writerows(rows)
-    return buf.getvalue(), errors
+    return _capped(buf.getvalue(), errors, "CSV")
 
 
 def _assemble_media(manifest: dict, artifacts_root: Path) -> AssemblyResult:

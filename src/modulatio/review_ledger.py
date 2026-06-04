@@ -151,6 +151,15 @@ def verify_assembly(
          the order the engine concatenated, so it is not re-verified here);
       6. the producer-authored framing (title/separator/trailer) is within bounds.
     """
+    # Nemo hull #5/#6: the `code` family currently generates only a wiring INDEX
+    # (no deterministic integration/wiring validation) and its README embeds an
+    # unvalidated producer `entrypoint`. So it is NOT eligible for the cheap
+    # structural pass — fall back to a full review (the index is small, so this
+    # costs nothing). document/data stay cheap. (When code grows real validation,
+    # lift this.)
+    if record.strategy == "code":
+        return False, "code assembly: full review (no deterministic wiring validation yet)"
+
     if not record.complete:
         return False, "assembly incomplete (missing or errored units)"
 

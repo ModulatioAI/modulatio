@@ -296,3 +296,40 @@ def test_document_framing_cannot_exceed_total_cap(tmp_path, monkeypatch):
         {"units": ["a.txt"], "title_page": "X" * 500, "trailer": "Y" * 500}, tmp_path,
     )
     assert any("framing" in e and "cap" in e for e in r.errors)
+    # framing alone over-cap → framing dropped + error logged (→ complete=False →
+    # full review); the units that DO fit still assemble.
+    assert r.content == "unit"
+
+
+# ── Nemo hull review fixes (2026-06-04) ───────────────────────────────────
+
+
+def test_document_separator_over_cap_returns_empty(tmp_path, monkeypatch):
+    """Separator x N blocks counts toward the cap; over-cap → content='' (not the
+    oversized bytes)."""
+    monkeypatch.setattr(assembly, "_MAX_TOTAL_BYTES", 50)
+    for n in ("a.txt", "b.txt", "c.txt"):
+        (tmp_path / n).write_text("unit")
+    r = assembly.assemble(
+        {"units": ["a.txt", "b.txt", "c.txt"], "separator": "Z" * 40}, tmp_path,
+    )
+    assert r.content == "" and any("exceed" in e for e in r.errors)
+
+
+def test_data_json_over_cap_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(assembly, "_MAX_TOTAL_BYTES", 30)
+    (tmp_path / "a.json").write_text('[{"a": 1}, {"b": 2}, {"c": 3}]')
+    r = assembly.assemble({"units": ["a.json"], "format": "json"}, tmp_path, strategy="data")
+    assert r.content == "" and any("exceeds" in e for e in r.errors)
+
+
+def test_csv_strict_rejects_unterminated_quote(tmp_path):
+    (tmp_path / "a.csv").write_text('id,name\n1,"unterminated\n')
+    r = assembly.assemble({"units": ["a.csv"], "format": "csv"}, tmp_path, strategy="data")
+    assert any("invalid CSV" in e for e in r.errors)
+
+
+def test_csv_row_arity_mismatch_is_error(tmp_path):
+    (tmp_path / "a.csv").write_text("id,name\n1,alice\n2,bob,extra\n")
+    r = assembly.assemble({"units": ["a.csv"], "format": "csv"}, tmp_path, strategy="data")
+    assert any("arity" in e for e in r.errors)

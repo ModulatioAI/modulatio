@@ -131,3 +131,14 @@ def test_select_assembler_skill_ignores_non_assembler():
     unit.artifact_kind = "code"
     _select_assembler_skill([unit], project_code=None)
     assert unit.required_skills == ["long-form"]  # not an assembler → untouched
+
+
+def test_select_canonicalizes_mixed_assembler_skills():
+    """A code task whose planner emitted BOTH document- and code-assembly must
+    end with code-assembly FIRST (else strategy resolves to document). Nemo #4."""
+    from modulatio.orchestration import _assembly_strategy_for_task
+    asm = _task("A1", skills=["document-assembly", "code-assembly"])
+    asm.artifact_kind = "code"
+    _select_assembler_skill([asm], project_code=None)
+    assert asm.required_skills[0] == "code-assembly"
+    assert _assembly_strategy_for_task(asm) == "code"

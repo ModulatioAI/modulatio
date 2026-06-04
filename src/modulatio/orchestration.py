@@ -328,7 +328,13 @@ def _select_assembler_skill(tasks: "list[Task]", project_code: str | None) -> No
         except Exception:  # noqa: BLE001 — keep the planner's skill on error
             continue
         target = entry.assembler_skill
-        if target and target in _ASSEMBLER_SKILLS and target not in t.required_skills:
+        if target and target in _ASSEMBLER_SKILLS:
+            # ALWAYS canonicalize the target to FIRST (Nemo hull #4): if the
+            # planner emitted mixed assembler skills (e.g. [document-assembly,
+            # code-assembly]) the target may already be present but NOT first, and
+            # _assembly_strategy_for_task picks the first — so code could route to
+            # the document join. Force the standards' family to be the sole/first
+            # assembler skill.
             t.required_skills = [target] + [
                 s for s in t.required_skills if s not in _ASSEMBLER_SKILLS
             ]
@@ -4842,6 +4848,25 @@ class Orchestrator:
         manifest = _assembly.parse_assembly_manifest(body_text)
         if manifest is None:
             return None
+        # Nemo hull #8: pre-filter manifest units to the AUTHORITATIVE dependency
+        # output paths BEFORE reading them — an in-root file that isn't a declared
+        # unit must not be copied into the draft (pre-QC exposure), even though
+        # verify_assembly would reject it afterward. Only when deps exist (a
+        # cross-goal assembly has none → no allowlist → read as the producer named,
+        # and verify_assembly fails closed on the empty dep set).
+        allowed = {
+            d.output_path.strip().lstrip("./")
+            for d in (
+                store.list_tasks(self.project.code, run_id=self.project.run_id)
+            )
+            if d.id in task.depends_on and d.output_path
+        }
+        if allowed:
+            kept_units, dropped = [], []
+            for u in manifest.get("units", []):
+                (kept_units if str(u).strip().lstrip("./") in allowed else dropped).append(u)
+            if dropped:
+                manifest = {**manifest, "units": kept_units}
         # Part B: the assembler skill selects the family/strategy; the engine owns
         # the mechanical join. document = text concat (today's default).
         strategy = _assembly_strategy_for_task(task)
@@ -8809,6 +8834,16 @@ class Orchestrator:
                 # Re-opened task has no live pass-mark (review 2026-06-04).
                 t.qc_passed_checksum = None
                 self._assembly_records.pop(t.id, None)
+                # Mirror _leader_auto_redo's mode selection (Nemo hull #7): build
+                # IN PLACE on an existing artifact (diff multi-file, else revise)
+                # so a stale `generate` can't full-rewrite a prior deliverable.
+                draft_path = self._task_artifact_path(t)
+                if draft_path is not None:
+                    t.producer_mode = (
+                        "diff" if _draft_is_multifile(t, draft_path) else "revise"
+                    )
+                else:
+                    t.producer_mode = "generate"
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
 
             for t in tasks:

@@ -213,3 +213,12 @@ def test_verify_assembly_oversized_framing_falls_back(tmp_path):
     rec, asm, by_id, root = _assembly_fixture(tmp_path, title="X" * 5000)
     ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "title_page exceeds" in reason
+
+
+def test_verify_assembly_code_strategy_falls_back(tmp_path):
+    """code assembly is not eligible for the cheap pass (no wiring validation) —
+    always falls back to a full review. Nemo #5/#6."""
+    rec, asm, by_id, root = _assembly_fixture(tmp_path)
+    rec.strategy = "code"
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "code assembly" in reason
