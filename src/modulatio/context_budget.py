@@ -60,7 +60,11 @@ from pathlib import Path
 from typing import Any, Iterator, Literal, Sequence
 
 
-_DEFAULT_FALLBACK_MAX_INPUT_TOKENS = 8192
+# 2026-06-04: doubled from the 8K guardrail per Clif's "double the litellm
+# fallback" directive (still conservative for UNKNOWN models — the floor stays,
+# just doubled). NOTE: the original 70dfafe commit claimed this change but the
+# edit never landed; corrected here after Nemo's hull review caught the mismatch.
+_DEFAULT_FALLBACK_MAX_INPUT_TOKENS = 16384
 
 _LOGGER = logging.getLogger("modulatio.context_budget")
 

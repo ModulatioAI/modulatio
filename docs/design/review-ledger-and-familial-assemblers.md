@@ -4,84 +4,136 @@ SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Cl
 -->
 # Design: Run Review-Ledger + Product-Aware Familial Assemblers
 
-Status: **DESIGN — pending Nemo (hull) + Lovecraft (coherence) review.** Not yet built.
-Branch context: sits on top of `integration/leader-end-to-end` (five committed fixes:
-context-doubling, sandbox `#82`+profile, consolidation manifest, consolidation
-loadout, codified-skill shadow-fix `#84`).
+Status: **DESIGN — reviewed, hardened, ready to build.** Not yet built.
+Sits on `integration/leader-end-to-end` (committed fixes: context-doubling,
+sandbox `#82`+profile, consolidation manifest, consolidation loadout,
+codified-skill shadow-fix `#84`, fallback-constant correction).
+
+## Review record (2026-06-04, Message-in-a-Bottle)
+
+- **Nemo (hull): "build with these changes."** Both gates pass
+  (`ruff` clean; `pytest` 2769). The five committed fixes are hull-sound. The
+  design needed tightening — folded below (A2 authoritative-source, full-recipe
+  hash + engine AssemblyRecord, fail-closed partial; narrowed A3 predicate;
+  metered tools as trusted narrow adapters + per-task spend bounds). He caught a
+  real code/commit mismatch (`_DEFAULT_FALLBACK_MAX_INPUT_TOKENS` was still 8192
+  despite the commit claim — **corrected to 16384**).
+- **Lovecraft (coherence): "coherent."** No thesis drift; the five fixes hold the
+  spine. Two seams made explicit below: the **emergent-whole** review pass, and
+  **"review-ledger" naming** (dropped "clipboard").
+
+Verdicts: `Message in a Bottle/2026-06-04-{nemo,lovecraft}-VERDICT-*`.
 
 ## Context
 
-The assembly arc is *mechanically proven*: live run `b194fa` produced a complete,
-byte-fidelity anthology (49 KB, all six stories, title + separators) via a producer
-manifest → engine concatenation. Three entangled problems remain.
+The assembly arc is mechanically proven (live run `b194fa`: a complete,
+byte-fidelity anthology via producer-manifest → engine concatenation). Three
+entangled problems remain:
 
 1. **`#85` — QC re-reads a large assembly from scratch.** `_qc_review`
-   (`orchestration.py:4720`) does `body = draft_path.read_text()` unconditionally.
-   The 49 KB book (≈13.8 K tokens) + QC's context blocks blew the 16 K QC budget →
-   compressed to a **partial view** → false-rejected the complete book on every
-   retry. QC re-verifies content the units **already passed** — the precise
-   anti-pattern the speculative-decoding thesis exists to kill.
-2. **`#86` — a retry clobbered the complete book with a stub.** Every producer write
-   is an unconditional `path.write_text()` (`orchestration.py:3376` + 7 siblings).
-   The retry loop re-entered the producer; attempt 4's 348-byte pointer-list
-   overwrote attempt 1's 49 KB. The QC-passed version lives only in an in-memory
-   list (`summary.drafts`), never checkpointed → lost. The stub was delivered.
-3. **The current assembler is document-shaped, not product-agnostic.** `assembly.py`
-   does `path.read_text()` + `separator.join()` — text only. Correct for prose/
-   reports/forms; **wrong** for code (don't `cat` source into one blob), binary
-   media (a tool render, not a string join), structured data (a real merge). It's
-   opt-in so it won't crash a code/video run today — but the `consolidation` skill
-   + the planner ASSEMBLY routing rule *would* steer such a task into the text
-   concatenator. Latent corruption, not a safe default.
+   (`orchestration.py:4720`) reads the full body unconditionally; a 49 KB book
+   (≈13.8 K tok) + QC context blew the 16 K QC budget → compressed to a partial
+   view → false-rejected the complete book on every retry. QC re-verifies content
+   the units already passed — the anti-pattern the speculative-decoding thesis
+   kills.
+2. **`#86` — a retry clobbered the complete book with a stub.** Every producer
+   write is an unconditional `path.write_text()`; attempt 4's 348-byte stub
+   overwrote attempt 1's 49 KB. The passed version lived only in an in-memory list,
+   never checkpointed → lost → the stub was delivered.
+3. **The current assembler is document-shaped, not product-agnostic.**
+   `assembly.py` is `read_text()` + `separator.join()` — text only; wrong for code
+   (don't `cat` source into a blob), binary media (a tool render), structured data
+   (a real merge). Opt-in, so it won't crash a code/video run today — but the
+   `consolidation` skill + planner ASSEMBLY routing *would* steer such a task into
+   the text concatenator. Latent corruption.
 
 **Through-line.** The task store is already the work-queue (states +
-`verifier_result` marks + `depends_on` + empty=done), and `qc_history` already
-records every verdict with the full artifact body — **but nothing consults those
-review marks to avoid re-reviewing already-passed content, and nothing pins the
-passed bytes.** Add that missing dimension (content-addressed review provenance)
-and `#85` + `#86` both fall. Then generalize assembly from "join a document" to
-"join the *product*" via a small family of assembler **skills**, each backed by a
-mechanical operation (engine concat, a local tool, or a metered SaaS call) — never
-routing unit *bytes* through the LLM. Keeps the engine true to its spine:
-artifact-agnostic, code-for-tokens-not-documents, QC-as-cheap-verifier.
+`verifier_result` + `depends_on` + empty=done); `qc_history` already records every
+verdict with the artifact body — **but nothing consults those marks to skip
+re-reviewing passed content, and nothing pins the passed bytes.** Add content-
+addressed review provenance (the **review-ledger**) and `#85` + `#86` both fall.
+Then generalize assembly from "join a document" to "join the *product*" via a
+small family of assembler **skills**, each backed by a mechanical operation —
+never routing unit *bytes* through the LLM.
 
-Part A (the ledger) is the foundation and ships first — it fixes `#85`/`#86` *and*
-becomes the cost governor that makes Part B's metered assembly affordable.
+Part A (the review-ledger) is the foundation, ships first, and is the cost
+governor that makes Part B's metered assembly affordable.
 
 ---
 
-## Part A — The run review-ledger (the "clipboard," upgraded)
+## Part A — The run review-ledger
 
-Principle: make the QC "reviewed" mark **first-class and content-addressed**, then
-make two consumers trust it.
+Make the QC "reviewed" mark **first-class and content-addressed**, then make two
+consumers trust it. (Naming: it is a **review-ledger** — a content-addressed
+provenance store — *not* a "clipboard." Don't muddy `team_canvas`/`team_state`/
+`team_memory`/`qc_history`/the task store.)
 
-- **A1 — Stamp the pass (content-addressed).** When QC passes an artifact, record
-  `qc_passed @ checksum` on the task/evidence. `ArtifactEvidence.checksum` exists
-  (`types.py`) but isn't populated/compared. Persist a per-run review ledger
-  (`task_id → {checksum, verdict, reviewed_at}`) — extend the store / a run-dir
-  sidecar; reuse `qc_history.append_verdict` (already holds verdict + body). This is
-  the "reviewed" column on the clipboard, keyed to *content*.
-- **A2 — Assembly QC verifies marks, not bytes (`#85`).** For an assembly task, QC
-  becomes a **cheap structural check**: every named unit is present, in declared
-  order, and its bytes match a `qc_passed` checksum in the ledger. No LLM re-read of
-  the assembled whole. Because mechanical assembly concatenates the *exact passed
-  bytes*, checksum-presence is airtight — the only *new* risk assembly introduces is
-  ordering/completeness, which the cheap check covers. Seam: a branch in `_qc_review`
-  (`orchestration.py:4688`) gated on the task being an assembly task → route to a
-  `verify_assembly(manifest, ledger)` structural check.
-- **A3 — Pin the passed version + no-regress (`#86`).** A `_safe_artifact_write`
-  guard: never overwrite a present, QC-passed, larger deliverable with one that drops
-  below its declared token band / shrinks past a regression threshold. Checkpoint a
-  QC-passed artifact (`checkpoints/qc_passed/<task>/`) the moment it passes, so a
-  drifted retry is *restored* from the last good version, not shipped as a stub. Call
-  sites: every `path.write_text` in the producer methods (`orchestration.py:3376,
-  3497, 3530, 3631, 3691, 3751, 4643, 6301`).
-- **A4 — (interim) raise the QC budget for assembly artifacts** as a belt while A2
-  lands — but A2 is the real fix (don't read the bytes at all).
+**A1 — Stamp the pass (content-addressed).** When QC passes an artifact, record
+`qc_passed @ checksum` on the task/evidence (`ArtifactEvidence.checksum` exists but
+isn't populated/compared). Persist a per-run review-ledger
+(`task_id → {checksum, verdict, reviewed_at}`); reuse `qc_history.append_verdict`.
 
-Critical files: `orchestration.py` (`_qc_review` ~4688/4720, write sites, redo loop
-~5882), `types.py` (`ArtifactEvidence.checksum`, a Task ledger field),
-`qc_history.py` (reuse), a small `review_ledger` helper / store extension.
+**A2 — Assembly QC verifies the deterministic RECIPE against an AUTHORITATIVE
+expected — not the producer's manifest.** (Nemo blockers 1–3.) The naive version —
+"every unit the manifest *names* is present, ordered, and qc_passed" — is
+**tautological**: a manifest can omit a required unit, duplicate one, or reorder,
+and every named checksum still matches. The hardened check:
+
+- **Authoritative expected_unit_sequence.** Compare `manifest.units` against the
+  *task graph* — the completed dependency artifacts / an explicit assembly input
+  list recorded **before** the producer emits the manifest — not against the
+  manifest itself. Reject missing, extras, duplicates, and out-of-order by default;
+  deviation only allowed by a *declared* assembly policy.
+- **Cover the full recipe, not just unit bytes.** `title_page` / `separator` /
+  `trailer` / newline handling are unreviewed producer bytes. They must be either
+  (a) deterministic from the standards/template, or (b) separately checksum-/
+  schema-/length-bounded. Record the assembler **strategy + algorithm version**.
+- **Engine-authored `AssemblyRecord` is the gate.** A2 applies **only** if the
+  engine wrote an `AssemblyRecord` (`mechanical=True, created_by=engine`) carrying
+  `{task_id, output_path, manifest, expected_unit_sequence, units_used+checksums,
+  missing/errors, strategy+algo_version, final_artifact_checksum}`. QC recomputes a
+  **deterministic hash of (framing + exact passed unit bytes + trailer)** and
+  compares to `final_artifact_checksum` — a cheap *mechanical* full-output
+  verification, no LLM byte-read. If no record exists, or the hash mismatches →
+  **fall back to normal QC, fail closed** (a producer emitting ordinary text can't
+  bypass review by looking assembled).
+- **No "best-effort" pass.** Missing/unsafe/oversize/total-cap-stop units are a
+  **deterministic structural FAIL** — persisted as diagnostic evidence, never
+  marked qc_passed or delivered. (Current `assembly.py` ships partial + a blocker
+  note; that must become a hard fail for deliverables.)
+- **Code note:** `assembly.py` does `body.strip("\n")` per unit — that is *not*
+  literal exact-unit-byte concatenation, so "byte fidelity" must be defined as the
+  deterministic transform the recipe hash covers (or stop stripping). Resolve at
+  build.
+
+**A2b — The emergent-whole is a SEPARATE pass.** (Lovecraft.) The mechanical recipe
+check catches order/completeness/regression/framing — it does **not** catch a book
+whose arc collapsed or an app whose integration broke though every unit passed.
+That emergent quality routes to an explicit higher-level **integration-review** seam
+(a `continuity-check`-class skill or a Leader/human pass), and must **not** leak
+into the cheap mark-check as "just check the marks." Name the seam so QC neither
+over-reads nor under-judges.
+
+**A3 — No-regress: protect the last passed checkpoint, narrowly.** (Nemo 5.) A
+blanket anti-shrink rule wrongly blocks legitimate refactors/trims/patch-deletes.
+Predicate:
+- Only protect a `last_qc_passed` checkpoint for the **same task/output_path**.
+- Only trigger on **retries after a passed deliverable exists**, and only for
+  full-rewrite modes (generate / tool-loop) — **not** first writes, and **not**
+  anchored patch/diff/edit modes that carry explicit delete intent.
+- **Hard fail** when the new artifact is below its declared minimum band /
+  near-empty floor.
+- **Suspicious-shrink** when `new_size < threshold * last_qc_passed_size` **AND**
+  no explicit shrink intent — where intent is recorded *structurally* (task flag /
+  user request / QC corrective-note classification), never inferred from model
+  prose.
+- On trigger: keep/checkpoint the prior passed artifact, record the rejected write
+  as a failed attempt, route a redo — **never freeze the task**.
+
+Critical files: `orchestration.py` (`_qc_review` ~4688/4720, write sites
+`3376/3497/3530/3631/3691/3751/4643/6301`, redo loop ~5882), `types.py`
+(`ArtifactEvidence.checksum`, `AssemblyRecord`/evidence), `assembly.py` (emit the
+record + recipe hash), `qc_history.py` (reuse), a `review_ledger` helper.
 
 ---
 
@@ -89,90 +141,98 @@ Critical files: `orchestration.py` (`_qc_review` ~4688/4720, write sites, redo l
 
 **Engine invariant (product-agnostic, engine-enforced):** *never route unit bytes
 through the LLM as output tokens.* The assembler **skill emits a PLAN** (manifest);
-a **mechanical operation does the bulk** — engine string-concat, a local tool, or a
-metered SaaS call. One invariant; holds for every family.
+a **mechanical operation does the bulk** — engine concat, a local tool, or a metered
+SaaS adapter. Holds for every family.
 
-**The families** — partitioned by the *byte-nature* a producer faces and the
-*reasoning mode* the join demands (where the strategy genuinely forks):
+**The families** — partitioned by the *byte-nature* a producer faces and where the
+mechanical join genuinely forks (Lovecraft confirms this tracks producer reasoning,
+not a filing cabinet):
 
-| family skill | products | the mechanical "join" | byte-nature |
+| family skill | products | mechanical "join" | byte-nature |
 |---|---|---|---|
-| **document-assembly** | prose, reports, forms, application packets, essays, slide-decks-as-ordered-units | engine ordered string-concat + framing (current `assemble()`) | flowing text |
-| **code-assembly** | apps, libraries, modules, multi-page sites | preserve the file tree; generate the wiring (manifest/build/index/entrypoint) — do NOT cat into one file | structured file-tree |
-| **media-assembly** | image, audio, video | a render/composite tool (`ffmpeg`/`imagemagick`/`zip`) — local default or metered SaaS; bytes never touch the LLM | opaque binary |
-| **data-assembly** | csv, json, tables, datasets | a semantic merge/fold (schema-align, dedupe, aggregate) via a merge tool/script | structured records |
+| **document-assembly** | prose, reports, forms, application packets, essays, slide-decks-as-ordered-units | engine ordered string-concat + framing (today's `assemble()`) | flowing text |
+| **code-assembly** | apps, libraries, modules, multi-page sites | preserve the file tree; generate the wiring (manifest/build/index/entrypoint) — never cat into one file | structured file-tree |
+| **media-assembly** | image, audio, video | a render/composite tool (`ffmpeg`/`imagemagick`/`zip`) — local or metered; bytes never touch the LLM | opaque binary |
+| **data-assembly** | csv, json, tables, datasets | a semantic merge/fold (schema-align, dedupe, aggregate) | structured records |
 
-*Rationale for these four:* they partition the four fundamental byte-natures a
-producer encounters — flowing text, structured file-tree, opaque binary, structured
-records — and each has a genuinely different mechanical join and reasoning mode.
-*Escape hatch:* a `bundle` strategy (zip/tarball + manifest) for heterogeneous units,
-or the producer authoring directly (consolidation's existing "not verbatim
-concatenation" clause). A minor strategy, not a core family.
+*Escape hatch:* a `bundle` strategy (zip/tarball + manifest) for heterogeneous
+units, or the producer authoring directly. Minor, not a core family.
 
-- **B1 — Generalize the manifest + executor.** The manifest gains a `strategy` field
-  (or it's derived from the artifact_kind standard, B2). `assembly.py` grows from one
-  `assemble()` into a strategy dispatch (`assemble_document` = today's concat;
-  `assemble_code`; `assemble_media`; `assemble_data`). The **engine executes the
-  mechanical op for all strategies** (it already controls subprocesses) — one control
-  point, the no-clobber/no-regress guarantee, and the Comptroller gate all stay
-  centralized.
-- **B2 — Standards-driven family selection (authoritative seam).** Each
+- **B1 — Generalize the manifest + executor.** Manifest gains `strategy` (or it's
+  derived from the artifact_kind standard, B2). `assembly.py` → strategy dispatch
+  (`assemble_document` = today's concat; `assemble_code`; `assemble_media`;
+  `assemble_data`). The **engine executes the mechanical op for all strategies** —
+  one control point, the AssemblyRecord + recipe-hash + no-regress + Comptroller
+  gate all centralized.
+- **B2 — Standards-driven family selection (sole authority).** Each
   `_seed_standards/<kind>.md` declares `assembler_skill: <family>` in frontmatter
-  (default `document-assembly`). `standards.load` already parses arbitrary frontmatter
-  (`standards.py:78-94`); `artifact_kind` already flows producer→QC→assembly→dispatch
-  (`types.py:184`, `orchestration.py:3138/4772`). Assembler chosen by the product's
-  kind, standards file as authority — no engine routing table. Replace the planner's
-  hardcoded `consolidation` (`task-plan.md`) with "route the assembly step to the
-  artifact_kind's `assembler_skill`."
+  (default `document-assembly`). `standards.load` already parses frontmatter;
+  `artifact_kind` already flows producer→QC→assembly→dispatch. **Reject any planner
+  fallback table or hardcoded default** (Lovecraft + Nemo) — it would re-introduce
+  document-shaped routing. Replace the planner's hardcoded `consolidation` with
+  "route the assembly step to the artifact_kind's `assembler_skill`."
 - **B3 — The skills.** Four assembler seed skills (`document-assembly` — generalize
-  the current `consolidation`; `code-assembly`; `media-assembly`; `data-assembly`),
-  each teaching the producer to emit its family's plan. Users add their own (a Blender
-  assembler, a CAD assembler) without touching the engine; the Alfred loop can codify
-  new ones. (Respect shadow-fix `#84`: seed wins over stale codifications.)
-- **B4 — Tool tier + Comptroller (the SaaS dimension).** Media/data strategies use a
-  tool: free-local default (`ffmpeg`/`imagemagick`/`duckdb`), optional metered SaaS
-  premium (cloud render). Model on web_search free-DDG / metered-Tavily (`tools.py:1130`).
-  **Metered tools are in-process `Tool` functions** (read their key from env directly,
-  like `web_search`) — NOT `run_shell` — sidestepping the sandbox deny-list that
-  strips API keys. Gate cost with the Comptroller (`comptroller.py:196`
-  `authorize_escalation`): add a tool `cost_class` + per-day cap in `comptroller.md`;
-  call before the metered op; deny → BLOCKER ticket + fall back to the free tool.
-  **The ledger (Part A) is what makes this safe**: a metered assembler runs only on
-  pinned, QC-passed inputs — you never pay for re-verification or a wasted call on a
-  drifted retry.
+  `consolidation`; `code-assembly`; `media-assembly`; `data-assembly`). Users add
+  their own without touching the engine; Alfred can codify new ones (respect
+  shadow-fix `#84`).
+- **B4 — Metered assembly: trusted ENGINE ADAPTERS, not producer sandbox tools.**
+  (Nemo 6–7; the earlier "sidestep the sandbox deny-list" framing was wrong.) A
+  metered SaaS assembler runs in-process with full orchestrator authority — so it
+  must be a **narrow, audited engine adapter**, not a general SaaS tool:
+  - narrow params only — **artifact IDs / ledger-pinned paths / strategy options**,
+    never an LLM-controlled URL/body/endpoint;
+  - reads only the one key it needs; never returns secrets/raw request metadata to
+    the model; SSRF / output-size / timeout / retry caps;
+  - validates inputs against **ledger-pinned, QC-passed** artifacts (Part A).
 
-Critical files: `assembly.py` (strategy dispatch), `orchestration.py`
-(`_apply_assembly_manifest` ~4654 → strategy-aware; assembler selection ~3117),
-`_seed_standards/*.md` (+`assembler_skill`), `_seed_skills/` (4 skills; generalize
-`consolidation.md` → `document-assembly.md`), `_seed_skills/task-plan.md` (route by
-kind), `tools.py` + `comptroller.py` (metered tier, B4).
+  Cost bounding (Nemo 7): call `comptroller.authorize_escalation` **inside the tool,
+  immediately before each spend**; add a `cost_class` to Tool metadata and
+  **fail closed for unknown metered cost_class**; a **per-task idempotency key**
+  (same pinned input checksums + strategy ⇒ not charged twice); a **per-task max
+  metered calls (default 1 for assembly)**; **missing config ≠ unlimited** for
+  metered — require explicit opt-in key/config; log actual units consumed. The daily
+  cap + BLOCKER-on-denial keep the free-local loop sovereign and must stay
+  **non-negotiable and visible** (Lovecraft).
+
+Critical files: `assembly.py`, `orchestration.py` (`_apply_assembly_manifest`
+~4654, assembler selection ~3117), `_seed_standards/*.md`, `_seed_skills/`
+(4 skills; `consolidation.md` → `document-assembly.md`), `task-plan.md`,
+`tools.py` + `comptroller.py` (B4).
 
 ---
 
-## Sequencing (each section gated: `ruff check src/ tests/` + full `pytest`)
+## Post-review follow-ups (small, on shipped code)
 
-1. **Part A — review-ledger** (fixes `#85` + `#86`, foundation). First.
-2. **Part B1+B2+B3 (text+code)** — generalize manifest/executor, standards-driven
-   selection, ship `document-assembly` (from `consolidation`) + `code-assembly`.
-   `media-assembly`/`data-assembly` land as defined seams (skill stubs + strategy
-   entry points), built when first needed.
-3. **Part B4 — metered tool tier + Comptroller gating** — last, opt-in, only after
-   the ledger guarantees pinned inputs.
+- **Shadow-fix provenance (Nemo 10).** "User override = absence of version/hash" is
+  a sharp edge: a human who edits a machine-codified shared skill but leaves
+  `version`/`base_seed_hash` may get superseded on the next seed change. Add an
+  explicit `user_override: true` / `machine_codified: true` provenance marker (or
+  document "remove version/base_seed_hash to make it sacred").
+- **Fallback doc/code mismatch (Nemo 8).** Corrected (`_DEFAULT_FALLBACK_MAX_INPUT_TOKENS`
+  16384). Done.
+- **Sandbox prod caveat (Nemo 9).** Don't store credentials in the venv tree;
+  bwrap-unavailable soft-fall to unsandboxed is incompatible with strong
+  "sandbox holds" production claims — document for operators.
 
-**Review gate:** this design + the five committed fixes go to the Message-in-a-Bottle
-pass — Nemo (hull) on ledger/write-guard/metered-security; Lovecraft (coherence) on
-whether "verify marks not bytes" stays true to QC-as-smart-verifier — **before** any
-of Part A/B is built. QC + cost are thesis-critical; the adversarial human pass is the
-real validation.
+## Sequencing (each gated: `ruff check src/ tests/` + full `pytest`)
+
+1. **Part A — review-ledger** (fixes `#85` + `#86`, with the hardened A2/A3). First.
+2. **Part B1+B2+B3 (text+code)** — manifest/executor dispatch, standards-driven
+   selection, `document-assembly` (from `consolidation`) + `code-assembly`;
+   `media`/`data` as defined seams.
+3. **Part B4 — metered tier** — last, opt-in, after the ledger guarantees pinned
+   inputs.
 
 ## Verification (observed, not reported)
 
-- **`#85`:** re-run the western anthology; the assembly task's QC does a structural
-  check (units present/ordered/checksum-matched), `compression_fired` stays false on
-  the QC review, no false-reject, retry_count low.
-- **`#86`:** force a QC reject on an assembly with a complete prior artifact; confirm
-  the engine restores/keeps the passed version, never ships the stub.
-- **Part B:** a `code` artifact_kind assembly routes to `code-assembly` and produces a
-  file-tree + manifest (NOT a concatenated blob); the western anthology (`document`)
-  still produces the complete book.
-- Then push + version bump (Clif's call) after both reviewers sign.
+- **`#85`:** re-run the western anthology; the assembly task's QC recomputes the
+  recipe hash mechanically (no LLM byte-read), `compression_fired` false on the QC
+  review, no false-reject, retry low.
+- **`#86`:** force a QC reject on an assembly with a complete prior artifact; the
+  engine keeps/restores the passed version, never ships the stub.
+- **A2 authoritative-source:** a manifest that drops/duplicates/reorders a unit is
+  **rejected** even though all named checksums match.
+- **Part B:** a `code` artifact_kind assembly routes to `code-assembly` and produces
+  a file-tree + manifest (NOT a blob); the western anthology (`document`) still
+  produces the complete book.
+- Then push + version bump (Clif's call).
