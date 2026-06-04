@@ -42,14 +42,18 @@ def test_frontmatter_present(skill_body: str) -> None:
     assert "capability_tags:" in fm
 
 
-def test_frontmatter_no_tool_loadout(skill_body: str) -> None:
-    """consolidation reads units from team_canvas + repo_map (already
-    in the prompt) and writes the consolidated artifact through the
-    standard producer return path. No shell or write_artifact tool
-    needed."""
+def test_frontmatter_has_tool_loadout(skill_body: str) -> None:
+    """consolidation MUST declare a tool_loadout so it routes through the
+    tool-loop producer path (_llm_with_tools_execute). That path is the only
+    one that injects the skill's own prompt_template ("## Skill guidance")
+    into the producer prompt — the plain generate path does not. Without the
+    loadout the manifest instruction never reaches the model and the producer
+    falls back to re-emitting unit bodies (the 2026-06-03 truncation
+    regression). run_shell also gives it an `ls artifacts/` discovery fallback
+    when the repo_map is thin."""
     end = skill_body.find("---", 4)
     frontmatter = skill_body[:end]
-    assert "tool_loadout" not in frontmatter
+    assert "tool_loadout: run_shell" in frontmatter
 
 
 # ── product-agnostic framing (PRODUCER-STRICT list) ───────────────────────
