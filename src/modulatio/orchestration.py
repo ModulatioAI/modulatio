@@ -5157,6 +5157,12 @@ class Orchestrator:
         documented exception is the locked ``qc_history.append_verdict``
         (a best-effort precedent log held under ``self._store_lock``).
         """
+        # Fix C hardening (Nemo BLOCK): the whole wave is submitted to the pool
+        # at once, so a task QUEUED behind the pool ceiling can start AFTER the
+        # operator hits F8. Bail before any producer/QC work — return the task
+        # untouched (stays PENDING) so a stopped run launches NO new model calls.
+        if self.abort_event.is_set():
+            return TaskExecutionResult(task=t)
         local_summary = RunSummary(project=self.project)
         deferred: list = []
         artifact_writes: list[str] = []
@@ -5566,6 +5572,7 @@ class Orchestrator:
         follow-ups; this lands the parallel execution + the bulkheads.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import CancelledError as _FuturesCancelled
 
         _TERMINAL_FAIL = {
             TaskStatus.BLOCKED, TaskStatus.QC_REJECTED, TaskStatus.ABANDONED,
@@ -5675,7 +5682,20 @@ class Orchestrator:
                     for t in to_run
                 }
                 for fut in as_completed(futures):
-                    done[futures[fut]] = fut.result()
+                    if fut.cancelled():
+                        continue
+                    try:
+                        done[futures[fut]] = fut.result()
+                    except _FuturesCancelled:
+                        continue
+                    # Fix C hardening (Nemo BLOCK): on operator stop, cancel every
+                    # not-yet-started task so the pool doesn't keep launching
+                    # queued work. Already-running tasks finish; their result is
+                    # collected above. (The _execute_task_isolated early-return is
+                    # the belt: a queued task that slips through no-ops anyway.)
+                    if self.abort_event.is_set():
+                        for f in futures:
+                            f.cancel()
 
             # 5. Merge on the main thread, deterministic task-id order.
             #    #151/e2e Blocker 2: durably write each worker's STAGED
@@ -5812,6 +5832,11 @@ class Orchestrator:
         )
 
         for attempt in range(t.max_retries + 1):
+            # Fix C hardening (Nemo BLOCK): the operator stopped the run — do not
+            # launch another producer/QC attempt on an already-started task. The
+            # in-flight call (if any) finishes; we bail before the NEXT one.
+            if self.abort_event.is_set():
+                return
             t.retry_count = attempt
             if attempt > 0:
                 t.transitions.append(
@@ -6010,6 +6035,13 @@ class Orchestrator:
         # is the fallback — flaky QC sometimes resolves on a fresh
         # call). If this final attempt passes QC → COMPLETED.
         # Otherwise settle QC_REJECTED / BLOCKED as before.
+        # Fix C hardening (Nemo BLOCK): if the operator stopped the run while the
+        # final attempt was in flight, the loop exits here — do NOT escalate (a
+        # higher-tier producer call) or run the QC-authored fixer (more model
+        # work). Leave the task on its last state; the run halts.
+        if self.abort_event.is_set():
+            self._record_abort(summary)
+            return
         escalation_outcome = self._run_escalation_attempt(
             t, summary, last_qc  # type: ignore[arg-type]
         )
@@ -7063,6 +7095,12 @@ class Orchestrator:
         control-flow — the artifact FILE stays on disk for the producer to
         revise.
         """
+        # Fix C hardening (Nemo BLOCK): the operator stopped the run — do not
+        # reset tasks and relaunch a whole producer pass. Bail before consuming a
+        # retry slot or touching task state.
+        if self.abort_event.is_set():
+            self._record_abort(summary)
+            return
         goal.retry_count += 1
         # Stamp the budget window's date as the budget is consumed. The in-run
         # loop no longer refreshes on a date roll (the absolute-cap invariant),

@@ -8456,3 +8456,115 @@ def test_decompose_prompt_has_goal_layer_parallel_deliverables_rule():
         assert "put them in ONE goal" in norm, f"{label} missing the one-goal rule"
         assert "NOT N separate goals" in norm, f"{label} missing the anti-split rule"
         assert "{team_capacity}" in body, f"{label} missing the producer-count slot"
+
+
+# ── Fix C hardening: abort actually stops concurrent work (Nemo BLOCK) ───────
+
+def test_execute_task_isolated_early_returns_on_abort(project: Project):
+    """Fix C hardening: a wave worker that starts AFTER the operator hit F8 (a
+    task queued behind the pool ceiling) does ZERO producer/QC work — it returns
+    the task untouched. This is the belt that stops queued-wave budget burn."""
+    calls = {"n": 0}
+
+    def drafter(prompt: str) -> str:
+        calls["n"] += 1
+        return _drafter_stub(prompt)
+
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "drafter": drafter, "qc": _qc_stub,
+    })
+    t = _wave_task("AB-T-001")
+    orch.abort_event.set()  # operator stopped the run before this worker started
+    result = orch._execute_task_isolated(t)
+    assert calls["n"] == 0, "no producer call after abort"
+    assert result.task is t
+    assert t.status is not TaskStatus.COMPLETED
+
+
+def test_run_task_with_redo_stops_dispatch_on_abort(project: Project, monkeypatch):
+    """Fix C hardening: F8 during an in-flight task — the current attempt
+    finishes, but the retry loop bails before launching the NEXT producer call
+    (and never reaches escalation / the QC-fixer)."""
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import AssertionEvidence
+    from pathlib import Path
+
+    calls = {"prod": 0}
+    holder: dict = {}
+
+    def fake_producer(self, t, corrective_notes=""):
+        calls["prod"] += 1
+        if calls["prod"] == 1:
+            holder["orch"].abort_event.set()  # operator hits F8 mid-attempt
+        return (Path("/tmp/x.md"), "sha256:abc", 100)
+
+    def fake_qc(self, t, draft_path, checksum, token_count):
+        # always reject → without abort the loop would keep retrying
+        return (AssertionEvidence(producer="qc", primary=False,
+                                  check="reject", passed=False),
+                "fix it", "substantive")
+
+    monkeypatch.setattr(Orchestrator, "_producer_execute", fake_producer)
+    monkeypatch.setattr(Orchestrator, "_qc_review", fake_qc)
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    holder["orch"] = orch
+    t = _wave_task("AB-T-002")
+    orch._run_task_with_redo(t, RunSummary(project=project))
+    # attempt 0 ran, set abort; the loop-top check stopped attempt 1 — and the
+    # post-loop escalation/QC-fixer never fired (each is another producer call).
+    assert calls["prod"] == 1, f"abort must stop redo; producer ran {calls['prod']}x"
+
+
+def test_leader_auto_redo_bails_on_abort(tmp_path, monkeypatch):
+    """Fix C hardening: F8 just before/at a Leader auto-redo — it must NOT reset
+    tasks and relaunch a whole producer pass."""
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import Goal, GoalStatus
+    from uuid import uuid4
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("disappointed"),
+                      code="ABR")
+    goal = Goal(id="ABR-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    task = _deliverable_task("ABR", output="story.md")
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "story.md").write_text("# S\n\n" + " ".join(["w"] * 50) + "\n")
+    report = orch._scope_root() / "reports" / "ABR-G-001.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("r")
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+
+    orch.abort_event.set()  # operator stopped the run
+    orch._leader_auto_redo(goal, [task], "redo it", report, summary)
+
+    assert goal.retry_count == 0, "auto-redo must not consume a retry on abort"
+    assert any("stopped by the operator" in e for e in summary.errors)
+
+
+def test_concurrent_wave_abort_stops_queued_tasks(project: Project, monkeypatch):
+    """Fix C hardening (Nemo's requested e2e): with the concurrent executor ON
+    and a wave wider than the pool ceiling, the tasks queued behind the pool must
+    NOT run once the operator aborts mid-wave — they early-return instead of
+    burning a producer call."""
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "1")
+    monkeypatch.setenv("MODULATIO_WAVE_POOL_CEILING", "1")  # force queueing
+    calls = {"n": 0}
+    holder: dict = {}
+
+    def drafter(prompt: str) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            holder["orch"].abort_event.set()  # operator stops after the 1st task
+        return _drafter_stub(prompt)
+
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "planner": _planner_stub,  # 3 independent tasks
+        "drafter": drafter, "qc": _qc_stub,
+    })
+    holder["orch"] = orch
+    orch.kickoff("Draft 3 essays on a chosen theme")
+
+    assert calls["n"] < 3, f"queued tasks ran after abort; drafted {calls['n']}/3"
