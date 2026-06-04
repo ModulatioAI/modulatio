@@ -71,3 +71,18 @@ def test_assembler_does_not_depend_on_another_assembler():
     a2 = _task("A2", skills=["document-assembly"])
     _wire_assembler_dependencies([u, a1, a2])
     assert a1.depends_on == ["U1"] and a2.depends_on == ["U1"]
+
+
+# ── Part B: strategy selection per assembler skill ────────────────────────
+
+from modulatio.orchestration import _assembly_strategy_for_task  # noqa: E402
+
+
+def test_strategy_for_task():
+    assert _assembly_strategy_for_task(_task("T", skills=["consolidation"])) == "document"
+    assert _assembly_strategy_for_task(_task("T", skills=["document-assembly"])) == "document"
+    assert _assembly_strategy_for_task(_task("T", skills=["code-assembly"])) == "code"
+    assert _assembly_strategy_for_task(_task("T", skills=["media-assembly"])) == "media"
+    assert _assembly_strategy_for_task(_task("T", skills=["data-assembly"])) == "data"
+    # a non-assembler / unnamed task defaults to document
+    assert _assembly_strategy_for_task(_task("T", skills=["long-form"])) == "document"

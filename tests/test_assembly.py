@@ -146,3 +146,24 @@ def test_allows_nested_unit_path(tmp_path):
     (tmp_path / "sub" / "a.txt").write_text("NESTED")
     r = assembly.assemble({"units": ["sub/a.txt"]}, tmp_path)
     assert r.content == "NESTED" and r.units_used == ["sub/a.txt"]
+
+
+# ── Part B: strategy dispatch ─────────────────────────────────────────────
+
+
+def test_assemble_default_strategy_is_document(tmp_path):
+    (tmp_path / "a.txt").write_text("A")
+    (tmp_path / "b.txt").write_text("B")
+    r = assembly.assemble({"units": ["a.txt", "b.txt"], "separator": "|"}, tmp_path)
+    assert r.content == "A|B"  # document concat, the default
+
+
+def test_assemble_unknown_strategy_fails_closed(tmp_path):
+    (tmp_path / "a.txt").write_text("A")
+    r = assembly.assemble({"units": ["a.txt"]}, tmp_path, strategy="code")
+    assert r.content == "" and "unknown assembly strategy 'code'" in r.errors[0]
+    assert r.missing == ["a.txt"]
+
+
+def test_document_strategy_registered():
+    assert "document" in assembly._STRATEGIES

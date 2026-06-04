@@ -163,8 +163,35 @@ def _safe_unit_path(name: str, artifacts_root: Path) -> Path | None:
     return candidate
 
 
-def assemble(manifest: dict, artifacts_root: Path) -> AssemblyResult:
-    """Concatenate the manifest's unit files (read from disk) into one body.
+def assemble(
+    manifest: dict, artifacts_root: Path, strategy: str = "document"
+) -> AssemblyResult:
+    """Mechanically assemble the manifest's units per the named STRATEGY (Part B).
+
+    The producer emits the PLAN (manifest); the engine does the bulk join — the
+    one invariant across every family is that unit bytes never round-trip through
+    the model. The *join* itself differs by family:
+
+      - ``document`` — ordered text concatenation + framing (prose/reports/forms).
+      - ``code`` — preserve the file tree, generate the wiring (apps/modules);
+        NOT a concat-into-one-blob. (Part B / code-assembly.)
+      - ``media`` / ``data`` — a render/merge TOOL (Part B seams).
+
+    Unknown strategy → an error result so the caller fails closed.
+    """
+    fn = _STRATEGIES.get(strategy)
+    if fn is None:
+        return AssemblyResult(
+            content="",
+            missing=[str(u) for u in manifest.get("units", [])],
+            errors=[f"unknown assembly strategy {strategy!r}"],
+        )
+    return fn(manifest, artifacts_root)
+
+
+def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
+    """The ``document`` strategy: concatenate the manifest's unit files (read from
+    disk) into one body.
 
     Order is the manifest's ``units`` order — data, not opinion. Missing or
     unsafe units are recorded (never fabricated, never silently dropped);
@@ -233,3 +260,11 @@ def assemble(manifest: dict, artifacts_root: Path) -> AssemblyResult:
     return AssemblyResult(
         content=content, units_used=used, missing=missing, errors=errors,
     )
+
+
+#: Family → mechanical-join function. ``document`` is the only live strategy until
+#: code/media/data land; the dispatch seam is what makes assembly product-agnostic
+#: (the assembler SKILL selects the strategy; the ENGINE owns the join).
+_STRATEGIES: dict = {
+    "document": _assemble_document,
+}

@@ -272,10 +272,20 @@ def _normalize_render_paths(text: str | None) -> str | None:
     return _RENDER_DELIVERABLE_RE.sub(lambda m: f"{m.group(1)}.md", text)
 
 
-#: Skills whose task is a multi-unit ASSEMBLY step — it combines already-produced
-#: units into one deliverable. Grows in Part B (document/code/media/data-assembly);
-#: today the consolidation seed (+ the document-assembly name it becomes).
-_ASSEMBLER_SKILLS: frozenset[str] = frozenset({"consolidation", "document-assembly"})
+#: Assembler skill → mechanical-join STRATEGY (Part B). The assembler SKILL the
+#: planner picks (by artifact_kind, via the standards file) selects the family;
+#: the ENGINE owns the join (assembly._STRATEGIES). ``consolidation`` is the
+#: original seed name, kept as a back-compat alias for ``document-assembly``.
+_ASSEMBLER_STRATEGY: dict[str, str] = {
+    "consolidation": "document",
+    "document-assembly": "document",
+    "code-assembly": "code",
+    "media-assembly": "media",
+    "data-assembly": "data",
+}
+#: Skills whose task is a multi-unit ASSEMBLY step (it combines already-produced
+#: units into one deliverable).
+_ASSEMBLER_SKILLS: frozenset[str] = frozenset(_ASSEMBLER_STRATEGY)
 
 #: No-regress guard (Part A / A3, #86): a generate-mode RETRY that collapses a
 #: QC-passed deliverable to a fraction of its size is almost certainly a drifted
@@ -291,6 +301,15 @@ _REGRESSION_MIN_PRIOR_TOKENS = 200
 def _is_assembler_task(task: "Task") -> bool:
     """True if ``task`` runs an assembler skill (a multi-unit assembly step)."""
     return bool(set(task.required_skills) & _ASSEMBLER_SKILLS)
+
+
+def _assembly_strategy_for_task(task: "Task") -> str:
+    """The mechanical-join strategy for ``task``'s assembler skill (default
+    ``document`` — a task that combines units but didn't name a family is text)."""
+    for skill_name in task.required_skills:
+        if skill_name in _ASSEMBLER_STRATEGY:
+            return _ASSEMBLER_STRATEGY[skill_name]
+    return "document"
 
 
 def _wire_assembler_dependencies(tasks: list["Task"]) -> None:
@@ -4778,7 +4797,10 @@ class Orchestrator:
         manifest = _assembly.parse_assembly_manifest(body_text)
         if manifest is None:
             return None
-        result = _assembly.assemble(manifest, self._artifacts_root())
+        # Part B: the assembler skill selects the family/strategy; the engine owns
+        # the mechanical join. document = text concat (today's default).
+        strategy = _assembly_strategy_for_task(task)
+        result = _assembly.assemble(manifest, self._artifacts_root(), strategy=strategy)
         # Part A / A2 (#85): record engine-authored proof of mechanical assembly so
         # assembly QC can do the cheap structural check (and a producer emitting
         # assembled-looking text — which leaves no record — can't bypass review).
@@ -4789,6 +4811,7 @@ class Orchestrator:
                 f"sha256:{hashlib.sha256(result.content.encode()).hexdigest()}"
             ),
             complete=complete,
+            strategy=strategy,
         )
         bits = [
             f"mechanical assembly: {len(result.units_used)} unit(s) concatenated"
