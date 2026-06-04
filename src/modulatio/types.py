@@ -261,6 +261,15 @@ class Task(BaseModel):
     tool_args: dict[str, Any] = Field(default_factory=dict)
     evidence_required: list[EvidenceRequirement] = Field(default_factory=list)
     evidence_provided: list[UUID] = Field(default_factory=list)
+    #: Content-addressed QC pass-mark (Part A / review-ledger, task #85/#86). Set
+    #: to the artifact's ``sha256:`` checksum the moment QC PASSES this task; the
+    #: ArtifactEvidence objects that also carry the checksum are transient (only
+    #: their IDs survive on ``evidence_provided``), so this is the durable,
+    #: queryable "reviewed @ content" mark. Consumers: an ASSEMBLY task derives
+    #: its authoritative expected-unit set from its ``depends_on`` tasks' marks
+    #: (path + this checksum), and the no-regress guard checkpoints the version
+    #: that earned this mark. ``None`` until the task first passes QC.
+    qc_passed_checksum: str | None = None
     status: TaskStatus = TaskStatus.PENDING
     transitions: list[StateTransition] = Field(default_factory=list)
     retry_count: int = 0

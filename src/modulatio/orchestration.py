@@ -5108,6 +5108,8 @@ class Orchestrator:
             t.evidence_provided.append(qc_verdict_new.id)
 
             if qc_verdict_new.passed:
+                # Part A / review-ledger (#85/#86): content-addressed pass-mark.
+                t.qc_passed_checksum = checksum
                 # Step 0 M4 (audit): QC verdict
                 # outcomes credit "qc"; only plan emission /
                 # (re-)dispatch decisions credit "planner".
@@ -5937,6 +5939,10 @@ class Orchestrator:
                 )
 
                 if qc_verdict.passed:
+                    # Part A / review-ledger (#85/#86): stamp the content-addressed
+                    # pass-mark so downstream assembly QC can verify against it and
+                    # the no-regress guard can pin this version.
+                    t.qc_passed_checksum = checksum
                     # Step 0 M4: QC verdict outcome → actor="qc".
                     t.transitions.append(
                         StateTransition(
@@ -6313,6 +6319,16 @@ class Orchestrator:
         same mind judged and wrote it; that's visible, not hidden), but it
         is NOT gated behind a separate independence check."""
         t.qc_authored_fix = True
+        # Part A / review-ledger (#85/#86): content-addressed pass-mark, computed
+        # from the patched artifact on disk (no checksum var threads to here).
+        # Best-effort — a failed mark just routes downstream assembly QC to its
+        # safe fail-closed (normal-QC) fallback.
+        try:
+            t.qc_passed_checksum = (
+                f"sha256:{hashlib.sha256(draft_path.read_text().encode()).hexdigest()}"
+            )
+        except OSError:
+            pass
         t.transitions.append(
             StateTransition(
                 from_state=t.status.value,
