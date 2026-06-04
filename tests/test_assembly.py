@@ -196,3 +196,57 @@ def test_assemble_code_records_missing(tmp_path):
 
 def test_code_strategy_registered():
     assert "code" in assembly._STRATEGIES
+
+
+# ── Part B: data-assembly strategy (merge/fold) ───────────────────────────
+
+
+def test_assemble_data_merges_json_arrays(tmp_path):
+    (tmp_path / "a.json").write_text('[{"id": 1}, {"id": 2}]')
+    (tmp_path / "b.json").write_text('[{"id": 3}]')
+    r = assembly.assemble({"units": ["a.json", "b.json"], "format": "json"},
+                          tmp_path, strategy="data")
+    import json as _json
+    assert _json.loads(r.content) == [{"id": 1}, {"id": 2}, {"id": 3}]
+    assert r.units_used == ["a.json", "b.json"] and r.errors == []
+
+
+def test_assemble_data_json_object_becomes_one_record(tmp_path):
+    (tmp_path / "a.json").write_text('{"id": 1}')
+    r = assembly.assemble({"units": ["a.json"]}, tmp_path, strategy="data")
+    import json as _json
+    assert _json.loads(r.content) == [{"id": 1}]  # inferred json from extension
+
+
+def test_assemble_data_json_dedupe(tmp_path):
+    (tmp_path / "a.json").write_text('[{"x": 1}, {"x": 1}]')
+    (tmp_path / "b.json").write_text('[{"x": 1}, {"x": 2}]')
+    r = assembly.assemble({"units": ["a.json", "b.json"], "dedupe": True},
+                          tmp_path, strategy="data")
+    import json as _json
+    assert _json.loads(r.content) == [{"x": 1}, {"x": 2}]
+
+
+def test_assemble_data_merges_csv_one_header(tmp_path):
+    (tmp_path / "a.csv").write_text("id,name\n1,alice\n2,bob\n")
+    (tmp_path / "b.csv").write_text("id,name\n3,carol\n")
+    r = assembly.assemble({"units": ["a.csv", "b.csv"]}, tmp_path, strategy="data")
+    assert r.content == "id,name\n1,alice\n2,bob\n3,carol\n"  # inferred csv
+
+
+def test_assemble_data_csv_dedupe(tmp_path):
+    (tmp_path / "a.csv").write_text("id\n1\n2\n")
+    (tmp_path / "b.csv").write_text("id\n2\n3\n")
+    r = assembly.assemble({"units": ["a.csv", "b.csv"], "dedupe": True},
+                          tmp_path, strategy="data")
+    assert r.content == "id\n1\n2\n3\n"
+
+
+def test_assemble_data_invalid_json_is_an_error(tmp_path):
+    (tmp_path / "a.json").write_text("not json{")
+    r = assembly.assemble({"units": ["a.json"], "format": "json"}, tmp_path, strategy="data")
+    assert any("invalid JSON" in e for e in r.errors)  # -> incomplete -> no cheap QC
+
+
+def test_data_strategy_registered():
+    assert "data" in assembly._STRATEGIES

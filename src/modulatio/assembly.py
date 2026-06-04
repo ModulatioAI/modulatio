@@ -305,11 +305,118 @@ def _norm(name: str) -> str:
     return str(name).strip().lstrip("./")
 
 
-#: Family → mechanical-join function. ``document`` (text concat) and ``code`` (file
-#: tree + generated index) are live; media/data land as seams. The dispatch is what
-#: makes assembly product-agnostic — the assembler SKILL selects the strategy; the
-#: ENGINE owns the join; unit bytes never round-trip through the model.
+def _assemble_data(manifest: dict, artifacts_root: Path) -> AssemblyResult:
+    """The ``data`` strategy: a mechanical MERGE/FOLD of homogeneous structured
+    units into one dataset — JSON arrays concatenated, CSV rows stacked under one
+    header. Pure engine, no LLM. ``format`` (json|csv) is explicit or inferred
+    from the first unit's extension; ``dedupe: true`` drops exact-equal records.
+
+    (Cross-schema joins / complex folds belong to a tool — Part B4. A unit that
+    fails to parse is recorded as an error, making the assembly incomplete and
+    ineligible for the cheap QC pass.)
+    """
+    dedupe = bool(manifest.get("dedupe"))
+    fmt = str(manifest.get("format") or "").lower()
+
+    resolved: list[tuple[str, str]] = []
+    missing: list[str] = []
+    errors: list[str] = []
+    total = 0
+    for name in manifest["units"]:
+        path = _safe_unit_path(name, artifacts_root)
+        if path is None:
+            errors.append(f"unsafe or out-of-root unit path: {name!r}")
+            missing.append(name)
+            continue
+        if not path.is_file():
+            missing.append(name)
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            errors.append(f"stat failed for {name!r}: {exc}")
+            missing.append(name)
+            continue
+        if size > _MAX_UNIT_BYTES:
+            errors.append(f"unit {name!r} is {size} bytes (> cap); skipped")
+            missing.append(name)
+            continue
+        if total + size > _MAX_TOTAL_BYTES:
+            errors.append(f"total merged size would exceed {_MAX_TOTAL_BYTES} bytes")
+            break
+        try:
+            resolved.append((name, path.read_text()))
+            total += size
+        except (OSError, UnicodeDecodeError) as exc:
+            errors.append(f"read failed for {name!r}: {exc}")
+            missing.append(name)
+
+    if not fmt:
+        first = resolved[0][0].lower() if resolved else ""
+        fmt = "csv" if first.endswith(".csv") else "json"
+
+    used = [n for n, _ in resolved]
+    if fmt == "csv":
+        content, merge_errs = _merge_csv([t for _, t in resolved], dedupe)
+    else:
+        content, merge_errs = _merge_json(resolved, dedupe)
+    return AssemblyResult(
+        content=content, units_used=used, missing=missing, errors=errors + merge_errs,
+    )
+
+
+def _merge_json(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[str]]:
+    merged: list = []
+    errors: list[str] = []
+    for name, text in items:
+        try:
+            obj = json.loads(text)
+        except ValueError as exc:
+            errors.append(f"{name}: invalid JSON ({exc})")
+            continue
+        merged.extend(obj if isinstance(obj, list) else [obj])
+    if dedupe:
+        seen: set[str] = set()
+        out: list = []
+        for el in merged:
+            key = json.dumps(el, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                out.append(el)
+        merged = out
+    return json.dumps(merged, indent=2) + "\n", errors
+
+
+def _merge_csv(texts: list[str], dedupe: bool) -> tuple[str, list[str]]:
+    header: str | None = None
+    rows: list[str] = []
+    for text in texts:
+        lines = [ln for ln in text.splitlines() if ln != ""]
+        if not lines:
+            continue
+        if header is None:
+            header = lines[0]
+        rows.extend(lines[1:] if lines[0] == header else lines)
+    if dedupe:
+        seen: set[str] = set()
+        out: list[str] = []
+        for r in rows:
+            if r not in seen:
+                seen.add(r)
+                out.append(r)
+        rows = out
+    if header is None:
+        return "", []
+    return "\n".join([header] + rows) + "\n", []
+
+
+#: Family → mechanical-join function. ``document`` (text concat), ``code`` (file
+#: tree + generated index), and ``data`` (structured merge/fold) are live; ``media``
+#: lands as a seam (needs a render tool — Part B4). The dispatch is what makes
+#: assembly product-agnostic — the assembler SKILL selects the strategy; the ENGINE
+#: owns the join; unit bytes never round-trip through the model.
 _STRATEGIES: dict = {
     "document": _assemble_document,
     "code": _assemble_code,
+    "data": _assemble_data,
 }
