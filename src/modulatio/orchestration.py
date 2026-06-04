@@ -3350,21 +3350,29 @@ class Orchestrator:
         )
         if summary_claim is not None:
             task.summary_for_state_doc = summary_claim
-        response = _strip_code_fences(
-            _strip_preamble(_strip_thinking(body_text))
-        )
-        # Two prose-stripping passes for code artifacts:
-        # 1. ``_extract_code_from_prose`` catches the fenced-block
-        #    case (CDE: prose surrounding ```python ...``` blocks).
-        # 2. ``_trim_leading_prose_from_code`` catches the unfenced
-        #    case (STR: "Let me emit:" + blank + #!/usr/bin/env...).
-        # Markdown / essay / report artifacts skip both via the kind
-        # gate; their prose stays.
-        if _is_code_artifact_kind(task.artifact_kind):
-            extracted = _extract_code_from_prose(response)
-            if extracted is not None:
-                response = extracted
-            response = _trim_leading_prose_from_code(response)
+        # Mechanical assembly: if the producer emitted an assembly manifest,
+        # the engine concatenates the named unit files from disk (no output-
+        # token re-emission → no truncation). Else the producer's own response
+        # IS the artifact, as before.
+        assembled = self._apply_assembly_manifest(task, body_text)
+        if assembled is not None:
+            response = assembled
+        else:
+            response = _strip_code_fences(
+                _strip_preamble(_strip_thinking(body_text))
+            )
+            # Two prose-stripping passes for code artifacts:
+            # 1. ``_extract_code_from_prose`` catches the fenced-block
+            #    case (CDE: prose surrounding ```python ...``` blocks).
+            # 2. ``_trim_leading_prose_from_code`` catches the unfenced
+            #    case (STR: "Let me emit:" + blank + #!/usr/bin/env...).
+            # Markdown / essay / report artifacts skip both via the kind
+            # gate; their prose stays.
+            if _is_code_artifact_kind(task.artifact_kind):
+                extracted = _extract_code_from_prose(response)
+                if extracted is not None:
+                    response = extracted
+                response = _trim_leading_prose_from_code(response)
         path.write_text(response)
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
 
@@ -4616,15 +4624,22 @@ class Orchestrator:
         if summary_claim is not None:
             task.summary_for_state_doc = summary_claim
 
-        # Same response-shaping pipeline as the regular drafter path —
-        # tool-using producers can still wrap their final text in code
-        # fences or leak thinking tags, and we want consistent stripping.
-        cleaned = _strip_code_fences(_strip_preamble(_strip_thinking(body_text)))
-        if _is_code_artifact_kind(task.artifact_kind):
-            extracted = _extract_code_from_prose(cleaned)
-            if extracted is not None:
-                cleaned = extracted
-            cleaned = _trim_leading_prose_from_code(cleaned)
+        # Mechanical assembly first (manifest → engine concatenates unit
+        # files from disk, no output-token re-emission). Parse from body_text
+        # BEFORE fence-stripping, since the manifest is itself a fenced block.
+        assembled = self._apply_assembly_manifest(task, body_text)
+        if assembled is not None:
+            cleaned = assembled
+        else:
+            # Same response-shaping pipeline as the regular drafter path —
+            # tool-using producers can still wrap their final text in code
+            # fences or leak thinking tags, and we want consistent stripping.
+            cleaned = _strip_code_fences(_strip_preamble(_strip_thinking(body_text)))
+            if _is_code_artifact_kind(task.artifact_kind):
+                extracted = _extract_code_from_prose(cleaned)
+                if extracted is not None:
+                    cleaned = extracted
+                cleaned = _trim_leading_prose_from_code(cleaned)
         path.write_text(cleaned)
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
         # QC-as-fixer Slice 2 (Nemo impl-sweep B2): the tool-loop producer
@@ -4635,6 +4650,39 @@ class Orchestrator:
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
         token_count = len(cleaned.split())
         return path, checksum, token_count
+
+    def _apply_assembly_manifest(self, task: Task, body_text: str) -> "str | None":
+        """If the producer emitted an assembly manifest, mechanically
+        assemble the named unit files from disk and return the concatenated
+        body; else ``None`` so the caller writes the producer's own response.
+
+        Speculative-decoding thesis applied to consolidation: the model
+        emits a small PLAN (title + ordered unit filenames + separator, all
+        cheap output) and the ENGINE does the bulk copy — unit bodies are
+        read from disk, never round-tripped as output tokens, so a large
+        deliverable can't truncate at the model's output cap (the 6-story →
+        2-story western-anthology failure). Missing/unsafe units are surfaced
+        as a blocker in ``summary_for_state_doc``; assembly is best-effort
+        (ship what resolved, name what didn't — never a silent drop).
+        """
+        from modulatio import assembly as _assembly
+        manifest = _assembly.parse_assembly_manifest(body_text)
+        if manifest is None:
+            return None
+        result = _assembly.assemble(manifest, self._artifacts_root())
+        bits = [
+            f"mechanical assembly: {len(result.units_used)} unit(s) concatenated"
+        ]
+        if result.missing:
+            bits.append("MISSING units: " + ", ".join(result.missing[:8]))
+        if result.errors:
+            bits.append("errors: " + "; ".join(result.errors[:3]))
+        note = "; ".join(bits)
+        if result.missing or result.errors:
+            note = "(blocker) " + note
+        existing = task.summary_for_state_doc
+        task.summary_for_state_doc = f"{existing}\n{note}" if existing else note
+        return result.content
 
     # ── QC: review evidence ──────────────────────────────────────────────
     def _qc_review(
@@ -9512,6 +9560,19 @@ SWEEP grouping: SWEEP batches size-bounded gather items into a few tasks;
 PARALLEL DELIVERABLES fans independent generative outputs one-per-item so
 the whole team works at once. Signals: an enumerable list of deliverables
 each worth its own file ("write 6 stories", "a profile of each founder").
+
+ASSEMBLY / CONSOLIDATION — the gather-back step after PARALLEL DELIVERABLES:
+when a task COMBINES already-produced units into ONE deliverable (assemble the
+6 stories into a book, stitch chapters into a manuscript, compile N sections
+into one report, merge the per-item write-ups), set the PRIMARY
+`required_skills` entry to `consolidation`.
+That producer emits a small assembly manifest (title + ordered unit filenames
++ separator) and the engine concatenates the unit BODIES from disk — so the
+assembler never re-types units and a large deliverable can't truncate. Do NOT
+use `long-form`/`drafter` for an assembly step (they re-emit content as output
+tokens → truncation). The unit files already exist; this task depends_on the
+unit tasks and reads the real on-disk filenames from the repo_map, not the
+paths guessed in the task description.
 
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
 events, any real-world factual claim): set the PRIMARY (first)

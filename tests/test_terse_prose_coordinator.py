@@ -121,7 +121,11 @@ def test_template_is_under_post_terse_threshold() -> None:
     rejects under-size drafts; artifact-agnostic, tokens not words), and the
     PARALLEL-DELIVERABLES rule (~870 chars, Fix A — fan N independent generative
     deliverables into an `artifacts:[]` list so the engine expands them into
-    parallel tasks sized to the producer count, instead of one serial mega-task).
+    parallel tasks sized to the producer count, instead of one serial mega-task),
+    and the ASSEMBLY/CONSOLIDATION rule (~640 chars, 2026-06-03 — the gather-back
+    step routes to the `consolidation` skill so the assembler emits a manifest
+    and the engine concatenates unit bodies from disk, instead of re-emitting
+    them as output tokens and truncating a large deliverable).
     Each is contract the planner must honor, not prose. Keep new additions
     justified by contract; the cap catches padding regressions.
 
@@ -129,10 +133,10 @@ def test_template_is_under_post_terse_threshold() -> None:
     / QC, replicate this pattern with their respective baselines.
     """
     char_count = len(orchestration._TASK_PLAN_PROMPT)
-    assert char_count < 8300, (
+    assert char_count < 9200, (
         f"_TASK_PLAN_PROMPT is {char_count} chars — should stay under "
-        f"8,300 (terse baseline + sweep + rigorous-sourcing + web-search "
-        f"+ size-floor + parallel-deliverables contracts)."
+        f"9,200 (terse baseline + sweep + rigorous-sourcing + web-search "
+        f"+ size-floor + parallel-deliverables + assembly contracts)."
     )
     # Lower bound too — a vacuous trim that drops the contract is
     # worse than no trim. 2,500 chars is a sanity floor.

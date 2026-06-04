@@ -818,8 +818,8 @@ def test_task_default_assigned_agent_id_is_none():
     A task that hasn't been dispatched or failed to match any agent
     stays None — the orchestrator reads None as "use the hardcoded role
     fallback for this task"."""
-    from modulatio.types import Task
     from uuid import uuid4
+    from modulatio.types import Task
 
     t = Task(
         id="X-T-001",
@@ -1628,8 +1628,8 @@ def test_operator_present_seam_defaults_autonomous(project: Project):
 def test_task_default_output_path_is_none():
     """Task.output_path defaults to None — tasks without an explicit
     path take the existing drafts/<slug>.md placement."""
-    from modulatio.types import Task
     from uuid import uuid4
+    from modulatio.types import Task
 
     t = Task(
         id="X-T-001",
@@ -1865,8 +1865,8 @@ def test_orchestrator_rejects_plan_with_traversal_output_path(project: Project):
 def test_task_default_depends_on_is_empty_list():
     """Task.depends_on defaults to empty — tasks without explicit deps
     dispatch unconstrained (preserves #1-#7d behavior)."""
-    from modulatio.types import Task
     from uuid import uuid4
+    from modulatio.types import Task
 
     t = Task(
         id="X-T-001",
@@ -3087,8 +3087,8 @@ def test_task_default_required_skills_is_empty_list():
     empty list. A task without explicit skills isn't an error — it
     signals "no skill-based routing constraint on this task", and
     hardcoded role dispatch (slice #6a safety net) still runs."""
-    from modulatio.types import Task
     from uuid import uuid4
+    from modulatio.types import Task
 
     t = Task(
         id="X-T-001",
@@ -3324,8 +3324,8 @@ def test_task_default_artifact_kind_is_neutral_text_not_essay(project: Project):
       (b) orchestrator's ``_plan_tasks`` applies ``"text"`` when the
           JSON item has no ``artifact_kind`` key.
     """
-    from modulatio.types import Task
     from uuid import uuid4
+    from modulatio.types import Task
 
     t = Task(
         id="X-T-001",
@@ -3811,8 +3811,8 @@ def test_task_default_tool_args_is_empty_dict():
     skills read structured args from this field; llm-executor skills
     ignore it. Empty default keeps every pre-#9e task construction
     working unchanged."""
-    from modulatio.types import Task
     from uuid import uuid4
+    from modulatio.types import Task
 
     t = Task(
         id="X-T-001",
@@ -3881,8 +3881,8 @@ def test_task_default_required_capabilities_is_empty_list():
     """Back-compat: Task's required_capabilities defaults to an empty
     list — a task without explicit capability constraints doesn't filter
     the roster on the capability axis."""
-    from modulatio.types import Task
     from uuid import uuid4
+    from modulatio.types import Task
 
     t = Task(
         id="X-T-001",
@@ -8609,3 +8609,75 @@ def test_leader_auto_redo_skips_verify_when_aborted_mid_redo(tmp_path, monkeypat
 
     assert verified["n"] == 0, "no Leader verify call after a mid-redo abort"
     assert any("stopped by the operator" in e for e in summary.errors)
+
+
+# ── Mechanical assembly hook (_apply_assembly_manifest) ───────────────────
+
+
+def _assembly_orch(project, tmp_path, artifacts: Path):
+    """Minimal orchestrator with _artifacts_root pinned to a tmp dir so the
+    assembly hook reads our fixture unit files."""
+    orch = Orchestrator(project, runners={"leader": lambda _p: ""})
+    orch._artifacts_root = lambda: artifacts  # type: ignore[method-assign]
+    return orch
+
+
+def test_apply_assembly_manifest_concatenates_from_disk(project, tmp_path):
+    """A producer response carrying an assembly manifest → the engine
+    concatenates the unit files from disk (not the manifest text), so a
+    large deliverable can't truncate. This is the western-anthology fix."""
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.txt").write_text("STORY ONE BODY")
+    (artifacts / "s2.txt").write_text("STORY TWO BODY")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+
+    task = Task(id="X-T-007", project_id=uuid4(), goal_id="X-G-002",
+                description="assemble", summary_for_state_doc="")
+    body = (
+        "Here is the assembly.\n\n"
+        '```assembly\n'
+        '{"title_page": "BOOK", "separator": "\\n==\\n", '
+        '"units": ["s1.txt", "s2.txt"]}\n'
+        '```\n'
+    )
+    out = orch._apply_assembly_manifest(task, body)
+    assert out == "BOOK\n==\nSTORY ONE BODY\n==\nSTORY TWO BODY"
+    # the manifest JSON itself never lands in the artifact
+    assert "units" not in out and "```" not in out
+    assert "2 unit(s) concatenated" in (task.summary_for_state_doc or "")
+
+
+def test_apply_assembly_manifest_missing_unit_flags_blocker(project, tmp_path):
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.txt").write_text("REAL")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    task = Task(id="X-T-007", project_id=uuid4(), goal_id="X-G-002",
+                description="assemble", summary_for_state_doc="")
+    body = '```assembly\n{"units": ["s1.txt", "ghost.txt"]}\n```'
+    out = orch._apply_assembly_manifest(task, body)
+    assert out == "REAL"  # best-effort: only the real unit, no fabrication
+    note = task.summary_for_state_doc or ""
+    assert "(blocker)" in note and "ghost.txt" in note
+
+
+def test_apply_assembly_manifest_no_manifest_passes_through(project, tmp_path):
+    """No manifest → returns None so the caller writes the producer's own
+    response unchanged (structured merges, normal drafts unaffected)."""
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    task = Task(id="X-T-007", project_id=uuid4(), goal_id="X-G-002",
+                description="x", summary_for_state_doc="")
+    assert orch._apply_assembly_manifest(task, "just a normal draft body") is None
+    assert task.summary_for_state_doc == ""  # untouched

@@ -58,6 +58,18 @@ one-per-item so the whole team works at once. Signals: an enumerable list
 of deliverables each worth its own file ("write 6 stories", "a profile of
 each of the 8 founders", "one section per chapter").
 
+ASSEMBLY / CONSOLIDATION — the gather-back step after PARALLEL DELIVERABLES:
+when a task COMBINES already-produced units into ONE deliverable (assemble the
+6 stories into a book, stitch the chapters into a manuscript, compile the N
+sections into one report, merge the per-item write-ups), set the PRIMARY
+`required_skills` entry to `consolidation`. That producer emits a small
+assembly manifest (title + ordered unit filenames + separator) and the engine
+concatenates the unit BODIES from disk — so the assembler never re-types the
+units and a large book can't truncate. Do NOT use `long-form`/`drafter` for an
+assembly step (those re-emit content as output tokens → truncation). The unit
+files already exist; name the assembly task by what it combines, and let it
+read the real filenames from the repo_map. This task depends_on the unit tasks.
+
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
 events, any real-world factual claim): set the PRIMARY (first)
 `required_skills` entry to `rigorous-sourcing` — the producer fetches real
