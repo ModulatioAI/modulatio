@@ -33,7 +33,7 @@ def test_config_defaults() -> None:
     c = context_budget.ContextBudgetConfig()
     assert c.enabled is True
     assert c.max_input_tokens is None
-    assert c.prune_at_pct == 0.80
+    assert c.prune_at_pct == 0.85
     assert c.pad_pct == 0.05
     assert c.keep_recent == 3
     assert c.checkpoints_dir is None

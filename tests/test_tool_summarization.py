@@ -33,7 +33,7 @@ def test_config_defaults() -> None:
     assert c.threshold_tokens == 2000
     assert c.summarizer_model is None
     assert c.keep_recent == 3
-    assert c.prune_at_pct == 0.80
+    assert c.prune_at_pct == 0.85
     assert c.tool_calls_dir is None
 
 

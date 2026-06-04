@@ -92,25 +92,31 @@ _WARNED_UNBOUND_GATE_FIRE: list[bool] = []
 # budget_role per semantically-distinct LLM call pattern — same
 # runner_role (e.g. "leader") may map to multiple budget_roles
 # depending on the call site (decompose vs iterate vs reflect vs chat).
+# 2026-06-04: DOUBLED from the original 8K-baseline presets (Clif's call, Nemo
+# concurred up to 32K). The engine was designed to operate + compress at 8K and
+# the original presets capped the heavy roles at 16K — too tight for synthesis
+# (a 6-story assembly / the Leader reading 6 deliverables ≈15K tokens crashed).
+# Every model in use has ≥32K real window, so the heavy roles now land at 32K
+# with headroom; same compress/operate behavior, just more room. Reversible.
 EXPERIMENTAL_DEFAULTS: dict[str, int] = {
-    "producer":        16_000,
-    "qc":               8_000,
-    "planner":          8_000,
-    "leader-decompose": 16_000,
-    "leader-iterate":   8_000,
-    "leader-reflect":  12_000,
-    "leader-chat":     16_000,
+    "producer":        32_000,
+    "qc":              16_000,
+    "planner":         16_000,
+    "leader-decompose": 32_000,
+    "leader-iterate":  16_000,
+    "leader-reflect":  24_000,
+    "leader-chat":     32_000,
     # Research gets more room than a generic producer. Reached via an explicit
     # budget_role="research" on the research fetch (Brick A). "researcher" is
     # kept as a back-compat alias so `--ctx-budget researcher=N` still validates.
-    "research":        24_000,
-    "researcher":      24_000,
+    "research":        48_000,
+    "researcher":      48_000,
 }
 
 #: Fallback for unknown budget_roles. Producer-class default so custom
 #: agents have a reasonable starting point until they explicitly opt into
-#: a different budget.
-CUSTOM_WORKER_DEFAULT = 16_000
+#: a different budget. (Doubled 2026-06-04 with the rest.)
+CUSTOM_WORKER_DEFAULT = 32_000
 
 #: Hard ceiling for ANY single LLM call's resolved budget. Discipline
 #: lever, not a model-capability claim — raising it requires an explicit
@@ -164,7 +170,14 @@ class ContextBudgetConfig:
     enabled: bool = True
     max_input_tokens: int | None = None
     soft_warn_at_pct: float = 0.70
-    prune_at_pct: float = 0.80
+    # 2026-06-03: with the role caps doubled (8K-era → 16-32K), prune at 85%
+    # rather than 80%. Higher trip = ride the doubled headroom for synthesis
+    # calls (the assembler reading N deliverables) WITHOUT compressing away the
+    # very artifacts it's reading, while keeping a 15% soft-compress band before
+    # the hard refuse-with-checkpoint at 100%. Blowout protection now comes from
+    # the PINNED cap (no litellm huge-window guesses) + that refuse, not from an
+    # early prune. soft_warn stays 70% as the early Leader-reflect tripwire.
+    prune_at_pct: float = 0.85
     pad_pct: float = 0.05
     keep_recent: int = 3
     checkpoints_dir: Path | None = None

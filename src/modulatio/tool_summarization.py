@@ -71,7 +71,11 @@ class ToolSummarizationConfig:
     threshold_tokens: int = 2000
     summarizer_model: str | None = None
     keep_recent: int = 3
-    prune_at_pct: float = 0.80
+    # 2026-06-03: aligned to the context-budget call-boundary prune (0.85) so
+    # there's a single coherent "compress at 85%" threshold — the doubled role
+    # caps gave the headroom; we don't want the in-loop sliding-window prune
+    # trimming tool outputs at 80% while the boundary gate waits for 85%.
+    prune_at_pct: float = 0.85
     tool_calls_dir: Path | None = None
 
 
