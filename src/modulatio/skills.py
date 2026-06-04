@@ -27,12 +27,16 @@ the registry into dispatch.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from modulatio import config
 from modulatio.vault import project_dir
+
+logger = logging.getLogger("modulatio.skills")
 
 _SKILLS_ROOT = config.get_shared_resources_path() / "skills"
 
@@ -109,6 +113,16 @@ class Skill:
     #: in place — the FULL history is kept by git (the skill library is a
     #: git repo), so nothing earned at a real token cost is ever lost.
     version: str | None = None
+    #: Codification provenance (task #84): the content hash of the bundled
+    #: SEED this codification was derived from, stamped by ``save()`` when a
+    #: seed exists. ``None`` for seeds themselves and for user-authored
+    #: overrides. ``load_with_metadata`` uses it to detect a STALE
+    #: codification — if the package later ships a newer seed (hash
+    #: mismatch), the seed supersedes the codification instead of being
+    #: permanently shadowed. A codification with no ``base_seed_hash``
+    #: (pre-#84 / legacy) is preserved as-is; it gets stamped the next time
+    #: it's re-codified.
+    base_seed_hash: str | None = None
     freshness_class: str | None = None
     last_verified_at: str | None = None
     #: Sandbox: skill explicitly opts in to network access for its
@@ -168,12 +182,35 @@ def _parse_file(path: Path) -> Skill:
         required_capabilities=_parse_csv(meta.get("required_capabilities", "")),
         executor=meta.get("executor") or "llm",
         version=meta.get("version") or None,
+        base_seed_hash=meta.get("base_seed_hash") or None,
         freshness_class=meta.get("freshness_class") or None,
         last_verified_at=meta.get("last_verified_at") or None,
         needs_network=str(meta.get("needs_network", "")).strip().lower() in ("true", "yes", "1"),
         pass_env=_parse_csv(meta.get("pass_env", "")),
         sources=(str(path),),
     )
+
+
+def seed_content_hash(name: str) -> str | None:
+    """Stable short content hash of the bundled SEED skill ``name``, or
+    ``None`` if no seed exists. Used to stamp codifications with the seed
+    they derive from and to detect when a codification has gone stale
+    against a newer bundled seed (task #84)."""
+    seed = _SEED_SKILLS_ROOT / f"{name}.md"
+    if not seed.exists():
+        return None
+    return hashlib.sha256(seed.read_bytes()).hexdigest()[:16]
+
+
+def _is_codified(skill: Skill) -> bool:
+    """A shared skill is machine-codified (vs a user-authored override) when
+    it carries a ``version`` (the Alfred loop stamps one) or a
+    ``base_seed_hash``. User overrides carry neither and are always honored."""
+    return skill.version is not None or skill.base_seed_hash is not None
+
+
+#: Warn once per (name) when a stale codification is superseded by its seed.
+_WARNED_SUPERSEDED: set[str] = set()
 
 
 def load_with_metadata(name: str, project_code: str | None = None) -> Skill:
@@ -187,21 +224,51 @@ def load_with_metadata(name: str, project_code: str | None = None) -> Skill:
 
     The seed-dir fallback is what makes the team_template's
     ``coding`` / ``code-review`` references work on a fresh install
-    where the user hasn't manually populated the shared dir. User
-    edits in either project-local or shared still take precedence —
-    the seed is read-only canonical defaults shipped with the package.
+    where the user hasn't manually populated the shared dir.
+
+    Freshness gate (task #84): a USER-authored shared/project override is
+    always honored — sacred. But a MACHINE-codified shared skill (Alfred
+    loop) is honored only while it's based on the CURRENT seed. If the
+    package ships a newer seed (its ``base_seed_hash`` no longer matches),
+    the seed SUPERSEDES the codification instead of permanently shadowing the
+    improvement. A legacy codification with no ``base_seed_hash`` is
+    preserved as-is (we can't prove it stale); it gets stamped the next time
+    it's re-codified.
     """
+    seed_path = _SEED_SKILLS_ROOT / f"{name}.md"
     if project_code is not None:
         local = project_dir(project_code) / "skills" / f"{name}.md"
         if local.exists():
-            return _parse_file(local)
+            return _maybe_supersede(name, _parse_file(local), seed_path)
     shared = _SKILLS_ROOT / f"{name}.md"
     if shared.exists():
-        return _parse_file(shared)
-    seed = _SEED_SKILLS_ROOT / f"{name}.md"
-    if seed.exists():
-        return _parse_file(seed)
+        return _maybe_supersede(name, _parse_file(shared), seed_path)
+    if seed_path.exists():
+        return _parse_file(seed_path)
     return _EMPTY_SKILL
+
+
+def _maybe_supersede(name: str, override: Skill, seed_path: Path) -> Skill:
+    """Return ``override`` unless it is a STALE codification — a machine
+    codification whose stamped ``base_seed_hash`` no longer matches the
+    current bundled seed — in which case return the seed (task #84)."""
+    if not seed_path.exists():
+        return override
+    if not _is_codified(override) or override.base_seed_hash is None:
+        # User override, or a legacy codification with no provenance stamp:
+        # honor it. (Legacy ones can't be proven stale; preserve learning.)
+        return override
+    current = seed_content_hash(name)
+    if override.base_seed_hash == current:
+        return override
+    if name not in _WARNED_SUPERSEDED:
+        _WARNED_SUPERSEDED.add(name)
+        logger.warning(
+            "skill %r: codified copy (base_seed_hash=%s) is stale against the "
+            "current seed (%s) — using the seed. Re-codify to refresh it.",
+            name, override.base_seed_hash, current,
+        )
+    return _parse_file(seed_path)
 
 
 def load(name: str, project_code: str | None = None) -> str:
@@ -255,6 +322,15 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
     ]
     if skill.version is not None:
         fm_lines.append(f"version: {skill.version}")
+    # task #84: stamp the seed this codification derives from so a later seed
+    # improvement can supersede it instead of being shadowed. Auto-derive when
+    # the skill is codified (has a version), a seed exists, and the caller
+    # didn't pin one explicitly. User overrides (no version) get no stamp.
+    base_seed_hash = skill.base_seed_hash
+    if base_seed_hash is None and skill.version is not None:
+        base_seed_hash = seed_content_hash(skill.name)
+    if base_seed_hash is not None:
+        fm_lines.append(f"base_seed_hash: {base_seed_hash}")
     if skill.freshness_class is not None:
         fm_lines.append(f"freshness_class: {skill.freshness_class}")
     if skill.last_verified_at is not None:

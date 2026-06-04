@@ -7717,6 +7717,13 @@ class Orchestrator:
         Alfred loop dies silently across runs and nobody knows."""
         if not self._codification_enabled():
             return
+        # task #84: never codify from an operator-aborted run. A killed run's
+        # QC fails reflect an interrupted (often half-produced / flailing) state,
+        # not a real recurring weakness to learn from — codifying from it can
+        # bake a regression into the skill library.
+        if self.abort_event.is_set():
+            self._codification_skipped("run_aborted")
+            return
         try:
             fails = lessons.unconsumed_fails(self.project.code)
         except Exception:  # noqa: BLE001
