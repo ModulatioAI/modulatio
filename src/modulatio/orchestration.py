@@ -4848,24 +4848,32 @@ class Orchestrator:
         manifest = _assembly.parse_assembly_manifest(body_text)
         if manifest is None:
             return None
-        # Nemo hull #8: pre-filter manifest units to the AUTHORITATIVE dependency
-        # output paths BEFORE reading them — an in-root file that isn't a declared
-        # unit must not be copied into the draft (pre-QC exposure), even though
-        # verify_assembly would reject it afterward. Only when deps exist (a
-        # cross-goal assembly has none → no allowlist → read as the producer named,
-        # and verify_assembly fails closed on the empty dep set).
-        allowed = {
-            d.output_path.strip().lstrip("./")
-            for d in (
-                store.list_tasks(self.project.code, run_id=self.project.run_id)
-            )
-            if d.id in task.depends_on and d.output_path
-        }
-        if allowed:
-            kept_units, dropped = [], []
+        # Nemo hull #8 (+ close-out): pre-filter manifest units to the AUTHORITATIVE
+        # dependency output paths BEFORE reading them — an in-root file that isn't a
+        # declared unit must not be copied into the draft (pre-QC exposure), even
+        # though verify_assembly would reject it afterward. The gate is the task's
+        # INTENT to constrain (`depends_on` non-empty), NOT whether the allowlist
+        # happened to resolve: if deps are declared but resolve to an empty/partial
+        # output set (stale/unresolved bindings), we still filter — to zero if need
+        # be — so an unresolved dep set fails CLOSED rather than reading any in-root
+        # unit. A genuine cross-goal assembly (no deps) keeps the read-as-named
+        # fallback; verify_assembly then fails closed on its empty dep set.
+        filtered_units: list[str] = []
+        if task.depends_on:
+            allowed = {
+                d.output_path.strip().lstrip("./")
+                for d in (
+                    store.list_tasks(self.project.code, run_id=self.project.run_id)
+                )
+                if d.id in task.depends_on and d.output_path
+            }
+            kept_units = []
             for u in manifest.get("units", []):
-                (kept_units if str(u).strip().lstrip("./") in allowed else dropped).append(u)
-            if dropped:
+                if str(u).strip().lstrip("./") in allowed:
+                    kept_units.append(u)
+                else:
+                    filtered_units.append(u)
+            if filtered_units:
                 manifest = {**manifest, "units": kept_units}
         # Part B: the assembler skill selects the family/strategy; the engine owns
         # the mechanical join. document = text concat (today's default).
@@ -4890,8 +4898,18 @@ class Orchestrator:
             bits.append("MISSING units: " + ", ".join(result.missing[:8]))
         if result.errors:
             bits.append("errors: " + "; ".join(result.errors[:3]))
+        if filtered_units:
+            # Nemo #8 close-out: units the producer named that are NOT in the
+            # task's authoritative dependency outputs were dropped UNREAD — a
+            # stale/unresolved dep binding (or an attempt to pull in a
+            # non-dependency in-root file). Surface it so the empty/partial
+            # assembly fails visibly rather than silently.
+            bits.append(
+                "DROPPED non-dependency units (unresolved deps): "
+                + ", ".join(str(u) for u in filtered_units[:8])
+            )
         note = "; ".join(bits)
-        if result.missing or result.errors:
+        if result.missing or result.errors or filtered_units:
             note = "(blocker) " + note
         existing = task.summary_for_state_doc
         task.summary_for_state_doc = f"{existing}\n{note}" if existing else note

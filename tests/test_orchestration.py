@@ -8668,6 +8668,29 @@ def test_apply_assembly_manifest_missing_unit_flags_blocker(project, tmp_path):
     assert "(blocker)" in note and "ghost.txt" in note
 
 
+def test_apply_assembly_manifest_unresolved_deps_drop_units_unread(project, tmp_path):
+    """Nemo #8 close-out: a task that DECLARES dependencies but whose authoritative
+    output allowlist resolves empty (stale/unresolved bindings) must NOT read any
+    in-root manifest unit — it fails closed (units dropped unread) and flags a
+    blocker, instead of copying a non-dependency file into the draft pre-QC."""
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "secret.txt").write_text("PRE-QC SECRET")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    # depends_on names a unit task that does NOT resolve in the store → empty allowlist
+    task = Task(id="X-T-009", project_id=uuid4(), goal_id="X-G-002",
+                description="assemble", summary_for_state_doc="",
+                depends_on=["U-1"])
+    body = '```assembly\n{"units": ["secret.txt"]}\n```'
+    out = orch._apply_assembly_manifest(task, body)
+    assert "PRE-QC SECRET" not in (out or "")  # the secret was never read
+    note = task.summary_for_state_doc or ""
+    assert "(blocker)" in note and "secret.txt" in note and "non-dependency" in note
+
+
 def test_apply_assembly_manifest_no_manifest_passes_through(project, tmp_path):
     """No manifest → returns None so the caller writes the producer's own
     response unchanged (structured merges, normal drafts unaffected)."""
