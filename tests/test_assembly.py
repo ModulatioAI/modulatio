@@ -160,8 +160,8 @@ def test_assemble_default_strategy_is_document(tmp_path):
 
 def test_assemble_unknown_strategy_fails_closed(tmp_path):
     (tmp_path / "a.txt").write_text("A")
-    r = assembly.assemble({"units": ["a.txt"]}, tmp_path, strategy="media")  # not yet built
-    assert r.content == "" and "unknown assembly strategy 'media'" in r.errors[0]
+    r = assembly.assemble({"units": ["a.txt"]}, tmp_path, strategy="bogus")
+    assert r.content == "" and "unknown assembly strategy 'bogus'" in r.errors[0]
     assert r.missing == ["a.txt"]
 
 
@@ -250,3 +250,49 @@ def test_assemble_data_invalid_json_is_an_error(tmp_path):
 
 def test_data_strategy_registered():
     assert "data" in assembly._STRATEGIES
+
+
+def test_assemble_media_is_registered_seam_fails_closed(tmp_path):
+    (tmp_path / "a.png").write_text("fake")
+    r = assembly.assemble({"units": ["a.png"]}, tmp_path, strategy="media")
+    assert r.content == "" and "Part B4" in r.errors[0] and r.missing == ["a.png"]
+
+
+# ── security/debug review fixes (2026-06-04) ──────────────────────────────
+
+
+def test_merge_json_recursionerror_is_caught(tmp_path):
+    """Deeply-nested JSON raises RecursionError (not ValueError) on parse OR
+    serialize — it must be caught + recorded, not escape the merge (→ incomplete
+    → full review)."""
+    (tmp_path / "a.json").write_text("[" * 2000 + "]" * 2000)
+    r = assembly.assemble({"units": ["a.json"], "format": "json"}, tmp_path, strategy="data")
+    assert any("RecursionError" in e for e in r.errors)  # no crash, recorded
+
+
+def test_csv_merge_uses_csv_module_quoted_newline(tmp_path):
+    """A quoted field with an embedded newline is ONE row, not two (naive
+    splitlines corrupts it)."""
+    (tmp_path / "a.csv").write_text('id,note\n1,"line1\nline2"\n')
+    r = assembly.assemble({"units": ["a.csv"], "format": "csv"}, tmp_path, strategy="data")
+    import csv as _csv
+    import io as _io
+    rows = list(_csv.reader(_io.StringIO(r.content)))
+    assert rows == [["id", "note"], ["1", "line1\nline2"]]  # 2 rows, not 3
+    assert r.errors == []
+
+
+def test_csv_header_mismatch_is_an_error(tmp_path):
+    (tmp_path / "a.csv").write_text("id,name\n1,alice\n")
+    (tmp_path / "b.csv").write_text("id,email\n2,bob@x\n")
+    r = assembly.assemble({"units": ["a.csv", "b.csv"], "format": "csv"}, tmp_path, strategy="data")
+    assert any("header mismatch" in e for e in r.errors)  # -> incomplete -> no cheap pass
+
+
+def test_document_framing_cannot_exceed_total_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(assembly, "_MAX_TOTAL_BYTES", 100)
+    (tmp_path / "a.txt").write_text("unit")
+    r = assembly.assemble(
+        {"units": ["a.txt"], "title_page": "X" * 500, "trailer": "Y" * 500}, tmp_path,
+    )
+    assert any("framing" in e and "cap" in e for e in r.errors)

@@ -43,6 +43,8 @@ caller's business; this module only concatenates bytes in the named order.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 from dataclasses import dataclass, field
@@ -212,10 +214,19 @@ def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
     missing: list[str] = []
     errors: list[str] = []
 
+    # Producer-authored framing (title/trailer/separator) is UNTRUSTED and counts
+    # toward the runaway-output cap — a huge title_page/trailer must not slip past
+    # _MAX_TOTAL_BYTES the way it did before (unit st_size alone was counted).
+    framing_bytes = len(title_page.encode()) + len(trailer.encode())
+    if framing_bytes > _MAX_TOTAL_BYTES:
+        errors.append("framing (title_page/trailer) exceeds total size cap")
+        title_page = trailer = ""
+        framing_bytes = 0
+
     if title_page.strip():
         blocks.append(title_page.rstrip("\n"))
 
-    total = len(title_page)
+    total = framing_bytes
     for name in manifest["units"]:
         path = _safe_unit_path(name, artifacts_root)
         if path is None:
@@ -257,6 +268,10 @@ def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
         blocks.append(trailer.strip("\n"))
 
     content = separator.join(blocks)
+    # Final belt: the separator repeated across N blocks (also producer-authored)
+    # can push the joined output past the cap even when each piece was in-bounds.
+    if len(content.encode()) > _MAX_TOTAL_BYTES:
+        errors.append(f"assembled output exceeds {_MAX_TOTAL_BYTES} bytes")
     return AssemblyResult(
         content=content, units_used=used, missing=missing, errors=errors,
     )
@@ -357,7 +372,7 @@ def _assemble_data(manifest: dict, artifacts_root: Path) -> AssemblyResult:
 
     used = [n for n, _ in resolved]
     if fmt == "csv":
-        content, merge_errs = _merge_csv([t for _, t in resolved], dedupe)
+        content, merge_errs = _merge_csv(resolved, dedupe)
     else:
         content, merge_errs = _merge_json(resolved, dedupe)
     return AssemblyResult(
@@ -369,54 +384,101 @@ def _merge_json(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[s
     merged: list = []
     errors: list[str] = []
     for name, text in items:
+        # Untrusted producer/unit content: a ValueError is bad JSON; a
+        # RecursionError is deeply-nested JSON (NOT a ValueError) — both must be
+        # caught here so the unit is recorded as an error (→ assembly incomplete →
+        # fail-closed to a full review) instead of escaping the merge.
         try:
             obj = json.loads(text)
-        except ValueError as exc:
-            errors.append(f"{name}: invalid JSON ({exc})")
+        except (ValueError, RecursionError) as exc:
+            errors.append(f"{name}: invalid JSON ({type(exc).__name__})")
             continue
         merged.extend(obj if isinstance(obj, list) else [obj])
     if dedupe:
         seen: set[str] = set()
         out: list = []
         for el in merged:
-            key = json.dumps(el, sort_keys=True)
+            try:
+                key = json.dumps(el, sort_keys=True)
+            except (ValueError, RecursionError):
+                out.append(el)  # un-dedupable element; the final serialize rules
+                continue
             if key not in seen:
                 seen.add(key)
                 out.append(el)
         merged = out
-    return json.dumps(merged, indent=2) + "\n", errors
+    # Serializing a deeply-nested merged structure can RecursionError even when
+    # every unit parsed fine — catch it so a deep dataset fails closed (recorded
+    # error → incomplete → full review) rather than escaping the merge.
+    try:
+        return json.dumps(merged, indent=2) + "\n", errors
+    except (ValueError, RecursionError) as exc:
+        return "", errors + [f"merged JSON not serializable ({type(exc).__name__})"]
 
 
-def _merge_csv(texts: list[str], dedupe: bool) -> tuple[str, list[str]]:
-    header: str | None = None
-    rows: list[str] = []
-    for text in texts:
-        lines = [ln for ln in text.splitlines() if ln != ""]
-        if not lines:
+def _merge_csv(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[str]]:
+    """Stack CSV units under ONE header. Uses the ``csv`` module so quoted fields
+    with embedded newlines/commas parse correctly (naive line-splitting corrupts
+    them). Header MISMATCH is a real error — recorded so the assembly is marked
+    incomplete (fail-closed), never silently merging mismatched schemas."""
+    header: list[str] | None = None
+    rows: list[list[str]] = []
+    errors: list[str] = []
+    for name, text in items:
+        try:
+            parsed = list(csv.reader(io.StringIO(text)))
+        except (csv.Error, ValueError) as exc:
+            errors.append(f"{name}: invalid CSV ({exc})")
+            continue
+        parsed = [r for r in parsed if r]  # drop blank rows
+        if not parsed:
             continue
         if header is None:
-            header = lines[0]
-        rows.extend(lines[1:] if lines[0] == header else lines)
+            header = parsed[0]
+        elif parsed[0] != header:
+            errors.append(f"{name}: CSV header mismatch (expected {header})")
+            continue
+        rows.extend(parsed[1:])
     if dedupe:
-        seen: set[str] = set()
-        out: list[str] = []
+        seen: set[tuple] = set()
+        out: list[list[str]] = []
         for r in rows:
-            if r not in seen:
-                seen.add(r)
+            key = tuple(r)
+            if key not in seen:
+                seen.add(key)
                 out.append(r)
         rows = out
     if header is None:
-        return "", []
-    return "\n".join([header] + rows) + "\n", []
+        return "", errors
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(header)
+    writer.writerows(rows)
+    return buf.getvalue(), errors
+
+
+def _assemble_media(manifest: dict, artifacts_root: Path) -> AssemblyResult:
+    """The ``media`` strategy (image/audio/video) is a SEAM, not yet built —
+    binary-media assembly is a render/composite TOOL (ffmpeg/imagemagick), which
+    arrives with the metered tool tier (Part B4). Until then it fails CLOSED with
+    a clear note, so a media assembly routes to a normal review rather than
+    silently mis-assembling. Registered (vs absent) so the boundary is explicit."""
+    return AssemblyResult(
+        content="",
+        missing=[str(u) for u in manifest.get("units", [])],
+        errors=["media assembly needs the render tool (Part B4) — not yet built"],
+    )
 
 
 #: Family → mechanical-join function. ``document`` (text concat), ``code`` (file
 #: tree + generated index), and ``data`` (structured merge/fold) are live; ``media``
-#: lands as a seam (needs a render tool — Part B4). The dispatch is what makes
-#: assembly product-agnostic — the assembler SKILL selects the strategy; the ENGINE
-#: owns the join; unit bytes never round-trip through the model.
+#: is a registered SEAM that fails closed until its render tool lands (Part B4). The
+#: dispatch is what makes assembly product-agnostic — the assembler SKILL selects
+#: the strategy; the ENGINE owns the join; unit bytes never round-trip through the
+#: model.
 _STRATEGIES: dict = {
     "document": _assemble_document,
     "code": _assemble_code,
     "data": _assemble_data,
+    "media": _assemble_media,
 }

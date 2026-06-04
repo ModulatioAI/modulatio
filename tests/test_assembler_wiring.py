@@ -16,7 +16,7 @@ from modulatio.orchestration import (
 from modulatio.types import Task
 
 
-def _task(tid: str, *, skills=None, depends_on=None) -> Task:
+def _task(tid: str, *, skills=None, depends_on=None, deliverable=False) -> Task:
     return Task(
         id=tid,
         project_id=uuid4(),
@@ -24,7 +24,12 @@ def _task(tid: str, *, skills=None, depends_on=None) -> Task:
         description="d",
         required_skills=list(skills or []),
         depends_on=list(depends_on or []),
+        deliverable=deliverable,
     )
+
+
+def _unit(tid: str, **kw) -> Task:
+    return _task(tid, deliverable=True, **kw)
 
 
 def test_is_assembler_task():
@@ -35,19 +40,30 @@ def test_is_assembler_task():
 
 
 def test_wires_assembler_to_sibling_units():
-    units = [_task("U1", skills=["long-form"]), _task("U2", skills=["drafter"])]
+    units = [_unit("U1", skills=["long-form"]), _unit("U2", skills=["drafter"])]
     asm = _task("A1", skills=["consolidation"])
     _wire_assembler_dependencies(units + [asm])
     assert asm.depends_on == ["U1", "U2"]
-    # units themselves are untouched
     assert units[0].depends_on == [] and units[1].depends_on == []
 
 
-def test_does_not_override_declared_deps():
-    units = [_task("U1", skills=["long-form"])]
-    asm = _task("A1", skills=["consolidation"], depends_on=["U1"])
+def test_unions_declared_deps_with_siblings():
+    """A planner's PARTIAL dep declaration is unioned with all deliverable
+    siblings — an under-declared set can't cheap-pass an incomplete assembly."""
+    units = [_unit("U1", skills=["long-form"]), _unit("U2", skills=["drafter"])]
+    asm = _task("A1", skills=["consolidation"], depends_on=["U1"])  # only declared U1
     _wire_assembler_dependencies(units + [asm])
-    assert asm.depends_on == ["U1"]  # unchanged (no duplication)
+    assert asm.depends_on == ["U1", "U2"]  # U2 unioned in; no duplicate U1
+
+
+def test_excludes_non_deliverable_scaffolding():
+    """Scaffolding/research siblings (not deliverable) are NOT wired as units —
+    they have no place in the assembled deliverable."""
+    scaffold = _task("S1", skills=["researcher"])  # deliverable=False
+    unit = _unit("U1", skills=["long-form"])
+    asm = _task("A1", skills=["consolidation"])
+    _wire_assembler_dependencies([scaffold, unit, asm])
+    assert asm.depends_on == ["U1"]  # only the deliverable unit, not S1
 
 
 def test_no_units_leaves_deps_empty():
@@ -59,14 +75,14 @@ def test_no_units_leaves_deps_empty():
 
 
 def test_no_assembler_is_noop():
-    units = [_task("U1", skills=["long-form"]), _task("U2", skills=["drafter"])]
+    units = [_unit("U1", skills=["long-form"]), _unit("U2", skills=["drafter"])]
     _wire_assembler_dependencies(units)
     assert all(u.depends_on == [] for u in units)
 
 
 def test_assembler_does_not_depend_on_another_assembler():
     """Only NON-assembler siblings are units."""
-    u = _task("U1", skills=["long-form"])
+    u = _unit("U1", skills=["long-form"])
     a1 = _task("A1", skills=["consolidation"])
     a2 = _task("A2", skills=["document-assembly"])
     _wire_assembler_dependencies([u, a1, a2])

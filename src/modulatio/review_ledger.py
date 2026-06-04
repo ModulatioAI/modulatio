@@ -55,13 +55,16 @@ def _norm_unit(name: str) -> str:
 
 
 def file_checksum(path: Path) -> str:
-    """Return the engine-format content checksum of ``path`` (text artifact).
+    """Return the engine-format content checksum of ``path``.
 
-    ``sha256:<hex>`` of the file's UTF-8-decoded-then-re-encoded text — identical
-    to how the producer stamps a fresh artifact, so a stored
-    ``qc_passed_checksum`` compares equal to this when the bytes are unchanged.
+    ``sha256:<hex>`` of the file's RAW bytes. The producer stamps
+    ``sha256(text.encode())`` and writes that text verbatim, so the on-disk bytes
+    equal ``text.encode()`` and this re-hash compares equal when unchanged —
+    including for CRLF content (raw-byte hashing avoids ``read_text``'s
+    universal-newline translation, which would otherwise force a spurious
+    "bytes changed" fallback to a full review).
     """
-    return f"sha256:{hashlib.sha256(path.read_text().encode()).hexdigest()}"
+    return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
 
 
 def is_passed(task: "Task") -> bool:

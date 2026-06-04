@@ -8852,3 +8852,22 @@ def test_qc_review_content_unchanged_short_circuits(project, tmp_path):
     verdict, notes, defect = orch._qc_review(t, p, cs(body), len(body.split()))
     assert verdict.passed and defect is None
     assert "unchanged since QC pass" in verdict.check
+
+
+def test_regression_blocked_only_in_generate_mode(project, tmp_path):
+    """A revise/edit shrink (the Leader/QC asked to tighten) is NOT blocked —
+    only a drifted generate full-rewrite is (security/debug review)."""
+    import hashlib
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    def cs(s): return f"sha256:{hashlib.sha256(s.encode()).hexdigest()}"
+    orch = Orchestrator(project, runners={"leader": lambda _p: ""})
+    big = "word " * 500
+    p = tmp_path / "d.md"
+    p.write_text(big)
+    base = dict(id="A-1", project_id=uuid4(), goal_id="G", description="d",
+                output_path="d.md", qc_passed_checksum=cs(big))
+    assert orch._regression_blocked(Task(producer_mode="generate", **base), p, "stub") is True
+    assert orch._regression_blocked(Task(producer_mode="revise", **base), p, "stub") is False
+    assert orch._regression_blocked(Task(producer_mode="edit", **base), p, "stub") is False

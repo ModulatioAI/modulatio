@@ -346,12 +346,21 @@ def _wire_assembler_dependencies(tasks: list["Task"]) -> None:
     assemblers = [t for t in tasks if _is_assembler_task(t)]
     if not assemblers:
         return
-    unit_ids = [t.id for t in tasks if not _is_assembler_task(t)]
+    # The units are the DELIVERABLE sibling tasks — exclude scaffolding/research
+    # (no place in the assembled deliverable; they'd defeat the cheap structural
+    # check). UNION them into each assembler's deps (not just when empty) so the
+    # dep set is the AUTHORITATIVE COMPLETE unit set — a planner that declared a
+    # partial dep set can't then cheap-pass an under-scoped assembly (review
+    # 2026-06-04).
+    unit_ids = [t.id for t in tasks if t.deliverable and not _is_assembler_task(t)]
     if not unit_ids:
         return
     for a in assemblers:
-        if not a.depends_on:
-            a.depends_on = list(unit_ids)
+        deps = list(a.depends_on)
+        for uid in unit_ids:
+            if uid not in deps:
+                deps.append(uid)
+        a.depends_on = deps
 
 
 def _build_requirement(raw: dict) -> EvidenceRequirement:
@@ -4763,19 +4772,31 @@ class Orchestrator:
         Fires ONLY when the file on disk is STILL the passed version (its bytes
         hash to the task's ``qc_passed_checksum``), so a legitimate first write,
         or a file already legitimately changed, is never blocked. The caller keeps
-        the passed version on disk when this returns True. Deliberately narrow:
-        guarded only at generate / tool-loop full-rewrite sites (anchored
-        patch/diff/edit modes carry intentional deletes and are not guarded).
+        the passed version on disk when this returns True.
+
+        Deliberately narrow to GENERATE-mode full rewrites — a drifted from-scratch
+        regeneration. ``edit``/``revise`` carry the reviewer's critique (an
+        intentional, possibly-shrinking change) and reach these same write sites,
+        so they are excluded here (security/debug review 2026-06-04): the guard
+        must never re-pass content the Leader or QC explicitly asked to change.
+        Re-opening a passed task also clears its mark (``_leader_auto_redo``), so
+        the guard only ever fires on an un-re-opened drift.
         """
+        if task.producer_mode != "generate":
+            return False
         mark = task.qc_passed_checksum
         if not mark or not path.exists():
             return False
         try:
-            prior = path.read_text()
-        except (OSError, UnicodeDecodeError):
+            prior_bytes = path.read_bytes()
+        except OSError:
             return False
-        if f"sha256:{hashlib.sha256(prior.encode()).hexdigest()}" != mark:
+        if f"sha256:{hashlib.sha256(prior_bytes).hexdigest()}" != mark:
             return False  # disk is no longer the passed version — nothing to protect
+        try:
+            prior = prior_bytes.decode()
+        except UnicodeDecodeError:
+            return False
         prior_tokens = len(prior.split())
         new_tokens = len(new_content.split())
         return (
@@ -4787,7 +4808,8 @@ class Orchestrator:
         """Keep the QC-passed version on disk (already there — just don't clobber
         it), record the refusal, and return this attempt's (path, checksum,
         token_count) as the PASSED version so QC re-affirms it. #86."""
-        kept = path.read_text()
+        kept_bytes = path.read_bytes()
+        kept = kept_bytes.decode(errors="replace")
         task.transitions.append(StateTransition(
             from_state=task.status.value,
             to_state=task.status.value,
@@ -4799,7 +4821,7 @@ class Orchestrator:
             ),
         ))
         self._record_artifact_write(path)
-        checksum = f"sha256:{hashlib.sha256(kept.encode()).hexdigest()}"
+        checksum = f"sha256:{hashlib.sha256(kept_bytes).hexdigest()}"
         return path, checksum, len(kept.split())
 
     def _apply_assembly_manifest(self, task: Task, body_text: str) -> "str | None":
@@ -6540,7 +6562,7 @@ class Orchestrator:
         # safe fail-closed (normal-QC) fallback.
         try:
             t.qc_passed_checksum = (
-                f"sha256:{hashlib.sha256(draft_path.read_text().encode()).hexdigest()}"
+                f"sha256:{hashlib.sha256(draft_path.read_bytes()).hexdigest()}"
             )
         except OSError:
             pass
@@ -7440,6 +7462,14 @@ class Orchestrator:
             t.assigned_agent_id = None
             t.qc_agent_id = None
             t.evidence_provided = []
+            # Security/debug review (2026-06-04): a re-opened task has NO live QC
+            # pass-mark — the Leader is overriding the prior pass. Clearing it stops
+            # the content-addressed short-circuit and the no-regress guard from
+            # re-affirming/protecting the very content the Leader asked to redo
+            # (which would re-pass rejected work). Drop the stale assembly record
+            # too so it can't outlive the bytes it describes.
+            t.qc_passed_checksum = None
+            self._assembly_records.pop(t.id, None)
             # Clear the prior round's QC-authored flag so the next round's
             # disappointed-branch deadlock check reflects THIS round only
             # (whether QC had to author the fix again).
@@ -8776,6 +8806,9 @@ class Orchestrator:
                 t.assigned_agent_id = None
                 t.qc_agent_id = None
                 t.evidence_provided = []
+                # Re-opened task has no live pass-mark (review 2026-06-04).
+                t.qc_passed_checksum = None
+                self._assembly_records.pop(t.id, None)
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
 
             for t in tasks:
@@ -9800,18 +9833,18 @@ PARALLEL DELIVERABLES fans independent generative outputs one-per-item so
 the whole team works at once. Signals: an enumerable list of deliverables
 each worth its own file ("write 6 stories", "a profile of each founder").
 
-ASSEMBLY / CONSOLIDATION — the gather-back step after PARALLEL DELIVERABLES:
-when a task COMBINES already-produced units into ONE deliverable (assemble the
-6 stories into a book, stitch chapters into a manuscript, compile N sections
-into one report, merge the per-item write-ups), set the PRIMARY
-`required_skills` entry to `consolidation`.
-That producer emits a small assembly manifest (title + ordered unit filenames
-+ separator) and the engine concatenates the unit BODIES from disk — so the
-assembler never re-types units and a large deliverable can't truncate. Do NOT
-use `long-form`/`drafter` for an assembly step (they re-emit content as output
-tokens → truncation). The unit files already exist; this task depends_on the
-unit tasks and reads the real on-disk filenames from the repo_map, not the
-paths guessed in the task description.
+ASSEMBLY — the gather-back step after PARALLEL DELIVERABLES: when a task COMBINES
+already-produced units into ONE deliverable (assemble 6 stories into a book, wire
+the modules into an app, merge the records into one dataset), set the PRIMARY
+`required_skills` entry to the assembler for the deliverable's KIND —
+`document-assembly` (text: books/reports/forms), `code-assembly` (multi-file
+code), or `data-assembly` (datasets). Unsure → `document-assembly`; the engine
+corrects the family from the artifact_kind. The producer emits a small assembly
+manifest and the ENGINE does the mechanical join (concat / file-index / merge),
+so it never re-types the units and a large deliverable can't truncate. Do NOT use
+`long-form`/`drafter` for an assembly step (they re-emit content → truncation).
+The unit files already exist; read their real names from the repo_map. This task
+depends_on the unit tasks.
 
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
 events, any real-world factual claim): set the PRIMARY (first)
