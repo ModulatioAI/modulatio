@@ -256,3 +256,17 @@ def test_bundled_seed_standards_ship_with_real_teeth(monkeypatch):
     assert "References" in research and "citation" in research.lower()
     assert "tests" in standards.load("code").lower()
     assert standards.load("text")  # neutral default also ships a baseline
+
+
+def test_assembler_skill_parsed_from_frontmatter(tmp_path, monkeypatch):
+    shared_root = tmp_path / "shared"
+    monkeypatch.setattr(standards, "_STANDARDS_ROOT", shared_root)
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
+    _write_standards(
+        shared_root / "code.md",
+        "---\nassembler_skill: code-assembly\n---\n\n# code rules\n",
+    )
+    assert standards.load_with_metadata("code").assembler_skill == "code-assembly"
+    # a kind with no assembler_skill declared → None (engine document default)
+    _write_standards(shared_root / "text.md", "# text rules\n")
+    assert standards.load_with_metadata("text").assembler_skill is None

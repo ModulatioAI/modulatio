@@ -262,9 +262,54 @@ def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
     )
 
 
-#: Family → mechanical-join function. ``document`` is the only live strategy until
-#: code/media/data land; the dispatch seam is what makes assembly product-agnostic
-#: (the assembler SKILL selects the strategy; the ENGINE owns the join).
+def _assemble_code(manifest: dict, artifacts_root: Path) -> AssemblyResult:
+    """The ``code`` strategy: a multi-file deliverable is its FILE TREE plus
+    generated wiring — NOT a concat-into-one-blob (you don't ``cat`` sources into
+    one file). The unit files STAY SEPARATE on disk; the assembled output_path is
+    a generated index/manifest (a README) listing the files + entry point, so the
+    product is usable as one whole.
+
+    Unit bodies are never read (the index is small — no output-token / QC-budget
+    pressure). Presence/safety is still checked; missing/unsafe units are recorded
+    (the assembly is then incomplete and not eligible for the cheap QC pass).
+    """
+    title = manifest.get("title_page")
+    title = title.strip() if isinstance(title, str) and title.strip() else "Project"
+    entrypoint = manifest.get("entrypoint")
+
+    used: list[str] = []
+    missing: list[str] = []
+    errors: list[str] = []
+    for name in manifest["units"]:
+        path = _safe_unit_path(name, artifacts_root)
+        if path is None:
+            errors.append(f"unsafe or out-of-root unit path: {name!r}")
+            missing.append(name)
+            continue
+        if not path.is_file():
+            missing.append(name)
+            continue
+        used.append(name)
+
+    lines = [f"# {title}", "", f"{len(used)} file(s):", ""]
+    lines += [f"- `{_norm(u)}`" for u in used]
+    if isinstance(entrypoint, str) and entrypoint.strip():
+        lines += ["", f"Entry point: `{entrypoint.strip()}`"]
+    content = "\n".join(lines) + "\n"
+    return AssemblyResult(
+        content=content, units_used=used, missing=missing, errors=errors,
+    )
+
+
+def _norm(name: str) -> str:
+    return str(name).strip().lstrip("./")
+
+
+#: Family → mechanical-join function. ``document`` (text concat) and ``code`` (file
+#: tree + generated index) are live; media/data land as seams. The dispatch is what
+#: makes assembly product-agnostic — the assembler SKILL selects the strategy; the
+#: ENGINE owns the join; unit bytes never round-trip through the model.
 _STRATEGIES: dict = {
     "document": _assemble_document,
+    "code": _assemble_code,
 }

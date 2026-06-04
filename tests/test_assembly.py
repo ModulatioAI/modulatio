@@ -160,10 +160,39 @@ def test_assemble_default_strategy_is_document(tmp_path):
 
 def test_assemble_unknown_strategy_fails_closed(tmp_path):
     (tmp_path / "a.txt").write_text("A")
-    r = assembly.assemble({"units": ["a.txt"]}, tmp_path, strategy="code")
-    assert r.content == "" and "unknown assembly strategy 'code'" in r.errors[0]
+    r = assembly.assemble({"units": ["a.txt"]}, tmp_path, strategy="media")  # not yet built
+    assert r.content == "" and "unknown assembly strategy 'media'" in r.errors[0]
     assert r.missing == ["a.txt"]
 
 
 def test_document_strategy_registered():
     assert "document" in assembly._STRATEGIES
+
+
+# ── Part B: code-assembly strategy (index, not concat) ────────────────────
+
+
+def test_assemble_code_generates_index_not_concat(tmp_path):
+    (tmp_path / "main.py").write_text("print('hi')")
+    (tmp_path / "util.py").write_text("def f(): pass")
+    r = assembly.assemble(
+        {"units": ["main.py", "util.py"], "title_page": "MyApp", "entrypoint": "main.py"},
+        tmp_path, strategy="code",
+    )
+    # the index lists the files + entry point; it does NOT contain the source
+    assert "main.py" in r.content and "util.py" in r.content
+    assert "MyApp" in r.content and "Entry point" in r.content
+    assert "print('hi')" not in r.content  # source NOT concatenated into the blob
+    assert r.units_used == ["main.py", "util.py"] and r.missing == []
+    # the files stay separate on disk, byte-for-byte
+    assert (tmp_path / "main.py").read_text() == "print('hi')"
+
+
+def test_assemble_code_records_missing(tmp_path):
+    (tmp_path / "main.py").write_text("x")
+    r = assembly.assemble({"units": ["main.py", "gone.py"]}, tmp_path, strategy="code")
+    assert r.units_used == ["main.py"] and r.missing == ["gone.py"]
+
+
+def test_code_strategy_registered():
+    assert "code" in assembly._STRATEGIES

@@ -67,11 +67,17 @@ class StandardsEntry:
     last_verified_at: str | None
     sources: tuple[str, ...]
     required_capabilities: tuple[str, ...] = ()
+    #: Part B: which assembler FAMILY this artifact_kind assembles with —
+    #: ``document-assembly`` (default), ``code-assembly``, ``media-assembly``,
+    #: ``data-assembly``. The standards file is the authoritative selector; the
+    #: engine routes the assembly step to this skill by artifact_kind (no
+    #: planner routing table). ``None`` → the engine's document default.
+    assembler_skill: str | None = None
 
 
 _EMPTY_ENTRY = StandardsEntry(
     body="", freshness_class=None, last_verified_at=None, sources=(),
-    required_capabilities=(),
+    required_capabilities=(), assembler_skill=None,
 )
 
 
@@ -177,12 +183,21 @@ def load_with_metadata(domain: str, project_code: str | None = None) -> Standard
             required_caps.append(cap)
             seen.add(cap)
 
+    # Part B: assembler family for this artifact_kind (precedence project >
+    # shared > seed, like the other metadata).
+    assembler_skill = (
+        project_meta.get("assembler_skill")
+        or shared_meta.get("assembler_skill")
+        or seed_meta.get("assembler_skill")
+    ) or None
+
     return StandardsEntry(
         body=body,
         freshness_class=freshness,
         last_verified_at=last_verified,
         sources=tuple(sources),
         required_capabilities=tuple(required_caps),
+        assembler_skill=assembler_skill,
     )
 
 

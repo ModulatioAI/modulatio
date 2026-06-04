@@ -86,3 +86,32 @@ def test_strategy_for_task():
     assert _assembly_strategy_for_task(_task("T", skills=["data-assembly"])) == "data"
     # a non-assembler / unnamed task defaults to document
     assert _assembly_strategy_for_task(_task("T", skills=["long-form"])) == "document"
+
+
+# ── Part B / B2: standards-driven assembler family selection ──────────────
+
+from modulatio.orchestration import _select_assembler_skill  # noqa: E402
+
+
+def test_select_assembler_skill_routes_code_by_kind():
+    """A code-kind assembly task is routed to code-assembly even if the planner
+    named the document assembler — the standards file is the authority."""
+    asm = _task("A1", skills=["consolidation"])
+    asm.artifact_kind = "code"  # code.md declares assembler_skill: code-assembly
+    _select_assembler_skill([asm], project_code=None)
+    assert asm.required_skills == ["code-assembly"]
+
+
+def test_select_assembler_skill_leaves_text_alone():
+    """text.md declares no assembler_skill → the planner's choice stands."""
+    asm = _task("A1", skills=["document-assembly"])
+    asm.artifact_kind = "text"
+    _select_assembler_skill([asm], project_code=None)
+    assert asm.required_skills == ["document-assembly"]
+
+
+def test_select_assembler_skill_ignores_non_assembler():
+    unit = _task("U1", skills=["long-form"])
+    unit.artifact_kind = "code"
+    _select_assembler_skill([unit], project_code=None)
+    assert unit.required_skills == ["long-form"]  # not an assembler → untouched

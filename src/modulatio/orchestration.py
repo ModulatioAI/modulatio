@@ -312,6 +312,28 @@ def _assembly_strategy_for_task(task: "Task") -> str:
     return "document"
 
 
+def _select_assembler_skill(tasks: "list[Task]", project_code: str | None) -> None:
+    """Engine bind (Part B / B2): route each assembler task to its artifact_kind's
+    ``assembler_skill`` (declared in the standards file), so a code/media/data
+    assembly uses the right FAMILY no matter which assembler skill the planner
+    named. The standards file is the sole authority — no planner routing table.
+    Best-effort: on any lookup error, keep the planner's choice."""
+    for t in tasks:
+        if not _is_assembler_task(t):
+            continue
+        try:
+            entry = standards.load_with_metadata(
+                t.artifact_kind, project_code=project_code
+            )
+        except Exception:  # noqa: BLE001 — keep the planner's skill on error
+            continue
+        target = entry.assembler_skill
+        if target and target in _ASSEMBLER_SKILLS and target not in t.required_skills:
+            t.required_skills = [target] + [
+                s for s in t.required_skills if s not in _ASSEMBLER_SKILLS
+            ]
+
+
 def _wire_assembler_dependencies(tasks: list["Task"]) -> None:
     """Engine bind (Part A / A2, #85): give each assembler task in a goal an
     AUTHORITATIVE dependency on the sibling unit tasks it combines, when it
@@ -2830,6 +2852,7 @@ class Orchestrator:
         # assembly QC fails closed to a normal review — safe. Keeping the assembly
         # step in the same goal as its units is the planner-side complement.)
         _wire_assembler_dependencies(tasks)
+        _select_assembler_skill(tasks, self.project.code)
         self._emit_activity(
             role="planner",
             phase="task_planning_ended",

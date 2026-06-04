@@ -1,5 +1,6 @@
 ---
 freshness_class: stable
+assembler_skill: code-assembly
 ---
 # Code standard (baseline)
 
