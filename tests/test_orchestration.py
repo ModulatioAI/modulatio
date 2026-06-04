@@ -8767,3 +8767,88 @@ def test_qc_review_assembly_bad_manifest_falls_back(project, tmp_path, monkeypat
     import pytest as _pytest
     with _pytest.raises(Exception):
         orch._qc_review(asm, art / "book.md", cs(assembled), 3)
+
+
+# ── A3: no-regress guard + content-addressed QC short-circuit (#86) ────────
+
+
+def _regress_orch(project):
+    return Orchestrator(project, runners={"leader": lambda _p: ""})
+
+
+def test_regression_blocked_matrix(project, tmp_path):
+    import hashlib
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    def cs(s): return f"sha256:{hashlib.sha256(s.encode()).hexdigest()}"
+
+    orch = _regress_orch(project)
+    big = "word " * 500  # ~500 tokens, a substantial passed deliverable
+    p = tmp_path / "book.md"
+    p.write_text(big)
+    t = Task(id="A-1", project_id=uuid4(), goal_id="G", description="d",
+             output_path="book.md", qc_passed_checksum=cs(big))
+
+    # passed version intact on disk + a suspicious-shrink rewrite → blocked
+    assert orch._regression_blocked(t, p, "tiny stub") is True
+    # a similar-size rewrite → allowed
+    assert orch._regression_blocked(t, p, "word " * 480) is False
+    # no mark → not blocked
+    t.qc_passed_checksum = None
+    assert orch._regression_blocked(t, p, "tiny stub") is False
+    # mark set but disk already differs from it → nothing to protect
+    t.qc_passed_checksum = cs("something else entirely")
+    assert orch._regression_blocked(t, p, "tiny stub") is False
+    # mark matches but prior was tiny (below the min) → not protected
+    small = "a b c"
+    p.write_text(small)
+    t.qc_passed_checksum = cs(small)
+    assert orch._regression_blocked(t, p, "") is False
+    # absent file → not blocked
+    assert orch._regression_blocked(t, tmp_path / "nope.md", "x") is False
+
+
+def test_note_regression_kept_preserves_passed_version(project, tmp_path):
+    import hashlib
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    def cs(s): return f"sha256:{hashlib.sha256(s.encode()).hexdigest()}"
+
+    orch = _regress_orch(project)
+    good = "word " * 500
+    p = tmp_path / "book.md"
+    p.write_text(good)
+    t = Task(id="A-1", project_id=uuid4(), goal_id="G", description="d",
+             output_path="book.md", qc_passed_checksum=cs(good))
+    ret_path, ret_checksum, ret_tokens = orch._note_regression_kept(t, p, "stub")
+    # the good version is still on disk (never clobbered)
+    assert p.read_text() == good
+    # returns the PASSED version's identity → checksum == the mark
+    assert ret_checksum == cs(good)
+    assert ret_tokens == len(good.split())
+    assert any("no-regress" in tr.rationale for tr in t.transitions)
+
+
+def test_qc_review_content_unchanged_short_circuits(project, tmp_path):
+    """Bytes identical to what already passed QC → instant pass, no re-review
+    (no qc runner wired here, so a re-review would raise)."""
+    import hashlib
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    def cs(s): return f"sha256:{hashlib.sha256(s.encode()).hexdigest()}"
+
+    art = tmp_path / "art"
+    art.mkdir()
+    body = "the complete passed deliverable " * 50
+    p = art / "book.md"
+    p.write_text(body)
+    t = Task(id="A-1", project_id=uuid4(), goal_id="G", description="d",
+             output_path="book.md", qc_passed_checksum=cs(body))
+    orch = _regress_orch(project)
+    orch._artifacts_root = lambda: art  # type: ignore[method-assign]
+    verdict, notes, defect = orch._qc_review(t, p, cs(body), len(body.split()))
+    assert verdict.passed and defect is None
+    assert "unchanged since QC pass" in verdict.check

@@ -277,6 +277,16 @@ def _normalize_render_paths(text: str | None) -> str | None:
 #: today the consolidation seed (+ the document-assembly name it becomes).
 _ASSEMBLER_SKILLS: frozenset[str] = frozenset({"consolidation", "document-assembly"})
 
+#: No-regress guard (Part A / A3, #86): a generate-mode RETRY that collapses a
+#: QC-passed deliverable to a fraction of its size is almost certainly a drifted
+#: clobber (the western-anthology 49KB → 348B stub), not a legitimate edit. Only
+#: generate / tool-loop FULL rewrites are guarded — anchored patch/diff/edit modes
+#: (intentional deletes) are not. The ratio is deliberately aggressive: a >60%
+#: collapse of a substantial passed deliverable on a rewrite is a regression, not
+#: a refactor.
+_REGRESSION_SHRINK_RATIO = 0.4
+_REGRESSION_MIN_PRIOR_TOKENS = 200
+
 
 def _is_assembler_task(task: "Task") -> bool:
     """True if ``task`` runs an assembler skill (a multi-unit assembly step)."""
@@ -3420,6 +3430,8 @@ class Orchestrator:
                 if extracted is not None:
                     response = extracted
                 response = _trim_leading_prose_from_code(response)
+        if self._regression_blocked(task, path, response):
+            return self._note_regression_kept(task, path, response)
         path.write_text(response)
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
 
@@ -4687,6 +4699,8 @@ class Orchestrator:
                 if extracted is not None:
                     cleaned = extracted
                 cleaned = _trim_leading_prose_from_code(cleaned)
+        if self._regression_blocked(task, path, cleaned):
+            return self._note_regression_kept(task, path, cleaned)
         path.write_text(cleaned)
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
         # QC-as-fixer Slice 2 (Nemo impl-sweep B2): the tool-loop producer
@@ -4697,6 +4711,54 @@ class Orchestrator:
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
         token_count = len(cleaned.split())
         return path, checksum, token_count
+
+    def _regression_blocked(self, task: Task, path: Path, new_content: str) -> bool:
+        """True if writing ``new_content`` to ``path`` would clobber a QC-passed
+        deliverable with a suspiciously-smaller one (Part A / A3, #86) — the
+        western-anthology case where a drifted retry overwrote a complete 49KB
+        book with a 348-byte stub.
+
+        Fires ONLY when the file on disk is STILL the passed version (its bytes
+        hash to the task's ``qc_passed_checksum``), so a legitimate first write,
+        or a file already legitimately changed, is never blocked. The caller keeps
+        the passed version on disk when this returns True. Deliberately narrow:
+        guarded only at generate / tool-loop full-rewrite sites (anchored
+        patch/diff/edit modes carry intentional deletes and are not guarded).
+        """
+        mark = task.qc_passed_checksum
+        if not mark or not path.exists():
+            return False
+        try:
+            prior = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            return False
+        if f"sha256:{hashlib.sha256(prior.encode()).hexdigest()}" != mark:
+            return False  # disk is no longer the passed version — nothing to protect
+        prior_tokens = len(prior.split())
+        new_tokens = len(new_content.split())
+        return (
+            prior_tokens >= _REGRESSION_MIN_PRIOR_TOKENS
+            and new_tokens < prior_tokens * _REGRESSION_SHRINK_RATIO
+        )
+
+    def _note_regression_kept(self, task: Task, path: Path, new_content: str) -> tuple:
+        """Keep the QC-passed version on disk (already there — just don't clobber
+        it), record the refusal, and return this attempt's (path, checksum,
+        token_count) as the PASSED version so QC re-affirms it. #86."""
+        kept = path.read_text()
+        task.transitions.append(StateTransition(
+            from_state=task.status.value,
+            to_state=task.status.value,
+            actor="orchestrator",
+            rationale=(
+                f"no-regress (#86): refused a generate write shrinking the "
+                f"QC-passed deliverable {len(kept.split())} → "
+                f"{len(new_content.split())} tokens; kept the passed version"
+            ),
+        ))
+        self._record_artifact_write(path)
+        checksum = f"sha256:{hashlib.sha256(kept.encode()).hexdigest()}"
+        return path, checksum, len(kept.split())
 
     def _apply_assembly_manifest(self, task: Task, body_text: str) -> "str | None":
         """If the producer emitted an assembly manifest, mechanically
@@ -4775,6 +4837,18 @@ class Orchestrator:
         - ``None`` — verdict passed, or legacy QC that didn't classify
           (the orchestrator defaults absent classification to substantive).
         """
+        # Part A / review-ledger: if the exact bytes in front of QC already
+        # passed QC this run (checksum == the task's content-addressed mark),
+        # don't re-review them — re-spending QC on already-verified content is the
+        # anti-pattern the thesis kills. Also re-affirms the version the #86
+        # no-regress guard keeps, cheaply (no re-read).
+        if task.qc_passed_checksum and checksum == task.qc_passed_checksum:
+            verdict = AssertionEvidence(
+                producer="qc", primary=True,
+                check="content unchanged since QC pass (review-ledger)",
+                passed=True,
+            )
+            return verdict, "", None
         # Part A / A2 (#85): assembly QC verifies the mechanical recipe against the
         # AUTHORITATIVE task-graph dependency set — cheaply, WITHOUT re-reading the
         # assembled bytes into the model (that re-read blew the QC budget →
