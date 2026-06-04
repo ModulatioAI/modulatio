@@ -8681,3 +8681,89 @@ def test_apply_assembly_manifest_no_manifest_passes_through(project, tmp_path):
                 description="x", summary_for_state_doc="")
     assert orch._apply_assembly_manifest(task, "just a normal draft body") is None
     assert task.summary_for_state_doc == ""  # untouched
+
+
+# ── A2: assembly QC structural pass (no LLM byte-read) ────────────────────
+
+
+def test_qc_review_assembly_structural_pass(project, tmp_path, monkeypatch):
+    """An assembly task with an engine AssemblyRecord whose structure verifies
+    PASSES QC via the cheap check — without _qc_review ever reading the body
+    into an LLM. The #85 fix: a complete assembled book no longer hits the
+    budget-blowing full re-read."""
+    import hashlib
+    from uuid import uuid4
+
+    from modulatio.assembly import AssemblyRecord
+    from modulatio.types import Task
+
+    def cs(s: str) -> str:
+        return f"sha256:{hashlib.sha256(s.encode()).hexdigest()}"
+
+    art = tmp_path / "art"
+    art.mkdir()
+    (art / "u1.txt").write_text("UNIT ONE")
+    (art / "u2.txt").write_text("UNIT TWO")
+    assembled = "BOOK\n--\nUNIT ONE\n--\nUNIT TWO"
+    (art / "book.md").write_text(assembled)
+
+    u1 = Task(id="U-1", project_id=uuid4(), goal_id="G", description="d",
+              output_path="u1.txt", qc_passed_checksum=cs("UNIT ONE"))
+    u2 = Task(id="U-2", project_id=uuid4(), goal_id="G", description="d",
+              output_path="u2.txt", qc_passed_checksum=cs("UNIT TWO"))
+    asm = Task(id="A-1", project_id=uuid4(), goal_id="G", description="d",
+               output_path="book.md", depends_on=["U-1", "U-2"])
+
+    orch = Orchestrator(project, runners={"leader": lambda _p: ""})
+    orch._artifacts_root = lambda: art  # type: ignore[method-assign]
+    orch._assembly_records[asm.id] = AssemblyRecord(
+        manifest={"units": ["u1.txt", "u2.txt"], "title_page": "BOOK",
+                  "separator": "\n--\n"},
+        final_checksum=cs(assembled), complete=True,
+    )
+    monkeypatch.setattr("modulatio.store.list_tasks", lambda *a, **k: [u1, u2, asm])
+    # If the branch fell through to normal QC it would call the (unwired) qc
+    # runner and blow up; a clean pass proves the structural path fired.
+    verdict, notes, defect = orch._qc_review(asm, art / "book.md", cs(assembled), 3)
+    assert verdict.passed
+    assert "structural verification" in verdict.check
+    assert defect is None
+
+
+def test_qc_review_assembly_bad_manifest_falls_back(project, tmp_path, monkeypatch):
+    """A manifest that drops a required unit does NOT pass cheaply — it falls
+    through to normal QC (which here raises because no qc runner is wired,
+    proving the fall-through happened rather than a false structural pass)."""
+    import hashlib
+    from uuid import uuid4
+
+    from modulatio.assembly import AssemblyRecord
+    from modulatio.types import Task
+
+    def cs(s: str) -> str:
+        return f"sha256:{hashlib.sha256(s.encode()).hexdigest()}"
+
+    art = tmp_path / "art"
+    art.mkdir()
+    (art / "u1.txt").write_text("UNIT ONE")
+    (art / "u2.txt").write_text("UNIT TWO")
+    assembled = "BOOK\n--\nUNIT ONE"
+    (art / "book.md").write_text(assembled)
+    u1 = Task(id="U-1", project_id=uuid4(), goal_id="G", description="d",
+              output_path="u1.txt", qc_passed_checksum=cs("UNIT ONE"))
+    u2 = Task(id="U-2", project_id=uuid4(), goal_id="G", description="d",
+              output_path="u2.txt", qc_passed_checksum=cs("UNIT TWO"))
+    asm = Task(id="A-1", project_id=uuid4(), goal_id="G", description="d",
+               output_path="book.md", depends_on=["U-1", "U-2"])
+    orch = Orchestrator(project, runners={"leader": lambda _p: ""})
+    orch._artifacts_root = lambda: art  # type: ignore[method-assign]
+    orch._assembly_records[asm.id] = AssemblyRecord(
+        manifest={"units": ["u1.txt"], "title_page": "BOOK", "separator": "\n--\n"},
+        final_checksum=cs(assembled), complete=True,
+    )
+    monkeypatch.setattr("modulatio.store.list_tasks", lambda *a, **k: [u1, u2, asm])
+    # Structural check fails (u2 dropped) -> falls through to normal QC, which
+    # has no runner wired -> raises. The raise proves fall-through, not a pass.
+    import pytest as _pytest
+    with _pytest.raises(Exception):
+        orch._qc_review(asm, art / "book.md", cs(assembled), 3)

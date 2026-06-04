@@ -103,3 +103,113 @@ def test_task_default_mark_is_none():
     assert t.qc_passed_checksum is None
     t2 = Task(**t.model_dump())
     assert t2.qc_passed_checksum is None
+
+
+# ── verify_assembly — the cheap structural check (#85) ────────────────────
+
+from modulatio.assembly import AssemblyRecord  # noqa: E402
+
+
+def _assembly_fixture(tmp_path, *, units=("01.txt", "02.txt", "03.txt"),
+                      manifest_units=None, title="BOOK", separator="\n--\n",
+                      complete=True, tamper=False):
+    """Build: unit files + QC-passed dep tasks + an assembled output on disk +
+    an assembly task (depends_on the deps) + a matching AssemblyRecord.
+    Returns (record, assembly_task, tasks_by_id, artifacts_root)."""
+    bodies = {u: f"BODY OF {u}" for u in units}
+    for u, b in bodies.items():
+        (tmp_path / u).write_text(b)
+    deps = []
+    tasks_by_id = {}
+    for i, u in enumerate(units):
+        d = _task(id=f"U-{i}", output_path=u, status=TaskStatus.COMPLETED,
+                  qc_passed_checksum=_engine_checksum(bodies[u]))
+        deps.append(d)
+        tasks_by_id[d.id] = d
+    mu = list(manifest_units if manifest_units is not None else units)
+    manifest = {"units": mu, "title_page": title, "separator": separator, "trailer": ""}
+    assembled = separator.join([title] + [bodies[u] for u in units])
+    (tmp_path / "Book.md").write_text("TAMPERED" if tamper else assembled)
+    asm = _task(id="A-1", output_path="Book.md", depends_on=[d.id for d in deps])
+    tasks_by_id[asm.id] = asm
+    record = AssemblyRecord(
+        manifest=manifest,
+        final_checksum=_engine_checksum(assembled),
+        complete=complete,
+    )
+    return record, asm, tasks_by_id, tmp_path
+
+
+def test_verify_assembly_happy_path(tmp_path):
+    rec, asm, by_id, root = _assembly_fixture(tmp_path)
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert ok, reason
+
+
+def test_verify_assembly_incomplete_fails(tmp_path):
+    rec, asm, by_id, root = _assembly_fixture(tmp_path, complete=False)
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "incomplete" in reason
+
+
+def test_verify_assembly_tampered_output_fails(tmp_path):
+    """Output bytes changed after assembly → checksum mismatch → fall back."""
+    rec, asm, by_id, root = _assembly_fixture(tmp_path, tamper=True)
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "changed since assembly" in reason
+
+
+def test_verify_assembly_no_deps_falls_back(tmp_path):
+    rec, asm, by_id, root = _assembly_fixture(tmp_path)
+    asm.depends_on = []  # cross-goal: no authoritative set
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "authoritative dependency set" in reason
+
+
+def test_verify_assembly_unit_not_passed_falls_back(tmp_path):
+    rec, asm, by_id, root = _assembly_fixture(tmp_path)
+    by_id["U-0"].qc_passed_checksum = None  # one unit never passed QC
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "never passed" in reason
+
+
+def test_verify_assembly_manifest_drops_a_unit(tmp_path):
+    """Nemo's tautology hole: manifest omits a required unit; all named
+    checksums still match — but the SET differs from the task graph → fail."""
+    rec, asm, by_id, root = _assembly_fixture(
+        tmp_path, manifest_units=["01.txt", "02.txt"],  # dropped 03.txt
+    )
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "missing=['03.txt']" in reason
+
+
+def test_verify_assembly_manifest_extra_unit(tmp_path):
+    rec, asm, by_id, root = _assembly_fixture(
+        tmp_path, manifest_units=["01.txt", "02.txt", "03.txt", "99.txt"],
+    )
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "extra=['99.txt']" in reason
+
+
+def test_verify_assembly_manifest_duplicate_unit(tmp_path):
+    rec, asm, by_id, root = _assembly_fixture(
+        tmp_path, manifest_units=["01.txt", "02.txt", "03.txt", "01.txt"],
+    )
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "more than once" in reason
+
+
+def test_verify_assembly_reorder_is_allowed(tmp_path):
+    """Order is the producer's editorial choice (a book's archetype sequence);
+    the SET is authoritative, not the order. A permutation still passes."""
+    rec, asm, by_id, root = _assembly_fixture(
+        tmp_path, manifest_units=["03.txt", "01.txt", "02.txt"],
+    )
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert ok, reason
+
+
+def test_verify_assembly_oversized_framing_falls_back(tmp_path):
+    rec, asm, by_id, root = _assembly_fixture(tmp_path, title="X" * 5000)
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "title_page exceeds" in reason

@@ -1702,6 +1702,13 @@ class Orchestrator:
         #: streaming-TUI/ACP drives the mid-run defer round-trip). See
         #: ``_autonomous`` / ``_operator_context_block``.
         self.operator_present: bool = operator_present
+        #: Part A / A2 (#85): engine-authored AssemblyRecord per task that the
+        #: engine mechanically assembled. Assembly QC consults it to do the cheap
+        #: structural check instead of re-reading the assembled bytes into the
+        #: model. Absent (or hash-mismatched) → QC falls back to a normal review
+        #: (fail-closed), so a producer emitting assembled-looking text can't
+        #: bypass review. Per-run, in-memory; lost on crash-resume → fall back.
+        self._assembly_records: dict = {}
         #: Core rebuild B3b: thread-local isolation state for a wave worker —
         #: ``deferred_writes`` (shared-store writes run at merge), ``child_tasks``
         #: (decompose children carried back), ``artifact_writes`` + ``staging_root``
@@ -4710,6 +4717,17 @@ class Orchestrator:
         if manifest is None:
             return None
         result = _assembly.assemble(manifest, self._artifacts_root())
+        # Part A / A2 (#85): record engine-authored proof of mechanical assembly so
+        # assembly QC can do the cheap structural check (and a producer emitting
+        # assembled-looking text — which leaves no record — can't bypass review).
+        complete = not result.missing and not result.errors
+        self._assembly_records[task.id] = _assembly.AssemblyRecord(
+            manifest=manifest,
+            final_checksum=(
+                f"sha256:{hashlib.sha256(result.content.encode()).hexdigest()}"
+            ),
+            complete=complete,
+        )
         bits = [
             f"mechanical assembly: {len(result.units_used)} unit(s) concatenated"
         ]
@@ -4757,6 +4775,43 @@ class Orchestrator:
         - ``None`` — verdict passed, or legacy QC that didn't classify
           (the orchestrator defaults absent classification to substantive).
         """
+        # Part A / A2 (#85): assembly QC verifies the mechanical recipe against the
+        # AUTHORITATIVE task-graph dependency set — cheaply, WITHOUT re-reading the
+        # assembled bytes into the model (that re-read blew the QC budget →
+        # compressed partial view → false-rejected complete books). Only fires when
+        # the ENGINE recorded a mechanical assembly AND it verifies; anything not
+        # provably correct falls through to the normal full review (fail-closed),
+        # so a producer emitting assembled-looking text can't bypass QC.
+        record = self._assembly_records.get(task.id)
+        if record is not None:
+            from modulatio import review_ledger as _review_ledger
+            tasks_by_id = {
+                t.id: t
+                for t in store.list_tasks(
+                    self.project.code, run_id=self.project.run_id
+                )
+            }
+            ok, reason = _review_ledger.verify_assembly(
+                record, task, tasks_by_id, self._artifacts_root()
+            )
+            if ok:
+                verdict = AssertionEvidence(
+                    producer="qc", primary=True,
+                    check=(
+                        f"assembly structural verification "
+                        f"({record.strategy}): {len(task.depends_on)} unit(s) "
+                        f"present + QC-passed; recipe hash matches"
+                    ),
+                    passed=True,
+                )
+                return verdict, "", None
+            self._emit_activity(
+                role="qc",
+                phase="assembly_qc_fallback",
+                task_id=task.id,
+                agent_id=task.qc_agent_id,
+            )
+            # fall through to a normal full review (fail-closed): {reason}
         body = draft_path.read_text()
         band = _token_band(task)
 

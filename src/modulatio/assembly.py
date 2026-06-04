@@ -82,6 +82,37 @@ class AssemblyResult:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass
+class AssemblyRecord:
+    """Engine-authored proof that a deliverable was produced by MECHANICAL
+    assembly (task #85, Nemo blocker 3). It exists ONLY when the engine ran
+    ``assemble()`` — a producer that merely emits assembled-looking text leaves
+    no record, so it cannot bypass normal QC. Assembly QC (``verify_assembly``)
+    routes to the cheap structural check only when this record exists AND the
+    on-disk output still hashes to ``final_checksum``; otherwise it falls back to
+    a full normal review (fail-closed).
+
+    Fields:
+      manifest      — the producer's plan (units order + framing). UNTRUSTED for
+                      the unit SET (verified against the task graph), but it is
+                      what the engine actually concatenated.
+      final_checksum— ``sha256:<hex>`` of the bytes the engine wrote to
+                      output_path. QC recomputes it from disk to detect any
+                      post-assembly tampering.
+      complete      — True iff every named unit resolved (no missing/errors). A
+                      partial assembly is never eligible for the cheap pass.
+      strategy / algo_version — which mechanical recipe produced it (Part B grows
+                      ``strategy`` past "document"; ``algo_version`` bumps if the
+                      deterministic transform changes).
+    """
+
+    manifest: dict
+    final_checksum: str
+    complete: bool
+    strategy: str = "document"
+    algo_version: str = "1"
+
+
 def parse_assembly_manifest(text: str) -> dict | None:
     """Return the parsed manifest dict if ``text`` carries a well-formed
     ``assembly`` block with a non-empty ``units`` list, else ``None``.

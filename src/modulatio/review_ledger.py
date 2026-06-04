@@ -36,7 +36,22 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pathlib import Path
 
+    from modulatio.assembly import AssemblyRecord
     from modulatio.types import Task
+
+
+#: Framing bytes a producer authors directly in the manifest (title_page /
+#: separator / trailer) are NOT QC-reviewed content. Bound them so the cheap
+#: structural pass can't be used to smuggle large unreviewed prose past review;
+#: over-bound → fall back to a normal review that actually reads it.
+_MAX_TITLE_CHARS = 4000
+_MAX_TRAILER_CHARS = 4000
+_MAX_SEPARATOR_CHARS = 200
+
+
+def _norm_unit(name: str) -> str:
+    """Normalize an artifacts-relative unit path for set comparison."""
+    return str(name).strip().lstrip("./")
 
 
 def file_checksum(path: Path) -> str:
@@ -101,3 +116,89 @@ def verify_unit(task: "Task", artifacts_root: Path) -> UnitVerdict:
             "unit bytes changed since QC pass (checksum mismatch)",
         )
     return UnitVerdict(tid, out_path, expected, actual, True, "")
+
+
+def verify_assembly(
+    record: "AssemblyRecord",
+    assembly_task: "Task",
+    tasks_by_id: "dict[str, Task]",
+    artifacts_root: "Path",
+) -> tuple[bool, str]:
+    """The cheap, no-LLM structural check for an assembly deliverable (#85).
+
+    Returns ``(True, "")`` only when the assembly is PROVABLY correct — safe to
+    PASS QC without re-reading the assembled bytes into the model. Returns
+    ``(False, reason)`` for anything not provably correct, and the caller then
+    FALLS BACK to a normal full review (fail-closed). It never *fails* a task on
+    its own — a genuinely-broken assembly simply gets the full review, which
+    rejects it. This both kills the #85 false-reject (a complete book passes
+    cheaply) and Nemo's tautology hole (the expected unit SET is the task graph's
+    ``depends_on``, not the producer's manifest).
+
+    Checks, in order:
+      1. the assembly was COMPLETE (no missing/errored units);
+      2. the on-disk output still hashes to the engine-recorded checksum (no
+         tampering since assembly);
+      3. there is an authoritative dependency set (``depends_on``) — cross-goal
+         assemblies have none and fall back;
+      4. every dependency unit is QC-passed AND its on-disk bytes still match its
+         mark (``verify_unit``);
+      5. the manifest's unit SET equals the dependency set exactly — no missing,
+         no extra, no duplicate (order is the producer's editorial choice and is
+         the order the engine concatenated, so it is not re-verified here);
+      6. the producer-authored framing (title/separator/trailer) is within bounds.
+    """
+    if not record.complete:
+        return False, "assembly incomplete (missing or errored units)"
+
+    out_rel = assembly_task.output_path
+    if not out_rel:
+        return False, "assembly task has no output_path"
+    root = artifacts_root.resolve()
+    out = (artifacts_root / out_rel).resolve()
+    try:
+        out.relative_to(root)
+    except ValueError:
+        return False, "assembled output_path escapes artifacts root"
+    if not out.is_file():
+        return False, "assembled output missing on disk"
+    try:
+        if file_checksum(out) != record.final_checksum:
+            return False, "assembled output changed since assembly (checksum mismatch)"
+    except (OSError, UnicodeDecodeError) as exc:
+        return False, f"assembled output unreadable: {exc}"
+
+    dep_ids = list(assembly_task.depends_on)
+    if not dep_ids:
+        return False, "no authoritative dependency set (cross-goal assembly)"
+    expected: list[str] = []
+    for dep_id in dep_ids:
+        dep = tasks_by_id.get(dep_id)
+        if dep is None:
+            return False, f"dependency task {dep_id} not found"
+        v = verify_unit(dep, artifacts_root)
+        if not v.ok:
+            return False, f"unit {dep_id} ({dep.output_path}): {v.reason}"
+        expected.append(_norm_unit(dep.output_path or ""))
+
+    manifest_units = [_norm_unit(u) for u in record.manifest.get("units", [])]
+    if len(manifest_units) != len(set(manifest_units)):
+        return False, "manifest names a unit more than once"
+    if set(manifest_units) != set(expected):
+        missing = set(expected) - set(manifest_units)
+        extra = set(manifest_units) - set(expected)
+        return False, (
+            "manifest unit set != authoritative dependency set "
+            f"(missing={sorted(missing)}, extra={sorted(extra)})"
+        )
+
+    m = record.manifest
+    if len(str(m.get("title_page") or "")) > _MAX_TITLE_CHARS:
+        return False, "title_page exceeds review-free bound"
+    if len(str(m.get("trailer") or "")) > _MAX_TRAILER_CHARS:
+        return False, "trailer exceeds review-free bound"
+    sep = m.get("separator")
+    if sep is not None and len(str(sep)) > _MAX_SEPARATOR_CHARS:
+        return False, "separator exceeds review-free bound"
+
+    return True, ""
