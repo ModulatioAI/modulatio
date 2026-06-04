@@ -41,9 +41,67 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 logger = logging.getLogger("modulatio.sandbox")
+
+
+# ── Sandbox profile ───────────────────────────────────────────────────────
+
+#: Operator-selected posture for run_shell. Controls how much the sandbox
+#: gets out of the agents' way. Set via the ``MODULATIO_SANDBOX_PROFILE``
+#: env var; default ``standard``. The agents (LLMs) cannot pick this — it's
+#: an operator/admin decision, like ``allow_network`` is skill-frontmatter,
+#: not a producer tool-arg.
+#:
+#:   standard  (default, ships safe for any user) — host filesystem
+#:             read-only, the project's artifacts root is the ONLY writable
+#:             host path, network unshared (per-skill ``needs_network``
+#:             opt-in still honored), cloud API keys/secrets stripped from
+#:             the child env, ``pip install`` blocked. The interpreter +
+#:             venv are bound in so code actually runs (this is the #82 fix
+#:             that applies to ALL profiles — a masked venv was never a
+#:             policy, just a bug).
+#:   trusted   (single-operator / trusted-content boxes) — same confinement
+#:             floor PLUS network on by default and ``pip`` unblocked, so an
+#:             agent can "do whatever is required" to perform a request.
+#:             The ONE floor kept here on purpose: cloud API keys/secrets
+#:             are STILL stripped (a skill that genuinely needs a key opts
+#:             in per-key via ``pass_env``). Drop to ``off`` only if you
+#:             truly want the producers to see every credential in the
+#:             parent env.
+#:   off       — no bwrap at all: full parent env (secrets included), full
+#:             filesystem write, full network. Identical to the long-standing
+#:             ``MODULATIO_RUN_SHELL_UNSAFE=1`` bypass. Use only when you own
+#:             the box AND trust every model/skill in the loop.
+_SANDBOX_PROFILE_ENV = "MODULATIO_SANDBOX_PROFILE"
+VALID_SANDBOX_PROFILES: tuple[str, ...] = ("standard", "trusted", "off")
+_DEFAULT_SANDBOX_PROFILE = "standard"
+_WARNED_BAD_PROFILE: set[str] = set()
+
+
+def current_profile() -> str:
+    """Return the active sandbox profile from ``MODULATIO_SANDBOX_PROFILE``.
+
+    Unset / empty → ``standard``. An unrecognized value falls back to
+    ``standard`` (fail-safe: an operator typo must NOT silently widen the
+    sandbox) and warns once per bad value.
+    """
+    raw = os.environ.get(_SANDBOX_PROFILE_ENV, "").strip().lower()
+    if not raw:
+        return _DEFAULT_SANDBOX_PROFILE
+    if raw not in VALID_SANDBOX_PROFILES:
+        if raw not in _WARNED_BAD_PROFILE:
+            _WARNED_BAD_PROFILE.add(raw)
+            logger.warning(
+                "unknown %s=%r; expected one of %s. Falling back to %r "
+                "(fail-safe — a typo never widens the sandbox).",
+                _SANDBOX_PROFILE_ENV, raw,
+                ", ".join(VALID_SANDBOX_PROFILES), _DEFAULT_SANDBOX_PROFILE,
+            )
+        return _DEFAULT_SANDBOX_PROFILE
+    return raw
 
 
 # ── Per-call context ─────────────────────────────────────────────────────
@@ -215,10 +273,46 @@ def warn_unsandboxed_once() -> None:
 
 # ── Sandbox argv construction ─────────────────────────────────────────────
 
-def _build_env(pass_env: tuple[str, ...]) -> dict[str, str]:
+def _interpreter_binds() -> tuple[Path, ...]:
+    """Read-only host paths that MUST be visible inside the sandbox for the
+    active Python interpreter to exec.
+
+    The #82 bug: ``--tmpfs /home`` masks the whole home tree to hide the
+    operator's secrets, but a project venv lives under home
+    (``/home/<user>/<proj>/.venv``). ``run_shell`` rewrites ``python3`` /
+    ``pytest`` to ``sys.executable`` (the venv interpreter), so without
+    binding the venv back in, ``bwrap`` dies with ``execvp ... .venv ...``.
+    Binding ``sys.prefix`` (the venv root) read-only restores the
+    interpreter + its site-packages WITHOUT un-masking the rest of home.
+    ``sys.base_prefix`` is included for the rare layout where the base
+    stdlib also sits under a masked mount; when it's under ``/usr`` (the
+    norm) the ``--ro-bind / /`` already covers it and the extra try-bind is
+    a harmless no-op.
+    """
+    binds: list[Path] = []
+    seen: set[str] = set()
+    for raw in (sys.prefix, sys.base_prefix):
+        if not raw:
+            continue
+        try:
+            rp = Path(raw).resolve()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        key = str(rp)
+        if key in seen:
+            continue
+        seen.add(key)
+        binds.append(rp)
+    return tuple(binds)
+
+
+def _build_env(pass_env: tuple[str, ...], *, profile: str = "standard") -> dict[str, str]:
     """Construct the env dict to forward into the sandboxed process.
     Starts from the static allowlist plus any safe per-skill pass-through
-    names; values are read from the parent's environment.
+    names; values are read from the parent's environment. ``profile``
+    selects how much capability the child gets (see ``current_profile``);
+    the secret deny-list is enforced in EVERY profile that reaches here
+    (``off`` never calls this — it runs with the raw parent env).
     """
     out: dict[str, str] = {}
     # Forward allowlisted base names if present in the parent.
@@ -230,7 +324,11 @@ def _build_env(pass_env: tuple[str, ...]) -> dict[str, str]:
     out["PATH"] = "/usr/local/bin:/usr/bin:/bin"
     # Defensive Python flags.
     out["PYTHONNOUSERSITE"] = "1"
-    out["PIP_INDEX_URL"] = "file:///dev/null"
+    # 'standard' blocks accidental installs by poisoning the index; 'trusted'
+    # leaves pip functional (network is on there) so an agent can pull a
+    # package it legitimately needs — into a writable target, NOT the RO venv.
+    if profile != "trusted":
+        out["PIP_INDEX_URL"] = "file:///dev/null"
     # Per-skill opt-in pass-through, filtered against the deny patterns.
     for name in pass_env:
         if not _is_safe_env_name(name):
@@ -252,6 +350,7 @@ def build_sandboxed_argv(
     allow_network: bool | None = None,
     pass_env: tuple[str, ...] | None = None,
     extra_binds: tuple[Path, ...] = (),
+    profile: str | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Wrap ``exec_argv`` in a ``bwrap ... -- exec_argv`` invocation.
 
@@ -267,11 +366,24 @@ def build_sandboxed_argv(
     ``extra_binds`` lets the caller request additional read-only mounts
     inside the sandbox — used to give pytest access to the project's
     test tree and venv site-packages.
+
+    ``profile`` selects the operator posture (see ``current_profile``);
+    ``None`` reads the ``MODULATIO_SANDBOX_PROFILE`` env. ``trusted``
+    forces network on (an agent that needs to fetch shouldn't be blocked)
+    while keeping the secret-stripping floor; ``off`` is handled by the
+    caller (no bwrap) and never reaches here. The active interpreter/venv
+    is ALWAYS bound read-only so code execs in every profile (the #82 fix).
     """
+    if profile is None:
+        profile = current_profile()
     if allow_network is None:
         allow_network = allow_network_var.get()
     if pass_env is None:
         pass_env = pass_env_var.get()
+    # 'trusted' = don't hamper the agents: network on regardless of the
+    # per-skill flag. The secret floor (_build_env deny-list) still holds.
+    if profile == "trusted":
+        allow_network = True
 
     artifacts_root_str = str(artifacts_root.resolve())
 
@@ -298,13 +410,17 @@ def build_sandboxed_argv(
     ]
     if not allow_network:
         bwrap += ["--unshare-net"]
-    for bind_path in extra_binds:
+    # #82 fix: bind the active interpreter/venv back in AFTER the --tmpfs
+    # /home that masks it, so python3/pytest actually exec. ro-bind-try is
+    # idempotent + safe when the path is already covered by --ro-bind / /.
+    # Caller-supplied extra_binds (e.g. a project test tree) come after.
+    for bind_path in (*_interpreter_binds(), *extra_binds):
         bp = str(Path(bind_path).resolve())
         bwrap += ["--ro-bind-try", bp, bp]
     # End of bwrap flags; everything after `--` is the child argv.
     bwrap += ["--"]
     bwrap += list(exec_argv)
-    env = _build_env(pass_env)
+    env = _build_env(pass_env, profile=profile)
     return bwrap, env
 
 
@@ -361,10 +477,12 @@ __all__ = [
     "allow_network_var",
     "pass_env_var",
     "build_sandboxed_argv",
+    "current_profile",
     "is_bypass_requested",
     "is_sandbox_available",
     "is_sandbox_installed",
     "reset_sandbox_probe_cache",
     "skill_context",
     "warn_unsandboxed_once",
+    "VALID_SANDBOX_PROFILES",
 ]

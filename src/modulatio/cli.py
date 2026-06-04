@@ -798,11 +798,21 @@ def doctor() -> None:
 
     # Sandbox (audit Wave 2, F2: distinguish absent vs unusable)
     from modulatio import sandbox as _sandbox
+    _profile = _sandbox.current_profile()
     typer.echo("\nSandbox (run_shell isolation):")
-    if _sandbox.is_bypass_requested():
+    typer.echo(
+        f"  profile: {_profile}  (MODULATIO_SANDBOX_PROFILE; one of "
+        f"{', '.join(_sandbox.VALID_SANDBOX_PROFILES)})"
+    )
+    if _sandbox.is_bypass_requested() or _profile == "off":
+        why = (
+            "MODULATIO_RUN_SHELL_UNSAFE=1"
+            if _sandbox.is_bypass_requested() else "profile=off"
+        )
         typer.echo(
-            "  ⚠ MODULATIO_RUN_SHELL_UNSAFE=1 set — sandbox bypass "
-            "explicitly enabled by the user."
+            f"  ⚠ {why} — sandbox bypassed; run_shell runs with the full "
+            "parent env (secrets included), full filesystem write, and "
+            "network. Operator-chosen."
         )
     elif not _sandbox.is_sandbox_installed():
         typer.echo(
@@ -822,8 +832,13 @@ def doctor() -> None:
     else:
         typer.echo(
             "  ✓ bubblewrap functional — run_shell calls execute "
-            "inside a confined namespace."
+            "inside a confined namespace (venv bound in so code runs)."
         )
+        if _profile == "trusted":
+            typer.echo(
+                "    trusted: network on + pip enabled for agents; cloud "
+                "API keys/secrets are still stripped."
+            )
 
     # Clipboard backend (TUI copy/paste reaches the OS clipboard via pyperclip;
     # Linux needs xclip/wl-clipboard, which `modulatio setup` ensures).

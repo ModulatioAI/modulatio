@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -397,3 +399,95 @@ def test_sandbox_allows_writes_inside_artifacts_root(tmp_path):
     proc = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10.0)
     assert proc.returncode == 0, f"stderr: {proc.stderr}"
     assert (artifacts / "ok.txt").read_text() == "hello"
+
+
+# ── #82: interpreter/venv bind so code actually execs ────────────────────
+
+
+def test_interpreter_binds_include_sys_prefix():
+    """The active venv root (sys.prefix) must be in the bind set so the
+    --tmpfs /home mask doesn't hide the interpreter that run_shell rewrites
+    python3/pytest to."""
+    binds = {str(p) for p in sandbox._interpreter_binds()}
+    assert str(Path(sys.prefix).resolve()) in binds
+
+
+def test_build_sandboxed_argv_binds_the_venv(tmp_path):
+    """The wrapped argv ro-binds the venv prefix back in AFTER --tmpfs /home."""
+    artifacts = tmp_path / "a"
+    artifacts.mkdir()
+    argv, _ = sandbox.build_sandboxed_argv(["echo"], artifacts)
+    prefix = str(Path(sys.prefix).resolve())
+    # appears as a --ro-bind-try pair
+    assert prefix in argv
+    i = argv.index(prefix)
+    assert argv[i - 1] == "--ro-bind-try"
+    # and it comes AFTER the /home tmpfs mask so it isn't clobbered
+    assert "--tmpfs" in argv and "/home" in argv
+    tmpfs_home = max(
+        j for j, a in enumerate(argv[:-1]) if a == "--tmpfs" and argv[j + 1] == "/home"
+    )
+    assert i > tmpfs_home
+
+
+@pytest.mark.skipif(not bwrap_available, reason="bubblewrap not functional on this host")
+def test_sandbox_execs_venv_interpreter(tmp_path):
+    """Direct #82 regression: the venv interpreter (sys.executable, which
+    lives under the masked /home for a project venv) execs inside the
+    sandbox instead of dying with `bwrap: execvp ... .venv ...`. run_shell
+    rewrites python3 -> sys.executable, so this is the real path."""
+    artifacts = tmp_path / "a"
+    artifacts.mkdir()
+    argv, env = sandbox.build_sandboxed_argv(
+        [sys.executable, "-c", "print('VENV_EXEC_OK')"],
+        artifacts,
+    )
+    proc = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=15.0)
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+    assert "VENV_EXEC_OK" in proc.stdout
+
+
+# ── Sandbox profile knob (MODULATIO_SANDBOX_PROFILE) ─────────────────────
+
+
+def test_profile_defaults_to_standard(monkeypatch):
+    monkeypatch.delenv("MODULATIO_SANDBOX_PROFILE", raising=False)
+    assert sandbox.current_profile() == "standard"
+
+
+def test_profile_is_case_insensitive(monkeypatch):
+    monkeypatch.setenv("MODULATIO_SANDBOX_PROFILE", "TRUSTED")
+    assert sandbox.current_profile() == "trusted"
+
+
+def test_profile_typo_fails_safe_to_standard(monkeypatch):
+    """A typo must NEVER silently widen the sandbox."""
+    monkeypatch.setenv("MODULATIO_SANDBOX_PROFILE", "trustted")
+    assert sandbox.current_profile() == "standard"
+
+
+def test_trusted_forces_network_on_and_keeps_secret_floor(tmp_path, monkeypatch):
+    """trusted = don't hamper (network on, pip functional) BUT the secret
+    deny-list still strips cloud keys."""
+    artifacts = tmp_path / "a"
+    artifacts.mkdir()
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-leak")
+    argv, env = sandbox.build_sandboxed_argv(
+        ["echo"], artifacts, profile="trusted", allow_network=False,
+    )
+    # network forced on despite allow_network=False
+    assert "--unshare-net" not in argv
+    # pip not poisoned in trusted
+    assert env.get("PIP_INDEX_URL") is None
+    # secret floor still holds
+    assert "OPENAI_API_KEY" not in env
+
+
+def test_standard_keeps_network_off_and_pip_blocked(tmp_path):
+    artifacts = tmp_path / "a"
+    artifacts.mkdir()
+    argv, env = sandbox.build_sandboxed_argv(
+        ["echo"], artifacts, profile="standard",
+    )
+    assert "--unshare-net" in argv
+    assert env["PIP_INDEX_URL"] == "file:///dev/null"

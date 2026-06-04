@@ -930,11 +930,12 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
 
         run_env: dict[str, str] | None = None
         run_argv = exec_argv
-        if _sandbox.is_bypass_requested():
-            pass  # explicit opt-out, run as-is
+        _profile = _sandbox.current_profile()
+        if _sandbox.is_bypass_requested() or _profile == "off":
+            pass  # explicit opt-out (UNSAFE env or profile=off), run as-is
         elif _sandbox.is_sandbox_available():
             run_argv, run_env = _sandbox.build_sandboxed_argv(
-                exec_argv, artifacts_root,
+                exec_argv, artifacts_root, profile=_profile,
             )
         else:
             _sandbox.warn_unsandboxed_once()
