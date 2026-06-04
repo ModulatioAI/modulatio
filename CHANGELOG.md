@@ -6,6 +6,67 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-06-04
+
+**Assemble the product, not just the document — and verify the marks, not the
+bytes.** Modulatio's mechanical assembly grows from a single document-concatenator
+into a **family of product-aware assemblers**, sitting on a new **content-addressed
+review-ledger** that lets QC pass a large finished deliverable cheaply instead of
+re-reading it. Speculative-decoding-for-agents, applied to the join: the producer
+emits a small *plan* (a manifest); the **engine** owns the bulk copy; unit bytes
+never round-trip through the model, so a big deliverable can't truncate at the
+model's output cap. Cleared fresh **hull + coherence** reviews (8 hull holes found
+and sealed across two close-out rounds). **2843 tests pass.**
+
+### Added
+
+- **Familial assemblers — assembly is now product-agnostic.** A `_STRATEGIES`
+  dispatch picks the join by the product's *byte-nature*, not a one-size concat:
+  - **`document-assembly`** — ordered text concat + framing (prose, reports, forms,
+    packets). The original consolidation behavior, generalized.
+  - **`code-assembly`** — preserves the file tree and **generates a wiring index**
+    (title + file list + entrypoint); it does **not** `cat` sources into one blob.
+  - **`data-assembly`** — a real **merge/fold** (JSON-array concat, CSV row-union)
+    with strict parsing, dedupe, and a hard output cap.
+  - **`media-assembly`** — a registered seam that **fails closed** until the render
+    tool lands (a future metered/local tool tier).
+- **Standards-driven family selection.** Each `_seed_standards/<kind>.md` declares
+  an `assembler_skill` in frontmatter; the engine routes the assembly step by the
+  artifact's `artifact_kind` (the standards file is the authority — no engine
+  routing table). The planner no longer hardcodes a single assembler.
+- **Content-addressed review-ledger (`review_ledger.py`).** A durable
+  `Task.qc_passed_checksum` marks *which bytes* a QC pass blessed. Assembly QC
+  verifies the marks (each unit QC-passed + on-disk bytes unchanged + the manifest
+  unit set equals the authoritative dependency set) instead of re-reading the
+  assembled whole — killing the false-reject where a complete book blew the QC
+  budget. `code` assemblies are deliberately **not** eligible for the cheap pass
+  (no deterministic wiring validation yet) and always get a full review.
+
+### Fixed
+
+- **No-regress guard (#86).** A drifted retry can no longer clobber a complete,
+  QC-passed deliverable with a smaller/worse one; the guard is scoped to
+  full-rewrite (`generate`) re-opens and never blocks legitimate in-place edits.
+- **Re-open builds in place.** `_leader_auto_redo` and the budget-resume re-open
+  now build on the existing artifact (diff/revise) rather than full-regenerating,
+  so a stale `generate` can't throw away good tokens.
+- **Assembly hardening (hull review).** Producer-authored framing/separators count
+  toward the size cap and over-cap output is never written; data merges enforce a
+  final output cap + bounded dedupe + strict CSV (field-size limit, row-arity);
+  manifest units are pre-filtered to the authoritative dependency outputs before
+  any read (no pre-QC exposure of a non-dependency in-root file, fails closed on
+  unresolved deps).
+- **Codified-skill shadow bug (#84) + provenance.** A stale shared codification can
+  no longer bury a seed-skill improvement; an explicit `user_override` marker keeps
+  a human edit sacred against re-codification.
+- **Sandbox.** The producer sandbox binds the venv read-only so producer code can
+  actually execute `python3` under the standard profile, without unmasking the home
+  tree or leaking secrets.
+- **Context budget.** Fallback/per-role input windows doubled for the roles that
+  demonstrably needed headroom, with an 85% prune threshold — reticent posture
+  preserved (still refuses at 100%, still compresses); unknown models never get a
+  litellm huge-window guess.
+
 ## [0.8.0] — 2026-06-02
 
 **Talk to the Leader from your editor.** Modulatio gains an **Agent Client
