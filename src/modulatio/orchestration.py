@@ -272,6 +272,37 @@ def _normalize_render_paths(text: str | None) -> str | None:
     return _RENDER_DELIVERABLE_RE.sub(lambda m: f"{m.group(1)}.md", text)
 
 
+#: Skills whose task is a multi-unit ASSEMBLY step — it combines already-produced
+#: units into one deliverable. Grows in Part B (document/code/media/data-assembly);
+#: today the consolidation seed (+ the document-assembly name it becomes).
+_ASSEMBLER_SKILLS: frozenset[str] = frozenset({"consolidation", "document-assembly"})
+
+
+def _is_assembler_task(task: "Task") -> bool:
+    """True if ``task`` runs an assembler skill (a multi-unit assembly step)."""
+    return bool(set(task.required_skills) & _ASSEMBLER_SKILLS)
+
+
+def _wire_assembler_dependencies(tasks: list["Task"]) -> None:
+    """Engine bind (Part A / A2, #85): give each assembler task in a goal an
+    AUTHORITATIVE dependency on the sibling unit tasks it combines, when it
+    declared none. Assembly QC derives its expected-unit set from these deps —
+    the task graph — not from the producer's (untrusted) manifest. No-op when the
+    assembler already declared deps, when there's no assembler, or when there are
+    no sibling units in the goal (e.g. a cross-goal assembly — which then leaves
+    deps empty and routes assembly QC to its safe fail-closed normal review).
+    """
+    assemblers = [t for t in tasks if _is_assembler_task(t)]
+    if not assemblers:
+        return
+    unit_ids = [t.id for t in tasks if not _is_assembler_task(t)]
+    if not unit_ids:
+        return
+    for a in assemblers:
+        if not a.depends_on:
+            a.depends_on = list(unit_ids)
+
+
 def _build_requirement(raw: dict) -> EvidenceRequirement:
     return EvidenceRequirement(
         kind=_coerce_evidence_kind(raw.get("kind", "report")),
@@ -2754,6 +2785,15 @@ class Orchestrator:
                     status=TaskStatus.PENDING,
                 )
                 tasks.append(t)
+        # Part A / A2 (review-ledger #85): an ASSEMBLER task's authoritative input
+        # set is the unit tasks it combines — that, not the producer's manifest, is
+        # what assembly QC verifies against. The planner can't reliably wire this
+        # (parallel fan-out ids don't exist at prompt time), so the ENGINE binds it:
+        # an assembler-skill task that declared no deps depends on every sibling
+        # NON-assembler task in this goal. (Cross-goal assembly leaves deps empty →
+        # assembly QC fails closed to a normal review — safe. Keeping the assembly
+        # step in the same goal as its units is the planner-side complement.)
+        _wire_assembler_dependencies(tasks)
         self._emit_activity(
             role="planner",
             phase="task_planning_ended",
@@ -9480,9 +9520,10 @@ goal — list the N artifacts in that goal's evidence — NOT N separate goals.
 Same-kind independent deliverables in one goal run IN PARALLEL across your
 producers (the task planner fans them into a wave); N separate goals run one
 at a time, serially, leaving producers idle. Reserve SEPARATE goals for
-deliverables of DIFFERENT kinds or with real dependencies (research → draft,
-or write-the-pieces → assemble-the-whole — the assembly is its own goal that
-depends on the pieces goal). {team_capacity}
+deliverables of DIFFERENT kinds or distinct phases (research → draft). But a
+deliverable ASSEMBLED from its own units (write-the-pieces → assemble-the-whole)
+is ONE goal — the N unit tasks PLUS the assembly task, which depends on the units
+and runs last, so the whole is verified against its already-reviewed parts. {team_capacity}
 
 SELF-CONTAINMENT (critical): each goal must NAME its concrete subject
 matter — never refer to it symbolically. A goal is executed by producers

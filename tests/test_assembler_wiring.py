@@ -1,0 +1,73 @@
+"""Tests for the engine-bound assembler→units dependency wiring (Part A / A2).
+
+An assembler task's authoritative input set must come from the task graph, not the
+producer's manifest (Nemo). The engine wires an assembler task's depends_on to its
+sibling unit tasks in the goal so assembly QC has a trustworthy expected sequence.
+"""
+
+from __future__ import annotations
+
+from uuid import uuid4
+
+from modulatio.orchestration import (
+    _is_assembler_task,
+    _wire_assembler_dependencies,
+)
+from modulatio.types import Task
+
+
+def _task(tid: str, *, skills=None, depends_on=None) -> Task:
+    return Task(
+        id=tid,
+        project_id=uuid4(),
+        goal_id="G-1",
+        description="d",
+        required_skills=list(skills or []),
+        depends_on=list(depends_on or []),
+    )
+
+
+def test_is_assembler_task():
+    assert _is_assembler_task(_task("T1", skills=["consolidation"]))
+    assert _is_assembler_task(_task("T2", skills=["document-assembly"]))
+    assert not _is_assembler_task(_task("T3", skills=["long-form"]))
+    assert not _is_assembler_task(_task("T4"))
+
+
+def test_wires_assembler_to_sibling_units():
+    units = [_task("U1", skills=["long-form"]), _task("U2", skills=["drafter"])]
+    asm = _task("A1", skills=["consolidation"])
+    _wire_assembler_dependencies(units + [asm])
+    assert asm.depends_on == ["U1", "U2"]
+    # units themselves are untouched
+    assert units[0].depends_on == [] and units[1].depends_on == []
+
+
+def test_does_not_override_declared_deps():
+    units = [_task("U1", skills=["long-form"])]
+    asm = _task("A1", skills=["consolidation"], depends_on=["U1"])
+    _wire_assembler_dependencies(units + [asm])
+    assert asm.depends_on == ["U1"]  # unchanged (no duplication)
+
+
+def test_no_units_leaves_deps_empty():
+    """Cross-goal assembly: the assembler is alone in its goal → no wire (A2 will
+    fail closed to normal QC)."""
+    asm = _task("A1", skills=["consolidation"])
+    _wire_assembler_dependencies([asm])
+    assert asm.depends_on == []
+
+
+def test_no_assembler_is_noop():
+    units = [_task("U1", skills=["long-form"]), _task("U2", skills=["drafter"])]
+    _wire_assembler_dependencies(units)
+    assert all(u.depends_on == [] for u in units)
+
+
+def test_assembler_does_not_depend_on_another_assembler():
+    """Only NON-assembler siblings are units."""
+    u = _task("U1", skills=["long-form"])
+    a1 = _task("A1", skills=["consolidation"])
+    a2 = _task("A2", skills=["document-assembly"])
+    _wire_assembler_dependencies([u, a1, a2])
+    assert a1.depends_on == ["U1"] and a2.depends_on == ["U1"]

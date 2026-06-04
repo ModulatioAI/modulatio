@@ -33,9 +33,10 @@ goal — list the N artifacts in that goal's evidence — NOT N separate goals.
 Same-kind independent deliverables in one goal run IN PARALLEL across your
 producers (the task planner fans them into a wave); N separate goals run one
 at a time, serially, leaving producers idle. Reserve SEPARATE goals for
-deliverables of DIFFERENT kinds or with real dependencies (research → draft,
-or write-the-pieces → assemble-the-whole — the assembly is its own goal that
-depends on the pieces goal). {team_capacity}
+deliverables of DIFFERENT kinds or distinct phases (research → draft). But a
+deliverable ASSEMBLED from its own units (write-the-pieces → assemble-the-whole)
+is ONE goal — the N unit tasks PLUS the assembly task, which depends on the units
+and runs last, so the whole is verified against its already-reviewed parts. {team_capacity}
 
 SELF-CONTAINMENT (critical): each goal must NAME its concrete subject
 matter — never refer to it symbolically. A goal is executed by producers
