@@ -127,3 +127,34 @@ def test_roundtrip_codification_stays_current(dirs):
     _write(seed, "s", "SEED BODY")
     skills.save(skills.Skill(name="s", description="d", prompt_template="FRESH CODIFIED", version="1"))
     assert skills.load_with_metadata("s").prompt_template.strip() == "FRESH CODIFIED"
+
+
+# ── #90: explicit user_override keeps a human edit sacred ──────────────────
+
+
+def test_user_override_marker_is_never_superseded(dirs):
+    """A codified shared skill (version + STALE base_seed_hash) that a human
+    edited and marked user_override:true is NOT superseded by the seed — the
+    explicit marker forces the sacred-override reading despite the stamps."""
+    seed, shared = dirs
+    _write(seed, "s", "NEW SEED BODY")
+    _write(shared, "s", "HUMAN-EDITED BODY",
+           version="3", base_seed_hash="deadbeefdeadbeef", user_override="true")
+    assert skills.load_with_metadata("s").prompt_template.strip() == "HUMAN-EDITED BODY"
+
+
+def test_is_codified_false_for_user_override():
+    sk = skills.Skill(name="s", description="d", prompt_template="x",
+                      version="2", base_seed_hash="abc", user_override=True)
+    assert skills._is_codified(sk) is False
+    sk2 = skills.Skill(name="s", description="d", prompt_template="x", version="2")
+    assert skills._is_codified(sk2) is True
+
+
+def test_save_round_trips_user_override(dirs):
+    seed, shared = dirs
+    skills.save(skills.Skill(name="s", description="d", prompt_template="X",
+                             user_override=True))
+    written = (shared / "s.md").read_text()
+    assert "user_override: true" in written
+    assert skills.load_with_metadata("s").user_override is True

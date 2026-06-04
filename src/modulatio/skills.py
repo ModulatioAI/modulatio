@@ -123,6 +123,15 @@ class Skill:
     #: (pre-#84 / legacy) is preserved as-is; it gets stamped the next time
     #: it's re-codified.
     base_seed_hash: str | None = None
+    #: Explicit "this is a HUMAN override, keep it sacred" marker (task #90,
+    #: Nemo's shadow-fix sharp edge). The seed→supersede rule treats any skill
+    #: carrying a ``version``/``base_seed_hash`` as machine-codified and may
+    #: supersede it on a seed change. But a human who EDITS a codified shared
+    #: skill and leaves that frontmatter would get silently superseded. Setting
+    #: ``user_override: true`` makes the skill a user override — ALWAYS honored,
+    #: never superseded — regardless of leftover codification stamps. (Removing
+    #: ``version``/``base_seed_hash`` does the same; this is the explicit way.)
+    user_override: bool = False
     freshness_class: str | None = None
     last_verified_at: str | None = None
     #: Sandbox: skill explicitly opts in to network access for its
@@ -183,6 +192,7 @@ def _parse_file(path: Path) -> Skill:
         executor=meta.get("executor") or "llm",
         version=meta.get("version") or None,
         base_seed_hash=meta.get("base_seed_hash") or None,
+        user_override=str(meta.get("user_override", "")).strip().lower() in ("true", "yes", "1"),
         freshness_class=meta.get("freshness_class") or None,
         last_verified_at=meta.get("last_verified_at") or None,
         needs_network=str(meta.get("needs_network", "")).strip().lower() in ("true", "yes", "1"),
@@ -203,9 +213,14 @@ def seed_content_hash(name: str) -> str | None:
 
 
 def _is_codified(skill: Skill) -> bool:
-    """A shared skill is machine-codified (vs a user-authored override) when
-    it carries a ``version`` (the Alfred loop stamps one) or a
-    ``base_seed_hash``. User overrides carry neither and are always honored."""
+    """A shared skill is machine-codified (vs a user-authored override) when it
+    carries a ``version`` (the Alfred loop stamps one) or a ``base_seed_hash``.
+    User overrides carry neither and are always honored. An explicit
+    ``user_override: true`` (task #90) forces the override reading even when
+    codification stamps are still present — so a human who edits a codified
+    shared skill can keep it sacred without scrubbing the frontmatter."""
+    if skill.user_override:
+        return False
     return skill.version is not None or skill.base_seed_hash is not None
 
 
@@ -331,6 +346,8 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
         base_seed_hash = seed_content_hash(skill.name)
     if base_seed_hash is not None:
         fm_lines.append(f"base_seed_hash: {base_seed_hash}")
+    if skill.user_override:  # task #90: persist the sacred-override marker
+        fm_lines.append("user_override: true")
     if skill.freshness_class is not None:
         fm_lines.append(f"freshness_class: {skill.freshness_class}")
     if skill.last_verified_at is not None:
