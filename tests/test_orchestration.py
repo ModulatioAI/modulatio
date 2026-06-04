@@ -8568,3 +8568,44 @@ def test_concurrent_wave_abort_stops_queued_tasks(project: Project, monkeypatch)
     orch.kickoff("Draft 3 essays on a chosen theme")
 
     assert calls["n"] < 3, f"queued tasks ran after abort; drafted {calls['n']}/3"
+
+
+def test_leader_auto_redo_skips_verify_when_aborted_mid_redo(tmp_path, monkeypatch):
+    """Fix C residual (Nemo close-out): F8 firing DURING auto-redo (after the
+    top-of-method check, while a task runs) must skip the final Leader verify —
+    the kill-switch contract is zero model calls after stop."""
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, TaskStatus
+    from uuid import uuid4
+
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("satisfied"),
+                      code="ABV")
+    verified = {"n": 0}
+
+    def spy_verify(self, g, tasks, summary):
+        verified["n"] += 1
+
+    def abort_during_redo(self, t, summary, initial_corrective_notes=""):
+        self.abort_event.set()  # operator hits F8 while this task runs
+        t.status = TaskStatus.COMPLETED
+
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo", abort_during_redo)
+    monkeypatch.setattr(Orchestrator, "_leader_verify_goal", spy_verify)
+
+    goal = Goal(id="ABV-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    task = _deliverable_task("ABV", output="s.md")
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "s.md").write_text("# s\n\nx\n")
+    report = orch._scope_root() / "reports" / "ABV-G-001.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("r")
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+
+    # abort is NOT set at entry → top check passes; it fires inside the task pass.
+    orch._leader_auto_redo(goal, [task], "redo", report, summary)
+
+    assert verified["n"] == 0, "no Leader verify call after a mid-redo abort"
+    assert any("stopped by the operator" in e for e in summary.errors)

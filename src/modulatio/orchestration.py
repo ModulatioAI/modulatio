@@ -7175,6 +7175,12 @@ class Orchestrator:
             )
             store.save_task(self.project.code, t, run_id=self.project.run_id)
 
+        # Fix C hardening (Nemo close-out residual): if F8 fired mid-redo, don't
+        # spend even ONE more Leader verify call — the kill-switch contract is
+        # zero model calls after stop.
+        if self.abort_event.is_set():
+            self._record_abort(summary)
+            return
         # Re-verify. If still disappointed AND budget still available,
         # this recurses; otherwise lands on satisfied / on_the_fence /
         # budget-exhausted-BLOCKER.
