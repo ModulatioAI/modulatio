@@ -33,11 +33,7 @@ from modulatio.attachments import Attachment, AttachmentKind, build_attachment
 from modulatio.tui.widgets.chat_input import ChatInput
 from modulatio.tui.widgets.indicator_panel import IndicatorPanel
 from modulatio.tui.widgets.stream_status import StreamStatus
-from modulatio.tui.widgets.stream_view import (
-    LEADER_ROLES,
-    TEAM_ROLES,
-    StreamView,
-)
+from modulatio.tui.widgets.stream_view import StreamView
 
 
 class PromptScreen(Vertical):
@@ -155,7 +151,7 @@ class PromptScreen(Vertical):
             with TabPane("LEADER", id="stream-leader-pane"):
                 # TV on top (big) …
                 yield StreamView(
-                    lane_roles=LEADER_ROLES, id="stream-leader",
+                    lane="leader", id="stream-leader",
                     classes="leader-tv",
                 )
                 # … a live status line (what the Leader is doing) …
@@ -179,7 +175,7 @@ class PromptScreen(Vertical):
             with TabPane("MOD SQUAD", id="stream-team-pane"):
                 # The factory floor — the workers' TV (big) on top …
                 yield StreamView(
-                    lane_roles=TEAM_ROLES, id="stream-team",
+                    lane="team", id="stream-team",
                     classes="team-tv",
                 )
                 yield StreamStatus(lane="team", id="stream-team-status")

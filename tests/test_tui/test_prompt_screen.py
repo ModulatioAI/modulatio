@@ -827,3 +827,66 @@ async def test_sending_a_message_gets_a_leader_reply(project_with_roster):
         assert "Leader" in text                      # the Leader's reply marker
         assert app.query_one("#prompt-input", ChatInput).text == ""  # cleared
         assert not hasattr(app, "_kickoff_started_at")  # NO job launched
+
+
+# ─── Phase 1: honest parallel lanes (names + wave marker) ───────────────────
+
+
+async def test_team_status_shows_producer_names_in_parallel(project_with_roster):
+    """Phase 1: when >1 producer is in flight the TEAM status shows WHO, by name
+    (not just a count) — concurrency reads as concurrency."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_status import StreamStatus
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="scribe", task_id="T-2"))
+        await pilot.pause()
+        status = app.query_one("#stream-team-status", StreamStatus)
+        assert status._working == 2
+        assert set(status._working_names) == {"Marlow", "Scribe"}
+
+
+async def test_team_stream_drops_wave_marker_on_concurrency_rise(project_with_roster):
+    """Phase 1: when a wave forms (producers rise to ≥2) ONE marker naming the
+    parallel producers lands in the feed — once, on the rise, not per event."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="scribe", task_id="T-2"))
+        await pilot.pause()
+        team = {s.id: s for s in app.query(StreamView)}["stream-team"]
+        markers = [m for m in team.messages if "producers working" in m]
+        assert len(markers) == 1
+        assert "Marlow" in markers[0] and "Scribe" in markers[0]
+
+        # more events while still ≥2 producers do NOT add another marker
+        app._record_activity_impl(
+            _ev("drafter", "task_completed", agent_id="writer", task_id="T-1"))
+        await pilot.pause()
+        assert len([m for m in team.messages if "producers working" in m]) == 1
+
+
+async def test_wave_marker_resets_each_run(project_with_roster):
+    """Phase 1: the wave-marker tracker resets at a run boundary so the next run's
+    first wave is marked again."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        team = {s.id: s for s in app.query(StreamView)}["stream-team"]
+        app._record_activity_impl(_ev("leader", "kickoff_started"))
+        await pilot.pause()
+        assert team._last_producer_count == 0

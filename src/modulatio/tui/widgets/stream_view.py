@@ -8,9 +8,10 @@ The conversation-first TUI shows two streams in the Console window:
     replies, his decompose/verify activity, his post-job verdicts.
   - **TEAM**   — the producers + QC working: dispatch, drafting, QC verdicts.
 
-Each ``StreamView`` filters the shared activity feed to its lane
-(``lane_roles``) and renders one line per event/message, auto-scrolling like a
-chat transcript.
+Each ``StreamView`` filters the shared activity feed to its lane (``lane`` =
+"leader" | "team", membership decided by the agent-agnostic ``is_leader_role`` /
+``is_team_role`` predicates) and renders one line per event/message, auto-scrolling
+like a chat transcript.
 
 **Why a stack of ``Static`` lines, not a ``RichLog``:** RichLog is write-only
 once rendered and exposes no content offset, so Textual can only ever select
@@ -33,11 +34,36 @@ from textual.widgets import Static
 
 from modulatio.types import ActivityEvent
 
-# Lane membership by the event ``role`` the orchestrator emits. The Leader
-# lane covers the Leader's own reasoning surfaces (decompose + plan + verify);
-# the Team lane covers the producers and QC doing the work.
+# Lane membership by the event ``role`` the orchestrator emits. AGENT-AGNOSTIC by
+# design: a producer is a model endpoint running ANY composable skill (no fixed
+# roles), so the Team lane is NOT a hardcoded allow-list of role names — it's the
+# COMPLEMENT of the Leader + run-level roles. Any producer/QC role (a custom
+# ``default_producer_role``, ``research``, an arbitrary skill role) shows up,
+# instead of being silently dropped by an enumerated set.
+#
+# - Leader lane  → the Leader's own surfaces: ``planner`` + any ``leader*`` role
+#   (``leader``, ``leader-decompose``, ``leader-reflect``, ``leader-iterate``,
+#   ``leader-chat``).
+# - Run-level    → ``orchestrator`` (run boundary/status, handled in the app) and
+#   ``comptroller`` (advisory cost gate): NEITHER transcript lane.
+# - Team lane    → everything else (every producer + QC doing the work).
+RUN_LEVEL_ROLES: frozenset[str] = frozenset({"orchestrator", "comptroller"})
+
+#: Back-compat: the Leader lane's core roles (kept as an export; membership is now
+#: decided by ``is_leader_role`` so the leader-* suffixes are covered too).
 LEADER_ROLES: frozenset[str] = frozenset({"leader", "planner"})
-TEAM_ROLES: frozenset[str] = frozenset({"drafter", "qc", "researcher"})
+
+
+def is_leader_role(role: str) -> bool:
+    """The Leader's own surfaces — agnostic to the ``leader-*`` phase suffixes."""
+    return role == "planner" or (role or "").startswith("leader")
+
+
+def is_team_role(role: str) -> bool:
+    """A PRODUCER or QC role — the COMPLEMENT of the Leader + run-level roles, so
+    ANY producer (any skill, any ``default_producer_role``) is visible. This is the
+    agent-agnostic rule: never enumerate producer role names."""
+    return bool(role) and not is_leader_role(role) and role not in RUN_LEVEL_ROLES
 
 # phase → (glyph, human verb). Falls back to the raw phase when unmapped, so
 # new engine phases still render (just less prettily) until added here.
@@ -87,12 +113,14 @@ class StreamView(VerticalScroll):
     def __init__(
         self,
         *,
-        lane_roles: frozenset[str],
+        lane: str,
         name_resolver: Callable[[str], str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.lane_roles = lane_roles
+        #: "leader" | "team" — membership is decided by the agnostic predicates
+        #: (``is_leader_role`` / ``is_team_role``), not an enumerated role set.
+        self.lane = lane
         self._name_resolver = name_resolver
         #: rendered ActivityEvents kept for tests / structured access.
         self.events: list[ActivityEvent] = []
@@ -111,6 +139,11 @@ class StreamView(VerticalScroll):
         #: success, ``task_settled`` on a worker-path failure); the run-boundary
         #: reset (in the app) clears the board. Insertion order = dispatch order.
         self.active_tasks: dict[str, tuple[str, str]] = {}
+        #: Phase 1 (parallel-execution): distinct-producer count at the last
+        #: rendered event, so a RISE to ≥2 drops one honest "▶ N producers
+        #: working: …" wave marker into the feed (concurrency the operator would
+        #: otherwise read as fast-serial). Reset with the board.
+        self._last_producer_count = 0
 
     # ── line plumbing ───────────────────────────────────────────────────
 
@@ -193,12 +226,26 @@ class StreamView(VerticalScroll):
             return ""
         return f"{len(names)} producers working: " + ", ".join(names)
 
+    def _in_lane(self, role: str) -> bool:
+        return is_leader_role(role) if self.lane == "leader" else is_team_role(role)
+
     def add_event(self, event: ActivityEvent) -> None:
         """Record + render an event when it belongs to this lane."""
-        if event.role not in self.lane_roles:
+        if not self._in_lane(event.role):
             return
         self.events.append(event)
         self._track_concurrency(event)
+        # Phase 1 (parallel-execution): the moment a wave forms (distinct
+        # producers rises to ≥2), drop ONE honest marker naming who's running in
+        # parallel — so concurrent work reads as concurrent, not fast-serial. Only
+        # on the RISE (not every event), so it marks the wave, not each line.
+        count = len(self.active_producer_names())
+        if count >= 2 and count > self._last_producer_count:
+            marker = Text()
+            marker.append("  ▶ ", style="bold #ff6b35")
+            marker.append(self.concurrency_label(), style="bold #ffb000")
+            self._append(marker)
+        self._last_producer_count = count
         glyph, verb = _PHASE.get(event.phase, ("·", event.phase))
         name = self._display_name(event.agent_id, event.role)
         line = Text()
@@ -211,4 +258,7 @@ class StreamView(VerticalScroll):
         self._append(line)
 
 
-__all__ = ["StreamView", "LEADER_ROLES", "TEAM_ROLES"]
+__all__ = [
+    "StreamView", "LEADER_ROLES", "RUN_LEVEL_ROLES",
+    "is_leader_role", "is_team_role",
+]

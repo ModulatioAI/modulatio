@@ -46,9 +46,9 @@ from modulatio.tui.widgets.activity_log import ActivityLog
 from modulatio.tui.widgets.chat_input import ChatInput
 from modulatio.tui.widgets.stream_status import StreamStatus
 from modulatio.tui.widgets.stream_view import (
-    LEADER_ROLES,
-    TEAM_ROLES,
     StreamView,
+    is_leader_role,
+    is_team_role,
     _humanize,
 )
 from modulatio.types import ActivityEvent, Project, ProjectState
@@ -811,12 +811,13 @@ class ModulatioApp(App):
         team_stream = None
         for stream in self.query(StreamView):
             stream.add_event(event)
-            if stream.lane_roles == TEAM_ROLES:
+            if stream.lane == "team":
                 team_stream = stream
         # §5: a new run starts with a clean concurrency board (the leader-role
         # kickoff events don't reach the TEAM lane's own tracker).
         if team_stream is not None and event.phase in ("kickoff_started", "kickoff_ended"):
             team_stream.active_tasks.clear()
+            team_stream._last_producer_count = 0  # Phase 1: reset the wave marker
         # Fix: when a run ENDS — normal completion OR an F8 stop, both via the
         # engine's role="orchestrator" kickoff_ended — reset the TEAM spinner to
         # 'done'. Without this it sticks on the last producer phase and the Mod
@@ -831,18 +832,19 @@ class ModulatioApp(App):
         # team-lane phases the TEAM status, named by the worker. §5: when more
         # than one producer is in flight, surface the parallel count so the
         # operator can SEE the concurrency (invisible parallelism isn't shippable).
-        if event.role in LEADER_ROLES:
+        if is_leader_role(event.role):
             self._set_lane_status("stream-leader-status", event.phase)
-        elif event.role in TEAM_ROLES:
+        elif is_team_role(event.role):
             actor = self._agent_name(event.agent_id or event.role) or _humanize(
                 event.agent_id or event.role
             )
-            working = (
-                len(team_stream.active_producer_names())
-                if team_stream is not None else 1
+            names = (
+                team_stream.active_producer_names()
+                if team_stream is not None else []
             )
             self._set_lane_status(
-                "stream-team-status", event.phase, actor, working=working,
+                "stream-team-status", event.phase, actor,
+                working=len(names) or 1, working_names=names,
             )
         # A logged ticket is a problem the Leader will relay — light the
         # orange lamp so the operator notices even from the factory floor.
@@ -1063,11 +1065,11 @@ class ModulatioApp(App):
 
     def _set_lane_status(
         self, status_id: str, phase: str, actor: str | None = None,
-        *, working: int = 1,
+        *, working: int = 1, working_names: "list[str] | None" = None,
     ) -> None:
         try:
             self.query_one(f"#{status_id}", StreamStatus).set_activity(
-                phase, actor, working=working,
+                phase, actor, working=working, working_names=working_names,
             )
         except Exception:
             pass
