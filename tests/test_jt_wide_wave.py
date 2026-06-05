@@ -132,3 +132,67 @@ def test_collapse_ignores_non_artifact_item_goal(orch):
     assert len(out) == 2
     assert any("Produce all 2" in g["description"] for g in out)
     assert any(g["description"] == "Review story Alpha for tone" for g in out)
+
+
+# ── Nemo hull review (2026-06-05): proof-of-partition, not substring presence ──
+
+
+def test_collapse_excludes_assembly_naming_all_values(orch):
+    """Nemo B1 #1: an assembly/synthesis goal that names ALL item values (and emits
+    an artifact) must NOT be folded into the item set — it references MULTIPLE
+    values, so it's not a per-item goal. The N stories still collapse; assembly stays."""
+    _bind(orch, values=["Alpha", "Bravo", "Charlie"])
+    assembly = {
+        "description": "Assemble the anthology of Alpha, Bravo, Charlie",
+        "success_criteria": "one bound anthology",
+        "evidence_required": [{"kind": "artifact", "output_path": "anthology.md"}],
+    }
+    data = [_item("Alpha"), _item("Bravo"), _item("Charlie"), assembly]
+    out = orch._collapse_jt_item_goals(data)
+    assert len(out) == 2  # merged-items + the (preserved) assembly goal
+    assert any("Produce all 3" in g["description"] for g in out)
+    asm = [g for g in out if "Assemble the anthology" in g["description"]]
+    assert len(asm) == 1
+    # the assembly's own artifact was NOT absorbed into the item set
+    merged = [g for g in out if "Produce all 3" in g["description"]][0]
+    paths = [r.get("output_path") for r in merged["evidence_required"]]
+    assert "anthology.md" not in paths
+
+
+def test_collapse_noop_for_short_values(orch):
+    """Nemo B1 #2: short values over-match even with a word boundary ("A"/"B") →
+    no safe per-item signal, fall back to the prose contract (no engine collapse)."""
+    _bind(orch, values=["A", "B"])
+    data = [
+        {"description": "Write Atlas profile", "success_criteria": "x",
+         "evidence_required": [{"kind": "artifact", "output_path": "atlas.md"}]},
+        {"description": "Write biography for Bob", "success_criteria": "x",
+         "evidence_required": [{"kind": "artifact", "output_path": "bob.md"}]},
+    ]
+    assert orch._collapse_jt_item_goals(data) == data
+
+
+def test_collapse_word_boundary_not_substring(orch):
+    """A value must match on a WORD BOUNDARY — "Ada" must not match "Adagio"."""
+    _bind(orch, values=["Ada", "Bee", "Cal"])
+    data = [
+        {"description": "Write the Adagio movement", "success_criteria": "x",
+         "evidence_required": [{"kind": "artifact", "output_path": "adagio.md"}]},
+        _item("Bee"), _item("Cal"),
+    ]
+    # "Ada" doesn't match "Adagio" → value Ada uncovered → no clean bijection → no-op
+    assert orch._collapse_jt_item_goals(data) == data
+
+
+def test_collapse_noop_on_frontmatter_value_coincidence(orch):
+    """A front-matter goal that coincidentally names ONE item value gives that value
+    two candidates → ambiguous → bail (never mis-merge). Conservative by design."""
+    _bind(orch, values=["Alpha", "Bravo", "Charlie"])
+    front = {
+        "description": "Front matter introducing the Alpha collection",
+        "success_criteria": "title page",
+        "evidence_required": [{"kind": "artifact", "output_path": "front.md"}],
+    }
+    data = [front, _item("Alpha"), _item("Bravo"), _item("Charlie")]
+    # value "Alpha" now claimed by front + the Alpha story → ambiguous → no collapse
+    assert orch._collapse_jt_item_goals(data) == data

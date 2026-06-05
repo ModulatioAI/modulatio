@@ -2577,21 +2577,48 @@ class Orchestrator:
         if not isinstance(values, (list, tuple)):
             return data
         norm_values = [str(v).strip().lower() for v in values if str(v).strip()]
-        if len(norm_values) < 2:
+        # Value-safety (Nemo B1 #2): short values over-match even with a word
+        # boundary ("A", "B"); without ≥2 distinct, safely-matchable values there
+        # is no precise per-item signal → fall back to the prose contract.
+        if len(norm_values) < 2 or any(len(v) < 3 for v in norm_values):
             return data
+        if len(set(norm_values)) != len(norm_values):
+            return data  # duplicate values → can't form a clean bijection
 
-        def _refs_item(item: dict) -> bool:
-            if not _goal_emits_artifact(item):
-                return False
+        def _values_in(item: dict) -> "set[str]":
+            """The DISTINCT per-item values this goal references by WORD-BOUNDARY
+            match (Nemo B1 #2: not raw substring — so "A" doesn't match "Atlas")."""
             hay = (
                 str(item.get("description", "")) + " "
                 + str(item.get("success_criteria", ""))
             ).lower()
-            return any(v in hay for v in norm_values)
+            found: set[str] = set()
+            for v in norm_values:
+                if re.search(r"(?<!\w)" + re.escape(v) + r"(?!\w)", hay):
+                    found.add(v)
+            return found
 
-        item_idxs = [i for i, it in enumerate(data) if isinstance(it, dict) and _refs_item(it)]
+        # Proof-of-partition (Nemo B1 #1): an ITEM goal EMITS an artifact AND
+        # references EXACTLY ONE distinct value. An assembly/synthesis goal names
+        # MULTIPLE values → excluded; front matter names zero → excluded. Collapse
+        # ONLY when the item goals form a clean BIJECTION onto the full value set
+        # (every value covered by exactly one candidate) — anything ambiguous (a
+        # value with 0 or >1 candidates, e.g. front matter coincidentally naming an
+        # item) falls back to the prose contract, never a mis-merge.
+        by_value: dict[str, list[int]] = {}
+        for i, it in enumerate(data):
+            if not isinstance(it, dict) or not _goal_emits_artifact(it):
+                continue
+            vs = _values_in(it)
+            if len(vs) == 1:
+                by_value.setdefault(next(iter(vs)), []).append(i)
+        if set(by_value) != set(norm_values):
+            return data  # not every value covered → ambiguous → belt only
+        if any(len(idxs) != 1 for idxs in by_value.values()):
+            return data  # a value claimed by >1 goal → ambiguous → belt only
+        item_idxs = sorted(idxs[0] for idxs in by_value.values())
         if len(item_idxs) < 2:
-            return data  # correctly in one goal (or only one item-goal) → no-op
+            return data
 
         # Collect every per-item artifact requirement into one merged goal so the
         # task-planner sees N artifacts to fan out.

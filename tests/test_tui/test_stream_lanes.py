@@ -55,3 +55,14 @@ def test_lanes_partition_emitted_roles():
             assert not in_leader and not in_team  # run-level, neither transcript lane
         else:
             assert in_leader ^ in_team, f"{r} in NEITHER lane (silently dropped)"
+
+
+def test_leader_role_does_not_overcatch_producer_skills():
+    """Nemo B1 #4: a producer SKILL role that merely starts with 'leader' (no
+    hyphen) must NOT be mis-routed to the Leader lane — the hyphen is required."""
+    for r in ("leaderboard-generator", "leadership-coach", "leaderly-writer"):
+        assert not is_leader_role(r), r
+        assert is_team_role(r), r  # it's a producer → team lane
+    # the real leader-* surfaces still route to the Leader lane
+    for r in ("leader", "leader-chat", "leader-decompose"):
+        assert is_leader_role(r) and not is_team_role(r), r

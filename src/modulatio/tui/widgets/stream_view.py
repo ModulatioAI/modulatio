@@ -55,8 +55,12 @@ LEADER_ROLES: frozenset[str] = frozenset({"leader", "planner"})
 
 
 def is_leader_role(role: str) -> bool:
-    """The Leader's own surfaces — agnostic to the ``leader-*`` phase suffixes."""
-    return role == "planner" or (role or "").startswith("leader")
+    """The Leader's own surfaces — ``leader`` itself, the ``leader-*`` phase
+    suffixes (``leader-decompose`` / ``-reflect`` / ``-iterate`` / ``-chat``), and
+    ``planner``. The hyphen is required (Nemo B1 #4) so a producer SKILL role like
+    ``leaderboard-generator`` / ``leadership-coach`` is NOT mis-routed here — the
+    team lane stays the true complement."""
+    return role in ("leader", "planner") or (role or "").startswith("leader-")
 
 
 def is_team_role(role: str) -> bool:
@@ -235,12 +239,13 @@ class StreamView(VerticalScroll):
             return
         self.events.append(event)
         self._track_concurrency(event)
-        # Phase 1 (parallel-execution): the moment a wave forms (distinct
-        # producers rises to ≥2), drop ONE honest marker naming who's running in
+        # Phase 1 (parallel-execution): the moment a wave forms (distinct producers
+        # cross from <2 to ≥2), drop ONE honest marker naming who's running in
         # parallel — so concurrent work reads as concurrent, not fast-serial. Only
-        # on the RISE (not every event), so it marks the wave, not each line.
+        # on the RISE THROUGH the threshold (Nemo B1 #3 — not again as the wave
+        # grows 2→3→4), so it marks the wave once, not each new producer.
         count = len(self.active_producer_names())
-        if count >= 2 and count > self._last_producer_count:
+        if self._last_producer_count < 2 <= count:
             marker = Text()
             marker.append("  ▶ ", style="bold #ff6b35")
             marker.append(self.concurrency_label(), style="bold #ffb000")

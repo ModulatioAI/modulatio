@@ -877,6 +877,29 @@ async def test_team_stream_drops_wave_marker_on_concurrency_rise(project_with_ro
         assert len([m for m in team.messages if "producers working" in m]) == 1
 
 
+async def test_wave_marker_fires_once_even_as_wave_grows(project_with_roster):
+    """Nemo B1 #3: the marker fires once on the rise THROUGH ≥2 — NOT again when a
+    live wave grows 2 → 3 producers."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="scribe", task_id="T-2"))
+        await pilot.pause()
+        team = {s.id: s for s in app.query(StreamView)}["stream-team"]
+        assert len([m for m in team.messages if "producers working" in m]) == 1
+        # a THIRD producer joins the live wave → no second marker
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="ali", task_id="T-3"))
+        await pilot.pause()
+        assert len([m for m in team.messages if "producers working" in m]) == 1
+
+
 async def test_wave_marker_resets_each_run(project_with_roster):
     """Phase 1: the wave-marker tracker resets at a run boundary so the next run's
     first wave is marked again."""
