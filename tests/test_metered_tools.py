@@ -196,3 +196,37 @@ def test_authorizer_unknown_cost_class_fails_closed(vault_with_budget):
     )
     allowed, why = authz("render", {"layout": "grid"})
     assert not allowed and "fail closed" in why
+
+
+def test_authorizer_denies_mismatched_tool_name(vault_with_budget):
+    """Nemo B4 #3: an authorizer bound to tool 'render' must not authorize a
+    different tool name (else a second metered tool gets billed as this one)."""
+    _root, artifacts = vault_with_budget
+    unit = _pinned_unit(artifacts, "a.png", "IMG")
+    authz = metered.build_metered_authorizer(
+        project_code=PROJECT_CODE, cost_class="paid-cloud", tool_name="render",
+        task_id="T-1", agent_id="a", pinned_units=[unit], artifacts_root=artifacts,
+    )
+    allowed, why = authz("premium_render", {"layout": "grid"})
+    assert not allowed and "different tool" in why
+
+
+def test_authorizer_rejects_aliased_nested_and_url_value_params(vault_with_budget):
+    """Nemo B4 #4: network params are rejected by token (input_url/base_url),
+    recursively (nested dict), and by URL-like VALUE under any key name."""
+    _root, artifacts = vault_with_budget
+    unit = _pinned_unit(artifacts, "a.png", "IMG")
+    authz = metered.build_metered_authorizer(
+        project_code=PROJECT_CODE, cost_class="paid-cloud", tool_name="render",
+        task_id="T-1", agent_id="a", pinned_units=[unit], artifacts_root=artifacts,
+    )
+    # aliased key
+    assert not authz("render", {"input_url": "x"})[0]
+    assert not authz("render", {"base_url": "x"})[0]
+    # nested forbidden key
+    assert not authz("render", {"opts": {"endpoint": "x"}})[0]
+    # URL-like VALUE under an innocuous key name
+    allowed, why = authz("render", {"note": "https://evil.test/exfil"})
+    assert not allowed and "forbidden" in why
+    # a clean call still passes
+    assert authz("render", {"layout": "grid", "tile": "x1"})[0]

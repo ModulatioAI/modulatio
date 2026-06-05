@@ -8770,6 +8770,44 @@ def test_apply_assembly_manifest_media_records_binary_output(project, tmp_path):
     assert rec.final_checksum == review_ledger.file_checksum(rec.output_file)
 
 
+def test_qc_review_media_binary_does_not_crash_and_verifies_provenance(project, tmp_path):
+    """Nemo B4 #2: a binary media deliverable reaching QC must NOT be read_text()'d
+    (a zip raises UnicodeDecodeError). It gets a binary-aware provenance verdict:
+    PASS when the engine-composited file is intact (checksum matches the record),
+    with content flagged as not machine-verifiable."""
+    from uuid import uuid4
+    from modulatio import assembly, review_ledger
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "a.txt").write_text("ALPHA")
+    (artifacts / "b.txt").write_text("BETA")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    # Compose a real zip via the media strategy → a genuinely binary deliverable.
+    r = assembly.assemble({"units": ["a.txt", "b.txt"], "media_kind": "bundle"},
+                          artifacts, strategy="media")
+    deliverable = artifacts / "bundle.zip"
+    import shutil
+    shutil.move(str(r.output_file), str(deliverable))
+    task = Task(id="X-T-010", project_id=uuid4(), goal_id="X-G-002",
+                description="media", output_path="bundle.zip")
+    orch._assembly_records[task.id] = assembly.AssemblyRecord(
+        manifest={"units": ["a.txt", "b.txt"]},
+        final_checksum=review_ledger.file_checksum(deliverable),
+        complete=True, strategy="media", output_file=deliverable,
+    )
+    # full _qc_review must not raise on the binary bytes
+    verdict, notes, defect = orch._qc_review(task, deliverable, "sha256:x", 0)
+    assert verdict.passed is True
+    assert "not machine-verifiable" in verdict.check.lower() or "human spot-check" in verdict.check.lower()
+
+    # tamper the bytes → integrity fail (no crash)
+    deliverable.write_bytes(b"TAMPERED NOT A ZIP \x00\xff")
+    verdict2, _n, defect2 = orch._qc_review(task, deliverable, "sha256:x", 0)
+    assert verdict2.passed is False and "changed since assembly" in verdict2.check
+
+
 def test_apply_assembly_manifest_no_manifest_passes_through(project, tmp_path):
     """No manifest → returns None so the caller writes the producer's own
     response unchanged (structured merges, normal drafts unaffected)."""

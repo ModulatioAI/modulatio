@@ -4946,6 +4946,78 @@ class Orchestrator:
         task.summary_for_state_doc = f"{existing}\n{note}" if existing else note
         return result.content
 
+    def _qc_media_verdict(
+        self, task: "Task", draft_path: "Path", record: "Any"
+    ) -> "tuple[AssertionEvidence, str, str | None]":
+        """Binary-aware QC for a MEDIA composite (Nemo B4 #2). No text read of the
+        bytes. We verify the MECHANICAL provenance the engine can stand behind —
+        the composite exists, is non-empty + within cap, and still hashes to the
+        engine-recorded checksum (the join of QC-passed units, untampered) — and we
+        flag that the PERCEPTUAL content is not machine-verifiable (advisory, human
+        spot-check). Integrity failure → environmental fail (re-composite/redo).
+        """
+        from modulatio import review_ledger as _review_ledger
+
+        root = self._artifacts_root()
+        out = (root / (task.output_path or "")).resolve()
+        try:
+            out.relative_to(root.resolve())
+            exists = out.is_file()
+            size = out.stat().st_size if exists else 0
+        except (ValueError, OSError):
+            exists, size = False, 0
+        if not exists or size == 0:
+            return (
+                AssertionEvidence(
+                    producer="qc", primary=False,
+                    check="media composite missing or empty on disk",
+                    passed=False,
+                ),
+                "The media deliverable is missing or empty — the composite did not "
+                "land. Re-run the media-assembly.",
+                "environmental",
+            )
+        try:
+            on_disk = _review_ledger.file_checksum(out)
+        except OSError as exc:
+            return (
+                AssertionEvidence(
+                    producer="qc", primary=False,
+                    check=f"media composite unreadable ({type(exc).__name__})",
+                    passed=False,
+                ),
+                "The media deliverable could not be read for an integrity check.",
+                "environmental",
+            )
+        if on_disk != record.final_checksum:
+            return (
+                AssertionEvidence(
+                    producer="qc", primary=False,
+                    check="media composite changed since assembly (checksum mismatch)",
+                    passed=False,
+                ),
+                "The media deliverable's bytes changed since the engine composited "
+                "it — re-run the media-assembly to produce a clean composite.",
+                "substantive",
+            )
+        # Provenance + integrity hold. Ship it, but loudly flag that QC cannot judge
+        # the perceptual content of a binary composite.
+        n_units = len(task.depends_on)
+        return (
+            AssertionEvidence(
+                producer="qc", primary=True,
+                check=(
+                    f"media composite ({record.strategy}): engine-composited from "
+                    f"{n_units} QC-passed unit(s); integrity verified ({size} bytes, "
+                    "checksum matches). Perceptual content NOT machine-verifiable — "
+                    "human spot-check advised."
+                ),
+                passed=True,
+            ),
+            "",
+            None,
+        )
+
     # ── QC: review evidence ──────────────────────────────────────────────
     def _qc_review(
         self,
@@ -5021,6 +5093,14 @@ class Orchestrator:
                     passed=True,
                 )
                 return verdict, "", None
+            # Nemo B4 #2: a MEDIA deliverable is BINARY — never read_text() it (a zip/
+            # mp4 raises UnicodeDecodeError or feeds garbage to the text QC contract).
+            # Media isn't cheap-pass eligible (verify_assembly already returned False),
+            # but its "full review" must be binary-aware: confirm the engine
+            # composited it from QC-passed units and the bytes are intact, and flag
+            # that perceptual CONTENT is not machine-verifiable (human spot-check).
+            if record.strategy == "media":
+                return self._qc_media_verdict(task, draft_path, record)
             self._emit_activity(
                 role="qc",
                 phase="assembly_qc_fallback",
@@ -5028,7 +5108,23 @@ class Orchestrator:
                 agent_id=task.qc_agent_id,
             )
             # fall through to a normal full review (fail-closed): {reason}
-        body = draft_path.read_text()
+        try:
+            body = draft_path.read_text()
+        except (UnicodeDecodeError, OSError) as exc:
+            # Defensive backstop: ANY binary/undecodable artifact reaching QC (a
+            # media output with no record, an opaque blob) gets an environmental
+            # verdict instead of crashing the review (Nemo B4 #2).
+            verdict = AssertionEvidence(
+                producer="qc", primary=False,
+                check=f"binary/undecodable artifact — QC cannot text-review ({type(exc).__name__})",
+                passed=False,
+            )
+            return verdict, (
+                "The deliverable is binary or undecodable as text, so QC cannot "
+                "review its content. If this is a media product, it must go through "
+                "media-assembly (which records an engine-composited proof); otherwise "
+                "a human must verify it."
+            ), "environmental"
         band = _token_band(task)
 
         # NEAR-EMPTY BACKSTOP (engine binds the genuine invariant only). Size

@@ -299,7 +299,11 @@ def _scan_metered_today(
             cost_count += 1
         if entry_task == task_id:
             task_count += 1
-        if entry_key == idempotency_key:
+        # Nemo B4 #1: idempotency is scoped to THIS (cost_class, task, key) — a
+        # DIFFERENT task with the same pinned inputs is a separate, chargeable spend
+        # (else a shared key would let task after task replay free past the daily
+        # cap). Only a same-task replay of the identical call is free.
+        if entry_cost == cost_class and entry_task == task_id and entry_key == idempotency_key:
             key_seen = True
     return cost_count, task_count, key_seen
 

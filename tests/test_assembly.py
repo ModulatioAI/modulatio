@@ -437,3 +437,15 @@ def test_csv_row_arity_mismatch_is_error(tmp_path):
     (tmp_path / "a.csv").write_text("id,name\n1,alice\n2,bob,extra\n")
     r = assembly.assemble({"units": ["a.csv"], "format": "csv"}, tmp_path, strategy="data")
     assert any("arity" in e for e in r.errors)
+
+
+def test_safe_unit_path_rejects_control_chars(tmp_path):
+    """Nemo B4 #5: a unit name with a newline/NUL is rejected (it could inject a
+    `file '...'` directive into ffmpeg's line-oriented concat list)."""
+    assert assembly._safe_unit_path("a\nb.mp4", tmp_path) is None
+    assert assembly._safe_unit_path("a\rb.mp4", tmp_path) is None
+    assert assembly._safe_unit_path("a\x00b.mp4", tmp_path) is None
+    # a normal nested name still resolves
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "ok.mp4").write_text("x")
+    assert assembly._safe_unit_path("sub/ok.mp4", tmp_path) is not None

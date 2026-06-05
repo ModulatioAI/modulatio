@@ -288,3 +288,21 @@ def test_metered_daily_cap_denies(project_vault):
         PROJECT_CODE, "paid-cloud", "render", "T-3", "k3", "a")
     assert not third.allowed and "budget exhausted" in third.reason
     assert third.refresh_at is not None  # refreshes at UTC midnight
+
+
+def test_metered_idempotency_is_per_task_not_global(project_vault):
+    """Nemo B4 #1: a DIFFERENT task with the same idempotency key is a SEPARATE
+    chargeable spend — it must not ride the first task's authorization free past
+    the daily cap. Only a same-task replay of the identical key is free."""
+    _set_budget(project_vault, paid=1)
+    a1 = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "samekey", "agent-1")
+    assert a1.allowed
+    # same task + same key → idempotent free replay
+    a1b = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "samekey", "agent-1")
+    assert a1b.allowed and "idempotent" in a1b.reason
+    # DIFFERENT task, same key → NOT free; the cap (1) is already spent → DENY
+    a2 = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-2", "samekey", "agent-1")
+    assert not a2.allowed and "budget exhausted" in a2.reason

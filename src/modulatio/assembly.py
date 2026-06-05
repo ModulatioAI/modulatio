@@ -168,6 +168,12 @@ def _safe_unit_path(name: str, artifacts_root: Path) -> Path | None:
     stripped = (name or "").strip()
     if not stripped or stripped.startswith("/") or stripped.startswith("~"):
         return None
+    # Nemo B4 #5: reject C0 control chars (esp. \r \n \0). A legitimate artifact
+    # filename never contains them, and a newline in a unit name could inject a
+    # `file '...'` directive into ffmpeg's line-oriented concat list (the media
+    # join) — belt-and-suspenders beyond the single-quote escaping there.
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in stripped):
+        return None
     root = artifacts_root.resolve()
     candidate = (root / stripped).resolve()
     try:
