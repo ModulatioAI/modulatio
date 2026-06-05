@@ -6,6 +6,48 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-06-04
+
+**The fourth assembler family + a fail-closed metered-tool tier.** v0.8.1 shipped
+three assembler families (document / code / data); v0.8.2 makes **media** real and
+adds the cost-governed **metered-tool** mechanism — the two built as orthogonal
+pieces (media joining is local-tool work; the metered tier is a general hook any
+tool can opt into). Cleared fresh **hull + coherence** reviews (five hull holes
+found and sealed across two close-out rounds). **2877 tests pass.**
+
+### Added
+
+- **`media-assembly` — the 4th family (local compositors).** Joins binary units
+  with a local tool, engine-owned, unit bytes never through the model:
+  **bundle** (heterogeneous) via stdlib zip; **video/audio** via ffmpeg's concat
+  demuxer (stream copy); **image** via ImageMagick (montage/append). The family is
+  chosen by the artifact's kind (`image`/`audio`/`video` standards declare
+  `assembler_skill: media-assembly`). A missing external tool **fails closed** with
+  a clear note (routes to a normal review — never a half/wrong-composited binary),
+  the same graceful-degradation discipline as the v0.8.1 renderer fallback.
+- **The metered-tool tier — a general, fail-closed cost hook.** `Tool.cost_class`
+  marks a tool metered (`paid-cloud` / `premium-cloud`); the default is unmetered
+  (every builtin runs free). A metered call is gated **before it spends** by
+  `comptroller.authorize_metered_tool`, which **fails closed**: deny on unknown /
+  missing cost-class, deny when no budget is declared (missing config ≠ unlimited),
+  a per-task call cap, a daily cap, and **idempotency** (the same pinned inputs +
+  options, scoped to the task, are authorized once and re-served free). The
+  contract (`metered.py`) enforces **narrow params** (no LLM-chosen URL/endpoint —
+  recursive + URL-value rejection) and **ledger-pinned inputs** (only QC-passed,
+  unchanged artifacts). No real provider ships — the mechanism is proven by a test
+  double; the first paid adapter lands when a genuine need appears.
+
+### Fixed
+
+- **Binary-aware media QC.** A media deliverable is binary, so QC never reads it as
+  text (a zip/mp4 would crash the review). Media gets a provenance verdict — the
+  engine-composited file is verified intact (checksum) and non-empty, content is
+  flagged not-machine-verifiable (human spot-check), and an integrity failure routes
+  to a human. Any undecodable artifact reaching QC now gets an environmental verdict
+  instead of crashing.
+- **Path hardening.** Manifest unit names with control characters (newline/NUL) are
+  rejected before any strategy reads them (closes an ffmpeg concat-list injection).
+
 ## [0.8.1] — 2026-06-04
 
 **Assemble the product, not just the document — and verify the marks, not the
