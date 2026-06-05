@@ -87,6 +87,23 @@ def test_passthrough_when_fewer_than_two_candidates(orch):
     assert orch._bind_wide_artifacts(data) == data
 
 
+def test_live_anthology_shape_fits_the_cap(orch):
+    """The exact live failure (ticket ALX-1): an 8-deliverable goal whose planner
+    emitted 8 separate story tasks + 1 compile = 9 > the 6-task cap → rejected. After
+    binding, the 8 stories become ONE artifacts spec → 2 plan items (≤ cap), and the
+    compile's deps remap onto the merged spec (→ all 8 sub-tasks once expanded)."""
+    from modulatio.orchestration import _PLAN_HARD_CAP
+    stories = [_story(f"{i:02d}_title.docx") for i in range(1, 9)]  # 8 independent
+    compile_spec = {"description": "Compile the 8 stories into one PDF",
+                    "output_path": "anthology.pdf", "artifact_kind": "pdf",
+                    "required_skills": ["media-assembly"], "deliverable": True,
+                    "depends_on": list(range(8))}
+    out = orch._bind_wide_artifacts(stories + [compile_spec])
+    assert len(out) == 2 <= _PLAN_HARD_CAP          # was 9 > 6 → rejected; now fits
+    assert len(out[0]["artifacts"]) == 8            # one wide fan-out of 8 stories
+    assert out[1]["depends_on"] == [0]              # compile waits on the merged spec
+
+
 def test_two_homogeneous_groups_each_bind(orch):
     """8 stories (one group) + 3 diagrams (another) → two artifacts specs."""
     stories = [_story(f"s{i}.md", skills=("long-form",)) for i in range(4)]
