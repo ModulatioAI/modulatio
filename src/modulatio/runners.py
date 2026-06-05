@@ -823,6 +823,7 @@ def run_llm_with_tools(
     summarizer_chat_runner_factory: Callable[[str], Callable[..., str]] | None = None,
     model: str | None = None,
     permission_callback: Callable[[str, dict], bool] | None = None,
+    metered_authorizer: Callable[[str, dict], "tuple[bool, str]"] | None = None,
 ) -> str:
     """Run a function-calling loop. Returns the model's final text.
 
@@ -966,6 +967,28 @@ def run_llm_with_tools(
                 result = (
                     f"DENIED: the operator declined to run tool {call.name!r}."
                 )
+            elif getattr(tool, "cost_class", None) in ("paid-cloud", "premium-cloud"):
+                # Metered tool (Part B4): gate the spend BEFORE the call. The engine
+                # supplies the authorizer (it holds the task/artifact context for the
+                # idempotency key + ledger-pinned-input check). Fail CLOSED: a metered
+                # tool with no authorizer wired never spends.
+                if metered_authorizer is None:
+                    result = (
+                        f"DENIED (metered): tool {call.name!r} is metered but no spend "
+                        f"authorizer is wired — fail closed."
+                    )
+                else:
+                    try:
+                        allowed, why = metered_authorizer(call.name, dict(call.args))
+                    except Exception as exc:
+                        allowed, why = False, f"authorizer error: {type(exc).__name__}: {exc}"
+                    if not allowed:
+                        result = f"DENIED (metered): {why}"
+                    else:
+                        try:
+                            result = str(tool.call(**call.args))
+                        except Exception as exc:
+                            result = f"ERROR: {type(exc).__name__}: {exc}"
             else:
                 try:
                     result = str(tool.call(**call.args))

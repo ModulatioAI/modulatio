@@ -264,9 +264,152 @@ def authorize_escalation(
     )
 
 
+def _scan_metered_today(
+    project_code: str, cost_class: str, task_id: str, idempotency_key: str
+) -> "tuple[int, int, bool]":
+    """Scan today's metered-tool ledger lines. Returns
+    ``(cost_class_count, task_count, key_already_seen)``.
+
+    Metered lines are distinct from agent-escalation lines (field 1 == ``metered``),
+    so the two accounting streams never collide. Format::
+
+        <iso-ts> metered <cost_class> <agent_id> <task_id> <idempotency_key>
+    """
+    ledger = _ledger_path(project_code)
+    if not ledger.exists():
+        return 0, 0, False
+    today = datetime.now(timezone.utc).date()
+    cost_count = 0
+    task_count = 0
+    key_seen = False
+    for line in ledger.read_text().splitlines():
+        parts = line.strip().split()
+        if len(parts) < 6 or parts[1] != "metered":
+            continue
+        ts_raw, _kind, entry_cost, _agent, entry_task, entry_key = parts[:6]
+        try:
+            ts = datetime.fromisoformat(ts_raw)
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts.astimezone(timezone.utc).date() != today:
+            continue
+        if entry_cost == cost_class:
+            cost_count += 1
+        if entry_task == task_id:
+            task_count += 1
+        if entry_key == idempotency_key:
+            key_seen = True
+    return cost_count, task_count, key_seen
+
+
+def _append_metered_ledger(
+    project_code: str, cost_class: str, agent_id: str, task_id: str, idempotency_key: str
+) -> None:
+    ledger = _ledger_path(project_code)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # agent_id/task_id/key are single-token by construction (ids + a hex hash); no
+    # spaces, so the space-delimited scan stays unambiguous.
+    with ledger.open("a") as f:
+        f.write(f"{ts} metered {cost_class} {agent_id} {task_id} {idempotency_key}\n")
+
+
+def authorize_metered_tool(
+    project_code: str,
+    cost_class: str | None,
+    tool_name: str,
+    task_id: str,
+    idempotency_key: str,
+    agent_id: str,
+    per_task_cap: int = 1,
+) -> Authorization:
+    """Gate ONE metered (paid-cloud / premium-cloud) tool call before it spends.
+
+    Unlike ``authorize_escalation`` (agent escalation, which degrades OPEN), the
+    metered-tool path **fails CLOSED** per the Part B review (Nemo #7) — real money
+    flows through it and the LLM controls when a tool fires:
+
+    - Unknown / missing ``cost_class`` (not paid-cloud/premium-cloud) → **DENY**.
+    - No declared budget for the tier → **DENY** (explicit opt-in required; a
+      missing ``comptroller.md`` field is NOT "unlimited" for metered SaaS).
+    - ``idempotency_key`` already authorized today (same pinned inputs + strategy) →
+      **ALLOW, not re-charged** (idempotent — a retry of the identical call costs
+      nothing and doesn't consume budget).
+    - At/over the per-task cap (default 1) → **DENY** (bounds a runaway tool-loop
+      calling the metered tool repeatedly inside one task).
+    - At/over the declared daily cap → **DENY** with ``refresh_at`` = UTC midnight.
+    - Otherwise → **ALLOW**, recording the call so the cap + idempotency hold.
+
+    The count→check→append runs under the ledger lock so concurrent waves can't
+    both slip under a cap.
+    """
+    if cost_class not in ("paid-cloud", "premium-cloud"):
+        return Authorization(
+            allowed=False,
+            refresh_at=None,
+            reason=(
+                f"metered tool {tool_name!r}: unknown/missing cost_class "
+                f"{cost_class!r} — denied (fail closed)"
+            ),
+        )
+    budget = load_budget(project_code)
+    cap = (
+        budget.paid_cloud_per_day
+        if cost_class == "paid-cloud"
+        else budget.premium_cloud_per_day
+    )
+    if cap is None:
+        return Authorization(
+            allowed=False,
+            refresh_at=None,
+            reason=(
+                f"metered tool {tool_name!r}: no {cost_class} budget configured — "
+                f"denied (set {cost_class.replace('-', '_')}_escalations_per_day in "
+                "comptroller.md to enable metered use)"
+            ),
+        )
+    with _ledger_lock(project_code):
+        cost_count, task_count, key_seen = _scan_metered_today(
+            project_code, cost_class, task_id, idempotency_key
+        )
+        if key_seen:
+            return Authorization(
+                allowed=True,
+                refresh_at=None,
+                reason=f"metered tool {tool_name!r}: idempotent re-use (not re-charged)",
+            )
+        if task_count >= per_task_cap:
+            return Authorization(
+                allowed=False,
+                refresh_at=None,
+                reason=(
+                    f"metered tool {tool_name!r}: per-task metered cap reached "
+                    f"({task_count}/{per_task_cap} for this task)"
+                ),
+            )
+        if cost_count >= cap:
+            return Authorization(
+                allowed=False,
+                refresh_at=_tomorrow_utc_midnight(),
+                reason=(
+                    f"metered tool {tool_name!r}: daily {cost_class} budget exhausted "
+                    f"({cost_count}/{cap} used); refreshes at UTC midnight"
+                ),
+            )
+        _append_metered_ledger(project_code, cost_class, agent_id, task_id, idempotency_key)
+    return Authorization(
+        allowed=True,
+        refresh_at=None,
+        reason=f"metered tool {tool_name!r} authorized ({cost_count + 1}/{cap} {cost_class} today)",
+    )
+
+
 __all__ = [
     "Authorization",
     "Budget",
     "authorize_escalation",
+    "authorize_metered_tool",
     "load_budget",
 ]

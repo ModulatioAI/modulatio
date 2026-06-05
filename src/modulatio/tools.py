@@ -128,6 +128,15 @@ class Tool:
     description: str
     call: Callable[..., str]
     params_schema: dict | None = None
+    #: Cost tier for the metered-tool tier (Part B4). ``None`` / ``"free-local"``
+    #: = unmetered, runs freely (the default — ddgs web_search, http_get, run_shell,
+    #: every builtin). ``"paid-cloud"`` / ``"premium-cloud"`` = METERED: the engine
+    #: gates each call through ``comptroller.authorize_metered_tool`` BEFORE the
+    #: call (fail-closed on unknown/missing budget, per-task-capped, idempotent).
+    #: A metered tool MUST take narrow params (artifact ids / pinned paths, never an
+    #: arbitrary URL/body/endpoint), read only its own key from env, and never
+    #: return secrets to the model. See ``comptroller.authorize_metered_tool``.
+    cost_class: str | None = None
 
 
 # ── builtin: http_get ──────────────────────────────────────────────────────

@@ -211,3 +211,80 @@ def test_authorize_escalation_unknown_cost_class_allowed(project_vault):
         PROJECT_CODE, cost_class=None, agent_id="unknown"
     )
     assert result.allowed is True
+
+
+# ── metered-tool tier (Part B4) — fail-closed authorization ────────────────
+
+
+def _set_budget(project_vault: Path, *, paid: int | None = None, premium: int | None = None):
+    lines = ["---"]
+    if paid is not None:
+        lines.append(f"paid_cloud_escalations_per_day: {paid}")
+    if premium is not None:
+        lines.append(f"premium_cloud_escalations_per_day: {premium}")
+    lines.append("---")
+    (project_vault / "comptroller.md").write_text("\n".join(lines) + "\n")
+
+
+def test_metered_unknown_cost_class_denied(project_vault):
+    """Unlike agent escalation (degrades open), a metered tool with an
+    unknown/missing cost_class fails CLOSED (Nemo #7)."""
+    for cc in (None, "free-local", "bogus"):
+        auth = comptroller.authorize_metered_tool(
+            PROJECT_CODE, cc, "render", "T-1", "key1", "agent-1")
+        assert not auth.allowed and "fail closed" in auth.reason
+
+
+def test_metered_missing_budget_denied(project_vault):
+    """A metered tier with NO declared budget is NOT unlimited — fail closed,
+    explicit opt-in required (Nemo #7)."""
+    _set_budget(project_vault)  # no caps declared
+    auth = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "key1", "agent-1")
+    assert not auth.allowed and "no paid-cloud budget configured" in auth.reason
+
+
+def test_metered_authorized_within_budget(project_vault):
+    _set_budget(project_vault, paid=5)
+    auth = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "key1", "agent-1")
+    assert auth.allowed and "1/5" in auth.reason
+
+
+def test_metered_idempotent_not_recharged(project_vault):
+    """The same idempotency key is authorized once and re-served free — a retry
+    of the identical call doesn't consume budget."""
+    _set_budget(project_vault, paid=5)
+    a1 = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "samekey", "agent-1")
+    a2 = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "samekey", "agent-1")
+    assert a1.allowed and a2.allowed and "idempotent" in a2.reason
+    # only one ledger charge despite two authorize calls
+    cost, _task, _seen = comptroller._scan_metered_today(
+        PROJECT_CODE, "paid-cloud", "T-1", "samekey")
+    assert cost == 1
+
+
+def test_metered_per_task_cap_denies_second_distinct_call(project_vault):
+    """Default per-task cap = 1 bounds a runaway tool-loop calling the metered
+    tool repeatedly (distinct inputs) inside one task."""
+    _set_budget(project_vault, paid=99)
+    a1 = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "key-a", "agent-1")
+    a2 = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "key-b", "agent-1")
+    assert a1.allowed and not a2.allowed and "per-task" in a2.reason
+
+
+def test_metered_daily_cap_denies(project_vault):
+    """Across tasks, the daily cap still bounds total spend."""
+    _set_budget(project_vault, paid=2)
+    assert comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "k1", "a").allowed
+    assert comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-2", "k2", "a").allowed
+    third = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-3", "k3", "a")
+    assert not third.allowed and "budget exhausted" in third.reason
+    assert third.refresh_at is not None  # refreshes at UTC midnight
