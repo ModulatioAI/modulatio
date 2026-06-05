@@ -6214,6 +6214,44 @@ class Orchestrator:
         if not any(msg in e for e in summary.errors):
             summary.errors.append(msg)
 
+    def _teardown_run(self, summary: RunSummary) -> None:
+        """Blow the live pipeline out of the pipes — the F8 KILL-SWITCH ONLY (Clif
+        2026-06-05: only the kill blows the pipes; a normal finish, or closing
+        Modulatio, leaves the run's final state + records intact). Every non-terminal
+        goal/task is finalized to ABANDONED and every open ticket is CLOSED, so the
+        killed run reads as DONE and NO residue — a blocked goal, an open ticket, a
+        parked queue — carries into or blocks the next run.
+
+        The durable run RECORD stays on disk for viewing (the files keep their full
+        transition logs); the leader chat lives outside the run and is untouched;
+        the TEAM TV is cleared by the F8 handler in the TUI.
+
+        NOTE (flagged): a killed run's budget-parked goal is also abandoned (the
+        operator killed it → no auto-resume). Best-effort — a teardown error never
+        breaks the run's return."""
+        code, rid = self.project.code, self.project.run_id
+        reason = "operator stopped the run (F8) — pipeline cleared"
+        try:
+            for t in store.list_tasks(code, run_id=rid):
+                if t.status not in (TaskStatus.COMPLETED, TaskStatus.ABANDONED):
+                    prior = t.status
+                    t.status = TaskStatus.ABANDONED
+                    t.transitions.append(StateTransition(
+                        from_state=prior.value, to_state=TaskStatus.ABANDONED.value,
+                        actor="orchestrator", rationale=reason))
+                    store.save_task(code, t, run_id=rid)
+            for g in store.list_goals(code, run_id=rid):
+                if g.status not in (GoalStatus.COMPLETED, GoalStatus.ABANDONED):
+                    prior = g.status
+                    g.status = GoalStatus.ABANDONED
+                    g.transitions.append(StateTransition(
+                        from_state=prior.value, to_state=GoalStatus.ABANDONED.value,
+                        actor="orchestrator", rationale=reason))
+                    store.save_goal(code, g, run_id=rid)
+            store.close_open_tickets(code, run_id=rid, note=reason)
+        except Exception:  # noqa: BLE001 — teardown must never break the run return
+            _logger.exception("run teardown (pipeline clear) failed — non-fatal")
+
     @staticmethod
     def _wave_global_cap() -> "int | None":
         raw = os.environ.get("MODULATIO_WAVE_GLOBAL_CAP")
@@ -9993,6 +10031,13 @@ class Orchestrator:
         # real delivery dir; the real run paths construct with deliver_products=True.
         if self._deliver_products:
             self._deliver_finished_products(summary)
+        # F8-ONLY teardown (Clif 2026-06-05: only the kill-switch blows out the
+        # pipes — a NORMAL finish leaves the run's final state + records intact).
+        # On an operator kill, finalize every non-terminal goal/task + close open
+        # tickets so no wedge residue carries into the next run. Runs AFTER delivery
+        # (completed deliverables still ship) + the PQR; the run RECORD stays.
+        if self.abort_event.is_set():
+            self._teardown_run(summary)
         self._emit_activity(
             role="orchestrator", phase="kickoff_ended", agent_id="orchestrator",
         )

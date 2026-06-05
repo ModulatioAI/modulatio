@@ -971,3 +971,37 @@ async def test_wave_marker_resets_each_run(project_with_roster):
         app._record_activity_impl(_ev("leader", "kickoff_started"))
         await pilot.pause()
         assert team._last_producer_count == 0
+
+
+# ─── F8 blows out the TEAM TV (Mod Squad floor), leaves the LEADER chat ──────
+
+
+async def test_f8_clears_team_tv_but_not_leader_chat(project_with_roster):
+    """F8 (clear the pipes) empties the TEAM TV transcript + concurrency state, but
+    the LEADER chat lane is never touched."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        streams = {s.id: s for s in app.query(StreamView)}
+        team, leader = streams["stream-team"], streams["stream-leader"]
+        # team gets producer activity; leader gets a chat line
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="scribe", task_id="T-2"))
+        leader.add_leader_message("hello from the Leader")
+        await pilot.pause()
+        assert team.messages and len(team.active_tasks) == 2
+        assert leader.messages  # chat present
+
+        app._clear_team_tv()
+        await pilot.pause()
+        # team TV blown out…
+        assert team.messages == [] and team.active_tasks == {}
+        assert team._last_producer_count == 0
+        assert list(team.query(".stream-line")) == []
+        # …leader chat untouched
+        assert leader.messages

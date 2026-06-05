@@ -165,6 +165,19 @@ class StreamView(VerticalScroll):
         # Follow the tail like a chat transcript.
         self.call_after_refresh(self.scroll_end, animate=False)
 
+    def clear(self) -> None:
+        """Blow this lane's transcript out of the pipes — remove the rendered lines
+        and reset the tracked state. Used by the F8 kill-switch to clean the TEAM TV
+        (the Mod Squad floor) for a fresh run; the LEADER chat lane is never cleared.
+        """
+        for line in list(self.query(".stream-line")):
+            line.remove()
+        self.messages.clear()
+        self.events.clear()
+        self.active_tasks.clear()
+        self._last_producer_count = 0
+        self.last_leader_text = ""
+
     def _display_name(self, agent_id: str | None, role: str) -> str:
         token = agent_id or role
         if self._name_resolver is not None:

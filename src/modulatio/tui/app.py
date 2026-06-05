@@ -825,9 +825,16 @@ class ModulatioApp(App):
         # lane's role set, so this is the only place that fires for BOTH the
         # direct-kickoff and the converse→run_job paths.
         if event.phase == "kickoff_ended":
-            status = self._lane_status("stream-team-status")
-            if status is not None:
-                status.set_done()
+            if getattr(self, "_kickoff_aborted", False):
+                # F8 kill: final clean of the TEAM TV once the run has fully
+                # unwound, so a late event from the in-flight step leaves no
+                # residue (the engine cleared goals/tasks/tickets). Chat untouched.
+                self._clear_team_tv()
+                self._kickoff_aborted = False
+            else:
+                status = self._lane_status("stream-team-status")
+                if status is not None:
+                    status.set_done()
         # Live status lines: the leader-lane phase drives the LEADER status;
         # team-lane phases the TEAM status, named by the worker. §5: when more
         # than one producer is in flight, surface the parallel count so the
@@ -953,10 +960,29 @@ class ModulatioApp(App):
         if orch is None:
             return
         orch.abort_event.set()  # thread-safe; the worker's kickoff loop reads it
+        # F8 blows out the pipes (Clif 2026-06-05): clear the TEAM TV now for instant
+        # kill feedback (and again when the run fully unwinds, so no late event re-
+        # fills it). The engine teardown finalizes goals/tasks/tickets at run-end.
+        # The LEADER chat is never touched.
+        self._kickoff_aborted = True
+        self._clear_team_tv()
         self._set_kickoff_status(
             "Stopping the run… finishing the current step, then halting. "
-            "The Leader will report what landed."
+            "The Mod Squad floor is cleared; the Leader will report what landed."
         )
+
+    def _clear_team_tv(self) -> None:
+        """Clear the TEAM (Mod Squad) TV transcript + its status line. The LEADER
+        chat lane is left intact. Best-effort (TUI may be mid-teardown)."""
+        try:
+            for sv in self.query(StreamView):
+                if getattr(sv, "lane", None) == "team":
+                    sv.clear()
+            status = self._lane_status("stream-team-status")
+            if status is not None:
+                status.set_idle()
+        except Exception:
+            pass
 
     def action_copy_text(self) -> None:
         """Ctrl+C → copy text from a TV to the clipboard so you can paste it
