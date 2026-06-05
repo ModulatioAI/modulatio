@@ -176,6 +176,38 @@ def test_create_job_template_tool_writes_and_lists(project: Project):
     assert "already exists" in again
 
 
+def test_create_job_template_captures_cardinality(project: Project):
+    """The cardinality-bug fix: the Leader's create_job_template tool now carries
+    the output cardinality into the JT, so a multi-unit job is codified as a
+    FAN-OUT (fixed:N / per-item) instead of always defaulting to 'one' — which
+    collapsed an 8-story anthology into a single task (HRWT 2026-06-05)."""
+    from modulatio import job_templates
+
+    orch = Orchestrator(project, _runners())
+    tool = orch._leader_function_tools()["create_job_template"]
+
+    out = tool.call(name="anthology", description="8-story book",
+                    interview="Ask the stories.", cardinality="fixed:8",
+                    artifact_kind="document")
+    assert "fixed:8" in out
+    jt = job_templates.load_with_metadata("anthology", project_code=PROJECT_CODE)
+    assert jt.output_spec.cardinality == "fixed:8"
+    assert jt.output_spec.artifact_kind == "document"
+
+    # A bare count is normalized to the engine grammar ("8" -> "fixed:8").
+    tool.call(name="bare-count", description="N pieces", interview="x",
+              cardinality="8")
+    assert job_templates.load_with_metadata(
+        "bare-count", project_code=PROJECT_CODE).output_spec.cardinality == "fixed:8"
+
+    # per-item:<param> splits the param out.
+    tool.call(name="per-founder", description="one per founder", interview="x",
+              cardinality="per-item:founders")
+    jt3 = job_templates.load_with_metadata("per-founder", project_code=PROJECT_CODE)
+    assert jt3.output_spec.cardinality == "per-item"
+    assert jt3.output_spec.per == "founders"
+
+
 def test_pending_approvals_surface_and_decide(project: Project):
     """The Leader sees pending approvals in the prompt and resolves one via the
     decide_approval tool (the conversational-approval path)."""

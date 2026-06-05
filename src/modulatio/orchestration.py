@@ -4422,15 +4422,34 @@ class Orchestrator:
             return "Job templates: " + (", ".join(names) if names else "(none yet)")
 
         def create_job_template(
-            name: str, description: str, interview: str, **_: object
+            name: str, description: str, interview: str,
+            cardinality: str = "one", artifact_kind: str = "document",
+            per: str = "", **_: object,
         ) -> str:
             """Codify a recurring job as a reusable Job Template (project-local).
             ``interview`` is the prose the Leader uses to gather the job's params
-            when the template is run."""
+            when the template is run. ``cardinality`` is the job's OUTPUT SHAPE —
+            the one thing the engine fans out on; a multi-unit job left at "one"
+            COLLAPSES to a single task (the anthology-as-one-task bug)."""
+            from modulatio.job_templates import OutputSpec
+            # Bind the cardinality to the engine's grammar, tolerating the Leader's
+            # phrasings: a bare count "8" → "fixed:8"; "per-item:stories" splits the
+            # param out. (Prose bends — normalize it so a near-miss still fans out.)
+            card = (str(cardinality).strip() or "one")
+            per_field = (str(per).strip() or None)
+            if card.isdigit():
+                card = f"fixed:{card}"
+            elif card.lower().startswith("per-item:"):
+                per_field = per_field or card.split(":", 1)[1].strip()
+                card = "per-item"
+            spec = OutputSpec(
+                cardinality=card, per=per_field,
+                artifact_kind=(str(artifact_kind).strip() or "document"),
+            )
             try:
                 _jt.create_job_template(
                     name=str(name), description=str(description),
-                    interview_body=str(interview),
+                    interview_body=str(interview), output_spec=spec,
                     project_code=self.project.code,
                 )
             except FileExistsError:
@@ -4438,7 +4457,10 @@ class Orchestrator:
                         "different name, or improve the existing one.")
             except Exception as exc:
                 return f"Couldn't create the template: {type(exc).__name__}: {exc}"
-            return f"Created job template {name!r} for this project."
+            return (
+                f"Created job template {name!r} (cardinality={spec.cardinality}, "
+                f"{spec.artifact_kind}) for this project."
+            )
 
         def create_skill(
             name: str, description: str, prompt: str, **_: object
@@ -4635,10 +4657,13 @@ class Orchestrator:
                 name="create_job_template",
                 description=(
                     "Codify a recurring kind of job as a reusable Job Template. "
-                    "Pass a 'name' (hyphen-case), a one-line 'description', and "
-                    "an 'interview' — the prose you'd use to gather the job's "
-                    "parameters when it's run. Use when the operator does the "
-                    "same class of work repeatedly."
+                    "Pass a 'name' (hyphen-case), a one-line 'description', an "
+                    "'interview' (the prose you'd use to gather the job's params "
+                    "when it's run), and the output 'cardinality'. Use when the "
+                    "operator does the same class of work repeatedly. ALWAYS set "
+                    "'cardinality' from the job: a multi-unit job (e.g. an 8-story "
+                    "anthology) left at the default 'one' COLLAPSES into a single "
+                    "task instead of fanning out — set 'fixed:8' (or 'per-item')."
                 ),
                 call=create_job_template,
                 params_schema={
@@ -4647,8 +4672,35 @@ class Orchestrator:
                         "name": {"type": "string"},
                         "description": {"type": "string"},
                         "interview": {"type": "string"},
+                        "cardinality": {
+                            "type": "string",
+                            "description": (
+                                "The job's OUTPUT SHAPE — the one thing the engine "
+                                "fans out on. 'one' = a single deliverable. "
+                                "'fixed:N' = exactly N same-kind deliverables (an "
+                                "8-story anthology → 'fixed:8'); the engine fans "
+                                "into N parallel unit tasks + an assembly. "
+                                "'per-item' = one deliverable per value of a list "
+                                "param (set 'per' to that param's name). A "
+                                "multi-unit job left at 'one' COLLAPSES to one task."
+                            ),
+                        },
+                        "artifact_kind": {
+                            "type": "string",
+                            "description": (
+                                "document | code | data | media — the deliverable "
+                                "family (drives the assembler). Default 'document'."
+                            ),
+                        },
+                        "per": {
+                            "type": "string",
+                            "description": (
+                                "For cardinality 'per-item': the list param whose "
+                                "values each yield one deliverable."
+                            ),
+                        },
                     },
-                    "required": ["name", "description", "interview"],
+                    "required": ["name", "description", "interview", "cardinality"],
                 },
             ),
             "create_skill": tools.Tool(
