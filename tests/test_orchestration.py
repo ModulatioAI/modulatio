@@ -8824,6 +8824,77 @@ def test_apply_assembly_manifest_no_manifest_passes_through(project, tmp_path):
     assert task.summary_for_state_doc == ""  # untouched
 
 
+# ── P1: engine binds a CROSS-GOAL assembly (HRWT 2026-06-05) ──────────────
+
+
+def test_cross_goal_assembler_wires_units_from_store(project, tmp_path):
+    """P1 (suspenders): an assembler whose units live in an EARLIER goal (the HRWT
+    shape — 'write 8 stories' goal, then 'assemble' goal) gets no same-goal deps, so
+    the engine resolves them from the store. Without this the assembler is blind and
+    the producer pulls every unit into context → overflow → fabrication."""
+    from uuid import uuid4
+    from modulatio import store
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    code = project.code
+    u2 = Task(id="X-T-002", project_id=uuid4(), goal_id="X-G-001",
+              description="story 2", output_path="s2.txt", deliverable=True)
+    u1 = Task(id="X-T-001", project_id=uuid4(), goal_id="X-G-001",
+              description="story 1", output_path="s1.txt", deliverable=True)
+    asm = Task(id="X-T-009", project_id=uuid4(), goal_id="X-G-002",
+               description="assemble the anthology",
+               required_skills=["document-assembly"], deliverable=True,
+               output_path="book.md")
+    for t in (u2, u1, asm):  # saved out of order on purpose
+        store.save_task(code, t)
+
+    orch._wire_cross_goal_assembler_deps([asm])
+
+    # Both cross-goal units wired, in PLAN (id) order — story 1 before story 2.
+    assert asm.depends_on == ["X-T-001", "X-T-002"]
+
+
+def test_assembler_engine_binds_when_producer_emits_no_manifest(project, tmp_path):
+    """P1 (keystone): a producer that returns garbage instead of a manifest (it
+    rambled / shelled out / fabricated) must NOT bypass the join. For an assembler
+    task with authoritative deps, the engine builds the manifest from the dependency
+    outputs and concatenates the REAL units from disk — the deliverable never
+    depends on the producer cooperating."""
+    from uuid import uuid4
+    from modulatio import store
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.txt").write_text("STORY ONE BODY")
+    (artifacts / "s2.txt").write_text("STORY TWO BODY")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    code = project.code
+    u1 = Task(id="X-T-001", project_id=uuid4(), goal_id="X-G-001",
+              description="story 1", output_path="s1.txt", deliverable=True)
+    u2 = Task(id="X-T-002", project_id=uuid4(), goal_id="X-G-001",
+              description="story 2", output_path="s2.txt", deliverable=True)
+    asm = Task(id="X-T-009", project_id=uuid4(), goal_id="X-G-002",
+               description="assemble", required_skills=["document-assembly"],
+               depends_on=["X-T-001", "X-T-002"], summary_for_state_doc="")
+    for t in (u1, u2):
+        store.save_task(code, t)
+
+    # The producer emitted NO manifest — pure fabrication-style prose.
+    out = orch._apply_assembly_manifest(
+        asm, "I converted everything to a bound PDF. Done!"
+    )
+
+    # The engine assembled the REAL units from disk, ignoring the producer's text.
+    assert out is not None
+    assert "STORY ONE BODY" in out and "STORY TWO BODY" in out
+    assert "bound PDF" not in out  # the fabricated prose never lands
+    assert "2 unit(s) concatenated" in (asm.summary_for_state_doc or "")
+
+
 # ── A2: assembly QC structural pass (no LLM byte-read) ────────────────────
 
 

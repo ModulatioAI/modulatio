@@ -271,13 +271,41 @@ async def test_kickoff_ended_settles_team_status(project_with_roster):
         # a producer is working → the TEAM spinner shows live activity
         app._record_activity_impl(
             _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        # ...and the Leader has just rendered its goal verdict (the phase that
+        # leaves the leader status reading "rendering a verdict").
+        app._record_activity_impl(_ev("leader", "leader_verify_ended", agent_id="leader"))
         await pilot.pause()
         team = app.query_one("#stream-team-status", StreamStatus)
+        leader = app.query_one("#stream-leader-status", StreamStatus)
         assert team._done is False
+        assert leader._verb is not None  # leader is mid-verdict
         # the run ends (orchestrator role — in neither lane's role set)
         app._record_activity_impl(_ev("orchestrator", "kickoff_ended"))
         await pilot.pause()
         assert team._done is True, "TEAM spinner must settle to done when a run ends"
+        # #3: the LEADER lane returns to conversational standby — a FINISHED job
+        # must not leave the leader stuck on "rendering a verdict". The open-ticket
+        # signal is the problem lamp, not a perpetual verdict spinner.
+        assert leader._verb is None, "LEADER status must return to standby when a run ends"
+        assert leader._done is False
+
+
+async def test_copy_and_paste_bindings_are_priority(project_with_roster):
+    """#2: BOTH Ctrl+C and Ctrl+V must be priority bindings so our pyperclip
+    (OS-clipboard) handlers win over a focused TextArea's native copy/paste
+    (Textual's OSC-52 path) — the recurring 'copy stopped working' regression
+    was Ctrl+C being non-priority while Ctrl+V was priority."""
+    from textual.binding import Binding
+
+    from modulatio.tui.app import ModulatioApp
+
+    by_key = {
+        b.key: b for b in ModulatioApp.BINDINGS if isinstance(b, Binding)
+    }
+    assert by_key["ctrl+c"].action == "copy_text"
+    assert by_key["ctrl+c"].priority is True, "Ctrl+C must be priority (mirror Ctrl+V)"
+    assert by_key["ctrl+v"].action == "paste"
+    assert by_key["ctrl+v"].priority is True
 
 
 async def test_f8_stop_job_signals_abort_on_running_orch(project_with_roster):

@@ -3113,6 +3113,15 @@ class Orchestrator:
         # assembly QC fails closed to a normal review — safe. Keeping the assembly
         # step in the same goal as its units is the planner-side complement.)
         _wire_assembler_dependencies(tasks)
+        # P1 (engine binds the assembly — suspenders): a CROSS-GOAL assembler (its
+        # units live in an earlier goal, e.g. an "assemble the anthology" goal that
+        # follows the "write the 8 stories" goal) gets no deps from the same-goal
+        # wiring above — leaving the engine blind and the producer to pull every
+        # unit into context (overflow → decompose-spiral → fabricated deliverable,
+        # HRWT 2026-06-05). Resolve those units from the store so the engine always
+        # has an authoritative unit set to bind from. The serial goal loop means the
+        # producing goal's tasks already exist here.
+        self._wire_cross_goal_assembler_deps(tasks)
         _select_assembler_skill(tasks, self.project.code)
         self._emit_activity(
             role="planner",
@@ -3683,9 +3692,23 @@ class Orchestrator:
         # (MVP-default "drafter"; a crypto harness would pass "analyst",
         # a software shop "engineer", etc — Modulatio is output-agnostic).
         producer_role = self.default_producer_role
-        raw_response = self._run_agent_call(
-            task.assigned_agent_id, producer_role, prompt
-        )
+        # P1 (engine binds the assembly): an assembler task is a MECHANICAL
+        # multi-unit join the ENGINE performs by reading unit bodies from disk.
+        # Skip the overflow-prone producer LLM call entirely when the engine can
+        # resolve the units — the producer pulling all units into its context is
+        # what overflowed, decompose-spiralled, and fabricated a fake deliverable
+        # (HRWT 2026-06-05). With no producer output, _apply_assembly_manifest
+        # (below) builds the manifest from the task's authoritative deps and
+        # assembles deterministically through the existing write path.
+        if (
+            _is_assembler_task(task)
+            and self._assembly_manifest_from_deps(task) is not None
+        ):
+            raw_response = ""
+        else:
+            raw_response = self._run_agent_call(
+                task.assigned_agent_id, producer_role, prompt
+            )
         # (c11): extract producer inbox_proposals BEFORE the
         # summary parser runs. The summary parser takes everything
         # after the LAST summary heading; if inbox_proposals lives
@@ -5074,6 +5097,76 @@ class Orchestrator:
         checksum = f"sha256:{hashlib.sha256(kept_bytes).hexdigest()}"
         return path, checksum, len(kept.split())
 
+    def _wire_cross_goal_assembler_deps(self, tasks: "list[Task]") -> None:
+        """P1 (engine binds the assembly — suspenders): wire a CROSS-GOAL assembler
+        task to the unit tasks it combines when the same-goal wiring found none.
+
+        The units are the DELIVERABLE (non-assembler) tasks of the goals THIS
+        assembler's goal depends on; if the goal declared no dependencies, fall back
+        to every prior deliverable task OUTSIDE this goal — the common single-
+        assembly shape ('write N units' goal, then 'assemble them' goal). Populating
+        ``depends_on`` gives BOTH the engine manifest AND assembly QC the
+        authoritative unit set, so the deliverable is built from disk instead of
+        pulled through the producer's context. No-op for an assembler that already
+        has deps (same-goal wiring or a planner-declared set)."""
+        pending = [t for t in tasks if _is_assembler_task(t) and not t.depends_on]
+        if not pending:
+            return
+        try:
+            all_tasks = store.list_tasks(
+                self.project.code, run_id=self.project.run_id
+            )
+            goals = {
+                g.id: g
+                for g in store.list_goals(
+                    self.project.code, run_id=self.project.run_id
+                )
+            }
+        except Exception:  # noqa: BLE001 — best effort; safe fail-closed keeps deps empty
+            return
+        for a in pending:
+            my_goal = goals.get(a.goal_id)
+            dep_goal_ids = (
+                set(my_goal.depends_on) if my_goal and my_goal.depends_on else set()
+            )
+            units = [
+                t for t in all_tasks
+                if t.id != a.id
+                and not _is_assembler_task(t)
+                and t.deliverable
+                and t.output_path
+                and t.goal_id != a.goal_id
+                and (t.goal_id in dep_goal_ids if dep_goal_ids else True)
+            ]
+            if units:
+                # Sort by task id so the unit ORDER is the plan order (zero-padded
+                # ids: T-001 < T-002 < …), i.e. story 1 before story 2 in the bind.
+                units.sort(key=lambda t: t.id)
+                a.depends_on = [t.id for t in units]
+
+    def _assembly_manifest_from_deps(self, task: "Task") -> "dict | None":
+        """P1 (engine binds the assembly): build an assembly manifest from the
+        task's AUTHORITATIVE dependency outputs — the unit tasks it combines — so
+        the engine runs the mechanical join even when the producer emitted no
+        parseable manifest (it rambled, shelled out, or fabricated). Unit bodies are
+        read from disk by the join, never round-tripped through the producer's
+        context. Returns None when the task isn't an assembler task or has no
+        resolvable dep outputs (then the caller keeps the producer's own output)."""
+        if not _is_assembler_task(task) or not task.depends_on:
+            return None
+        by_id = {
+            t.id: t
+            for t in store.list_tasks(self.project.code, run_id=self.project.run_id)
+        }
+        units: list[str] = []
+        for dep_id in task.depends_on:
+            dep = by_id.get(dep_id)
+            if dep is not None and dep.output_path:
+                units.append(dep.output_path.strip().lstrip("./"))
+        if not units:
+            return None
+        return {"units": units}
+
     def _apply_assembly_manifest(self, task: Task, body_text: str) -> "str | None":
         """If the producer emitted an assembly manifest, mechanically
         assemble the named unit files from disk and return the concatenated
@@ -5092,7 +5185,15 @@ class Orchestrator:
         from modulatio import review_ledger as _review_ledger
         manifest = _assembly.parse_assembly_manifest(body_text)
         if manifest is None:
-            return None
+            # P1 (engine binds the assembly): a producer that emitted no parseable
+            # manifest (rambled, shelled out, or fabricated) must NOT bypass the
+            # join — that is exactly how a fake deliverable got written (HRWT). For
+            # an assembler task with authoritative deps, the engine builds the
+            # manifest from the dependency outputs itself; the deliverable never
+            # depends on the producer cooperating.
+            manifest = self._assembly_manifest_from_deps(task)
+            if manifest is None:
+                return None
         # Nemo hull #8 (+ close-out): pre-filter manifest units to the AUTHORITATIVE
         # dependency output paths BEFORE reading them — an in-root file that isn't a
         # declared unit must not be copied into the draft (pre-QC exposure), even

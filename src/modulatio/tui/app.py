@@ -307,10 +307,13 @@ class ModulatioApp(App):
         # Select text in a TV stream (drag), then Ctrl+C to copy it to the OS
         # clipboard; Ctrl+V pastes the OS clipboard into the focused text field.
         # (Quit is Alt+Q / Ctrl+Q.)
-        ("ctrl+c", "copy_text", "COPY"),
-        # priority=True so Ctrl+V runs the OS-clipboard paste BEFORE a focused
-        # Input/TextArea's native paste (which only sees Textual's internal
-        # clipboard, not the OS one).
+        #
+        # priority=True on BOTH so our pyperclip (OS-clipboard) handlers win over
+        # the focused widget's native Ctrl+C/Ctrl+V. Without priority on Ctrl+C, a
+        # focused TextArea (the chatbox) lets Textual's built-in selection-copy
+        # (OSC-52 → terminal clipboard, the unreliable path) shadow our handler —
+        # the recurring "copy stopped working" regression. Symmetric with Ctrl+V.
+        Binding("ctrl+c", "copy_text", "COPY", priority=True),
         Binding("ctrl+v", "paste", "PASTE", priority=True),
     ]
 
@@ -835,6 +838,15 @@ class ModulatioApp(App):
                 status = self._lane_status("stream-team-status")
                 if status is not None:
                     status.set_done()
+            # The run is over — return the LEADER lane to conversational standby.
+            # Without this the leader status sticks on its last working phase
+            # (typically ``leader_verify_ended`` = "rendering a verdict"), so a
+            # FINISHED job reads as forever-rendering-a-verdict. An open ticket is
+            # surfaced by the problem lamp (``ticket_opened`` below), NOT by parking
+            # the Leader in a perpetual verdict spinner.
+            leader_status = self._lane_status("stream-leader-status")
+            if leader_status is not None:
+                leader_status.set_idle()
         # Live status lines: the leader-lane phase drives the LEADER status;
         # team-lane phases the TEAM status, named by the worker. §5: when more
         # than one producer is in flight, surface the parallel count so the
