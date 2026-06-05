@@ -2772,6 +2772,109 @@ class Orchestrator:
         )
         return goals
 
+    def _bind_wide_artifacts(self, data: "list") -> "list":
+        """Parallel-execution Phase 1.5 — the task-level twin of the goal collapse.
+
+        When the planner emits several INDEPENDENT, same-kind, same-skill producer
+        specs (each a single ``output_path``, no ``depends_on``, no ``artifacts``)
+        instead of ONE ``artifacts: [...]`` fan-out, bind each homogeneous group of
+        ≥2 into a single artifacts-spec. One plan item → N parallel sub-tasks: the
+        wide wave forms AND the plan fits the per-goal task cap (the live anthology
+        died at 9 separate tasks > 6). A dependent task (a compile/assembly step)
+        keeps its ``depends_on``; the dep indices are remapped onto the merged spec,
+        and the artifacts expansion then multiplies that dep onto every sub-task.
+
+        Conservative: only INDEPENDENT (dep-free) single-output specs merge, grouped
+        by an exact (artifact_kind, required_skills, required_capabilities,
+        deliverable) key — a differently-skilled research/compile task never folds
+        in. Plans without the pattern pass through byte-identical.
+        """
+        if not isinstance(data, list) or len(data) < 2:
+            return data
+
+        def _indep_single(spec: dict) -> bool:
+            return (
+                isinstance(spec, dict)
+                and not spec.get("artifacts")
+                and isinstance(spec.get("output_path"), str)
+                and spec["output_path"].strip()
+                and not (spec.get("depends_on") or [])
+            )
+
+        def _key(spec: dict) -> tuple:
+            return (
+                str(spec.get("artifact_kind") or "text"),
+                tuple(str(s) for s in (spec.get("required_skills") or [])),
+                tuple(str(c) for c in (spec.get("required_capabilities") or [])),
+                bool(spec.get("deliverable", False)),
+            )
+
+        groups: dict[tuple, list[int]] = {}
+        for i, spec in enumerate(data):
+            if _indep_single(spec):
+                groups.setdefault(_key(spec), []).append(i)
+        merge_groups = {k: idxs for k, idxs in groups.items() if len(idxs) >= 2}
+        if not merge_groups:
+            return data
+
+        # lead index per merged group (the group's FIRST spec keeps its slot).
+        lead_of: dict[int, int] = {}
+        merged_specs: dict[int, dict] = {}
+        for idxs in merge_groups.values():
+            lead = idxs[0]
+            merged = {k: v for k, v in data[lead].items() if k != "output_path"}
+            merged["artifacts"] = [
+                {"path": data[i]["output_path"],
+                 "description": data[i].get("description") or ""}
+                for i in idxs
+            ]
+            merged["depends_on"] = []  # every member was independent
+            merged["description"] = (
+                f"Produce {len(idxs)} independent "
+                f"{str(data[lead].get('artifact_kind') or 'text')} deliverables in parallel"
+            )
+            merged_specs[lead] = merged
+            for i in idxs:
+                lead_of[i] = lead
+
+        # Rebuild the plan in order; a lead becomes its merged spec, the other group
+        # members drop, everything else is preserved. Track old-index → new-index.
+        old_to_new: dict[int, int] = {}
+        new_data: list = []
+        for old_i, spec in enumerate(data):
+            if old_i in lead_of:
+                lead = lead_of[old_i]
+                if old_i == lead:
+                    old_to_new[old_i] = len(new_data)
+                    new_data.append(merged_specs[lead])
+                else:
+                    old_to_new[old_i] = old_to_new[lead]  # → the merged spec
+            else:
+                old_to_new[old_i] = len(new_data)
+                new_data.append(dict(spec))  # copy: remap mustn't mutate the input
+
+        # Remap depends_on plan-indices onto the rebuilt plan (dedupe — a task that
+        # depended on two now-merged members collapses to one merged reference).
+        for spec in new_data:
+            raw = spec.get("depends_on")
+            if not raw:
+                continue
+            remapped: list = []
+            seen: set = set()
+            for dep in raw:
+                if isinstance(dep, bool):
+                    nd = dep
+                elif isinstance(dep, int) and dep in old_to_new:
+                    nd = old_to_new[dep]
+                else:
+                    nd = dep  # string id / out-of-range → leave for topo-sort
+                key = (type(nd).__name__, nd)
+                if key not in seen:
+                    seen.add(key)
+                    remapped.append(nd)
+            spec["depends_on"] = remapped
+        return new_data
+
     # ── Task planning: goal → tasks ──────────────────────────────────────
     def _plan_tasks(self, goal: Goal) -> list[Task]:
         # Step 0 M3 (audit): the LLM call below
@@ -2820,6 +2923,15 @@ class Orchestrator:
         data = _extract_json(response)
         if not isinstance(data, list):
             raise ValueError(f"expected list of tasks, got {type(data).__name__}")
+
+        # Parallel-execution Phase 1.5: bind independent, same-kind, same-skill
+        # producer specs into ONE artifacts-fan-out task BEFORE the cap check, so a
+        # wide goal forms a wide parallel wave (1 plan item → N sub-tasks) instead
+        # of N separate tasks that bust the per-goal cap (the live anthology
+        # failure: a correct one-wide-goal whose 8 story tasks the planner emitted
+        # separately → 9 > 6 cap → rejected). The task-level twin of the goal
+        # collapse: prose steers the planner to use `artifacts`; the engine binds it.
+        data = self._bind_wide_artifacts(data)
 
         # Defense-in-depth on top of the "wait for QC" prompt fix:
         # cap task count proportional to the goal's actual artifact
