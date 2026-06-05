@@ -4378,23 +4378,10 @@ class Orchestrator:
 
     def _leader_function_tools(self) -> "dict[str, tools.Tool]":
         """The Leader's own functions, exposed as tools his converse loop can
-        call. ``run_job`` is the orchestrate function — he switches from
-        conversing to commanding the producer swarm (a full kickoff, streamed
-        into LEADER/TEAM). The thread is the same Leader doing the work."""
+        call. NOTE: there is deliberately NO ``run_job`` here — the Leader does not
+        start jobs from conversation (that made every turn spawn a job). A job is
+        launched ONLY by the operator's explicit ``/kickoff … /end`` brackets."""
         from modulatio import job_templates as _jt
-        from modulatio import vault as _vault
-
-        def run_job(objective: str, **_: object) -> str:
-            run_id = _vault.generate_run_id()
-            _vault.init_run(self.project.code, run_id, str(objective))
-            self.project.run_id = run_id
-            summary = self.kickoff(str(objective))
-            return (
-                f"Job done — {len(summary.goals)} goal(s), "
-                f"{len(summary.tasks)} task(s), {len(summary.drafts)} draft(s), "
-                f"{len(summary.errors)} error(s). The deliverables are in the "
-                "run's output folder."
-            )
 
         def list_job_templates(**_: object) -> str:
             names = _jt.list_job_templates(self.project.code)
@@ -4497,7 +4484,8 @@ class Orchestrator:
             run_id = self._converse_run_scope()
             if not run_id:
                 return ("No job has run yet for this project — there's nothing for "
-                        "the team to show. Use run_job to start one.")
+                        "the team to show. The operator can start one with "
+                        "`/kickoff … /end`.")
             goals = store.list_goals(self.project.code, run_id=run_id)
             tasks = store.list_tasks(self.project.code, run_id=run_id)
             live = self._kickoff_active
@@ -4598,21 +4586,12 @@ class Orchestrator:
             return f"--- {path} ---\n{text}"
 
         return {
-            "run_job": tools.Tool(
-                name="run_job",
-                description=(
-                    "Hand a job to the producer team — decompose into goals, "
-                    "dispatch to producers, QC reviews, you verify. Use for big, "
-                    "repetitive, or many-piece work; not for things you can just "
-                    "answer or do yourself. Pass a clear 'objective'."
-                ),
-                call=run_job,
-                params_schema={
-                    "type": "object",
-                    "properties": {"objective": {"type": "string"}},
-                    "required": ["objective"],
-                },
-            ),
+            # NOTE: the Leader has NO ``run_job`` tool — he does NOT start jobs
+            # himself (it made every conversational turn spawn a job). A job starts
+            # ONLY from the operator's explicit ``/kickoff … /end`` brackets (the
+            # TUI / the kickoff surface); the Leader's part in a job is to
+            # decompose/plan/verify once it's launched. In conversation, if the work
+            # wants the swarm, he SAYS so and asks the operator to bracket the brief.
             "list_job_templates": tools.Tool(
                 name="list_job_templates",
                 description="List the saved job templates for this project.",
@@ -10018,8 +9997,10 @@ _LEADER_CONVERSE_PROMPT = """\
 You are the Leader of this Modulatio project, talking with the operator as a
 fully-capable partner — the smartest agent on the team. You can do anything
 asked directly (think, analyze, read/write files, run a shell command, search
-the web, build a skill, draft a job template), and you command the producer
-team via ``run_job`` for work that wants scale. You are never a job-intake
+the web, build a skill, draft a job template). You do NOT start jobs yourself —
+a job is launched ONLY by the operator bracketing the brief with
+``/kickoff … /end``. When work wants the producer swarm, say so and help the
+operator sharpen the brief; they pull the trigger. You are never a job-intake
 form; never say "I only run jobs."
 
 {operator_context}

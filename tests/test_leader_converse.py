@@ -213,9 +213,11 @@ def test_pending_approvals_surface_and_decide(project: Project):
     assert orch._pending_approvals_block() == ""
 
 
-def test_leader_can_command_the_team(project: Project):
-    """The converse loop offers the Leader his orchestrate function as tools:
-    run_job (command the producer swarm) + list_job_templates."""
+def test_leader_does_not_self_start_jobs(project: Project):
+    """The Leader has NO ``run_job`` tool — a job is launched ONLY by the operator's
+    ``/kickoff … /end`` brackets, never by the Leader self-starting from a chat turn
+    (which made every conversational message spawn a job). He keeps his other
+    functions (job-template management, etc.)."""
     offered: dict = {}
 
     def mock_leader(*, messages, tools, tool_choice=None):
@@ -228,10 +230,10 @@ def test_leader_can_command_the_team(project: Project):
         chat_runner_models={"leader": "mock-model"},
     )
     orch.converse("run the weekly brief for me")
-    assert "run_job" in offered["names"]
+    assert "run_job" not in offered["names"]  # he cannot self-start a job
     assert "list_job_templates" in offered["names"]
 
-    # the tools themselves are bound to this Leader
+    # the tool itself is gone from the Leader's function set
     lft = orch._leader_function_tools()
-    assert "run_job" in lft and "list_job_templates" in lft
-    assert lft["run_job"].params_schema["required"] == ["objective"]
+    assert "run_job" not in lft
+    assert "list_job_templates" in lft

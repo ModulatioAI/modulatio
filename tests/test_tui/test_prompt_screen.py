@@ -598,10 +598,9 @@ async def test_send_posts_message_and_does_not_kickoff(project_with_roster):
         assert not hasattr(app, "_kickoff_started_at")  # no run launched
 
 
-async def test_slash_kickoff_from_chat_launches_a_job(project_with_roster):
-    """A `/kickoff <objective>` message in the LEADER chatbox launches a job
-    (the Leader's orchestrate function) instead of conversing — the run starts
-    and the floor flips into view."""
+async def test_oneshot_kickoff_end_launches_a_job(project_with_roster):
+    """A `/kickoff <objective> /end` message launches a job (the only way a job
+    starts) and flips the view to the TEAM floor."""
     from textual.widgets import TabbedContent
 
     from modulatio.tui.app import ModulatioApp
@@ -613,22 +612,20 @@ async def test_slash_kickoff_from_chat_launches_a_job(project_with_roster):
         await pilot.pause()
         screen = app.query_one(PromptScreen)
         app.query_one("#prompt-input", ChatInput).text = (
-            "/kickoff write a stub note on herbs"
+            "/kickoff write a stub note on herbs /end"
         )
         screen._send_message()
         await pilot.pause()
-
-        # a job ran (the stub completes fast; the status reflects it) …
         assert app.last_summary_text.startswith(("Running", "Completed"))
-        # … and the view flipped to the TEAM floor to watch it run.
         assert (
             app.query_one("#console-streams", TabbedContent).active
             == "stream-team-pane"
         )
 
 
-async def test_bare_slash_kickoff_asks_for_an_objective(project_with_roster):
-    """`/kickoff` with no objective doesn't launch — the Leader asks for one."""
+async def test_bare_kickoff_starts_capture_not_a_job(project_with_roster):
+    """`/kickoff` alone does NOT launch — it opens job-brief capture and waits for
+    `/end`. (The whole fix: a job never starts without explicit brackets.)"""
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.screens.prompt import PromptScreen
     from modulatio.tui.widgets.chat_input import ChatInput
@@ -640,7 +637,68 @@ async def test_bare_slash_kickoff_asks_for_an_objective(project_with_roster):
         app.query_one("#prompt-input", ChatInput).text = "/kickoff"
         screen._send_message()
         await pilot.pause()
-        assert not hasattr(app, "_kickoff_started_at")  # nothing launched
+        assert not hasattr(app, "_kickoff_started_at")   # nothing launched
+        assert screen._kickoff_capture == []             # capture is open
+
+
+def _send(app, screen, text):
+    from modulatio.tui.widgets.chat_input import ChatInput
+    app.query_one("#prompt-input", ChatInput).text = text
+    screen._send_message()
+
+
+async def test_multi_message_capture_then_end_launches(project_with_roster):
+    """The brief can be built across messages between `/kickoff` and `/end`; only
+    `/end` fires the job, with the accumulated brief as the objective."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        _send(app, screen, "/kickoff")
+        await pilot.pause()
+        _send(app, screen, "write a stub note on herbs")
+        _send(app, screen, "keep it short")
+        await pilot.pause()
+        assert not hasattr(app, "_kickoff_started_at")     # not launched mid-capture
+        assert screen._kickoff_capture == ["write a stub note on herbs", "keep it short"]
+        _send(app, screen, "/end")
+        await pilot.pause()
+        assert app.last_summary_text.startswith(("Running", "Completed"))
+        assert screen._kickoff_capture is None             # capture reset
+
+
+async def test_cancel_aborts_capture(project_with_roster):
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        _send(app, screen, "/kickoff do a thing")
+        _send(app, screen, "/cancel")
+        await pilot.pause()
+        assert screen._kickoff_capture is None
+        assert not hasattr(app, "_kickoff_started_at")
+
+
+async def test_plain_message_never_starts_a_job(project_with_roster):
+    """Plain conversation never spawns a job — it goes to converse, not kickoff
+    (the bug that made 'everything I say creates a job')."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        _send(app, screen, "produce a 12-story anthology about robots")
+        await pilot.pause()
+        assert not hasattr(app, "_kickoff_started_at")  # conversation, not a job
+        assert screen._kickoff_capture is None
 
 
 # ─── Copy out of the TV → paste into the chatbox ────────────────────────────
