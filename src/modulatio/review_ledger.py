@@ -67,6 +67,52 @@ def file_checksum(path: Path) -> str:
     return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
 
 
+#: P5 — declared-format magic bytes. A deliverable whose extension names a known
+#: binary format MUST carry that format's signature; a text blob named ``.pdf``
+#: (the HRWT fabrication) is rejected. Family-agnostic and start-of-file only
+#: (cheap). The zip-container office formats share the ``PK`` signature — enough
+#: to catch a fabricated TEXT blob, which is the whole job here (not deep format
+#: discrimination). Extensions with no entry (``.md``/``.txt``/``.json``/code) are
+#: text/unknown and impose NO constraint — Modulatio enforces only the format the
+#: deliverable itself DECLARES.
+_ZIP_SIGS: tuple[bytes, ...] = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+_FORMAT_MAGIC: "dict[str, tuple[bytes, ...]]" = {
+    "pdf": (b"%PDF-",),
+    "docx": _ZIP_SIGS, "xlsx": _ZIP_SIGS, "pptx": _ZIP_SIGS,
+    "odt": _ZIP_SIGS, "ods": _ZIP_SIGS, "odp": _ZIP_SIGS,
+    "epub": _ZIP_SIGS, "zip": _ZIP_SIGS,
+    "rtf": (b"{\\rtf",),
+    "png": (b"\x89PNG\r\n\x1a\n",),
+    "jpg": (b"\xff\xd8\xff",), "jpeg": (b"\xff\xd8\xff",),
+    "gif": (b"GIF87a", b"GIF89a"),
+}
+
+
+def verify_declared_format(path: Path) -> "tuple[bool, str]":
+    """P5 (universal fabrication gate): a deliverable that DECLARES a known binary
+    format (by its extension) must carry that format's magic bytes.
+
+    Returns ``(True, "")`` for a match — and also for any extension with no known
+    signature (text/unknown formats impose nothing). Returns ``(False, reason)``
+    when a declared-binary deliverable's bytes are NOT that format — a text blob
+    named ``.pdf``/``.docx``, the fabrication this gate exists to reject. Pure,
+    family-agnostic, start-of-file only."""
+    ext = path.suffix.lower().lstrip(".")
+    sigs = _FORMAT_MAGIC.get(ext)
+    if not sigs:
+        return True, ""  # not a known binary format → nothing to enforce
+    try:
+        head = path.read_bytes()[:16] if path.is_file() else b""
+    except OSError as exc:
+        return False, f"unreadable ({type(exc).__name__})"
+    if any(head.startswith(sig) for sig in sigs):
+        return True, ""
+    return False, (
+        f"declared .{ext} but the bytes start {head[:8]!r} — not a real {ext} "
+        f"(looks fabricated, e.g. text named .{ext})"
+    )
+
+
 def is_passed(task: "Task") -> bool:
     """True if ``task`` carries a content-addressed QC pass-mark."""
     return bool(getattr(task, "qc_passed_checksum", None))

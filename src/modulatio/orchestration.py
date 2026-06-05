@@ -5409,6 +5409,27 @@ class Orchestrator:
         - ``None`` — verdict passed, or legacy QC that didn't classify
           (the orchestrator defaults absent classification to substantive).
         """
+        # P5 (universal fabrication gate): a deliverable that DECLARES a binary
+        # format (by its output extension) must carry that format's magic bytes.
+        # This runs FIRST — before the LLM judgment AND before the review-ledger
+        # cheap-pass — so a text blob named .pdf/.docx (the HRWT fabrication) can
+        # never pass, in ANY family, and can't be checksum-waved-through on a
+        # re-run. Deterministic, family-agnostic; imposes nothing on text/unknown
+        # extensions (it enforces only the format the deliverable itself declares).
+        from modulatio import review_ledger as _review_ledger
+        fmt_ok, fmt_reason = _review_ledger.verify_declared_format(draft_path)
+        if not fmt_ok:
+            verdict = AssertionEvidence(
+                producer="qc", primary=True,
+                check=f"declared-format integrity: {fmt_reason}",
+                passed=False,
+            )
+            return verdict, (
+                f"The deliverable was not really rendered as its declared format: "
+                f"{fmt_reason}. Render it as the real binary (the engine assembler "
+                f"does this when the toolchain is present) or correct the declared "
+                f"output format — do not ship text under a binary extension."
+            ), "environmental"
         # Part A / review-ledger: if the exact bytes in front of QC already
         # passed QC this run (checksum == the task's content-addressed mark),
         # don't re-review them — re-spending QC on already-verified content is the
@@ -10449,7 +10470,10 @@ manifest and the ENGINE does the mechanical join (concat / file-index / merge),
 so it never re-types the units and a large deliverable can't truncate. Do NOT use
 `long-form`/`drafter` for an assembly step (they re-emit content → truncation).
 The unit files already exist; read their real names from the repo_map. This task
-depends_on the unit tasks.
+depends_on the unit tasks. Set its `output_path` to the deliverable's DECLARED
+format extension (`anthology.pdf`, `report.docx`) so the engine renders the real
+binary; a bare name or `.md` stays text. Format = the user's declared deliverable,
+not an assumption ("a bound PDF" → `.pdf`).
 
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
 events, any real-world factual claim): set the PRIMARY (first)

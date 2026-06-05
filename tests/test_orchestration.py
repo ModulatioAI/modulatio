@@ -8802,8 +8802,10 @@ def test_qc_review_media_binary_does_not_crash_and_verifies_provenance(project, 
     assert verdict.passed is True
     assert "not machine-verifiable" in verdict.check.lower() or "human spot-check" in verdict.check.lower()
 
-    # tamper the bytes → integrity fail (no crash)
-    deliverable.write_bytes(b"TAMPERED NOT A ZIP \x00\xff")
+    # tamper the bytes → integrity fail (no crash). Keep a valid ZIP signature so
+    # this exercises the PROVENANCE/checksum check, not the P5 declared-format gate
+    # (which has its own test) — the bytes differ from the recorded checksum.
+    deliverable.write_bytes(b"PK\x03\x04 tampered but still a zip header \x00\xff")
     verdict2, _n, defect2 = orch._qc_review(task, deliverable, "sha256:x", 0)
     assert verdict2.passed is False and "changed since assembly" in verdict2.check
     assert defect2 == "environmental"  # integrity failure → human, not blind-retry
@@ -8916,6 +8918,34 @@ def test_assembler_render_format_from_declared_extension(project, tmp_path):
     assert fmt("data.json") is None       # not a document binary
     assert fmt(None) is None              # nothing declared → no binary imposed
     assert fmt("notes") is None           # no extension
+
+
+def test_qc_review_rejects_fabricated_binary(project, tmp_path):
+    """P5: _qc_review fails CLOSED (environmental) on a deliverable that DECLARES a
+    binary format but is text — the HRWT fake — before any LLM judgment or the
+    review-ledger cheap-pass. Universal: any family, any binary extension."""
+    from uuid import uuid4
+    from modulatio import review_ledger
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    fake = artifacts / "anthology.pdf"
+    fake.write_text("Have Robot, Will Travel\n\n# The Last Companion\n...text...")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    task = Task(id="X-T-009", project_id=uuid4(), goal_id="X-G-002",
+                description="assemble", output_path="anthology.pdf")
+    checksum = review_ledger.file_checksum(fake)
+
+    verdict, notes, defect = orch._qc_review(task, fake, checksum, 50)
+
+    assert verdict.passed is False
+    assert defect == "environmental"
+    assert "declared-format" in verdict.check
+    # even a prior cheap-pass mark cannot wave the fake through
+    task.qc_passed_checksum = checksum
+    verdict2, _n, defect2 = orch._qc_review(task, fake, checksum, 50)
+    assert verdict2.passed is False and defect2 == "environmental"
 
 
 # ── A2: assembly QC structural pass (no LLM byte-read) ────────────────────

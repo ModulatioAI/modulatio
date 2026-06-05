@@ -231,3 +231,42 @@ def test_verify_assembly_media_strategy_falls_back(tmp_path):
     rec.strategy = "media"
     ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "media assembly" in reason
+
+
+# ── P5: declared-format magic-byte gate (universal fabrication guard) ──────
+
+
+def test_verify_declared_format_rejects_text_named_pdf(tmp_path):
+    """The HRWT fabrication: a text blob named .pdf is rejected."""
+    from modulatio import review_ledger
+    fake = tmp_path / "anthology.pdf"
+    fake.write_text("Have Robot, Will Travel\n\n# The Last Companion\n...")
+    ok, reason = review_ledger.verify_declared_format(fake)
+    assert ok is False
+    assert "not a real pdf" in reason.lower()
+
+
+def test_verify_declared_format_accepts_real_pdf(tmp_path):
+    from modulatio import review_ledger
+    real = tmp_path / "doc.pdf"
+    real.write_bytes(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n... body ...")
+    assert review_ledger.verify_declared_format(real) == (True, "")
+
+
+def test_verify_declared_format_zip_office_formats(tmp_path):
+    from modulatio import review_ledger
+    real = tmp_path / "book.docx"
+    real.write_bytes(b"PK\x03\x04\x14\x00\x06\x00 ...docx zip body...")
+    assert review_ledger.verify_declared_format(real)[0] is True
+    fake = tmp_path / "book.docx"
+    fake.write_text("# not really a docx, just markdown")
+    assert review_ledger.verify_declared_format(fake)[0] is False
+
+
+def test_verify_declared_format_text_extensions_impose_nothing(tmp_path):
+    """.md/.txt/.json/no-extension are text/unknown → no constraint."""
+    from modulatio import review_ledger
+    for name in ("report.md", "notes.txt", "data.json", "README", "main.py"):
+        p = tmp_path / name
+        p.write_text("anything goes here")
+        assert review_ledger.verify_declared_format(p) == (True, "")
