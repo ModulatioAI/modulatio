@@ -2802,11 +2802,22 @@ class Orchestrator:
             )
 
         def _key(spec: dict) -> tuple:
+            # Nemo P1.5 #1/#2: the key must include EVERY field the artifacts
+            # expansion copies from the parent spec onto each sub-task —
+            # artifact_kind / required_skills / required_capabilities / deliverable
+            # AND research_topics / tool_args / evidence_required. Only specs
+            # IDENTICAL in all of them may merge; otherwise a sibling would inherit
+            # the wrong prompt/tool/evidence contract (and a same-skill scaffolding
+            # task can't fold into the deliverable fan-out). Description + output_path
+            # stay per-artifact, so they legitimately differ within a group.
             return (
                 str(spec.get("artifact_kind") or "text"),
                 tuple(str(s) for s in (spec.get("required_skills") or [])),
                 tuple(str(c) for c in (spec.get("required_capabilities") or [])),
                 bool(spec.get("deliverable", False)),
+                tuple(str(t) for t in (spec.get("research_topics") or [])),
+                json.dumps(spec.get("tool_args") or {}, sort_keys=True, default=str),
+                json.dumps(spec.get("evidence_required") or [], sort_keys=True, default=str),
             )
 
         groups: dict[tuple, list[int]] = {}

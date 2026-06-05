@@ -112,3 +112,66 @@ def test_two_homogeneous_groups_each_bind(orch):
     assert len(out) == 2
     sizes = sorted(len(s["artifacts"]) for s in out)
     assert sizes == [3, 4]
+
+
+# ── Nemo P1.5 review: bind only when ALL expansion-inherited fields match ──
+
+
+def _ev(desc):
+    return [{"kind": "artifact", "description": desc}]
+
+
+def test_heterogeneous_evidence_not_merged(orch):
+    """Two same-kind/same-skill specs with DIFFERENT evidence_required must NOT
+    merge — a sibling would inherit the wrong evidence contract (Nemo #1)."""
+    a = _story("a.md")
+    a["evidence_required"] = _ev("2000 words")
+    b = _story("b.md")
+    b["evidence_required"] = _ev("5000 words")
+    assert orch._bind_wide_artifacts([a, b]) == [a, b]
+
+
+def test_heterogeneous_research_topics_not_merged(orch):
+    a = _story("a.md")
+    a["research_topics"] = ["robots"]
+    b = _story("b.md")
+    b["research_topics"] = ["spaceships"]
+    assert orch._bind_wide_artifacts([a, b]) == [a, b]
+
+
+def test_heterogeneous_tool_args_not_merged(orch):
+    a = _story("a.md")
+    a["tool_args"] = {"mode": "fast"}
+    b = _story("b.md")
+    b["tool_args"] = {"mode": "deep"}
+    assert orch._bind_wide_artifacts([a, b]) == [a, b]
+
+
+def test_homogeneous_evidence_still_merges(orch):
+    """Identical inherited fields (the real anthology shape — same generic 'a
+    complete story' evidence) DO merge."""
+    a = _story("a.md")
+    a["evidence_required"] = _ev("a complete story")
+    b = _story("b.md")
+    b["evidence_required"] = _ev("a complete story")
+    out = orch._bind_wide_artifacts([a, b])
+    assert len(out) == 1 and len(out[0]["artifacts"]) == 2
+
+
+def test_dep_remap_multi_group_shifted_nonmerged_and_weird_deps(orch):
+    """Nemo's hand-probe, pinned: two merged groups + a shifted non-merged
+    singleton + bool/string/out-of-range/duplicate deps in one case."""
+    data = [
+        _story("s0.md", skills=("long-form",)),    # group A (lead 0)
+        _story("s1.md", skills=("long-form",)),    # group A
+        _story("d0.svg", skills=("diagram",)),     # group B (lead 2)
+        _story("d1.svg", skills=("diagram",)),     # group B
+        _story("r.md", skills=("researcher",)),    # singleton (shifts 4 → 2)
+        {"description": "Compile", "output_path": "out.pdf", "artifact_kind": "pdf",
+         "required_skills": ["media-assembly"], "deliverable": True,
+         "depends_on": [0, 1, 2, 3, 4, False, True, "x", 99, 0]},
+    ]
+    out = orch._bind_wide_artifacts(data)
+    assert len(out) == 4  # mergedA, mergedB, research singleton, compile
+    compile_spec = out[-1]
+    assert compile_spec["depends_on"] == [0, 1, 2, False, True, "x", 99]
