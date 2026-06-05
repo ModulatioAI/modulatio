@@ -47,7 +47,12 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -83,6 +88,11 @@ class AssemblyResult:
     units_used: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    #: For BINARY families (media): the engine-composited file the strategy wrote
+    #: to disk (inside artifacts_root). When set, ``content`` is a human-readable
+    #: receipt (not the deliverable), and the caller moves this file into the
+    #: task's output_path + checksums ITS bytes — text strategies leave it None.
+    output_file: "Path | None" = None
 
 
 @dataclass
@@ -114,6 +124,10 @@ class AssemblyRecord:
     complete: bool
     strategy: str = "document"
     algo_version: str = "1"
+    #: For BINARY (media) assemblies: the engine-composited file on disk. When set,
+    #: the caller moves it onto the deliverable path and ``final_checksum`` is the
+    #: hash of ITS bytes (not of ``content``). None for text strategies.
+    output_file: "Path | None" = None
 
 
 def parse_assembly_manifest(text: str) -> dict | None:
@@ -484,16 +498,219 @@ def _merge_csv(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[st
     return _capped(buf.getvalue(), errors, "CSV")
 
 
+#: External-compositor wall-clock ceiling. A media join that can't finish in this
+#: many seconds is treated as failed (fail closed → normal review).
+_MEDIA_JOIN_TIMEOUT_SECONDS = 120
+
+_VIDEO_EXTS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"})
+_AUDIO_EXTS = frozenset({".mp3", ".wav", ".flac", ".aac", ".ogg", ".oga", ".m4a"})
+_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp"})
+
+
+class _MediaToolError(Exception):
+    """A media compositor was absent, timed out, or failed. Caught by
+    ``_assemble_media`` → fail closed (the assembly routes to a normal review;
+    we never write a half-composited or wrong-kind binary)."""
+
+
+def _media_kind(manifest: dict, resolved: "list[tuple[str, Path]]") -> str:
+    """The media family to join by: explicit ``media_kind``, else inferred from
+    the units' extensions (homogeneous video/audio/image), else ``bundle``."""
+    declared = str(manifest.get("media_kind") or "").strip().lower()
+    if declared in ("video", "audio", "image", "bundle"):
+        return declared
+    exts = {p.suffix.lower() for _n, p in resolved}
+    if exts and exts <= _VIDEO_EXTS:
+        return "video"
+    if exts and exts <= _AUDIO_EXTS:
+        return "audio"
+    if exts and exts <= _IMAGE_EXTS:
+        return "image"
+    return "bundle"
+
+
+def _run_media_join(argv: "list[str]", *, tool: str) -> None:
+    """Run an external compositor, fail-closed on absent/timeout/non-zero. The
+    engine owns this subprocess (not the producer sandbox); argv is built from
+    engine-validated paths only, never producer-supplied flags."""
+    if shutil.which(argv[0]) is None:
+        raise _MediaToolError(
+            f"media assembly needs {tool} — not installed "
+            f"(install it to enable {tool}-based media joins)"
+        )
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True,
+            timeout=_MEDIA_JOIN_TIMEOUT_SECONDS, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise _MediaToolError(f"media assembly needs {tool} — not installed ({exc})")
+    except subprocess.TimeoutExpired:
+        raise _MediaToolError(
+            f"media assembly: {tool} timed out after {_MEDIA_JOIN_TIMEOUT_SECONDS}s"
+        )
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()
+        why = tail[-1] if tail else f"{tool} exit {proc.returncode}"
+        raise _MediaToolError(f"media assembly: {tool} failed — {why}")
+
+
+def _media_out(artifacts_root: Path, suffix: str) -> Path:
+    """A fresh temp output path INSIDE artifacts_root (so the engine can move it
+    onto the deliverable path, same filesystem; producer-untrusted names never
+    touch it)."""
+    fd, name = tempfile.mkstemp(prefix=".assembly_media_", suffix=suffix, dir=str(artifacts_root))
+    os.close(fd)
+    return Path(name)
+
+
+def _check_output_size(out: Path) -> None:
+    """A composited binary over the total cap is discarded + fails closed."""
+    if out.stat().st_size > _MAX_TOTAL_BYTES:
+        out.unlink(missing_ok=True)
+        raise _MediaToolError(
+            f"media assembly: composited output exceeds {_MAX_TOTAL_BYTES} bytes"
+        )
+
+
+def _join_bundle(resolved: "list[tuple[str, Path]]", artifacts_root: Path) -> "tuple[Path, str]":
+    """Heterogeneous units → one ZIP. Stdlib ``zipfile`` — no external binary, so
+    bundle never fails closed on a missing tool."""
+    out = _media_out(artifacts_root, ".zip")
+    try:
+        with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, path in resolved:
+                zf.write(path, arcname=name)
+    except OSError as exc:
+        out.unlink(missing_ok=True)
+        raise _MediaToolError(f"media assembly: bundle write failed — {exc}")
+    _check_output_size(out)
+    return out, f"bundled {len(resolved)} unit(s) into a zip archive"
+
+
+def _join_av(resolved: "list[tuple[str, Path]]", artifacts_root: Path, kind: str) -> "tuple[Path, str]":
+    """Video/audio units → one stream via ffmpeg's concat demuxer (stream copy,
+    no re-encode). Mismatched codecs make ffmpeg fail → fail closed (re-encode is
+    out of scope)."""
+    suffix = resolved[0][1].suffix.lower() or (".mp4" if kind == "video" else ".m4a")
+    out = _media_out(artifacts_root, suffix)
+    with tempfile.TemporaryDirectory() as td:
+        listfile = Path(td) / "concat.txt"
+        # ffmpeg concat list: each line `file '<abs path>'`; single-quotes in a
+        # path are escaped per ffmpeg's rule ('\'').
+        lines = [f"file '{str(p).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'"
+                 for _n, p in resolved]
+        listfile.write_text("\n".join(lines) + "\n")
+        try:
+            _run_media_join(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                 "-i", str(listfile), "-c", "copy", str(out)],
+                tool="ffmpeg",
+            )
+        except _MediaToolError:
+            out.unlink(missing_ok=True)
+            raise
+    _check_output_size(out)
+    return out, f"concatenated {len(resolved)} {kind} unit(s) via ffmpeg (stream copy)"
+
+
+def _join_image(resolved: "list[tuple[str, Path]]", artifacts_root: Path,
+                manifest: dict) -> "tuple[Path, str]":
+    """Image units → one composite via ImageMagick. ``layout`` = ``append`` (a
+    vertical strip via ``convert -append``) or ``montage`` (a grid, default).
+    ImageMagick absent → fail closed."""
+    out = _media_out(artifacts_root, resolved[0][1].suffix.lower() or ".png")
+    paths = [str(p) for _n, p in resolved]
+    layout = str(manifest.get("layout") or "montage").strip().lower()
+    # ImageMagick 7 prefers `magick ...`; 6 ships `convert`/`montage`. Pick what's
+    # present so a v7-only box (no legacy shims) still works.
+    has_magick = shutil.which("magick") is not None
+    try:
+        if layout == "append":
+            argv = (["magick"] if has_magick else []) + ["convert", *paths, "-append", str(out)]
+            _run_media_join(argv, tool="ImageMagick")
+        else:
+            argv = (["magick", "montage"] if has_magick else ["montage"]) + [
+                *paths, "-tile", "x1", "-geometry", "+2+2", str(out)
+            ]
+            _run_media_join(argv, tool="ImageMagick")
+    except _MediaToolError:
+        out.unlink(missing_ok=True)
+        raise
+    _check_output_size(out)
+    return out, f"composited {len(resolved)} image(s) via ImageMagick ({layout})"
+
+
 def _assemble_media(manifest: dict, artifacts_root: Path) -> AssemblyResult:
-    """The ``media`` strategy (image/audio/video) is a SEAM, not yet built —
-    binary-media assembly is a render/composite TOOL (ffmpeg/imagemagick), which
-    arrives with the metered tool tier (Part B4). Until then it fails CLOSED with
-    a clear note, so a media assembly routes to a normal review rather than
-    silently mis-assembling. Registered (vs absent) so the boundary is explicit."""
+    """The ``media`` strategy (image/audio/video/bundle): join binary units with a
+    LOCAL compositor — ``bundle`` via stdlib zip, ``video``/``audio`` via ffmpeg
+    concat, ``image`` via ImageMagick. The engine owns the subprocess and the
+    output stays in the vault; unit bytes never round-trip through the model.
+
+    A missing external tool (ffmpeg/ImageMagick) fails CLOSED with a clear note —
+    the assembly routes to a normal review rather than shipping a half- or
+    wrong-composited binary (mirrors the renderer-degradation discipline). The
+    composited file is returned via ``output_file`` (the engine moves it onto the
+    deliverable + checksums its bytes); ``content`` is a human-readable receipt.
+    """
+    units = manifest.get("units", [])
+    resolved: list[tuple[str, Path]] = []
+    missing: list[str] = []
+    errors: list[str] = []
+    for name in units:
+        path = _safe_unit_path(name, artifacts_root)
+        if path is None:
+            errors.append(f"unsafe or out-of-root unit path: {name!r}")
+            missing.append(name)
+            continue
+        if not path.is_file():
+            missing.append(name)
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            errors.append(f"stat failed for {name!r}: {exc}")
+            missing.append(name)
+            continue
+        if size > _MAX_UNIT_BYTES:
+            errors.append(f"unit {name!r} is {size} bytes (> {_MAX_UNIT_BYTES} cap); skipped")
+            missing.append(name)
+            continue
+        resolved.append((name, path))
+
+    if not resolved:
+        return AssemblyResult(
+            content="", missing=missing,
+            errors=errors or ["media assembly: no resolvable units"],
+        )
+
+    kind = _media_kind(manifest, resolved)
+    try:
+        if kind == "bundle":
+            out_file, receipt = _join_bundle(resolved, artifacts_root)
+        elif kind in ("video", "audio"):
+            out_file, receipt = _join_av(resolved, artifacts_root, kind)
+        elif kind == "image":
+            out_file, receipt = _join_image(resolved, artifacts_root, manifest)
+        else:  # pragma: no cover - _media_kind only yields the four above
+            return AssemblyResult(
+                content="", missing=[n for n, _ in resolved] + missing,
+                errors=errors + [f"media assembly: unknown media_kind {kind!r}"],
+            )
+    except _MediaToolError as exc:
+        # Fail closed: the binary the producer expected does NOT get written.
+        return AssemblyResult(
+            content="", units_used=[],
+            missing=[n for n, _ in resolved] + missing,
+            errors=errors + [str(exc)],
+        )
+
     return AssemblyResult(
-        content="",
-        missing=[str(u) for u in manifest.get("units", [])],
-        errors=["media assembly needs the render tool (Part B4) — not yet built"],
+        content=f"media assembly ({kind}): {receipt}",
+        units_used=[n for n, _ in resolved],
+        missing=missing,
+        errors=errors,
+        output_file=out_file,
     )
 
 

@@ -222,3 +222,12 @@ def test_verify_assembly_code_strategy_falls_back(tmp_path):
     rec.strategy = "code"
     ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "code assembly" in reason
+
+
+def test_verify_assembly_media_strategy_falls_back(tmp_path):
+    """media assembly composites binary units — no deterministic correctness check
+    the marks can stand in for, so it always gets a full review (B4)."""
+    rec, asm, by_id, root = _assembly_fixture(tmp_path)
+    rec.strategy = "media"
+    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "media assembly" in reason

@@ -159,6 +159,12 @@ def verify_assembly(
     # lift this.)
     if record.strategy == "code":
         return False, "code assembly: full review (no deterministic wiring validation yet)"
+    # media (image/audio/video/bundle) joins binary units with an external
+    # compositor — there is no deterministic "is this composite correct" check the
+    # marks can stand in for (the marks cover the INPUTS, not the rendered output).
+    # So media always gets a full review too; document/data stay cheap.
+    if record.strategy == "media":
+        return False, "media assembly: full review (no deterministic composite validation)"
 
     if not record.complete:
         return False, "assembly incomplete (missing or errored units)"

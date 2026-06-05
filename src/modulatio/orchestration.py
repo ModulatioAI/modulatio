@@ -3469,6 +3469,25 @@ class Orchestrator:
         # token re-emission → no truncation). Else the producer's own response
         # IS the artifact, as before.
         assembled = self._apply_assembly_manifest(task, body_text)
+        _asm_rec = self._assembly_records.get(task.id)
+        if _asm_rec is not None and getattr(_asm_rec, "output_file", None) is not None:
+            # Binary (media) deliverable: the engine composited a file in the vault
+            # (ffmpeg/ImageMagick/zip). Move it onto the deliverable path — NOT a
+            # text write — and skip the prose strip + circuit-breaker + regression
+            # guard, which all operate on text. The AssemblyRecord checksum was
+            # taken from these exact bytes, so it still matches post-move.
+            import shutil
+            src = _asm_rec.output_file
+            try:
+                shutil.move(str(src), str(path))
+            except OSError:
+                shutil.copyfile(str(src), str(path))
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
+            self._record_artifact_write(path)
+            return path, _asm_rec.final_checksum, 0
         if assembled is not None:
             response = assembled
         else:
@@ -4845,6 +4864,7 @@ class Orchestrator:
         (ship what resolved, name what didn't — never a silent drop).
         """
         from modulatio import assembly as _assembly
+        from modulatio import review_ledger as _review_ledger
         manifest = _assembly.parse_assembly_manifest(body_text)
         if manifest is None:
             return None
@@ -4883,16 +4903,27 @@ class Orchestrator:
         # assembly QC can do the cheap structural check (and a producer emitting
         # assembled-looking text — which leaves no record — can't bypass review).
         complete = not result.missing and not result.errors
+        # Binary (media) families: the strategy already wrote the composited file;
+        # the AssemblyRecord checksums THAT file's bytes (not the text receipt), and
+        # the deliverable is the binary, not `content`. Text families checksum the
+        # content they're about to write, as before.
+        binary_out = result.output_file
+        if binary_out is not None:
+            final_checksum = _review_ledger.file_checksum(binary_out)
+        else:
+            final_checksum = (
+                f"sha256:{hashlib.sha256(result.content.encode()).hexdigest()}"
+            )
         self._assembly_records[task.id] = _assembly.AssemblyRecord(
             manifest=manifest,
-            final_checksum=(
-                f"sha256:{hashlib.sha256(result.content.encode()).hexdigest()}"
-            ),
+            final_checksum=final_checksum,
             complete=complete,
             strategy=strategy,
+            output_file=binary_out,
         )
+        verb = "composited" if binary_out is not None else "concatenated"
         bits = [
-            f"mechanical assembly: {len(result.units_used)} unit(s) concatenated"
+            f"mechanical assembly: {len(result.units_used)} unit(s) {verb}"
         ]
         if result.missing:
             bits.append("MISSING units: " + ", ".join(result.missing[:8]))

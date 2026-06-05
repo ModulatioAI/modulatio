@@ -8737,6 +8737,39 @@ def test_apply_assembly_manifest_unresolved_deps_drop_units_unread(project, tmp_
     assert "(blocker)" in note and "secret.txt" in note and "non-dependency" in note
 
 
+def test_apply_assembly_manifest_media_records_binary_output(project, tmp_path):
+    """B4 binary seam: a media manifest → the engine composites a binary file in
+    the vault, the AssemblyRecord checksums the FILE bytes (not the text receipt),
+    and stashes output_file so _producer_execute moves it onto the deliverable."""
+    from uuid import uuid4
+    from modulatio import review_ledger
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "a.txt").write_text("ALPHA")
+    (artifacts / "b.txt").write_text("BETA")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    task = Task(id="X-T-008", project_id=uuid4(), goal_id="X-G-002",
+                description="bundle", summary_for_state_doc="")
+    body = '```assembly\n{"units": ["a.txt", "b.txt"], "media_kind": "bundle"}\n```'
+    # route the strategy to media regardless of artifact_kind
+    import modulatio.orchestration as orch_mod
+    orig = orch_mod._assembly_strategy_for_task
+    orch_mod._assembly_strategy_for_task = lambda _t: "media"
+    try:
+        out = orch._apply_assembly_manifest(task, body)
+    finally:
+        orch_mod._assembly_strategy_for_task = orig
+    # the returned content is a RECEIPT (text), not the binary
+    assert out is not None and "media assembly" in out
+    rec = orch._assembly_records[task.id]
+    assert rec.strategy == "media" and rec.output_file is not None
+    assert rec.output_file.is_file()
+    # the record checksums the FILE bytes (engine-format), not the receipt text
+    assert rec.final_checksum == review_ledger.file_checksum(rec.output_file)
+
+
 def test_apply_assembly_manifest_no_manifest_passes_through(project, tmp_path):
     """No manifest → returns None so the caller writes the producer's own
     response unchanged (structured merges, normal drafts unaffected)."""
