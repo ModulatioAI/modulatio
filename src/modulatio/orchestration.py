@@ -4990,6 +4990,10 @@ class Orchestrator:
                 "environmental",
             )
         if on_disk != record.final_checksum:
+            # Consistent with the missing/empty branch: a media-integrity failure is
+            # ENVIRONMENTAL (a human looks) — a binary composite has no content oracle
+            # to blind-retry against, so we don't loop a re-composite on a corruption
+            # we can't diagnose (Nemo B4 close-out).
             return (
                 AssertionEvidence(
                     producer="qc", primary=False,
@@ -4997,8 +5001,9 @@ class Orchestrator:
                     passed=False,
                 ),
                 "The media deliverable's bytes changed since the engine composited "
-                "it — re-run the media-assembly to produce a clean composite.",
-                "substantive",
+                "it (corruption/tampering) — a human should re-run the media-assembly "
+                "and verify the inputs.",
+                "environmental",
             )
         # Provenance + integrity hold. Ship it, but loudly flag that QC cannot judge
         # the perceptual content of a binary composite.

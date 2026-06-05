@@ -8806,6 +8806,7 @@ def test_qc_review_media_binary_does_not_crash_and_verifies_provenance(project, 
     deliverable.write_bytes(b"TAMPERED NOT A ZIP \x00\xff")
     verdict2, _n, defect2 = orch._qc_review(task, deliverable, "sha256:x", 0)
     assert verdict2.passed is False and "changed since assembly" in verdict2.check
+    assert defect2 == "environmental"  # integrity failure → human, not blind-retry
 
 
 def test_apply_assembly_manifest_no_manifest_passes_through(project, tmp_path):
