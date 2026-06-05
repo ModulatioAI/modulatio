@@ -187,7 +187,8 @@ def _safe_unit_path(name: str, artifacts_root: Path) -> Path | None:
 
 
 def assemble(
-    manifest: dict, artifacts_root: Path, strategy: str = "document"
+    manifest: dict, artifacts_root: Path, strategy: str = "document",
+    render_format: "str | None" = None,
 ) -> AssemblyResult:
     """Mechanically assemble the manifest's units per the named STRATEGY (Part B).
 
@@ -209,18 +210,31 @@ def assemble(
             missing=[str(u) for u in manifest.get("units", [])],
             errors=[f"unknown assembly strategy {strategy!r}"],
         )
+    if strategy == "document":
+        return _assemble_document(
+            manifest, artifacts_root, render_format=render_format
+        )
     return fn(manifest, artifacts_root)
 
 
-def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
+def _assemble_document(
+    manifest: dict, artifacts_root: Path, render_format: "str | None" = None,
+) -> AssemblyResult:
     """The ``document`` strategy: concatenate the manifest's unit files (read from
-    disk) into one body.
+    disk) into one body, then OPTIONALLY render that body into a declared binary
+    document format (``render_format`` — docx/odt/rtf/epub/pdf/…).
 
     Order is the manifest's ``units`` order — data, not opinion. Missing or
     unsafe units are recorded (never fabricated, never silently dropped);
     assembly proceeds best-effort with whatever resolved so the caller can
     ship-with-blocker. ``title_page`` leads, ``trailer`` trails, both
     optional; blocks are joined by ``separator``.
+
+    ``render_format`` is the deliverable's DECLARED format, not an assumption —
+    Modulatio is artifact-agnostic, so the engine renders whatever format the
+    deliverable asked for and imposes none when none is declared (the body stays
+    text). Render is fail-closed: a missing toolchain keeps the real text and
+    flags the binary as unrendered, never fabricates a binary.
     """
     title_page = manifest.get("title_page")
     trailer = manifest.get("trailer")
@@ -302,9 +316,22 @@ def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
         if not over_cap:
             errors.append(f"assembled output exceeds {_MAX_TOTAL_BYTES} bytes")
         content = ""
-    return AssemblyResult(
+    result = AssemblyResult(
         content=content, units_used=used, missing=missing, errors=errors,
     )
+    # P4: render the assembled markdown into the deliverable's DECLARED binary
+    # document format, via an engine-owned tool. Fail-closed — a missing toolchain
+    # keeps the real text (an openable .md) and flags the binary as unrendered;
+    # never a fabricated binary. No render_format → text stands (no binary imposed).
+    if content and render_format:
+        try:
+            out_file, _msg = render_document(content, render_format, artifacts_root)
+            result.output_file = out_file
+        except _DocToolError as exc:
+            result.errors.append(
+                f"binary render unavailable ({render_format}); kept text — {exc}"
+            )
+    return result
 
 
 def _assemble_code(manifest: dict, artifacts_root: Path) -> AssemblyResult:
@@ -559,6 +586,84 @@ def _run_media_join(argv: "list[str]", *, tool: str) -> None:
         tail = (proc.stderr or "").strip().splitlines()
         why = tail[-1] if tail else f"{tool} exit {proc.returncode}"
         raise _MediaToolError(f"media assembly: {tool} failed — {why}")
+
+
+_DOC_RENDER_TIMEOUT_SECONDS = 180.0
+#: Document formats pandoc writes DIRECTLY from markdown by output extension.
+#: Artifact-agnostic: the engine renders whatever format the deliverable declares;
+#: this set is "what the tool can do," not "what a document is assumed to be." PDF
+#: is handled separately (a docx→libreoffice bridge) to avoid a LaTeX dependency.
+_PANDOC_DIRECT_FORMATS: frozenset[str] = frozenset(
+    {"docx", "odt", "rtf", "html", "epub", "tex"}
+)
+
+
+class _DocToolError(Exception):
+    """A document-render tool was absent or failed — the caller fails closed to
+    the assembled text (keeps the real content; flags the binary as unrendered)."""
+
+
+def _run_doc_tool(argv: "list[str]", *, tool: str) -> None:
+    """Run a document-render tool, fail-closed on absent/timeout/non-zero. Engine-
+    owned (not the producer sandbox); argv is built from engine-validated paths."""
+    if shutil.which(argv[0]) is None:
+        raise _DocToolError(f"{tool} is not installed")
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True,
+            timeout=_DOC_RENDER_TIMEOUT_SECONDS, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise _DocToolError(f"{tool} is not installed ({exc})")
+    except subprocess.TimeoutExpired:
+        raise _DocToolError(
+            f"{tool} timed out after {_DOC_RENDER_TIMEOUT_SECONDS}s"
+        )
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()
+        why = tail[-1] if tail else f"exit {proc.returncode}"
+        raise _DocToolError(f"{tool} failed — {why}")
+
+
+def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path, str]":
+    """Render assembled markdown ``content`` into the DECLARED binary document
+    format ``fmt``, engine-owned subprocess, fail-closed.
+
+    Modulatio is artifact-agnostic: ``fmt`` is whatever the deliverable declared
+    (docx/odt/rtf/epub/pdf/…), never an assumed default. ``md→<fmt>`` via pandoc;
+    ``pdf`` via a pandoc→docx→libreoffice bridge (no LaTeX dependency). Returns the
+    rendered file path inside ``artifacts_root`` (the engine moves it onto the
+    deliverable path). Raises :class:`_DocToolError` when the toolchain is
+    unavailable, so the caller keeps the real text and flags the binary as
+    unrendered — it NEVER fabricates a binary (the HRWT text-named-.pdf failure)."""
+    fmt = (fmt or "").lower().lstrip(".")
+    src = _media_out(artifacts_root, ".md")
+    src.write_text(content)
+    try:
+        if fmt in _PANDOC_DIRECT_FORMATS:
+            out = _media_out(artifacts_root, f".{fmt}")
+            _run_doc_tool(["pandoc", str(src), "-o", str(out)], tool="pandoc")
+            _check_output_size(out)
+            return out, f"rendered .{fmt} via pandoc"
+        if fmt == "pdf":
+            docx_tmp = _media_out(artifacts_root, ".docx")
+            _run_doc_tool(["pandoc", str(src), "-o", str(docx_tmp)], tool="pandoc")
+            try:
+                _run_doc_tool(
+                    ["soffice", "--headless", "--convert-to", "pdf",
+                     "--outdir", str(artifacts_root), str(docx_tmp)],
+                    tool="libreoffice",
+                )
+                pdf_out = docx_tmp.with_suffix(".pdf")
+                if not pdf_out.is_file():
+                    raise _DocToolError("libreoffice produced no PDF")
+                _check_output_size(pdf_out)
+                return pdf_out, "rendered .pdf via pandoc+libreoffice"
+            finally:
+                docx_tmp.unlink(missing_ok=True)
+        raise _DocToolError(f"unsupported document render format {fmt!r}")
+    finally:
+        src.unlink(missing_ok=True)
 
 
 def _media_out(artifacts_root: Path, suffix: str) -> Path:

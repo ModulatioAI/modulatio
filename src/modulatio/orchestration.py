@@ -5167,6 +5167,24 @@ class Orchestrator:
             return None
         return {"units": units}
 
+    #: Binary document formats the engine renders an assembled deliverable into
+    #: when the task's output_path DECLARES one. Artifact-agnostic: this is "what
+    #: the engine can render", driven by the deliverable's declared extension — it
+    #: imposes NO format when none is declared (.md/.txt/.json/etc. stay text).
+    _DOC_RENDER_EXTS: "frozenset[str]" = frozenset(
+        {"docx", "odt", "rtf", "epub", "pdf"}
+    )
+
+    def _assembler_render_format(self, task: "Task") -> "str | None":
+        """The DECLARED binary document format for an assembler deliverable, taken
+        from the task's ``output_path`` extension (the user's/standards' choice —
+        Modulatio assumes none). None → the assembled body stays text."""
+        op = (task.output_path or "").strip().lower()
+        if "." not in op:
+            return None
+        ext = op.rsplit(".", 1)[-1]
+        return ext if ext in self._DOC_RENDER_EXTS else None
+
     def _apply_assembly_manifest(self, task: Task, body_text: str) -> "str | None":
         """If the producer emitted an assembly manifest, mechanically
         assemble the named unit files from disk and return the concatenated
@@ -5224,7 +5242,16 @@ class Orchestrator:
         # Part B: the assembler skill selects the family/strategy; the engine owns
         # the mechanical join. document = text concat (today's default).
         strategy = _assembly_strategy_for_task(task)
-        result = _assembly.assemble(manifest, self._artifacts_root(), strategy=strategy)
+        # P4: for a DOCUMENT assembly, render the concatenated body into the
+        # deliverable's DECLARED binary format (artifact-agnostic — driven by the
+        # task's output extension, never assumed; None → text stands).
+        render_format = (
+            self._assembler_render_format(task) if strategy == "document" else None
+        )
+        result = _assembly.assemble(
+            manifest, self._artifacts_root(), strategy=strategy,
+            render_format=render_format,
+        )
         # Part A / A2 (#85): record engine-authored proof of mechanical assembly so
         # assembly QC can do the cheap structural check (and a producer emitting
         # assembled-looking text — which leaves no record — can't bypass review).

@@ -449,3 +449,54 @@ def test_safe_unit_path_rejects_control_chars(tmp_path):
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "ok.mp4").write_text("x")
     assert assembly._safe_unit_path("sub/ok.mp4", tmp_path) is not None
+
+
+# ── P4: document family renders a declared binary (artifact-agnostic) ──────
+
+
+def test_assemble_document_render_fail_closed_keeps_text(tmp_path, monkeypatch):
+    """P4: a missing render toolchain must NOT fabricate a binary — it keeps the
+    REAL assembled text and flags the binary as unrendered (the anti-HRWT)."""
+    import shutil as _sh
+    (tmp_path / "u1.md").write_text("# One\n\nbody one\n")
+    (tmp_path / "u2.md").write_text("# Two\n\nbody two\n")
+    monkeypatch.setattr(assembly, "shutil", _sh)
+    monkeypatch.setattr(_sh, "which", lambda _name: None)
+    res = assembly.assemble(
+        {"units": ["u1.md", "u2.md"]}, tmp_path, strategy="document",
+        render_format="docx",
+    )
+    assert res.output_file is None  # no fabricated binary
+    assert "body one" in res.content and "body two" in res.content  # real text kept
+    assert any("binary render unavailable" in e for e in res.errors)
+
+
+def test_render_document_raises_without_tool(tmp_path, monkeypatch):
+    import shutil as _sh
+    monkeypatch.setattr(_sh, "which", lambda _name: None)
+    with pytest.raises(assembly._DocToolError):
+        assembly.render_document("# x\n\nbody\n", "docx", tmp_path)
+
+
+def test_assemble_document_no_render_format_stays_text(tmp_path):
+    """No declared format → the body stays text; no binary imposed (agnostic)."""
+    (tmp_path / "u1.md").write_text("alpha")
+    res = assembly.assemble({"units": ["u1.md"]}, tmp_path, strategy="document")
+    assert res.output_file is None
+    assert res.content == "alpha"
+
+
+@pytest.mark.skipif(
+    __import__("shutil").which("pandoc") is None, reason="pandoc not installed"
+)
+def test_assemble_document_renders_real_docx(tmp_path):
+    """With pandoc present, a document assembly renders a REAL .docx (zip magic),
+    not a text blob named .docx."""
+    (tmp_path / "u1.md").write_text("# One\n\nbody one\n")
+    (tmp_path / "u2.md").write_text("# Two\n\nbody two\n")
+    res = assembly.assemble(
+        {"units": ["u1.md", "u2.md"]}, tmp_path, strategy="document",
+        render_format="docx",
+    )
+    assert res.output_file is not None and res.output_file.is_file()
+    assert res.output_file.read_bytes()[:4] == b"PK\x03\x04"  # real .docx = zip

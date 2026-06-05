@@ -8895,6 +8895,29 @@ def test_assembler_engine_binds_when_producer_emits_no_manifest(project, tmp_pat
     assert "2 unit(s) concatenated" in (asm.summary_for_state_doc or "")
 
 
+def test_assembler_render_format_from_declared_extension(project, tmp_path):
+    """P4: the binary render format is the deliverable's DECLARED extension (the
+    user's/standards' choice) — never assumed. Non-binary or absent → text (None),
+    so Modulatio imposes no format (artifact-agnostic)."""
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    orch = _assembly_orch(project, tmp_path, tmp_path)
+
+    def fmt(op):
+        return orch._assembler_render_format(
+            Task(id="X-T-1", project_id=uuid4(), goal_id="X-G-1",
+                 description="a", output_path=op)
+        )
+
+    assert fmt("book.docx") == "docx"
+    assert fmt("anthology.pdf") == "pdf"
+    assert fmt("report.md") is None       # text stays text
+    assert fmt("data.json") is None       # not a document binary
+    assert fmt(None) is None              # nothing declared → no binary imposed
+    assert fmt("notes") is None           # no extension
+
+
 # ── A2: assembly QC structural pass (no LLM byte-read) ────────────────────
 
 
