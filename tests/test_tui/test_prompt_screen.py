@@ -308,6 +308,32 @@ async def test_copy_and_paste_bindings_are_priority(project_with_roster):
     assert by_key["ctrl+v"].priority is True
 
 
+async def test_kickoff_verdict_no_hollow_success(project_with_roster):
+    """A run that RETURNS but delivers nothing (0 drafts / blocked tasks /
+    unfinished goals) must NOT report 'deliverables are in' — the Leader says
+    plainly it failed (the HRWT hollow-success misreport)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        leader = app.query_one("#stream-leader", StreamView)
+        # empty, blocked run — the HRWT shape
+        app._post_leader_verdict(
+            {"mode": "real", "goals": 1, "tasks": 1, "drafts": 0, "errors": 2,
+             "blocked_tasks": 1, "incomplete_goals": 1}, None)
+        await pilot.pause()
+        assert "did NOT finish" in leader.last_leader_text
+        assert "Deliverables are in" not in leader.last_leader_text
+        # a clean, delivering run reports done honestly
+        app._post_leader_verdict(
+            {"mode": "real", "goals": 1, "tasks": 3, "drafts": 3, "errors": 0,
+             "blocked_tasks": 0, "incomplete_goals": 0}, None)
+        await pilot.pause()
+        assert "Deliverables are in" in leader.last_leader_text
+
+
 async def test_f8_stop_job_signals_abort_on_running_orch(project_with_roster):
     """Fix C: F8 / action_stop_job sets the running job's abort_event — but only
     when a job is actually in flight (_kickoff_active), so a stray F8 is a no-op."""

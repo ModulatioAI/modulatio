@@ -492,12 +492,25 @@ class ModulatioApp(App):
         # can signal its abort_event from the main thread while we run here.
         self._kickoff_orch = orch
         summary = orch.kickoff(objective, attachments=attachments)
+        # Honest outcome (no hollow success): a run that RETURNS is not the same as
+        # a run that DELIVERED. Count what actually landed vs what blocked / never
+        # finished, so the verdict can't claim "deliverables are in" over a blocked,
+        # empty run (HRWT 2026-06-05).
+        from modulatio.types import GoalStatus, TaskStatus
+        blocked_tasks = sum(
+            1 for t in summary.tasks if t.status == TaskStatus.BLOCKED
+        )
+        incomplete_goals = sum(
+            1 for g in summary.goals if g.status != GoalStatus.COMPLETED
+        )
         return {
             "mode": mode,
             "goals": len(summary.goals),
             "tasks": len(summary.tasks),
             "drafts": len(summary.drafts),
             "errors": len(summary.errors),
+            "blocked_tasks": blocked_tasks,
+            "incomplete_goals": incomplete_goals,
         }
 
     def _update_kickoff_progress(self) -> None:
@@ -543,17 +556,35 @@ class ModulatioApp(App):
             btn.disabled = False
         except NoMatches:
             pass
-        # Settle the team floor's status line — that's where the work ran.
+        # Settle the team floor's status line — that's where the work ran. A run
+        # that returned but delivered nothing / left blocked work is NOT a clean
+        # ✓done; show it as an error state so the floor doesn't read "success".
+        delivered = (result or {}).get("drafts", 0)
+        blocked = (result or {}).get("blocked_tasks", 0)
+        incomplete = (result or {}).get("incomplete_goals", 0)
+        no_deliver = error is None and (
+            delivered == 0 or blocked > 0 or incomplete > 0
+        )
         team_status = self._lane_status("stream-team-status")
         if error is not None:
             if team_status is not None:
                 team_status.set_error(str(error)[:80])
+        elif no_deliver:
+            if team_status is not None:
+                team_status.set_error("finished without deliverables")
         else:
             if team_status is not None:
                 team_status.set_done()
         # Render the result on the floor's status line …
         if error is not None:
             self._set_kickoff_status(f"Kickoff failed: {error}")
+        elif no_deliver:
+            self._set_kickoff_status(
+                f"Kickoff finished WITHOUT deliverables — "
+                f"goals: {result['goals']}, tasks: {result['tasks']}, "
+                f"drafts: {delivered}, blocked: {blocked}, "
+                f"unfinished goals: {incomplete}, errors: {result['errors']}"
+            )
         else:
             self._set_kickoff_status(
                 f"Completed {result['mode']} kickoff — "
@@ -583,11 +614,28 @@ class ModulatioApp(App):
                 f"That job hit a wall — {error}. Want me to take another run at it?"
             )
             return
-        msg = (
-            f"Job's done — {result['goals']} goal(s), {result['tasks']} task(s), "
-            f"{result['drafts']} draft(s), {result['errors']} error(s). "
-            "Deliverables are in. Ask me anything about it."
-        )
+        delivered = result.get("drafts", 0)
+        blocked = result.get("blocked_tasks", 0)
+        incomplete = result.get("incomplete_goals", 0)
+        # No hollow success: only call it done-with-deliverables when something
+        # ACTUALLY landed and nothing blocked / stayed unfinished. A run that
+        # returned but produced nothing is a FAILURE the operator must hear plainly.
+        if delivered == 0 or blocked > 0 or incomplete > 0:
+            msg = (
+                f"That job did NOT finish cleanly — {result['goals']} goal(s), "
+                f"{result['tasks']} task(s), but only {delivered} deliverable(s)"
+                + (f", {blocked} blocked task(s)" if blocked else "")
+                + (f", {incomplete} unfinished goal(s)" if incomplete else "")
+                + (f", {result['errors']} error(s)" if result.get("errors") else "")
+                + ". Nothing usable landed — tell me to dig into what went wrong, "
+                "or F8 and we adjust."
+            )
+        else:
+            msg = (
+                f"Job's done — {result['goals']} goal(s), {result['tasks']} task(s), "
+                f"{delivered} deliverable(s). Deliverables are in. Ask me anything "
+                "about it."
+            )
         tv.add_leader_message(msg)
 
     def _build_real_runners(self) -> dict | None:
