@@ -2546,6 +2546,95 @@ class Orchestrator:
         return body if body.strip() else fallback
 
     # ── Leader: decompose objective → goals ──────────────────────────────
+    def _collapse_jt_item_goals(self, data: "list[dict]") -> "list[dict]":
+        """Engine-bind the JT cardinality invariant (parallel-execution Phase 1).
+
+        A bound JT with an enforceable PER-ITEM cardinality is a HARD operator
+        requirement for N independent same-kind deliverables. The PARALLEL
+        DELIVERABLES contract steers the Leader to put them in ONE goal (which the
+        task-planner fans into a wide parallel wave) — but prose only bends; the
+        Leader can still split the N items into N SEPARATE goals, which the serial
+        goal loop then runs one at a time (the anthology failure). When it does,
+        the engine MERGES the per-item goals back into one goal carrying the N
+        artifacts as evidence; the task-planner (already steered by the output
+        contract) then emits a single ``artifacts: [...]`` task → a wide wave.
+
+        Conservative by design — only fires for a per-item list, where the list
+        VALUES give a precise, non-fuzzy signal: an item-goal both EMITS an
+        artifact AND mentions one of the per-item values. Different-kind goals
+        (front matter) and a dependent assembly/synthesis goal mention no value
+        and are LEFT ALONE. ``fixed:N`` (no per-item values to match) relies on
+        the prose contract — no safe engine signal, so no collapse. Never merges
+        fewer than 2 goals (the correct one-goal shape is a no-op).
+        """
+        jt = self._bound_jt
+        if jt is None:
+            return data
+        spec = jt.output_spec
+        if (spec.cardinality or "").strip() != "per-item" or not spec.per:
+            return data
+        values = self._bound_jt_params.get(spec.per)
+        if not isinstance(values, (list, tuple)):
+            return data
+        norm_values = [str(v).strip().lower() for v in values if str(v).strip()]
+        if len(norm_values) < 2:
+            return data
+
+        def _refs_item(item: dict) -> bool:
+            if not _goal_emits_artifact(item):
+                return False
+            hay = (
+                str(item.get("description", "")) + " "
+                + str(item.get("success_criteria", ""))
+            ).lower()
+            return any(v in hay for v in norm_values)
+
+        item_idxs = [i for i, it in enumerate(data) if isinstance(it, dict) and _refs_item(it)]
+        if len(item_idxs) < 2:
+            return data  # correctly in one goal (or only one item-goal) → no-op
+
+        # Collect every per-item artifact requirement into one merged goal so the
+        # task-planner sees N artifacts to fan out.
+        merged_evidence: list = []
+        for i in item_idxs:
+            for req in (data[i].get("evidence_required") or []):
+                if (
+                    isinstance(req, dict)
+                    and str(req.get("kind", "")).strip().lower() == "artifact"
+                ):
+                    merged_evidence.append(req)
+        n = len(item_idxs)
+        merged_goal = {
+            "description": (
+                f"Produce all {n} {spec.artifact_kind} deliverables (one per "
+                f"`{spec.per}`) — independent of each other, run in parallel."
+            ),
+            "success_criteria": (
+                f"All {n} deliverables are produced, each its own "
+                f"{spec.artifact_kind} file."
+            ),
+            "evidence_required": merged_evidence,
+        }
+        first = item_idxs[0]
+        drop = set(item_idxs[1:])
+        out: list = []
+        for i, it in enumerate(data):
+            if i == first:
+                out.append(merged_goal)
+            elif i in drop:
+                continue
+            else:
+                out.append(it)
+        self._emit_activity(
+            role="leader", phase="leader_jt_wide_wave_collapse", agent_id="leader",
+        )
+        _logger.info(
+            "Collapsed %d per-item goals into one wide-wave goal (JT cardinality "
+            "is a hard requirement; %d goals → %d)",
+            n, len(data), len(out),
+        )
+        return out
+
     def _leader_decompose(
         self,
         objective: str,
@@ -2628,6 +2717,13 @@ class Orchestrator:
                     str(it.get("description", ""))[:120],
                 )
             data = producing
+
+        # Parallel-execution Phase 1: engine-bind the JT cardinality invariant —
+        # if a bound per-item JT's N items were split into N separate goals (which
+        # the serial goal loop runs one at a time), merge them back into ONE goal
+        # carrying the N artifacts, so the task-planner fans them into a wide
+        # parallel wave. Prose steers this; the engine guarantees it.
+        data = self._collapse_jt_item_goals(data)
 
         goals: list[Goal] = []
         for item in data:
@@ -9319,11 +9415,14 @@ class Orchestrator:
             parts.append(
                 f"This job MUST produce **exactly {n} separate deliverables** "
                 f"({item_phrase}), each its own {spec.artifact_kind} file — the "
-                f"operator set this as a hard requirement. Emit a SINGLE task "
-                f"with an `artifacts: [...]` list of {n} entries (one per item), "
-                f"each marked `deliverable: true`.{naming} Do NOT merge them into "
-                f"fewer files and do NOT batch them away — the efficiency "
-                f"grouping rule is OVERRIDDEN for this job.\n"
+                f"operator set this as a hard requirement. Keep all {n} in **ONE "
+                f"goal** — emit a SINGLE task with an `artifacts: [...]` list of "
+                f"{n} entries (one per item), each marked `deliverable: true`."
+                f"{naming} Do NOT create one goal per item: {n} separate goals "
+                f"run one at a time and leave your producers idle — the {n} "
+                f"items are independent and MUST run in parallel as one wave. Do "
+                f"NOT merge them into fewer files and do NOT batch them away — the "
+                f"efficiency grouping rule is OVERRIDDEN for this job.\n"
             )
         hard = [pf.name for pf in jt.param_schema if pf.required]
         kv = ", ".join(
