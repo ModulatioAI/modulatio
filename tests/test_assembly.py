@@ -455,13 +455,12 @@ def test_safe_unit_path_rejects_control_chars(tmp_path):
 
 
 def test_assemble_document_render_fail_closed_keeps_text(tmp_path, monkeypatch):
-    """P4: a missing render toolchain must NOT fabricate a binary — it keeps the
-    REAL assembled text and flags the binary as unrendered (the anti-HRWT)."""
-    import shutil as _sh
+    """P4: a GENUINELY-absent render toolchain must NOT fabricate a binary — it
+    keeps the REAL assembled text and flags the binary as unrendered (anti-HRWT).
+    'Absent' now means resolve_tool finds nothing (PATH *and* the search dirs)."""
     (tmp_path / "u1.md").write_text("# One\n\nbody one\n")
     (tmp_path / "u2.md").write_text("# Two\n\nbody two\n")
-    monkeypatch.setattr(assembly, "shutil", _sh)
-    monkeypatch.setattr(_sh, "which", lambda _name: None)
+    monkeypatch.setattr(assembly, "resolve_tool", lambda _name: None)
     res = assembly.assemble(
         {"units": ["u1.md", "u2.md"]}, tmp_path, strategy="document",
         render_format="docx",
@@ -472,8 +471,7 @@ def test_assemble_document_render_fail_closed_keeps_text(tmp_path, monkeypatch):
 
 
 def test_render_document_raises_without_tool(tmp_path, monkeypatch):
-    import shutil as _sh
-    monkeypatch.setattr(_sh, "which", lambda _name: None)
+    monkeypatch.setattr(assembly, "resolve_tool", lambda _name: None)
     with pytest.raises(assembly._DocToolError):
         assembly.render_document("# x\n\nbody\n", "docx", tmp_path)
 
@@ -500,3 +498,45 @@ def test_assemble_document_renders_real_docx(tmp_path):
     )
     assert res.output_file is not None and res.output_file.is_file()
     assert res.output_file.read_bytes()[:4] == b"PK\x03\x04"  # real .docx = zip
+
+
+# ── robust engine-tool discovery (HRWT pandoc-in-~/bin failure) ────────────
+
+
+def test_resolve_tool_env_override(monkeypatch, tmp_path):
+    """An explicit MODULATIO_<NAME>_PATH override wins and is returned verbatim."""
+    fake = tmp_path / "mytool"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("MODULATIO_MY_TOOL_PATH", str(fake))
+    assert assembly.resolve_tool("my-tool") == str(fake)
+
+
+def test_resolve_tool_found_in_search_dir_when_off_path(monkeypatch):
+    """The whole point: a tool NOT on PATH is still found via the common install
+    dirs (~/bin, /bin, /usr/local/bin…). Simulate the HRWT case — PATH lookup
+    fails, but the engine still resolves the tool to an absolute path."""
+    import shutil as _sh
+    monkeypatch.setattr(assembly, "shutil", _sh)
+    monkeypatch.setattr(_sh, "which", lambda _n: None)  # PATH misses it
+    # /bin/sh exists and /bin is in _TOOL_SEARCH_DIRS
+    resolved = assembly.resolve_tool("sh")
+    assert resolved is not None
+    assert resolved.endswith("/sh")
+    from pathlib import Path as _P
+    assert _P(resolved).is_file()
+
+
+def test_resolve_tool_none_when_absent(monkeypatch):
+    import shutil as _sh
+    monkeypatch.setattr(_sh, "which", lambda _n: None)
+    assert assembly.resolve_tool("definitely-not-a-real-binary-xyz123") is None
+
+
+def test_render_doc_tool_failclosed_message_names_override(tmp_path, monkeypatch):
+    """When a render tool is genuinely unfindable, the error names the override
+    env var so the operator knows how to point the engine at it."""
+    monkeypatch.setattr(assembly, "resolve_tool", lambda _n: None)
+    with pytest.raises(assembly._DocToolError) as exc:
+        assembly.render_document("# x\n\nbody\n", "docx", tmp_path)
+    assert "MODULATIO_PANDOC_PATH" in str(exc.value)

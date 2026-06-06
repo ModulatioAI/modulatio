@@ -562,15 +562,54 @@ def _media_kind(manifest: dict, resolved: "list[tuple[str, Path]]") -> str:
     return "bundle"
 
 
+#: Extra directories to search for an engine tool BEYOND ``PATH`` — the common
+#: non-PATH installs (a user's ~/bin, pipx/local, Homebrew, /opt, snap). The HRWT
+#: render failed only because pandoc lived in ``~/bin``, off the launching process's
+#: PATH; the engine should find a tool wherever it is, not only when the shell that
+#: started it happened to export the right PATH.
+_TOOL_SEARCH_DIRS: tuple[str, ...] = (
+    "~/bin", "~/.local/bin",
+    "/usr/local/bin", "/usr/bin", "/bin",
+    "/opt/bin", "/opt/local/bin", "/opt/homebrew/bin",
+    "/snap/bin",
+)
+
+
+def resolve_tool(name: str) -> "str | None":
+    """Resolve an external engine tool to an ABSOLUTE path, robust to ``PATH``.
+
+    Search order: (1) an explicit operator override env var
+    ``MODULATIO_<NAME>_PATH`` (``-`` → ``_``); (2) the standard ``PATH``
+    (``shutil.which``); (3) the common install dirs ``PATH`` often misses
+    (:data:`_TOOL_SEARCH_DIRS`). Returns ``None`` only when the tool is genuinely
+    absent. Engine tools are invoked by the ABSOLUTE path this returns, so the
+    render is independent of how the process (TUI / cron / CLI) was launched and of
+    whatever ``PATH`` it inherited. NOTE: this is engine-owned tool discovery — the
+    tool runs as a plain subprocess, NEVER inside the producer sandbox."""
+    override = os.environ.get(f"MODULATIO_{name.upper().replace('-', '_')}_PATH")
+    if override and Path(override).is_file() and os.access(override, os.X_OK):
+        return override
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in _TOOL_SEARCH_DIRS:
+        cand = Path(d).expanduser() / name
+        if cand.is_file() and os.access(str(cand), os.X_OK):
+            return str(cand)
+    return None
+
+
 def _run_media_join(argv: "list[str]", *, tool: str) -> None:
     """Run an external compositor, fail-closed on absent/timeout/non-zero. The
     engine owns this subprocess (not the producer sandbox); argv is built from
     engine-validated paths only, never producer-supplied flags."""
-    if shutil.which(argv[0]) is None:
+    resolved = resolve_tool(argv[0])
+    if resolved is None:
         raise _MediaToolError(
             f"media assembly needs {tool} — not installed "
             f"(install it to enable {tool}-based media joins)"
         )
+    argv = [resolved, *argv[1:]]  # invoke by absolute path — PATH-independent
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True,
@@ -605,9 +644,16 @@ class _DocToolError(Exception):
 
 def _run_doc_tool(argv: "list[str]", *, tool: str) -> None:
     """Run a document-render tool, fail-closed on absent/timeout/non-zero. Engine-
-    owned (not the producer sandbox); argv is built from engine-validated paths."""
-    if shutil.which(argv[0]) is None:
-        raise _DocToolError(f"{tool} is not installed")
+    owned (not the producer sandbox); argv is built from engine-validated paths.
+    The tool is resolved to an ABSOLUTE path (robust to PATH) so the render works
+    however the process was launched — the HRWT pandoc-in-~/bin failure."""
+    resolved = resolve_tool(argv[0])
+    if resolved is None:
+        raise _DocToolError(
+            f"{tool} is not installed or not found "
+            f"(set MODULATIO_{argv[0].upper().replace('-', '_')}_PATH to its path)"
+        )
+    argv = [resolved, *argv[1:]]  # invoke by absolute path — PATH-independent
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True,
@@ -734,8 +780,9 @@ def _join_image(resolved: "list[tuple[str, Path]]", artifacts_root: Path,
     paths = [str(p) for _n, p in resolved]
     layout = str(manifest.get("layout") or "montage").strip().lower()
     # ImageMagick 7 prefers `magick ...`; 6 ships `convert`/`montage`. Pick what's
-    # present so a v7-only box (no legacy shims) still works.
-    has_magick = shutil.which("magick") is not None
+    # present so a v7-only box (no legacy shims) still works. Robust discovery
+    # (resolve_tool) so a ~/bin / Homebrew install is found regardless of PATH.
+    has_magick = resolve_tool("magick") is not None
     try:
         if layout == "append":
             argv = (["magick"] if has_magick else []) + ["convert", *paths, "-append", str(out)]
