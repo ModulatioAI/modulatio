@@ -270,3 +270,19 @@ def test_verify_declared_format_text_extensions_impose_nothing(tmp_path):
         p = tmp_path / name
         p.write_text("anything goes here")
         assert review_ledger.verify_declared_format(p) == (True, "")
+
+
+def test_verify_declared_format_media_family(tmp_path):
+    """Nemo #4 / Lovecraft Q6: the gate is family-agnostic — media binaries get the
+    same fabrication check. A text blob named .mp4/.mp3 is rejected; a real ftyp
+    (offset-4) mp4 and an ID3 mp3 pass."""
+    from modulatio import review_ledger
+    fake = tmp_path / "clip.mp4"
+    fake.write_text("not a video, just text")
+    assert review_ledger.verify_declared_format(fake)[0] is False
+    real_mp4 = tmp_path / "clip.mp4"
+    real_mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00")
+    assert review_ledger.verify_declared_format(real_mp4)[0] is True
+    real_mp3 = tmp_path / "song.mp3"
+    real_mp3.write_bytes(b"ID3\x03\x00\x00\x00...")
+    assert review_ledger.verify_declared_format(real_mp3)[0] is True

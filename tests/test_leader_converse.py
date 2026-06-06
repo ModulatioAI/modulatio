@@ -167,12 +167,13 @@ def test_create_job_template_tool_writes_and_lists(project: Project):
 
     orch = Orchestrator(project, _runners())
     out = orch._leader_function_tools()["create_job_template"].call(
-        name="daily-brief", description="A daily brief", interview="Ask the topic.")
+        name="daily-brief", description="A daily brief", interview="Ask the topic.",
+        cardinality="one")
     assert "Created" in out
     assert "daily-brief" in job_templates.list_job_templates(PROJECT_CODE)
     # idempotency guard: a second create on the same name is reported, not raised
     again = orch._leader_function_tools()["create_job_template"].call(
-        name="daily-brief", description="dup", interview="x")
+        name="daily-brief", description="dup", interview="x", cardinality="one")
     assert "already exists" in again
 
 
@@ -206,6 +207,30 @@ def test_create_job_template_captures_cardinality(project: Project):
     jt3 = job_templates.load_with_metadata("per-founder", project_code=PROJECT_CODE)
     assert jt3.output_spec.cardinality == "per-item"
     assert jt3.output_spec.per == "founders"
+
+
+def test_create_job_template_cardinality_validation(project: Project):
+    """Nemo hull #12/#13: cardinality is REQUIRED (no silent default-to-one), is
+    normalized CASE-insensitively, and 'per-item' must name its 'per' param —
+    otherwise the job has no enforceable output count (the bug class in disguise)."""
+    from modulatio import job_templates
+
+    orch = Orchestrator(project, _runners())
+    tool = orch._leader_function_tools()["create_job_template"]
+
+    # missing cardinality → rejected, not silently "one"
+    assert "required" in tool.call(name="a", description="d", interview="i").lower()
+    # per-item with no per binding → rejected
+    out = tool.call(name="b", description="d", interview="i", cardinality="per-item")
+    assert "per" in out.lower() and "couldn't" in out.lower()
+    # case/space-tolerant normalization: "Fixed: 8" → fixed:8
+    assert "Created" in tool.call(name="c", description="d", interview="i",
+                                  cardinality="Fixed: 8")
+    assert job_templates.load_with_metadata(
+        "c", project_code=PROJECT_CODE).output_spec.cardinality == "fixed:8"
+    # garbage cardinality → rejected
+    assert "couldn't" in tool.call(name="e", description="d", interview="i",
+                                   cardinality="lots").lower()
 
 
 def test_pending_approvals_surface_and_decide(project: Project):

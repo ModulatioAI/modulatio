@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory() as d:
     finally:
         os.environ["PATH"] = old
     check("resolve_tool finds 'sh' with PATH stripped (search-dir fallback)",
-          r is not None and r.endswith("/sh"), str(r))
+          r is not None and Path(r).is_absolute() and Path(r).is_file(), str(r))
 
 # 2. resolve_tool honors an explicit override.
 with tempfile.TemporaryDirectory() as d:

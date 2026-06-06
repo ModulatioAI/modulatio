@@ -515,16 +515,37 @@ def test_resolve_tool_env_override(monkeypatch, tmp_path):
 def test_resolve_tool_found_in_search_dir_when_off_path(monkeypatch):
     """The whole point: a tool NOT on PATH is still found via the common install
     dirs (~/bin, /bin, /usr/local/bin…). Simulate the HRWT case — PATH lookup
-    fails, but the engine still resolves the tool to an absolute path."""
+    fails, but the engine still resolves the tool to an ABSOLUTE executable.
+    (resolve() canonicalizes symlinks, so assert is_file, not the basename — sh is
+    commonly a symlink to dash.)"""
+    from pathlib import Path as _P
     import shutil as _sh
     monkeypatch.setattr(assembly, "shutil", _sh)
     monkeypatch.setattr(_sh, "which", lambda _n: None)  # PATH misses it
-    # /bin/sh exists and /bin is in _TOOL_SEARCH_DIRS
-    resolved = assembly.resolve_tool("sh")
+    resolved = assembly.resolve_tool("sh")  # /bin in _TOOL_SEARCH_DIRS (curated)
     assert resolved is not None
-    assert resolved.endswith("/sh")
-    from pathlib import Path as _P
-    assert _P(resolved).is_file()
+    assert _P(resolved).is_absolute() and _P(resolved).is_file()
+
+
+def test_resolve_tool_rejects_relative_override(monkeypatch, tmp_path):
+    """Nemo hull #6: a RELATIVE override is rejected (would re-introduce cwd
+    dependence) — a set-but-unusable override is a HARD STOP, not a fall-through."""
+    monkeypatch.setenv("MODULATIO_MY_TOOL_PATH", "./mytool")  # relative
+    assert assembly.resolve_tool("my-tool") is None
+
+
+def test_resolve_tool_curated_dirs_before_path(monkeypatch, tmp_path):
+    """Nemo hull #7: curated absolute dirs are checked BEFORE PATH, so a
+    contaminated PATH cannot shadow a real system binary. A fake 'sh' planted on a
+    PATH dir must NOT win over /bin/sh."""
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    (evil / "sh").write_text("#!/bin/sh\necho pwned\n")
+    (evil / "sh").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{evil}:/usr/bin:/bin")
+    resolved = assembly.resolve_tool("sh")
+    # Resolves to a curated /bin or /usr/bin sh, never the tmp 'evil' one.
+    assert resolved is not None and str(tmp_path) not in resolved
 
 
 def test_resolve_tool_none_when_absent(monkeypatch):

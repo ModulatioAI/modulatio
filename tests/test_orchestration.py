@@ -8956,6 +8956,45 @@ def test_qc_review_rejects_fabricated_binary(project, tmp_path):
     assert verdict2.passed is False and defect2 == "environmental"
 
 
+def test_cross_goal_wiring_scopes_to_immediately_preceding_goal(project, tmp_path):
+    """Nemo BLOCKER #1/#2/#11: cross-goal resolution must NOT sweep an earlier
+    research/support deliverable into the assembly. A research(G-001) -> write(G-002,
+    the stories) -> assemble(G-003) run must wire the assembler to ONLY the G-002
+    stories, never the G-001 research note."""
+    from uuid import uuid4
+    from modulatio import store
+    from modulatio.types import Goal, Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    code = project.code
+    pid = uuid4()
+    for gid, desc in (("X-G-001", "research"), ("X-G-002", "write the stories"),
+                      ("X-G-003", "assemble")):
+        store.save_goal(code, Goal(id=gid, project_id=pid, description=desc,
+                                   success_criteria="s"))
+    # research deliverable in the EARLIER goal — must be excluded
+    store.save_task(code, Task(id="X-T-001", project_id=pid, goal_id="X-G-001",
+                               description="research note", output_path="research.md",
+                               deliverable=True))
+    # the real units in the immediately-preceding goal
+    store.save_task(code, Task(id="X-T-002", project_id=pid, goal_id="X-G-002",
+                               description="story 1", output_path="s1.md",
+                               deliverable=True))
+    store.save_task(code, Task(id="X-T-003", project_id=pid, goal_id="X-G-002",
+                               description="story 2", output_path="s2.md",
+                               deliverable=True))
+    asm = Task(id="X-T-009", project_id=pid, goal_id="X-G-003", description="assemble",
+               required_skills=["document-assembly"], deliverable=True,
+               output_path="book.pdf")
+
+    orch._wire_cross_goal_assembler_deps([asm])
+
+    assert asm.depends_on == ["X-T-002", "X-T-003"]  # stories only
+    assert "X-T-001" not in asm.depends_on  # research NOT swept in
+
+
 def test_assembler_engine_binds_in_every_producer_mode(project, tmp_path):
     """Debug fix (HRWT): the engine-bind must fire for an assembler in ANY
     producer_mode — generate/diff/revise/edit — not only generate. Before the fix

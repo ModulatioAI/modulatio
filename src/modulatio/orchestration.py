@@ -3468,7 +3468,11 @@ class Orchestrator:
                 except OSError:
                     pass
             self._record_artifact_write(path)
-            return path, rec.final_checksum, 0
+            # Rehash the DESTINATION after the move (Nemo hull #10) so the returned
+            # checksum is provably of the bytes now ON the deliverable path, not the
+            # pre-move temp render output.
+            from modulatio import review_ledger as _rl
+            return path, _rl.file_checksum(path), 0
         # Text deliverable: the mechanically-joined body.
         response = assembled if assembled is not None else ""
         path.write_text(response)
@@ -4461,7 +4465,7 @@ class Orchestrator:
 
         def create_job_template(
             name: str, description: str, interview: str,
-            cardinality: str = "one", artifact_kind: str = "document",
+            cardinality: str = "", artifact_kind: str = "document",
             per: str = "", **_: object,
         ) -> str:
             """Codify a recurring job as a reusable Job Template (project-local).
@@ -4470,16 +4474,47 @@ class Orchestrator:
             the one thing the engine fans out on; a multi-unit job left at "one"
             COLLAPSES to a single task (the anthology-as-one-task bug)."""
             from modulatio.job_templates import OutputSpec
-            # Bind the cardinality to the engine's grammar, tolerating the Leader's
-            # phrasings: a bare count "8" → "fixed:8"; "per-item:stories" splits the
-            # param out. (Prose bends — normalize it so a near-miss still fans out.)
-            card = (str(cardinality).strip() or "one")
+            # Normalize the cardinality to the engine's grammar — CASE-INSENSITIVE
+            # and space-tolerant (Nemo hull #12: "Fixed:8" / "fixed: 8" must not slip
+            # through as an unrecognized literal). Tolerate the Leader's phrasings:
+            # a bare count "8" → "fixed:8"; "per-item:stories" splits the param out.
+            raw = str(cardinality).strip()
             per_field = (str(per).strip() or None)
-            if card.isdigit():
-                card = f"fixed:{card}"
-            elif card.lower().startswith("per-item:"):
-                per_field = per_field or card.split(":", 1)[1].strip()
+            low = raw.lower()
+            if raw.isdigit():
+                card = f"fixed:{raw}"
+            elif low.startswith("fixed:"):
+                card = "fixed:" + raw.split(":", 1)[1].strip()
+            elif low.startswith("per-item"):
+                rest = raw.split(":", 1)[1].strip() if ":" in raw else ""
+                per_field = per_field or (rest or None)
                 card = "per-item"
+            elif low == "one":
+                card = "one"
+            else:
+                card = low  # surfaced to the validation below
+            # No silent default-to-"one" (#13) and no unenforceable contract (#12):
+            # cardinality must be one of one / fixed:N (N>=1) / per-item, and per-item
+            # MUST name the list param it fans over (else _jt_target_count returns
+            # None — a multi-unit template with no fan-out contract, the original bug
+            # class in a new disguise).
+            err = None
+            if not raw:
+                err = ("cardinality is required — 'one', 'fixed:N' (e.g. fixed:8 for "
+                       "an 8-unit anthology), or 'per-item' with a 'per' param.")
+            elif card.startswith("fixed:"):
+                n = card.split(":", 1)[1]
+                if not (n.isdigit() and int(n) >= 1):
+                    err = f"cardinality 'fixed:N' needs a positive integer N, got {raw!r}."
+            elif card == "per-item" and not per_field:
+                err = ("cardinality 'per-item' needs a 'per' param naming the list it "
+                       "fans over (e.g. per='founders') — otherwise the job has no "
+                       "enforceable output count.")
+            elif card not in ("one",) and not card.startswith("fixed:") and card != "per-item":
+                err = (f"unknown cardinality {raw!r} — use 'one', 'fixed:N', or "
+                       "'per-item' (with a 'per' param).")
+            if err:
+                return f"Couldn't create the template: {err}"
             spec = OutputSpec(
                 cardinality=card, per=per_field,
                 artifact_kind=(str(artifact_kind).strip() or "document"),
@@ -5191,14 +5226,19 @@ class Orchestrator:
         """P1 (engine binds the assembly — suspenders): wire a CROSS-GOAL assembler
         task to the unit tasks it combines when the same-goal wiring found none.
 
-        The units are the DELIVERABLE (non-assembler) tasks of the goals THIS
-        assembler's goal depends on; if the goal declared no dependencies, fall back
-        to every prior deliverable task OUTSIDE this goal — the common single-
-        assembly shape ('write N units' goal, then 'assemble them' goal). Populating
-        ``depends_on`` gives BOTH the engine manifest AND assembly QC the
-        authoritative unit set, so the deliverable is built from disk instead of
-        pulled through the producer's context. No-op for an assembler that already
-        has deps (same-goal wiring or a planner-declared set)."""
+        Goals carry no dependency edges (they run by plan order, which is goal-id
+        order). The units are the DELIVERABLE (non-assembler) tasks of the
+        IMMEDIATELY-PRECEDING goal — the single goal with the highest id that ran
+        BEFORE this assembler's goal and produced deliverables (the 'write N units'
+        goal right before the 'assemble them' goal). Scoping to ONE prior goal — not
+        'all other goals' — is the fix for Nemo's BLOCKER: a research→write→assemble
+        run must NOT sweep the research deliverable into the book. Under-including is
+        safer than over-including: a mechanically-real book with the WRONG units
+        passes P5 (real bytes, wrong content); a short book is caught by QC/size
+        floors. Populating ``depends_on`` gives BOTH the engine manifest AND assembly
+        QC the authoritative unit set. No-op for an assembler that already has deps;
+        no prior deliverable-producing goal → leaves deps empty (the producer
+        manifest path, P5-backstopped, is the fallback)."""
         pending = [t for t in tasks if _is_assembler_task(t) and not t.depends_on]
         if not pending:
             return
@@ -5208,24 +5248,31 @@ class Orchestrator:
             )
         except Exception:  # noqa: BLE001 — best effort; safe fail-closed keeps deps empty
             return
-        # Goals carry no dependency edges (they run by plan order, not an explicit
-        # graph), so the units are simply the DELIVERABLE non-assembler tasks of the
-        # OTHER goals — the 'write the units' goal(s) that ran before this 'assemble'
-        # goal. The same-goal wiring already handled the co-located case; this only
-        # fires for a genuinely cross-goal assembler (empty deps).
         for a in pending:
-            units = [
+            if not a.goal_id:
+                continue
+            candidates = [
                 t for t in all_tasks
                 if t.id != a.id
                 and not _is_assembler_task(t)
                 and t.deliverable
                 and t.output_path
+                and t.goal_id
                 and t.goal_id != a.goal_id
             ]
+            # Goals that ran BEFORE the assembler's goal (plan order = goal-id order)
+            # and produced deliverables. The units come from the LAST of these — the
+            # goal immediately preceding the assembly — never from an earlier
+            # research/setup goal.
+            prior = sorted({t.goal_id for t in candidates if t.goal_id < a.goal_id})
+            if not prior:
+                continue
+            src_goal = prior[-1]
+            units = sorted(
+                (t for t in candidates if t.goal_id == src_goal),
+                key=lambda t: t.id,  # plan order: T-001 < T-002 < … (zero-padded)
+            )
             if units:
-                # Sort by task id so the unit ORDER is the plan order (zero-padded
-                # ids: T-001 < T-002 < …), i.e. story 1 before story 2 in the bind.
-                units.sort(key=lambda t: t.id)
                 a.depends_on = [t.id for t in units]
 
     def _assembly_manifest_from_deps(self, task: "Task") -> "dict | None":

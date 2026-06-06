@@ -327,7 +327,11 @@ def _assemble_document(
         try:
             out_file, _msg = render_document(content, render_format, artifacts_root)
             result.output_file = out_file
-        except _DocToolError as exc:
+        except (_DocToolError, _MediaToolError) as exc:
+            # Catch BOTH: a missing/failed render tool raises _DocToolError; the
+            # output-size cap (_check_output_size) raises _MediaToolError. Either way
+            # fail CLOSED — keep the real text, flag the binary as unrendered, never
+            # let it escape and never fabricate (Nemo hull #8).
             result.errors.append(
                 f"binary render unavailable ({render_format}); kept text — {exc}"
             )
@@ -575,27 +579,45 @@ _TOOL_SEARCH_DIRS: tuple[str, ...] = (
 )
 
 
+def _usable_abs(p: "Path") -> bool:
+    """True iff ``p`` is an ABSOLUTE path to an executable regular file."""
+    return p.is_absolute() and p.is_file() and os.access(str(p), os.X_OK)
+
+
 def resolve_tool(name: str) -> "str | None":
     """Resolve an external engine tool to an ABSOLUTE path, robust to ``PATH``.
 
-    Search order: (1) an explicit operator override env var
-    ``MODULATIO_<NAME>_PATH`` (``-`` → ``_``); (2) the standard ``PATH``
-    (``shutil.which``); (3) the common install dirs ``PATH`` often misses
-    (:data:`_TOOL_SEARCH_DIRS`). Returns ``None`` only when the tool is genuinely
-    absent. Engine tools are invoked by the ABSOLUTE path this returns, so the
-    render is independent of how the process (TUI / cron / CLI) was launched and of
-    whatever ``PATH`` it inherited. NOTE: this is engine-owned tool discovery — the
-    tool runs as a plain subprocess, NEVER inside the producer sandbox."""
+    Order (Nemo hull #6/#7 — the security contract is a real absolute,
+    PATH-independent invocation):
+
+    1. operator override ``MODULATIO_<NAME>_PATH`` — must be an ABSOLUTE path to an
+       executable. A *set-but-unusable* override (relative, missing, non-exec) is a
+       HARD STOP (returns None), never a silent fall-through to a different binary —
+       "use THIS" must not quietly become "use whatever's on PATH."
+    2. the curated absolute system dirs (:data:`_TOOL_SEARCH_DIRS`) — checked BEFORE
+       ``PATH`` so a contaminated or relative ``PATH`` entry cannot SHADOW
+       ``/usr/bin`` etc.
+    3. ``PATH`` last (``shutil.which``), and only if it yields an ABSOLUTE path
+       (relative / cwd ``PATH`` components are never trusted for an engine tool).
+
+    Returns ``None`` when genuinely unresolvable. The tool runs as a plain
+    engine-owned subprocess invoked by THIS absolute path — never inside the
+    producer sandbox."""
     override = os.environ.get(f"MODULATIO_{name.upper().replace('-', '_')}_PATH")
-    if override and Path(override).is_file() and os.access(override, os.X_OK):
-        return override
+    if override:
+        p = Path(override)
+        return str(p) if _usable_abs(p) else None  # set ⇒ honor or fail; no fallthrough
+    for d in _TOOL_SEARCH_DIRS:
+        cand = (Path(d).expanduser() / name).resolve()
+        if _usable_abs(cand):
+            return str(cand)
     found = shutil.which(name)
     if found:
-        return found
-    for d in _TOOL_SEARCH_DIRS:
-        cand = Path(d).expanduser() / name
-        if cand.is_file() and os.access(str(cand), os.X_OK):
-            return str(cand)
+        fp = Path(found)
+        if fp.is_absolute():
+            fp = fp.resolve()
+            if _usable_abs(fp):
+                return str(fp)
     return None
 
 
@@ -688,8 +710,14 @@ def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path
     try:
         if fmt in _PANDOC_DIRECT_FORMATS:
             out = _media_out(artifacts_root, f".{fmt}")
-            _run_doc_tool(["pandoc", str(src), "-o", str(out)], tool="pandoc")
-            _check_output_size(out)
+            try:
+                _run_doc_tool(["pandoc", str(src), "-o", str(out)], tool="pandoc")
+                _check_output_size(out)
+            except (_DocToolError, _MediaToolError):
+                # Fail-closed hygiene (Nemo hull #9): a failed/oversized render must
+                # not leave a partial hidden output behind to pollute artifact scans.
+                out.unlink(missing_ok=True)
+                raise
             return out, f"rendered .{fmt} via pandoc"
         if fmt == "pdf":
             docx_tmp = _media_out(artifacts_root, ".docx")
