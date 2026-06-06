@@ -1,10 +1,12 @@
 # Skill/tool binding + deterministic assembly arc
 
-**Status:** DESIGN (not built). Opened 2026-06-05 after the first live wide-fan-out
-run ("Have Robot, Will Travel" anthology). **Rewritten 2026-06-05** after verifying
-the real root cause (the first draft's "planner forgot to tag the skill" diagnosis
-was WRONG — the skill was tagged) and after Clif's directives on the sandbox and the
-skill/tool-tag economics.
+**Status:** BUILT + TEAM-REVIEWED, held local on `fix/assembly-engine-binds` pending
+Clif's merge (2026-06-05). **Nemo (hull) SIGNED OFF** and **Lovecraft (coherence)
+SIGNED OFF** — see "Review outcome" below. Opened 2026-06-05 after the first live
+wide-fan-out run ("Have Robot, Will Travel" anthology). **Rewritten 2026-06-05** after
+verifying the real root cause (the first draft's "planner forgot to tag the skill"
+diagnosis was WRONG — the skill was tagged) and after Clif's directives on the sandbox
+and the skill/tool-tag economics.
 
 ## What happened (the live run that opened this)
 
@@ -183,3 +185,43 @@ the no-regress guard (#86) as another engine-bound deliverable invariant.
   arc (the honest count+names version already ships).
 - **JT over-fit (#97)** — the Leader reaching for make/use-a-template instead of
   producing.
+
+## Review outcome (2026-06-05, Message-in-a-Bottle)
+
+Both reviewers signed; branch held local pending Clif's merge. Letters +
+verdicts under `~/Message in a Bottle/2026-06-05-*-assembly-arc*`.
+
+**Lovecraft (coherence): SIGN-OFF, first pass.** "One coherent move — 'engine binds
+the mechanical truth of the artifact' — executed without visible seams." One
+structural refinement (converged with Nemo #4): make deliverable validation
+family-agnostic, not document-shaped. Implemented (see below). Also named the
+through-line: fail-closed render + magic-byte gate + hollow-success are ONE
+principle, the **deliverable integrity invariant** (prevention / detection /
+reporting).
+
+**Nemo (hull): BLOCK → close-out → round-2 SIGN-OFF.** Found one real hull breach +
+several hardening defects the green suite was blind to:
+- **BLOCKER (#1/#2/#11) — cross-goal unit over-inclusion.** First fix (scope to the
+  immediately-preceding goal) was a heuristic and re-blocked: a support/research
+  deliverable landing right before the assembly could still be selected. SEALED in
+  round 2: units are resolved by the wide-wave UNIT SIGNATURE — a goal with ≥2
+  deliverables ALL of the same `artifact_kind` — and wired ONLY when EXACTLY ONE
+  prior goal matches; zero or multiple → fail-closed (producer-manifest fallback). A
+  singleton/mixed-kind support goal can never qualify. Product-agnostic by
+  construction (count + kind; a code fan-out binds like a text one).
+- **MAJORs (all closed):** `resolve_tool` now enforces absolute paths + rejects
+  relative overrides + curated-dirs-before-PATH (#6/#7); P5 honestly scoped as a
+  magic-byte FAMILY gate AND made family-complete with media signatures + offset-4
+  `ftyp` (#4, the convergent fix); `_assemble_document` catches both error types so
+  an oversized render fails closed (#8); cardinality required + case-insensitive +
+  `per-item`-needs-`per` (#12/#13).
+- **MINORs (closed):** stale render temp unlinked (#9); checksum rehashed after move
+  (#10). #5 (BOM/preamble false-fail) accepted unchanged by Nemo's own severity call.
+
+**Named follow-on (Nemo, NOT required to close):** to bind through TWO distinct
+same-kind fan-out goals (currently fail-closed), the engine needs an explicit
+planner-declared source signal (unit-set provenance) — a planner-side enhancement,
+its own arc.
+
+**Gates at sign-off:** ruff PASS; `scripts/smoke/assembly-arc/smoke.py` PASS; full
+suite 2941 green.
