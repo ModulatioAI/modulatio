@@ -5226,19 +5226,20 @@ class Orchestrator:
         """P1 (engine binds the assembly — suspenders): wire a CROSS-GOAL assembler
         task to the unit tasks it combines when the same-goal wiring found none.
 
-        Goals carry no dependency edges (they run by plan order, which is goal-id
-        order). The units are the DELIVERABLE (non-assembler) tasks of the
-        IMMEDIATELY-PRECEDING goal — the single goal with the highest id that ran
-        BEFORE this assembler's goal and produced deliverables (the 'write N units'
-        goal right before the 'assemble them' goal). Scoping to ONE prior goal — not
-        'all other goals' — is the fix for Nemo's BLOCKER: a research→write→assemble
-        run must NOT sweep the research deliverable into the book. Under-including is
-        safer than over-including: a mechanically-real book with the WRONG units
-        passes P5 (real bytes, wrong content); a short book is caught by QC/size
-        floors. Populating ``depends_on`` gives BOTH the engine manifest AND assembly
-        QC the authoritative unit set. No-op for an assembler that already has deps;
-        no prior deliverable-producing goal → leaves deps empty (the producer
-        manifest path, P5-backstopped, is the fallback)."""
+        Goals carry no dependency edges, so the units are resolved by the wide-wave
+        UNIT SIGNATURE, not by position: a fan-out goal holds ≥2 DELIVERABLE units
+        all of the SAME ``artifact_kind`` (the planner binds N same-kind units into
+        one goal — Phase 1A/1.5). A research/support deliverable goal is a singleton
+        or mixed-kind, so it can NEVER qualify as a unit source.
+
+        SEALED INVARIANT (Nemo BLOCKER, close-out re-review): among the PRIOR goals
+        (id < the assembler's; plan order = goal-id order), wire the assembler ONLY
+        when EXACTLY ONE goal carries the fan-out signature. Zero or multiple →
+        FAIL-CLOSED (deps stay empty → the producer-manifest path, P5/QC-backstopped)
+        — never guess which goal holds the units, and never let an immediately-
+        preceding support/research deliverable become an authoritative unit. This is
+        not 'rarity by planner order'; it's a hard structural gate. No-op for an
+        assembler that already has deps (same-goal wiring or planner-declared)."""
         pending = [t for t in tasks if _is_assembler_task(t) and not t.depends_on]
         if not pending:
             return
@@ -5258,22 +5259,21 @@ class Orchestrator:
                 and t.deliverable
                 and t.output_path
                 and t.goal_id
-                and t.goal_id != a.goal_id
+                and t.goal_id < a.goal_id  # prior goals only (plan order)
             ]
-            # Goals that ran BEFORE the assembler's goal (plan order = goal-id order)
-            # and produced deliverables. The units come from the LAST of these — the
-            # goal immediately preceding the assembly — never from an earlier
-            # research/setup goal.
-            prior = sorted({t.goal_id for t in candidates if t.goal_id < a.goal_id})
-            if not prior:
-                continue
-            src_goal = prior[-1]
-            units = sorted(
-                (t for t in candidates if t.goal_id == src_goal),
-                key=lambda t: t.id,  # plan order: T-001 < T-002 < … (zero-padded)
-            )
-            if units:
-                a.depends_on = [t.id for t in units]
+            by_goal: dict[str, list[Task]] = {}
+            for t in candidates:
+                by_goal.setdefault(t.goal_id, []).append(t)
+            # Fan-out goals: ≥2 deliverables, ALL the same artifact_kind. A singleton
+            # or mixed-kind support/research goal is excluded by construction.
+            fanout = [
+                gid for gid, ts in by_goal.items()
+                if len(ts) >= 2 and len({t.artifact_kind for t in ts}) == 1
+            ]
+            if len(fanout) != 1:
+                continue  # 0 or >1 fan-out goals → AMBIGUOUS → fail-closed
+            units = sorted(by_goal[fanout[0]], key=lambda t: t.id)
+            a.depends_on = [t.id for t in units]
 
     def _assembly_manifest_from_deps(self, task: "Task") -> "dict | None":
         """P1 (engine binds the assembly): build an assembly manifest from the

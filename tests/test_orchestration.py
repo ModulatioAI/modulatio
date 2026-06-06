@@ -8956,43 +8956,57 @@ def test_qc_review_rejects_fabricated_binary(project, tmp_path):
     assert verdict2.passed is False and defect2 == "environmental"
 
 
-def test_cross_goal_wiring_scopes_to_immediately_preceding_goal(project, tmp_path):
-    """Nemo BLOCKER #1/#2/#11: cross-goal resolution must NOT sweep an earlier
-    research/support deliverable into the assembly. A research(G-001) -> write(G-002,
-    the stories) -> assemble(G-003) run must wire the assembler to ONLY the G-002
-    stories, never the G-001 research note."""
+def test_cross_goal_wiring_is_product_agnostic_and_sealed(project, tmp_path):
+    """Nemo BLOCKER, sealed (close-out re-review). Cross-goal resolution targets the
+    wide-wave UNIT SIGNATURE — a goal with >=2 deliverables of the SAME artifact_kind
+    — for ANY product type, never 'stories'. It fails CLOSED on ambiguity so a
+    support/research deliverable can never become an authoritative unit."""
     from uuid import uuid4
-    from modulatio import store
+    from modulatio import store, vault
     from modulatio.types import Goal, Task
-
-    artifacts = tmp_path / "art"
-    artifacts.mkdir()
-    orch = _assembly_orch(project, tmp_path, artifacts)
     code = project.code
-    pid = uuid4()
-    for gid, desc in (("X-G-001", "research"), ("X-G-002", "write the stories"),
-                      ("X-G-003", "assemble")):
-        store.save_goal(code, Goal(id=gid, project_id=pid, description=desc,
-                                   success_criteria="s"))
-    # research deliverable in the EARLIER goal — must be excluded
-    store.save_task(code, Task(id="X-T-001", project_id=pid, goal_id="X-G-001",
-                               description="research note", output_path="research.md",
-                               deliverable=True))
-    # the real units in the immediately-preceding goal
-    store.save_task(code, Task(id="X-T-002", project_id=pid, goal_id="X-G-002",
-                               description="story 1", output_path="s1.md",
-                               deliverable=True))
-    store.save_task(code, Task(id="X-T-003", project_id=pid, goal_id="X-G-002",
-                               description="story 2", output_path="s2.md",
-                               deliverable=True))
-    asm = Task(id="X-T-009", project_id=pid, goal_id="X-G-003", description="assemble",
-               required_skills=["document-assembly"], deliverable=True,
-               output_path="book.pdf")
 
-    orch._wire_cross_goal_assembler_deps([asm])
+    def scenario(rid, goals, units, asm_goal, asm_id):
+        vault.init_run(code, rid, "obj")
+        project.run_id = rid  # isolate each scenario's store scope
+        art = tmp_path / rid
+        art.mkdir()
+        orch = _assembly_orch(project, tmp_path, art)
+        for gid in goals:
+            store.save_goal(code, Goal(id=gid, project_id=uuid4(), description=gid,
+                                       success_criteria="s"), run_id=rid)
+        for tid, gid, kind in units:
+            store.save_task(code, Task(id=tid, project_id=uuid4(), goal_id=gid,
+                                       description="u", output_path=f"{tid}.x",
+                                       artifact_kind=kind, deliverable=True), run_id=rid)
+        asm = Task(id=asm_id, project_id=uuid4(), goal_id=asm_goal,
+                   description="assemble", required_skills=["document-assembly"],
+                   deliverable=True, output_path="out.pdf")
+        orch._wire_cross_goal_assembler_deps([asm])
+        return asm
 
-    assert asm.depends_on == ["X-T-002", "X-T-003"]  # stories only
-    assert "X-T-001" not in asm.depends_on  # research NOT swept in
+    # (a) product-agnostic: a CODE fan-out (not text) binds just the same.
+    asm = scenario("20260606T000001Z-aaaaaa", ["G-001", "G-002"],
+                   [("T-001", "G-001", "code"), ("T-002", "G-001", "code")],
+                   "G-002", "T-009")
+    assert asm.depends_on == ["T-001", "T-002"]
+
+    # (b) a SUPPORT singleton landing right before the assembly (the order Nemo
+    #     named) is excluded — singletons are not fan-out goals.
+    asm = scenario("20260606T000002Z-aaaaaa", ["G-001", "G-002", "G-003"],
+                   [("T-001", "G-001", "research"),       # research singleton
+                    ("T-002", "G-002", "text"), ("T-003", "G-002", "text"),  # units
+                    ("T-004", "G-003", "design")],        # support, just before
+                   "G-004", "T-009")
+    assert asm.depends_on == ["T-002", "T-003"]
+    assert "T-001" not in asm.depends_on and "T-004" not in asm.depends_on
+
+    # (c) TWO fan-out goals → AMBIGUOUS → fail-closed (empty deps, producer fallback).
+    asm = scenario("20260606T000003Z-aaaaaa", ["G-001", "G-002", "G-003"],
+                   [("T-001", "G-001", "text"), ("T-002", "G-001", "text"),
+                    ("T-003", "G-002", "media"), ("T-004", "G-002", "media")],
+                   "G-003", "T-009")
+    assert asm.depends_on == []
 
 
 def test_assembler_engine_binds_in_every_producer_mode(project, tmp_path):
