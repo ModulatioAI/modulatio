@@ -8956,6 +8956,44 @@ def test_qc_review_rejects_fabricated_binary(project, tmp_path):
     assert verdict2.passed is False and defect2 == "environmental"
 
 
+def test_assembler_engine_binds_in_every_producer_mode(project, tmp_path):
+    """Debug fix (HRWT): the engine-bind must fire for an assembler in ANY
+    producer_mode — generate/diff/revise/edit — not only generate. Before the fix
+    the mode router sent a non-generate assembler into _producer_patch/_diff and
+    the producer fabricated a digest. The producer LLM call must NEVER be made for
+    a resolvable assembler, whatever the mode."""
+    from uuid import uuid4
+    from modulatio import store
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.txt").write_text("UNIT ONE BODY")
+    (artifacts / "s2.txt").write_text("UNIT TWO BODY")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    code = project.code
+    for tid, op in (("X-T-001", "s1.txt"), ("X-T-002", "s2.txt")):
+        store.save_task(code, Task(id=tid, project_id=uuid4(), goal_id="X-G-001",
+                                   description="u", output_path=op, deliverable=True))
+    asm = Task(id="X-T-009", project_id=uuid4(), goal_id="X-G-002",
+               description="assemble", required_skills=["document-assembly"],
+               depends_on=["X-T-001", "X-T-002"], output_path="book.md")
+
+    def _boom(*a, **k):
+        raise AssertionError("producer LLM was called for an assembler task!")
+    orch._run_agent_call = _boom  # type: ignore[method-assign]
+    orch._increment_turn_persisted = lambda: None  # type: ignore[method-assign]
+    orch._sweep_abandoned_candidates = lambda: None  # type: ignore[method-assign]
+
+    for mode in ("generate", "diff", "revise", "edit", "patch"):
+        asm.producer_mode = mode
+        path, _checksum, _tok = orch._producer_execute(asm)
+        body = path.read_text()
+        assert "UNIT ONE BODY" in body and "UNIT TWO BODY" in body, (
+            f"mode={mode}: engine did not bind the real units"
+        )
+
+
 # ── A2: assembly QC structural pass (no LLM byte-read) ────────────────────
 
 

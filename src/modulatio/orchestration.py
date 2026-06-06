@@ -3438,6 +3438,44 @@ class Orchestrator:
             return ""
         return team_memory.render_for_prompt(hits)
 
+    def _engine_assemble_deliverable(
+        self, task: Task, path: Path
+    ) -> tuple[Path, str, int]:
+        """P1 (engine binds the assembly): produce an assembler task's deliverable
+        DIRECTLY from its units — NO producer LLM call, in ANY mode. The engine
+        builds the manifest from the task's authoritative deps, joins the unit
+        bodies from disk, and (for a declared binary format) renders the real
+        binary. Returns ``(path, checksum, token_count)`` like ``_producer_execute``.
+
+        Only call when ``_assembly_manifest_from_deps(task) is not None`` — i.e. the
+        engine can resolve the units. A producer never sees the units, so the
+        deliverable can't be a fabricated digest (the HRWT failure)."""
+        import shutil as _shutil
+
+        assembled = self._apply_assembly_manifest(task, "")
+        rec = self._assembly_records.get(task.id)
+        if rec is not None and getattr(rec, "output_file", None) is not None:
+            # Binary deliverable (rendered .docx/.pdf or a media composite): move
+            # the engine-produced file onto the deliverable path; the record's
+            # checksum is of those exact bytes.
+            src = rec.output_file
+            try:
+                _shutil.move(str(src), str(path))
+            except OSError:
+                _shutil.copyfile(str(src), str(path))
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
+            self._record_artifact_write(path)
+            return path, rec.final_checksum, 0
+        # Text deliverable: the mechanically-joined body.
+        response = assembled if assembled is not None else ""
+        path.write_text(response)
+        self._record_artifact_write(path)
+        checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
+        return path, checksum, len(response.split())
+
     def _producer_execute(self, task: Task, corrective_notes: str = "") -> tuple[Path, str, int]:
         """Drafter writes the task's artifact to artifacts/drafts/.
 
@@ -3475,6 +3513,18 @@ class Orchestrator:
         else:
             path = artifacts_root / "drafts" / f"{task.id.lower()}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
+
+        # P1 (engine binds the assembly): an assembler task is a MECHANICAL
+        # multi-unit join the engine performs from disk — it must NEVER run a
+        # producer LLM call, in ANY mode. The producer-mode dispatch below would
+        # otherwise route a non-generate assembler into _producer_patch/_diff
+        # (which fabricated a "# Collected Stories" digest in the HRWT run, masking
+        # the real stories). Bind from the authoritative deps up front, before any
+        # mode branch, so the deliverable is always the real units, never a
+        # producer's invention. (No resolvable deps → falls through to the producer
+        # manifest path below, the cross-goal-less fallback.)
+        if _is_assembler_task(task) and self._assembly_manifest_from_deps(task) is not None:
+            return self._engine_assemble_deliverable(task, path)
 
         # Slice #9e: if the primary declared skill is a tool executor,
         # run the tool and skip the LLM path entirely. QC still runs
@@ -3692,23 +3742,11 @@ class Orchestrator:
         # (MVP-default "drafter"; a crypto harness would pass "analyst",
         # a software shop "engineer", etc — Modulatio is output-agnostic).
         producer_role = self.default_producer_role
-        # P1 (engine binds the assembly): an assembler task is a MECHANICAL
-        # multi-unit join the ENGINE performs by reading unit bodies from disk.
-        # Skip the overflow-prone producer LLM call entirely when the engine can
-        # resolve the units — the producer pulling all units into its context is
-        # what overflowed, decompose-spiralled, and fabricated a fake deliverable
-        # (HRWT 2026-06-05). With no producer output, _apply_assembly_manifest
-        # (below) builds the manifest from the task's authoritative deps and
-        # assembles deterministically through the existing write path.
-        if (
-            _is_assembler_task(task)
-            and self._assembly_manifest_from_deps(task) is not None
-        ):
-            raw_response = ""
-        else:
-            raw_response = self._run_agent_call(
-                task.assigned_agent_id, producer_role, prompt
-            )
+        # (Assembler tasks with resolvable units never reach here — they're bound
+        # by the engine at the top of this method, before the mode dispatch.)
+        raw_response = self._run_agent_call(
+            task.assigned_agent_id, producer_role, prompt
+        )
         # (c11): extract producer inbox_proposals BEFORE the
         # summary parser runs. The summary parser takes everything
         # after the LAST summary heading; if inbox_proposals lives
