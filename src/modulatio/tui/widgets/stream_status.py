@@ -94,6 +94,7 @@ class StreamStatus(Static):
         self._frame = 0
         self._started_at = 0.0
         self._working = 1          # §5: producers in flight (TEAM lane)
+        self._working_names: list[str] = []  # Phase 1: WHO is in flight, by name
 
     def on_mount(self) -> None:
         # 0.1s drives the spinner; the elapsed counter reads a monotonic clock.
@@ -106,16 +107,20 @@ class StreamStatus(Static):
 
     def set_activity(
         self, phase: str, actor: str | None = None, *, working: int = 1,
+        working_names: "list[str] | None" = None,
     ) -> None:
         """Show the verb for the current phase, spinner running. ``actor`` is
         the worker's user-given name (used on the TEAM lane). ``working`` is the
         number of producers in flight — when > 1 the TEAM lane shows the parallel
-        count so the operator can see the concurrency (§5)."""
+        count so the operator can see the concurrency (§5). ``working_names``
+        (Phase 1) is the in-flight producers BY NAME — when present and > 1, the
+        status shows *who* is running in parallel, not just how many."""
         if self._verb is None or self._error is not None or self._done:
             self._started_at = time.monotonic()
         self._verb = _verb_for(phase)
         self._actor = actor
         self._working = max(1, working)
+        self._working_names = list(working_names or [])
         self._error = None
         self._done = False
         self._render_status()
@@ -150,11 +155,14 @@ class StreamStatus(Static):
             if self._lane == "team" and self._actor:
                 phrase = f"{self._actor} is {self._verb}"
             text.append(f"{phrase}…", style="#ffb000")
-            # §5: surface parallelism — N producers working at once.
+            # §5 + Phase 1: surface parallelism — N producers working at once, BY
+            # NAME when we have them ("· 3 producers working: a, b, c"), else the
+            # count alone. Names make concurrent work read as concurrent.
             if self._lane == "team" and self._working > 1:
-                text.append(
-                    f"  · {self._working} producers working", style="bold #ff6b35",
-                )
+                label = f"  · {self._working} producers working"
+                if self._working_names:
+                    label += ": " + ", ".join(self._working_names)
+                text.append(label, style="bold #ff6b35")
             elapsed = time.monotonic() - self._started_at
             if elapsed >= _ELAPSED_AFTER:
                 text.append(f"  ({int(elapsed)}s)", style="#b08858")

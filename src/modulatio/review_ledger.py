@@ -67,6 +67,73 @@ def file_checksum(path: Path) -> str:
     return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
 
 
+#: P5 — declared-format magic bytes, the SHARED deliverable-integrity gate for
+#: EVERY assembler family (document, media, future), not a document-only check
+#: (Nemo hull #4, Lovecraft Q2/Q6). A deliverable whose extension names a known
+#: binary format MUST carry that format's signature.
+#:
+#: HONEST SCOPE — this is a magic-byte FAMILY gate, not a deep format validator:
+#:   - It catches the HRWT failure cold: a TEXT blob named ``.pdf``/``.docx``/``.mp4``
+#:     (fabrication-as-binary) is rejected.
+#:   - It does NOT discriminate WITHIN a container family: any ZIP passes for any of
+#:     ``.docx/.xlsx/.pptx/.odt/.epub`` (they share the ``PK`` sig); any ISO-BMFF
+#:     file passes for any of ``.mp4/.m4a/.mov`` (they share the ``ftyp`` box). A
+#:     real ``.docx`` renamed ``.xlsx`` is NOT caught — that's format-family
+#:     confusion, out of scope; provenance (AssemblyRecord checksum) covers the
+#:     mechanically-real-but-wrong case for media.
+#:   - Extensions with no entry (``.md``/``.txt``/``.json``/source) impose NOTHING —
+#:     Modulatio enforces only the format the deliverable itself DECLARES.
+_ZIP_SIGS: tuple[bytes, ...] = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+#: Container formats whose signature is the ISO-BMFF ``ftyp`` box at byte OFFSET 4,
+#: not byte 0 — handled specially below.
+_FTYP_EXTS: "frozenset[str]" = frozenset({"mp4", "m4a", "m4v", "mov"})
+_FORMAT_MAGIC: "dict[str, tuple[bytes, ...]]" = {
+    # documents
+    "pdf": (b"%PDF-",),
+    "docx": _ZIP_SIGS, "xlsx": _ZIP_SIGS, "pptx": _ZIP_SIGS,
+    "odt": _ZIP_SIGS, "ods": _ZIP_SIGS, "odp": _ZIP_SIGS,
+    "epub": _ZIP_SIGS, "zip": _ZIP_SIGS,
+    "rtf": (b"{\\rtf",),
+    # images
+    "png": (b"\x89PNG\r\n\x1a\n",),
+    "jpg": (b"\xff\xd8\xff",), "jpeg": (b"\xff\xd8\xff",),
+    "gif": (b"GIF87a", b"GIF89a"),
+    # audio / video (media family — same fabrication gate, no longer document-only)
+    "mp3": (b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"),
+    "wav": (b"RIFF",), "ogg": (b"OggS",), "flac": (b"fLaC",),
+    "webm": (b"\x1a\x45\xdf\xa3",), "mkv": (b"\x1a\x45\xdf\xa3",),
+}
+
+
+def verify_declared_format(path: Path) -> "tuple[bool, str]":
+    """P5 — the SHARED deliverable-integrity gate (all families). A deliverable that
+    DECLARES a known binary format (by extension) must carry that format's magic
+    bytes.
+
+    Returns ``(True, "")`` on a match, and for any extension with no known signature
+    (text/unknown impose nothing). Returns ``(False, reason)`` when a declared-binary
+    deliverable's bytes are NOT that format — a text blob named ``.pdf``/``.docx``/
+    ``.mp4``, the fabrication this gate rejects. Pure; start-of-file (and the
+    offset-4 ``ftyp`` box for the mp4 family). See ``_FORMAT_MAGIC`` for the honest
+    scope: this catches fabrication-as-binary, not within-family format confusion."""
+    ext = path.suffix.lower().lstrip(".")
+    is_ftyp = ext in _FTYP_EXTS
+    sigs = _FORMAT_MAGIC.get(ext)
+    if not sigs and not is_ftyp:
+        return True, ""  # not a known binary format → nothing to enforce
+    try:
+        head = path.read_bytes()[:16] if path.is_file() else b""
+    except OSError as exc:
+        return False, f"unreadable ({type(exc).__name__})"
+    ok = head[4:8] == b"ftyp" if is_ftyp else any(head.startswith(s) for s in sigs)
+    if ok:
+        return True, ""
+    return False, (
+        f"declared .{ext} but the bytes start {head[:8]!r} — not a real {ext} "
+        f"(looks fabricated, e.g. text named .{ext})"
+    )
+
+
 def is_passed(task: "Task") -> bool:
     """True if ``task`` carries a content-addressed QC pass-mark."""
     return bool(getattr(task, "qc_passed_checksum", None))

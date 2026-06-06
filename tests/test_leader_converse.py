@@ -167,13 +167,70 @@ def test_create_job_template_tool_writes_and_lists(project: Project):
 
     orch = Orchestrator(project, _runners())
     out = orch._leader_function_tools()["create_job_template"].call(
-        name="daily-brief", description="A daily brief", interview="Ask the topic.")
+        name="daily-brief", description="A daily brief", interview="Ask the topic.",
+        cardinality="one")
     assert "Created" in out
     assert "daily-brief" in job_templates.list_job_templates(PROJECT_CODE)
     # idempotency guard: a second create on the same name is reported, not raised
     again = orch._leader_function_tools()["create_job_template"].call(
-        name="daily-brief", description="dup", interview="x")
+        name="daily-brief", description="dup", interview="x", cardinality="one")
     assert "already exists" in again
+
+
+def test_create_job_template_captures_cardinality(project: Project):
+    """The cardinality-bug fix: the Leader's create_job_template tool now carries
+    the output cardinality into the JT, so a multi-unit job is codified as a
+    FAN-OUT (fixed:N / per-item) instead of always defaulting to 'one' — which
+    collapsed an 8-story anthology into a single task (HRWT 2026-06-05)."""
+    from modulatio import job_templates
+
+    orch = Orchestrator(project, _runners())
+    tool = orch._leader_function_tools()["create_job_template"]
+
+    out = tool.call(name="anthology", description="8-story book",
+                    interview="Ask the stories.", cardinality="fixed:8",
+                    artifact_kind="document")
+    assert "fixed:8" in out
+    jt = job_templates.load_with_metadata("anthology", project_code=PROJECT_CODE)
+    assert jt.output_spec.cardinality == "fixed:8"
+    assert jt.output_spec.artifact_kind == "document"
+
+    # A bare count is normalized to the engine grammar ("8" -> "fixed:8").
+    tool.call(name="bare-count", description="N pieces", interview="x",
+              cardinality="8")
+    assert job_templates.load_with_metadata(
+        "bare-count", project_code=PROJECT_CODE).output_spec.cardinality == "fixed:8"
+
+    # per-item:<param> splits the param out.
+    tool.call(name="per-founder", description="one per founder", interview="x",
+              cardinality="per-item:founders")
+    jt3 = job_templates.load_with_metadata("per-founder", project_code=PROJECT_CODE)
+    assert jt3.output_spec.cardinality == "per-item"
+    assert jt3.output_spec.per == "founders"
+
+
+def test_create_job_template_cardinality_validation(project: Project):
+    """Nemo hull #12/#13: cardinality is REQUIRED (no silent default-to-one), is
+    normalized CASE-insensitively, and 'per-item' must name its 'per' param —
+    otherwise the job has no enforceable output count (the bug class in disguise)."""
+    from modulatio import job_templates
+
+    orch = Orchestrator(project, _runners())
+    tool = orch._leader_function_tools()["create_job_template"]
+
+    # missing cardinality → rejected, not silently "one"
+    assert "required" in tool.call(name="a", description="d", interview="i").lower()
+    # per-item with no per binding → rejected
+    out = tool.call(name="b", description="d", interview="i", cardinality="per-item")
+    assert "per" in out.lower() and "couldn't" in out.lower()
+    # case/space-tolerant normalization: "Fixed: 8" → fixed:8
+    assert "Created" in tool.call(name="c", description="d", interview="i",
+                                  cardinality="Fixed: 8")
+    assert job_templates.load_with_metadata(
+        "c", project_code=PROJECT_CODE).output_spec.cardinality == "fixed:8"
+    # garbage cardinality → rejected
+    assert "couldn't" in tool.call(name="e", description="d", interview="i",
+                                   cardinality="lots").lower()
 
 
 def test_pending_approvals_surface_and_decide(project: Project):
@@ -213,9 +270,11 @@ def test_pending_approvals_surface_and_decide(project: Project):
     assert orch._pending_approvals_block() == ""
 
 
-def test_leader_can_command_the_team(project: Project):
-    """The converse loop offers the Leader his orchestrate function as tools:
-    run_job (command the producer swarm) + list_job_templates."""
+def test_leader_does_not_self_start_jobs(project: Project):
+    """The Leader has NO ``run_job`` tool — a job is launched ONLY by the operator's
+    ``/kickoff … /end`` brackets, never by the Leader self-starting from a chat turn
+    (which made every conversational message spawn a job). He keeps his other
+    functions (job-template management, etc.)."""
     offered: dict = {}
 
     def mock_leader(*, messages, tools, tool_choice=None):
@@ -228,10 +287,10 @@ def test_leader_can_command_the_team(project: Project):
         chat_runner_models={"leader": "mock-model"},
     )
     orch.converse("run the weekly brief for me")
-    assert "run_job" in offered["names"]
+    assert "run_job" not in offered["names"]  # he cannot self-start a job
     assert "list_job_templates" in offered["names"]
 
-    # the tools themselves are bound to this Leader
+    # the tool itself is gone from the Leader's function set
     lft = orch._leader_function_tools()
-    assert "run_job" in lft and "list_job_templates" in lft
-    assert lft["run_job"].params_schema["required"] == ["objective"]
+    assert "run_job" not in lft
+    assert "list_job_templates" in lft

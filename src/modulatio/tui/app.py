@@ -46,9 +46,9 @@ from modulatio.tui.widgets.activity_log import ActivityLog
 from modulatio.tui.widgets.chat_input import ChatInput
 from modulatio.tui.widgets.stream_status import StreamStatus
 from modulatio.tui.widgets.stream_view import (
-    LEADER_ROLES,
-    TEAM_ROLES,
     StreamView,
+    is_leader_role,
+    is_team_role,
     _humanize,
 )
 from modulatio.types import ActivityEvent, Project, ProjectState
@@ -307,10 +307,13 @@ class ModulatioApp(App):
         # Select text in a TV stream (drag), then Ctrl+C to copy it to the OS
         # clipboard; Ctrl+V pastes the OS clipboard into the focused text field.
         # (Quit is Alt+Q / Ctrl+Q.)
-        ("ctrl+c", "copy_text", "COPY"),
-        # priority=True so Ctrl+V runs the OS-clipboard paste BEFORE a focused
-        # Input/TextArea's native paste (which only sees Textual's internal
-        # clipboard, not the OS one).
+        #
+        # priority=True on BOTH so our pyperclip (OS-clipboard) handlers win over
+        # the focused widget's native Ctrl+C/Ctrl+V. Without priority on Ctrl+C, a
+        # focused TextArea (the chatbox) lets Textual's built-in selection-copy
+        # (OSC-52 → terminal clipboard, the unreliable path) shadow our handler —
+        # the recurring "copy stopped working" regression. Symmetric with Ctrl+V.
+        Binding("ctrl+c", "copy_text", "COPY", priority=True),
         Binding("ctrl+v", "paste", "PASTE", priority=True),
     ]
 
@@ -489,12 +492,25 @@ class ModulatioApp(App):
         # can signal its abort_event from the main thread while we run here.
         self._kickoff_orch = orch
         summary = orch.kickoff(objective, attachments=attachments)
+        # Honest outcome (no hollow success): a run that RETURNS is not the same as
+        # a run that DELIVERED. Count what actually landed vs what blocked / never
+        # finished, so the verdict can't claim "deliverables are in" over a blocked,
+        # empty run (HRWT 2026-06-05).
+        from modulatio.types import GoalStatus, TaskStatus
+        blocked_tasks = sum(
+            1 for t in summary.tasks if t.status == TaskStatus.BLOCKED
+        )
+        incomplete_goals = sum(
+            1 for g in summary.goals if g.status != GoalStatus.COMPLETED
+        )
         return {
             "mode": mode,
             "goals": len(summary.goals),
             "tasks": len(summary.tasks),
             "drafts": len(summary.drafts),
             "errors": len(summary.errors),
+            "blocked_tasks": blocked_tasks,
+            "incomplete_goals": incomplete_goals,
         }
 
     def _update_kickoff_progress(self) -> None:
@@ -540,17 +556,35 @@ class ModulatioApp(App):
             btn.disabled = False
         except NoMatches:
             pass
-        # Settle the team floor's status line — that's where the work ran.
+        # Settle the team floor's status line — that's where the work ran. A run
+        # that returned but delivered nothing / left blocked work is NOT a clean
+        # ✓done; show it as an error state so the floor doesn't read "success".
+        delivered = (result or {}).get("drafts", 0)
+        blocked = (result or {}).get("blocked_tasks", 0)
+        incomplete = (result or {}).get("incomplete_goals", 0)
+        no_deliver = error is None and (
+            delivered == 0 or blocked > 0 or incomplete > 0
+        )
         team_status = self._lane_status("stream-team-status")
         if error is not None:
             if team_status is not None:
                 team_status.set_error(str(error)[:80])
+        elif no_deliver:
+            if team_status is not None:
+                team_status.set_error("finished without deliverables")
         else:
             if team_status is not None:
                 team_status.set_done()
         # Render the result on the floor's status line …
         if error is not None:
             self._set_kickoff_status(f"Kickoff failed: {error}")
+        elif no_deliver:
+            self._set_kickoff_status(
+                f"Kickoff finished WITHOUT deliverables — "
+                f"goals: {result['goals']}, tasks: {result['tasks']}, "
+                f"drafts: {delivered}, blocked: {blocked}, "
+                f"unfinished goals: {incomplete}, errors: {result['errors']}"
+            )
         else:
             self._set_kickoff_status(
                 f"Completed {result['mode']} kickoff — "
@@ -580,11 +614,28 @@ class ModulatioApp(App):
                 f"That job hit a wall — {error}. Want me to take another run at it?"
             )
             return
-        msg = (
-            f"Job's done — {result['goals']} goal(s), {result['tasks']} task(s), "
-            f"{result['drafts']} draft(s), {result['errors']} error(s). "
-            "Deliverables are in. Ask me anything about it."
-        )
+        delivered = result.get("drafts", 0)
+        blocked = result.get("blocked_tasks", 0)
+        incomplete = result.get("incomplete_goals", 0)
+        # No hollow success: only call it done-with-deliverables when something
+        # ACTUALLY landed and nothing blocked / stayed unfinished. A run that
+        # returned but produced nothing is a FAILURE the operator must hear plainly.
+        if delivered == 0 or blocked > 0 or incomplete > 0:
+            msg = (
+                f"That job did NOT finish cleanly — {result['goals']} goal(s), "
+                f"{result['tasks']} task(s), but only {delivered} deliverable(s)"
+                + (f", {blocked} blocked task(s)" if blocked else "")
+                + (f", {incomplete} unfinished goal(s)" if incomplete else "")
+                + (f", {result['errors']} error(s)" if result.get("errors") else "")
+                + ". Nothing usable landed — tell me to dig into what went wrong, "
+                "or F8 and we adjust."
+            )
+        else:
+            msg = (
+                f"Job's done — {result['goals']} goal(s), {result['tasks']} task(s), "
+                f"{delivered} deliverable(s). Deliverables are in. Ask me anything "
+                "about it."
+            )
         tv.add_leader_message(msg)
 
     def _build_real_runners(self) -> dict | None:
@@ -811,12 +862,13 @@ class ModulatioApp(App):
         team_stream = None
         for stream in self.query(StreamView):
             stream.add_event(event)
-            if stream.lane_roles == TEAM_ROLES:
+            if stream.lane == "team":
                 team_stream = stream
         # §5: a new run starts with a clean concurrency board (the leader-role
         # kickoff events don't reach the TEAM lane's own tracker).
         if team_stream is not None and event.phase in ("kickoff_started", "kickoff_ended"):
             team_stream.active_tasks.clear()
+            team_stream._last_producer_count = 0  # Phase 1: reset the wave marker
         # Fix: when a run ENDS — normal completion OR an F8 stop, both via the
         # engine's role="orchestrator" kickoff_ended — reset the TEAM spinner to
         # 'done'. Without this it sticks on the last producer phase and the Mod
@@ -824,25 +876,42 @@ class ModulatioApp(App):
         # lane's role set, so this is the only place that fires for BOTH the
         # direct-kickoff and the converse→run_job paths.
         if event.phase == "kickoff_ended":
-            status = self._lane_status("stream-team-status")
-            if status is not None:
-                status.set_done()
+            if getattr(self, "_kickoff_aborted", False):
+                # F8 kill: final clean of the TEAM TV once the run has fully
+                # unwound, so a late event from the in-flight step leaves no
+                # residue (the engine cleared goals/tasks/tickets). Chat untouched.
+                self._clear_team_tv()
+                self._kickoff_aborted = False
+            else:
+                status = self._lane_status("stream-team-status")
+                if status is not None:
+                    status.set_done()
+            # The run is over — return the LEADER lane to conversational standby.
+            # Without this the leader status sticks on its last working phase
+            # (typically ``leader_verify_ended`` = "rendering a verdict"), so a
+            # FINISHED job reads as forever-rendering-a-verdict. An open ticket is
+            # surfaced by the problem lamp (``ticket_opened`` below), NOT by parking
+            # the Leader in a perpetual verdict spinner.
+            leader_status = self._lane_status("stream-leader-status")
+            if leader_status is not None:
+                leader_status.set_idle()
         # Live status lines: the leader-lane phase drives the LEADER status;
         # team-lane phases the TEAM status, named by the worker. §5: when more
         # than one producer is in flight, surface the parallel count so the
         # operator can SEE the concurrency (invisible parallelism isn't shippable).
-        if event.role in LEADER_ROLES:
+        if is_leader_role(event.role):
             self._set_lane_status("stream-leader-status", event.phase)
-        elif event.role in TEAM_ROLES:
+        elif is_team_role(event.role):
             actor = self._agent_name(event.agent_id or event.role) or _humanize(
                 event.agent_id or event.role
             )
-            working = (
-                len(team_stream.active_producer_names())
-                if team_stream is not None else 1
+            names = (
+                team_stream.active_producer_names()
+                if team_stream is not None else []
             )
             self._set_lane_status(
-                "stream-team-status", event.phase, actor, working=working,
+                "stream-team-status", event.phase, actor,
+                working=len(names) or 1, working_names=names,
             )
         # A logged ticket is a problem the Leader will relay — light the
         # orange lamp so the operator notices even from the factory floor.
@@ -951,10 +1020,29 @@ class ModulatioApp(App):
         if orch is None:
             return
         orch.abort_event.set()  # thread-safe; the worker's kickoff loop reads it
+        # F8 blows out the pipes (Clif 2026-06-05): clear the TEAM TV now for instant
+        # kill feedback (and again when the run fully unwinds, so no late event re-
+        # fills it). The engine teardown finalizes goals/tasks/tickets at run-end.
+        # The LEADER chat is never touched.
+        self._kickoff_aborted = True
+        self._clear_team_tv()
         self._set_kickoff_status(
             "Stopping the run… finishing the current step, then halting. "
-            "The Leader will report what landed."
+            "The Mod Squad floor is cleared; the Leader will report what landed."
         )
+
+    def _clear_team_tv(self) -> None:
+        """Clear the TEAM (Mod Squad) TV transcript + its status line. The LEADER
+        chat lane is left intact. Best-effort (TUI may be mid-teardown)."""
+        try:
+            for sv in self.query(StreamView):
+                if getattr(sv, "lane", None) == "team":
+                    sv.clear()
+            status = self._lane_status("stream-team-status")
+            if status is not None:
+                status.set_idle()
+        except Exception:
+            pass
 
     def action_copy_text(self) -> None:
         """Ctrl+C → copy text from a TV to the clipboard so you can paste it
@@ -1063,11 +1151,11 @@ class ModulatioApp(App):
 
     def _set_lane_status(
         self, status_id: str, phase: str, actor: str | None = None,
-        *, working: int = 1,
+        *, working: int = 1, working_names: "list[str] | None" = None,
     ) -> None:
         try:
             self.query_one(f"#{status_id}", StreamStatus).set_activity(
-                phase, actor, working=working,
+                phase, actor, working=working, working_names=working_names,
             )
         except Exception:
             pass

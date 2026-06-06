@@ -187,7 +187,8 @@ def _safe_unit_path(name: str, artifacts_root: Path) -> Path | None:
 
 
 def assemble(
-    manifest: dict, artifacts_root: Path, strategy: str = "document"
+    manifest: dict, artifacts_root: Path, strategy: str = "document",
+    render_format: "str | None" = None,
 ) -> AssemblyResult:
     """Mechanically assemble the manifest's units per the named STRATEGY (Part B).
 
@@ -209,18 +210,31 @@ def assemble(
             missing=[str(u) for u in manifest.get("units", [])],
             errors=[f"unknown assembly strategy {strategy!r}"],
         )
+    if strategy == "document":
+        return _assemble_document(
+            manifest, artifacts_root, render_format=render_format
+        )
     return fn(manifest, artifacts_root)
 
 
-def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
+def _assemble_document(
+    manifest: dict, artifacts_root: Path, render_format: "str | None" = None,
+) -> AssemblyResult:
     """The ``document`` strategy: concatenate the manifest's unit files (read from
-    disk) into one body.
+    disk) into one body, then OPTIONALLY render that body into a declared binary
+    document format (``render_format`` — docx/odt/rtf/epub/pdf/…).
 
     Order is the manifest's ``units`` order — data, not opinion. Missing or
     unsafe units are recorded (never fabricated, never silently dropped);
     assembly proceeds best-effort with whatever resolved so the caller can
     ship-with-blocker. ``title_page`` leads, ``trailer`` trails, both
     optional; blocks are joined by ``separator``.
+
+    ``render_format`` is the deliverable's DECLARED format, not an assumption —
+    Modulatio is artifact-agnostic, so the engine renders whatever format the
+    deliverable asked for and imposes none when none is declared (the body stays
+    text). Render is fail-closed: a missing toolchain keeps the real text and
+    flags the binary as unrendered, never fabricates a binary.
     """
     title_page = manifest.get("title_page")
     trailer = manifest.get("trailer")
@@ -302,9 +316,26 @@ def _assemble_document(manifest: dict, artifacts_root: Path) -> AssemblyResult:
         if not over_cap:
             errors.append(f"assembled output exceeds {_MAX_TOTAL_BYTES} bytes")
         content = ""
-    return AssemblyResult(
+    result = AssemblyResult(
         content=content, units_used=used, missing=missing, errors=errors,
     )
+    # P4: render the assembled markdown into the deliverable's DECLARED binary
+    # document format, via an engine-owned tool. Fail-closed — a missing toolchain
+    # keeps the real text (an openable .md) and flags the binary as unrendered;
+    # never a fabricated binary. No render_format → text stands (no binary imposed).
+    if content and render_format:
+        try:
+            out_file, _msg = render_document(content, render_format, artifacts_root)
+            result.output_file = out_file
+        except (_DocToolError, _MediaToolError) as exc:
+            # Catch BOTH: a missing/failed render tool raises _DocToolError; the
+            # output-size cap (_check_output_size) raises _MediaToolError. Either way
+            # fail CLOSED — keep the real text, flag the binary as unrendered, never
+            # let it escape and never fabricate (Nemo hull #8).
+            result.errors.append(
+                f"binary render unavailable ({render_format}); kept text — {exc}"
+            )
+    return result
 
 
 def _assemble_code(manifest: dict, artifacts_root: Path) -> AssemblyResult:
@@ -535,15 +566,72 @@ def _media_kind(manifest: dict, resolved: "list[tuple[str, Path]]") -> str:
     return "bundle"
 
 
+#: Extra directories to search for an engine tool BEYOND ``PATH`` — the common
+#: non-PATH installs (a user's ~/bin, pipx/local, Homebrew, /opt, snap). The HRWT
+#: render failed only because pandoc lived in ``~/bin``, off the launching process's
+#: PATH; the engine should find a tool wherever it is, not only when the shell that
+#: started it happened to export the right PATH.
+_TOOL_SEARCH_DIRS: tuple[str, ...] = (
+    "~/bin", "~/.local/bin",
+    "/usr/local/bin", "/usr/bin", "/bin",
+    "/opt/bin", "/opt/local/bin", "/opt/homebrew/bin",
+    "/snap/bin",
+)
+
+
+def _usable_abs(p: "Path") -> bool:
+    """True iff ``p`` is an ABSOLUTE path to an executable regular file."""
+    return p.is_absolute() and p.is_file() and os.access(str(p), os.X_OK)
+
+
+def resolve_tool(name: str) -> "str | None":
+    """Resolve an external engine tool to an ABSOLUTE path, robust to ``PATH``.
+
+    Order (Nemo hull #6/#7 — the security contract is a real absolute,
+    PATH-independent invocation):
+
+    1. operator override ``MODULATIO_<NAME>_PATH`` — must be an ABSOLUTE path to an
+       executable. A *set-but-unusable* override (relative, missing, non-exec) is a
+       HARD STOP (returns None), never a silent fall-through to a different binary —
+       "use THIS" must not quietly become "use whatever's on PATH."
+    2. the curated absolute system dirs (:data:`_TOOL_SEARCH_DIRS`) — checked BEFORE
+       ``PATH`` so a contaminated or relative ``PATH`` entry cannot SHADOW
+       ``/usr/bin`` etc.
+    3. ``PATH`` last (``shutil.which``), and only if it yields an ABSOLUTE path
+       (relative / cwd ``PATH`` components are never trusted for an engine tool).
+
+    Returns ``None`` when genuinely unresolvable. The tool runs as a plain
+    engine-owned subprocess invoked by THIS absolute path — never inside the
+    producer sandbox."""
+    override = os.environ.get(f"MODULATIO_{name.upper().replace('-', '_')}_PATH")
+    if override:
+        p = Path(override)
+        return str(p) if _usable_abs(p) else None  # set ⇒ honor or fail; no fallthrough
+    for d in _TOOL_SEARCH_DIRS:
+        cand = (Path(d).expanduser() / name).resolve()
+        if _usable_abs(cand):
+            return str(cand)
+    found = shutil.which(name)
+    if found:
+        fp = Path(found)
+        if fp.is_absolute():
+            fp = fp.resolve()
+            if _usable_abs(fp):
+                return str(fp)
+    return None
+
+
 def _run_media_join(argv: "list[str]", *, tool: str) -> None:
     """Run an external compositor, fail-closed on absent/timeout/non-zero. The
     engine owns this subprocess (not the producer sandbox); argv is built from
     engine-validated paths only, never producer-supplied flags."""
-    if shutil.which(argv[0]) is None:
+    resolved = resolve_tool(argv[0])
+    if resolved is None:
         raise _MediaToolError(
             f"media assembly needs {tool} — not installed "
             f"(install it to enable {tool}-based media joins)"
         )
+    argv = [resolved, *argv[1:]]  # invoke by absolute path — PATH-independent
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True,
@@ -559,6 +647,97 @@ def _run_media_join(argv: "list[str]", *, tool: str) -> None:
         tail = (proc.stderr or "").strip().splitlines()
         why = tail[-1] if tail else f"{tool} exit {proc.returncode}"
         raise _MediaToolError(f"media assembly: {tool} failed — {why}")
+
+
+_DOC_RENDER_TIMEOUT_SECONDS = 180.0
+#: Document formats pandoc writes DIRECTLY from markdown by output extension.
+#: Artifact-agnostic: the engine renders whatever format the deliverable declares;
+#: this set is "what the tool can do," not "what a document is assumed to be." PDF
+#: is handled separately (a docx→libreoffice bridge) to avoid a LaTeX dependency.
+_PANDOC_DIRECT_FORMATS: frozenset[str] = frozenset(
+    {"docx", "odt", "rtf", "html", "epub", "tex"}
+)
+
+
+class _DocToolError(Exception):
+    """A document-render tool was absent or failed — the caller fails closed to
+    the assembled text (keeps the real content; flags the binary as unrendered)."""
+
+
+def _run_doc_tool(argv: "list[str]", *, tool: str) -> None:
+    """Run a document-render tool, fail-closed on absent/timeout/non-zero. Engine-
+    owned (not the producer sandbox); argv is built from engine-validated paths.
+    The tool is resolved to an ABSOLUTE path (robust to PATH) so the render works
+    however the process was launched — the HRWT pandoc-in-~/bin failure."""
+    resolved = resolve_tool(argv[0])
+    if resolved is None:
+        raise _DocToolError(
+            f"{tool} is not installed or not found "
+            f"(set MODULATIO_{argv[0].upper().replace('-', '_')}_PATH to its path)"
+        )
+    argv = [resolved, *argv[1:]]  # invoke by absolute path — PATH-independent
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True,
+            timeout=_DOC_RENDER_TIMEOUT_SECONDS, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise _DocToolError(f"{tool} is not installed ({exc})")
+    except subprocess.TimeoutExpired:
+        raise _DocToolError(
+            f"{tool} timed out after {_DOC_RENDER_TIMEOUT_SECONDS}s"
+        )
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()
+        why = tail[-1] if tail else f"exit {proc.returncode}"
+        raise _DocToolError(f"{tool} failed — {why}")
+
+
+def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path, str]":
+    """Render assembled markdown ``content`` into the DECLARED binary document
+    format ``fmt``, engine-owned subprocess, fail-closed.
+
+    Modulatio is artifact-agnostic: ``fmt`` is whatever the deliverable declared
+    (docx/odt/rtf/epub/pdf/…), never an assumed default. ``md→<fmt>`` via pandoc;
+    ``pdf`` via a pandoc→docx→libreoffice bridge (no LaTeX dependency). Returns the
+    rendered file path inside ``artifacts_root`` (the engine moves it onto the
+    deliverable path). Raises :class:`_DocToolError` when the toolchain is
+    unavailable, so the caller keeps the real text and flags the binary as
+    unrendered — it NEVER fabricates a binary (the HRWT text-named-.pdf failure)."""
+    fmt = (fmt or "").lower().lstrip(".")
+    src = _media_out(artifacts_root, ".md")
+    src.write_text(content)
+    try:
+        if fmt in _PANDOC_DIRECT_FORMATS:
+            out = _media_out(artifacts_root, f".{fmt}")
+            try:
+                _run_doc_tool(["pandoc", str(src), "-o", str(out)], tool="pandoc")
+                _check_output_size(out)
+            except (_DocToolError, _MediaToolError):
+                # Fail-closed hygiene (Nemo hull #9): a failed/oversized render must
+                # not leave a partial hidden output behind to pollute artifact scans.
+                out.unlink(missing_ok=True)
+                raise
+            return out, f"rendered .{fmt} via pandoc"
+        if fmt == "pdf":
+            docx_tmp = _media_out(artifacts_root, ".docx")
+            _run_doc_tool(["pandoc", str(src), "-o", str(docx_tmp)], tool="pandoc")
+            try:
+                _run_doc_tool(
+                    ["soffice", "--headless", "--convert-to", "pdf",
+                     "--outdir", str(artifacts_root), str(docx_tmp)],
+                    tool="libreoffice",
+                )
+                pdf_out = docx_tmp.with_suffix(".pdf")
+                if not pdf_out.is_file():
+                    raise _DocToolError("libreoffice produced no PDF")
+                _check_output_size(pdf_out)
+                return pdf_out, "rendered .pdf via pandoc+libreoffice"
+            finally:
+                docx_tmp.unlink(missing_ok=True)
+        raise _DocToolError(f"unsupported document render format {fmt!r}")
+    finally:
+        src.unlink(missing_ok=True)
 
 
 def _media_out(artifacts_root: Path, suffix: str) -> Path:
@@ -629,8 +808,9 @@ def _join_image(resolved: "list[tuple[str, Path]]", artifacts_root: Path,
     paths = [str(p) for _n, p in resolved]
     layout = str(manifest.get("layout") or "montage").strip().lower()
     # ImageMagick 7 prefers `magick ...`; 6 ships `convert`/`montage`. Pick what's
-    # present so a v7-only box (no legacy shims) still works.
-    has_magick = shutil.which("magick") is not None
+    # present so a v7-only box (no legacy shims) still works. Robust discovery
+    # (resolve_tool) so a ~/bin / Homebrew install is found regardless of PATH.
+    has_magick = resolve_tool("magick") is not None
     try:
         if layout == "append":
             argv = (["magick"] if has_magick else []) + ["convert", *paths, "-append", str(out)]

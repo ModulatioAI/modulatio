@@ -271,13 +271,67 @@ async def test_kickoff_ended_settles_team_status(project_with_roster):
         # a producer is working → the TEAM spinner shows live activity
         app._record_activity_impl(
             _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        # ...and the Leader has just rendered its goal verdict (the phase that
+        # leaves the leader status reading "rendering a verdict").
+        app._record_activity_impl(_ev("leader", "leader_verify_ended", agent_id="leader"))
         await pilot.pause()
         team = app.query_one("#stream-team-status", StreamStatus)
+        leader = app.query_one("#stream-leader-status", StreamStatus)
         assert team._done is False
+        assert leader._verb is not None  # leader is mid-verdict
         # the run ends (orchestrator role — in neither lane's role set)
         app._record_activity_impl(_ev("orchestrator", "kickoff_ended"))
         await pilot.pause()
         assert team._done is True, "TEAM spinner must settle to done when a run ends"
+        # #3: the LEADER lane returns to conversational standby — a FINISHED job
+        # must not leave the leader stuck on "rendering a verdict". The open-ticket
+        # signal is the problem lamp, not a perpetual verdict spinner.
+        assert leader._verb is None, "LEADER status must return to standby when a run ends"
+        assert leader._done is False
+
+
+async def test_copy_and_paste_bindings_are_priority(project_with_roster):
+    """#2: BOTH Ctrl+C and Ctrl+V must be priority bindings so our pyperclip
+    (OS-clipboard) handlers win over a focused TextArea's native copy/paste
+    (Textual's OSC-52 path) — the recurring 'copy stopped working' regression
+    was Ctrl+C being non-priority while Ctrl+V was priority."""
+    from textual.binding import Binding
+
+    from modulatio.tui.app import ModulatioApp
+
+    by_key = {
+        b.key: b for b in ModulatioApp.BINDINGS if isinstance(b, Binding)
+    }
+    assert by_key["ctrl+c"].action == "copy_text"
+    assert by_key["ctrl+c"].priority is True, "Ctrl+C must be priority (mirror Ctrl+V)"
+    assert by_key["ctrl+v"].action == "paste"
+    assert by_key["ctrl+v"].priority is True
+
+
+async def test_kickoff_verdict_no_hollow_success(project_with_roster):
+    """A run that RETURNS but delivers nothing (0 drafts / blocked tasks /
+    unfinished goals) must NOT report 'deliverables are in' — the Leader says
+    plainly it failed (the HRWT hollow-success misreport)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        leader = app.query_one("#stream-leader", StreamView)
+        # empty, blocked run — the HRWT shape
+        app._post_leader_verdict(
+            {"mode": "real", "goals": 1, "tasks": 1, "drafts": 0, "errors": 2,
+             "blocked_tasks": 1, "incomplete_goals": 1}, None)
+        await pilot.pause()
+        assert "did NOT finish" in leader.last_leader_text
+        assert "Deliverables are in" not in leader.last_leader_text
+        # a clean, delivering run reports done honestly
+        app._post_leader_verdict(
+            {"mode": "real", "goals": 1, "tasks": 3, "drafts": 3, "errors": 0,
+             "blocked_tasks": 0, "incomplete_goals": 0}, None)
+        await pilot.pause()
+        assert "Deliverables are in" in leader.last_leader_text
 
 
 async def test_f8_stop_job_signals_abort_on_running_orch(project_with_roster):
@@ -598,10 +652,9 @@ async def test_send_posts_message_and_does_not_kickoff(project_with_roster):
         assert not hasattr(app, "_kickoff_started_at")  # no run launched
 
 
-async def test_slash_kickoff_from_chat_launches_a_job(project_with_roster):
-    """A `/kickoff <objective>` message in the LEADER chatbox launches a job
-    (the Leader's orchestrate function) instead of conversing — the run starts
-    and the floor flips into view."""
+async def test_oneshot_kickoff_end_launches_a_job(project_with_roster):
+    """A `/kickoff <objective> /end` message launches a job (the only way a job
+    starts) and flips the view to the TEAM floor."""
     from textual.widgets import TabbedContent
 
     from modulatio.tui.app import ModulatioApp
@@ -613,22 +666,20 @@ async def test_slash_kickoff_from_chat_launches_a_job(project_with_roster):
         await pilot.pause()
         screen = app.query_one(PromptScreen)
         app.query_one("#prompt-input", ChatInput).text = (
-            "/kickoff write a stub note on herbs"
+            "/kickoff write a stub note on herbs /end"
         )
         screen._send_message()
         await pilot.pause()
-
-        # a job ran (the stub completes fast; the status reflects it) …
         assert app.last_summary_text.startswith(("Running", "Completed"))
-        # … and the view flipped to the TEAM floor to watch it run.
         assert (
             app.query_one("#console-streams", TabbedContent).active
             == "stream-team-pane"
         )
 
 
-async def test_bare_slash_kickoff_asks_for_an_objective(project_with_roster):
-    """`/kickoff` with no objective doesn't launch — the Leader asks for one."""
+async def test_bare_kickoff_starts_capture_not_a_job(project_with_roster):
+    """`/kickoff` alone does NOT launch — it opens job-brief capture and waits for
+    `/end`. (The whole fix: a job never starts without explicit brackets.)"""
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.screens.prompt import PromptScreen
     from modulatio.tui.widgets.chat_input import ChatInput
@@ -640,7 +691,68 @@ async def test_bare_slash_kickoff_asks_for_an_objective(project_with_roster):
         app.query_one("#prompt-input", ChatInput).text = "/kickoff"
         screen._send_message()
         await pilot.pause()
-        assert not hasattr(app, "_kickoff_started_at")  # nothing launched
+        assert not hasattr(app, "_kickoff_started_at")   # nothing launched
+        assert screen._kickoff_capture == []             # capture is open
+
+
+def _send(app, screen, text):
+    from modulatio.tui.widgets.chat_input import ChatInput
+    app.query_one("#prompt-input", ChatInput).text = text
+    screen._send_message()
+
+
+async def test_multi_message_capture_then_end_launches(project_with_roster):
+    """The brief can be built across messages between `/kickoff` and `/end`; only
+    `/end` fires the job, with the accumulated brief as the objective."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        _send(app, screen, "/kickoff")
+        await pilot.pause()
+        _send(app, screen, "write a stub note on herbs")
+        _send(app, screen, "keep it short")
+        await pilot.pause()
+        assert not hasattr(app, "_kickoff_started_at")     # not launched mid-capture
+        assert screen._kickoff_capture == ["write a stub note on herbs", "keep it short"]
+        _send(app, screen, "/end")
+        await pilot.pause()
+        assert app.last_summary_text.startswith(("Running", "Completed"))
+        assert screen._kickoff_capture is None             # capture reset
+
+
+async def test_cancel_aborts_capture(project_with_roster):
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        _send(app, screen, "/kickoff do a thing")
+        _send(app, screen, "/cancel")
+        await pilot.pause()
+        assert screen._kickoff_capture is None
+        assert not hasattr(app, "_kickoff_started_at")
+
+
+async def test_plain_message_never_starts_a_job(project_with_roster):
+    """Plain conversation never spawns a job — it goes to converse, not kickoff
+    (the bug that made 'everything I say creates a job')."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        _send(app, screen, "produce a 12-story anthology about robots")
+        await pilot.pause()
+        assert not hasattr(app, "_kickoff_started_at")  # conversation, not a job
+        assert screen._kickoff_capture is None
 
 
 # ─── Copy out of the TV → paste into the chatbox ────────────────────────────
@@ -827,3 +939,123 @@ async def test_sending_a_message_gets_a_leader_reply(project_with_roster):
         assert "Leader" in text                      # the Leader's reply marker
         assert app.query_one("#prompt-input", ChatInput).text == ""  # cleared
         assert not hasattr(app, "_kickoff_started_at")  # NO job launched
+
+
+# ─── Phase 1: honest parallel lanes (names + wave marker) ───────────────────
+
+
+async def test_team_status_shows_producer_names_in_parallel(project_with_roster):
+    """Phase 1: when >1 producer is in flight the TEAM status shows WHO, by name
+    (not just a count) — concurrency reads as concurrency."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_status import StreamStatus
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="scribe", task_id="T-2"))
+        await pilot.pause()
+        status = app.query_one("#stream-team-status", StreamStatus)
+        assert status._working == 2
+        assert set(status._working_names) == {"Marlow", "Scribe"}
+
+
+async def test_team_stream_drops_wave_marker_on_concurrency_rise(project_with_roster):
+    """Phase 1: when a wave forms (producers rise to ≥2) ONE marker naming the
+    parallel producers lands in the feed — once, on the rise, not per event."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="scribe", task_id="T-2"))
+        await pilot.pause()
+        team = {s.id: s for s in app.query(StreamView)}["stream-team"]
+        markers = [m for m in team.messages if "producers working" in m]
+        assert len(markers) == 1
+        assert "Marlow" in markers[0] and "Scribe" in markers[0]
+
+        # more events while still ≥2 producers do NOT add another marker
+        app._record_activity_impl(
+            _ev("drafter", "task_completed", agent_id="writer", task_id="T-1"))
+        await pilot.pause()
+        assert len([m for m in team.messages if "producers working" in m]) == 1
+
+
+async def test_wave_marker_fires_once_even_as_wave_grows(project_with_roster):
+    """Nemo B1 #3: the marker fires once on the rise THROUGH ≥2 — NOT again when a
+    live wave grows 2 → 3 producers."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="scribe", task_id="T-2"))
+        await pilot.pause()
+        team = {s.id: s for s in app.query(StreamView)}["stream-team"]
+        assert len([m for m in team.messages if "producers working" in m]) == 1
+        # a THIRD producer joins the live wave → no second marker
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="ali", task_id="T-3"))
+        await pilot.pause()
+        assert len([m for m in team.messages if "producers working" in m]) == 1
+
+
+async def test_wave_marker_resets_each_run(project_with_roster):
+    """Phase 1: the wave-marker tracker resets at a run boundary so the next run's
+    first wave is marked again."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        team = {s.id: s for s in app.query(StreamView)}["stream-team"]
+        app._record_activity_impl(_ev("leader", "kickoff_started"))
+        await pilot.pause()
+        assert team._last_producer_count == 0
+
+
+# ─── F8 blows out the TEAM TV (Mod Squad floor), leaves the LEADER chat ──────
+
+
+async def test_f8_clears_team_tv_but_not_leader_chat(project_with_roster):
+    """F8 (clear the pipes) empties the TEAM TV transcript + concurrency state, but
+    the LEADER chat lane is never touched."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        streams = {s.id: s for s in app.query(StreamView)}
+        team, leader = streams["stream-team"], streams["stream-leader"]
+        # team gets producer activity; leader gets a chat line
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="scribe", task_id="T-2"))
+        leader.add_leader_message("hello from the Leader")
+        await pilot.pause()
+        assert team.messages and len(team.active_tasks) == 2
+        assert leader.messages  # chat present
+
+        app._clear_team_tv()
+        await pilot.pause()
+        # team TV blown out…
+        assert team.messages == [] and team.active_tasks == {}
+        assert team._last_producer_count == 0
+        assert list(team.query(".stream-line")) == []
+        # …leader chat untouched
+        assert leader.messages

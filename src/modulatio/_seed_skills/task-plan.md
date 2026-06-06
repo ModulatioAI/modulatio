@@ -69,7 +69,10 @@ manifest and the ENGINE does the mechanical join (concat / file-index / merge),
 so it never re-types the units and a large deliverable can't truncate. Do NOT use
 `long-form`/`drafter` for an assembly step (they re-emit content → truncation).
 The unit files already exist; read their real names from the repo_map. This task
-depends_on the unit tasks.
+depends_on the unit tasks. Set its `output_path` to the deliverable's DECLARED
+format extension (`anthology.pdf`, `report.docx`) so the engine renders the real
+binary; a bare name or `.md` stays text. Format = the user's declared deliverable,
+not an assumption ("a bound PDF" → `.pdf`).
 
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
 events, any real-world factual claim): set the PRIMARY (first)

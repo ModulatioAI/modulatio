@@ -8802,8 +8802,10 @@ def test_qc_review_media_binary_does_not_crash_and_verifies_provenance(project, 
     assert verdict.passed is True
     assert "not machine-verifiable" in verdict.check.lower() or "human spot-check" in verdict.check.lower()
 
-    # tamper the bytes → integrity fail (no crash)
-    deliverable.write_bytes(b"TAMPERED NOT A ZIP \x00\xff")
+    # tamper the bytes → integrity fail (no crash). Keep a valid ZIP signature so
+    # this exercises the PROVENANCE/checksum check, not the P5 declared-format gate
+    # (which has its own test) — the bytes differ from the recorded checksum.
+    deliverable.write_bytes(b"PK\x03\x04 tampered but still a zip header \x00\xff")
     verdict2, _n, defect2 = orch._qc_review(task, deliverable, "sha256:x", 0)
     assert verdict2.passed is False and "changed since assembly" in verdict2.check
     assert defect2 == "environmental"  # integrity failure → human, not blind-retry
@@ -8822,6 +8824,227 @@ def test_apply_assembly_manifest_no_manifest_passes_through(project, tmp_path):
                 description="x", summary_for_state_doc="")
     assert orch._apply_assembly_manifest(task, "just a normal draft body") is None
     assert task.summary_for_state_doc == ""  # untouched
+
+
+# ── P1: engine binds a CROSS-GOAL assembly (HRWT 2026-06-05) ──────────────
+
+
+def test_cross_goal_assembler_wires_units_from_store(project, tmp_path):
+    """P1 (suspenders): an assembler whose units live in an EARLIER goal (the HRWT
+    shape — 'write 8 stories' goal, then 'assemble' goal) gets no same-goal deps, so
+    the engine resolves them from the store. Without this the assembler is blind and
+    the producer pulls every unit into context → overflow → fabrication."""
+    from uuid import uuid4
+    from modulatio import store
+    from modulatio.types import Goal, Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    code = project.code
+    # Save the GOALS too — the real run shape. (Regression guard: the first cut
+    # accessed a non-existent Goal.depends_on and crashed the live run only when a
+    # real Goal object existed; a test without goals never exercised that path.)
+    pid = uuid4()
+    store.save_goal(code, Goal(id="X-G-001", project_id=pid,
+                               description="write the stories", success_criteria="s"))
+    store.save_goal(code, Goal(id="X-G-002", project_id=pid,
+                               description="assemble", success_criteria="s"))
+    u2 = Task(id="X-T-002", project_id=uuid4(), goal_id="X-G-001",
+              description="story 2", output_path="s2.txt", deliverable=True)
+    u1 = Task(id="X-T-001", project_id=uuid4(), goal_id="X-G-001",
+              description="story 1", output_path="s1.txt", deliverable=True)
+    asm = Task(id="X-T-009", project_id=uuid4(), goal_id="X-G-002",
+               description="assemble the anthology",
+               required_skills=["document-assembly"], deliverable=True,
+               output_path="book.md")
+    for t in (u2, u1, asm):  # saved out of order on purpose
+        store.save_task(code, t)
+
+    orch._wire_cross_goal_assembler_deps([asm])
+
+    # Both cross-goal units wired, in PLAN (id) order — story 1 before story 2.
+    assert asm.depends_on == ["X-T-001", "X-T-002"]
+
+
+def test_assembler_engine_binds_when_producer_emits_no_manifest(project, tmp_path):
+    """P1 (keystone): a producer that returns garbage instead of a manifest (it
+    rambled / shelled out / fabricated) must NOT bypass the join. For an assembler
+    task with authoritative deps, the engine builds the manifest from the dependency
+    outputs and concatenates the REAL units from disk — the deliverable never
+    depends on the producer cooperating."""
+    from uuid import uuid4
+    from modulatio import store
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.txt").write_text("STORY ONE BODY")
+    (artifacts / "s2.txt").write_text("STORY TWO BODY")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    code = project.code
+    u1 = Task(id="X-T-001", project_id=uuid4(), goal_id="X-G-001",
+              description="story 1", output_path="s1.txt", deliverable=True)
+    u2 = Task(id="X-T-002", project_id=uuid4(), goal_id="X-G-001",
+              description="story 2", output_path="s2.txt", deliverable=True)
+    asm = Task(id="X-T-009", project_id=uuid4(), goal_id="X-G-002",
+               description="assemble", required_skills=["document-assembly"],
+               depends_on=["X-T-001", "X-T-002"], summary_for_state_doc="")
+    for t in (u1, u2):
+        store.save_task(code, t)
+
+    # The producer emitted NO manifest — pure fabrication-style prose.
+    out = orch._apply_assembly_manifest(
+        asm, "I converted everything to a bound PDF. Done!"
+    )
+
+    # The engine assembled the REAL units from disk, ignoring the producer's text.
+    assert out is not None
+    assert "STORY ONE BODY" in out and "STORY TWO BODY" in out
+    assert "bound PDF" not in out  # the fabricated prose never lands
+    assert "2 unit(s) concatenated" in (asm.summary_for_state_doc or "")
+
+
+def test_assembler_render_format_from_declared_extension(project, tmp_path):
+    """P4: the binary render format is the deliverable's DECLARED extension (the
+    user's/standards' choice) — never assumed. Non-binary or absent → text (None),
+    so Modulatio imposes no format (artifact-agnostic)."""
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    orch = _assembly_orch(project, tmp_path, tmp_path)
+
+    def fmt(op):
+        return orch._assembler_render_format(
+            Task(id="X-T-1", project_id=uuid4(), goal_id="X-G-1",
+                 description="a", output_path=op)
+        )
+
+    assert fmt("book.docx") == "docx"
+    assert fmt("anthology.pdf") == "pdf"
+    assert fmt("report.md") is None       # text stays text
+    assert fmt("data.json") is None       # not a document binary
+    assert fmt(None) is None              # nothing declared → no binary imposed
+    assert fmt("notes") is None           # no extension
+
+
+def test_qc_review_rejects_fabricated_binary(project, tmp_path):
+    """P5: _qc_review fails CLOSED (environmental) on a deliverable that DECLARES a
+    binary format but is text — the HRWT fake — before any LLM judgment or the
+    review-ledger cheap-pass. Universal: any family, any binary extension."""
+    from uuid import uuid4
+    from modulatio import review_ledger
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    fake = artifacts / "anthology.pdf"
+    fake.write_text("Have Robot, Will Travel\n\n# The Last Companion\n...text...")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    task = Task(id="X-T-009", project_id=uuid4(), goal_id="X-G-002",
+                description="assemble", output_path="anthology.pdf")
+    checksum = review_ledger.file_checksum(fake)
+
+    verdict, notes, defect = orch._qc_review(task, fake, checksum, 50)
+
+    assert verdict.passed is False
+    assert defect == "environmental"
+    assert "declared-format" in verdict.check
+    # even a prior cheap-pass mark cannot wave the fake through
+    task.qc_passed_checksum = checksum
+    verdict2, _n, defect2 = orch._qc_review(task, fake, checksum, 50)
+    assert verdict2.passed is False and defect2 == "environmental"
+
+
+def test_cross_goal_wiring_is_product_agnostic_and_sealed(project, tmp_path):
+    """Nemo BLOCKER, sealed (close-out re-review). Cross-goal resolution targets the
+    wide-wave UNIT SIGNATURE — a goal with >=2 deliverables of the SAME artifact_kind
+    — for ANY product type, never 'stories'. It fails CLOSED on ambiguity so a
+    support/research deliverable can never become an authoritative unit."""
+    from uuid import uuid4
+    from modulatio import store, vault
+    from modulatio.types import Goal, Task
+    code = project.code
+
+    def scenario(rid, goals, units, asm_goal, asm_id):
+        vault.init_run(code, rid, "obj")
+        project.run_id = rid  # isolate each scenario's store scope
+        art = tmp_path / rid
+        art.mkdir()
+        orch = _assembly_orch(project, tmp_path, art)
+        for gid in goals:
+            store.save_goal(code, Goal(id=gid, project_id=uuid4(), description=gid,
+                                       success_criteria="s"), run_id=rid)
+        for tid, gid, kind in units:
+            store.save_task(code, Task(id=tid, project_id=uuid4(), goal_id=gid,
+                                       description="u", output_path=f"{tid}.x",
+                                       artifact_kind=kind, deliverable=True), run_id=rid)
+        asm = Task(id=asm_id, project_id=uuid4(), goal_id=asm_goal,
+                   description="assemble", required_skills=["document-assembly"],
+                   deliverable=True, output_path="out.pdf")
+        orch._wire_cross_goal_assembler_deps([asm])
+        return asm
+
+    # (a) product-agnostic: a CODE fan-out (not text) binds just the same.
+    asm = scenario("20260606T000001Z-aaaaaa", ["G-001", "G-002"],
+                   [("T-001", "G-001", "code"), ("T-002", "G-001", "code")],
+                   "G-002", "T-009")
+    assert asm.depends_on == ["T-001", "T-002"]
+
+    # (b) a SUPPORT singleton landing right before the assembly (the order Nemo
+    #     named) is excluded — singletons are not fan-out goals.
+    asm = scenario("20260606T000002Z-aaaaaa", ["G-001", "G-002", "G-003"],
+                   [("T-001", "G-001", "research"),       # research singleton
+                    ("T-002", "G-002", "text"), ("T-003", "G-002", "text"),  # units
+                    ("T-004", "G-003", "design")],        # support, just before
+                   "G-004", "T-009")
+    assert asm.depends_on == ["T-002", "T-003"]
+    assert "T-001" not in asm.depends_on and "T-004" not in asm.depends_on
+
+    # (c) TWO fan-out goals → AMBIGUOUS → fail-closed (empty deps, producer fallback).
+    asm = scenario("20260606T000003Z-aaaaaa", ["G-001", "G-002", "G-003"],
+                   [("T-001", "G-001", "text"), ("T-002", "G-001", "text"),
+                    ("T-003", "G-002", "media"), ("T-004", "G-002", "media")],
+                   "G-003", "T-009")
+    assert asm.depends_on == []
+
+
+def test_assembler_engine_binds_in_every_producer_mode(project, tmp_path):
+    """Debug fix (HRWT): the engine-bind must fire for an assembler in ANY
+    producer_mode — generate/diff/revise/edit — not only generate. Before the fix
+    the mode router sent a non-generate assembler into _producer_patch/_diff and
+    the producer fabricated a digest. The producer LLM call must NEVER be made for
+    a resolvable assembler, whatever the mode."""
+    from uuid import uuid4
+    from modulatio import store
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.txt").write_text("UNIT ONE BODY")
+    (artifacts / "s2.txt").write_text("UNIT TWO BODY")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    code = project.code
+    for tid, op in (("X-T-001", "s1.txt"), ("X-T-002", "s2.txt")):
+        store.save_task(code, Task(id=tid, project_id=uuid4(), goal_id="X-G-001",
+                                   description="u", output_path=op, deliverable=True))
+    asm = Task(id="X-T-009", project_id=uuid4(), goal_id="X-G-002",
+               description="assemble", required_skills=["document-assembly"],
+               depends_on=["X-T-001", "X-T-002"], output_path="book.md")
+
+    def _boom(*a, **k):
+        raise AssertionError("producer LLM was called for an assembler task!")
+    orch._run_agent_call = _boom  # type: ignore[method-assign]
+    orch._increment_turn_persisted = lambda: None  # type: ignore[method-assign]
+    orch._sweep_abandoned_candidates = lambda: None  # type: ignore[method-assign]
+
+    for mode in ("generate", "diff", "revise", "edit", "patch"):
+        asm.producer_mode = mode
+        path, _checksum, _tok = orch._producer_execute(asm)
+        body = path.read_text()
+        assert "UNIT ONE BODY" in body and "UNIT TWO BODY" in body, (
+            f"mode={mode}: engine did not bind the real units"
+        )
 
 
 # ── A2: assembly QC structural pass (no LLM byte-read) ────────────────────

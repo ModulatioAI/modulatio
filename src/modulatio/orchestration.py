@@ -2546,6 +2546,122 @@ class Orchestrator:
         return body if body.strip() else fallback
 
     # ── Leader: decompose objective → goals ──────────────────────────────
+    def _collapse_jt_item_goals(self, data: "list[dict]") -> "list[dict]":
+        """Engine-bind the JT cardinality invariant (parallel-execution Phase 1).
+
+        A bound JT with an enforceable PER-ITEM cardinality is a HARD operator
+        requirement for N independent same-kind deliverables. The PARALLEL
+        DELIVERABLES contract steers the Leader to put them in ONE goal (which the
+        task-planner fans into a wide parallel wave) — but prose only bends; the
+        Leader can still split the N items into N SEPARATE goals, which the serial
+        goal loop then runs one at a time (the anthology failure). When it does,
+        the engine MERGES the per-item goals back into one goal carrying the N
+        artifacts as evidence; the task-planner (already steered by the output
+        contract) then emits a single ``artifacts: [...]`` task → a wide wave.
+
+        Conservative by design — only fires for a per-item list, where the list
+        VALUES give a precise, non-fuzzy signal: an item-goal both EMITS an
+        artifact AND mentions one of the per-item values. Different-kind goals
+        (front matter) and a dependent assembly/synthesis goal mention no value
+        and are LEFT ALONE. ``fixed:N`` (no per-item values to match) relies on
+        the prose contract — no safe engine signal, so no collapse. Never merges
+        fewer than 2 goals (the correct one-goal shape is a no-op).
+        """
+        jt = self._bound_jt
+        if jt is None:
+            return data
+        spec = jt.output_spec
+        if (spec.cardinality or "").strip() != "per-item" or not spec.per:
+            return data
+        values = self._bound_jt_params.get(spec.per)
+        if not isinstance(values, (list, tuple)):
+            return data
+        norm_values = [str(v).strip().lower() for v in values if str(v).strip()]
+        # Value-safety (Nemo B1 #2): short values over-match even with a word
+        # boundary ("A", "B"); without ≥2 distinct, safely-matchable values there
+        # is no precise per-item signal → fall back to the prose contract.
+        if len(norm_values) < 2 or any(len(v) < 3 for v in norm_values):
+            return data
+        if len(set(norm_values)) != len(norm_values):
+            return data  # duplicate values → can't form a clean bijection
+
+        def _values_in(item: dict) -> "set[str]":
+            """The DISTINCT per-item values this goal references by WORD-BOUNDARY
+            match (Nemo B1 #2: not raw substring — so "A" doesn't match "Atlas")."""
+            hay = (
+                str(item.get("description", "")) + " "
+                + str(item.get("success_criteria", ""))
+            ).lower()
+            found: set[str] = set()
+            for v in norm_values:
+                if re.search(r"(?<!\w)" + re.escape(v) + r"(?!\w)", hay):
+                    found.add(v)
+            return found
+
+        # Proof-of-partition (Nemo B1 #1): an ITEM goal EMITS an artifact AND
+        # references EXACTLY ONE distinct value. An assembly/synthesis goal names
+        # MULTIPLE values → excluded; front matter names zero → excluded. Collapse
+        # ONLY when the item goals form a clean BIJECTION onto the full value set
+        # (every value covered by exactly one candidate) — anything ambiguous (a
+        # value with 0 or >1 candidates, e.g. front matter coincidentally naming an
+        # item) falls back to the prose contract, never a mis-merge.
+        by_value: dict[str, list[int]] = {}
+        for i, it in enumerate(data):
+            if not isinstance(it, dict) or not _goal_emits_artifact(it):
+                continue
+            vs = _values_in(it)
+            if len(vs) == 1:
+                by_value.setdefault(next(iter(vs)), []).append(i)
+        if set(by_value) != set(norm_values):
+            return data  # not every value covered → ambiguous → belt only
+        if any(len(idxs) != 1 for idxs in by_value.values()):
+            return data  # a value claimed by >1 goal → ambiguous → belt only
+        item_idxs = sorted(idxs[0] for idxs in by_value.values())
+        if len(item_idxs) < 2:
+            return data
+
+        # Collect every per-item artifact requirement into one merged goal so the
+        # task-planner sees N artifacts to fan out.
+        merged_evidence: list = []
+        for i in item_idxs:
+            for req in (data[i].get("evidence_required") or []):
+                if (
+                    isinstance(req, dict)
+                    and str(req.get("kind", "")).strip().lower() == "artifact"
+                ):
+                    merged_evidence.append(req)
+        n = len(item_idxs)
+        merged_goal = {
+            "description": (
+                f"Produce all {n} {spec.artifact_kind} deliverables (one per "
+                f"`{spec.per}`) — independent of each other, run in parallel."
+            ),
+            "success_criteria": (
+                f"All {n} deliverables are produced, each its own "
+                f"{spec.artifact_kind} file."
+            ),
+            "evidence_required": merged_evidence,
+        }
+        first = item_idxs[0]
+        drop = set(item_idxs[1:])
+        out: list = []
+        for i, it in enumerate(data):
+            if i == first:
+                out.append(merged_goal)
+            elif i in drop:
+                continue
+            else:
+                out.append(it)
+        self._emit_activity(
+            role="leader", phase="leader_jt_wide_wave_collapse", agent_id="leader",
+        )
+        _logger.info(
+            "Collapsed %d per-item goals into one wide-wave goal (JT cardinality "
+            "is a hard requirement; %d goals → %d)",
+            n, len(data), len(out),
+        )
+        return out
+
     def _leader_decompose(
         self,
         objective: str,
@@ -2629,6 +2745,13 @@ class Orchestrator:
                 )
             data = producing
 
+        # Parallel-execution Phase 1: engine-bind the JT cardinality invariant —
+        # if a bound per-item JT's N items were split into N separate goals (which
+        # the serial goal loop runs one at a time), merge them back into ONE goal
+        # carrying the N artifacts, so the task-planner fans them into a wide
+        # parallel wave. Prose steers this; the engine guarantees it.
+        data = self._collapse_jt_item_goals(data)
+
         goals: list[Goal] = []
         for item in data:
             gid = self._next_goal_id()
@@ -2648,6 +2771,120 @@ class Orchestrator:
             role="leader", phase="leader_decompose_ended", agent_id="leader",
         )
         return goals
+
+    def _bind_wide_artifacts(self, data: "list") -> "list":
+        """Parallel-execution Phase 1.5 — the task-level twin of the goal collapse.
+
+        When the planner emits several INDEPENDENT, same-kind, same-skill producer
+        specs (each a single ``output_path``, no ``depends_on``, no ``artifacts``)
+        instead of ONE ``artifacts: [...]`` fan-out, bind each homogeneous group of
+        ≥2 into a single artifacts-spec. One plan item → N parallel sub-tasks: the
+        wide wave forms AND the plan fits the per-goal task cap (the live anthology
+        died at 9 separate tasks > 6). A dependent task (a compile/assembly step)
+        keeps its ``depends_on``; the dep indices are remapped onto the merged spec,
+        and the artifacts expansion then multiplies that dep onto every sub-task.
+
+        Conservative: only INDEPENDENT (dep-free) single-output specs merge, grouped
+        by an exact (artifact_kind, required_skills, required_capabilities,
+        deliverable) key — a differently-skilled research/compile task never folds
+        in. Plans without the pattern pass through byte-identical.
+        """
+        if not isinstance(data, list) or len(data) < 2:
+            return data
+
+        def _indep_single(spec: dict) -> bool:
+            return (
+                isinstance(spec, dict)
+                and not spec.get("artifacts")
+                and isinstance(spec.get("output_path"), str)
+                and spec["output_path"].strip()
+                and not (spec.get("depends_on") or [])
+            )
+
+        def _key(spec: dict) -> tuple:
+            # Nemo P1.5 #1/#2: the key must include EVERY field the artifacts
+            # expansion copies from the parent spec onto each sub-task —
+            # artifact_kind / required_skills / required_capabilities / deliverable
+            # AND research_topics / tool_args / evidence_required. Only specs
+            # IDENTICAL in all of them may merge; otherwise a sibling would inherit
+            # the wrong prompt/tool/evidence contract (and a same-skill scaffolding
+            # task can't fold into the deliverable fan-out). Description + output_path
+            # stay per-artifact, so they legitimately differ within a group.
+            return (
+                str(spec.get("artifact_kind") or "text"),
+                tuple(str(s) for s in (spec.get("required_skills") or [])),
+                tuple(str(c) for c in (spec.get("required_capabilities") or [])),
+                bool(spec.get("deliverable", False)),
+                tuple(str(t) for t in (spec.get("research_topics") or [])),
+                json.dumps(spec.get("tool_args") or {}, sort_keys=True, default=str),
+                json.dumps(spec.get("evidence_required") or [], sort_keys=True, default=str),
+            )
+
+        groups: dict[tuple, list[int]] = {}
+        for i, spec in enumerate(data):
+            if _indep_single(spec):
+                groups.setdefault(_key(spec), []).append(i)
+        merge_groups = {k: idxs for k, idxs in groups.items() if len(idxs) >= 2}
+        if not merge_groups:
+            return data
+
+        # lead index per merged group (the group's FIRST spec keeps its slot).
+        lead_of: dict[int, int] = {}
+        merged_specs: dict[int, dict] = {}
+        for idxs in merge_groups.values():
+            lead = idxs[0]
+            merged = {k: v for k, v in data[lead].items() if k != "output_path"}
+            merged["artifacts"] = [
+                {"path": data[i]["output_path"],
+                 "description": data[i].get("description") or ""}
+                for i in idxs
+            ]
+            merged["depends_on"] = []  # every member was independent
+            merged["description"] = (
+                f"Produce {len(idxs)} independent "
+                f"{str(data[lead].get('artifact_kind') or 'text')} deliverables in parallel"
+            )
+            merged_specs[lead] = merged
+            for i in idxs:
+                lead_of[i] = lead
+
+        # Rebuild the plan in order; a lead becomes its merged spec, the other group
+        # members drop, everything else is preserved. Track old-index → new-index.
+        old_to_new: dict[int, int] = {}
+        new_data: list = []
+        for old_i, spec in enumerate(data):
+            if old_i in lead_of:
+                lead = lead_of[old_i]
+                if old_i == lead:
+                    old_to_new[old_i] = len(new_data)
+                    new_data.append(merged_specs[lead])
+                else:
+                    old_to_new[old_i] = old_to_new[lead]  # → the merged spec
+            else:
+                old_to_new[old_i] = len(new_data)
+                new_data.append(dict(spec))  # copy: remap mustn't mutate the input
+
+        # Remap depends_on plan-indices onto the rebuilt plan (dedupe — a task that
+        # depended on two now-merged members collapses to one merged reference).
+        for spec in new_data:
+            raw = spec.get("depends_on")
+            if not raw:
+                continue
+            remapped: list = []
+            seen: set = set()
+            for dep in raw:
+                if isinstance(dep, bool):
+                    nd = dep
+                elif isinstance(dep, int) and dep in old_to_new:
+                    nd = old_to_new[dep]
+                else:
+                    nd = dep  # string id / out-of-range → leave for topo-sort
+                key = (type(nd).__name__, nd)
+                if key not in seen:
+                    seen.add(key)
+                    remapped.append(nd)
+            spec["depends_on"] = remapped
+        return new_data
 
     # ── Task planning: goal → tasks ──────────────────────────────────────
     def _plan_tasks(self, goal: Goal) -> list[Task]:
@@ -2697,6 +2934,15 @@ class Orchestrator:
         data = _extract_json(response)
         if not isinstance(data, list):
             raise ValueError(f"expected list of tasks, got {type(data).__name__}")
+
+        # Parallel-execution Phase 1.5: bind independent, same-kind, same-skill
+        # producer specs into ONE artifacts-fan-out task BEFORE the cap check, so a
+        # wide goal forms a wide parallel wave (1 plan item → N sub-tasks) instead
+        # of N separate tasks that bust the per-goal cap (the live anthology
+        # failure: a correct one-wide-goal whose 8 story tasks the planner emitted
+        # separately → 9 > 6 cap → rejected). The task-level twin of the goal
+        # collapse: prose steers the planner to use `artifacts`; the engine binds it.
+        data = self._bind_wide_artifacts(data)
 
         # Defense-in-depth on top of the "wait for QC" prompt fix:
         # cap task count proportional to the goal's actual artifact
@@ -2867,6 +3113,15 @@ class Orchestrator:
         # assembly QC fails closed to a normal review — safe. Keeping the assembly
         # step in the same goal as its units is the planner-side complement.)
         _wire_assembler_dependencies(tasks)
+        # P1 (engine binds the assembly — suspenders): a CROSS-GOAL assembler (its
+        # units live in an earlier goal, e.g. an "assemble the anthology" goal that
+        # follows the "write the 8 stories" goal) gets no deps from the same-goal
+        # wiring above — leaving the engine blind and the producer to pull every
+        # unit into context (overflow → decompose-spiral → fabricated deliverable,
+        # HRWT 2026-06-05). Resolve those units from the store so the engine always
+        # has an authoritative unit set to bind from. The serial goal loop means the
+        # producing goal's tasks already exist here.
+        self._wire_cross_goal_assembler_deps(tasks)
         _select_assembler_skill(tasks, self.project.code)
         self._emit_activity(
             role="planner",
@@ -3183,6 +3438,48 @@ class Orchestrator:
             return ""
         return team_memory.render_for_prompt(hits)
 
+    def _engine_assemble_deliverable(
+        self, task: Task, path: Path
+    ) -> tuple[Path, str, int]:
+        """P1 (engine binds the assembly): produce an assembler task's deliverable
+        DIRECTLY from its units — NO producer LLM call, in ANY mode. The engine
+        builds the manifest from the task's authoritative deps, joins the unit
+        bodies from disk, and (for a declared binary format) renders the real
+        binary. Returns ``(path, checksum, token_count)`` like ``_producer_execute``.
+
+        Only call when ``_assembly_manifest_from_deps(task) is not None`` — i.e. the
+        engine can resolve the units. A producer never sees the units, so the
+        deliverable can't be a fabricated digest (the HRWT failure)."""
+        import shutil as _shutil
+
+        assembled = self._apply_assembly_manifest(task, "")
+        rec = self._assembly_records.get(task.id)
+        if rec is not None and getattr(rec, "output_file", None) is not None:
+            # Binary deliverable (rendered .docx/.pdf or a media composite): move
+            # the engine-produced file onto the deliverable path; the record's
+            # checksum is of those exact bytes.
+            src = rec.output_file
+            try:
+                _shutil.move(str(src), str(path))
+            except OSError:
+                _shutil.copyfile(str(src), str(path))
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
+            self._record_artifact_write(path)
+            # Rehash the DESTINATION after the move (Nemo hull #10) so the returned
+            # checksum is provably of the bytes now ON the deliverable path, not the
+            # pre-move temp render output.
+            from modulatio import review_ledger as _rl
+            return path, _rl.file_checksum(path), 0
+        # Text deliverable: the mechanically-joined body.
+        response = assembled if assembled is not None else ""
+        path.write_text(response)
+        self._record_artifact_write(path)
+        checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
+        return path, checksum, len(response.split())
+
     def _producer_execute(self, task: Task, corrective_notes: str = "") -> tuple[Path, str, int]:
         """Drafter writes the task's artifact to artifacts/drafts/.
 
@@ -3220,6 +3517,18 @@ class Orchestrator:
         else:
             path = artifacts_root / "drafts" / f"{task.id.lower()}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
+
+        # P1 (engine binds the assembly): an assembler task is a MECHANICAL
+        # multi-unit join the engine performs from disk — it must NEVER run a
+        # producer LLM call, in ANY mode. The producer-mode dispatch below would
+        # otherwise route a non-generate assembler into _producer_patch/_diff
+        # (which fabricated a "# Collected Stories" digest in the HRWT run, masking
+        # the real stories). Bind from the authoritative deps up front, before any
+        # mode branch, so the deliverable is always the real units, never a
+        # producer's invention. (No resolvable deps → falls through to the producer
+        # manifest path below, the cross-goal-less fallback.)
+        if _is_assembler_task(task) and self._assembly_manifest_from_deps(task) is not None:
+            return self._engine_assemble_deliverable(task, path)
 
         # Slice #9e: if the primary declared skill is a tool executor,
         # run the tool and skip the LLM path entirely. QC still runs
@@ -3437,6 +3746,8 @@ class Orchestrator:
         # (MVP-default "drafter"; a crypto harness would pass "analyst",
         # a software shop "engineer", etc — Modulatio is output-agnostic).
         producer_role = self.default_producer_role
+        # (Assembler tasks with resolvable units never reach here — they're bound
+        # by the engine at the top of this method, before the mode dispatch.)
         raw_response = self._run_agent_call(
             task.assigned_agent_id, producer_role, prompt
         )
@@ -4143,38 +4454,75 @@ class Orchestrator:
 
     def _leader_function_tools(self) -> "dict[str, tools.Tool]":
         """The Leader's own functions, exposed as tools his converse loop can
-        call. ``run_job`` is the orchestrate function — he switches from
-        conversing to commanding the producer swarm (a full kickoff, streamed
-        into LEADER/TEAM). The thread is the same Leader doing the work."""
+        call. NOTE: there is deliberately NO ``run_job`` here — the Leader does not
+        start jobs from conversation (that made every turn spawn a job). A job is
+        launched ONLY by the operator's explicit ``/kickoff … /end`` brackets."""
         from modulatio import job_templates as _jt
-        from modulatio import vault as _vault
-
-        def run_job(objective: str, **_: object) -> str:
-            run_id = _vault.generate_run_id()
-            _vault.init_run(self.project.code, run_id, str(objective))
-            self.project.run_id = run_id
-            summary = self.kickoff(str(objective))
-            return (
-                f"Job done — {len(summary.goals)} goal(s), "
-                f"{len(summary.tasks)} task(s), {len(summary.drafts)} draft(s), "
-                f"{len(summary.errors)} error(s). The deliverables are in the "
-                "run's output folder."
-            )
 
         def list_job_templates(**_: object) -> str:
             names = _jt.list_job_templates(self.project.code)
             return "Job templates: " + (", ".join(names) if names else "(none yet)")
 
         def create_job_template(
-            name: str, description: str, interview: str, **_: object
+            name: str, description: str, interview: str,
+            cardinality: str = "", artifact_kind: str = "document",
+            per: str = "", **_: object,
         ) -> str:
             """Codify a recurring job as a reusable Job Template (project-local).
             ``interview`` is the prose the Leader uses to gather the job's params
-            when the template is run."""
+            when the template is run. ``cardinality`` is the job's OUTPUT SHAPE —
+            the one thing the engine fans out on; a multi-unit job left at "one"
+            COLLAPSES to a single task (the anthology-as-one-task bug)."""
+            from modulatio.job_templates import OutputSpec
+            # Normalize the cardinality to the engine's grammar — CASE-INSENSITIVE
+            # and space-tolerant (Nemo hull #12: "Fixed:8" / "fixed: 8" must not slip
+            # through as an unrecognized literal). Tolerate the Leader's phrasings:
+            # a bare count "8" → "fixed:8"; "per-item:stories" splits the param out.
+            raw = str(cardinality).strip()
+            per_field = (str(per).strip() or None)
+            low = raw.lower()
+            if raw.isdigit():
+                card = f"fixed:{raw}"
+            elif low.startswith("fixed:"):
+                card = "fixed:" + raw.split(":", 1)[1].strip()
+            elif low.startswith("per-item"):
+                rest = raw.split(":", 1)[1].strip() if ":" in raw else ""
+                per_field = per_field or (rest or None)
+                card = "per-item"
+            elif low == "one":
+                card = "one"
+            else:
+                card = low  # surfaced to the validation below
+            # No silent default-to-"one" (#13) and no unenforceable contract (#12):
+            # cardinality must be one of one / fixed:N (N>=1) / per-item, and per-item
+            # MUST name the list param it fans over (else _jt_target_count returns
+            # None — a multi-unit template with no fan-out contract, the original bug
+            # class in a new disguise).
+            err = None
+            if not raw:
+                err = ("cardinality is required — 'one', 'fixed:N' (e.g. fixed:8 for "
+                       "an 8-unit anthology), or 'per-item' with a 'per' param.")
+            elif card.startswith("fixed:"):
+                n = card.split(":", 1)[1]
+                if not (n.isdigit() and int(n) >= 1):
+                    err = f"cardinality 'fixed:N' needs a positive integer N, got {raw!r}."
+            elif card == "per-item" and not per_field:
+                err = ("cardinality 'per-item' needs a 'per' param naming the list it "
+                       "fans over (e.g. per='founders') — otherwise the job has no "
+                       "enforceable output count.")
+            elif card not in ("one",) and not card.startswith("fixed:") and card != "per-item":
+                err = (f"unknown cardinality {raw!r} — use 'one', 'fixed:N', or "
+                       "'per-item' (with a 'per' param).")
+            if err:
+                return f"Couldn't create the template: {err}"
+            spec = OutputSpec(
+                cardinality=card, per=per_field,
+                artifact_kind=(str(artifact_kind).strip() or "document"),
+            )
             try:
                 _jt.create_job_template(
                     name=str(name), description=str(description),
-                    interview_body=str(interview),
+                    interview_body=str(interview), output_spec=spec,
                     project_code=self.project.code,
                 )
             except FileExistsError:
@@ -4182,7 +4530,10 @@ class Orchestrator:
                         "different name, or improve the existing one.")
             except Exception as exc:
                 return f"Couldn't create the template: {type(exc).__name__}: {exc}"
-            return f"Created job template {name!r} for this project."
+            return (
+                f"Created job template {name!r} (cardinality={spec.cardinality}, "
+                f"{spec.artifact_kind}) for this project."
+            )
 
         def create_skill(
             name: str, description: str, prompt: str, **_: object
@@ -4262,7 +4613,8 @@ class Orchestrator:
             run_id = self._converse_run_scope()
             if not run_id:
                 return ("No job has run yet for this project — there's nothing for "
-                        "the team to show. Use run_job to start one.")
+                        "the team to show. The operator can start one with "
+                        "`/kickoff … /end`.")
             goals = store.list_goals(self.project.code, run_id=run_id)
             tasks = store.list_tasks(self.project.code, run_id=run_id)
             live = self._kickoff_active
@@ -4363,21 +4715,12 @@ class Orchestrator:
             return f"--- {path} ---\n{text}"
 
         return {
-            "run_job": tools.Tool(
-                name="run_job",
-                description=(
-                    "Hand a job to the producer team — decompose into goals, "
-                    "dispatch to producers, QC reviews, you verify. Use for big, "
-                    "repetitive, or many-piece work; not for things you can just "
-                    "answer or do yourself. Pass a clear 'objective'."
-                ),
-                call=run_job,
-                params_schema={
-                    "type": "object",
-                    "properties": {"objective": {"type": "string"}},
-                    "required": ["objective"],
-                },
-            ),
+            # NOTE: the Leader has NO ``run_job`` tool — he does NOT start jobs
+            # himself (it made every conversational turn spawn a job). A job starts
+            # ONLY from the operator's explicit ``/kickoff … /end`` brackets (the
+            # TUI / the kickoff surface); the Leader's part in a job is to
+            # decompose/plan/verify once it's launched. In conversation, if the work
+            # wants the swarm, he SAYS so and asks the operator to bracket the brief.
             "list_job_templates": tools.Tool(
                 name="list_job_templates",
                 description="List the saved job templates for this project.",
@@ -4387,10 +4730,13 @@ class Orchestrator:
                 name="create_job_template",
                 description=(
                     "Codify a recurring kind of job as a reusable Job Template. "
-                    "Pass a 'name' (hyphen-case), a one-line 'description', and "
-                    "an 'interview' — the prose you'd use to gather the job's "
-                    "parameters when it's run. Use when the operator does the "
-                    "same class of work repeatedly."
+                    "Pass a 'name' (hyphen-case), a one-line 'description', an "
+                    "'interview' (the prose you'd use to gather the job's params "
+                    "when it's run), and the output 'cardinality'. Use when the "
+                    "operator does the same class of work repeatedly. ALWAYS set "
+                    "'cardinality' from the job: a multi-unit job (e.g. an 8-story "
+                    "anthology) left at the default 'one' COLLAPSES into a single "
+                    "task instead of fanning out — set 'fixed:8' (or 'per-item')."
                 ),
                 call=create_job_template,
                 params_schema={
@@ -4399,8 +4745,35 @@ class Orchestrator:
                         "name": {"type": "string"},
                         "description": {"type": "string"},
                         "interview": {"type": "string"},
+                        "cardinality": {
+                            "type": "string",
+                            "description": (
+                                "The job's OUTPUT SHAPE — the one thing the engine "
+                                "fans out on. 'one' = a single deliverable. "
+                                "'fixed:N' = exactly N same-kind deliverables (an "
+                                "8-story anthology → 'fixed:8'); the engine fans "
+                                "into N parallel unit tasks + an assembly. "
+                                "'per-item' = one deliverable per value of a list "
+                                "param (set 'per' to that param's name). A "
+                                "multi-unit job left at 'one' COLLAPSES to one task."
+                            ),
+                        },
+                        "artifact_kind": {
+                            "type": "string",
+                            "description": (
+                                "document | code | data | media — the deliverable "
+                                "family (drives the assembler). Default 'document'."
+                            ),
+                        },
+                        "per": {
+                            "type": "string",
+                            "description": (
+                                "For cardinality 'per-item': the list param whose "
+                                "values each yield one deliverable."
+                            ),
+                        },
                     },
-                    "required": ["name", "description", "interview"],
+                    "required": ["name", "description", "interview", "cardinality"],
                 },
             ),
             "create_skill": tools.Tool(
@@ -4849,6 +5222,100 @@ class Orchestrator:
         checksum = f"sha256:{hashlib.sha256(kept_bytes).hexdigest()}"
         return path, checksum, len(kept.split())
 
+    def _wire_cross_goal_assembler_deps(self, tasks: "list[Task]") -> None:
+        """P1 (engine binds the assembly — suspenders): wire a CROSS-GOAL assembler
+        task to the unit tasks it combines when the same-goal wiring found none.
+
+        Goals carry no dependency edges, so the units are resolved by the wide-wave
+        UNIT SIGNATURE, not by position: a fan-out goal holds ≥2 DELIVERABLE units
+        all of the SAME ``artifact_kind`` (the planner binds N same-kind units into
+        one goal — Phase 1A/1.5). A research/support deliverable goal is a singleton
+        or mixed-kind, so it can NEVER qualify as a unit source.
+
+        SEALED INVARIANT (Nemo BLOCKER, close-out re-review): among the PRIOR goals
+        (id < the assembler's; plan order = goal-id order), wire the assembler ONLY
+        when EXACTLY ONE goal carries the fan-out signature. Zero or multiple →
+        FAIL-CLOSED (deps stay empty → the producer-manifest path, P5/QC-backstopped)
+        — never guess which goal holds the units, and never let an immediately-
+        preceding support/research deliverable become an authoritative unit. This is
+        not 'rarity by planner order'; it's a hard structural gate. No-op for an
+        assembler that already has deps (same-goal wiring or planner-declared)."""
+        pending = [t for t in tasks if _is_assembler_task(t) and not t.depends_on]
+        if not pending:
+            return
+        try:
+            all_tasks = store.list_tasks(
+                self.project.code, run_id=self.project.run_id
+            )
+        except Exception:  # noqa: BLE001 — best effort; safe fail-closed keeps deps empty
+            return
+        for a in pending:
+            if not a.goal_id:
+                continue
+            candidates = [
+                t for t in all_tasks
+                if t.id != a.id
+                and not _is_assembler_task(t)
+                and t.deliverable
+                and t.output_path
+                and t.goal_id
+                and t.goal_id < a.goal_id  # prior goals only (plan order)
+            ]
+            by_goal: dict[str, list[Task]] = {}
+            for t in candidates:
+                by_goal.setdefault(t.goal_id, []).append(t)
+            # Fan-out goals: ≥2 deliverables, ALL the same artifact_kind. A singleton
+            # or mixed-kind support/research goal is excluded by construction.
+            fanout = [
+                gid for gid, ts in by_goal.items()
+                if len(ts) >= 2 and len({t.artifact_kind for t in ts}) == 1
+            ]
+            if len(fanout) != 1:
+                continue  # 0 or >1 fan-out goals → AMBIGUOUS → fail-closed
+            units = sorted(by_goal[fanout[0]], key=lambda t: t.id)
+            a.depends_on = [t.id for t in units]
+
+    def _assembly_manifest_from_deps(self, task: "Task") -> "dict | None":
+        """P1 (engine binds the assembly): build an assembly manifest from the
+        task's AUTHORITATIVE dependency outputs — the unit tasks it combines — so
+        the engine runs the mechanical join even when the producer emitted no
+        parseable manifest (it rambled, shelled out, or fabricated). Unit bodies are
+        read from disk by the join, never round-tripped through the producer's
+        context. Returns None when the task isn't an assembler task or has no
+        resolvable dep outputs (then the caller keeps the producer's own output)."""
+        if not _is_assembler_task(task) or not task.depends_on:
+            return None
+        by_id = {
+            t.id: t
+            for t in store.list_tasks(self.project.code, run_id=self.project.run_id)
+        }
+        units: list[str] = []
+        for dep_id in task.depends_on:
+            dep = by_id.get(dep_id)
+            if dep is not None and dep.output_path:
+                units.append(dep.output_path.strip().lstrip("./"))
+        if not units:
+            return None
+        return {"units": units}
+
+    #: Binary document formats the engine renders an assembled deliverable into
+    #: when the task's output_path DECLARES one. Artifact-agnostic: this is "what
+    #: the engine can render", driven by the deliverable's declared extension — it
+    #: imposes NO format when none is declared (.md/.txt/.json/etc. stay text).
+    _DOC_RENDER_EXTS: "frozenset[str]" = frozenset(
+        {"docx", "odt", "rtf", "epub", "pdf"}
+    )
+
+    def _assembler_render_format(self, task: "Task") -> "str | None":
+        """The DECLARED binary document format for an assembler deliverable, taken
+        from the task's ``output_path`` extension (the user's/standards' choice —
+        Modulatio assumes none). None → the assembled body stays text."""
+        op = (task.output_path or "").strip().lower()
+        if "." not in op:
+            return None
+        ext = op.rsplit(".", 1)[-1]
+        return ext if ext in self._DOC_RENDER_EXTS else None
+
     def _apply_assembly_manifest(self, task: Task, body_text: str) -> "str | None":
         """If the producer emitted an assembly manifest, mechanically
         assemble the named unit files from disk and return the concatenated
@@ -4867,7 +5334,15 @@ class Orchestrator:
         from modulatio import review_ledger as _review_ledger
         manifest = _assembly.parse_assembly_manifest(body_text)
         if manifest is None:
-            return None
+            # P1 (engine binds the assembly): a producer that emitted no parseable
+            # manifest (rambled, shelled out, or fabricated) must NOT bypass the
+            # join — that is exactly how a fake deliverable got written (HRWT). For
+            # an assembler task with authoritative deps, the engine builds the
+            # manifest from the dependency outputs itself; the deliverable never
+            # depends on the producer cooperating.
+            manifest = self._assembly_manifest_from_deps(task)
+            if manifest is None:
+                return None
         # Nemo hull #8 (+ close-out): pre-filter manifest units to the AUTHORITATIVE
         # dependency output paths BEFORE reading them — an in-root file that isn't a
         # declared unit must not be copied into the draft (pre-QC exposure), even
@@ -4898,7 +5373,16 @@ class Orchestrator:
         # Part B: the assembler skill selects the family/strategy; the engine owns
         # the mechanical join. document = text concat (today's default).
         strategy = _assembly_strategy_for_task(task)
-        result = _assembly.assemble(manifest, self._artifacts_root(), strategy=strategy)
+        # P4: for a DOCUMENT assembly, render the concatenated body into the
+        # deliverable's DECLARED binary format (artifact-agnostic — driven by the
+        # task's output extension, never assumed; None → text stands).
+        render_format = (
+            self._assembler_render_format(task) if strategy == "document" else None
+        )
+        result = _assembly.assemble(
+            manifest, self._artifacts_root(), strategy=strategy,
+            render_format=render_format,
+        )
         # Part A / A2 (#85): record engine-authored proof of mechanical assembly so
         # assembly QC can do the cheap structural check (and a producer emitting
         # assembled-looking text — which leaves no record — can't bypass review).
@@ -5056,6 +5540,27 @@ class Orchestrator:
         - ``None`` — verdict passed, or legacy QC that didn't classify
           (the orchestrator defaults absent classification to substantive).
         """
+        # P5 (universal fabrication gate): a deliverable that DECLARES a binary
+        # format (by its output extension) must carry that format's magic bytes.
+        # This runs FIRST — before the LLM judgment AND before the review-ledger
+        # cheap-pass — so a text blob named .pdf/.docx (the HRWT fabrication) can
+        # never pass, in ANY family, and can't be checksum-waved-through on a
+        # re-run. Deterministic, family-agnostic; imposes nothing on text/unknown
+        # extensions (it enforces only the format the deliverable itself declares).
+        from modulatio import review_ledger as _review_ledger
+        fmt_ok, fmt_reason = _review_ledger.verify_declared_format(draft_path)
+        if not fmt_ok:
+            verdict = AssertionEvidence(
+                producer="qc", primary=True,
+                check=f"declared-format integrity: {fmt_reason}",
+                passed=False,
+            )
+            return verdict, (
+                f"The deliverable was not really rendered as its declared format: "
+                f"{fmt_reason}. Render it as the real binary (the engine assembler "
+                f"does this when the toolchain is present) or correct the declared "
+                f"output format — do not ship text under a binary extension."
+            ), "environmental"
         # Part A / review-ledger: if the exact bytes in front of QC already
         # passed QC this run (checksum == the task's content-addressed mark),
         # don't re-review them — re-spending QC on already-verified content is the
@@ -5988,6 +6493,44 @@ class Orchestrator:
         msg = "run stopped by the operator — remaining work not started"
         if not any(msg in e for e in summary.errors):
             summary.errors.append(msg)
+
+    def _teardown_run(self, summary: RunSummary) -> None:
+        """Blow the live pipeline out of the pipes — the F8 KILL-SWITCH ONLY (Clif
+        2026-06-05: only the kill blows the pipes; a normal finish, or closing
+        Modulatio, leaves the run's final state + records intact). Every non-terminal
+        goal/task is finalized to ABANDONED and every open ticket is CLOSED, so the
+        killed run reads as DONE and NO residue — a blocked goal, an open ticket, a
+        parked queue — carries into or blocks the next run.
+
+        The durable run RECORD stays on disk for viewing (the files keep their full
+        transition logs); the leader chat lives outside the run and is untouched;
+        the TEAM TV is cleared by the F8 handler in the TUI.
+
+        NOTE (flagged): a killed run's budget-parked goal is also abandoned (the
+        operator killed it → no auto-resume). Best-effort — a teardown error never
+        breaks the run's return."""
+        code, rid = self.project.code, self.project.run_id
+        reason = "operator stopped the run (F8) — pipeline cleared"
+        try:
+            for t in store.list_tasks(code, run_id=rid):
+                if t.status not in (TaskStatus.COMPLETED, TaskStatus.ABANDONED):
+                    prior = t.status
+                    t.status = TaskStatus.ABANDONED
+                    t.transitions.append(StateTransition(
+                        from_state=prior.value, to_state=TaskStatus.ABANDONED.value,
+                        actor="orchestrator", rationale=reason))
+                    store.save_task(code, t, run_id=rid)
+            for g in store.list_goals(code, run_id=rid):
+                if g.status not in (GoalStatus.COMPLETED, GoalStatus.ABANDONED):
+                    prior = g.status
+                    g.status = GoalStatus.ABANDONED
+                    g.transitions.append(StateTransition(
+                        from_state=prior.value, to_state=GoalStatus.ABANDONED.value,
+                        actor="orchestrator", rationale=reason))
+                    store.save_goal(code, g, run_id=rid)
+            store.close_open_tickets(code, run_id=rid, note=reason)
+        except Exception:  # noqa: BLE001 — teardown must never break the run return
+            _logger.exception("run teardown (pipeline clear) failed — non-fatal")
 
     @staticmethod
     def _wave_global_cap() -> "int | None":
@@ -9319,11 +9862,14 @@ class Orchestrator:
             parts.append(
                 f"This job MUST produce **exactly {n} separate deliverables** "
                 f"({item_phrase}), each its own {spec.artifact_kind} file — the "
-                f"operator set this as a hard requirement. Emit a SINGLE task "
-                f"with an `artifacts: [...]` list of {n} entries (one per item), "
-                f"each marked `deliverable: true`.{naming} Do NOT merge them into "
-                f"fewer files and do NOT batch them away — the efficiency "
-                f"grouping rule is OVERRIDDEN for this job.\n"
+                f"operator set this as a hard requirement. Keep all {n} in **ONE "
+                f"goal** — emit a SINGLE task with an `artifacts: [...]` list of "
+                f"{n} entries (one per item), each marked `deliverable: true`."
+                f"{naming} Do NOT create one goal per item: {n} separate goals "
+                f"run one at a time and leave your producers idle — the {n} "
+                f"items are independent and MUST run in parallel as one wave. Do "
+                f"NOT merge them into fewer files and do NOT batch them away — the "
+                f"efficiency grouping rule is OVERRIDDEN for this job.\n"
             )
         hard = [pf.name for pf in jt.param_schema if pf.required]
         kv = ", ".join(
@@ -9765,6 +10311,13 @@ class Orchestrator:
         # real delivery dir; the real run paths construct with deliver_products=True.
         if self._deliver_products:
             self._deliver_finished_products(summary)
+        # F8-ONLY teardown (Clif 2026-06-05: only the kill-switch blows out the
+        # pipes — a NORMAL finish leaves the run's final state + records intact).
+        # On an operator kill, finalize every non-terminal goal/task + close open
+        # tickets so no wedge residue carries into the next run. Runs AFTER delivery
+        # (completed deliverables still ship) + the PQR; the run RECORD stays.
+        if self.abort_event.is_set():
+            self._teardown_run(summary)
         self._emit_activity(
             role="orchestrator", phase="kickoff_ended", agent_id="orchestrator",
         )
@@ -9780,8 +10333,10 @@ _LEADER_CONVERSE_PROMPT = """\
 You are the Leader of this Modulatio project, talking with the operator as a
 fully-capable partner — the smartest agent on the team. You can do anything
 asked directly (think, analyze, read/write files, run a shell command, search
-the web, build a skill, draft a job template), and you command the producer
-team via ``run_job`` for work that wants scale. You are never a job-intake
+the web, build a skill, draft a job template). You do NOT start jobs yourself —
+a job is launched ONLY by the operator bracketing the brief with
+``/kickoff … /end``. When work wants the producer swarm, say so and help the
+operator sharpen the brief; they pull the trigger. You are never a job-intake
 form; never say "I only run jobs."
 
 {operator_context}
@@ -10046,7 +10601,10 @@ manifest and the ENGINE does the mechanical join (concat / file-index / merge),
 so it never re-types the units and a large deliverable can't truncate. Do NOT use
 `long-form`/`drafter` for an assembly step (they re-emit content → truncation).
 The unit files already exist; read their real names from the repo_map. This task
-depends_on the unit tasks.
+depends_on the unit tasks. Set its `output_path` to the deliverable's DECLARED
+format extension (`anthology.pdf`, `report.docx`) so the engine renders the real
+binary; a bare name or `.md` stays text. Format = the user's declared deliverable,
+not an assumption ("a bound PDF" → `.pdf`).
 
 RIGOROUS SOURCING — fact-bearing tasks (research, analysis, current
 events, any real-world factual claim): set the PRIMARY (first)

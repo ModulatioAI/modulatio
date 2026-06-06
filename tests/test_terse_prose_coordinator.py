@@ -125,7 +125,10 @@ def test_template_is_under_post_terse_threshold() -> None:
     and the ASSEMBLY/CONSOLIDATION rule (~640 chars, 2026-06-03 — the gather-back
     step routes to the `consolidation` skill so the assembler emits a manifest
     and the engine concatenates unit bodies from disk, instead of re-emitting
-    them as output tokens and truncating a large deliverable).
+    them as output tokens and truncating a large deliverable), and the
+    ASSEMBLY-OUTPUT-FORMAT rule (~250 chars, 2026-06-05 / P4 — the assembly task's
+    output_path declares the deliverable's binary FORMAT extension so the engine
+    renders a real .docx/.pdf instead of text-named-binary; artifact-agnostic).
     Each is contract the planner must honor, not prose. Keep new additions
     justified by contract; the cap catches padding regressions.
 
@@ -133,10 +136,10 @@ def test_template_is_under_post_terse_threshold() -> None:
     / QC, replicate this pattern with their respective baselines.
     """
     char_count = len(orchestration._TASK_PLAN_PROMPT)
-    assert char_count < 9200, (
+    assert char_count < 9500, (
         f"_TASK_PLAN_PROMPT is {char_count} chars — should stay under "
-        f"9,200 (terse baseline + sweep + rigorous-sourcing + web-search "
-        f"+ size-floor + parallel-deliverables + assembly contracts)."
+        f"9,500 (terse baseline + sweep + rigorous-sourcing + web-search "
+        f"+ size-floor + parallel-deliverables + assembly + output-format)."
     )
     # Lower bound too — a vacuous trim that drops the contract is
     # worse than no trim. 2,500 chars is a sanity floor.

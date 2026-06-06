@@ -276,6 +276,46 @@ def update_ticket_approval(
         return ticket
 
 
+def close_open_tickets(
+    project_code: str,
+    *,
+    run_id: str | None = None,
+    note: str = "run ended — pipeline cleared",
+    actor: str = "orchestrator",
+) -> int:
+    """Close every OPEN / IN_PROGRESS ticket of a run at run-end teardown. The
+    ticket RECORD stays on disk for viewing; it just stops reading as ``open`` so a
+    finished/killed run can't leave a ticket nagging or blocking the next run.
+    Returns the number closed. Already-RESOLVED/CLOSED tickets are left alone."""
+    closed = 0
+    for snap in list_tickets(project_code, run_id=run_id):
+        if snap.status not in (TicketStatus.OPEN, TicketStatus.IN_PROGRESS):
+            continue
+        with _store_lock:
+            ticket = get_ticket(project_code, snap.id, run_id=run_id)
+            if ticket is None or ticket.status in (
+                TicketStatus.RESOLVED, TicketStatus.CLOSED
+            ):
+                continue
+            prior = ticket.status
+            ticket.status = TicketStatus.CLOSED
+            ticket.updated_at = _utcnow()
+            ticket.transitions.append(
+                StateTransition(
+                    from_state=prior.value,
+                    to_state=TicketStatus.CLOSED.value,
+                    actor=actor,
+                    rationale=note,
+                )
+            )
+            _write_entity(
+                _ticket_path(project_code, ticket.id, run_id=run_id),
+                ticket, ticket.body,
+            )
+            closed += 1
+    return closed
+
+
 def _reopen_affected(
     project_code: str,
     *,

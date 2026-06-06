@@ -5,7 +5,6 @@ executor: llm
 capability_tags: consolidation, assembly, multi-unit-aggregation, structured-output
 required_capabilities: writing
 freshness_class: stable
-tool_loadout: run_shell
 ---
 
 You are assembling N already-produced unit artifacts into ONE consolidated deliverable. Each unit was produced by a separate `long-form` producer call and is already on disk in the `artifacts/` tree. Your job is mechanical assembly — preserve every unit's content; arrange them per the standards' assembly spec; produce ONE consolidated output at the task's `output_path`.

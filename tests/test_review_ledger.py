@@ -231,3 +231,58 @@ def test_verify_assembly_media_strategy_falls_back(tmp_path):
     rec.strategy = "media"
     ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "media assembly" in reason
+
+
+# ── P5: declared-format magic-byte gate (universal fabrication guard) ──────
+
+
+def test_verify_declared_format_rejects_text_named_pdf(tmp_path):
+    """The HRWT fabrication: a text blob named .pdf is rejected."""
+    from modulatio import review_ledger
+    fake = tmp_path / "anthology.pdf"
+    fake.write_text("Have Robot, Will Travel\n\n# The Last Companion\n...")
+    ok, reason = review_ledger.verify_declared_format(fake)
+    assert ok is False
+    assert "not a real pdf" in reason.lower()
+
+
+def test_verify_declared_format_accepts_real_pdf(tmp_path):
+    from modulatio import review_ledger
+    real = tmp_path / "doc.pdf"
+    real.write_bytes(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n... body ...")
+    assert review_ledger.verify_declared_format(real) == (True, "")
+
+
+def test_verify_declared_format_zip_office_formats(tmp_path):
+    from modulatio import review_ledger
+    real = tmp_path / "book.docx"
+    real.write_bytes(b"PK\x03\x04\x14\x00\x06\x00 ...docx zip body...")
+    assert review_ledger.verify_declared_format(real)[0] is True
+    fake = tmp_path / "book.docx"
+    fake.write_text("# not really a docx, just markdown")
+    assert review_ledger.verify_declared_format(fake)[0] is False
+
+
+def test_verify_declared_format_text_extensions_impose_nothing(tmp_path):
+    """.md/.txt/.json/no-extension are text/unknown → no constraint."""
+    from modulatio import review_ledger
+    for name in ("report.md", "notes.txt", "data.json", "README", "main.py"):
+        p = tmp_path / name
+        p.write_text("anything goes here")
+        assert review_ledger.verify_declared_format(p) == (True, "")
+
+
+def test_verify_declared_format_media_family(tmp_path):
+    """Nemo #4 / Lovecraft Q6: the gate is family-agnostic — media binaries get the
+    same fabrication check. A text blob named .mp4/.mp3 is rejected; a real ftyp
+    (offset-4) mp4 and an ID3 mp3 pass."""
+    from modulatio import review_ledger
+    fake = tmp_path / "clip.mp4"
+    fake.write_text("not a video, just text")
+    assert review_ledger.verify_declared_format(fake)[0] is False
+    real_mp4 = tmp_path / "clip.mp4"
+    real_mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00")
+    assert review_ledger.verify_declared_format(real_mp4)[0] is True
+    real_mp3 = tmp_path / "song.mp3"
+    real_mp3.write_bytes(b"ID3\x03\x00\x00\x00...")
+    assert review_ledger.verify_declared_format(real_mp3)[0] is True

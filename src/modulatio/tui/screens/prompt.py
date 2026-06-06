@@ -23,6 +23,7 @@ either way the Mod Squad streams into MOD SQUAD and he reports back on LEADER.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -33,11 +34,7 @@ from modulatio.attachments import Attachment, AttachmentKind, build_attachment
 from modulatio.tui.widgets.chat_input import ChatInput
 from modulatio.tui.widgets.indicator_panel import IndicatorPanel
 from modulatio.tui.widgets.stream_status import StreamStatus
-from modulatio.tui.widgets.stream_view import (
-    LEADER_ROLES,
-    TEAM_ROLES,
-    StreamView,
-)
+from modulatio.tui.widgets.stream_view import StreamView
 
 
 class PromptScreen(Vertical):
@@ -126,6 +123,11 @@ class PromptScreen(Vertical):
         super().__init__(*args, **kwargs)
         self._kickoff_attachments: list[Attachment] = []
         self._chatbox_attachments: list[Attachment] = []
+        #: Job-objective capture between `/kickoff` and `/end`. None = not
+        #: capturing (plain text is conversation); a list = accumulating the brief
+        #: across messages until `/end` fires the job. The ONLY way a job starts —
+        #: the Leader never self-kickoffs (jobs come from the operator's brackets).
+        self._kickoff_capture: list[str] | None = None
 
     @property
     def chatbox_attachments(self) -> list[Attachment]:
@@ -155,7 +157,7 @@ class PromptScreen(Vertical):
             with TabPane("LEADER", id="stream-leader-pane"):
                 # TV on top (big) …
                 yield StreamView(
-                    lane_roles=LEADER_ROLES, id="stream-leader",
+                    lane="leader", id="stream-leader",
                     classes="leader-tv",
                 )
                 # … a live status line (what the Leader is doing) …
@@ -179,7 +181,7 @@ class PromptScreen(Vertical):
             with TabPane("MOD SQUAD", id="stream-team-pane"):
                 # The factory floor — the workers' TV (big) on top …
                 yield StreamView(
-                    lane_roles=TEAM_ROLES, id="stream-team",
+                    lane="team", id="stream-team",
                     classes="team-tv",
                 )
                 yield StreamStatus(lane="team", id="stream-team-status")
@@ -289,11 +291,38 @@ class PromptScreen(Vertical):
         """Enter in the composer → send (never a kickoff)."""
         self._send_message()
 
+    @staticmethod
+    def _is_cmd(text: str, name: str) -> bool:
+        """True if ``text`` is the slash-command ``name`` (exact, or followed by
+        whitespace) — so ``/end`` matches but ``/endpoint`` / ``/kickoffx`` don't."""
+        low = text.lower()
+        return low == name or (low.startswith(name) and text[len(name):len(name) + 1].isspace())
+
+    def _launch_captured_job(self, leader_tv: "StreamView") -> None:
+        """Fire the operator-bracketed job with the captured `/kickoff…/end`
+        objective, then reset capture. This is the ONLY path that starts a job."""
+        objective = "\n".join(s for s in (self._kickoff_capture or []) if s).strip()
+        self._kickoff_capture = None
+        if not objective:
+            leader_tv.add_leader_message(
+                "(no objective captured — `/kickoff <brief>` then `/end`.)"
+            )
+            return
+        leader_tv.add_leader_message(
+            "On it — running that job. Watch the TEAM floor; "
+            "I'll report back here when it's done."
+        )
+        runner = getattr(self.app, "_run_kickoff", None)
+        if runner is not None:
+            runner(objective)
+
     def _send_message(self) -> None:
-        """Route the chatbox text. `/kickoff <obj>` launches a job (the Leader's
-        orchestrate function); any other `/cmd` runs a slash command; plain text
-        is a message to the Leader (his converse function). The reply / verdict
-        renders in the LEADER TV."""
+        """Route the chatbox text. A JOB is ONLY the text between ``/kickoff`` and
+        ``/end`` — one message (`/kickoff <brief> /end`) or built up across several
+        messages, then ``/end`` launches it. The Leader never self-starts a job;
+        jobs come only from these operator brackets. Everything else is a message to
+        the Leader (his converse function); any other ``/cmd`` runs a slash command.
+        """
         inp = self.query_one("#prompt-input", ChatInput)
         text = inp.text.strip()
         if not text:
@@ -301,35 +330,62 @@ class PromptScreen(Vertical):
         inp.text = ""
         leader_tv = self.query_one("#stream-leader", StreamView)
 
-        # `/kickoff <objective>` — launch a job from the conversation. Text
-        # only; for docs/images use the KICK OFF box on the TEAM floor.
-        low = text.lower()
-        if low == "/kickoff" or low.startswith("/kickoff "):
-            objective = text[len("/kickoff"):].strip()
+        # ── Already capturing a job brief (between /kickoff and /end) ──
+        if self._kickoff_capture is not None:
             leader_tv.add_operator_message(text)
-            if not objective:
+            if self._is_cmd(text, "/end"):
+                self._launch_captured_job(leader_tv)
+                return
+            if self._is_cmd(text, "/cancel"):
+                self._kickoff_capture = None
+                leader_tv.add_leader_message("(job cancelled — back to conversation.)")
+                return
+            if self._is_cmd(text, "/kickoff"):  # restart the brief
+                rest = text[len("/kickoff"):].strip()
+                self._kickoff_capture = [rest] if rest else []
                 leader_tv.add_leader_message(
-                    "(give me something to run — `/kickoff <objective>`)"
+                    "(restarted — keep adding the brief, then `/end` to launch.)"
                 )
                 return
-            leader_tv.add_leader_message(
-                "On it — running that job. Watch the TEAM floor; "
-                "I'll report back here when it's done."
-            )
-            runner = getattr(self.app, "_run_kickoff", None)
-            if runner is not None:
-                runner(objective)
+            self._kickoff_capture.append(text)  # accumulate this line of the brief
             return
 
-        # Any other `/cmd` → the slash-command dispatcher.
+        # ── Start a job: /kickoff … (optionally … /end on the same line) ──
+        if self._is_cmd(text, "/kickoff"):
+            leader_tv.add_operator_message(text)
+            body = text[len("/kickoff"):].strip()
+            # one-shot: /kickoff <objective> /end  (the /end must be a trailing token)
+            m = re.search(r"(?:^|\s)/end\s*$", body, re.IGNORECASE)
+            if m is not None:
+                self._kickoff_capture = [body[:m.start()].strip()]
+                self._launch_captured_job(leader_tv)
+                return
+            # multi-message capture: start the buffer and wait for /end
+            self._kickoff_capture = [body] if body else []
+            leader_tv.add_leader_message(
+                "(capturing the job brief — type it out, then send `/end` to "
+                "launch or `/cancel` to drop it. Everything between `/kickoff` and "
+                "`/end` becomes the objective; nothing else starts a job.)"
+            )
+            return
+
+        # ── /end with nothing captured ──
+        if self._is_cmd(text, "/end"):
+            leader_tv.add_operator_message(text)
+            leader_tv.add_leader_message(
+                "(nothing to launch — start a job with `/kickoff`, type the brief, "
+                "then `/end`.)"
+            )
+            return
+
+        # ── Any other /cmd → the slash-command dispatcher ──
         if text.startswith("/"):
             handler = getattr(self.app, "_handle_slash_command", None)
             if handler is not None:
                 handler(text)
             return
 
-        # Plain text → a message to the Leader (converse), with any staged
-        # attachments. Snapshot + clear so the next message starts clean.
+        # ── Plain text → a message to the Leader (converse) ──
         leader_tv.add_operator_message(text)
         attachments = self.chatbox_attachments
         self.clear_chatbox_attachments()
