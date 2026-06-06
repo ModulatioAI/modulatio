@@ -5168,19 +5168,14 @@ class Orchestrator:
             all_tasks = store.list_tasks(
                 self.project.code, run_id=self.project.run_id
             )
-            goals = {
-                g.id: g
-                for g in store.list_goals(
-                    self.project.code, run_id=self.project.run_id
-                )
-            }
         except Exception:  # noqa: BLE001 — best effort; safe fail-closed keeps deps empty
             return
+        # Goals carry no dependency edges (they run by plan order, not an explicit
+        # graph), so the units are simply the DELIVERABLE non-assembler tasks of the
+        # OTHER goals — the 'write the units' goal(s) that ran before this 'assemble'
+        # goal. The same-goal wiring already handled the co-located case; this only
+        # fires for a genuinely cross-goal assembler (empty deps).
         for a in pending:
-            my_goal = goals.get(a.goal_id)
-            dep_goal_ids = (
-                set(my_goal.depends_on) if my_goal and my_goal.depends_on else set()
-            )
             units = [
                 t for t in all_tasks
                 if t.id != a.id
@@ -5188,7 +5183,6 @@ class Orchestrator:
                 and t.deliverable
                 and t.output_path
                 and t.goal_id != a.goal_id
-                and (t.goal_id in dep_goal_ids if dep_goal_ids else True)
             ]
             if units:
                 # Sort by task id so the unit ORDER is the plan order (zero-padded

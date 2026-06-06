@@ -8836,12 +8836,20 @@ def test_cross_goal_assembler_wires_units_from_store(project, tmp_path):
     the producer pulls every unit into context → overflow → fabrication."""
     from uuid import uuid4
     from modulatio import store
-    from modulatio.types import Task
+    from modulatio.types import Goal, Task
 
     artifacts = tmp_path / "art"
     artifacts.mkdir()
     orch = _assembly_orch(project, tmp_path, artifacts)
     code = project.code
+    # Save the GOALS too — the real run shape. (Regression guard: the first cut
+    # accessed a non-existent Goal.depends_on and crashed the live run only when a
+    # real Goal object existed; a test without goals never exercised that path.)
+    pid = uuid4()
+    store.save_goal(code, Goal(id="X-G-001", project_id=pid,
+                               description="write the stories", success_criteria="s"))
+    store.save_goal(code, Goal(id="X-G-002", project_id=pid,
+                               description="assemble", success_criteria="s"))
     u2 = Task(id="X-T-002", project_id=uuid4(), goal_id="X-G-001",
               description="story 2", output_path="s2.txt", deliverable=True)
     u1 = Task(id="X-T-001", project_id=uuid4(), goal_id="X-G-001",
