@@ -8145,6 +8145,129 @@ def test_leader_auto_redo_absent_artifact_uses_generate(tmp_path, monkeypatch):
     assert task.producer_mode == "generate"
 
 
+def _redo_goal_and_tasks(code, n=2):
+    """A goal + n distinct deliverable tasks for redo-dispatch tests."""
+    from uuid import uuid4
+    from modulatio.types import Goal, GoalStatus, Task, TaskStatus
+    goal = Goal(id=f"{code}-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    tasks = []
+    for i in range(1, n + 1):
+        t = Task(id=f"{code}-T-00{i}", project_id=uuid4(), goal_id=goal.id,
+                 description=f"produce deliverable {i}", depends_on=[])
+        t.status = TaskStatus.COMPLETED
+        t.deliverable = True
+        t.output_path = f"d{i}.md"
+        tasks.append(t)
+    return goal, tasks
+
+
+def test_leader_auto_redo_routes_through_waves_when_concurrent(tmp_path, monkeypatch):
+    """#79: with the wave executor enabled (the default), a goal redo re-executes
+    through _run_task_waves — same parallelism + per-task staging/merge isolation as
+    the first pass — passing the Leader's rationale as the workers' initial
+    corrective notes. The old serial _run_task_with_redo loop is NOT used."""
+    monkeypatch.delenv("MODULATIO_CONCURRENT_WAVES", raising=False)  # field default ON
+    from modulatio.orchestration import RunSummary
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("satisfied"), code="WV1")
+    goal, tasks = _redo_goal_and_tasks("WV1")
+
+    waves_calls, serial_calls = [], []
+    monkeypatch.setattr(
+        orch, "_run_task_waves",
+        lambda g, ts, summary, task_map, initial_corrective_notes="":
+            waves_calls.append((task_map, initial_corrective_notes)),
+    )
+    monkeypatch.setattr(
+        orch, "_run_task_with_redo",
+        lambda t, summary, initial_corrective_notes="": serial_calls.append(t.id),
+    )
+    summary = RunSummary(project=orch.project)
+    summary.tasks = list(tasks)
+    report = orch._scope_root() / "reports" / "WV1-G-001.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("r")
+
+    orch._leader_auto_redo(goal, tasks, "tighten the focus", report, summary)
+
+    assert len(waves_calls) == 1, "redo must route through the wave executor"
+    task_map, notes = waves_calls[0]
+    assert notes == "tighten the focus"          # rationale → workers' corrective notes
+    assert set(task_map) == {t.id for t in tasks}  # ALL the goal's tasks, one wave call
+    assert serial_calls == [], "the serial redo loop must not run when waves are on"
+    assert goal.retry_count == 1                  # budget still consumed exactly once
+
+
+def test_leader_auto_redo_serial_under_kill_switch(tmp_path, monkeypatch):
+    """#79 flag-mirror: MODULATIO_CONCURRENT_WAVES=0 forces the FIRST pass serial,
+    so the redo must mirror it — sequential _run_task_with_redo, never the wave
+    path. (An operator debugging with the kill-switch must not get concurrent redo.)"""
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "0")
+    from modulatio.orchestration import RunSummary
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("satisfied"), code="WV0")
+    goal, tasks = _redo_goal_and_tasks("WV0")
+
+    waves_calls, serial_calls = [], []
+    monkeypatch.setattr(
+        orch, "_run_task_waves",
+        lambda g, ts, summary, task_map, initial_corrective_notes="":
+            waves_calls.append(task_map),
+    )
+    monkeypatch.setattr(
+        orch, "_run_task_with_redo",
+        lambda t, summary, initial_corrective_notes="": serial_calls.append(
+            (t.id, initial_corrective_notes)),
+    )
+    summary = RunSummary(project=orch.project)
+    summary.tasks = list(tasks)
+    report = orch._scope_root() / "reports" / "WV0-G-001.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("r")
+
+    orch._leader_auto_redo(goal, tasks, "tighten the focus", report, summary)
+
+    assert waves_calls == [], "kill-switch must keep redo sequential"
+    assert [tid for tid, _ in serial_calls] == [t.id for t in tasks]  # each task, in order
+    assert all(notes == "tighten the focus" for _, notes in serial_calls)  # notes still injected
+
+
+def test_run_task_waves_records_blocked_on_worker_crash(project: Project, monkeypatch):
+    """Hero MINOR: an UNEXPECTED worker exception inside a wave must not abort the
+    whole wave and orphan siblings — the crashed task surfaces as BLOCKED and its
+    independent sibling still completes."""
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "1")
+
+    def _coord_two(prompt: str) -> str:
+        tasks = [
+            {"description": f"produce artifact {i}{mark}",
+             "assignee_specialist": "drafter", "artifact_kind": "essay",
+             "evidence_required": [{"kind": "artifact", "description": "file"}]}
+            for i, mark in ((1, ""), (2, " CRASHME"))
+        ]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader_with_verdict("satisfied"), "planner": _coord_two,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    orig = orch._execute_task_isolated
+
+    def crashing(t, initial_corrective_notes=""):
+        if "CRASHME" in t.description:
+            raise RuntimeError("simulated engine bug in a wave worker")
+        return orig(t, initial_corrective_notes)
+
+    monkeypatch.setattr(orch, "_execute_task_isolated", crashing)
+
+    orch.kickoff("two independent things, one explodes")
+
+    by_desc = {t.description: t for t in store.list_tasks(PROJECT_CODE)}
+    crashed = next(t for d, t in by_desc.items() if "CRASHME" in d)
+    sibling = next(t for d, t in by_desc.items() if "CRASHME" not in d)
+    assert crashed.status is TaskStatus.BLOCKED, "crashed worker → BLOCKED, not vanished"
+    assert sibling.status is TaskStatus.COMPLETED, "sibling still merges despite the crash"
+
+
 def test_leader_redo_loop_breaker_stops_unchanged_deliverable(tmp_path, monkeypatch):
     """The loop-breaker: once a redo has run (retry_count >= 1) and the
     deliverable artifacts are UNCHANGED from when that redo was dispatched, a

@@ -6560,7 +6560,7 @@ class Orchestrator:
 
     def _run_task_waves(
         self, g: Goal, tasks: list[Task], summary: RunSummary,
-        task_map: dict[str, Task],
+        task_map: dict[str, Task], initial_corrective_notes: str = "",
     ) -> None:
         """Core rebuild B4 — execute a goal's tasks in CONCURRENT WAVES.
 
@@ -6683,16 +6683,37 @@ class Orchestrator:
             pool_size = max(1, min(len(to_run), self._wave_pool_ceiling()))
             with ThreadPoolExecutor(max_workers=pool_size) as ex:
                 futures = {
-                    ex.submit(self._execute_task_isolated, t): t.id
+                    ex.submit(
+                        self._execute_task_isolated, t, initial_corrective_notes
+                    ): t.id
                     for t in to_run
                 }
                 for fut in as_completed(futures):
                     if fut.cancelled():
                         continue
+                    tid = futures[fut]
                     try:
-                        done[futures[fut]] = fut.result()
+                        done[tid] = fut.result()
                     except _FuturesCancelled:
                         continue
+                    except Exception as exc:  # noqa: BLE001
+                        # Hero review (MINOR): an UNEXPECTED worker exception (an
+                        # engine bug — producer failures are caught INSIDE the
+                        # worker and returned as a result) must not propagate out
+                        # of collection and orphan the completed siblings already
+                        # in `done`. Record a synthetic failed-task result so the
+                        # merge proceeds and this task surfaces as BLOCKED rather
+                        # than vanishing.
+                        crashed = task_map.get(tid)
+                        if crashed is not None:
+                            crashed.status = TaskStatus.BLOCKED
+                            done[tid] = TaskExecutionResult(
+                                task=crashed,
+                                errors=[f"wave worker crashed: {type(exc).__name__}: {exc}"],
+                            )
+                        _logger.exception(
+                            "wave worker for task %s crashed; recorded as BLOCKED", tid
+                        )
                     # Fix C hardening (Nemo BLOCK): on operator stop, cancel every
                     # not-yet-started task so the pool doesn't keep launching
                     # queued work. Already-running tasks finish; their result is
@@ -8194,13 +8215,25 @@ class Orchestrator:
             t.qc_authored_fix = False
             store.save_task(self.project.code, t, run_id=self.project.run_id)
 
-        # Re-run the per-task execution loop with Leader's rationale
-        # injected as initial corrective notes.
-        for t in tasks:
-            self._run_task_with_redo(
-                t, summary, initial_corrective_notes=leader_rationale,
+        # Re-run execution with Leader's rationale injected as initial corrective
+        # notes — MIRRORING the initial pass's dispatch decision (#79). When the
+        # concurrent wave executor is enabled (default), the redo runs through it
+        # too, so a multi-task goal redo gets the same parallelism + per-task
+        # staging / lock / deterministic-merge isolation as the first pass. The
+        # MODULATIO_CONCURRENT_WAVES=0 kill-switch keeps redo sequential, matching
+        # an operator who forced the first pass serial.
+        if self._concurrent_waves_enabled(self.project):
+            task_map = {t.id: t for t in tasks}
+            self._run_task_waves(
+                goal, tasks, summary, task_map,
+                initial_corrective_notes=leader_rationale,
             )
-            store.save_task(self.project.code, t, run_id=self.project.run_id)
+        else:
+            for t in tasks:
+                self._run_task_with_redo(
+                    t, summary, initial_corrective_notes=leader_rationale,
+                )
+                store.save_task(self.project.code, t, run_id=self.project.run_id)
 
         # Fix C hardening (Nemo close-out residual): if F8 fired mid-redo, don't
         # spend even ONE more Leader verify call — the kill-switch contract is
@@ -10159,11 +10192,10 @@ class Orchestrator:
                 TaskStatus.ABANDONED,
             }
             # Core rebuild B4: when the concurrent wave executor is enabled
-            # (flag, off by default), it runs ALL of this goal's tasks in
-            # parallel waves; the sequential loop below is then skipped
-            # wholesale. Goal verification (after the loop) runs in BOTH
-            # modes. Sequential stays the production path until concurrency
-            # is fully hardened.
+            # (default ON since §5 — kill-switch MODULATIO_CONCURRENT_WAVES=0
+            # forces sequential), it runs ALL of this goal's tasks in parallel
+            # waves; the sequential loop below is then skipped wholesale. Goal
+            # verification (after the loop) runs in BOTH modes.
             run_concurrent = self._concurrent_waves_enabled(self.project)
             if run_concurrent:
                 self._run_task_waves(g, tasks, summary, task_map)
