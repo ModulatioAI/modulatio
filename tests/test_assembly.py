@@ -620,3 +620,17 @@ def test_digest_is_product_agnostic_generic_fallback(tmp_path):
     assert [p["size"] for p in d.parts] == [5, 2]
     assert d.structure == {}              # no document framing assumed
     assert d.whole_size is None
+
+
+def test_write_text_twin_persists_under_twins_dir(tmp_path):
+    rel = assembly.write_text_twin("# Bound\n\nreadable body", tmp_path, "DIG-T-001")
+    assert rel == ".twins/DIG-T-001.md"
+    assert (tmp_path / rel).read_text() == "# Bound\n\nreadable body"
+
+
+def test_write_text_twin_sanitizes_name_no_traversal(tmp_path):
+    rel = assembly.write_text_twin("x", tmp_path, "weird/../name")
+    assert rel.startswith(".twins/")
+    leaf = rel[len(".twins/"):]
+    assert "/" not in leaf                 # path separators stripped — no traversal
+    assert (tmp_path / rel).is_file()

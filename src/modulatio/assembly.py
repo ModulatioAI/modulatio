@@ -128,6 +128,9 @@ class AssemblyRecord:
     #: the caller moves it onto the deliverable path and ``final_checksum`` is the
     #: hash of ITS bytes (not of ``content``). None for text strategies.
     output_file: "Path | None" = None
+    #: #101 Part 0: the engine-extracted structural digest of this deliverable (the
+    #: verifier's eyes), attached at assembly time. None until Part 0 wiring runs.
+    digest: "DeliverableDigest | None" = None
 
 
 @dataclass
@@ -352,6 +355,19 @@ def build_deliverable_digest(
         manifest, units_used, artifacts_root,
         output_file=output_file, text_twin_path=text_twin_path,
     )
+
+
+def write_text_twin(content: str, artifacts_root: Path, name: str) -> str:
+    """Persist the readable markdown TWIN of a bound (binary) deliverable under
+    ``artifacts_root/.twins/`` so the verifier has eyes on bytes it cannot read (#101
+    Part 0). Engine-owned; ``name`` is sanitized (a task id — never a producer path).
+    Returns the path RELATIVE to ``artifacts_root``."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("_") or "twin"
+    twins = artifacts_root / ".twins"
+    twins.mkdir(parents=True, exist_ok=True)
+    out = twins / f"{safe}.md"
+    out.write_text(content)
+    return str(out.relative_to(artifacts_root))
 
 
 def assemble(

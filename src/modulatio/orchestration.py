@@ -5398,12 +5398,27 @@ class Orchestrator:
             final_checksum = (
                 f"sha256:{hashlib.sha256(result.content.encode()).hexdigest()}"
             )
+        # #101 Part 0: give the verifier EYES. Persist a readable text twin (binary
+        # deliverables only — a text deliverable is already its own readable twin) and
+        # attach the engine-extracted structural digest, so QC/Leader-verify can judge
+        # the WHOLE without reading binary bytes they can't (the HRWT blind-verify).
+        if binary_out is not None:
+            text_twin_rel = _assembly.write_text_twin(
+                result.content, self._artifacts_root(), task.id
+            )
+        else:
+            text_twin_rel = task.output_path  # the text deliverable is readable as-is
+        digest = _assembly.build_deliverable_digest(
+            manifest, result.units_used, self._artifacts_root(),
+            strategy=strategy, output_file=binary_out, text_twin_path=text_twin_rel,
+        )
         self._assembly_records[task.id] = _assembly.AssemblyRecord(
             manifest=manifest,
             final_checksum=final_checksum,
             complete=complete,
             strategy=strategy,
             output_file=binary_out,
+            digest=digest,
         )
         verb = "composited" if binary_out is not None else "concatenated"
         bits = [

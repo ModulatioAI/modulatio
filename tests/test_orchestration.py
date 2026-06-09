@@ -8820,6 +8820,33 @@ def test_apply_assembly_manifest_concatenates_from_disk(project, tmp_path):
     assert "2 unit(s) concatenated" in (task.summary_for_state_doc or "")
 
 
+def test_apply_assembly_manifest_attaches_deliverable_digest(project, tmp_path):
+    """#101 Part 0: a document assembly attaches the engine-extracted digest to the
+    AssemblyRecord (the verifier's eyes) — per-part labels + word sizes + framing
+    flags — and a text deliverable's twin pointer is the output itself."""
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.md").write_text("# Chapter One\n\nalpha beta gamma")   # 6 words
+    (artifacts / "s2.md").write_text("# Chapter Two\n\nword")               # 4 words
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    task = Task(id="DIG-T-001", project_id=uuid4(), goal_id="DIG-G-001",
+                description="assemble", summary_for_state_doc="", output_path="book.md")
+    body = '```assembly\n{"units": ["s1.md", "s2.md"], "title_page": "BOOK", "toc": true}\n```\n'
+    orch._apply_assembly_manifest(task, body)
+
+    rec = orch._assembly_records[task.id]
+    assert rec.digest is not None
+    d = rec.digest
+    assert d.kind == "document" and d.part_count == 2
+    assert [p["label"] for p in d.parts] == ["Chapter One", "Chapter Two"]
+    assert [p["size"] for p in d.parts] == [6, 4]
+    assert d.structure == {"title": True, "toc": True}
+    assert d.text_twin_path == "book.md"   # text deliverable is its own readable twin
+
+
 def test_apply_assembly_manifest_missing_unit_flags_blocker(project, tmp_path):
     from uuid import uuid4
     from modulatio.types import Task
