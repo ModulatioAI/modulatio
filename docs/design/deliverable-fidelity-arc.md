@@ -1,7 +1,11 @@
 # Deliverable fidelity arc — produce AND verify the WHOLE against the brief
 
-**Status:** DESIGN (not built). Opened 2026-06-06 from the first END-TO-END SUCCESS
-run of the "Have Robot, Will Travel" anthology (`20260606T043029Z-db9f03`). The
+**Status:** DESIGN (not built). Opened 2026-06-06; **amended 2026-06-09** with Hero's
+(Fable 5) independent assembly-architecture review — added **Part 0** (the verifier
+needs eyes: digest + text twin) as the keystone-before-the-keystone, reframed Part B
+to run over the digest, and closed the two design MAJORs (non-JT declared-data source;
+class-routed bounce semantics). Opened from the first END-TO-END SUCCESS run of the
+"Have Robot, Will Travel" anthology (`20260606T043029Z-db9f03`). The
 deterministic-assembly arc (engine binds the bind, real binary, magic-byte gate) is
 done and signed — and this run PROVED the plumbing: 8 stories in parallel, engine
 bound the 8 real units, a genuine 33-page `%PDF` rendered, P5 passed. Then the
@@ -54,6 +58,33 @@ corollaries:
 
 ## The arc
 
+### Part 0 — Give the verifier EYES (digest + text twin) — BUILD FIRST
+
+*(Added 2026-06-09 from Hero's assembly-architecture review — the keystone UNDER the
+keystone. Part B assumed the smart layer could READ the assembled deliverable. It
+cannot: the HRWT run shipped because Leader-verify did `read_text(utf-8)` on the bound
+PDF, got a decode error, was handed the literal string `"(could not read: …)"`, and
+shrugged `on_the_fence` — which ships. Even for TEXT deliverables the verifier sees
+only the first 4,000 chars. So "verify the WHOLE" is impossible until the engine
+extracts a model-readable representation.)*
+
+At assembly/render the engine has everything in hand. Emit two artifacts:
+
+- **Text twin** — persist the assembled markdown as a sidecar (today it is `unlink`ed
+  after render in `assembly.py`), so a readable form of the bound product always
+  survives the binary render.
+- **Structural digest** — engine-computed, model-readable, stored on the
+  `AssemblyRecord`: unit count, ordered unit headings, per-unit word/token counts,
+  framing flags (title page present? TOC present?), page count for rendered PDFs (via
+  `resolve_tool`→`pdfinfo`, fail-open to twin-only). Artifact-agnostic: a dataset's
+  digest is row/column counts, a codebase's is a file/symbol manifest.
+
+**The invariant (Hero R2): "cannot verify" must NOT ship.** The engine KNOWS when a
+read failed — it authors the error string. A binary deliverable with no digest/twin
+routes to bounce/blocker DETERMINISTICALLY; `on_the_fence` stays ship-eligible only
+for genuine JUDGMENT, never for BLINDNESS. Engine binds the invariant; the LLM judges
+within it ([[feedback_prose_bends_llm_engine_binds]]).
+
 ### Part A — Engine produces the declared framing (title page, TOC, page numbers)
 
 When the brief/JT/standards declare document framing, the document assembler
@@ -68,8 +99,13 @@ generates it MECHANICALLY — no model:
 - Framing is DECLARED data (the brief asked for it), never invented. No framing
   declared → bare join, as today (artifact-agnostic: a dataset's "framing" is a
   manifest, a codebase's is an index — different per family, same principle).
+- **The missing wire is the CHANNEL (Hero R3), not the pandoc flags.** The
+  engine-built manifest is `{units:[…]}` only; it must gain engine-authored framing
+  fields (title, `toc:true`, numbering scheme) carried from the declared spec, which
+  `render_document` then realizes with `--toc` + `--metadata title=` + a page-numbered
+  reference template.
 
-### Part B — Whole-deliverable verification (the KEYSTONE)
+### Part B — Whole-deliverable verification (the safety net — stands on Part 0)
 
 A deliverable-level review pass — QC AND the Leader-verify — that judges the
 ASSEMBLED product against the brief, not the units in isolation. The check set is
@@ -82,12 +118,33 @@ DECLARED, artifact-agnostic data:
   no dupes);
 - **fitness** — the whole reads as the requested product.
 
-This is cheap (structure/metadata, not regeneration) and it's the SAFETY NET: even
-when Parts A/C/D have a gap, B catches it → bounce → fix. The fix that catches the
-most: B alone would have flagged all five issues. Engine-binds the deterministic
-ones (count, presence, magic bytes via P5); leaves the judgment ones (fitness) to
-the smart QC, constructively (per the over-mechanize-judgment lesson —
-[[feedback_prose_bends_llm_engine_binds]]).
+B runs over **Part 0's digest + text twin**, never raw bytes — which is what makes it
+possible at all (the verifier is blind to the binary) AND cheap (metadata, not
+regeneration). It's the SAFETY NET: even when Parts A/C/D have a gap, B catches it →
+bounce → fix. Engine-binds the deterministic checks (count, per-unit length from the
+digest, framing-present flags, numbering 1..N, magic bytes via P5); leaves the
+judgment one (fitness) to the smart QC over the twin, constructively
+([[feedback_prose_bends_llm_engine_binds]]). B alone would have flagged all four HRWT
+failures.
+
+**Where the expected values come from (closes Hero's non-JT MAJOR).** The digest is
+engine data; the EXPECTED values are the declared spec. For a JT-bound run that's
+`output_spec` (count, per-unit band, framing). For a **free-form brief** (no JT), the
+Leader distills a lightweight **deliverable-spec at decompose** (N units? per-unit
+floor? framing?) which the engine then treats as declared data — so B isn't
+fitness-only on exactly the runs most likely to drift. JT-first to build; the
+Leader-extract step is the second increment.
+
+**Bounce semantics (closes Hero's bounce MAJOR) — route by class, never a blind re-run:**
+- *mechanical* miss (missing title/TOC, inconsistent numbering) → **engine re-render**
+  (Parts A/D), no model;
+- *per-unit* miss (a unit under its band) → **per-unit bounce** under Part C's contract
+  — only the short unit redoes;
+- *fitness* miss (the whole doesn't read as the product) → the **redo seam** (#79, now
+  wave-routed + budget-bounded), **edit-first** (build on the draft, don't regenerate),
+  and **every bounce increments the retry budget** so B can't become a new door into an
+  unbounded loop. QC owns the deliverable gate; Leader-verify consumes its verdict
+  (one owner, no split-brain).
 
 ### Part C — Carry declared constraints from spec into task contracts
 
@@ -102,6 +159,9 @@ task — not let it evaporate into prose:
   declared size," not "complete at any size."
 - The JT's `output_spec`/interview already holds the constraint; the binding from
   there to the task contract is the missing wire.
+- **Hero R5 confirmed:** this is UPSTREAM of assembly — decompose/JT-bind owns the
+  stamping. Assembly's only job is to REPORT actual per-unit lengths into the Part 0
+  digest, where B does the band arithmetic.
 
 ### Part D — Consistent unit framing (numbering/headings)
 
@@ -110,14 +170,18 @@ order): the assembler stamps a consistent unit heading ("Story 1".."Story N", or
 unit's own title under a uniform `#` level) from the unit ORDER, so the bound product
 is coherent regardless of how each producer headed its draft. (This also gives Part
 A's TOC clean headings to build from.) Belt: the task contract can request a heading
-shape; suspenders: the engine normalizes at assembly.
+shape; suspenders: the engine normalizes at assembly. **(Hero R4 confirmed:
+engine-owned, in `_assemble_document` pre-join — it feeds Part A's TOC.)**
 
 ## Sequencing & verification
 
-1. **Part B first** (the keystone + safety net) — a deliverable-level check the
-   Leader-verify and QC run against the assembled product + declared requirements.
-   Test: a bare-concat / mis-numbered / under-length assembled deliverable is
-   FLAGGED (not passed). This catches the regression class even before A/C/D land.
+0. **Part 0 FIRST** (the keystone prereq — Hero R1/R2): engine emits the digest + text
+   twin at assembly/render, and "cannot verify a binary" routes to bounce/blocker
+   deterministically. Test: a bound PDF yields a digest with the right unit count +
+   page count + per-unit lengths; a binary with no digest does NOT ship `on_the_fence`.
+1. **Part B** (the safety net), running OVER the digest from Part 0. Test: a bare-concat
+   / mis-numbered / under-length assembled deliverable is FLAGGED (not passed). Catches
+   the regression class even before A/C/D land.
 2. **Part C** — spec→floor wiring; test the JT's stated length stamps a per-unit
    `token_count` floor and a short unit bounces.
 3. **Part A + D** — engine framing + consistent headings; test the assembled output
