@@ -130,6 +130,41 @@ class AssemblyRecord:
     output_file: "Path | None" = None
 
 
+@dataclass
+class DeliverableDigest:
+    """Engine-extracted, MODEL-READABLE structure of an assembled deliverable — the
+    verifier's EYES (#101 Part 0). Computed at assembly time so the smart layer can
+    judge the WHOLE without reading binary bytes it cannot (the HRWT Leader-verify
+    was handed ``"(could not read: …)"`` and shipped ``on_the_fence``).
+
+    PRODUCT-AGNOSTIC by design. The engine defines only the CONTRACT — how many
+    PARTS, a ``label`` + ``size`` per part, which structural elements are present, an
+    optional whole-deliverable size — and each artifact FAMILY fills it with
+    domain-appropriate facts (a document's parts are sections sized in words; a
+    dataset's are tables sized in rows; a codebase's are files sized in lines). The
+    per-``artifact_kind`` STANDARDS say what the numbers must satisfy. Nothing here
+    assumes "document" — baking one output class in is the recurring failure mode."""
+
+    #: the artifact family that produced this digest ("document", "data", "code", …).
+    kind: str
+    #: number of assembled parts (units).
+    part_count: int
+    #: ordered, one per part. Each is a small family-defined dict that ALWAYS carries
+    #: ``label`` (str) and ``size`` (int); a family may add its own extra keys.
+    parts: list[dict] = field(default_factory=list)
+    #: what each part's ``size`` counts — "words" | "rows" | "lines" | "bytes" | …
+    part_size_unit: str = ""
+    #: structural elements ACTUALLY present, family-defined (e.g. {"title": True,
+    #: "toc": True} for a document; {"header_row": True} for a dataset).
+    structure: dict = field(default_factory=dict)
+    #: a whole-deliverable size measure + its unit, family-defined (pages for a
+    #: paginated doc, total rows for data, total files for code). None when N/A.
+    whole_size: "int | None" = None
+    whole_size_unit: "str | None" = None
+    #: relative path to the readable text twin of the bound product, when persisted.
+    text_twin_path: "str | None" = None
+
+
 def parse_assembly_manifest(text: str) -> dict | None:
     """Return the parsed manifest dict if ``text`` carries a well-formed
     ``assembly`` block with a non-empty ``units`` list, else ``None``.
@@ -184,6 +219,139 @@ def _safe_unit_path(name: str, artifacts_root: Path) -> Path | None:
         if part in ("..", ".") or part.startswith(".."):
             return None
     return candidate
+
+
+# ── #101 Part 0: the deliverable digest (give the verifier eyes) ──────────────
+
+def _first_heading(body: str) -> str:
+    """A unit's display heading: the first non-empty line, stripped of leading
+    markdown ``#`` and surrounding whitespace. ``""`` for an empty body."""
+    for line in body.splitlines():
+        s = line.strip()
+        if s:
+            return s.lstrip("#").strip()
+    return ""
+
+
+def _pdf_page_count(path: "Path | None") -> "int | None":
+    """Page count of a rendered PDF via ``pdfinfo`` (engine-owned, fail-open). Returns
+    None when the file isn't a readable PDF, ``pdfinfo`` is absent, or the probe
+    fails — never raises (the digest is best-effort observability, not a gate)."""
+    if path is None or path.suffix.lower() != ".pdf" or not path.is_file():
+        return None
+    tool = resolve_tool("pdfinfo")
+    if tool is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [tool, str(path)], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        if line.lower().startswith("pages:"):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _generic_digest(
+    manifest: dict,
+    units_used: "list[str]",
+    artifacts_root: Path,
+    *,
+    kind: str = "generic",
+    output_file: "Path | None" = None,
+    text_twin_path: "str | None" = None,
+) -> DeliverableDigest:
+    """Family-NEUTRAL digest: any deliverable is N parts of some BYTE size. The
+    default until a family grows a richer extractor — it reads NO domain meaning from
+    the bytes, so it is correct for code / data / media / anything at all."""
+    parts: list[dict] = []
+    for name in units_used:
+        path = _safe_unit_path(name, artifacts_root)
+        size = path.stat().st_size if (path is not None and path.is_file()) else 0
+        parts.append({"label": str(name), "size": size})
+    return DeliverableDigest(
+        kind=kind, part_count=len(units_used), parts=parts,
+        part_size_unit="bytes", text_twin_path=text_twin_path,
+    )
+
+
+def _document_digest(
+    manifest: dict,
+    units_used: "list[str]",
+    artifacts_root: Path,
+    *,
+    output_file: "Path | None" = None,
+    text_twin_path: "str | None" = None,
+) -> DeliverableDigest:
+    """The ``document`` family's digest: parts are sections (heading ``label`` + word
+    ``size``), ``structure`` is title/TOC presence, ``whole_size`` is the PDF page
+    count. ALL the document-domain meaning lives HERE, in the family extractor — never
+    in the generic contract. Best-effort + fail-open: an unreadable/missing unit
+    contributes ``{"label": "", "size": 0}`` and never raises."""
+    parts: list[dict] = []
+    for name in units_used:
+        path = _safe_unit_path(name, artifacts_root)
+        if path is None or not path.is_file():
+            parts.append({"label": "", "size": 0})
+            continue
+        try:
+            body = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            parts.append({"label": "", "size": 0})
+            continue
+        parts.append({"label": _first_heading(body), "size": len(body.split())})
+    title_page = manifest.get("title_page")
+    structure = {
+        "title": bool(isinstance(title_page, str) and title_page.strip()),
+        "toc": bool(manifest.get("toc")) or any(
+            "table of contents" in p["label"].lower() or p["label"].lower() == "contents"
+            for p in parts
+        ),
+    }
+    return DeliverableDigest(
+        kind="document", part_count=len(units_used), parts=parts,
+        part_size_unit="words", structure=structure,
+        whole_size=_pdf_page_count(output_file), whole_size_unit="pages",
+        text_twin_path=text_twin_path,
+    )
+
+
+#: Per-family digest extractors (mirrors the ``_STRATEGIES`` assembly table). A family
+#: without a rich extractor falls back to the family-neutral byte digest.
+_DIGEST_BUILDERS: dict = {"document": _document_digest}
+
+
+def build_deliverable_digest(
+    manifest: dict,
+    units_used: "list[str]",
+    artifacts_root: Path,
+    *,
+    strategy: str = "document",
+    output_file: "Path | None" = None,
+    text_twin_path: "str | None" = None,
+) -> DeliverableDigest:
+    """Build the deliverable digest for the named STRATEGY/family (#101 Part 0) —
+    PRODUCT-AGNOSTIC dispatch (mirrors ``assemble``'s strategy table). ``document``
+    has a rich extractor; every other family falls back to the family-neutral byte
+    digest until it grows its own. ``units_used`` is the engine's authoritative
+    ordered set, not the producer's manifest claim. Fail-open throughout."""
+    builder = _DIGEST_BUILDERS.get(strategy)
+    if builder is None:
+        return _generic_digest(
+            manifest, units_used, artifacts_root, kind=strategy,
+            output_file=output_file, text_twin_path=text_twin_path,
+        )
+    return builder(
+        manifest, units_used, artifacts_root,
+        output_file=output_file, text_twin_path=text_twin_path,
+    )
 
 
 def assemble(

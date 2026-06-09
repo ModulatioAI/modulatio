@@ -74,10 +74,15 @@ At assembly/render the engine has everything in hand. Emit two artifacts:
   after render in `assembly.py`), so a readable form of the bound product always
   survives the binary render.
 - **Structural digest** — engine-computed, model-readable, stored on the
-  `AssemblyRecord`: unit count, ordered unit headings, per-unit word/token counts,
-  framing flags (title page present? TOC present?), page count for rendered PDFs (via
-  `resolve_tool`→`pdfinfo`, fail-open to twin-only). Artifact-agnostic: a dataset's
-  digest is row/column counts, a codebase's is a file/symbol manifest.
+  `AssemblyRecord`. **PRODUCT-AGNOSTIC contract** (the engine never assumes
+  "document"): part count, a `label` + `size` per part, the structural-element flags
+  present, an optional whole-deliverable size. Each artifact **family** fills it with
+  domain facts via its own extractor (dispatched like `assemble`'s strategy table),
+  and the per-`artifact_kind` **standards** say what those numbers must satisfy —
+  *document*: parts are sections sized in words + title/TOC flags + PDF page count
+  (via `resolve_tool`→`pdfinfo`); *dataset*: tables sized in rows + header flags;
+  *codebase*: files sized in lines + entrypoint. A family without a rich extractor
+  falls back to a family-neutral byte digest. Fail-open to twin-only throughout.
 
 **The invariant (Hero R2): "cannot verify" must NOT ship.** The engine KNOWS when a
 read failed — it authors the error string. A binary deliverable with no digest/twin

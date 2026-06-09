@@ -561,3 +561,62 @@ def test_render_doc_tool_failclosed_message_names_override(tmp_path, monkeypatch
     with pytest.raises(assembly._DocToolError) as exc:
         assembly.render_document("# x\n\nbody\n", "docx", tmp_path)
     assert "MODULATIO_PANDOC_PATH" in str(exc.value)
+
+
+# ── #101 Part 0: the deliverable digest (the verifier's eyes) ─────────────────
+
+def test_document_digest_parts_label_and_size(tmp_path):
+    _units(tmp_path, **{
+        # whitespace word count is the document family's part-size unit; the leading
+        # "#" token counts (consistent with the engine's word-count convention)
+        "s1.md": "# Chapter One\n\nalpha beta gamma",       # label "Chapter One", 6 words
+        "s2.md": "Chapter Two\n\nword word",                # label "Chapter Two", 4 words
+    })
+    d = assembly.build_deliverable_digest(
+        {"units": ["s1.md", "s2.md"]}, ["s1.md", "s2.md"], tmp_path, strategy="document")
+    assert d.kind == "document"
+    assert d.part_count == 2
+    assert d.part_size_unit == "words"
+    assert [p["label"] for p in d.parts] == ["Chapter One", "Chapter Two"]
+    assert [p["size"] for p in d.parts] == [6, 4]
+    assert d.whole_size is None and d.whole_size_unit == "pages"   # no rendered PDF
+    assert d.text_twin_path is None
+
+
+def test_document_digest_structure_flags(tmp_path):
+    _units(tmp_path, **{"a.md": "Body\n\ntext"})
+    d = assembly.build_deliverable_digest(
+        {"units": ["a.md"], "title_page": "My Anthology", "toc": True},
+        ["a.md"], tmp_path, strategy="document")
+    assert d.structure == {"title": True, "toc": True}
+    d2 = assembly.build_deliverable_digest(
+        {"units": ["a.md"]}, ["a.md"], tmp_path, strategy="document")
+    assert d2.structure == {"title": False, "toc": False}
+
+
+def test_document_digest_fail_open_on_missing_unit(tmp_path):
+    d = assembly.build_deliverable_digest(
+        {"units": ["ghost.md"]}, ["ghost.md"], tmp_path, strategy="document")
+    assert d.part_count == 1
+    assert d.parts == [{"label": "", "size": 0}]
+
+
+def test_document_digest_first_heading_strips_markdown_hashes(tmp_path):
+    _units(tmp_path, **{"a.md": "###  Spaced Heading  \n\nbody here"})
+    d = assembly.build_deliverable_digest(
+        {"units": ["a.md"]}, ["a.md"], tmp_path, strategy="document")
+    assert d.parts[0]["label"] == "Spaced Heading"
+
+
+def test_digest_is_product_agnostic_generic_fallback(tmp_path):
+    """A NON-document strategy must NOT get document assumptions — it falls back to a
+    family-neutral byte digest (parts sized in bytes, no headings/words/TOC). This is
+    the guard against baking one output class into the engine contract."""
+    _units(tmp_path, **{"f1.bin": "abcde", "f2.bin": "xy"})
+    d = assembly.build_deliverable_digest(
+        {"units": ["f1.bin", "f2.bin"]}, ["f1.bin", "f2.bin"], tmp_path, strategy="data")
+    assert d.kind == "data"               # echoes the family, no "document" default
+    assert d.part_size_unit == "bytes"    # neutral measure, not "words"
+    assert [p["size"] for p in d.parts] == [5, 2]
+    assert d.structure == {}              # no document framing assumed
+    assert d.whole_size is None
