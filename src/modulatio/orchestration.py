@@ -7818,6 +7818,31 @@ class Orchestrator:
             # convention when output_path is unset.
             if t.status == TaskStatus.COMPLETED:
                 artifacts_root = self._scope_root() / "artifacts"
+                # #101 Part 0: an engine-assembled deliverable carries a structural
+                # DIGEST + readable text TWIN. Feed THOSE — the verifier's eyes — never
+                # the raw bound bytes (which may be a binary the model can't read; the
+                # HRWT verify was handed "(could not read: …)" on the PDF and shipped).
+                rec = self._assembly_records.get(t.id)
+                if rec is not None and rec.digest is not None:
+                    from modulatio import assembly as _assembly
+                    block = _assembly.format_digest(rec.digest)
+                    twin_rel = rec.digest.text_twin_path
+                    if twin_rel:
+                        twin_path = artifacts_root / twin_rel
+                        try:
+                            twin_body = twin_path.read_text(encoding="utf-8")
+                        except OSError:
+                            twin_body = ""
+                        if twin_body:
+                            snip = twin_body if len(twin_body) <= 4000 else (
+                                twin_body[:4000]
+                                + f"\n\n... [truncated; full readable twin at {twin_path}]"
+                            )
+                            block += f"\n\nreadable content (twin):\n{snip}"
+                    artifact_blocks.append(
+                        f"### Deliverable for {t.id} (engine-assembled)\n\n{block}"
+                    )
+                    continue
                 candidate = None
                 if t.output_path:
                     primary = artifacts_root / t.output_path

@@ -634,3 +634,19 @@ def test_write_text_twin_sanitizes_name_no_traversal(tmp_path):
     leaf = rel[len(".twins/"):]
     assert "/" not in leaf                 # path separators stripped — no traversal
     assert (tmp_path / rel).is_file()
+
+
+def test_format_digest_is_readable_and_product_agnostic():
+    # a DATA digest (rows, header_row) — the renderer must carry NO document vocabulary
+    d = assembly.DeliverableDigest(
+        kind="data", part_count=2,
+        parts=[{"label": "users.csv", "size": 1000}, {"label": "orders.csv", "size": 50}],
+        part_size_unit="rows", structure={"header_row": True},
+        whole_size=1050, whole_size_unit="rows")
+    s = assembly.format_digest(d)
+    assert "kind=data, parts=2" in s
+    assert "'users.csv' — 1000 rows" in s
+    assert "header_row=True" in s
+    assert "whole size: 1050 rows" in s
+    low = s.lower()
+    assert "word" not in low and "page" not in low and "toc" not in low

@@ -8847,6 +8847,58 @@ def test_apply_assembly_manifest_attaches_deliverable_digest(project, tmp_path):
     assert d.text_twin_path == "book.md"   # text deliverable is its own readable twin
 
 
+def test_leader_verify_feeds_digest_and_twin_not_binary(tmp_path, monkeypatch):
+    """#101 Part 0 (0.3): a deliverable with an engine assembly digest feeds
+    Leader-verify the STRUCTURAL DIGEST + readable twin — never "(could not read)" on
+    bound binary bytes (the HRWT blind-verify, fixed)."""
+    from uuid import uuid4
+    from modulatio import assembly as _assembly, vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+
+    seen = {}
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            seen["prompt"] = prompt
+            return '```json\n{"verdict":"satisfied","rationale":"r","report_body":"r"}\n```'
+        return _leader_stub(prompt)
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("DGV", "digest verify", "obj")
+    vault.init_run("DGV", "run-1", "obj")
+    project = Project(code="DGV", name="DGV", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "dgv"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub})
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    # a binary deliverable that is NOT utf-8 — the OLD path would read "(could not read)"
+    (art / "book.pdf").write_bytes(b"%PDF-1.7\x00\x01 not utf8 \xff\xfe")
+    (art / ".twins").mkdir(exist_ok=True)
+    (art / ".twins" / "DGV-T-001.md").write_text("# Chapter One\n\nreadable prose here")
+
+    task = _deliverable_task("DGV", output="book.pdf")   # id DGV-T-001
+    orch._assembly_records[task.id] = _assembly.AssemblyRecord(
+        manifest={}, final_checksum="sha256:x", complete=True, strategy="document",
+        digest=_assembly.DeliverableDigest(
+            kind="document", part_count=2,
+            parts=[{"label": "Chapter One", "size": 2692}, {"label": "Story 2", "size": 906}],
+            part_size_unit="words", structure={"title": False, "toc": False},
+            whole_size=33, whole_size_unit="pages", text_twin_path=".twins/DGV-T-001.md"))
+    goal = Goal(id="DGV-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    p = seen["prompt"]
+    assert "deliverable structure (engine-extracted)" in p   # digest fed
+    assert "2692 words" in p and "906 words" in p            # per-part sizes visible
+    assert "readable prose here" in p                        # the twin, not the binary
+    assert "could not read" not in p                         # never the blind path
+
+
 def test_apply_assembly_manifest_missing_unit_flags_blocker(project, tmp_path):
     from uuid import uuid4
     from modulatio.types import Task

@@ -370,6 +370,28 @@ def write_text_twin(content: str, artifacts_root: Path, name: str) -> str:
     return str(out.relative_to(artifacts_root))
 
 
+def format_digest(d: DeliverableDigest) -> str:
+    """Render a digest as compact, MODEL-READABLE text for the verifier — PRODUCT-
+    AGNOSTIC: uses only the generic contract fields (kind / parts label+size /
+    structure / whole_size), never document-specific vocabulary. This is what the
+    verifier judges in place of bytes it cannot read."""
+    lines = [
+        f"deliverable structure (engine-extracted): kind={d.kind}, parts={d.part_count}"
+    ]
+    for i, p in enumerate(d.parts, 1):
+        lines.append(
+            f"  {i}. {p.get('label', '')!r} — {p.get('size', 0)} {d.part_size_unit}".rstrip()
+        )
+    if d.structure:
+        lines.append(
+            "  structure: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(d.structure.items()))
+        )
+    if d.whole_size is not None:
+        lines.append(f"  whole size: {d.whole_size} {d.whole_size_unit or ''}".rstrip())
+    return "\n".join(lines)
+
+
 def assemble(
     manifest: dict, artifacts_root: Path, strategy: str = "document",
     render_format: "str | None" = None,
