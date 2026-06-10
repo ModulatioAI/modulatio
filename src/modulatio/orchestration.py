@@ -5381,6 +5381,15 @@ class Orchestrator:
         # Part B: the assembler skill selects the family/strategy; the engine owns
         # the mechanical join. document = text concat (today's default).
         strategy = _assembly_strategy_for_task(task)
+        # #101 Part A: the engine supplies FRAMING as declared data (title + required
+        # structure from the bound DeliverableSpec); the family's head renderer builds
+        # its own head (document → title+TOC; other families no-op until they grow one).
+        # Augment BEFORE both assemble and digest so each sees the same framed manifest.
+        _spec = self._deliverable_spec
+        manifest = _assembly.apply_framing(
+            manifest, self._artifacts_root(), strategy,
+            title=_spec.title, required_structure=_spec.required_structure,
+        )
         # P4: for a DOCUMENT assembly, render the concatenated body into the
         # deliverable's DECLARED binary format (artifact-agnostic — driven by the
         # task's output extension, never assumed; None → text stands).

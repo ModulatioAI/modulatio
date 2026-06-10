@@ -357,6 +357,94 @@ def build_deliverable_digest(
     )
 
 
+# ── #101 Part A: engine-supplied FRAMING (per-family head dispatch) ────────────
+#
+# The engine supplies framing as DECLARED DATA — ``title`` + ``required_structure``
+# from the DeliverableSpec — and names no family. Each family renders its OWN head from
+# that data (mirrors the ``_STRATEGIES`` / ``_DIGEST_BUILDERS`` tables): ``document`` →
+# a title + table-of-contents text head; ``media`` would prepend a title-card/intro
+# SEGMENT, ``code`` a README/index, ``data`` a header/schema — each its own renderer.
+# A family with no head builder is a graceful NO-OP: the engine never forces a
+# document-style head onto a video. Producer-authored framing always wins (engine fills
+# only what is absent).
+
+
+def _unit_headings(units: "list", artifacts_root: Path) -> "list[str]":
+    """The display heading of each readable unit, in order (document family helper —
+    reuses :func:`_first_heading`). Unreadable/missing units are skipped, never
+    fabricated."""
+    out: list[str] = []
+    for name in units or []:
+        if not isinstance(name, str):
+            continue
+        path = _safe_unit_path(name, artifacts_root)
+        if path is None or not path.is_file():
+            continue
+        try:
+            heading = _first_heading(path.read_text())
+        except (OSError, UnicodeDecodeError):
+            continue
+        if heading:
+            out.append(heading)
+    return out
+
+
+def _document_head(
+    manifest: dict, artifacts_root: Path, *, title: "str | None",
+    required_structure: "tuple[str, ...]",
+) -> dict:
+    """The ``document`` family's head renderer: fill a title + table-of-contents into
+    the manifest's ``title_page`` (which ``_assemble_document`` already prepends) and
+    flag ``toc`` so the digest recognizes it. ALL document-domain head vocabulary lives
+    HERE, in the family renderer — never in the engine. Producer-authored framing wins:
+    if a non-empty ``title_page`` already exists, this is a no-op."""
+    existing = manifest.get("title_page")
+    if isinstance(existing, str) and existing.strip():
+        return manifest
+    want_title = bool(title and str(title).strip())
+    want_toc = "toc" in {str(s).strip().lower() for s in required_structure}
+    if not (want_title or want_toc):
+        return manifest
+    lines: list[str] = []
+    if want_title:
+        lines.append(f"# {str(title).strip()}")
+    out = dict(manifest)
+    if want_toc:
+        headings = _unit_headings(manifest.get("units", []), artifacts_root)
+        if headings:
+            if lines:
+                lines.append("")
+            lines.append("## Contents")
+            lines.extend(f"{i}. {h}" for i, h in enumerate(headings, 1))
+            out["toc"] = True
+    if lines:
+        out["title_page"] = "\n".join(lines)
+    return out
+
+
+#: Per-family head renderers (mirrors ``_STRATEGIES`` / ``_DIGEST_BUILDERS``). A family
+#: without one gets no engine head — the seam is there for it to grow its own.
+_HEAD_BUILDERS: dict = {"document": _document_head}
+
+
+def apply_framing(
+    manifest: dict, artifacts_root: Path, strategy: str, *,
+    title: "str | None" = None, required_structure: "tuple[str, ...]" = (),
+) -> dict:
+    """Augment ``manifest`` with engine-supplied framing for the named family (#101
+    Part A) — PRODUCT-AGNOSTIC dispatch. The engine passes the DECLARED data (title +
+    required structure); the family's :data:`_HEAD_BUILDERS` entry renders its own head.
+    A family with no renderer returns the manifest unchanged (no document head forced on
+    a non-document deliverable). No declared framing → effectively a no-op."""
+    builder = _HEAD_BUILDERS.get(strategy)
+    if builder is None:
+        return manifest
+    return builder(
+        manifest, artifacts_root, title=title,
+        required_structure=tuple(required_structure),
+    )
+
+
 def write_text_twin(content: str, artifacts_root: Path, name: str) -> str:
     """Persist the readable markdown TWIN of a bound (binary) deliverable under
     ``artifacts_root/.twins/`` so the verifier has eyes on bytes it cannot read (#101

@@ -8847,6 +8847,35 @@ def test_apply_assembly_manifest_attaches_deliverable_digest(project, tmp_path):
     assert d.text_twin_path == "book.md"   # text deliverable is its own readable twin
 
 
+def test_apply_assembly_manifest_engine_frames_from_spec(project, tmp_path):
+    """#101 Part A: a BARE producer manifest (no title_page/toc) + a bound DeliverableSpec
+    that declares a title + structure → the ENGINE frames the document (the HRWT
+    bare-concat, fixed). The resulting digest reports title+toc PRESENT, and the real
+    units are untouched (no fabricated parts). Product-agnostic: framing is per-family;
+    only the document head renders here."""
+    from uuid import uuid4
+    from modulatio import job_templates as _jt
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.md").write_text("# Story One\n\nalpha beta")
+    (artifacts / "s2.md").write_text("# Story Two\n\ngamma delta")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    orch._deliverable_spec = _jt.DeliverableSpec(
+        title="My Anthology", required_structure=("title", "toc"))
+    task = Task(id="FRM-T-001", project_id=uuid4(), goal_id="FRM-G-001",
+                description="assemble", summary_for_state_doc="", output_path="book.md")
+    body = '```assembly\n{"units": ["s1.md", "s2.md"]}\n```\n'   # BARE — producer framed nothing
+    orch._apply_assembly_manifest(task, body)
+
+    # title+toc PRESENT from a BARE producer manifest can only come from engine framing.
+    d = orch._assembly_records[task.id].digest
+    assert d.structure == {"title": True, "toc": True}            # engine supplied the head
+    assert [p["label"] for p in d.parts] == ["Story One", "Story Two"]   # real units, not fabricated
+    assert "# My Anthology" in orch._assembly_records[task.id].manifest["title_page"]
+
+
 def test_leader_verify_feeds_digest_and_twin_not_binary(tmp_path, monkeypatch):
     """#101 Part 0 (0.3): a deliverable with an engine assembly digest feeds
     Leader-verify the STRUCTURAL DIGEST + readable twin — never "(could not read)" on

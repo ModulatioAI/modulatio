@@ -594,6 +594,72 @@ def test_document_digest_structure_flags(tmp_path):
     assert d2.structure == {"title": False, "toc": False}
 
 
+# ── #101 Part A: engine-supplied framing (per-family head dispatch) ────────────
+
+
+def test_apply_framing_document_generates_title_and_toc(tmp_path):
+    """The document head renderer builds a title + a TOC from the unit headings into
+    title_page (which the assembler prepends) and flags toc."""
+    _units(tmp_path, **{"s1.md": "# Story One\n\nbody", "s2.md": "# Story Two\n\nbody"})
+    m = assembly.apply_framing(
+        {"units": ["s1.md", "s2.md"]}, tmp_path, "document",
+        title="My Anthology", required_structure=("title", "toc"))
+    tp = m["title_page"]
+    assert tp.startswith("# My Anthology")
+    assert "## Contents" in tp and "1. Story One" in tp and "2. Story Two" in tp
+    assert m["toc"] is True
+
+
+def test_apply_framing_closes_loop_digest_recognizes_structure(tmp_path):
+    """Part A + B.2 loop: after the engine frames the manifest, the digest reports the
+    declared structure as PRESENT — so B.2's required_structure check passes."""
+    _units(tmp_path, **{"s1.md": "# One\n\nx", "s2.md": "# Two\n\ny"})
+    m = assembly.apply_framing(
+        {"units": ["s1.md", "s2.md"]}, tmp_path, "document",
+        title="Anthology", required_structure=("title", "toc"))
+    d = assembly.build_deliverable_digest(m, ["s1.md", "s2.md"], tmp_path,
+                                          strategy="document")
+    assert d.structure == {"title": True, "toc": True}
+
+
+def test_apply_framing_respects_producer_title_page(tmp_path):
+    """Producer-authored framing wins — a non-empty title_page is never overridden."""
+    _units(tmp_path, **{"s1.md": "# One\n\nx"})
+    m = assembly.apply_framing(
+        {"units": ["s1.md"], "title_page": "PRODUCER FRAME"}, tmp_path, "document",
+        title="Engine Title", required_structure=("title", "toc"))
+    assert m["title_page"] == "PRODUCER FRAME"
+    assert "toc" not in m
+
+
+def test_apply_framing_non_document_family_is_noop(tmp_path):
+    """A family with no head renderer (media/code/data) gets NO engine head — a
+    document-style title is never forced onto a video/app/dataset."""
+    _units(tmp_path, **{"clip1.mp4": "x", "clip2.mp4": "y"})
+    manifest = {"units": ["clip1.mp4", "clip2.mp4"]}
+    m = assembly.apply_framing(manifest, tmp_path, "media",
+                               title="My Film", required_structure=("title", "toc"))
+    assert m == manifest and "title_page" not in m   # untouched
+
+
+def test_apply_framing_no_declared_framing_is_noop(tmp_path):
+    """No declared title/structure (the empty-spec default) → manifest unchanged."""
+    _units(tmp_path, **{"s1.md": "# One\n\nx"})
+    manifest = {"units": ["s1.md"]}
+    m = assembly.apply_framing(manifest, tmp_path, "document",
+                               title=None, required_structure=())
+    assert m == manifest and "title_page" not in m
+
+
+def test_apply_framing_title_only_no_toc(tmp_path):
+    """Title declared but not toc → a title head, no Contents, no toc flag."""
+    _units(tmp_path, **{"s1.md": "# One\n\nx"})
+    m = assembly.apply_framing({"units": ["s1.md"]}, tmp_path, "document",
+                               title="Just A Title", required_structure=("title",))
+    assert m["title_page"] == "# Just A Title"
+    assert "Contents" not in m["title_page"] and "toc" not in m
+
+
 def test_document_digest_fail_open_on_missing_unit(tmp_path):
     d = assembly.build_deliverable_digest(
         {"units": ["ghost.md"]}, ["ghost.md"], tmp_path, strategy="document")
