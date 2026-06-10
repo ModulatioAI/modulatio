@@ -8899,6 +8899,65 @@ def test_leader_verify_feeds_digest_and_twin_not_binary(tmp_path, monkeypatch):
     assert "could not read" not in p                         # never the blind path
 
 
+def test_satisfied_over_blind_binary_forces_unverified_reservation(tmp_path, monkeypatch):
+    """#101 Part 0 (0.3b): a 'satisfied' verdict over a binary deliverable with NO
+    digest (the engine was blind) must NOT ship clean — the engine forces an UNVERIFIED
+    reservation into the Product Quality Report (the HRWT blind-ship, backstopped)."""
+    from uuid import uuid4
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("BLD", "blind", "obj")
+    vault.init_run("BLD", "run-1", "obj")
+    project = Project(code="BLD", name="BLD", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "bld"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": _leader_with_verdict("satisfied"),
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    art = orch._artifacts_root(); art.mkdir(parents=True, exist_ok=True)
+    (art / "out.pdf").write_bytes(b"%PDF-1.7\x00\xff not utf8")   # unreadable, no record
+    task = _deliverable_task("BLD", output="out.pdf")
+    goal = Goal(id="BLD-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project); summary.tasks = [task]
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert goal.status == GoalStatus.COMPLETED   # still ships (no hard block in this arch)
+    blind_recs = [r for r in summary.recommendations
+                  if "could NOT verify" in r.get("concern", "")]
+    assert blind_recs, "a blind binary must force an UNVERIFIED reservation"
+    assert "Human verification REQUIRED" in blind_recs[0]["suggestion"]
+
+
+def test_satisfied_over_readable_deliverable_does_not_false_blind(tmp_path, monkeypatch):
+    """0.3b must NOT over-fire: a readable text deliverable ships clean, no blind flag."""
+    from uuid import uuid4
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("RDB", "readable", "obj")
+    vault.init_run("RDB", "run-1", "obj")
+    project = Project(code="RDB", name="RDB", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "rdb"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": _leader_with_verdict("satisfied"),
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    art = orch._artifacts_root(); art.mkdir(parents=True, exist_ok=True)
+    (art / "out.md").write_text("# Readable\n\nplain text deliverable")
+    task = _deliverable_task("RDB", output="out.md")
+    goal = Goal(id="RDB-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project); summary.tasks = [task]
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert not any("could NOT verify" in r.get("concern", "")
+                   for r in summary.recommendations)
+
+
 def test_apply_assembly_manifest_missing_unit_flags_blocker(project, tmp_path):
     from uuid import uuid4
     from modulatio.types import Task

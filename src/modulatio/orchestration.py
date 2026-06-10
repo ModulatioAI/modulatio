@@ -8113,6 +8113,26 @@ class Orchestrator:
             rationale_text = (
                 f"leader verdict {verdict}: {rationale} | report {report_path.name}"
             )
+            # #101 Part 0 R2 (cannot-verify-blocks): the engine KNOWS when a bound
+            # deliverable was unreadable AND undigested — the verdict over it is BLIND,
+            # not a judgment. Force a deterministic UNVERIFIED reservation so it never
+            # ships reported as cleanly verified (the HRWT on_the_fence-blind ship).
+            blind = self._goal_blind_deliverables(tasks)
+            if blind:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        "The engine could NOT verify the bound deliverable(s) "
+                        + ", ".join(blind)
+                        + " — binary/unreadable with no structural digest, so the "
+                        "verdict did not actually inspect the product."
+                    ),
+                    "suggestion": "Human verification REQUIRED before relying on this.",
+                })
+                rationale_text = (
+                    f"leader verdict {verdict} (UNVERIFIED binary — engine blind): "
+                    f"{rationale} | report {report_path.name}"
+                )
 
         # Every verdict completes the goal — the run is never blocked on the
         # Leader's reservations; the human reads them in the Product Quality
@@ -8127,6 +8147,28 @@ class Orchestrator:
         )
         goal.status = GoalStatus.COMPLETED
         self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
+
+    def _goal_blind_deliverables(self, tasks: "list[Task]") -> "list[str]":
+        """Deliverable tasks the verifier was BLIND to — a completed deliverable whose
+        bound output is a real on-disk file that is NOT utf-8 readable AND carries no
+        engine assembly digest (so the Part 0 digest path didn't give the verifier
+        eyes). Returns their output paths. The engine knows its own blindness; #101 R2
+        forbids shipping such a binary reported as cleanly verified."""
+        blind: list[str] = []
+        for t in tasks:
+            if t.status != TaskStatus.COMPLETED or not getattr(t, "deliverable", False):
+                continue
+            rec = self._assembly_records.get(t.id)
+            if rec is not None and rec.digest is not None:
+                continue  # engine-assembled → the digest gave the verifier eyes
+            path = self._task_artifact_path(t)
+            if path is None:
+                continue
+            try:
+                path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                blind.append(t.output_path or str(path))
+        return blind
 
     def _record_recommendations(self, goal: Goal, raw, summary: RunSummary) -> None:
         """Fold the Leader's reservations for ``goal`` into the run's
