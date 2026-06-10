@@ -392,6 +392,45 @@ def format_digest(d: DeliverableDigest) -> str:
     return "\n".join(lines)
 
 
+def check_deliverable(
+    digest: DeliverableDigest,
+    *,
+    expected_count: "int | None" = None,
+    part_floor: "int | None" = None,
+    required_structure: "tuple[str, ...]" = (),
+) -> "list[str]":
+    """Deterministic whole-deliverable checks over the engine-extracted digest (#101
+    Part B). PRODUCT-AGNOSTIC: compares the generic digest facts against a DECLARED
+    spec — expected part count, per-part size floor (in the digest's OWN unit, whatever
+    the family counts), and required structural elements. Returns human-readable ISSUE
+    strings; empty means the deterministic checks pass (fitness is judged separately by
+    the smart QC over the twin). The EXPECTED values are the declared spec (a JT
+    ``output_spec`` or a Leader-distilled deliverable-spec) — the engine only does the
+    arithmetic, it never invents a requirement."""
+    issues: list[str] = []
+    if expected_count is not None and digest.part_count != expected_count:
+        issues.append(f"expected {expected_count} parts, got {digest.part_count}")
+    if part_floor is not None:
+        short = [
+            f"{p.get('label') or '?'} ({int(p.get('size', 0))} {digest.part_size_unit})"
+            for p in digest.parts
+            if int(p.get("size", 0)) < part_floor
+        ]
+        if short:
+            issues.append(
+                f"{len(short)} part(s) under the {part_floor}-{digest.part_size_unit} "
+                "floor: " + ", ".join(short[:8])
+            )
+    for key in required_structure:
+        if not digest.structure.get(key):
+            issues.append(f"required structure missing: {key}")
+    # Generic consistency: a part with no label is a structural gap in ANY family.
+    blank = sum(1 for p in digest.parts if not str(p.get("label", "")).strip())
+    if blank:
+        issues.append(f"{blank} part(s) have no label/heading (structural gap)")
+    return issues
+
+
 def assemble(
     manifest: dict, artifacts_root: Path, strategy: str = "document",
     render_format: "str | None" = None,

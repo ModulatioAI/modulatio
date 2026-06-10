@@ -650,3 +650,42 @@ def test_format_digest_is_readable_and_product_agnostic():
     assert "whole size: 1050 rows" in s
     low = s.lower()
     assert "word" not in low and "page" not in low and "toc" not in low
+
+
+def _digest(parts, **kw):
+    return assembly.DeliverableDigest(
+        kind=kw.get("kind", "document"), part_count=len(parts), parts=parts,
+        part_size_unit=kw.get("unit", "words"), structure=kw.get("structure", {}))
+
+
+def test_check_deliverable_clean_passes():
+    d = _digest([{"label": "One", "size": 2500}, {"label": "Two", "size": 2200}],
+                structure={"title": True, "toc": True})
+    assert assembly.check_deliverable(
+        d, expected_count=2, part_floor=2000, required_structure=("title", "toc")) == []
+
+
+def test_check_deliverable_flags_hrwt_failures():
+    """Count + under-length + missing framing — the HRWT failures, caught by arithmetic."""
+    d = _digest([{"label": "One", "size": 2692}, {"label": "Two", "size": 906}],  # 1 short
+                structure={"title": False, "toc": False})
+    issues = assembly.check_deliverable(
+        d, expected_count=8, part_floor=2000, required_structure=("title", "toc"))
+    assert any("expected 8 parts, got 2" in i for i in issues)
+    assert any("under the 2000-words floor" in i and "Two" in i for i in issues)
+    assert any("title" in i for i in issues) and any("toc" in i for i in issues)
+
+
+def test_check_deliverable_flags_blank_label():
+    d = _digest([{"label": "", "size": 100}])
+    assert any("no label/heading" in i for i in assembly.check_deliverable(d))
+
+
+def test_check_deliverable_is_product_agnostic_rows():
+    # a DATA digest, floor in ROWS — the check needs no document vocabulary
+    d = assembly.DeliverableDigest(
+        kind="data", part_count=2,
+        parts=[{"label": "users", "size": 1000}, {"label": "orders", "size": 5}],
+        part_size_unit="rows")
+    issues = assembly.check_deliverable(d, part_floor=10)
+    assert any("under the 10-rows floor" in i and "orders" in i for i in issues)
