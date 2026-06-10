@@ -68,6 +68,13 @@ class MemoryScreen(Vertical):
 
     def set_project(self, project_code: str) -> None:
         self._project_code = project_code
+        # Populate immediately rather than waiting for on_show: the tables
+        # must not depend on a Show message landing before a caller looks
+        # at them (Pilot.pause()'s idle heuristic can return early under
+        # load — #91). Both calls no-op safely when children aren't
+        # mounted yet; on_show still re-populates on every tab switch.
+        self._populate_agent_picker()
+        self._refresh_views()
 
     def focus_agent(self, agent_id: str) -> None:
         """Programmatic focus from /memory <agent_id> command."""
