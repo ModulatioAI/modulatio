@@ -56,6 +56,41 @@ def test_param_schema_with_colons_in_json_survives_parser(shared):
     assert loaded.param_schema[0].prompt == "Base URL (e.g. https://x.io)?"
 
 
+# ── #101 C.0: DeliverableSpec — the declared-constraint vessel ──────────────
+
+
+def test_round_trip_deliverable_spec(shared):
+    t = jt.create_job_template(
+        name="anthology", description="bound anthology", interview_body="# Interview\n",
+        output_spec=jt.OutputSpec(cardinality="fixed:8", artifact_kind="document"),
+        deliverable_spec=jt.DeliverableSpec(
+            part_floor=2000, part_ceiling=3000, size_unit="words",
+            required_structure=("title", "toc"), title="Have Robot, Will Travel"),
+    )
+    loaded = jt.load_with_metadata("anthology")
+    assert loaded.deliverable_spec == t.deliverable_spec     # nested JSON round-trips
+    assert loaded.deliverable_spec.part_floor == 2000
+    assert loaded.deliverable_spec.required_structure == ("title", "toc")
+    assert loaded.deliverable_spec.title == "Have Robot, Will Travel"
+
+
+def test_deliverable_spec_absent_is_empty_and_omitted(shared):
+    jt.create_job_template(name="plain", description="d", interview_body="b")
+    loaded = jt.load_with_metadata("plain")
+    assert loaded.deliverable_spec.is_empty()               # nothing declared == today
+    raw = (jt._JT_ROOT / "plain.md").read_text()
+    assert "deliverable_spec" not in raw                    # omitted to keep files lean
+
+
+def test_parse_deliverable_spec_graceful_and_agnostic():
+    assert jt._parse_deliverable_spec("").is_empty()
+    assert jt._parse_deliverable_spec("not json").is_empty()
+    assert jt._parse_deliverable_spec("[1, 2]").is_empty()  # non-dict → empty
+    # product-agnostic: a data spec sized in ROWS round-trips with no document vocab
+    d = jt._parse_deliverable_spec('{"part_floor": 500, "size_unit": "rows"}')
+    assert d.part_floor == 500 and d.size_unit == "rows" and not d.is_empty()
+
+
 def test_cardinality_variants(shared):
     for card, per in (("one", None), ("per-item", "items"), ("fixed:12", None)):
         jt.save(jt.JobTemplate(name=f"c-{card.replace(':','-')}", description="d",

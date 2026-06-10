@@ -27,7 +27,7 @@ from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from modulatio import comptroller, dispatch, job_template_library, job_templates, kickoff_history, lessons, qc_history, qc_notes, research, roster, skill_git, skills, standards, standards_proposals, store, tools
-from modulatio.job_templates import JobTemplate
+from modulatio.job_templates import DeliverableSpec, JobTemplate
 from modulatio import context_budget as _ctx_budget_module
 from modulatio import dispatch_breaker as _dispatch_breaker_module
 from modulatio import tool_summarization as _tool_sum_module
@@ -1775,6 +1775,10 @@ class Orchestrator:
         #: (fail-closed), so a producer emitting assembled-looking text can't
         #: bypass review. Per-run, in-memory; lost on crash-resume → fall back.
         self._assembly_records: dict = {}
+        #: #101 C.0: the declared DeliverableSpec for this run — the verifier's expected
+        #: values (per-unit floor / required structure / title). Empty == today's
+        #: behavior; bound at intake from the JT field (or Leader-distill, later).
+        self._deliverable_spec = DeliverableSpec()
         #: Core rebuild B3b: thread-local isolation state for a wave worker —
         #: ``deferred_writes`` (shared-store writes run at merge), ``child_tasks``
         #: (decompose children carried back), ``artifact_writes`` + ``staging_root``
@@ -8625,6 +8629,7 @@ class Orchestrator:
         never breaks a kickoff (it just falls back to greenfield)."""
         self._bound_jt = None
         self._bound_jt_params = {}
+        self._deliverable_spec = DeliverableSpec()
         self._jt_candidates = []
         try:
             if bound_jt_name:
@@ -8649,6 +8654,7 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — JT resolution must never break a run
             self._bound_jt = None
             self._bound_jt_params = {}
+            self._deliverable_spec = DeliverableSpec()
             self._jt_candidates = []
 
     def _bind_job_template(
@@ -8664,6 +8670,7 @@ class Orchestrator:
         params = self._run_jt_interview(jt, bound_params, ask_operator)
         self._bound_jt = jt
         self._bound_jt_params = params
+        self._deliverable_spec = jt.deliverable_spec  # #101 C.0: bind the declared spec
         summary.job_slug = jt.name  # names this job's output folder (Feature A)
         self._emit_activity(
             role="leader", phase=f"jt_bound:{jt.name}", agent_id="leader",

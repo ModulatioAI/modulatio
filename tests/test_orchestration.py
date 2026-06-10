@@ -8915,12 +8915,14 @@ def test_satisfied_over_blind_binary_forces_unverified_reservation(tmp_path, mon
                       wiki_path=str(tmp_path / "bld"), run_id="run-1")
     orch = Orchestrator(project, {"leader": _leader_with_verdict("satisfied"),
                                   "drafter": _drafter_stub, "qc": _qc_stub})
-    art = orch._artifacts_root(); art.mkdir(parents=True, exist_ok=True)
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
     (art / "out.pdf").write_bytes(b"%PDF-1.7\x00\xff not utf8")   # unreadable, no record
     task = _deliverable_task("BLD", output="out.pdf")
     goal = Goal(id="BLD-G-001", project_id=uuid4(), description="d",
                 success_criteria="s", status=GoalStatus.IN_PROGRESS)
-    summary = RunSummary(project=orch.project); summary.tasks = [task]
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
 
     orch._leader_verify_goal(goal, [task], summary)
 
@@ -8945,17 +8947,46 @@ def test_satisfied_over_readable_deliverable_does_not_false_blind(tmp_path, monk
                       wiki_path=str(tmp_path / "rdb"), run_id="run-1")
     orch = Orchestrator(project, {"leader": _leader_with_verdict("satisfied"),
                                   "drafter": _drafter_stub, "qc": _qc_stub})
-    art = orch._artifacts_root(); art.mkdir(parents=True, exist_ok=True)
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
     (art / "out.md").write_text("# Readable\n\nplain text deliverable")
     task = _deliverable_task("RDB", output="out.md")
     goal = Goal(id="RDB-G-001", project_id=uuid4(), description="d",
                 success_criteria="s", status=GoalStatus.IN_PROGRESS)
-    summary = RunSummary(project=orch.project); summary.tasks = [task]
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
 
     orch._leader_verify_goal(goal, [task], summary)
 
     assert not any("could NOT verify" in r.get("concern", "")
                    for r in summary.recommendations)
+
+
+def test_binding_a_jt_sets_deliverable_spec(tmp_path, monkeypatch):
+    """#101 C.0b: a fresh run starts with an empty DeliverableSpec; binding a JT that
+    declares one puts it in run state (self._deliverable_spec) — the vessel B.2 reads."""
+    from modulatio import vault, job_templates as _jt
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Project
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("DSB", "spec bind", "obj")
+    vault.init_run("DSB", "run-1", "obj")
+    project = Project(code="DSB", name="DSB", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "dsb"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": lambda _p: ""})
+    assert orch._deliverable_spec.is_empty()   # fresh run == today's behavior
+
+    jt_with_spec = _jt.JobTemplate(
+        name="anthology", description="d", interview_body="b",
+        deliverable_spec=_jt.DeliverableSpec(
+            part_floor=2000, size_unit="words", required_structure=("title", "toc")))
+    summary = RunSummary(project=orch.project)
+    orch._bind_job_template(jt_with_spec, {}, None, summary)
+
+    assert orch._deliverable_spec == jt_with_spec.deliverable_spec
+    assert orch._deliverable_spec.part_floor == 2000
+    assert orch._deliverable_spec.required_structure == ("title", "toc")
 
 
 def test_apply_assembly_manifest_missing_unit_flags_blocker(project, tmp_path):
