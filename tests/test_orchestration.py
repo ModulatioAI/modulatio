@@ -9103,6 +9103,102 @@ def test_deliverable_spec_unset_unit_uses_native(tmp_path, monkeypatch):
     assert "under the 2000-rows floor" in seen["prompt"]     # judged in the family's unit
 
 
+# ── #101 C.1: the engine STAMPS the per-unit floor onto produce tasks ──────────
+
+
+def _bare_orch(tmp_path, monkeypatch, code):
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(code, "c1", "obj")
+    vault.init_run(code, "run-1", "obj")
+    project = Project(code=code, name=code, objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / code.lower()), run_id="run-1")
+    return Orchestrator(project, {"leader": lambda _p: ""})
+
+
+def _produce_task(code, idx, kind="document", *, skills=(), evidence=()):
+    from uuid import uuid4
+    from modulatio.types import Task, TaskStatus
+    t = Task(id=f"{code}-T-{idx:03d}", project_id=uuid4(), goal_id=f"{code}-G-001",
+             description=f"write unit {idx}", depends_on=[], artifact_kind=kind,
+             required_skills=list(skills), evidence_required=list(evidence))
+    t.status = TaskStatus.PENDING
+    t.deliverable = True
+    return t
+
+
+def test_spec_size_metric_only_for_token_units(tmp_path, monkeypatch):
+    """#101 C.1: the engine stamps a token-floor metric only when the declared floor is
+    in its UNIVERSAL whitespace measure — unset/native or a token/word unit. A foreign
+    measure (rows) yields None (B.2 verifies those natively); no floor yields None."""
+    from modulatio import job_templates as _jt
+    orch = _bare_orch(tmp_path, monkeypatch, "SM1")
+
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=2000)        # unset → native
+    m = orch._spec_size_metric()
+    assert m is not None and m.kind == "metric" and m.target == "token_count >= 2000"
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=1500, size_unit="words")
+    assert orch._spec_size_metric().target == "token_count >= 1500"     # token/word → stamp
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=500, size_unit="rows")
+    assert orch._spec_size_metric() is None                             # foreign unit → no stamp
+    orch._deliverable_spec = _jt.DeliverableSpec(required_structure=("title",))
+    assert orch._spec_size_metric() is None                             # no floor → None
+
+
+def test_stamp_size_metric_targets_units_not_assembler(tmp_path, monkeypatch):
+    """#101 C.1: the stamp lands on same-kind unit producers, NOT the assembler, and the
+    stamped metric round-trips through _token_band so the per-task floor is enforced."""
+    from modulatio import job_templates as _jt
+    from modulatio.orchestration import _token_band
+    orch = _bare_orch(tmp_path, monkeypatch, "SM2")
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=2000)
+    orch._bound_jt = _jt.JobTemplate(
+        name="anthology", description="d", interview_body="b",
+        output_spec=_jt.OutputSpec(cardinality="fixed:8", artifact_kind="document"))
+    units = [_produce_task("SM2", i, "document") for i in (1, 2, 3)]
+    assembler = _produce_task("SM2", 9, "document", skills=["document-assembly"])
+
+    orch._stamp_deliverable_size_metric([*units, assembler])
+
+    for u in units:
+        assert _token_band(u) == (2000, None)      # floor stamped + readable by the band
+    assert _token_band(assembler) is None          # the WHOLE's size is the sum, not per-unit
+
+
+def test_stamp_skips_foreign_kind_and_existing_metric(tmp_path, monkeypatch):
+    """C.1 precision: skip tasks of a different artifact_kind (a media cover in a doc job)
+    and never override a task that already declares its own size metric."""
+    from modulatio import job_templates as _jt
+    from modulatio.types import EvidenceRequirement
+    from modulatio.orchestration import _token_band
+    orch = _bare_orch(tmp_path, monkeypatch, "SM3")
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=2000)
+    orch._bound_jt = _jt.JobTemplate(
+        name="a", description="d", interview_body="b",
+        output_spec=_jt.OutputSpec(artifact_kind="document"))
+    doc = _produce_task("SM3", 1, "document")
+    cover = _produce_task("SM3", 2, "media")           # different kind
+    own = _produce_task("SM3", 3, "document", evidence=[EvidenceRequirement(
+        kind="metric", description="word count", target="token_count >= 5000")])
+
+    orch._stamp_deliverable_size_metric([doc, cover, own])
+
+    assert _token_band(doc) == (2000, None)            # the doc unit gets the floor
+    assert _token_band(cover) is None                  # media cover untouched (foreign kind)
+    assert _token_band(own) == (5000, None)            # explicit metric respected, not overridden
+
+
+def test_stamp_noop_when_spec_empty(tmp_path, monkeypatch):
+    """C.1 no-op: with no declared spec (today's default), nothing is stamped."""
+    from modulatio.orchestration import _token_band
+    orch = _bare_orch(tmp_path, monkeypatch, "SM4")
+    t = _produce_task("SM4", 1, "document")
+    orch._stamp_deliverable_size_metric([t])
+    assert _token_band(t) is None
+
+
 def test_apply_assembly_manifest_missing_unit_flags_blocker(project, tmp_path):
     from uuid import uuid4
     from modulatio.types import Task

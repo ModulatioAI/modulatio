@@ -3127,6 +3127,10 @@ class Orchestrator:
         # producing goal's tasks already exist here.
         self._wire_cross_goal_assembler_deps(tasks)
         _select_assembler_skill(tasks, self.project.code)
+        # #101 C.1: the engine stamps the bound deliverable's per-unit size floor onto
+        # the unit producers (after the assembler is settled, so it's excluded) — the
+        # HARD bind at produce, where the size band + QC enforce it deterministically.
+        self._stamp_deliverable_size_metric(tasks)
         self._emit_activity(
             role="planner",
             phase="task_planning_ended",
@@ -8221,6 +8225,66 @@ class Orchestrator:
             digest, expected_count=None, part_floor=floor,
             required_structure=spec.required_structure,
         )
+
+    def _spec_size_metric(self) -> "EvidenceRequirement | None":
+        """#101 C.1: the per-unit size-floor metric the engine STAMPS onto each
+        deliverable produce task from the run's DeliverableSpec — so the per-task size
+        band (:func:`_token_band` → the QC size / near-empty backstop) enforces the
+        floor at PRODUCE time, deterministically, instead of hoping the planner-LLM
+        stamped it (the HRWT parts shipped below the declared floor precisely because it
+        didn't — the size mechanism existed but was starved). "Below the floor" is unit-
+        neutral: too few tokens for prose, too few rows for data, too short a runtime for
+        media — each judged in the part's OWN measure.
+
+        Product-agnostic: the produce-time measure is the engine's UNIVERSAL whitespace
+        ``token_count``. We stamp only when the declared floor is in that universal unit
+        — an unset/native ``size_unit`` (the default), or one the engine already treats
+        as its whitespace count (:data:`_SIZE_DIMENSION_RE`). An explicit foreign
+        measure (``rows``/``lines``/…) is NOT forced through token_count (a category
+        error); B.2 enforces those at verify in the deliverable's own native unit.
+        Returns the metric, or ``None`` when nothing stampable is declared."""
+        spec = self._deliverable_spec
+        floor = spec.part_floor
+        if floor is None:
+            return None
+        unit = (spec.size_unit or "").strip().lower()
+        if unit and not _SIZE_DIMENSION_RE.search(unit):
+            return None
+        return EvidenceRequirement(
+            kind="metric",
+            description=(
+                "Per-unit minimum token_count (engine-stamped from the bound "
+                "deliverable spec)"
+            ),
+            target=f"token_count >= {floor}",
+        )
+
+    def _stamp_deliverable_size_metric(self, tasks: "list[Task]") -> None:
+        """#101 C.1: stamp the spec's per-unit size floor (:meth:`_spec_size_metric`)
+        onto each fan-out PRODUCE task of the bound deliverable — the unit producers,
+        never the assembler (it builds the WHOLE, whose size is the sum, not per-unit).
+        Targets only tasks of the bound deliverable's ``artifact_kind`` that already
+        carry NO size metric (an explicit planner metric is respected, never
+        overridden). A no-op when nothing is bound/declared, so an empty spec leaves
+        today's behavior exactly as it was.
+
+        (A legitimately small same-kind auxiliary unit — structural scaffolding the
+        family wraps around its content — is the one over-stamp edge; Part A turns such
+        framing into engine-generated structure rather than a produce task, which
+        dissolves it — tracked there, not papered over here.)"""
+        metric = self._spec_size_metric()
+        if metric is None:
+            return
+        jt = self._bound_jt
+        kind = (jt.output_spec.artifact_kind if jt else "").strip().lower()
+        for t in tasks:
+            if _is_assembler_task(t):
+                continue
+            if kind and str(t.artifact_kind or "").strip().lower() != kind:
+                continue
+            if _token_band(t) is not None:
+                continue
+            t.evidence_required = [*t.evidence_required, metric]
 
     def _record_recommendations(self, goal: Goal, raw, summary: RunSummary) -> None:
         """Fold the Leader's reservations for ``goal`` into the run's
