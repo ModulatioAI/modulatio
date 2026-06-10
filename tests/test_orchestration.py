@@ -8145,6 +8145,129 @@ def test_leader_auto_redo_absent_artifact_uses_generate(tmp_path, monkeypatch):
     assert task.producer_mode == "generate"
 
 
+def _redo_goal_and_tasks(code, n=2):
+    """A goal + n distinct deliverable tasks for redo-dispatch tests."""
+    from uuid import uuid4
+    from modulatio.types import Goal, GoalStatus, Task, TaskStatus
+    goal = Goal(id=f"{code}-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    tasks = []
+    for i in range(1, n + 1):
+        t = Task(id=f"{code}-T-00{i}", project_id=uuid4(), goal_id=goal.id,
+                 description=f"produce deliverable {i}", depends_on=[])
+        t.status = TaskStatus.COMPLETED
+        t.deliverable = True
+        t.output_path = f"d{i}.md"
+        tasks.append(t)
+    return goal, tasks
+
+
+def test_leader_auto_redo_routes_through_waves_when_concurrent(tmp_path, monkeypatch):
+    """#79: with the wave executor enabled (the default), a goal redo re-executes
+    through _run_task_waves — same parallelism + per-task staging/merge isolation as
+    the first pass — passing the Leader's rationale as the workers' initial
+    corrective notes. The old serial _run_task_with_redo loop is NOT used."""
+    monkeypatch.delenv("MODULATIO_CONCURRENT_WAVES", raising=False)  # field default ON
+    from modulatio.orchestration import RunSummary
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("satisfied"), code="WV1")
+    goal, tasks = _redo_goal_and_tasks("WV1")
+
+    waves_calls, serial_calls = [], []
+    monkeypatch.setattr(
+        orch, "_run_task_waves",
+        lambda g, ts, summary, task_map, initial_corrective_notes="":
+            waves_calls.append((task_map, initial_corrective_notes)),
+    )
+    monkeypatch.setattr(
+        orch, "_run_task_with_redo",
+        lambda t, summary, initial_corrective_notes="": serial_calls.append(t.id),
+    )
+    summary = RunSummary(project=orch.project)
+    summary.tasks = list(tasks)
+    report = orch._scope_root() / "reports" / "WV1-G-001.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("r")
+
+    orch._leader_auto_redo(goal, tasks, "tighten the focus", report, summary)
+
+    assert len(waves_calls) == 1, "redo must route through the wave executor"
+    task_map, notes = waves_calls[0]
+    assert notes == "tighten the focus"          # rationale → workers' corrective notes
+    assert set(task_map) == {t.id for t in tasks}  # ALL the goal's tasks, one wave call
+    assert serial_calls == [], "the serial redo loop must not run when waves are on"
+    assert goal.retry_count == 1                  # budget still consumed exactly once
+
+
+def test_leader_auto_redo_serial_under_kill_switch(tmp_path, monkeypatch):
+    """#79 flag-mirror: MODULATIO_CONCURRENT_WAVES=0 forces the FIRST pass serial,
+    so the redo must mirror it — sequential _run_task_with_redo, never the wave
+    path. (An operator debugging with the kill-switch must not get concurrent redo.)"""
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "0")
+    from modulatio.orchestration import RunSummary
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_with_verdict("satisfied"), code="WV0")
+    goal, tasks = _redo_goal_and_tasks("WV0")
+
+    waves_calls, serial_calls = [], []
+    monkeypatch.setattr(
+        orch, "_run_task_waves",
+        lambda g, ts, summary, task_map, initial_corrective_notes="":
+            waves_calls.append(task_map),
+    )
+    monkeypatch.setattr(
+        orch, "_run_task_with_redo",
+        lambda t, summary, initial_corrective_notes="": serial_calls.append(
+            (t.id, initial_corrective_notes)),
+    )
+    summary = RunSummary(project=orch.project)
+    summary.tasks = list(tasks)
+    report = orch._scope_root() / "reports" / "WV0-G-001.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("r")
+
+    orch._leader_auto_redo(goal, tasks, "tighten the focus", report, summary)
+
+    assert waves_calls == [], "kill-switch must keep redo sequential"
+    assert [tid for tid, _ in serial_calls] == [t.id for t in tasks]  # each task, in order
+    assert all(notes == "tighten the focus" for _, notes in serial_calls)  # notes still injected
+
+
+def test_run_task_waves_records_blocked_on_worker_crash(project: Project, monkeypatch):
+    """Hero MINOR: an UNEXPECTED worker exception inside a wave must not abort the
+    whole wave and orphan siblings — the crashed task surfaces as BLOCKED and its
+    independent sibling still completes."""
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "1")
+
+    def _coord_two(prompt: str) -> str:
+        tasks = [
+            {"description": f"produce artifact {i}{mark}",
+             "assignee_specialist": "drafter", "artifact_kind": "essay",
+             "evidence_required": [{"kind": "artifact", "description": "file"}]}
+            for i, mark in ((1, ""), (2, " CRASHME"))
+        ]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader_with_verdict("satisfied"), "planner": _coord_two,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    })
+    orig = orch._execute_task_isolated
+
+    def crashing(t, initial_corrective_notes=""):
+        if "CRASHME" in t.description:
+            raise RuntimeError("simulated engine bug in a wave worker")
+        return orig(t, initial_corrective_notes)
+
+    monkeypatch.setattr(orch, "_execute_task_isolated", crashing)
+
+    orch.kickoff("two independent things, one explodes")
+
+    by_desc = {t.description: t for t in store.list_tasks(PROJECT_CODE)}
+    crashed = next(t for d, t in by_desc.items() if "CRASHME" in d)
+    sibling = next(t for d, t in by_desc.items() if "CRASHME" not in d)
+    assert crashed.status is TaskStatus.BLOCKED, "crashed worker → BLOCKED, not vanished"
+    assert sibling.status is TaskStatus.COMPLETED, "sibling still merges despite the crash"
+
+
 def test_leader_redo_loop_breaker_stops_unchanged_deliverable(tmp_path, monkeypatch):
     """The loop-breaker: once a redo has run (retry_count >= 1) and the
     deliverable artifacts are UNCHANGED from when that redo was dispatched, a
@@ -8695,6 +8818,461 @@ def test_apply_assembly_manifest_concatenates_from_disk(project, tmp_path):
     # the manifest JSON itself never lands in the artifact
     assert "units" not in out and "```" not in out
     assert "2 unit(s) concatenated" in (task.summary_for_state_doc or "")
+
+
+def test_apply_assembly_manifest_attaches_deliverable_digest(project, tmp_path):
+    """#101 Part 0: a document assembly attaches the engine-extracted digest to the
+    AssemblyRecord (the verifier's eyes) — per-part labels + word sizes + framing
+    flags — and a text deliverable's twin pointer is the output itself."""
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.md").write_text("# Chapter One\n\nalpha beta gamma")   # 6 words
+    (artifacts / "s2.md").write_text("# Chapter Two\n\nword")               # 4 words
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    task = Task(id="DIG-T-001", project_id=uuid4(), goal_id="DIG-G-001",
+                description="assemble", summary_for_state_doc="", output_path="book.md")
+    body = '```assembly\n{"units": ["s1.md", "s2.md"], "title_page": "BOOK", "toc": true}\n```\n'
+    orch._apply_assembly_manifest(task, body)
+
+    rec = orch._assembly_records[task.id]
+    assert rec.digest is not None
+    d = rec.digest
+    assert d.kind == "document" and d.part_count == 2
+    assert [p["label"] for p in d.parts] == ["Chapter One", "Chapter Two"]
+    assert [p["size"] for p in d.parts] == [6, 4]
+    assert d.structure == {"title": True, "toc": True}
+    assert d.text_twin_path == "book.md"   # text deliverable is its own readable twin
+
+
+def test_apply_assembly_manifest_engine_frames_from_spec(project, tmp_path):
+    """#101 Part A: a BARE producer manifest (no title_page/toc) + a bound DeliverableSpec
+    that declares a title + structure → the ENGINE frames the document (the HRWT
+    bare-concat, fixed). The resulting digest reports title+toc PRESENT, and the real
+    units are untouched (no fabricated parts). Product-agnostic: framing is per-family;
+    only the document head renders here."""
+    from uuid import uuid4
+    from modulatio import job_templates as _jt
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.md").write_text("# Story One\n\nalpha beta")
+    (artifacts / "s2.md").write_text("# Story Two\n\ngamma delta")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    orch._deliverable_spec = _jt.DeliverableSpec(
+        title="My Anthology", required_structure=("title", "toc"))
+    task = Task(id="FRM-T-001", project_id=uuid4(), goal_id="FRM-G-001",
+                description="assemble", summary_for_state_doc="", output_path="book.md")
+    body = '```assembly\n{"units": ["s1.md", "s2.md"]}\n```\n'   # BARE — producer framed nothing
+    orch._apply_assembly_manifest(task, body)
+
+    # title+toc PRESENT from a BARE producer manifest can only come from engine framing.
+    d = orch._assembly_records[task.id].digest
+    assert d.structure == {"title": True, "toc": True}            # engine supplied the head
+    assert [p["label"] for p in d.parts] == ["Story One", "Story Two"]   # real units, not fabricated
+    assert "# My Anthology" in orch._assembly_records[task.id].manifest["title_page"]
+
+
+def test_leader_verify_feeds_digest_and_twin_not_binary(tmp_path, monkeypatch):
+    """#101 Part 0 (0.3): a deliverable with an engine assembly digest feeds
+    Leader-verify the STRUCTURAL DIGEST + readable twin — never "(could not read)" on
+    bound binary bytes (the HRWT blind-verify, fixed)."""
+    from uuid import uuid4
+    from modulatio import assembly as _assembly, vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+
+    seen = {}
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            seen["prompt"] = prompt
+            return '```json\n{"verdict":"satisfied","rationale":"r","report_body":"r"}\n```'
+        return _leader_stub(prompt)
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("DGV", "digest verify", "obj")
+    vault.init_run("DGV", "run-1", "obj")
+    project = Project(code="DGV", name="DGV", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "dgv"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub})
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    # a binary deliverable that is NOT utf-8 — the OLD path would read "(could not read)"
+    (art / "book.pdf").write_bytes(b"%PDF-1.7\x00\x01 not utf8 \xff\xfe")
+    (art / ".twins").mkdir(exist_ok=True)
+    (art / ".twins" / "DGV-T-001.md").write_text("# Chapter One\n\nreadable prose here")
+
+    task = _deliverable_task("DGV", output="book.pdf")   # id DGV-T-001
+    orch._assembly_records[task.id] = _assembly.AssemblyRecord(
+        manifest={}, final_checksum="sha256:x", complete=True, strategy="document",
+        digest=_assembly.DeliverableDigest(
+            kind="document", part_count=2,
+            parts=[{"label": "Chapter One", "size": 2692}, {"label": "Story 2", "size": 906}],
+            part_size_unit="words", structure={"title": False, "toc": False},
+            whole_size=33, whole_size_unit="pages", text_twin_path=".twins/DGV-T-001.md"))
+    goal = Goal(id="DGV-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    p = seen["prompt"]
+    assert "deliverable structure (engine-extracted)" in p   # digest fed
+    assert "2692 words" in p and "906 words" in p            # per-part sizes visible
+    assert "readable prose here" in p                        # the twin, not the binary
+    assert "could not read" not in p                         # never the blind path
+
+
+def test_satisfied_over_blind_binary_forces_unverified_reservation(tmp_path, monkeypatch):
+    """#101 Part 0 (0.3b): a 'satisfied' verdict over a binary deliverable with NO
+    digest (the engine was blind) must NOT ship clean — the engine forces an UNVERIFIED
+    reservation into the Product Quality Report (the HRWT blind-ship, backstopped)."""
+    from uuid import uuid4
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("BLD", "blind", "obj")
+    vault.init_run("BLD", "run-1", "obj")
+    project = Project(code="BLD", name="BLD", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "bld"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": _leader_with_verdict("satisfied"),
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "out.pdf").write_bytes(b"%PDF-1.7\x00\xff not utf8")   # unreadable, no record
+    task = _deliverable_task("BLD", output="out.pdf")
+    goal = Goal(id="BLD-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert goal.status == GoalStatus.COMPLETED   # still ships (no hard block in this arch)
+    blind_recs = [r for r in summary.recommendations
+                  if "could NOT verify" in r.get("concern", "")]
+    assert blind_recs, "a blind binary must force an UNVERIFIED reservation"
+    assert "Human verification REQUIRED" in blind_recs[0]["suggestion"]
+
+
+def test_satisfied_over_readable_deliverable_does_not_false_blind(tmp_path, monkeypatch):
+    """0.3b must NOT over-fire: a readable text deliverable ships clean, no blind flag."""
+    from uuid import uuid4
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("RDB", "readable", "obj")
+    vault.init_run("RDB", "run-1", "obj")
+    project = Project(code="RDB", name="RDB", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "rdb"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": _leader_with_verdict("satisfied"),
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "out.md").write_text("# Readable\n\nplain text deliverable")
+    task = _deliverable_task("RDB", output="out.md")
+    goal = Goal(id="RDB-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert not any("could NOT verify" in r.get("concern", "")
+                   for r in summary.recommendations)
+
+
+def test_binding_a_jt_sets_deliverable_spec(tmp_path, monkeypatch):
+    """#101 C.0b: a fresh run starts with an empty DeliverableSpec; binding a JT that
+    declares one puts it in run state (self._deliverable_spec) — the vessel B.2 reads."""
+    from modulatio import vault, job_templates as _jt
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Project
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("DSB", "spec bind", "obj")
+    vault.init_run("DSB", "run-1", "obj")
+    project = Project(code="DSB", name="DSB", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "dsb"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": lambda _p: ""})
+    assert orch._deliverable_spec.is_empty()   # fresh run == today's behavior
+
+    jt_with_spec = _jt.JobTemplate(
+        name="anthology", description="d", interview_body="b",
+        deliverable_spec=_jt.DeliverableSpec(
+            part_floor=2000, size_unit="words", required_structure=("title", "toc")))
+    summary = RunSummary(project=orch.project)
+    orch._bind_job_template(jt_with_spec, {}, None, summary)
+
+    assert orch._deliverable_spec == jt_with_spec.deliverable_spec
+    assert orch._deliverable_spec.part_floor == 2000
+    assert orch._deliverable_spec.required_structure == ("title", "toc")
+
+
+def _verify_orch_with_digest(tmp_path, monkeypatch, code, digest, *, spec=None):
+    """Stand up an orchestrator whose one COMPLETED deliverable carries ``digest``,
+    capture the Leader-verification prompt, and optionally seed a DeliverableSpec.
+    Returns (orch, seen) where seen["prompt"] is the verify prompt."""
+    from modulatio import assembly as _assembly, vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+    from uuid import uuid4
+
+    seen = {}
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            seen["prompt"] = prompt
+            return '```json\n{"verdict":"satisfied","rationale":"r","report_body":"r"}\n```'
+        return _leader_stub(prompt)
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(code, "spec verify", "obj")
+    vault.init_run(code, "run-1", "obj")
+    project = Project(code=code, name=code, objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / code.lower()), run_id="run-1")
+    orch = Orchestrator(project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub})
+    if spec is not None:
+        orch._deliverable_spec = spec
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "book.pdf").write_bytes(b"%PDF-1.7\x00 bound")
+    task = _deliverable_task(code, output="book.pdf")
+    orch._assembly_records[task.id] = _assembly.AssemblyRecord(
+        manifest={}, final_checksum="sha256:x", complete=True, strategy="document",
+        digest=digest)
+    goal = Goal(id=f"{code}-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+    orch._leader_verify_goal(goal, [task], summary)
+    return orch, seen
+
+
+def test_leader_verify_surfaces_declared_spec_issues(tmp_path, monkeypatch):
+    """#101 B.2: with a declared DeliverableSpec, the engine runs check_deliverable over
+    the digest and SURFACES its findings to Leader-verify — the under-floor parts and
+    the missing framing the HRWT verify was blind to are now in the prompt."""
+    from modulatio import assembly as _assembly, job_templates as _jt
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=2,
+        parts=[{"label": "Story One", "size": 2500}, {"label": "Story Two", "size": 900}],
+        part_size_unit="words", structure={"title": False, "toc": False},
+        text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=2000, size_unit="words",
+                               required_structure=("title", "toc"))
+    _orch, seen = _verify_orch_with_digest(tmp_path, monkeypatch, "SPC", digest, spec=spec)
+
+    p = seen["prompt"]
+    assert "DECLARED-SPEC CHECK" in p                        # the check ran + surfaced
+    assert "under the 2000-words floor" in p and "Story Two" in p   # the short part named
+    assert "Story One" not in p.split("DECLARED-SPEC CHECK")[1]     # the OK part not flagged
+    assert "required structure missing: title" in p
+    assert "required structure missing: toc" in p
+
+
+def test_empty_deliverable_spec_surfaces_nothing(tmp_path, monkeypatch):
+    """B.2 must not over-fire: with NO declared spec (today's default), the verifier sees
+    the digest but no DECLARED-SPEC CHECK block — behavior is unchanged."""
+    from modulatio import assembly as _assembly
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=1,
+        parts=[{"label": "Only", "size": 10}], part_size_unit="words",
+        structure={"title": False}, text_twin_path=None)
+    _orch, seen = _verify_orch_with_digest(tmp_path, monkeypatch, "EMP", digest)
+
+    assert "DECLARED-SPEC CHECK" not in seen["prompt"]
+
+
+def test_deliverable_spec_skips_floor_on_unit_mismatch(tmp_path, monkeypatch):
+    """#101 B.2 seam 1 (Hero): when the spec's size_unit denotes a DIFFERENT measure than
+    the digest's part unit, the engine SKIPS the floor check — no cross-unit arithmetic.
+    A 500-ROW floor must never fire against a digest counted in WORDS. Structure checks
+    (unit-independent) still run."""
+    from modulatio import assembly as _assembly, job_templates as _jt
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=1,
+        parts=[{"label": "Prose", "size": 12}],   # 12 words — far under any row-floor
+        part_size_unit="words", structure={"title": False}, text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=500, size_unit="rows",
+                               required_structure=("title",))
+    _orch, seen = _verify_orch_with_digest(tmp_path, monkeypatch, "MIS", digest, spec=spec)
+
+    p = seen["prompt"]
+    assert "floor" not in p.split("DECLARED-SPEC CHECK")[1]   # the mismatched floor skipped
+    assert "required structure missing: title" in p           # but structure still checked
+
+
+def test_deliverable_spec_unset_unit_uses_native(tmp_path, monkeypatch):
+    """#101 B.2 seam 1 (product-agnostic): with NO asserted size_unit (the default), the
+    floor is judged in the deliverable's OWN native unit — whatever the family counts —
+    so a bare floor fires against ANY family. The engine names no unit. Here the digest
+    counts in 'rows' (a data deliverable) and a unit-less floor still applies."""
+    from modulatio import assembly as _assembly, job_templates as _jt
+
+    digest = _assembly.DeliverableDigest(
+        kind="data", part_count=1,
+        parts=[{"label": "sheet1", "size": 50}], part_size_unit="rows",
+        structure={}, text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=2000)              # no unit asserted → native
+    _orch, seen = _verify_orch_with_digest(tmp_path, monkeypatch, "NAT", digest, spec=spec)
+
+    assert "under the 2000-rows floor" in seen["prompt"]     # judged in the family's unit
+
+
+# ── #101 C.1: the engine STAMPS the per-unit floor onto produce tasks ──────────
+
+
+def _bare_orch(tmp_path, monkeypatch, code):
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(code, "c1", "obj")
+    vault.init_run(code, "run-1", "obj")
+    project = Project(code=code, name=code, objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / code.lower()), run_id="run-1")
+    return Orchestrator(project, {"leader": lambda _p: ""})
+
+
+def _produce_task(code, idx, kind="document", *, skills=(), evidence=()):
+    from uuid import uuid4
+    from modulatio.types import Task, TaskStatus
+    t = Task(id=f"{code}-T-{idx:03d}", project_id=uuid4(), goal_id=f"{code}-G-001",
+             description=f"write unit {idx}", depends_on=[], artifact_kind=kind,
+             required_skills=list(skills), evidence_required=list(evidence))
+    t.status = TaskStatus.PENDING
+    t.deliverable = True
+    return t
+
+
+def test_spec_size_metric_only_for_token_units(tmp_path, monkeypatch):
+    """#101 C.1: the engine stamps a token-floor metric only when the declared floor is
+    in its UNIVERSAL whitespace measure — unset/native or a token/word unit. A foreign
+    measure (rows) yields None (B.2 verifies those natively); no floor yields None."""
+    from modulatio import job_templates as _jt
+    orch = _bare_orch(tmp_path, monkeypatch, "SM1")
+
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=2000)        # unset → native
+    m = orch._spec_size_metric()
+    assert m is not None and m.kind == "metric" and m.target == "token_count >= 2000"
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=1500, size_unit="words")
+    assert orch._spec_size_metric().target == "token_count >= 1500"     # token/word → stamp
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=500, size_unit="rows")
+    assert orch._spec_size_metric() is None                             # foreign unit → no stamp
+    orch._deliverable_spec = _jt.DeliverableSpec(required_structure=("title",))
+    assert orch._spec_size_metric() is None                             # no floor → None
+
+
+def test_stamp_size_metric_targets_units_not_assembler(tmp_path, monkeypatch):
+    """#101 C.1: the stamp lands on same-kind unit producers, NOT the assembler, and the
+    stamped metric round-trips through _token_band so the per-task floor is enforced."""
+    from modulatio import job_templates as _jt
+    from modulatio.orchestration import _token_band
+    orch = _bare_orch(tmp_path, monkeypatch, "SM2")
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=2000)
+    orch._bound_jt = _jt.JobTemplate(
+        name="anthology", description="d", interview_body="b",
+        output_spec=_jt.OutputSpec(cardinality="fixed:8", artifact_kind="document"))
+    units = [_produce_task("SM2", i, "document") for i in (1, 2, 3)]
+    assembler = _produce_task("SM2", 9, "document", skills=["document-assembly"])
+    assembler.depends_on = [u.id for u in units]   # the authoritative unit set
+
+    orch._stamp_deliverable_size_metric([*units, assembler])
+
+    for u in units:
+        assert _token_band(u) == (2000, None)      # floor stamped + readable by the band
+    assert _token_band(assembler) is None          # the WHOLE's size is the sum, not per-unit
+
+
+def test_stamp_excludes_same_kind_auxiliary(tmp_path, monkeypatch):
+    """#101 C.1 (Nemo BLOCK #2): a same-kind auxiliary (front-matter/preface) that is NOT
+    one of the assembler's dependency units must NOT inherit the per-unit floor — even
+    though it shares artifact_kind. Only the assembler's actual parts get stamped."""
+    from modulatio import job_templates as _jt
+    from modulatio.orchestration import _token_band
+    orch = _bare_orch(tmp_path, monkeypatch, "AUX")
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=2000)
+    orch._bound_jt = _jt.JobTemplate(
+        name="jt", description="d", interview_body="b",
+        output_spec=_jt.OutputSpec(artifact_kind="document"))
+    units = [_produce_task("AUX", i, "document") for i in (1, 2)]
+    frontmatter = _produce_task("AUX", 3, "document")   # same kind, but NOT an assembler dep
+    frontmatter.deliverable = False
+    assembler = _produce_task("AUX", 9, "document", skills=["document-assembly"])
+    assembler.depends_on = [u.id for u in units]        # units only — never the front-matter
+
+    orch._stamp_deliverable_size_metric([*units, frontmatter, assembler])
+
+    for u in units:
+        assert _token_band(u) == (2000, None)           # real units floored
+    assert _token_band(frontmatter) is None             # auxiliary spared (the fix)
+    assert _token_band(assembler) is None
+
+
+def test_stamp_no_assembler_falls_back_to_deliverable_only(tmp_path, monkeypatch):
+    """#101 C.1: with NO assembler in the goal the unit set can't be resolved, so the
+    engine stamps only finished-product (deliverable=True) same-kind tasks — a same-kind
+    non-deliverable auxiliary is NOT blanket-stamped (deliverable is the fallback gate)."""
+    from modulatio import job_templates as _jt
+    from modulatio.orchestration import _token_band
+    orch = _bare_orch(tmp_path, monkeypatch, "NOA")
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=2000)
+    orch._bound_jt = _jt.JobTemplate(
+        name="jt", description="d", interview_body="b",
+        output_spec=_jt.OutputSpec(artifact_kind="document"))
+    product = _produce_task("NOA", 1, "document")       # deliverable=True
+    aux = _produce_task("NOA", 2, "document")
+    aux.deliverable = False
+
+    orch._stamp_deliverable_size_metric([product, aux])   # no assembler present
+
+    assert _token_band(product) == (2000, None)           # finished product floored
+    assert _token_band(aux) is None                       # non-deliverable auxiliary spared
+
+
+def test_stamp_skips_foreign_kind_and_existing_metric(tmp_path, monkeypatch):
+    """C.1 precision: skip tasks of a different artifact_kind (a media cover in a doc job)
+    and never override a task that already declares its own size metric."""
+    from modulatio import job_templates as _jt
+    from modulatio.types import EvidenceRequirement
+    from modulatio.orchestration import _token_band
+    orch = _bare_orch(tmp_path, monkeypatch, "SM3")
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=2000)
+    orch._bound_jt = _jt.JobTemplate(
+        name="a", description="d", interview_body="b",
+        output_spec=_jt.OutputSpec(artifact_kind="document"))
+    doc = _produce_task("SM3", 1, "document")
+    cover = _produce_task("SM3", 2, "media")           # different kind
+    own = _produce_task("SM3", 3, "document", evidence=[EvidenceRequirement(
+        kind="metric", description="word count", target="token_count >= 5000")])
+
+    orch._stamp_deliverable_size_metric([doc, cover, own])
+
+    assert _token_band(doc) == (2000, None)            # the doc unit gets the floor
+    assert _token_band(cover) is None                  # media cover untouched (foreign kind)
+    assert _token_band(own) == (5000, None)            # explicit metric respected, not overridden
+
+
+def test_stamp_noop_when_spec_empty(tmp_path, monkeypatch):
+    """C.1 no-op: with no declared spec (today's default), nothing is stamped."""
+    from modulatio.orchestration import _token_band
+    orch = _bare_orch(tmp_path, monkeypatch, "SM4")
+    t = _produce_task("SM4", 1, "document")
+    orch._stamp_deliverable_size_metric([t])
+    assert _token_band(t) is None
 
 
 def test_apply_assembly_manifest_missing_unit_flags_blocker(project, tmp_path):

@@ -561,3 +561,279 @@ def test_render_doc_tool_failclosed_message_names_override(tmp_path, monkeypatch
     with pytest.raises(assembly._DocToolError) as exc:
         assembly.render_document("# x\n\nbody\n", "docx", tmp_path)
     assert "MODULATIO_PANDOC_PATH" in str(exc.value)
+
+
+# ── #101 Part 0: the deliverable digest (the verifier's eyes) ─────────────────
+
+def test_document_digest_parts_label_and_size(tmp_path):
+    _units(tmp_path, **{
+        # whitespace word count is the document family's part-size unit; the leading
+        # "#" token counts (consistent with the engine's word-count convention)
+        "s1.md": "# Chapter One\n\nalpha beta gamma",       # label "Chapter One", 6 words
+        "s2.md": "Chapter Two\n\nword word",                # label "Chapter Two", 4 words
+    })
+    d = assembly.build_deliverable_digest(
+        {"units": ["s1.md", "s2.md"]}, ["s1.md", "s2.md"], tmp_path, strategy="document")
+    assert d.kind == "document"
+    assert d.part_count == 2
+    assert d.part_size_unit == "words"
+    assert [p["label"] for p in d.parts] == ["Chapter One", "Chapter Two"]
+    assert [p["size"] for p in d.parts] == [6, 4]
+    assert d.whole_size is None and d.whole_size_unit == "pages"   # no rendered PDF
+    assert d.text_twin_path is None
+
+
+def test_document_digest_structure_flags(tmp_path):
+    _units(tmp_path, **{"a.md": "Body\n\ntext"})
+    d = assembly.build_deliverable_digest(
+        {"units": ["a.md"], "title_page": "My Anthology", "toc": True},
+        ["a.md"], tmp_path, strategy="document")
+    assert d.structure == {"title": True, "toc": True}
+    d2 = assembly.build_deliverable_digest(
+        {"units": ["a.md"]}, ["a.md"], tmp_path, strategy="document")
+    assert d2.structure == {"title": False, "toc": False}
+
+
+# ── #101 Part A: engine-supplied framing (per-family head dispatch) ────────────
+
+
+def test_apply_framing_document_generates_title_and_toc(tmp_path):
+    """The document head renderer builds a title + a TOC from the unit headings into
+    title_page (which the assembler prepends) and flags toc."""
+    _units(tmp_path, **{"s1.md": "# Story One\n\nbody", "s2.md": "# Story Two\n\nbody"})
+    m = assembly.apply_framing(
+        {"units": ["s1.md", "s2.md"]}, tmp_path, "document",
+        title="My Anthology", required_structure=("title", "toc"))
+    tp = m["title_page"]
+    assert tp.startswith("# My Anthology")
+    assert "## Contents" in tp and "1. Story One" in tp and "2. Story Two" in tp
+    assert m["toc"] is True
+
+
+def test_apply_framing_closes_loop_digest_recognizes_structure(tmp_path):
+    """Part A + B.2 loop: after the engine frames the manifest, the digest reports the
+    declared structure as PRESENT — so B.2's required_structure check passes."""
+    _units(tmp_path, **{"s1.md": "# One\n\nx", "s2.md": "# Two\n\ny"})
+    m = assembly.apply_framing(
+        {"units": ["s1.md", "s2.md"]}, tmp_path, "document",
+        title="Anthology", required_structure=("title", "toc"))
+    d = assembly.build_deliverable_digest(m, ["s1.md", "s2.md"], tmp_path,
+                                          strategy="document")
+    assert d.structure == {"title": True, "toc": True}
+
+
+def test_apply_framing_respects_producer_title_page(tmp_path):
+    """Producer-authored framing wins — a non-empty title_page is never overridden."""
+    _units(tmp_path, **{"s1.md": "# One\n\nx"})
+    m = assembly.apply_framing(
+        {"units": ["s1.md"], "title_page": "PRODUCER FRAME"}, tmp_path, "document",
+        title="Engine Title", required_structure=("title", "toc"))
+    assert m["title_page"] == "PRODUCER FRAME"
+    assert "toc" not in m
+
+
+def test_apply_framing_non_document_family_is_noop(tmp_path):
+    """A family with no head renderer (media/code/data) gets NO engine head — a
+    document-style title is never forced onto a video/app/dataset."""
+    _units(tmp_path, **{"clip1.mp4": "x", "clip2.mp4": "y"})
+    manifest = {"units": ["clip1.mp4", "clip2.mp4"]}
+    m = assembly.apply_framing(manifest, tmp_path, "media",
+                               title="My Film", required_structure=("title", "toc"))
+    assert m == manifest and "title_page" not in m   # untouched
+
+
+def test_apply_framing_no_declared_framing_is_noop(tmp_path):
+    """No declared title/structure (the empty-spec default) → manifest unchanged."""
+    _units(tmp_path, **{"s1.md": "# One\n\nx"})
+    manifest = {"units": ["s1.md"]}
+    m = assembly.apply_framing(manifest, tmp_path, "document",
+                               title=None, required_structure=())
+    assert m == manifest and "title_page" not in m
+
+
+def test_apply_framing_title_only_no_toc(tmp_path):
+    """Title declared but not toc → a title head, no Contents, no toc flag."""
+    _units(tmp_path, **{"s1.md": "# One\n\nx"})
+    m = assembly.apply_framing({"units": ["s1.md"]}, tmp_path, "document",
+                               title="Just A Title", required_structure=("title",))
+    assert m["title_page"] == "# Just A Title"
+    assert "Contents" not in m["title_page"] and "toc" not in m
+
+
+# ── #101 Part D: cross-part continuity normalization (per-family dispatch) ─────
+
+
+def test_continuity_normalizes_inconsistent_sequence():
+    out, changed = assembly.continuity_headings(
+        ["Story 1: A", "Story 7: B", "Story 1: C"], "document")
+    assert changed and out == ["Story 1: A", "Story 2: B", "Story 3: C"]
+
+
+def test_continuity_leaves_clean_sequence_untouched():
+    hs = ["Chapter 1", "Chapter 2", "Chapter 3"]
+    out, changed = assembly.continuity_headings(hs, "document")
+    assert not changed and out == hs            # already 1..N — never disturb it
+
+
+def test_continuity_no_op_when_a_part_is_unlabeled():
+    hs = ["Story 1", "An Interlude", "Story 3"]  # middle carries no ordinal
+    out, changed = assembly.continuity_headings(hs, "document")
+    assert not changed and out == hs            # never partially renumber
+
+
+def test_continuity_does_not_touch_incidental_numbers():
+    out, changed = assembly.continuity_headings(["The 7 Samurai", "Two Towers"], "document")
+    assert not changed                          # not sequence markers — left alone
+
+
+def test_continuity_leading_number_form():
+    out, changed = assembly.continuity_headings(["3. Alpha", "9. Beta"], "document")
+    assert changed and out == ["1. Alpha", "2. Beta"]
+
+
+def test_continuity_mixed_labels_is_noop():
+    """Nemo follow-up: a heterogeneous label set is not one sequence — leave it untouched
+    rather than renumber Story/Chapter/Section into a fake run."""
+    hs = ["Story 1: A", "Chapter 7: B", "Section 3: C"]
+    out, changed = assembly.continuity_headings(hs, "document")
+    assert not changed and out == hs
+
+
+def test_continuity_label_mixed_with_leading_number_is_noop():
+    out, changed = assembly.continuity_headings(["Story 1", "2. B"], "document")
+    assert not changed                                  # label form + bare-number form ≠ one family
+
+
+def test_continuity_non_document_family_is_noop():
+    hs = ["Story 1", "Story 7"]
+    out, changed = assembly.continuity_headings(hs, "media")
+    assert not changed and out == hs            # no normalizer for the family → untouched
+
+
+def test_replace_first_heading_preserves_hashes():
+    assert assembly._replace_first_heading("## Story 7\n\nbody", "Story 2") == \
+        "## Story 2\n\nbody"
+
+
+def test_assemble_document_renumbers_inconsistent_parts(tmp_path):
+    _units(tmp_path, **{"a.md": "# Story 1\n\nalpha", "b.md": "# Story 7\n\nbeta",
+                        "c.md": "# Story 1\n\ngamma"})
+    r = assembly.assemble(
+        {"units": ["a.md", "b.md", "c.md"], "separator": "\n\n"}, tmp_path)
+    assert "# Story 1" in r.content and "# Story 2" in r.content and "# Story 3" in r.content
+    assert "# Story 7" not in r.content                       # the collision is reconciled
+    assert "alpha" in r.content and "beta" in r.content and "gamma" in r.content  # bodies kept
+
+
+def test_assemble_document_leaves_clean_sequence(tmp_path):
+    _units(tmp_path, **{"a.md": "# Part 1\n\nx", "b.md": "# Part 2\n\ny"})
+    r = assembly.assemble({"units": ["a.md", "b.md"], "separator": "\n\n"}, tmp_path)
+    assert "# Part 1" in r.content and "# Part 2" in r.content   # untouched
+
+
+def test_framing_toc_matches_renumbered_body(tmp_path):
+    """Part A + D: the engine-framed TOC lists the SAME normalized sequence the assembled
+    body uses — both pass through the one document normalizer."""
+    _units(tmp_path, **{"a.md": "# Story 1\n\nx", "b.md": "# Story 7\n\ny"})
+    m = assembly.apply_framing({"units": ["a.md", "b.md"]}, tmp_path, "document",
+                               title="Anthology", required_structure=("title", "toc"))
+    assert "1. Story 1" in m["title_page"] and "2. Story 2" in m["title_page"]
+    r = assembly.assemble(m, tmp_path)
+    assert "# Story 1" in r.content and "# Story 2" in r.content and "# Story 7" not in r.content
+
+
+def test_document_digest_fail_open_on_missing_unit(tmp_path):
+    d = assembly.build_deliverable_digest(
+        {"units": ["ghost.md"]}, ["ghost.md"], tmp_path, strategy="document")
+    assert d.part_count == 1
+    assert d.parts == [{"label": "", "size": 0}]
+
+
+def test_document_digest_first_heading_strips_markdown_hashes(tmp_path):
+    _units(tmp_path, **{"a.md": "###  Spaced Heading  \n\nbody here"})
+    d = assembly.build_deliverable_digest(
+        {"units": ["a.md"]}, ["a.md"], tmp_path, strategy="document")
+    assert d.parts[0]["label"] == "Spaced Heading"
+
+
+def test_digest_is_product_agnostic_generic_fallback(tmp_path):
+    """A NON-document strategy must NOT get document assumptions — it falls back to a
+    family-neutral byte digest (parts sized in bytes, no headings/words/TOC). This is
+    the guard against baking one output class into the engine contract."""
+    _units(tmp_path, **{"f1.bin": "abcde", "f2.bin": "xy"})
+    d = assembly.build_deliverable_digest(
+        {"units": ["f1.bin", "f2.bin"]}, ["f1.bin", "f2.bin"], tmp_path, strategy="data")
+    assert d.kind == "data"               # echoes the family, no "document" default
+    assert d.part_size_unit == "bytes"    # neutral measure, not "words"
+    assert [p["size"] for p in d.parts] == [5, 2]
+    assert d.structure == {}              # no document framing assumed
+    assert d.whole_size is None
+
+
+def test_write_text_twin_persists_under_twins_dir(tmp_path):
+    rel = assembly.write_text_twin("# Bound\n\nreadable body", tmp_path, "DIG-T-001")
+    assert rel == ".twins/DIG-T-001.md"
+    assert (tmp_path / rel).read_text() == "# Bound\n\nreadable body"
+
+
+def test_write_text_twin_sanitizes_name_no_traversal(tmp_path):
+    rel = assembly.write_text_twin("x", tmp_path, "weird/../name")
+    assert rel.startswith(".twins/")
+    leaf = rel[len(".twins/"):]
+    assert "/" not in leaf                 # path separators stripped — no traversal
+    assert (tmp_path / rel).is_file()
+
+
+def test_format_digest_is_readable_and_product_agnostic():
+    # a DATA digest (rows, header_row) — the renderer must carry NO document vocabulary
+    d = assembly.DeliverableDigest(
+        kind="data", part_count=2,
+        parts=[{"label": "users.csv", "size": 1000}, {"label": "orders.csv", "size": 50}],
+        part_size_unit="rows", structure={"header_row": True},
+        whole_size=1050, whole_size_unit="rows")
+    s = assembly.format_digest(d)
+    assert "kind=data, parts=2" in s
+    assert "'users.csv' — 1000 rows" in s
+    assert "header_row=True" in s
+    assert "whole size: 1050 rows" in s
+    low = s.lower()
+    assert "word" not in low and "page" not in low and "toc" not in low
+
+
+def _digest(parts, **kw):
+    return assembly.DeliverableDigest(
+        kind=kw.get("kind", "document"), part_count=len(parts), parts=parts,
+        part_size_unit=kw.get("unit", "words"), structure=kw.get("structure", {}))
+
+
+def test_check_deliverable_clean_passes():
+    d = _digest([{"label": "One", "size": 2500}, {"label": "Two", "size": 2200}],
+                structure={"title": True, "toc": True})
+    assert assembly.check_deliverable(
+        d, expected_count=2, part_floor=2000, required_structure=("title", "toc")) == []
+
+
+def test_check_deliverable_flags_hrwt_failures():
+    """Count + under-length + missing framing — the HRWT failures, caught by arithmetic."""
+    d = _digest([{"label": "One", "size": 2692}, {"label": "Two", "size": 906}],  # 1 short
+                structure={"title": False, "toc": False})
+    issues = assembly.check_deliverable(
+        d, expected_count=8, part_floor=2000, required_structure=("title", "toc"))
+    assert any("expected 8 parts, got 2" in i for i in issues)
+    assert any("under the 2000-words floor" in i and "Two" in i for i in issues)
+    assert any("title" in i for i in issues) and any("toc" in i for i in issues)
+
+
+def test_check_deliverable_flags_blank_label():
+    d = _digest([{"label": "", "size": 100}])
+    assert any("no label/heading" in i for i in assembly.check_deliverable(d))
+
+
+def test_check_deliverable_is_product_agnostic_rows():
+    # a DATA digest, floor in ROWS — the check needs no document vocabulary
+    d = assembly.DeliverableDigest(
+        kind="data", part_count=2,
+        parts=[{"label": "users", "size": 1000}, {"label": "orders", "size": 5}],
+        part_size_unit="rows")
+    issues = assembly.check_deliverable(d, part_floor=10)
+    assert any("under the 10-rows floor" in i and "orders" in i for i in issues)

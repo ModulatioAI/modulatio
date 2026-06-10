@@ -128,6 +128,44 @@ class AssemblyRecord:
     #: the caller moves it onto the deliverable path and ``final_checksum`` is the
     #: hash of ITS bytes (not of ``content``). None for text strategies.
     output_file: "Path | None" = None
+    #: #101 Part 0: the engine-extracted structural digest of this deliverable (the
+    #: verifier's eyes), attached at assembly time. None until Part 0 wiring runs.
+    digest: "DeliverableDigest | None" = None
+
+
+@dataclass
+class DeliverableDigest:
+    """Engine-extracted, MODEL-READABLE structure of an assembled deliverable — the
+    verifier's EYES (#101 Part 0). Computed at assembly time so the smart layer can
+    judge the WHOLE without reading binary bytes it cannot (the HRWT Leader-verify
+    was handed ``"(could not read: …)"`` and shipped ``on_the_fence``).
+
+    PRODUCT-AGNOSTIC by design. The engine defines only the CONTRACT — how many
+    PARTS, a ``label`` + ``size`` per part, which structural elements are present, an
+    optional whole-deliverable size — and each artifact FAMILY fills it with
+    domain-appropriate facts (a document's parts are sections sized in words; a
+    dataset's are tables sized in rows; a codebase's are files sized in lines). The
+    per-``artifact_kind`` STANDARDS say what the numbers must satisfy. Nothing here
+    assumes "document" — baking one output class in is the recurring failure mode."""
+
+    #: the artifact family that produced this digest ("document", "data", "code", …).
+    kind: str
+    #: number of assembled parts (units).
+    part_count: int
+    #: ordered, one per part. Each is a small family-defined dict that ALWAYS carries
+    #: ``label`` (str) and ``size`` (int); a family may add its own extra keys.
+    parts: list[dict] = field(default_factory=list)
+    #: what each part's ``size`` counts — "words" | "rows" | "lines" | "bytes" | …
+    part_size_unit: str = ""
+    #: structural elements ACTUALLY present, family-defined (e.g. {"title": True,
+    #: "toc": True} for a document; {"header_row": True} for a dataset).
+    structure: dict = field(default_factory=dict)
+    #: a whole-deliverable size measure + its unit, family-defined (pages for a
+    #: paginated doc, total rows for data, total files for code). None when N/A.
+    whole_size: "int | None" = None
+    whole_size_unit: "str | None" = None
+    #: relative path to the readable text twin of the bound product, when persisted.
+    text_twin_path: "str | None" = None
 
 
 def parse_assembly_manifest(text: str) -> dict | None:
@@ -184,6 +222,397 @@ def _safe_unit_path(name: str, artifacts_root: Path) -> Path | None:
         if part in ("..", ".") or part.startswith(".."):
             return None
     return candidate
+
+
+# ── #101 Part 0: the deliverable digest (give the verifier eyes) ──────────────
+
+def _first_heading(body: str) -> str:
+    """A unit's display heading: the first non-empty line, stripped of leading
+    markdown ``#`` and surrounding whitespace. ``""`` for an empty body."""
+    for line in body.splitlines():
+        s = line.strip()
+        if s:
+            return s.lstrip("#").strip()
+    return ""
+
+
+def _pdf_page_count(path: "Path | None") -> "int | None":
+    """Page count of a rendered PDF via ``pdfinfo`` (engine-owned, fail-open). Returns
+    None when the file isn't a readable PDF, ``pdfinfo`` is absent, or the probe
+    fails — never raises (the digest is best-effort observability, not a gate)."""
+    if path is None or path.suffix.lower() != ".pdf" or not path.is_file():
+        return None
+    tool = resolve_tool("pdfinfo")
+    if tool is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [tool, str(path)], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        if line.lower().startswith("pages:"):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _generic_digest(
+    manifest: dict,
+    units_used: "list[str]",
+    artifacts_root: Path,
+    *,
+    kind: str = "generic",
+    output_file: "Path | None" = None,
+    text_twin_path: "str | None" = None,
+) -> DeliverableDigest:
+    """Family-NEUTRAL digest: any deliverable is N parts of some BYTE size. The
+    default until a family grows a richer extractor — it reads NO domain meaning from
+    the bytes, so it is correct for code / data / media / anything at all."""
+    parts: list[dict] = []
+    for name in units_used:
+        path = _safe_unit_path(name, artifacts_root)
+        size = path.stat().st_size if (path is not None and path.is_file()) else 0
+        parts.append({"label": str(name), "size": size})
+    return DeliverableDigest(
+        kind=kind, part_count=len(units_used), parts=parts,
+        part_size_unit="bytes", text_twin_path=text_twin_path,
+    )
+
+
+def _document_digest(
+    manifest: dict,
+    units_used: "list[str]",
+    artifacts_root: Path,
+    *,
+    output_file: "Path | None" = None,
+    text_twin_path: "str | None" = None,
+) -> DeliverableDigest:
+    """The ``document`` family's digest: parts are sections (heading ``label`` + word
+    ``size``), ``structure`` is title/TOC presence, ``whole_size`` is the PDF page
+    count. ALL the document-domain meaning lives HERE, in the family extractor — never
+    in the generic contract. Best-effort + fail-open: an unreadable/missing unit
+    contributes ``{"label": "", "size": 0}`` and never raises."""
+    parts: list[dict] = []
+    for name in units_used:
+        path = _safe_unit_path(name, artifacts_root)
+        if path is None or not path.is_file():
+            parts.append({"label": "", "size": 0})
+            continue
+        try:
+            body = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            parts.append({"label": "", "size": 0})
+            continue
+        parts.append({"label": _first_heading(body), "size": len(body.split())})
+    title_page = manifest.get("title_page")
+    structure = {
+        "title": bool(isinstance(title_page, str) and title_page.strip()),
+        "toc": bool(manifest.get("toc")) or any(
+            "table of contents" in p["label"].lower() or p["label"].lower() == "contents"
+            for p in parts
+        ),
+    }
+    return DeliverableDigest(
+        kind="document", part_count=len(units_used), parts=parts,
+        part_size_unit="words", structure=structure,
+        whole_size=_pdf_page_count(output_file), whole_size_unit="pages",
+        text_twin_path=text_twin_path,
+    )
+
+
+#: Per-family digest extractors (mirrors the ``_STRATEGIES`` assembly table). A family
+#: without a rich extractor falls back to the family-neutral byte digest.
+_DIGEST_BUILDERS: dict = {"document": _document_digest}
+
+
+def build_deliverable_digest(
+    manifest: dict,
+    units_used: "list[str]",
+    artifacts_root: Path,
+    *,
+    strategy: str = "document",
+    output_file: "Path | None" = None,
+    text_twin_path: "str | None" = None,
+) -> DeliverableDigest:
+    """Build the deliverable digest for the named STRATEGY/family (#101 Part 0) —
+    PRODUCT-AGNOSTIC dispatch (mirrors ``assemble``'s strategy table). ``document``
+    has a rich extractor; every other family falls back to the family-neutral byte
+    digest until it grows its own. ``units_used`` is the engine's authoritative
+    ordered set, not the producer's manifest claim. Fail-open throughout."""
+    builder = _DIGEST_BUILDERS.get(strategy)
+    if builder is None:
+        return _generic_digest(
+            manifest, units_used, artifacts_root, kind=strategy,
+            output_file=output_file, text_twin_path=text_twin_path,
+        )
+    return builder(
+        manifest, units_used, artifacts_root,
+        output_file=output_file, text_twin_path=text_twin_path,
+    )
+
+
+# ── #101 Part A: engine-supplied FRAMING (per-family head dispatch) ────────────
+#
+# The engine supplies framing as DECLARED DATA — ``title`` + ``required_structure``
+# from the DeliverableSpec — and names no family. Each family renders its OWN head from
+# that data (mirrors the ``_STRATEGIES`` / ``_DIGEST_BUILDERS`` tables): ``document`` →
+# a title + table-of-contents text head; ``media`` would prepend a title-card/intro
+# SEGMENT, ``code`` a README/index, ``data`` a header/schema — each its own renderer.
+# A family with no head builder is a graceful NO-OP: the engine never forces a
+# document-style head onto a video. Producer-authored framing always wins (engine fills
+# only what is absent).
+
+
+def _unit_headings(units: "list", artifacts_root: Path) -> "list[str]":
+    """The display heading of each readable unit, in order (document family helper —
+    reuses :func:`_first_heading`). Unreadable/missing units are skipped, never
+    fabricated."""
+    out: list[str] = []
+    for name in units or []:
+        if not isinstance(name, str):
+            continue
+        path = _safe_unit_path(name, artifacts_root)
+        if path is None or not path.is_file():
+            continue
+        try:
+            heading = _first_heading(path.read_text())
+        except (OSError, UnicodeDecodeError):
+            continue
+        if heading:
+            out.append(heading)
+    return out
+
+
+def _document_head(
+    manifest: dict, artifacts_root: Path, *, title: "str | None",
+    required_structure: "tuple[str, ...]",
+) -> dict:
+    """The ``document`` family's head renderer: fill a title + table-of-contents into
+    the manifest's ``title_page`` (which ``_assemble_document`` already prepends) and
+    flag ``toc`` so the digest recognizes it. ALL document-domain head vocabulary lives
+    HERE, in the family renderer — never in the engine. Producer-authored framing wins:
+    if a non-empty ``title_page`` already exists, this is a no-op."""
+    existing = manifest.get("title_page")
+    if isinstance(existing, str) and existing.strip():
+        return manifest
+    want_title = bool(title and str(title).strip())
+    want_toc = "toc" in {str(s).strip().lower() for s in required_structure}
+    if not (want_title or want_toc):
+        return manifest
+    lines: list[str] = []
+    if want_title:
+        lines.append(f"# {str(title).strip()}")
+    out = dict(manifest)
+    if want_toc:
+        headings = _unit_headings(manifest.get("units", []), artifacts_root)
+        # #101 Part D: the TOC lists the NORMALIZED sequence, so it agrees with the body
+        # the assembler renumbers (both pass through the same document normalizer).
+        headings, _ = continuity_headings(headings, "document")
+        if headings:
+            if lines:
+                lines.append("")
+            lines.append("## Contents")
+            lines.extend(f"{i}. {h}" for i, h in enumerate(headings, 1))
+            out["toc"] = True
+    if lines:
+        out["title_page"] = "\n".join(lines)
+    return out
+
+
+#: Per-family head renderers (mirrors ``_STRATEGIES`` / ``_DIGEST_BUILDERS``). A family
+#: without one gets no engine head — the seam is there for it to grow its own.
+_HEAD_BUILDERS: dict = {"document": _document_head}
+
+
+def apply_framing(
+    manifest: dict, artifacts_root: Path, strategy: str, *,
+    title: "str | None" = None, required_structure: "tuple[str, ...]" = (),
+) -> dict:
+    """Augment ``manifest`` with engine-supplied framing for the named family (#101
+    Part A) — PRODUCT-AGNOSTIC dispatch. The engine passes the DECLARED data (title +
+    required structure); the family's :data:`_HEAD_BUILDERS` entry renders its own head.
+    A family with no renderer returns the manifest unchanged (no document head forced on
+    a non-document deliverable). No declared framing → effectively a no-op."""
+    builder = _HEAD_BUILDERS.get(strategy)
+    if builder is None:
+        return manifest
+    return builder(
+        manifest, artifacts_root, title=title,
+        required_structure=tuple(required_structure),
+    )
+
+
+# ── #101 Part D: cross-part continuity normalization (per-family dispatch) ─────
+#
+# N joined units should read as ONE ordered whole. Each family expresses continuity
+# differently — a document renumbers its part sequence; code would reconcile an index /
+# import order; data a sequence column; media segment/chapter order. The engine names no
+# family's mechanic: it hands the family its ordered unit headings and the family's
+# normalizer returns a consistent set. NORMALIZE, NEVER FABRICATE — only a genuine
+# cross-part conflict is reconciled; an already-consistent (or unlabeled) sequence is
+# left exactly as the producers wrote it.
+
+#: A part heading that self-declares a sequence ordinal: an explicit label word + number
+#: ("Story 7", "Chapter 3: …") or a leading "N. …" / "N) …". Conservative on purpose — a
+#: heading like "The 7 Samurai" (no leading label/ordinal form) is NOT a sequence marker.
+_SEQ_LABEL_RE = re.compile(
+    r"^(?P<pre>(?:part|chapter|section|story|episode|book|volume|act|scene|"
+    r"no\.?|number)\s+)(?P<num>\d+)(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_SEQ_LEADING_RE = re.compile(r"^(?P<num>\d+)(?P<rest>[.):–—-]\s.*)$")
+
+
+def _seq_parts(heading: str) -> "tuple[int, str, str] | None":
+    """Split a heading into ``(current_number, prefix, suffix)`` when it self-declares a
+    sequence ordinal, else ``None``. Rebuild with a new index ``i`` as ``prefix+i+suffix``."""
+    h = heading.strip()
+    m = _SEQ_LABEL_RE.match(h)
+    if m:
+        return int(m.group("num")), m.group("pre"), m.group("rest")
+    m = _SEQ_LEADING_RE.match(h)
+    if m:
+        return int(m.group("num")), "", m.group("rest")
+    return None
+
+
+def _normalize_doc_sequence(headings: "list[str]") -> "tuple[list[str], bool]":
+    """The ``document`` family's continuity normalizer: renumber part headings to a clean
+    ``1..N`` in assembly order — but ONLY when every unit carries an explicit ordinal AND
+    the existing run is not already ``1..N``. Otherwise a no-op (never fabricate a
+    sequence onto unlabeled parts, never disturb an already-correct one). Returns the
+    (possibly rewritten) headings + whether anything changed.
+
+    The label family must be HOMOGENEOUS (Nemo follow-up): a heterogeneous set
+    (``Story 1`` / ``Chapter 7`` / ``Section 3``, or a label form mixed with a bare
+    leading-number form) is not one sequence, so it is left untouched rather than
+    renumbered into a fake one."""
+    parsed = [_seq_parts(h) for h in headings]
+    if len(headings) < 2 or any(p is None for p in parsed):
+        return list(headings), False
+    if len({p[1].strip().lower() for p in parsed}) > 1:  # type: ignore[index]
+        return list(headings), False                     # heterogeneous labels → no-op
+    current = [p[0] for p in parsed]                      # type: ignore[index]
+    if current == list(range(1, len(headings) + 1)):
+        return list(headings), False                     # already clean — leave it be
+    out: list[str] = []
+    for i, p in enumerate(parsed, 1):
+        _num, pre, rest = p                              # type: ignore[misc]
+        out.append(f"{pre}{i}{rest}")
+    return out, True
+
+
+#: Per-family continuity normalizers (mirrors ``_STRATEGIES`` / ``_HEAD_BUILDERS``). A
+#: family with no normalizer leaves its units exactly as produced.
+_CONTINUITY_NORMALIZERS: dict = {"document": _normalize_doc_sequence}
+
+
+def continuity_headings(
+    headings: "list[str]", strategy: str
+) -> "tuple[list[str], bool]":
+    """Normalize cross-part sequence continuity for the named family (#101 Part D) —
+    PRODUCT-AGNOSTIC dispatch. The engine passes the ordered unit headings; the family's
+    normalizer returns a consistent set (or leaves them untouched). A family with no
+    normalizer is a no-op."""
+    fn = _CONTINUITY_NORMALIZERS.get(strategy)
+    if fn is None:
+        return list(headings), False
+    return fn(list(headings))
+
+
+def _replace_first_heading(body: str, new_text: str) -> str:
+    """Rewrite the text of a block's first non-empty line to ``new_text``, preserving its
+    leading markdown ``#`` markers + indentation. Used to apply a normalized heading back
+    onto a unit body without disturbing the rest of it."""
+    lines = body.splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip():
+            indent = line[: len(line) - len(line.lstrip())]
+            stripped = line.lstrip()
+            hashes = stripped[: len(stripped) - len(stripped.lstrip("#"))]
+            lines[idx] = f"{indent}{hashes}{' ' if hashes else ''}{new_text}".rstrip()
+            return "\n".join(lines)
+    return body
+
+
+def write_text_twin(content: str, artifacts_root: Path, name: str) -> str:
+    """Persist the readable markdown TWIN of a bound (binary) deliverable under
+    ``artifacts_root/.twins/`` so the verifier has eyes on bytes it cannot read (#101
+    Part 0). Engine-owned; ``name`` is sanitized (a task id — never a producer path).
+    Returns the path RELATIVE to ``artifacts_root``."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("_") or "twin"
+    twins = artifacts_root / ".twins"
+    twins.mkdir(parents=True, exist_ok=True)
+    out = twins / f"{safe}.md"
+    out.write_text(content)
+    return str(out.relative_to(artifacts_root))
+
+
+def format_digest(d: DeliverableDigest) -> str:
+    """Render a digest as compact, MODEL-READABLE text for the verifier — PRODUCT-
+    AGNOSTIC: uses only the generic contract fields (kind / parts label+size /
+    structure / whole_size), never document-specific vocabulary. This is what the
+    verifier judges in place of bytes it cannot read."""
+    lines = [
+        f"deliverable structure (engine-extracted): kind={d.kind}, parts={d.part_count}"
+    ]
+    for i, p in enumerate(d.parts, 1):
+        lines.append(
+            f"  {i}. {p.get('label', '')!r} — {p.get('size', 0)} {d.part_size_unit}".rstrip()
+        )
+    if d.structure:
+        lines.append(
+            "  structure: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(d.structure.items()))
+        )
+    if d.whole_size is not None:
+        lines.append(f"  whole size: {d.whole_size} {d.whole_size_unit or ''}".rstrip())
+    return "\n".join(lines)
+
+
+def check_deliverable(
+    digest: DeliverableDigest,
+    *,
+    expected_count: "int | None" = None,
+    part_floor: "int | None" = None,
+    required_structure: "tuple[str, ...]" = (),
+) -> "list[str]":
+    """Deterministic whole-deliverable checks over the engine-extracted digest (#101
+    Part B). PRODUCT-AGNOSTIC: compares the generic digest facts against a DECLARED
+    spec — expected part count, per-part size floor (in the digest's OWN unit, whatever
+    the family counts), and required structural elements. Returns human-readable ISSUE
+    strings; empty means the deterministic checks pass (fitness is judged separately by
+    the smart QC over the twin). The EXPECTED values are the declared spec (a JT
+    ``output_spec`` or a Leader-distilled deliverable-spec) — the engine only does the
+    arithmetic, it never invents a requirement."""
+    issues: list[str] = []
+    if expected_count is not None and digest.part_count != expected_count:
+        issues.append(f"expected {expected_count} parts, got {digest.part_count}")
+    if part_floor is not None:
+        short = [
+            f"{p.get('label') or '?'} ({int(p.get('size', 0))} {digest.part_size_unit})"
+            for p in digest.parts
+            if int(p.get("size", 0)) < part_floor
+        ]
+        if short:
+            issues.append(
+                f"{len(short)} part(s) under the {part_floor}-{digest.part_size_unit} "
+                "floor: " + ", ".join(short[:8])
+            )
+    for key in required_structure:
+        if not digest.structure.get(key):
+            issues.append(f"required structure missing: {key}")
+    # Generic consistency: a part with no label is a structural gap in ANY family.
+    blank = sum(1 for p in digest.parts if not str(p.get("label", "")).strip())
+    if blank:
+        issues.append(f"{blank} part(s) have no label/heading (structural gap)")
+    return issues
 
 
 def assemble(
@@ -264,6 +693,7 @@ def _assemble_document(
     sep_bytes = len(separator.encode())
     total = framing_bytes
     over_cap = False
+    unit_start = len(blocks)   # #101 Part D: where the UNIT blocks begin (after framing)
     for name in manifest["units"]:
         path = _safe_unit_path(name, artifacts_root)
         if path is None:
@@ -304,6 +734,16 @@ def _assemble_document(
         blocks.append(body.strip("\n"))
         used.append(name)
         total += added
+
+    # #101 Part D: normalize cross-part sequence continuity over the UNIT blocks only
+    # (framing/trailer untouched). Conservative — a no-op unless the parts self-number
+    # AND that numbering is inconsistent with 1..N (see _normalize_doc_sequence).
+    unit_blocks = blocks[unit_start:len(blocks)]
+    headings = [_first_heading(b) for b in unit_blocks]
+    normalized, changed = continuity_headings(headings, "document")
+    if changed:
+        for k, new_h in enumerate(normalized):
+            blocks[unit_start + k] = _replace_first_heading(unit_blocks[k], new_h)
 
     if trailer.strip():
         blocks.append(trailer.strip("\n"))

@@ -27,7 +27,7 @@ from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from modulatio import comptroller, dispatch, job_template_library, job_templates, kickoff_history, lessons, qc_history, qc_notes, research, roster, skill_git, skills, standards, standards_proposals, store, tools
-from modulatio.job_templates import JobTemplate
+from modulatio.job_templates import DeliverableSpec, JobTemplate
 from modulatio import context_budget as _ctx_budget_module
 from modulatio import dispatch_breaker as _dispatch_breaker_module
 from modulatio import tool_summarization as _tool_sum_module
@@ -1775,6 +1775,10 @@ class Orchestrator:
         #: (fail-closed), so a producer emitting assembled-looking text can't
         #: bypass review. Per-run, in-memory; lost on crash-resume → fall back.
         self._assembly_records: dict = {}
+        #: #101 C.0: the declared DeliverableSpec for this run — the verifier's expected
+        #: values (per-unit floor / required structure / title). Empty == today's
+        #: behavior; bound at intake from the JT field (or Leader-distill, later).
+        self._deliverable_spec = DeliverableSpec()
         #: Core rebuild B3b: thread-local isolation state for a wave worker —
         #: ``deferred_writes`` (shared-store writes run at merge), ``child_tasks``
         #: (decompose children carried back), ``artifact_writes`` + ``staging_root``
@@ -3123,6 +3127,10 @@ class Orchestrator:
         # producing goal's tasks already exist here.
         self._wire_cross_goal_assembler_deps(tasks)
         _select_assembler_skill(tasks, self.project.code)
+        # #101 C.1: the engine stamps the bound deliverable's per-unit size floor onto
+        # the unit producers (after the assembler is settled, so it's excluded) — the
+        # HARD bind at produce, where the size band + QC enforce it deterministically.
+        self._stamp_deliverable_size_metric(tasks)
         self._emit_activity(
             role="planner",
             phase="task_planning_ended",
@@ -5373,6 +5381,15 @@ class Orchestrator:
         # Part B: the assembler skill selects the family/strategy; the engine owns
         # the mechanical join. document = text concat (today's default).
         strategy = _assembly_strategy_for_task(task)
+        # #101 Part A: the engine supplies FRAMING as declared data (title + required
+        # structure from the bound DeliverableSpec); the family's head renderer builds
+        # its own head (document → title+TOC; other families no-op until they grow one).
+        # Augment BEFORE both assemble and digest so each sees the same framed manifest.
+        _spec = self._deliverable_spec
+        manifest = _assembly.apply_framing(
+            manifest, self._artifacts_root(), strategy,
+            title=_spec.title, required_structure=_spec.required_structure,
+        )
         # P4: for a DOCUMENT assembly, render the concatenated body into the
         # deliverable's DECLARED binary format (artifact-agnostic — driven by the
         # task's output extension, never assumed; None → text stands).
@@ -5398,12 +5415,27 @@ class Orchestrator:
             final_checksum = (
                 f"sha256:{hashlib.sha256(result.content.encode()).hexdigest()}"
             )
+        # #101 Part 0: give the verifier EYES. Persist a readable text twin (binary
+        # deliverables only — a text deliverable is already its own readable twin) and
+        # attach the engine-extracted structural digest, so QC/Leader-verify can judge
+        # the WHOLE without reading binary bytes they can't (the HRWT blind-verify).
+        if binary_out is not None:
+            text_twin_rel = _assembly.write_text_twin(
+                result.content, self._artifacts_root(), task.id
+            )
+        else:
+            text_twin_rel = task.output_path  # the text deliverable is readable as-is
+        digest = _assembly.build_deliverable_digest(
+            manifest, result.units_used, self._artifacts_root(),
+            strategy=strategy, output_file=binary_out, text_twin_path=text_twin_rel,
+        )
         self._assembly_records[task.id] = _assembly.AssemblyRecord(
             manifest=manifest,
             final_checksum=final_checksum,
             complete=complete,
             strategy=strategy,
             output_file=binary_out,
+            digest=digest,
         )
         verb = "composited" if binary_out is not None else "concatenated"
         bits = [
@@ -6560,7 +6592,7 @@ class Orchestrator:
 
     def _run_task_waves(
         self, g: Goal, tasks: list[Task], summary: RunSummary,
-        task_map: dict[str, Task],
+        task_map: dict[str, Task], initial_corrective_notes: str = "",
     ) -> None:
         """Core rebuild B4 — execute a goal's tasks in CONCURRENT WAVES.
 
@@ -6683,16 +6715,37 @@ class Orchestrator:
             pool_size = max(1, min(len(to_run), self._wave_pool_ceiling()))
             with ThreadPoolExecutor(max_workers=pool_size) as ex:
                 futures = {
-                    ex.submit(self._execute_task_isolated, t): t.id
+                    ex.submit(
+                        self._execute_task_isolated, t, initial_corrective_notes
+                    ): t.id
                     for t in to_run
                 }
                 for fut in as_completed(futures):
                     if fut.cancelled():
                         continue
+                    tid = futures[fut]
                     try:
-                        done[futures[fut]] = fut.result()
+                        done[tid] = fut.result()
                     except _FuturesCancelled:
                         continue
+                    except Exception as exc:  # noqa: BLE001
+                        # Hero review (MINOR): an UNEXPECTED worker exception (an
+                        # engine bug — producer failures are caught INSIDE the
+                        # worker and returned as a result) must not propagate out
+                        # of collection and orphan the completed siblings already
+                        # in `done`. Record a synthetic failed-task result so the
+                        # merge proceeds and this task surfaces as BLOCKED rather
+                        # than vanishing.
+                        crashed = task_map.get(tid)
+                        if crashed is not None:
+                            crashed.status = TaskStatus.BLOCKED
+                            done[tid] = TaskExecutionResult(
+                                task=crashed,
+                                errors=[f"wave worker crashed: {type(exc).__name__}: {exc}"],
+                            )
+                        _logger.exception(
+                            "wave worker for task %s crashed; recorded as BLOCKED", tid
+                        )
                     # Fix C hardening (Nemo BLOCK): on operator stop, cancel every
                     # not-yet-started task so the pool doesn't keep launching
                     # queued work. Already-running tasks finish; their result is
@@ -7782,6 +7835,42 @@ class Orchestrator:
             # convention when output_path is unset.
             if t.status == TaskStatus.COMPLETED:
                 artifacts_root = self._scope_root() / "artifacts"
+                # #101 Part 0: an engine-assembled deliverable carries a structural
+                # DIGEST + readable text TWIN. Feed THOSE — the verifier's eyes — never
+                # the raw bound bytes (which may be a binary the model can't read; the
+                # HRWT verify was handed "(could not read: …)" on the PDF and shipped).
+                rec = self._assembly_records.get(t.id)
+                if rec is not None and rec.digest is not None:
+                    from modulatio import assembly as _assembly
+                    block = _assembly.format_digest(rec.digest)
+                    # #101 B.2: run the deterministic whole-deliverable check from the
+                    # declared DeliverableSpec and SURFACE its findings to the verifier.
+                    # The HRWT verify was BLIND to "6 of 8 under the floor / no title /
+                    # inconsistent numbering"; now those facts are in front of it.
+                    spec_issues = self._deliverable_spec_issues(rec.digest)
+                    if spec_issues:
+                        block += (
+                            "\n\nDECLARED-SPEC CHECK (engine, deterministic) — this "
+                            "deliverable does NOT meet the declared requirements:\n"
+                            + "\n".join(f"  - {issue}" for issue in spec_issues)
+                        )
+                    twin_rel = rec.digest.text_twin_path
+                    if twin_rel:
+                        twin_path = artifacts_root / twin_rel
+                        try:
+                            twin_body = twin_path.read_text(encoding="utf-8")
+                        except OSError:
+                            twin_body = ""
+                        if twin_body:
+                            snip = twin_body if len(twin_body) <= 4000 else (
+                                twin_body[:4000]
+                                + f"\n\n... [truncated; full readable twin at {twin_path}]"
+                            )
+                            block += f"\n\nreadable content (twin):\n{snip}"
+                    artifact_blocks.append(
+                        f"### Deliverable for {t.id} (engine-assembled)\n\n{block}"
+                    )
+                    continue
                 candidate = None
                 if t.output_path:
                     primary = artifacts_root / t.output_path
@@ -8052,6 +8141,26 @@ class Orchestrator:
             rationale_text = (
                 f"leader verdict {verdict}: {rationale} | report {report_path.name}"
             )
+            # #101 Part 0 R2 (cannot-verify-blocks): the engine KNOWS when a bound
+            # deliverable was unreadable AND undigested — the verdict over it is BLIND,
+            # not a judgment. Force a deterministic UNVERIFIED reservation so it never
+            # ships reported as cleanly verified (the HRWT on_the_fence-blind ship).
+            blind = self._goal_blind_deliverables(tasks)
+            if blind:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        "The engine could NOT verify the bound deliverable(s) "
+                        + ", ".join(blind)
+                        + " — binary/unreadable with no structural digest, so the "
+                        "verdict did not actually inspect the product."
+                    ),
+                    "suggestion": "Human verification REQUIRED before relying on this.",
+                })
+                rationale_text = (
+                    f"leader verdict {verdict} (UNVERIFIED binary — engine blind): "
+                    f"{rationale} | report {report_path.name}"
+                )
 
         # Every verdict completes the goal — the run is never blocked on the
         # Leader's reservations; the human reads them in the Product Quality
@@ -8066,6 +8175,145 @@ class Orchestrator:
         )
         goal.status = GoalStatus.COMPLETED
         self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
+
+    def _goal_blind_deliverables(self, tasks: "list[Task]") -> "list[str]":
+        """Deliverable tasks the verifier was BLIND to — a completed deliverable whose
+        bound output is a real on-disk file that is NOT utf-8 readable AND carries no
+        engine assembly digest (so the Part 0 digest path didn't give the verifier
+        eyes). Returns their output paths. The engine knows its own blindness; #101 R2
+        forbids shipping such a binary reported as cleanly verified."""
+        blind: list[str] = []
+        for t in tasks:
+            if t.status != TaskStatus.COMPLETED or not getattr(t, "deliverable", False):
+                continue
+            rec = self._assembly_records.get(t.id)
+            if rec is not None and rec.digest is not None:
+                continue  # engine-assembled → the digest gave the verifier eyes
+            path = self._task_artifact_path(t)
+            if path is None:
+                continue
+            try:
+                path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                blind.append(t.output_path or str(path))
+        return blind
+
+    def _deliverable_spec_issues(self, digest) -> "list[str]":
+        """#101 B.2: run the deterministic whole-deliverable check from the run's
+        declared ``DeliverableSpec`` against the engine-extracted digest. Empty spec →
+        no issues (today's behavior — the verifier just judges fitness as before).
+
+        Hero's two seams (the engine stays product-agnostic — it names NO family's
+        unit): (1) the per-unit floor is judged in the deliverable's OWN native unit,
+        whatever the family counts. The spec's ``size_unit`` is an OPTIONAL assertion;
+        left unset it just rides the digest's unit. Only when the spec asserts a unit
+        that DIFFERS from the digest's does the engine skip + log (the author expected a
+        measure this family doesn't produce — no cross-unit arithmetic). (2)
+        ``expected_count`` is NOT fed here — a dropped unit is already an
+        assembly-incompleteness, and a clean fan-out-N (vs the bound deliverable's
+        part_count, which excludes the assembly step) is a later refinement; feeding
+        cardinality (e.g. a ``fixed:9`` JT vs 8 bound parts) would false-fail every
+        correct fan-out."""
+        from modulatio import assembly as _assembly
+
+        spec = self._deliverable_spec
+        if spec.is_empty():
+            return []
+        floor = spec.part_floor
+        if floor is not None:
+            su = (spec.size_unit or "").strip().lower()
+            du = (getattr(digest, "part_size_unit", "") or "").strip().lower()
+            if su and su != du:
+                _logger.info(
+                    "deliverable-spec floor asserts unit %r but the digest measures %r "
+                    "— skipping the per-unit floor check (no cross-unit arithmetic)",
+                    su, du,
+                )
+                floor = None
+        return _assembly.check_deliverable(
+            digest, expected_count=None, part_floor=floor,
+            required_structure=spec.required_structure,
+        )
+
+    def _spec_size_metric(self) -> "EvidenceRequirement | None":
+        """#101 C.1: the per-unit size-floor metric the engine STAMPS onto each
+        deliverable produce task from the run's DeliverableSpec — so the per-task size
+        band (:func:`_token_band` → the QC size / near-empty backstop) enforces the
+        floor at PRODUCE time, deterministically, instead of hoping the planner-LLM
+        stamped it (the HRWT parts shipped below the declared floor precisely because it
+        didn't — the size mechanism existed but was starved). "Below the floor" is unit-
+        neutral: too few tokens for prose, too few rows for data, too short a runtime for
+        media — each judged in the part's OWN measure.
+
+        Product-agnostic: the produce-time measure is the engine's UNIVERSAL whitespace
+        ``token_count``. We stamp only when the declared floor is in that universal unit
+        — an unset/native ``size_unit`` (the default), or one the engine already treats
+        as its whitespace count (:data:`_SIZE_DIMENSION_RE`). An explicit foreign
+        measure (``rows``/``lines``/…) is NOT forced through token_count (a category
+        error); B.2 enforces those at verify in the deliverable's own native unit.
+        Returns the metric, or ``None`` when nothing stampable is declared."""
+        spec = self._deliverable_spec
+        floor = spec.part_floor
+        if floor is None:
+            return None
+        unit = (spec.size_unit or "").strip().lower()
+        if unit and not _SIZE_DIMENSION_RE.search(unit):
+            return None
+        return EvidenceRequirement(
+            kind="metric",
+            description=(
+                "Per-unit minimum token_count (engine-stamped from the bound "
+                "deliverable spec)"
+            ),
+            target=f"token_count >= {floor}",
+        )
+
+    def _stamp_deliverable_size_metric(self, tasks: "list[Task]") -> None:
+        """#101 C.1: stamp the spec's per-unit size floor (:meth:`_spec_size_metric`)
+        onto the bound deliverable's UNIT PRODUCERS — never the assembler (it builds the
+        WHOLE, whose size is the sum, not per-unit), and never a same-kind AUXILIARY
+        (front-matter / preface / copyright page) that is not actually a part.
+
+        The authoritative unit set is the assembler's DEPENDENCIES — the parts it
+        combines (resolved by ``_wire_assembler_dependencies`` /
+        ``_wire_cross_goal_assembler_deps`` before this runs). When an assembler is
+        present in the goal, stamp only its dependency tasks (same-kind, no existing
+        metric). When NO assembler is bound here, the unit set can't be resolved
+        authoritatively, so fall back conservatively to finished-product
+        (``deliverable``) tasks only — and log that fallback. ``deliverable=True`` is the
+        FALLBACK gate, not the primary, so a forgotten flag can't silently re-broaden the
+        stamp to every same-kind task (the Nemo BLOCK #2 over-stamp). A no-op when nothing
+        is bound/declared — an empty spec leaves today's behavior untouched."""
+        metric = self._spec_size_metric()
+        if metric is None:
+            return
+        jt = self._bound_jt
+        kind = (jt.output_spec.artifact_kind if jt else "").strip().lower()
+        # Authoritative units = the assembler's declared dependencies (the parts it joins).
+        assembler_dep_ids: set[str] = set()
+        has_assembler = False
+        for t in tasks:
+            if _is_assembler_task(t):
+                has_assembler = True
+                assembler_dep_ids.update(str(d) for d in (t.depends_on or []))
+        if not has_assembler:
+            _logger.info(
+                "deliverable size-floor: no assembler in this goal — using the "
+                "conservative deliverable-only fallback to target unit producers."
+            )
+        for t in tasks:
+            if _is_assembler_task(t):
+                continue
+            if kind and str(t.artifact_kind or "").strip().lower() != kind:
+                continue
+            if _token_band(t) is not None:
+                continue
+            if has_assembler:
+                if t.id not in assembler_dep_ids:
+                    continue          # same-kind but not a part the assembler combines
+            elif not getattr(t, "deliverable", False):
+                continue              # no assembler → only finished-product tasks
+            t.evidence_required = [*t.evidence_required, metric]
 
     def _record_recommendations(self, goal: Goal, raw, summary: RunSummary) -> None:
         """Fold the Leader's reservations for ``goal`` into the run's
@@ -8194,13 +8442,25 @@ class Orchestrator:
             t.qc_authored_fix = False
             store.save_task(self.project.code, t, run_id=self.project.run_id)
 
-        # Re-run the per-task execution loop with Leader's rationale
-        # injected as initial corrective notes.
-        for t in tasks:
-            self._run_task_with_redo(
-                t, summary, initial_corrective_notes=leader_rationale,
+        # Re-run execution with Leader's rationale injected as initial corrective
+        # notes — MIRRORING the initial pass's dispatch decision (#79). When the
+        # concurrent wave executor is enabled (default), the redo runs through it
+        # too, so a multi-task goal redo gets the same parallelism + per-task
+        # staging / lock / deterministic-merge isolation as the first pass. The
+        # MODULATIO_CONCURRENT_WAVES=0 kill-switch keeps redo sequential, matching
+        # an operator who forced the first pass serial.
+        if self._concurrent_waves_enabled(self.project):
+            task_map = {t.id: t for t in tasks}
+            self._run_task_waves(
+                goal, tasks, summary, task_map,
+                initial_corrective_notes=leader_rationale,
             )
-            store.save_task(self.project.code, t, run_id=self.project.run_id)
+        else:
+            for t in tasks:
+                self._run_task_with_redo(
+                    t, summary, initial_corrective_notes=leader_rationale,
+                )
+                store.save_task(self.project.code, t, run_id=self.project.run_id)
 
         # Fix C hardening (Nemo close-out residual): if F8 fired mid-redo, don't
         # spend even ONE more Leader verify call — the kill-switch contract is
@@ -8510,6 +8770,7 @@ class Orchestrator:
         never breaks a kickoff (it just falls back to greenfield)."""
         self._bound_jt = None
         self._bound_jt_params = {}
+        self._deliverable_spec = DeliverableSpec()
         self._jt_candidates = []
         try:
             if bound_jt_name:
@@ -8534,6 +8795,7 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — JT resolution must never break a run
             self._bound_jt = None
             self._bound_jt_params = {}
+            self._deliverable_spec = DeliverableSpec()
             self._jt_candidates = []
 
     def _bind_job_template(
@@ -8549,6 +8811,7 @@ class Orchestrator:
         params = self._run_jt_interview(jt, bound_params, ask_operator)
         self._bound_jt = jt
         self._bound_jt_params = params
+        self._deliverable_spec = jt.deliverable_spec  # #101 C.0: bind the declared spec
         summary.job_slug = jt.name  # names this job's output folder (Feature A)
         self._emit_activity(
             role="leader", phase=f"jt_bound:{jt.name}", agent_id="leader",
@@ -10159,11 +10422,10 @@ class Orchestrator:
                 TaskStatus.ABANDONED,
             }
             # Core rebuild B4: when the concurrent wave executor is enabled
-            # (flag, off by default), it runs ALL of this goal's tasks in
-            # parallel waves; the sequential loop below is then skipped
-            # wholesale. Goal verification (after the loop) runs in BOTH
-            # modes. Sequential stays the production path until concurrency
-            # is fully hardened.
+            # (default ON since §5 — kill-switch MODULATIO_CONCURRENT_WAVES=0
+            # forces sequential), it runs ALL of this goal's tasks in parallel
+            # waves; the sequential loop below is then skipped wholesale. Goal
+            # verification (after the loop) runs in BOTH modes.
             run_concurrent = self._concurrent_waves_enabled(self.project)
             if run_concurrent:
                 self._run_task_waves(g, tasks, summary, task_map)

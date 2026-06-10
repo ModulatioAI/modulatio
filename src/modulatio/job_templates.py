@@ -73,6 +73,33 @@ class OutputSpec:
 
 
 @dataclass(frozen=True)
+class DeliverableSpec:
+    """Declared, CHECKABLE facts about the bound product (#101 Part C / C.0) — DATA the
+    engine stamps + checks, never branched on. A SIBLING of OutputSpec (which is
+    control-flow / cardinality only): OutputSpec is what the engine *branches* on and
+    stays frozen; this is what the engine *checks against* and is free to grow. Every
+    field optional; an empty spec == today's behavior. Product-agnostic: ``size_unit``
+    is an OPTIONAL assertion of which measure the floor is in; left unset (default), the
+    floor is judged in whatever unit the deliverable's own family counts (no privileged
+    unit). Set it only to assert a specific family measure (e.g. ``rows`` for data)."""
+    part_floor: int | None = None              # per-unit minimum, in ``size_unit``
+    part_ceiling: int | None = None            # per-unit maximum (the QC band's top)
+    size_unit: str = ""                        # "" = the family's native unit; else assert
+    required_structure: tuple[str, ...] = ()   # structural elements, e.g. ("title", "toc")
+    title: str | None = None                   # declared title (Part A's framing input)
+
+    def is_empty(self) -> bool:
+        """True when nothing checkable was declared — the engine then behaves exactly
+        as it did before #101 (no floor judged, no structure required)."""
+        return (
+            self.part_floor is None
+            and self.part_ceiling is None
+            and not self.required_structure
+            and self.title is None
+        )
+
+
+@dataclass(frozen=True)
 class JobTemplate:
     """A loaded Job Template — setup schema + interview prose + output shape.
 
@@ -87,6 +114,7 @@ class JobTemplate:
     description: str
     interview_body: str
     output_spec: OutputSpec = field(default_factory=OutputSpec)
+    deliverable_spec: DeliverableSpec = field(default_factory=DeliverableSpec)
     param_schema: tuple[ParamField, ...] = ()
     capability_preferences: tuple[str, ...] = ()
     version: str | None = None
@@ -169,6 +197,37 @@ def _parse_output_spec(raw: str) -> OutputSpec:
     )
 
 
+def _parse_deliverable_spec(raw: str) -> DeliverableSpec:
+    """Parse the single-line JSON ``deliverable_spec`` value. Best-effort → an EMPTY
+    spec (today's behavior) on anything absent or malformed — never raises, never
+    invents a constraint."""
+    raw = raw.strip()
+    if not raw:
+        return DeliverableSpec()
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return DeliverableSpec()
+    if not isinstance(data, dict):
+        return DeliverableSpec()
+
+    def _int(v: Any) -> int | None:
+        try:
+            return int(v) if v is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    rs = data.get("required_structure")
+    structure = tuple(str(x) for x in rs) if isinstance(rs, (list, tuple)) else ()
+    return DeliverableSpec(
+        part_floor=_int(data.get("part_floor")),
+        part_ceiling=_int(data.get("part_ceiling")),
+        size_unit=str(data.get("size_unit") or ""),
+        required_structure=structure,
+        title=str(data["title"]) if data.get("title") else None,
+    )
+
+
 def _dump_param_schema(fields: tuple[ParamField, ...]) -> str:
     """ParamFields → single-line JSON (round-trips through _parse_param_schema).
     Omits falsy/default attributes to keep the line lean + git-diffable."""
@@ -197,6 +256,24 @@ def _dump_output_spec(spec: OutputSpec) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
+def _dump_deliverable_spec(spec: DeliverableSpec) -> str:
+    """DeliverableSpec → single-line JSON (round-trips through _parse_deliverable_spec).
+    Omits unset fields to keep the frontmatter lean + git-diffable; ``size_unit`` rides
+    only when a floor/ceiling makes it meaningful."""
+    obj: dict[str, Any] = {}
+    if spec.part_floor is not None:
+        obj["part_floor"] = spec.part_floor
+    if spec.part_ceiling is not None:
+        obj["part_ceiling"] = spec.part_ceiling
+    if spec.size_unit and (spec.part_floor is not None or spec.part_ceiling is not None):
+        obj["size_unit"] = spec.size_unit
+    if spec.required_structure:
+        obj["required_structure"] = list(spec.required_structure)
+    if spec.title:
+        obj["title"] = spec.title
+    return json.dumps(obj, ensure_ascii=False)
+
+
 def _parse_file(path: Path) -> JobTemplate:
     raw = path.read_text()
     m = _OWN_FRONTMATTER_RE.match(raw)
@@ -216,6 +293,7 @@ def _parse_file(path: Path) -> JobTemplate:
         description=meta.get("description") or "",
         interview_body=body,
         output_spec=_parse_output_spec(meta.get("output_spec", "")),
+        deliverable_spec=_parse_deliverable_spec(meta.get("deliverable_spec", "")),
         param_schema=_parse_param_schema(meta.get("param_schema", "")),
         capability_preferences=_parse_csv(meta.get("capability_preferences", "")),
         version=meta.get("version") or None,
@@ -282,6 +360,8 @@ def save(jt: JobTemplate, project_code: str | None = None) -> Path:
         f"param_schema: {_dump_param_schema(jt.param_schema)}",
         f"output_spec: {_dump_output_spec(jt.output_spec)}",
     ]
+    if not jt.deliverable_spec.is_empty():
+        fm_lines.append(f"deliverable_spec: {_dump_deliverable_spec(jt.deliverable_spec)}")
     if jt.version is not None:
         fm_lines.append(f"version: {jt.version}")
     if jt.last_verified_at is not None:
@@ -298,6 +378,7 @@ def create_job_template(
     description: str,
     interview_body: str,
     output_spec: OutputSpec | None = None,
+    deliverable_spec: "DeliverableSpec | None" = None,
     param_schema: tuple[ParamField, ...] = (),
     capability_preferences: tuple[str, ...] = (),
     version: str | None = None,
@@ -324,6 +405,7 @@ def create_job_template(
         description=description,
         interview_body=interview_body,
         output_spec=output_spec or OutputSpec(),
+        deliverable_spec=deliverable_spec or DeliverableSpec(),
         param_schema=param_schema,
         capability_preferences=capability_preferences,
         version=version,
@@ -335,6 +417,7 @@ def create_job_template(
 __all__ = [
     "JobTemplate",
     "OutputSpec",
+    "DeliverableSpec",
     "ParamField",
     "create_job_template",
     "list_job_templates",
