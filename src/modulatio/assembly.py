@@ -411,6 +411,9 @@ def _document_head(
     out = dict(manifest)
     if want_toc:
         headings = _unit_headings(manifest.get("units", []), artifacts_root)
+        # #101 Part D: the TOC lists the NORMALIZED sequence, so it agrees with the body
+        # the assembler renumbers (both pass through the same document normalizer).
+        headings, _ = continuity_headings(headings, "document")
         if headings:
             if lines:
                 lines.append("")
@@ -443,6 +446,92 @@ def apply_framing(
         manifest, artifacts_root, title=title,
         required_structure=tuple(required_structure),
     )
+
+
+# ── #101 Part D: cross-part continuity normalization (per-family dispatch) ─────
+#
+# N joined units should read as ONE ordered whole. Each family expresses continuity
+# differently — a document renumbers its part sequence; code would reconcile an index /
+# import order; data a sequence column; media segment/chapter order. The engine names no
+# family's mechanic: it hands the family its ordered unit headings and the family's
+# normalizer returns a consistent set. NORMALIZE, NEVER FABRICATE — only a genuine
+# cross-part conflict is reconciled; an already-consistent (or unlabeled) sequence is
+# left exactly as the producers wrote it.
+
+#: A part heading that self-declares a sequence ordinal: an explicit label word + number
+#: ("Story 7", "Chapter 3: …") or a leading "N. …" / "N) …". Conservative on purpose — a
+#: heading like "The 7 Samurai" (no leading label/ordinal form) is NOT a sequence marker.
+_SEQ_LABEL_RE = re.compile(
+    r"^(?P<pre>(?:part|chapter|section|story|episode|book|volume|act|scene|"
+    r"no\.?|number)\s+)(?P<num>\d+)(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_SEQ_LEADING_RE = re.compile(r"^(?P<num>\d+)(?P<rest>[.):–—-]\s.*)$")
+
+
+def _seq_parts(heading: str) -> "tuple[int, str, str] | None":
+    """Split a heading into ``(current_number, prefix, suffix)`` when it self-declares a
+    sequence ordinal, else ``None``. Rebuild with a new index ``i`` as ``prefix+i+suffix``."""
+    h = heading.strip()
+    m = _SEQ_LABEL_RE.match(h)
+    if m:
+        return int(m.group("num")), m.group("pre"), m.group("rest")
+    m = _SEQ_LEADING_RE.match(h)
+    if m:
+        return int(m.group("num")), "", m.group("rest")
+    return None
+
+
+def _normalize_doc_sequence(headings: "list[str]") -> "tuple[list[str], bool]":
+    """The ``document`` family's continuity normalizer: renumber part headings to a clean
+    ``1..N`` in assembly order — but ONLY when every unit carries an explicit ordinal AND
+    the existing run is not already ``1..N``. Otherwise a no-op (never fabricate a
+    sequence onto unlabeled parts, never disturb an already-correct one). Returns the
+    (possibly rewritten) headings + whether anything changed."""
+    parsed = [_seq_parts(h) for h in headings]
+    if len(headings) < 2 or any(p is None for p in parsed):
+        return list(headings), False
+    current = [p[0] for p in parsed]                      # type: ignore[index]
+    if current == list(range(1, len(headings) + 1)):
+        return list(headings), False                     # already clean — leave it be
+    out: list[str] = []
+    for i, p in enumerate(parsed, 1):
+        _num, pre, rest = p                              # type: ignore[misc]
+        out.append(f"{pre}{i}{rest}")
+    return out, True
+
+
+#: Per-family continuity normalizers (mirrors ``_STRATEGIES`` / ``_HEAD_BUILDERS``). A
+#: family with no normalizer leaves its units exactly as produced.
+_CONTINUITY_NORMALIZERS: dict = {"document": _normalize_doc_sequence}
+
+
+def continuity_headings(
+    headings: "list[str]", strategy: str
+) -> "tuple[list[str], bool]":
+    """Normalize cross-part sequence continuity for the named family (#101 Part D) —
+    PRODUCT-AGNOSTIC dispatch. The engine passes the ordered unit headings; the family's
+    normalizer returns a consistent set (or leaves them untouched). A family with no
+    normalizer is a no-op."""
+    fn = _CONTINUITY_NORMALIZERS.get(strategy)
+    if fn is None:
+        return list(headings), False
+    return fn(list(headings))
+
+
+def _replace_first_heading(body: str, new_text: str) -> str:
+    """Rewrite the text of a block's first non-empty line to ``new_text``, preserving its
+    leading markdown ``#`` markers + indentation. Used to apply a normalized heading back
+    onto a unit body without disturbing the rest of it."""
+    lines = body.splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip():
+            indent = line[: len(line) - len(line.lstrip())]
+            stripped = line.lstrip()
+            hashes = stripped[: len(stripped) - len(stripped.lstrip("#"))]
+            lines[idx] = f"{indent}{hashes}{' ' if hashes else ''}{new_text}".rstrip()
+            return "\n".join(lines)
+    return body
 
 
 def write_text_twin(content: str, artifacts_root: Path, name: str) -> str:
@@ -597,6 +686,7 @@ def _assemble_document(
     sep_bytes = len(separator.encode())
     total = framing_bytes
     over_cap = False
+    unit_start = len(blocks)   # #101 Part D: where the UNIT blocks begin (after framing)
     for name in manifest["units"]:
         path = _safe_unit_path(name, artifacts_root)
         if path is None:
@@ -637,6 +727,16 @@ def _assemble_document(
         blocks.append(body.strip("\n"))
         used.append(name)
         total += added
+
+    # #101 Part D: normalize cross-part sequence continuity over the UNIT blocks only
+    # (framing/trailer untouched). Conservative — a no-op unless the parts self-number
+    # AND that numbering is inconsistent with 1..N (see _normalize_doc_sequence).
+    unit_blocks = blocks[unit_start:len(blocks)]
+    headings = [_first_heading(b) for b in unit_blocks]
+    normalized, changed = continuity_headings(headings, "document")
+    if changed:
+        for k, new_h in enumerate(normalized):
+            blocks[unit_start + k] = _replace_first_heading(unit_blocks[k], new_h)
 
     if trailer.strip():
         blocks.append(trailer.strip("\n"))

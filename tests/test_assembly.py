@@ -660,6 +660,75 @@ def test_apply_framing_title_only_no_toc(tmp_path):
     assert "Contents" not in m["title_page"] and "toc" not in m
 
 
+# ── #101 Part D: cross-part continuity normalization (per-family dispatch) ─────
+
+
+def test_continuity_normalizes_inconsistent_sequence():
+    out, changed = assembly.continuity_headings(
+        ["Story 1: A", "Story 7: B", "Story 1: C"], "document")
+    assert changed and out == ["Story 1: A", "Story 2: B", "Story 3: C"]
+
+
+def test_continuity_leaves_clean_sequence_untouched():
+    hs = ["Chapter 1", "Chapter 2", "Chapter 3"]
+    out, changed = assembly.continuity_headings(hs, "document")
+    assert not changed and out == hs            # already 1..N — never disturb it
+
+
+def test_continuity_no_op_when_a_part_is_unlabeled():
+    hs = ["Story 1", "An Interlude", "Story 3"]  # middle carries no ordinal
+    out, changed = assembly.continuity_headings(hs, "document")
+    assert not changed and out == hs            # never partially renumber
+
+
+def test_continuity_does_not_touch_incidental_numbers():
+    out, changed = assembly.continuity_headings(["The 7 Samurai", "Two Towers"], "document")
+    assert not changed                          # not sequence markers — left alone
+
+
+def test_continuity_leading_number_form():
+    out, changed = assembly.continuity_headings(["3. Alpha", "9. Beta"], "document")
+    assert changed and out == ["1. Alpha", "2. Beta"]
+
+
+def test_continuity_non_document_family_is_noop():
+    hs = ["Story 1", "Story 7"]
+    out, changed = assembly.continuity_headings(hs, "media")
+    assert not changed and out == hs            # no normalizer for the family → untouched
+
+
+def test_replace_first_heading_preserves_hashes():
+    assert assembly._replace_first_heading("## Story 7\n\nbody", "Story 2") == \
+        "## Story 2\n\nbody"
+
+
+def test_assemble_document_renumbers_inconsistent_parts(tmp_path):
+    _units(tmp_path, **{"a.md": "# Story 1\n\nalpha", "b.md": "# Story 7\n\nbeta",
+                        "c.md": "# Story 1\n\ngamma"})
+    r = assembly.assemble(
+        {"units": ["a.md", "b.md", "c.md"], "separator": "\n\n"}, tmp_path)
+    assert "# Story 1" in r.content and "# Story 2" in r.content and "# Story 3" in r.content
+    assert "# Story 7" not in r.content                       # the collision is reconciled
+    assert "alpha" in r.content and "beta" in r.content and "gamma" in r.content  # bodies kept
+
+
+def test_assemble_document_leaves_clean_sequence(tmp_path):
+    _units(tmp_path, **{"a.md": "# Part 1\n\nx", "b.md": "# Part 2\n\ny"})
+    r = assembly.assemble({"units": ["a.md", "b.md"], "separator": "\n\n"}, tmp_path)
+    assert "# Part 1" in r.content and "# Part 2" in r.content   # untouched
+
+
+def test_framing_toc_matches_renumbered_body(tmp_path):
+    """Part A + D: the engine-framed TOC lists the SAME normalized sequence the assembled
+    body uses — both pass through the one document normalizer."""
+    _units(tmp_path, **{"a.md": "# Story 1\n\nx", "b.md": "# Story 7\n\ny"})
+    m = assembly.apply_framing({"units": ["a.md", "b.md"]}, tmp_path, "document",
+                               title="Anthology", required_structure=("title", "toc"))
+    assert "1. Story 1" in m["title_page"] and "2. Story 2" in m["title_page"]
+    r = assembly.assemble(m, tmp_path)
+    assert "# Story 1" in r.content and "# Story 2" in r.content and "# Story 7" not in r.content
+
+
 def test_document_digest_fail_open_on_missing_unit(tmp_path):
     d = assembly.build_deliverable_digest(
         {"units": ["ghost.md"]}, ["ghost.md"], tmp_path, strategy="document")
