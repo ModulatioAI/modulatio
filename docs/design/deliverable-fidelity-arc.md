@@ -151,7 +151,45 @@ Leader-extract step is the second increment.
   unbounded loop. QC owns the deliverable gate; Leader-verify consumes its verdict
   (one owner, no split-brain).
 
-### Part C — Carry declared constraints from spec into task contracts
+### Part C — the declared-constraint HOME + the stamp (split per Hero's accounting, 2026-06-09)
+
+**Root cause (Hero's first-hand reckoning of the HRWT records, verified):** the
+constraint died at **INTAKE (D1)**, not decompose. The "2,000–3,000 words" band lived
+ONLY in the JT's `interview_body`, which is injected into **no planning prompt**; and
+HRWT ran the **fuzzy-match lane** (`jt_id: null`), which engages **none** of the
+JT-contract machinery (no output contract, no collapse guard, no shortfall check). The
+run executed with **zero engine-held expectations**. There was no leak — **there was no
+pipe.** Meanwhile the DEMAND side is all built and starved: QC's size-band judge
+(`orchestration.py ~5653`), the near-empty backstop, and B.1 `check_deliverable` — feed
+one supply and they light up (two without touching a line).
+
+**The home — a run-level `DeliverableSpec`, a SIBLING of `OutputSpec` (never inside
+it).** Lives in orchestrator run state (`self._deliverable_spec`), bound ONCE at intake
+from whichever source declared it. Why a sibling, not a field on `OutputSpec`:
+**control-flow vs check-data** — `OutputSpec` is what the engine BRANCHES on (fan-out,
+collapse, contract; stays frozen + minimal); `DeliverableSpec` is what the engine CHECKS
+AGAINST (wants to grow). A free-form run needs the spec when no `OutputSpec` exists at
+all. Product-agnostic minimal shape (every field optional; empty == today's behavior):
+
+    DeliverableSpec(part_floor, part_ceiling, size_unit="tokens",
+                    required_structure=(), title=None)
+
+NO `expected_count` (already in `_jt_target_count` — don't store a fact twice); no
+numbering scheme (Part D normalizes mechanically). Sources bind by precedence (explicit
+JT `deliverable_spec` field > interview/Leader-distilled > standards default); standards
+stay the DEFAULTS/promotion layer, not the per-run home. **Two seams to design in:**
+(1) check `spec.size_unit` vs the digest's `part_size_unit`, **SKIP+log on mismatch** —
+no silent cross-unit math; (2) the whole-deliverable `expected_count` is the **unit
+fan-out N**, NOT cardinality — HRWT `fixed:9` = 8 stories + the bound PDF, but the bound
+digest is 8 parts, so feeding 9 false-fails every correct anthology.
+
+**Split C so it stops being a monolith:**
+- **C.0 — the home + intake binding** (build FIRST; the vessel every reader needs).
+- **C.1 — engine-stamp the metric** onto each fan-out unit task from the spec (belt: the
+  planner prose stays; suspenders: the engine appends the metric deterministically so the
+  dial can't lose what it never carried). Lands AFTER B.2.
+
+*The original Part C text below is the C.1 stamp detail:*
 
 When the brief/JT declares a quantitative constraint (per-unit length, unit count,
 format), the decompose/JT-bind must STAMP it as an enforceable contract on each unit
@@ -180,17 +218,23 @@ engine-owned, in `_assemble_document` pre-join — it feeds Part A's TOC.)**
 
 ## Sequencing & verification
 
-0. **Part 0 FIRST** (the keystone prereq — Hero R1/R2): engine emits the digest + text
-   twin at assembly/render, and "cannot verify a binary" routes to bounce/blocker
-   deterministically. Test: a bound PDF yields a digest with the right unit count +
-   page count + per-unit lengths; a binary with no digest does NOT ship `on_the_fence`.
-1. **Part B** (the safety net), running OVER the digest from Part 0. Test: a bare-concat
-   / mis-numbered / under-length assembled deliverable is FLAGGED (not passed). Catches
-   the regression class even before A/C/D land.
-2. **Part C** — spec→floor wiring; test the JT's stated length stamps a per-unit
-   `token_count` floor and a short unit bounces.
-3. **Part A + D** — engine framing + consistent headings; test the assembled output
-   has a title page + TOC + 1..N numbering when declared.
+*(Revised 2026-06-09 per Hero's accounting — split C; the home comes before B's feed.)*
+
+- **Part 0 — DONE** (digest + text twin + feed-to-verify + cannot-verify-blocks).
+- **B.1 — DONE** (`assembly.check_deliverable`, the deterministic check; uncalled until B.2).
+
+0. **C.0 FIRST** (Hero's correction — the missing PIPE): the `DeliverableSpec` run-state
+   home + intake binding (dataclass + JT `deliverable_spec` frontmatter parse + bind at
+   `_resolve_job_template` / Leader-distill at decompose). Test: a JT field / a distilled
+   spec lands in `self._deliverable_spec`; an empty spec == today's behavior.
+1. **B.2** — feed `check_deliverable` from the spec at the assembly-QC / Leader-verify
+   seam, with the two seams handled (unit-match skip+log; `expected_count` = unit fan-out
+   N, not cardinality). Test: a short/under-count/missing-framing deliverable is FLAGGED;
+   a correct anthology (8 parts vs `fixed:9`) is NOT false-failed.
+2. **C.1** — engine-stamp the per-unit metric onto fan-out tasks from the spec; test the
+   stated floor stamps a `token_count` metric and a short unit bounces per-unit.
+3. **Part A + D** — engine framing (`spec.title` + `required_structure`) + consistent
+   headings; test the assembled output has a title page + TOC + 1..N numbering when declared.
 4. **Live re-run** the HRWT anthology: a real bound book — title page, TOC, page
    numbers, 8 stories numbered 1–8, each in the 2,000–3,000 band — and QC/Leader
    catch any miss instead of reporting a hollow "done."
