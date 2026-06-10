@@ -15,11 +15,30 @@ import pytest
 
 from modulatio import context_budget as cb
 from modulatio import roster, vault
+from modulatio import types as types_mod
 from modulatio.orchestration import Orchestrator
 from modulatio.types import Project
 
 
 PROJECT_CODE = "BDG"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_warn_once_state(monkeypatch):
+    """Reset context_budget's module-level warn-once registries per test.
+
+    Three tests in this file feed the same "lieder-reflect" role into
+    ``_WARNED_UNKNOWN_RUNNER_ROLE``; whichever runs first consumes the
+    once-per-role WARN and the others see silence (order-dependent flake —
+    proven under seeded full-suite shuffle). Fresh sets make every test
+    see first-occurrence behavior regardless of suite order.
+    """
+    monkeypatch.setattr(cb, "_WARNED_UNKNOWN_RUNNER_ROLE", set())
+    monkeypatch.setattr(cb, "_WARNED_MISSING_RUN_ID", set())
+    monkeypatch.setattr(cb, "_WARNED_UNBOUND_GATE_FIRE", [])
+    # The schema-load unknown-role warn dedups through types.py, not
+    # context_budget.py — it's the registry test_20/test_39 collide on.
+    monkeypatch.setattr(types_mod, "_SEEN_UNKNOWN_BUDGET_ROLES", set())
 
 
 @pytest.fixture
