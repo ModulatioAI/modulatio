@@ -23,6 +23,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Self-bootstrap: prepend the repo's src/ so a COLD `python3 scripts/.../fidelity_smoke.py`
+# imports `modulatio` without an editable install or an activated venv (Nemo BLOCK #1 —
+# the documented cold command must actually run).
+_SRC = Path(__file__).resolve().parents[3] / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 from modulatio import assembly
 from modulatio.job_templates import DeliverableSpec, OutputSpec, JobTemplate
 

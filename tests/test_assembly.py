@@ -691,6 +691,19 @@ def test_continuity_leading_number_form():
     assert changed and out == ["1. Alpha", "2. Beta"]
 
 
+def test_continuity_mixed_labels_is_noop():
+    """Nemo follow-up: a heterogeneous label set is not one sequence — leave it untouched
+    rather than renumber Story/Chapter/Section into a fake run."""
+    hs = ["Story 1: A", "Chapter 7: B", "Section 3: C"]
+    out, changed = assembly.continuity_headings(hs, "document")
+    assert not changed and out == hs
+
+
+def test_continuity_label_mixed_with_leading_number_is_noop():
+    out, changed = assembly.continuity_headings(["Story 1", "2. B"], "document")
+    assert not changed                                  # label form + bare-number form ≠ one family
+
+
 def test_continuity_non_document_family_is_noop():
     hs = ["Story 1", "Story 7"]
     out, changed = assembly.continuity_headings(hs, "media")

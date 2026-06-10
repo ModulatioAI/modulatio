@@ -9188,12 +9188,59 @@ def test_stamp_size_metric_targets_units_not_assembler(tmp_path, monkeypatch):
         output_spec=_jt.OutputSpec(cardinality="fixed:8", artifact_kind="document"))
     units = [_produce_task("SM2", i, "document") for i in (1, 2, 3)]
     assembler = _produce_task("SM2", 9, "document", skills=["document-assembly"])
+    assembler.depends_on = [u.id for u in units]   # the authoritative unit set
 
     orch._stamp_deliverable_size_metric([*units, assembler])
 
     for u in units:
         assert _token_band(u) == (2000, None)      # floor stamped + readable by the band
     assert _token_band(assembler) is None          # the WHOLE's size is the sum, not per-unit
+
+
+def test_stamp_excludes_same_kind_auxiliary(tmp_path, monkeypatch):
+    """#101 C.1 (Nemo BLOCK #2): a same-kind auxiliary (front-matter/preface) that is NOT
+    one of the assembler's dependency units must NOT inherit the per-unit floor — even
+    though it shares artifact_kind. Only the assembler's actual parts get stamped."""
+    from modulatio import job_templates as _jt
+    from modulatio.orchestration import _token_band
+    orch = _bare_orch(tmp_path, monkeypatch, "AUX")
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=2000)
+    orch._bound_jt = _jt.JobTemplate(
+        name="jt", description="d", interview_body="b",
+        output_spec=_jt.OutputSpec(artifact_kind="document"))
+    units = [_produce_task("AUX", i, "document") for i in (1, 2)]
+    frontmatter = _produce_task("AUX", 3, "document")   # same kind, but NOT an assembler dep
+    frontmatter.deliverable = False
+    assembler = _produce_task("AUX", 9, "document", skills=["document-assembly"])
+    assembler.depends_on = [u.id for u in units]        # units only — never the front-matter
+
+    orch._stamp_deliverable_size_metric([*units, frontmatter, assembler])
+
+    for u in units:
+        assert _token_band(u) == (2000, None)           # real units floored
+    assert _token_band(frontmatter) is None             # auxiliary spared (the fix)
+    assert _token_band(assembler) is None
+
+
+def test_stamp_no_assembler_falls_back_to_deliverable_only(tmp_path, monkeypatch):
+    """#101 C.1: with NO assembler in the goal the unit set can't be resolved, so the
+    engine stamps only finished-product (deliverable=True) same-kind tasks — a same-kind
+    non-deliverable auxiliary is NOT blanket-stamped (deliverable is the fallback gate)."""
+    from modulatio import job_templates as _jt
+    from modulatio.orchestration import _token_band
+    orch = _bare_orch(tmp_path, monkeypatch, "NOA")
+    orch._deliverable_spec = _jt.DeliverableSpec(part_floor=2000)
+    orch._bound_jt = _jt.JobTemplate(
+        name="jt", description="d", interview_body="b",
+        output_spec=_jt.OutputSpec(artifact_kind="document"))
+    product = _produce_task("NOA", 1, "document")       # deliverable=True
+    aux = _produce_task("NOA", 2, "document")
+    aux.deliverable = False
+
+    orch._stamp_deliverable_size_metric([product, aux])   # no assembler present
+
+    assert _token_band(product) == (2000, None)           # finished product floored
+    assert _token_band(aux) is None                       # non-deliverable auxiliary spared
 
 
 def test_stamp_skips_foreign_kind_and_existing_metric(tmp_path, monkeypatch):

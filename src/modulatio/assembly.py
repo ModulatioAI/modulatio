@@ -487,10 +487,17 @@ def _normalize_doc_sequence(headings: "list[str]") -> "tuple[list[str], bool]":
     ``1..N`` in assembly order — but ONLY when every unit carries an explicit ordinal AND
     the existing run is not already ``1..N``. Otherwise a no-op (never fabricate a
     sequence onto unlabeled parts, never disturb an already-correct one). Returns the
-    (possibly rewritten) headings + whether anything changed."""
+    (possibly rewritten) headings + whether anything changed.
+
+    The label family must be HOMOGENEOUS (Nemo follow-up): a heterogeneous set
+    (``Story 1`` / ``Chapter 7`` / ``Section 3``, or a label form mixed with a bare
+    leading-number form) is not one sequence, so it is left untouched rather than
+    renumbered into a fake one."""
     parsed = [_seq_parts(h) for h in headings]
     if len(headings) < 2 or any(p is None for p in parsed):
         return list(headings), False
+    if len({p[1].strip().lower() for p in parsed}) > 1:  # type: ignore[index]
+        return list(headings), False                     # heterogeneous labels → no-op
     current = [p[0] for p in parsed]                      # type: ignore[index]
     if current == list(range(1, len(headings) + 1)):
         return list(headings), False                     # already clean — leave it be

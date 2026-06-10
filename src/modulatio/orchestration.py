@@ -8270,22 +8270,37 @@ class Orchestrator:
 
     def _stamp_deliverable_size_metric(self, tasks: "list[Task]") -> None:
         """#101 C.1: stamp the spec's per-unit size floor (:meth:`_spec_size_metric`)
-        onto each fan-out PRODUCE task of the bound deliverable — the unit producers,
-        never the assembler (it builds the WHOLE, whose size is the sum, not per-unit).
-        Targets only tasks of the bound deliverable's ``artifact_kind`` that already
-        carry NO size metric (an explicit planner metric is respected, never
-        overridden). A no-op when nothing is bound/declared, so an empty spec leaves
-        today's behavior exactly as it was.
+        onto the bound deliverable's UNIT PRODUCERS — never the assembler (it builds the
+        WHOLE, whose size is the sum, not per-unit), and never a same-kind AUXILIARY
+        (front-matter / preface / copyright page) that is not actually a part.
 
-        (A legitimately small same-kind auxiliary unit — structural scaffolding the
-        family wraps around its content — is the one over-stamp edge; Part A turns such
-        framing into engine-generated structure rather than a produce task, which
-        dissolves it — tracked there, not papered over here.)"""
+        The authoritative unit set is the assembler's DEPENDENCIES — the parts it
+        combines (resolved by ``_wire_assembler_dependencies`` /
+        ``_wire_cross_goal_assembler_deps`` before this runs). When an assembler is
+        present in the goal, stamp only its dependency tasks (same-kind, no existing
+        metric). When NO assembler is bound here, the unit set can't be resolved
+        authoritatively, so fall back conservatively to finished-product
+        (``deliverable``) tasks only — and log that fallback. ``deliverable=True`` is the
+        FALLBACK gate, not the primary, so a forgotten flag can't silently re-broaden the
+        stamp to every same-kind task (the Nemo BLOCK #2 over-stamp). A no-op when nothing
+        is bound/declared — an empty spec leaves today's behavior untouched."""
         metric = self._spec_size_metric()
         if metric is None:
             return
         jt = self._bound_jt
         kind = (jt.output_spec.artifact_kind if jt else "").strip().lower()
+        # Authoritative units = the assembler's declared dependencies (the parts it joins).
+        assembler_dep_ids: set[str] = set()
+        has_assembler = False
+        for t in tasks:
+            if _is_assembler_task(t):
+                has_assembler = True
+                assembler_dep_ids.update(str(d) for d in (t.depends_on or []))
+        if not has_assembler:
+            _logger.info(
+                "deliverable size-floor: no assembler in this goal — using the "
+                "conservative deliverable-only fallback to target unit producers."
+            )
         for t in tasks:
             if _is_assembler_task(t):
                 continue
@@ -8293,6 +8308,11 @@ class Orchestrator:
                 continue
             if _token_band(t) is not None:
                 continue
+            if has_assembler:
+                if t.id not in assembler_dep_ids:
+                    continue          # same-kind but not a part the assembler combines
+            elif not getattr(t, "deliverable", False):
+                continue              # no assembler → only finished-product tasks
             t.evidence_required = [*t.evidence_required, metric]
 
     def _record_recommendations(self, goal: Goal, raw, summary: RunSummary) -> None:
