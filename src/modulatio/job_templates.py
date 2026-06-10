@@ -79,11 +79,12 @@ class DeliverableSpec:
     control-flow / cardinality only): OutputSpec is what the engine *branches* on and
     stays frozen; this is what the engine *checks against* and is free to grow. Every
     field optional; an empty spec == today's behavior. Product-agnostic: ``size_unit``
-    names the family's own measure (tokens/words for prose, rows for data, lines for
-    code)."""
+    is an OPTIONAL assertion of which measure the floor is in; left unset (default), the
+    floor is judged in whatever unit the deliverable's own family counts (no privileged
+    unit). Set it only to assert a specific family measure (e.g. ``rows`` for data)."""
     part_floor: int | None = None              # per-unit minimum, in ``size_unit``
     part_ceiling: int | None = None            # per-unit maximum (the QC band's top)
-    size_unit: str = "tokens"                  # tokens | words | rows | lines | …
+    size_unit: str = ""                        # "" = the family's native unit; else assert
     required_structure: tuple[str, ...] = ()   # structural elements, e.g. ("title", "toc")
     title: str | None = None                   # declared title (Part A's framing input)
 
@@ -221,7 +222,7 @@ def _parse_deliverable_spec(raw: str) -> DeliverableSpec:
     return DeliverableSpec(
         part_floor=_int(data.get("part_floor")),
         part_ceiling=_int(data.get("part_ceiling")),
-        size_unit=str(data.get("size_unit") or "tokens"),
+        size_unit=str(data.get("size_unit") or ""),
         required_structure=structure,
         title=str(data["title"]) if data.get("title") else None,
     )
@@ -264,7 +265,7 @@ def _dump_deliverable_spec(spec: DeliverableSpec) -> str:
         obj["part_floor"] = spec.part_floor
     if spec.part_ceiling is not None:
         obj["part_ceiling"] = spec.part_ceiling
-    if spec.part_floor is not None or spec.part_ceiling is not None:
+    if spec.size_unit and (spec.part_floor is not None or spec.part_ceiling is not None):
         obj["size_unit"] = spec.size_unit
     if spec.required_structure:
         obj["required_structure"] = list(spec.required_structure)

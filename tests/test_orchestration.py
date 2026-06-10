@@ -8989,6 +8989,120 @@ def test_binding_a_jt_sets_deliverable_spec(tmp_path, monkeypatch):
     assert orch._deliverable_spec.required_structure == ("title", "toc")
 
 
+def _verify_orch_with_digest(tmp_path, monkeypatch, code, digest, *, spec=None):
+    """Stand up an orchestrator whose one COMPLETED deliverable carries ``digest``,
+    capture the Leader-verification prompt, and optionally seed a DeliverableSpec.
+    Returns (orch, seen) where seen["prompt"] is the verify prompt."""
+    from modulatio import assembly as _assembly, vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+    from uuid import uuid4
+
+    seen = {}
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            seen["prompt"] = prompt
+            return '```json\n{"verdict":"satisfied","rationale":"r","report_body":"r"}\n```'
+        return _leader_stub(prompt)
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(code, "spec verify", "obj")
+    vault.init_run(code, "run-1", "obj")
+    project = Project(code=code, name=code, objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / code.lower()), run_id="run-1")
+    orch = Orchestrator(project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub})
+    if spec is not None:
+        orch._deliverable_spec = spec
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "book.pdf").write_bytes(b"%PDF-1.7\x00 bound")
+    task = _deliverable_task(code, output="book.pdf")
+    orch._assembly_records[task.id] = _assembly.AssemblyRecord(
+        manifest={}, final_checksum="sha256:x", complete=True, strategy="document",
+        digest=digest)
+    goal = Goal(id=f"{code}-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+    orch._leader_verify_goal(goal, [task], summary)
+    return orch, seen
+
+
+def test_leader_verify_surfaces_declared_spec_issues(tmp_path, monkeypatch):
+    """#101 B.2: with a declared DeliverableSpec, the engine runs check_deliverable over
+    the digest and SURFACES its findings to Leader-verify — the under-floor parts and
+    the missing framing the HRWT verify was blind to are now in the prompt."""
+    from modulatio import assembly as _assembly, job_templates as _jt
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=2,
+        parts=[{"label": "Story One", "size": 2500}, {"label": "Story Two", "size": 900}],
+        part_size_unit="words", structure={"title": False, "toc": False},
+        text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=2000, size_unit="words",
+                               required_structure=("title", "toc"))
+    _orch, seen = _verify_orch_with_digest(tmp_path, monkeypatch, "SPC", digest, spec=spec)
+
+    p = seen["prompt"]
+    assert "DECLARED-SPEC CHECK" in p                        # the check ran + surfaced
+    assert "under the 2000-words floor" in p and "Story Two" in p   # the short part named
+    assert "Story One" not in p.split("DECLARED-SPEC CHECK")[1]     # the OK part not flagged
+    assert "required structure missing: title" in p
+    assert "required structure missing: toc" in p
+
+
+def test_empty_deliverable_spec_surfaces_nothing(tmp_path, monkeypatch):
+    """B.2 must not over-fire: with NO declared spec (today's default), the verifier sees
+    the digest but no DECLARED-SPEC CHECK block — behavior is unchanged."""
+    from modulatio import assembly as _assembly
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=1,
+        parts=[{"label": "Only", "size": 10}], part_size_unit="words",
+        structure={"title": False}, text_twin_path=None)
+    _orch, seen = _verify_orch_with_digest(tmp_path, monkeypatch, "EMP", digest)
+
+    assert "DECLARED-SPEC CHECK" not in seen["prompt"]
+
+
+def test_deliverable_spec_skips_floor_on_unit_mismatch(tmp_path, monkeypatch):
+    """#101 B.2 seam 1 (Hero): when the spec's size_unit denotes a DIFFERENT measure than
+    the digest's part unit, the engine SKIPS the floor check — no cross-unit arithmetic.
+    A 500-ROW floor must never fire against a digest counted in WORDS. Structure checks
+    (unit-independent) still run."""
+    from modulatio import assembly as _assembly, job_templates as _jt
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=1,
+        parts=[{"label": "Prose", "size": 12}],   # 12 words — far under any row-floor
+        part_size_unit="words", structure={"title": False}, text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=500, size_unit="rows",
+                               required_structure=("title",))
+    _orch, seen = _verify_orch_with_digest(tmp_path, monkeypatch, "MIS", digest, spec=spec)
+
+    p = seen["prompt"]
+    assert "floor" not in p.split("DECLARED-SPEC CHECK")[1]   # the mismatched floor skipped
+    assert "required structure missing: title" in p           # but structure still checked
+
+
+def test_deliverable_spec_unset_unit_uses_native(tmp_path, monkeypatch):
+    """#101 B.2 seam 1 (product-agnostic): with NO asserted size_unit (the default), the
+    floor is judged in the deliverable's OWN native unit — whatever the family counts —
+    so a bare floor fires against ANY family. The engine names no unit. Here the digest
+    counts in 'rows' (a data deliverable) and a unit-less floor still applies."""
+    from modulatio import assembly as _assembly, job_templates as _jt
+
+    digest = _assembly.DeliverableDigest(
+        kind="data", part_count=1,
+        parts=[{"label": "sheet1", "size": 50}], part_size_unit="rows",
+        structure={}, text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=2000)              # no unit asserted → native
+    _orch, seen = _verify_orch_with_digest(tmp_path, monkeypatch, "NAT", digest, spec=spec)
+
+    assert "under the 2000-rows floor" in seen["prompt"]     # judged in the family's unit
+
+
 def test_apply_assembly_manifest_missing_unit_flags_blocker(project, tmp_path):
     from uuid import uuid4
     from modulatio.types import Task

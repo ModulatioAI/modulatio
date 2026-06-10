@@ -7830,6 +7830,17 @@ class Orchestrator:
                 if rec is not None and rec.digest is not None:
                     from modulatio import assembly as _assembly
                     block = _assembly.format_digest(rec.digest)
+                    # #101 B.2: run the deterministic whole-deliverable check from the
+                    # declared DeliverableSpec and SURFACE its findings to the verifier.
+                    # The HRWT verify was BLIND to "6 of 8 under the floor / no title /
+                    # inconsistent numbering"; now those facts are in front of it.
+                    spec_issues = self._deliverable_spec_issues(rec.digest)
+                    if spec_issues:
+                        block += (
+                            "\n\nDECLARED-SPEC CHECK (engine, deterministic) — this "
+                            "deliverable does NOT meet the declared requirements:\n"
+                            + "\n".join(f"  - {issue}" for issue in spec_issues)
+                        )
                     twin_rel = rec.digest.text_twin_path
                     if twin_rel:
                         twin_path = artifacts_root / twin_rel
@@ -8173,6 +8184,43 @@ class Orchestrator:
             except (OSError, UnicodeDecodeError):
                 blind.append(t.output_path or str(path))
         return blind
+
+    def _deliverable_spec_issues(self, digest) -> "list[str]":
+        """#101 B.2: run the deterministic whole-deliverable check from the run's
+        declared ``DeliverableSpec`` against the engine-extracted digest. Empty spec →
+        no issues (today's behavior — the verifier just judges fitness as before).
+
+        Hero's two seams (the engine stays product-agnostic — it names NO family's
+        unit): (1) the per-unit floor is judged in the deliverable's OWN native unit,
+        whatever the family counts. The spec's ``size_unit`` is an OPTIONAL assertion;
+        left unset it just rides the digest's unit. Only when the spec asserts a unit
+        that DIFFERS from the digest's does the engine skip + log (the author expected a
+        measure this family doesn't produce — no cross-unit arithmetic). (2)
+        ``expected_count`` is NOT fed here — a dropped unit is already an
+        assembly-incompleteness, and a clean fan-out-N (vs the bound deliverable's
+        part_count, which excludes the assembly step) is a later refinement; feeding
+        cardinality (e.g. a ``fixed:9`` JT vs 8 bound parts) would false-fail every
+        correct fan-out."""
+        from modulatio import assembly as _assembly
+
+        spec = self._deliverable_spec
+        if spec.is_empty():
+            return []
+        floor = spec.part_floor
+        if floor is not None:
+            su = (spec.size_unit or "").strip().lower()
+            du = (getattr(digest, "part_size_unit", "") or "").strip().lower()
+            if su and su != du:
+                _logger.info(
+                    "deliverable-spec floor asserts unit %r but the digest measures %r "
+                    "— skipping the per-unit floor check (no cross-unit arithmetic)",
+                    su, du,
+                )
+                floor = None
+        return _assembly.check_deliverable(
+            digest, expected_count=None, part_floor=floor,
+            required_structure=spec.required_structure,
+        )
 
     def _record_recommendations(self, goal: Goal, raw, summary: RunSummary) -> None:
         """Fold the Leader's reservations for ``goal`` into the run's
