@@ -168,6 +168,19 @@ def test_legacy_no_schema_jt_still_binds(env):
     assert o._jt_refusal is None
 
 
+def test_cron_refused_bind_skips_the_slot(env):
+    """R2 (Hero): a refused explicit bind under on_refused='skip' (the cron default)
+    SKIPS the slot — no greenfield substitute runs, the refused template name is
+    recorded for the visible gap, and the run does not decompose any goals."""
+    _make_jt(name="brief", schema=(jt.ParamField(name="topic", required=True),))
+    o, pr = _orch(env)
+    summary = o.kickoff(pr.objective, bound_jt_name="brief", bound_jt_params={"topic": ""},
+                        on_refused="skip")
+    assert summary.skipped_refused_jt == "brief"
+    assert summary.goals == []                       # skipped before decompose
+    assert o._bound_jt is None
+
+
 def test_refused_bind_renders_derive_prompt_in_block(env):
     """The converse surface: a refused bind surfaces a 'derive a fitting one' block
     (the third _job_template_block state), naming the template + the reason."""

@@ -995,6 +995,7 @@ def heartbeat_run_once(
     def _dispatch(
         project_code: str, objective: str, *,
         jt_id: str | None = None, jt_params: dict | None = None,
+        on_refused: str = "skip",
     ) -> str:
         # Build the same Orchestrator stack kickoff() uses.
         if stub:
@@ -1024,7 +1025,10 @@ def heartbeat_run_once(
             wiki_path=str(wiki),
         )
         orch = Orchestrator(project, runners, semantic_matcher=matcher)
-        summary = orch.kickoff(objective, bound_jt_name=jt_id, bound_jt_params=jt_params)
+        summary = orch.kickoff(objective, bound_jt_name=jt_id, bound_jt_params=jt_params,
+                               on_refused=on_refused)
+        if summary.skipped_refused_jt:
+            return f"skipped: job template {summary.skipped_refused_jt!r} refused (doesn't fit) — slot skipped"
         return f"goals={len(summary.goals)} tasks={len(summary.tasks)} drafts={len(summary.drafts)}"
 
     hb = heartbeat.Heartbeat(dispatch_callback=_dispatch)

@@ -233,6 +233,11 @@ class RunSummary:
     withheld_deliverables: list[str] = field(default_factory=list)
     #: §2 — the rendered Product Quality Report (always ships, advisory), or None.
     product_quality_report: object = None
+    #: #97 R2 — when an explicit/cron bind was REFUSED by the fit-gate and the
+    #: caller's policy is skip-the-slot (the cron default), the slot is skipped:
+    #: no greenfield substitute runs, this records the refused template name so the
+    #: pipeline/operator sees the visible gap. None on a normal (or greenfield) run.
+    skipped_refused_jt: str | None = None
 
 
 # ── Core rebuild B3: isolated-worker result + deterministic merge ───────
@@ -10380,6 +10385,7 @@ class Orchestrator:
         bound_jt_name: str | None = None,
         bound_jt_params: dict | None = None,
         ask_operator: "Callable[[str], str] | None" = None,
+        on_refused: str = "greenfield",
     ) -> RunSummary:
         # Alpha (F1): bind Layer 1 (tool_summarization) + Layer 2
         # (context_budget) configs for the duration of the kickoff so
@@ -10406,6 +10412,7 @@ class Orchestrator:
                     bound_jt_name=bound_jt_name,
                     bound_jt_params=bound_jt_params,
                     ask_operator=ask_operator,
+                    on_refused=on_refused,
                 )
         finally:
             self._kickoff_active = False
@@ -10624,6 +10631,7 @@ class Orchestrator:
         bound_jt_name: str | None = None,
         bound_jt_params: dict | None = None,
         ask_operator: "Callable[[str], str] | None" = None,
+        on_refused: str = "greenfield",
     ) -> RunSummary:
         summary = RunSummary(project=self.project)
         self._emit_activity(
@@ -10639,6 +10647,22 @@ class Orchestrator:
             bound_jt_params=bound_jt_params, ask_operator=ask_operator,
             summary=summary,
         )
+        # #97 R2 — skip-the-slot: when an explicit/cron bind was REFUSED by the
+        # fit-gate and the caller's policy is "skip" (the cron default), do NOT
+        # run a greenfield substitute. A refused cron bind is a persistent config
+        # drift; improvising unsupervised every cycle is a soft re-wedge. Record
+        # the refused template (the visible gap) and return — the pipeline moves
+        # to its next slot, never crashing, never gating. Non-cron callers default
+        # to "greenfield" (one-off / interactive prefer continuity; the refusal
+        # block surfaces to the Leader instead).
+        if self._jt_refusal is not None and on_refused == "skip":
+            summary.skipped_refused_jt = self._jt_refusal.get("name")
+            self._emit_activity(
+                role="orchestrator",
+                phase=f"jt_slot_skipped:{summary.skipped_refused_jt}",
+                agent_id="orchestrator",
+            )
+            return summary
         # Iteration: pin any --attach'd files into the workspace BEFORE
         # decompose so the contract + the files are live for every downstream
         # prompt (decompose, task-plan, producer).

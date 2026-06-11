@@ -156,6 +156,38 @@ def test_orchestrator_runs_end_to_end(project: Project):
         assert len(d.read_text().split()) >= 200
 
 
+def test_refused_cron_bind_greenfields_by_default_but_skips_when_asked(project: Project, monkeypatch):
+    """#97 R2: a refused explicit bind under the DEFAULT policy (greenfield) does NOT
+    skip — it runs the objective greenfield (goals produced, skipped_refused_jt None).
+    The same refusal under on_refused='skip' (the cron default) skips the slot instead.
+    Locks that the default is greenfield (one-off/interactive continuity), not skip."""
+    from modulatio import job_templates as jt
+    monkeypatch.setattr(jt, "_JT_ROOT", project_tmp := (Path(project.wiki_path).parent / "jts"))
+    jt.create_job_template(
+        name="needs-topic", description="d", interview_body="b",
+        param_schema=(jt.ParamField(name="topic", required=True),),
+    )
+    runners = {
+        "leader": _leader_stub, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    # default policy → greenfield: refused bind, but the objective still runs
+    orch = Orchestrator(project, runners)
+    summary = orch.kickoff("Draft 3 essays on a chosen theme",
+                           bound_jt_name="needs-topic", bound_jt_params={"topic": ""})
+    assert summary.skipped_refused_jt is None
+    assert orch._bound_jt is None and orch._jt_refusal is not None
+    assert len(summary.goals) >= 1            # greenfielded — work proceeded
+
+    # skip policy → the slot is skipped, no goals
+    orch2 = Orchestrator(project, runners)
+    summary2 = orch2.kickoff("Draft 3 essays on a chosen theme",
+                             bound_jt_name="needs-topic", bound_jt_params={"topic": ""},
+                             on_refused="skip")
+    assert summary2.skipped_refused_jt == "needs-topic"
+    assert summary2.goals == []
+
+
 def test_orchestrator_marks_task_rejected_when_qc_fails(project: Project, monkeypatch):
     monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the rejection terminal
 
