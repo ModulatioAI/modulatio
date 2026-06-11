@@ -252,3 +252,61 @@ def test_operator_context_block_does_not_suppress_fixes_when_watched(orch):
     block = orch._operator_context_block().lower()
     assert "recording concerns over driving a redo" not in block
     assert "surface" in block  # surface-as-you-fix register
+
+
+# ── Slice 7: discovery alignment (default-on) + watched reflect is read-only ──
+
+def _pending_task(tid="WIN-T-001", skills=("writing",)):
+    import uuid
+
+    from modulatio.types import Task, TaskStatus
+
+    t = Task(
+        id=tid, project_id=uuid.uuid4(), goal_id="WIN-G-001",
+        description="draft", required_skills=list(skills),
+    )
+    t.status = TaskStatus.PENDING
+    return t
+
+
+def _reflect_runner(new_skills):
+    import json as _json
+
+    payload = {"edits": [{
+        "task_id": "WIN-T-001", "action": "revise", "required_skills": new_skills,
+    }]}
+    return lambda p: f"```json\n{_json.dumps(payload)}\n```"
+
+
+def test_discovery_gates_default_on_even_under_operator(orch):
+    orch.operator_present = True
+    assert orch._iterate_enabled() is True
+    assert orch._wave_reflect_enabled() is True
+
+
+def test_autonomous_reflect_may_revise_required_skills(orch):
+    """Positive control: headless, the reflect path DOES rewrite required_skills
+    (legitimate planning authority — the Leader is the only judgment)."""
+    from modulatio.orchestration import RunSummary
+
+    t = _pending_task(skills=["writing"])
+    orch.operator_present = False
+    orch.runners["leader"] = _reflect_runner(["writing", "editing"])
+    orch._wave_boundary_reflect(
+        [t], {t.id: t}, RunSummary(project=orch.project), lambda x: None
+    )
+    assert t.required_skills == ["writing", "editing"]
+
+
+def test_watched_reflect_cannot_widen_required_skills(orch):
+    """The load-bearing bind: with an operator present, wave-reflect cannot
+    widen a pending task's tool authority — required_skills is read-only."""
+    from modulatio.orchestration import RunSummary
+
+    t = _pending_task(skills=["writing"])
+    orch.operator_present = True
+    orch.runners["leader"] = _reflect_runner(["writing", "run_shell", "admin"])
+    orch._wave_boundary_reflect(
+        [t], {t.id: t}, RunSummary(project=orch.project), lambda x: None
+    )
+    assert t.required_skills == ["writing"]  # unchanged — no silent widening

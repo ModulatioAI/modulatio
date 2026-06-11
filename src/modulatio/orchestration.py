@@ -6411,31 +6411,27 @@ class Orchestrator:
         return True  # no project → default ON
 
     def _iterate_enabled(self) -> bool:
-        """Brick C: the between-task iterate gate. Runs by DEFAULT when the
-        run is autonomous (the Leader is the only judgment past QC); stays
-        opt-in via ``MODULATIO_LEADER_ITERATE=1`` when an operator is present.
-        The env var is an explicit force-on override in either mode. Mirrors
-        ``_wave_reflect_enabled``."""
-        return (
-            os.environ.get("MODULATIO_LEADER_ITERATE") == "1"
-            or self._autonomous()
-        )
+        """The between-task iterate gate. #80 slice 7 (Q5 alignment): runs by
+        DEFAULT regardless of operator presence — presence governs VISIBILITY,
+        not whether the Leader discovers fixable concerns. (Pre-#80 this was
+        gated on ``_autonomous()``, which leaked presence into the fix-rate via
+        the discovery-rate.) Watched runs surface their self-correction; they
+        no longer suppress it. Mirrors ``_wave_reflect_enabled``."""
+        return True
 
     def _wave_reflect_enabled(self) -> bool:
         """#151: wave-boundary reflection. After a committed wave merge, the
         Leader may revise/drop ONLY not-yet-dispatched (PENDING) tasks —
         future-wave edits only, never mid-wave mutation (design decision 5).
 
-        Brick C: presence-aware default, mirroring the between-task iterate.
-        When autonomous the Leader is the only judgment past QC, so the
-        reflection runs by default; with an operator present it stays opt-in.
-        ``MODULATIO_WAVE_REFLECT=1`` remains an explicit force-on override in
-        either mode. It rides inside the (off-by-default) concurrent-wave
-        path, so its blast radius stays bounded by that flag regardless."""
-        return (
-            os.environ.get("MODULATIO_WAVE_REFLECT") == "1"
-            or self._autonomous()
-        )
+        #80 slice 7 (Q5 alignment): runs by DEFAULT regardless of operator
+        presence — discovery-rate no longer depends on who is watching. With an
+        operator present the reflection is READ-ONLY with respect to tool
+        authority (it may re-describe and drop pending tasks, but never widen
+        their ``required_skills``; see the revise handler). It rides inside the
+        (off-by-default) concurrent-wave path, so its blast radius stays bounded
+        by that flag regardless."""
+        return True
 
     def _skill_floor_for(self, skill_name: str) -> tuple[str, ...]:
         """Slice #9b skill capability floor, instance-cached. Shared by the
@@ -7018,7 +7014,16 @@ class Orchestrator:
                     t.description = new_desc.strip()
                     changed.append("description")
                 new_skills = edit.get("required_skills")
-                if isinstance(new_skills, list) and all(isinstance(s, str) for s in new_skills):
+                # #80 slice 7: with an operator present, wave-reflect is
+                # READ-ONLY re: tool authority — it may re-describe and drop, but
+                # NEVER widen a pending task's required_skills (which feeds
+                # _task_tool_loadout). Authority-widening re-planning belongs to
+                # the operator-asked surface, not a silent reflection pass.
+                if (
+                    not self.operator_present
+                    and isinstance(new_skills, list)
+                    and all(isinstance(s, str) for s in new_skills)
+                ):
                     t.required_skills = new_skills
                     changed.append("required_skills")
                 if changed:
@@ -7029,6 +7034,14 @@ class Orchestrator:
                         rationale=f"wave-boundary reflection revised {', '.join(changed)}",
                     ))
                     save_task(t)
+                    # Surface the plan move to a watching partner (distinct from
+                    # leader_self_fix — this is plan-shaping, not fixing).
+                    if self.operator_present:
+                        self._emit_activity(
+                            role="leader", phase="plan_reflect_revise",
+                            agent_id="leader",
+                            detail={"task_id": t.id, "changed": changed},
+                        )
             # action == "keep" (or unknown) → no-op
 
     def _run_task_with_redo(

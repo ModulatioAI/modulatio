@@ -389,28 +389,30 @@ def _make_two_task_project(tmp_path, monkeypatch):
     )
 
 
-def test_iterate_skips_when_operator_present_and_env_unset(
+def test_iterate_fires_when_operator_present_and_env_unset(
     tmp_path, monkeypatch,
 ) -> None:
-    """Brick C: with an operator PRESENT and MODULATIO_LEADER_ITERATE
-    unset, _leader_iterate stays OFF — the human is the live judgment,
-    so the Leader doesn't self-revise under them. (Pre-Brick-C this was
-    the default for ALL runs; now it's the operator-present case only.)"""
+    """#80 slice 7 (Q5 alignment): with an operator PRESENT and
+    MODULATIO_LEADER_ITERATE unset, _leader_iterate now FIRES by default —
+    presence governs visibility, not discovery-rate. (Pre-#80 it was suppressed
+    under a watching operator, which leaked presence into the fix-rate; the
+    watched-run authority-widening is bound separately, not by skipping
+    discovery.)"""
     monkeypatch.delenv("MODULATIO_LEADER_ITERATE", raising=False)
     project = _make_two_task_project(tmp_path, monkeypatch)
     runners = _two_task_kickoff_runners()
     orch = orchestration.Orchestrator(project, runners, operator_present=True)
 
     calls: list = []
-    real = orch._leader_iterate
 
-    def _spy(*args, **kwargs):
-        calls.append(args)
-        return real(*args, **kwargs)
+    def _spy(goal, all_tasks, next_task):  # type: ignore[no-untyped-def]
+        calls.append(next_task.id)
+        return None  # parse-fail path → orchestrator default-continues
 
     monkeypatch.setattr(orch, "_leader_iterate", _spy)
     orch.kickoff("two-task goal")
-    assert calls == []
+    # 2 tasks → 1 between-task reflection → fires once even under an operator.
+    assert len(calls) == 1
 
 
 def test_iterate_fires_when_autonomous_and_env_unset(
