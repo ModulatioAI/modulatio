@@ -10525,6 +10525,17 @@ class Orchestrator:
         jt = self._bound_jt
         if jt is not None:
             return self._output_contract_text(jt, self._bound_jt_params)
+        if self._jt_refusal is not None:
+            name = self._jt_refusal.get("name", "")
+            reason = self._jt_refusal.get("reason", "")
+            return (
+                "\n\n# JOB TEMPLATE — the bound template was REFUSED (derive a fitting one)\n"
+                f"The template `{name}` was refused for this job because it doesn't fit: "
+                f"{reason}. The engine did NOT run the ill-fitting template. **Derive a "
+                "fitting one** — use the create-JT interview to capture the right "
+                "parameters (which are required, their type/enum/default) and save it "
+                "alongside the old, then proceed with that. Do not force the near-miss.\n"
+            )
         if self._jt_candidates:
             lines = "\n".join(f"- `{n}` — {d}" for n, d in self._jt_candidates)
             return (

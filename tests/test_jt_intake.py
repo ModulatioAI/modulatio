@@ -168,6 +168,18 @@ def test_legacy_no_schema_jt_still_binds(env):
     assert o._jt_refusal is None
 
 
+def test_refused_bind_renders_derive_prompt_in_block(env):
+    """The converse surface: a refused bind surfaces a 'derive a fitting one' block
+    (the third _job_template_block state), naming the template + the reason."""
+    _make_jt(name="brief", schema=(jt.ParamField(name="topic", required=True),))
+    o, pr = _orch(env)
+    _resolve(o, pr, bound_jt_name="brief")  # headless, topic missing → refused
+    block = o._job_template_block()
+    assert "brief" in block
+    assert "refused" in block.lower() or "doesn't fit" in block.lower()
+    assert "derive" in block.lower()
+
+
 # ── greenfield (no JT) stays byte-identical ───────────────────────────────
 
 
