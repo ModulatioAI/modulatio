@@ -8274,10 +8274,22 @@ class Orchestrator:
                 and goal.retry_count >= 1
                 and self._goal_redo_fingerprints.get(goal.id) == fingerprint
             )
+            # #80 slices 2/3: the typed remediation gate. The model DECLARES whether
+            # this is fixable-in-scope (revise_in_place) or needs the operator (defer);
+            # the engine validates by enum + target identity (validate_remediation) and
+            # binds. A MEASURED HARD violation (goal_spec_issues) is the engine's call
+            # and always drives the fix path regardless of the model's declaration — the
+            # model cannot defer what the engine measured. A pure FITNESS gap honors the
+            # declaration: revise_in_place → redo, defer → a named reservation (no redo).
+            remediation = validate_remediation(data, {t.id for t in tasks})
             can_redo = (
                 goal.retry_count < goal.max_retries
                 and not stalled
                 and not deadlocked
+                and (
+                    bool(goal_spec_issues)
+                    or remediation.action is RemediationAction.REVISE_IN_PLACE
+                )
             )
             if can_redo:
                 # Remember what we're handing the producers, so a no-progress
@@ -8317,6 +8329,25 @@ class Orchestrator:
                     f"leader: WITHHELD — {len(goal_spec_issues)} measured HARD "
                     f"violation(s) after {goal.retry_count} attempt(s): "
                     f"{rationale} | report {report_path.name}"
+                )
+            elif remediation.action is RemediationAction.DEFER:
+                # #80 slices 2/3: the model declared this concern is NOT a
+                # fixable-in-scope shape (or its declaration failed validation) — it
+                # defers to the operator rather than self-fixing. Record it NAMED and
+                # ship (no redo). `rejected` distinguishes an engine-rejected
+                # declaration from a model-chosen defer in the audit trail.
+                reason = remediation.rejected or remediation.reason_code or "deferred"
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        f"Leader deferred this concern to the operator ({reason}) "
+                        "rather than self-fixing — not a fixable-in-scope remediation."
+                    ),
+                    "suggestion": f"Review and decide — {rationale}",
+                })
+                rationale_text = (
+                    f"leader: deferred to operator ({reason}): {rationale} "
+                    f"| report {report_path.name}"
                 )
             elif stalled:
                 summary.recommendations.append({
@@ -10952,10 +10983,25 @@ Respond with a fenced ```json ... ``` block with exactly these keys:
         {{"concern": "<what you don't fully trust / couldn't verify>",
           "suggestion": "<the specific check you'd advise the human to run>"}}
       ],
-      "report_body": "<your human-facing assessment of the finished product, 150-400 words>"
+      "report_body": "<your human-facing assessment of the finished product, 150-400 words>",
+      "remediation": {{
+        "action": "revise_in_place" | "defer",
+        "reason_code": "fixable_goal_gap" | "missing_required_content" | "off_brief_content" | "needs_operator_authority" | "ambiguous_brief" | "outside_run_scope",
+        "window_requested": false
+      }}
     }}
 
-"recommendations" may be empty []. report_body and recommendations are
+On a "disappointed" verdict, declare a "remediation": choose "revise_in_place"
+(reason_code one of fixable_goal_gap / missing_required_content / off_brief_content)
+when the team can fix it by revising the existing work — this drives an in-place
+redo. Choose "defer" (reason_code one of needs_operator_authority / ambiguous_brief
+/ outside_run_scope) only when the concern genuinely needs the operator and is NOT
+something the team can fix within this run — this records a reservation, no redo.
+Set "window_requested": true ONLY on the rare, exceptional fix where a watching
+operator should get a brief veto window before you proceed; default false. Omit
+"remediation" entirely to mean the ordinary revise-in-place. "recommendations" is
+separate (advisory notes). "recommendations" may be empty []. report_body and
+recommendations are
 the Leader's contribution to the **Product Quality Report** that ships to
 the human beside the deliverables — be specific about what was delivered,
 what you stand behind, and what you'd have the human double-check.

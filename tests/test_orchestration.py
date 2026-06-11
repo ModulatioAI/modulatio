@@ -9180,6 +9180,35 @@ def test_leader_verify_withholds_on_hard_violation_at_exhaustion(tmp_path, monke
     assert any("WITHHELD" in r["concern"] for r in summary.recommendations)
 
 
+def test_leader_verify_defer_remediation_records_reservation_no_redo(project):
+    """#80 slices 2/3: a disappointed verdict whose declared remediation is `defer`
+    (the model judged it needs the operator, not a fixable-in-scope shape) records a
+    NAMED reservation and ships — it does NOT self-redo."""
+    def leader_defer(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return (
+                '```json\n{"verdict":"disappointed","rationale":"needs a paid API key",'
+                '"report_body":"r","remediation":{"action":"defer",'
+                '"reason_code":"needs_operator_authority"}}\n```'
+            )
+        return _leader_stub(prompt)
+
+    runners = {
+        "leader": leader_defer, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    orch = Orchestrator(project, runners)
+    summary = orch.kickoff("defer-me")
+
+    goals = store.list_goals(PROJECT_CODE)
+    assert goals[0].status == GoalStatus.COMPLETED
+    assert goals[0].retry_count == 0  # NO redo — the Leader deferred
+    assert any(
+        "deferred" in r["concern"].lower() and "operator" in r["concern"].lower()
+        for r in summary.recommendations
+    )
+
+
 def test_empty_deliverable_spec_surfaces_nothing(tmp_path, monkeypatch):
     """B.2 must not over-fire: with NO declared spec (today's default), the verifier sees
     the digest but no DECLARED-SPEC CHECK block — behavior is unchanged."""
