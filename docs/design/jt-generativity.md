@@ -1,9 +1,10 @@
 # JT generativity — derive-don't-wedge (#97)
 
 **Status:** DESIGN, held local on `arc/jt-generativity` (2026-06-11). Not built. **Lovecraft
-(coherence): SIGN-OFF.** **Nemo (hull) round-1: BLOCK — 5 holes, all remediated below** (pending
-his scoped round-2 close-out). Then TDD, then a full-code review. Branch held local; merge =
-Clif. Plan-approved.
+(coherence): SIGN-OFF.** **Nemo (hull): round-1 BLOCK — 5 holes — → round-2 SIGN-OFF** (all five
+sealed against the `370d41b` seams). **Hero (hull): letter out, awaiting reply** (esp. Q5 —
+refused bind in an ordered cron pipeline: greenfield-with-reservation vs halt-the-pipeline). Then
+TDD, then a full-code review. Branch held local; merge = Clif. Plan-approved.
 
 ## What this is, and what grounding corrected
 
