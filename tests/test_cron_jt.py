@@ -103,7 +103,7 @@ def test_heartbeat_passes_jt_kwargs_to_callback():
                        jt_id="daily-essay", jt_params={"theme": "stoicism"})
     seen = {}
 
-    def cb(pc, obj, *, jt_id=None, jt_params=None):
+    def cb(pc, obj, *, jt_id=None, jt_params=None, on_refused=None):
         seen.update(pc=pc, obj=obj, jt_id=jt_id, jt_params=jt_params)
         return "ok"
 
@@ -111,6 +111,60 @@ def test_heartbeat_passes_jt_kwargs_to_callback():
     task = next(t for t in heartbeat.list_tasks() if t["description"] == "jtcron")
     hb._run_task(task)
     assert seen["jt_id"] == "daily-essay" and seen["jt_params"] == {"theme": "stoicism"}
+
+
+def test_heartbeat_passes_on_refused_skip_default_for_jt_tasks():
+    """#97 R2: a JT-bound (cron) task dispatches with on_refused='skip' by default —
+    a refused bind skips the slot rather than improvising greenfield every cycle."""
+    heartbeat.add_task(description="jtskip", project_code="PHI", objective="o",
+                       jt_id="daily-essay", jt_params={"theme": "stoicism"})
+    seen = {}
+
+    def cb(pc, obj, *, jt_id=None, jt_params=None, on_refused="greenfield"):
+        seen["on_refused"] = on_refused
+        return "ok"
+
+    hb = heartbeat.Heartbeat(dispatch_callback=cb)
+    task = next(t for t in heartbeat.list_tasks() if t["description"] == "jtskip")
+    hb._run_task(task)
+    assert seen["on_refused"] == "skip"
+
+
+def test_heartbeat_passes_on_refused_override_when_set():
+    """Clif's named decision: a cron may opt a slot back into greenfield-on-refusal."""
+    heartbeat.add_task(description="jtgreen", project_code="PHI", objective="o",
+                       jt_id="daily-essay", jt_params={"theme": "stoicism"},
+                       on_refused="greenfield")
+    seen = {}
+
+    def cb(pc, obj, *, jt_id=None, jt_params=None, on_refused="skip"):
+        seen["on_refused"] = on_refused
+        return "ok"
+
+    hb = heartbeat.Heartbeat(dispatch_callback=cb)
+    task = next(t for t in heartbeat.list_tasks() if t["description"] == "jtgreen")
+    hb._run_task(task)
+    assert seen["on_refused"] == "greenfield"
+
+
+def test_run_now_round_trips_on_refused_override(monkeypatch):
+    """Nemo code-hull BLOCKER 2: manual cron run-now must carry the stored on_refused
+    override, exactly like scheduled dispatch — else a 'greenfield' cron behaves
+    differently under run-now (a policy fork). Assert the enqueued task carries it."""
+    _make_jt("daily-essay", required=())
+    job = cron.add(name="nightly", schedule="daily 09:00", project_code="PHI",
+                   objective="o", jt_id="daily-essay", jt_params={"theme": "x"},
+                   on_refused="greenfield")
+    captured = {}
+    real_add = heartbeat.add_task
+
+    def spy(**kw):
+        captured.update(kw)
+        return real_add(**kw)
+
+    monkeypatch.setattr(heartbeat, "add_task", spy)
+    cron.run_now(job["id"])
+    assert captured.get("on_refused") == "greenfield"
 
 
 def test_recurring_heartbeat_task_preserves_jt_binding():

@@ -197,6 +197,65 @@ def test_missing_required_lists_absent_required_params():
     assert t.missing_required({"a": 1, "b": None}) == ["b"]  # None counts as absent
 
 
+def test_unfilled_required_is_strict_about_empty_values():
+    """#97: the fit-gate's required check. UNLIKE missing_required (absent/None only),
+    unfilled_required treats empty-string, whitespace-only, and (for list/per-driver
+    fields) empty-list as MISSING — an explicit cron bind of {"topic": ""} must not pass."""
+    t = jt.JobTemplate(
+        name="t", description="d", interview_body="b",
+        param_schema=(
+            jt.ParamField(name="topic", type="str", required=True),
+            jt.ParamField(name="competitors", type="list[str]", required=True),
+            jt.ParamField(name="lookback", type="int", required=False),
+        ),
+    )
+    # absent / None → missing (matches missing_required)
+    assert t.unfilled_required({}) == ["topic", "competitors"]
+    assert t.unfilled_required({"topic": None, "competitors": None}) == ["topic", "competitors"]
+    # empty / whitespace string → missing (the bypass missing_required allows)
+    assert t.unfilled_required({"topic": "", "competitors": ["x"]}) == ["topic"]
+    assert t.unfilled_required({"topic": "   ", "competitors": ["x"]}) == ["topic"]
+    # empty list for a list-typed required field → missing
+    assert t.unfilled_required({"topic": "ai", "competitors": []}) == ["competitors"]
+    # all filled, non-empty → nothing missing
+    assert t.unfilled_required({"topic": "ai", "competitors": ["x"]}) == []
+    # optional empties are fine — only REQUIRED fields are checked
+    assert t.unfilled_required({"topic": "ai", "competitors": ["x"], "lookback": ""}) == []
+
+
+def test_unfilled_required_empty_schema_is_back_compat():
+    """A legacy JT with no param_schema has nothing required → fit passes (no false-refuse)."""
+    t = jt.JobTemplate(name="legacy", description="d", interview_body="b")
+    assert t.unfilled_required({}) == []
+    assert t.unfilled_required({"anything": "here"}) == []
+
+
+def test_enum_violations_flags_out_of_contract_values():
+    """#97 R1 (Hero): a supplied value outside a declared non-empty enum is a
+    present-but-out-of-contract misfit. List/per-driver fields: any non-member item flags.
+    A field with no enum is unconstrained; a not-supplied field is the presence check's job."""
+    t = jt.JobTemplate(
+        name="t", description="d", interview_body="b",
+        param_schema=(
+            jt.ParamField(name="region", type="enum", enum=("NA", "EU", "APAC")),
+            jt.ParamField(name="zones", type="list[str]", enum=("a", "b", "c")),
+            jt.ParamField(name="freeform", type="str"),  # no enum → unconstrained
+        ),
+    )
+    # in-contract scalar + list → no violations
+    assert t.enum_violations({"region": "EU", "zones": ["a", "c"]}) == []
+    # out-of-contract scalar
+    assert t.enum_violations({"region": "Atlantis"}) == ["region"]
+    # any non-member item in a list field flags the field
+    assert t.enum_violations({"zones": ["a", "Atlantis"]}) == ["zones"]
+    # unconstrained field never flags
+    assert t.enum_violations({"freeform": "whatever"}) == []
+    # absent enum field is NOT an enum violation (presence-check owns absence)
+    assert t.enum_violations({}) == []
+    # empty-string against an enum is absence-shaped, left to the presence check, not flagged here
+    assert t.enum_violations({"region": ""}) == []
+
+
 # ── name-dedup hard guard ─────────────────────────────────────────────────
 
 

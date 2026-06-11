@@ -233,6 +233,16 @@ class RunSummary:
     withheld_deliverables: list[str] = field(default_factory=list)
     #: §2 — the rendered Product Quality Report (always ships, advisory), or None.
     product_quality_report: object = None
+    #: #97 R2 — when an explicit/cron bind was REFUSED by the fit-gate and the
+    #: caller's policy is skip-the-slot (the cron default), the slot is skipped:
+    #: no greenfield substitute runs, this records the refused template name so the
+    #: pipeline/operator sees the visible gap. None on a normal (or greenfield) run.
+    skipped_refused_jt: str | None = None
+    #: #97 Hero m1 — the WHY behind the skip (the fit-gate's reason, e.g. "missing
+    #: required parameter(s): topic"). A skipped cron slot recurs every cycle until a
+    #: human fixes it, so the reason is the single most useful debugging string; it
+    #: rides the skip surface (activity detail + dispatch result) alongside the name.
+    skipped_refused_reason: str | None = None
 
 
 # ── Core rebuild B3: isolated-worker result + deterministic merge ───────
@@ -1962,6 +1972,12 @@ class Orchestrator:
         #: Fuzzy JT matches surfaced to the Leader at intake as candidates it
         #: MAY choose (a nudge, not a bind) — ``(name, description)`` pairs.
         self._jt_candidates: list[tuple[str, str]] = []
+        #: #97 — an explicit/cron bind REFUSED by the fit-gate (the job can't fill
+        #: the template's required blanks / out-of-enum / empty per-driver). The
+        #: corrupt template never binds; this records the refusal so the converse
+        #: surface can offer to derive a fitting one and the cron runner can skip
+        #: the slot. ``{"name": <jt>, "reason": <why>}`` or None.
+        self._jt_refusal: "dict[str, str] | None" = None
         #: Per-role context-budget overrides supplied at the dispatcher
         #: entry point (CLI ``--ctx-budget``, daemon, TUI advanced
         #: settings). Keys are budget_role strings; values are
@@ -4663,13 +4679,15 @@ class Orchestrator:
         def create_job_template(
             name: str, description: str, interview: str,
             cardinality: str = "", artifact_kind: str = "document",
-            per: str = "", **_: object,
+            per: str = "", param_schema: object = None, **_: object,
         ) -> str:
             """Codify a recurring job as a reusable Job Template (project-local).
             ``interview`` is the prose the Leader uses to gather the job's params
             when the template is run. ``cardinality`` is the job's OUTPUT SHAPE —
             the one thing the engine fans out on; a multi-unit job left at "one"
-            COLLAPSES to a single task (the anthology-as-one-task bug)."""
+            COLLAPSES to a single task (the anthology-as-one-task bug). ``param_schema``
+            (#97) declares the job's variable inputs — which are REQUIRED, their type/
+            enum/default — so the fit-gate can refuse a bind this template can't run."""
             from modulatio.job_templates import OutputSpec
             # Normalize the cardinality to the engine's grammar — CASE-INSENSITIVE
             # and space-tolerant (Nemo hull #12: "Fixed:8" / "fixed: 8" must not slip
@@ -4716,11 +4734,12 @@ class Orchestrator:
                 cardinality=card, per=per_field,
                 artifact_kind=(str(artifact_kind).strip() or "document"),
             )
+            fields = self._jt_paramfields_from_spec(param_schema)
             try:
                 _jt.create_job_template(
                     name=str(name), description=str(description),
                     interview_body=str(interview), output_spec=spec,
-                    project_code=self.project.code,
+                    param_schema=fields, project_code=self.project.code,
                 )
             except FileExistsError:
                 return (f"A job template named {name!r} already exists — pick a "
@@ -4968,6 +4987,32 @@ class Orchestrator:
                                 "For cardinality 'per-item': the list param whose "
                                 "values each yield one deliverable."
                             ),
+                        },
+                        "param_schema": {
+                            "type": "array",
+                            "description": (
+                                "The job's variable inputs (the fill-in-the-blanks). "
+                                "Each item: {name, type ('str'|'int'|'list[str]'|'enum'"
+                                "|'bool'), required (bool — mark the blanks a run CANNOT "
+                                "proceed without), default, enum (allowed values when "
+                                "type='enum'), prompt (the question to ask the operator)}. "
+                                "Declaring required params is what lets the engine REFUSE "
+                                "a future bind that can't fill them, instead of mis-running "
+                                "the template. For 'per-item', include the 'per' list param "
+                                "here and mark it required."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "type": {"type": "string"},
+                                    "required": {"type": "boolean"},
+                                    "default": {},
+                                    "enum": {"type": "array", "items": {"type": "string"}},
+                                    "prompt": {"type": "string"},
+                                },
+                                "required": ["name"],
+                            },
                         },
                     },
                     "required": ["name", "description", "interview", "cardinality"],
@@ -9120,6 +9165,7 @@ class Orchestrator:
         self._bound_jt_params = {}
         self._deliverable_spec = DeliverableSpec()
         self._jt_candidates = []
+        self._jt_refusal = None
         try:
             if bound_jt_name:
                 cand = job_template_library.checkout(bound_jt_name, self.project.code)
@@ -9145,6 +9191,41 @@ class Orchestrator:
             self._bound_jt_params = {}
             self._deliverable_spec = DeliverableSpec()
             self._jt_candidates = []
+            self._jt_refusal = None
+
+    @staticmethod
+    def _jt_fit(jt: JobTemplate, params: dict) -> tuple[bool, str]:
+        """#97 — the mechanical-fit gate. A pure boolean over ``jt + params``
+        (no similarity scalar, no objective-prose inference): can this job
+        actually fill this template's required blanks? Three checks, all read
+        only declaration + supplied value on the bind path:
+
+        - **required-presence** (strict, ``unfilled_required``): every required
+          param supplied AND non-empty (catches the ``""`` / ``[]`` bypass);
+        - **enum conformance** (Hero R1, ``enum_violations``): every supplied
+          value within its declared ``enum``;
+        - **per-driver shape**: a ``per-item`` JT's fan-out driver param is a
+          present, non-empty list (the only shape fact derivable here).
+
+        Returns ``(ok, reason)``; ``reason`` names the misfit for the refusal.
+        A legacy JT with no ``param_schema`` has nothing required → fit passes
+        (back-compat). TOTAL over its inputs (Nemo code-hull BLOCKER 1): a
+        non-mapping ``params`` is itself a malformed bind → a clean misfit, never
+        an exception that escapes into the best-effort reset and loses the refusal."""
+        if not isinstance(params, dict):
+            return False, "bind parameters are malformed (expected a mapping of name→value)"
+        unfilled = jt.unfilled_required(params)
+        if unfilled:
+            return False, f"missing required parameter(s): {', '.join(unfilled)}"
+        out_of_enum = jt.enum_violations(params)
+        if out_of_enum:
+            return False, f"parameter(s) outside their allowed values: {', '.join(out_of_enum)}"
+        spec = jt.output_spec
+        if spec.cardinality == "per-item" and spec.per:
+            driver = params.get(spec.per)
+            if not isinstance(driver, (list, tuple)) or len(driver) == 0:
+                return False, f"per-item driver parameter '{spec.per}' is empty"
+        return True, ""
 
     def _bind_job_template(
         self,
@@ -9155,8 +9236,45 @@ class Orchestrator:
     ) -> None:
         """Bind a JT the operator explicitly chose: interview-or-default its
         params, name the output folder, record it, and surface any unmet HARD
-        (required) setup answer as an honest PQR reservation. Never blocks."""
-        params = self._run_jt_interview(jt, bound_params, ask_operator)
+        (required) setup answer as an honest PQR reservation. Never blocks.
+
+        #97 Decision B: the bind is GATED — if the resolved params can't
+        mechanically fill the template (:meth:`_jt_fit`), the corrupt template
+        is REFUSED (``_bound_jt`` stays None, ``_jt_refusal`` records why) and
+        we return without binding, so the run derives/skips rather than
+        mis-running a wedge every cycle.
+
+        Nemo code-hull BLOCKER 1: a malformed (non-mapping) ``bound_params`` is
+        gated BEFORE the interview — it can't be interviewed or fit-checked, so we
+        refuse it cleanly here rather than letting an ``AttributeError`` escape
+        into ``_resolve_job_template``'s best-effort catch (which would reset
+        ``_jt_refusal`` to None and let a malformed cron silently greenfield).
+        Well-formed params are fit-checked AFTER the interview so the JT's own
+        defaults count toward filling required blanks."""
+        if isinstance(bound_params, dict):
+            params = self._run_jt_interview(jt, bound_params, ask_operator)
+            ok, reason = self._jt_fit(jt, params)
+        else:
+            params = {}
+            ok = False
+            reason = "bind parameters are malformed (expected a mapping of name→value)"
+        if not ok:
+            self._jt_refusal = {"name": jt.name, "reason": reason}
+            self._emit_activity(
+                role="leader", phase=f"jt_bind_refused:{jt.name}", agent_id="leader",
+            )
+            summary.recommendations.append({
+                "goal_id": "",
+                "concern": (
+                    f"Job template '{jt.name}' was refused — it doesn't fit this "
+                    f"job: {reason}."
+                ),
+                "suggestion": (
+                    "Derive a fitting template (the create-JT interview), or fix the "
+                    "bind's parameters; the engine did not run the ill-fitting template."
+                ),
+            })
+            return
         self._bound_jt = jt
         self._bound_jt_params = params
         self._deliverable_spec = jt.deliverable_spec  # #101 C.0: bind the declared spec
@@ -9196,9 +9314,14 @@ class Orchestrator:
         JT's setup questions. When present (interactive *refresh*), each
         not-pre-bound param's ``prompt`` is asked and the answer overrides the
         default. When absent (headless / cron *run-as-always*), the defaults
-        stand and nothing is asked. A broken callback can't break a run."""
+        stand and nothing is asked. A broken callback can't break a run.
+
+        Defensive (belt for Nemo BLOCKER 1): a non-mapping ``provided`` is treated
+        as no pre-binds rather than throwing — the gate already refuses a malformed
+        bind upstream, but the interview never crashes on weird input."""
+        provided = provided if isinstance(provided, dict) else {}
         params = dict(jt.defaults())
-        params.update({k: v for k, v in (provided or {}).items() if v is not None})
+        params.update({k: v for k, v in provided.items() if v is not None})
         if ask_operator is None:
             return params
         for pf in jt.param_schema:
@@ -10289,6 +10412,7 @@ class Orchestrator:
         bound_jt_name: str | None = None,
         bound_jt_params: dict | None = None,
         ask_operator: "Callable[[str], str] | None" = None,
+        on_refused: str = "greenfield",
     ) -> RunSummary:
         # Alpha (F1): bind Layer 1 (tool_summarization) + Layer 2
         # (context_budget) configs for the duration of the kickoff so
@@ -10315,6 +10439,7 @@ class Orchestrator:
                     bound_jt_name=bound_jt_name,
                     bound_jt_params=bound_jt_params,
                     ask_operator=ask_operator,
+                    on_refused=on_refused,
                 )
         finally:
             self._kickoff_active = False
@@ -10434,6 +10559,17 @@ class Orchestrator:
         jt = self._bound_jt
         if jt is not None:
             return self._output_contract_text(jt, self._bound_jt_params)
+        if self._jt_refusal is not None:
+            name = self._jt_refusal.get("name", "")
+            reason = self._jt_refusal.get("reason", "")
+            return (
+                "\n\n# JOB TEMPLATE — the bound template was REFUSED (derive a fitting one)\n"
+                f"The template `{name}` was refused for this job because it doesn't fit: "
+                f"{reason}. The engine did NOT run the ill-fitting template. **Derive a "
+                "fitting one** — use the create-JT interview to capture the right "
+                "parameters (which are required, their type/enum/default) and save it "
+                "alongside the old, then proceed with that. Do not force the near-miss.\n"
+            )
         if self._jt_candidates:
             lines = "\n".join(f"- `{n}` — {d}" for n, d in self._jt_candidates)
             return (
@@ -10522,6 +10658,7 @@ class Orchestrator:
         bound_jt_name: str | None = None,
         bound_jt_params: dict | None = None,
         ask_operator: "Callable[[str], str] | None" = None,
+        on_refused: str = "greenfield",
     ) -> RunSummary:
         summary = RunSummary(project=self.project)
         self._emit_activity(
@@ -10537,6 +10674,24 @@ class Orchestrator:
             bound_jt_params=bound_jt_params, ask_operator=ask_operator,
             summary=summary,
         )
+        # #97 R2 — skip-the-slot: when an explicit/cron bind was REFUSED by the
+        # fit-gate and the caller's policy is "skip" (the cron default), do NOT
+        # run a greenfield substitute. A refused cron bind is a persistent config
+        # drift; improvising unsupervised every cycle is a soft re-wedge. Record
+        # the refused template (the visible gap) and return — the pipeline moves
+        # to its next slot, never crashing, never gating. Non-cron callers default
+        # to "greenfield" (one-off / interactive prefer continuity; the refusal
+        # block surfaces to the Leader instead).
+        if self._jt_refusal is not None and on_refused == "skip":
+            summary.skipped_refused_jt = self._jt_refusal.get("name")
+            summary.skipped_refused_reason = self._jt_refusal.get("reason")
+            self._emit_activity(
+                role="orchestrator",
+                phase=f"jt_slot_skipped:{summary.skipped_refused_jt}",
+                agent_id="orchestrator",
+                detail=summary.skipped_refused_reason,  # Hero m1: the WHY, not just the name
+            )
+            return summary
         # Iteration: pin any --attach'd files into the workspace BEFORE
         # decompose so the contract + the files are live for every downstream
         # prompt (decompose, task-plan, producer).

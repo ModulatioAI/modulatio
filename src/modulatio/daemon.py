@@ -251,6 +251,7 @@ def _make_dispatch_callback(*, stub: bool):
     def _dispatch(
         project_code: str, objective: str, *,
         jt_id: str | None = None, jt_params: dict | None = None,
+        on_refused: str = "skip",
     ) -> str:
         from modulatio import roster, semantic_router, tools as _tools_mod, vault
         from modulatio.orchestration import Orchestrator
@@ -396,7 +397,11 @@ def _make_dispatch_callback(*, stub: bool):
         # B3: a cron-bound Job Template runs HEADLESS — no interview
         # (ask_operator omitted ⇒ defaults / pre-bound params); the params were
         # validated at cron add-time.
-        summary = orch.kickoff(objective, bound_jt_name=jt_id, bound_jt_params=jt_params)
+        summary = orch.kickoff(objective, bound_jt_name=jt_id, bound_jt_params=jt_params,
+                               on_refused=on_refused)
+        if getattr(summary, "skipped_refused_jt", None):
+            _why = getattr(summary, "skipped_refused_reason", None) or "doesn't fit"
+            return f"skipped: job template {summary.skipped_refused_jt!r} refused — {_why} — slot skipped"
         return f"goals={len(summary.goals)} tasks={len(summary.tasks)} drafts={len(summary.drafts)} errors={len(summary.errors)}"
 
     return _dispatch

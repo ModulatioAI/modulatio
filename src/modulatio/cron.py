@@ -219,6 +219,7 @@ def add(
     enabled: bool = True,
     jt_id: Optional[str] = None,
     jt_params: Optional[dict] = None,
+    on_refused: Optional[str] = None,
 ) -> dict:
     """Add a cron job. Computes initial next_run from schedule. Raises
     ``ValueError`` if the schedule doesn't parse.
@@ -256,6 +257,7 @@ def add(
         "enabled": enabled,
         "jt_id": jt_id or None,
         "jt_params": dict(jt_params) if jt_params else None,
+        "on_refused": on_refused or None,  # #97 R2: per-cron refusal policy override
         "created": _now_iso(),
         "next_run": nxt.isoformat(timespec="seconds"),
         "last_run": None,
@@ -360,6 +362,7 @@ def dispatch_due(*, now: Optional[datetime] = None) -> list[dict]:
                 tags=["cron", job.get("name", "")],
                 jt_id=job.get("jt_id"),
                 jt_params=job.get("jt_params"),
+                on_refused=job.get("on_refused"),
             )
         except Exception as e:
             logger.exception("Cron job %s: heartbeat add_task failed", job.get("id"))
@@ -389,6 +392,7 @@ def run_now(job_id: str) -> Optional[dict]:
             tags=["cron", "manual", job.get("name", "")],
             jt_id=job.get("jt_id"),
             jt_params=job.get("jt_params"),
+            on_refused=job.get("on_refused"),  # #97 R2: manual run honors the stored policy too
         )
     except Exception as e:
         update(job_id, last_run=_now_iso(), last_status=f"error:{e}")

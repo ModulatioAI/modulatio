@@ -135,6 +135,52 @@ class JobTemplate:
             if p.required and params.get(p.name) is None
         ]
 
+    def unfilled_required(self, params: dict[str, Any]) -> list[str]:
+        """STRICT required check for the #97 fit-gate: names of required params that
+        are absent, None, an empty/whitespace-only string, or — for a list/tuple value
+        — empty. Unlike :meth:`missing_required` (absent/None only, kept for cron.add's
+        existing semantics), this catches the present-but-empty bypass (``{"topic": ""}``
+        / ``{"competitors": []}``) so an explicit cron/operator bind that literally can't
+        run is refused, not bound. Total over ``params`` (Nemo code-hull belt):
+        a non-mapping is treated as "nothing supplied" → every required field is
+        unfilled, never an ``AttributeError``."""
+        if not isinstance(params, dict):
+            params = {}
+        unfilled: list[str] = []
+        for p in self.param_schema:
+            if not p.required:
+                continue
+            value = params.get(p.name)
+            if value is None:
+                unfilled.append(p.name)
+            elif isinstance(value, str) and not value.strip():
+                unfilled.append(p.name)
+            elif isinstance(value, (list, tuple)) and len(value) == 0:
+                unfilled.append(p.name)
+        return unfilled
+
+    def enum_violations(self, params: dict[str, Any]) -> list[str]:
+        """#97 R1 (Hero): names of SUPPLIED params whose value falls outside a declared
+        non-empty ``enum`` — a present-but-out-of-contract misfit a cron would mis-run
+        every cycle. For a list/tuple value (a per-driver or list-typed field), any
+        non-member item flags the field. Absence and emptiness are the presence check's
+        job (:meth:`unfilled_required`), not flagged here; a field with no ``enum`` is
+        unconstrained. Total over ``params`` (belt): a non-mapping → no supplied
+        values → no enum violations (the malformed bind is caught by the gate)."""
+        if not isinstance(params, dict):
+            return []
+        violations: list[str] = []
+        for p in self.param_schema:
+            if not p.enum:
+                continue
+            value = params.get(p.name)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue  # absence/emptiness belongs to unfilled_required
+            items = value if isinstance(value, (list, tuple)) else [value]
+            if any(item not in p.enum for item in items):
+                violations.append(p.name)
+        return violations
+
 
 _EMPTY_JT = JobTemplate(name="", description="", interview_body="")
 

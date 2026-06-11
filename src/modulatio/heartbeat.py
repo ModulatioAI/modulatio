@@ -106,6 +106,7 @@ def add_task(
     max_retries: int = 1,
     jt_id: Optional[str] = None,
     jt_params: Optional[dict] = None,
+    on_refused: Optional[str] = None,
 ) -> dict:
     """Queue an objective for the given project.
 
@@ -119,6 +120,11 @@ def add_task(
     ``jt_id`` (+ ``jt_params``) — B3: a bound Job Template to run headless. They
     ride on the task and are handed to ``kickoff(bound_jt_name=, bound_jt_params=)``
     by the dispatch callback. ``None`` ⇒ a plain objective run (unchanged).
+
+    ``on_refused`` (#97 R2) — what a JT-bound task does when the fit-gate refuses
+    its bind: ``"skip"`` (the cron default — skip the slot, no greenfield
+    substitute) or ``"greenfield"`` (Clif's per-cron override — run the objective
+    greenfield). ``None`` ⇒ the dispatch callback's default ("skip" for cron).
     """
     from modulatio import vault
 
@@ -149,6 +155,7 @@ def add_task(
             "depends_on": list(depends_on or []),
             "jt_id": jt_id or None,
             "jt_params": dict(jt_params) if jt_params else None,
+            "on_refused": on_refused or None,
         }
         tasks.append(task)
         _save_queue(tasks)
@@ -331,6 +338,7 @@ def requeue_recurring(task: dict) -> Optional[dict]:
         # heartbeat-native path.)
         jt_id=task.get("jt_id"),
         jt_params=task.get("jt_params"),
+        on_refused=task.get("on_refused"),  # #97 R2: carry the refusal policy too
     )
     return update_task(new_task["id"], next_run=next_run)
 
@@ -440,7 +448,13 @@ class Heartbeat:
             # existing dispatch callbacks + test stubs).
             jt_extra = {}
             if task.get("jt_id"):
-                jt_extra = {"jt_id": task["jt_id"], "jt_params": task.get("jt_params")}
+                jt_extra = {
+                    "jt_id": task["jt_id"],
+                    "jt_params": task.get("jt_params"),
+                    # #97 R2: a JT-bound (cron) dispatch skips a refused bind by
+                    # default; a stored override ("greenfield") rides through.
+                    "on_refused": task.get("on_refused") or "skip",
+                }
             result = self.dispatch_callback(
                 task["project_code"], task["objective"], **jt_extra,
             )
