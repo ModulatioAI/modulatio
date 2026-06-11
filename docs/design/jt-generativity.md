@@ -128,7 +128,14 @@ prose. The refusal sets `self._jt_refusal = {"name": <jt>, "reason": <why>}`. Th
     output-*fidelity*, a per-cron `on_refused: greenfield` override can opt that cron back into
     greenfield-with-reservation. Default = visible gap; override = Clif's explicit per-cron choice.
   - *Filed forward (not this cut):* N-consecutive-refusals pauses **that slot** (not the pipeline)
-    pending a human — mirrors the budget-BLOCKER refresh pattern.
+    pending a human — mirrors the budget-BLOCKER refresh pattern. **Requires (Hero m1 forward-note):
+    a durable per-cron-task `refused_count` that persists across cycles** — today a refusal is only
+    an activity event + result string, not counted across runs. When the first-class pipeline object
+    lands, give the task dict a `refused_count` so the pause-after-N requirement is inherited.
+  - *Forward-note (Hero, multi-JT pipeline):* `RunSummary.skipped_refused_jt` /
+    `skipped_refused_reason` are **single-valued** — right for today's one-JT-per-kickoff, but a
+    first-class ordered pipeline running several JTs in ONE kickoff would need **per-slot** skip
+    records. Don't let the pipeline cut reuse the single field.
 
 **Deferred this cut (Nemo hole 3): the candidate-surface filter.** `search_job_templates`
 returns a `JobTemplateIndexEntry` (`job_template_library.py:31-38`) carrying only

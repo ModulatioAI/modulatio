@@ -179,6 +179,10 @@ def test_cron_refused_bind_skips_the_slot(env):
     assert summary.skipped_refused_jt == "brief"
     assert summary.goals == []                       # skipped before decompose
     assert o._bound_jt is None
+    # Hero m1: the skip surface must carry the WHY, not just the name — a slot skips
+    # every cycle until a human fixes it; the reason is the single most useful string.
+    assert summary.skipped_refused_reason is not None
+    assert "topic" in summary.skipped_refused_reason
 
 
 def test_engine_created_jt_is_gated_end_to_end(env):

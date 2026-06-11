@@ -238,6 +238,11 @@ class RunSummary:
     #: no greenfield substitute runs, this records the refused template name so the
     #: pipeline/operator sees the visible gap. None on a normal (or greenfield) run.
     skipped_refused_jt: str | None = None
+    #: #97 Hero m1 — the WHY behind the skip (the fit-gate's reason, e.g. "missing
+    #: required parameter(s): topic"). A skipped cron slot recurs every cycle until a
+    #: human fixes it, so the reason is the single most useful debugging string; it
+    #: rides the skip surface (activity detail + dispatch result) alongside the name.
+    skipped_refused_reason: str | None = None
 
 
 # ── Core rebuild B3: isolated-worker result + deterministic merge ───────
@@ -10679,10 +10684,12 @@ class Orchestrator:
         # block surfaces to the Leader instead).
         if self._jt_refusal is not None and on_refused == "skip":
             summary.skipped_refused_jt = self._jt_refusal.get("name")
+            summary.skipped_refused_reason = self._jt_refusal.get("reason")
             self._emit_activity(
                 role="orchestrator",
                 phase=f"jt_slot_skipped:{summary.skipped_refused_jt}",
                 agent_id="orchestrator",
+                detail=summary.skipped_refused_reason,  # Hero m1: the WHY, not just the name
             )
             return summary
         # Iteration: pin any --attach'd files into the workspace BEFORE
