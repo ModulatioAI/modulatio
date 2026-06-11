@@ -7891,6 +7891,44 @@ def test_engine_renders_grounded_deliverables_partial(tmp_path, monkeypatch):
     assert summary.product_quality_report is not None
 
 
+def test_policy_withhold_survives_delivery_pass(tmp_path, monkeypatch):
+    """#80 (Nemo BLOCKER): a pre-existing POLICY withhold — the verify-time HARD-violation
+    withhold — must SURVIVE _deliver_finished_products. The violating deliverable is a
+    COMPLETED, otherwise-shippable task; the old code reassigned withheld_deliverables and
+    shipped it. With the fix it is excluded from `grounded` (not rendered) and stays
+    withheld."""
+    from uuid import uuid4
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Project, Task, TaskStatus
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "deliver"))
+    vault.init_project("PWH", "policy withhold", "obj")
+    vault.init_run("PWH", "run-1", "obj")
+    project = Project(code="PWH", name="PWH", objective="obj",
+                      leader_model="stub", wiki_path=str(tmp_path / "pwh"), run_id="run-1")
+    orch = Orchestrator(
+        project, {"leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_stub},
+        deliver_products=True,
+    )
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "bad.md").write_text("# Brief-violating Product\n\nunder the declared floor.\n")
+
+    t = Task(id="T-bad", project_id=uuid4(), goal_id="PWH-G-001", description="bad")
+    t.status = TaskStatus.COMPLETED
+    t.deliverable = True
+    t.output_path = "bad.md"
+
+    summary = RunSummary(project=project)
+    summary.tasks = [t]
+    summary.withheld_deliverables = ["T-bad"]  # the verify-time HARD-violation withhold
+    orch._deliver_finished_products(summary)
+
+    assert "T-bad" in summary.withheld_deliverables, "policy withhold must survive delivery"
+    assert not summary.rendered_deliverables, "a withheld deliverable must NOT ship"
+
+
 def test_deliver_degrades_to_markdown_when_renderer_absent(tmp_path, monkeypatch):
     """A missing OPTIONAL renderer (pandoc absent — the install-smoke CI case)
     must NOT mean zero delivery: the product ships as Markdown with error=None and
@@ -9079,6 +9117,232 @@ def test_leader_verify_surfaces_declared_spec_issues(tmp_path, monkeypatch):
     assert "Story One" not in p.split("DECLARED-SPEC CHECK")[1]     # the OK part not flagged
     assert "required structure missing: title" in p
     assert "required structure missing: toc" in p
+
+
+def test_leader_verify_clamps_verdict_on_measured_hard_violation(tmp_path, monkeypatch):
+    """#80 slice 4: a measured declared-spec (HARD) violation CLAMPS the verdict off
+    'satisfied' — the engine binds, the model cannot wave it through. The leader keeps
+    saying 'satisfied'; the clamp keeps driving the redo (persistent violation), so the
+    goal redoes at least once rather than shipping the brief-violating product clean."""
+    from uuid import uuid4
+
+    from modulatio import assembly as _assembly, job_templates as _jt, vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=2,
+        parts=[{"label": "Story One", "size": 2500}, {"label": "Story Two", "size": 900}],
+        part_size_unit="words", structure={"title": False, "toc": False},
+        text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=2000, size_unit="words",
+                               required_structure=("title", "toc"))
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return '```json\n{"verdict":"satisfied","rationale":"r","report_body":"r"}\n```'
+        return _leader_stub(prompt)
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("CLP", "clamp", "obj")
+    vault.init_run("CLP", "run-1", "obj")
+    project = Project(code="CLP", name="CLP", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "clp"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub})
+    orch._deliverable_spec = spec
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "book.pdf").write_bytes(b"%PDF-1.7\x00 bound")
+    task = _deliverable_task("CLP", output="book.pdf")
+    orch._assembly_records[task.id] = _assembly.AssemblyRecord(
+        manifest={}, final_checksum="sha256:x", complete=True, strategy="document",
+        digest=digest)
+    goal = Goal(id="CLP-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+    orch._leader_verify_goal(goal, [task], summary)
+    # The leader said "satisfied" every round; the engine clamp forced disappointed
+    # → at least one redo, instead of shipping the measured HARD violation clean.
+    assert goal.retry_count >= 1
+
+
+def test_leader_verify_withholds_on_hard_violation_at_exhaustion(tmp_path, monkeypatch):
+    """#80 slice 4 (WITHHOLD): when a measured declared-spec (HARD) violation survives
+    the retry budget, the engine WITHHOLDS the deliverable rather than shipping it with
+    a reservation — HARD means the engine binds. The goal still COMPLETES (the run is
+    never blocked); the deliverable just doesn't go out clean. Exhaustion-on-entry via
+    max_retries=0 isolates the withhold path."""
+    from uuid import uuid4
+
+    from modulatio import assembly as _assembly, job_templates as _jt, vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=2,
+        parts=[{"label": "Story One", "size": 2500}, {"label": "Story Two", "size": 900}],
+        part_size_unit="words", structure={"title": False, "toc": False},
+        text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=2000, size_unit="words",
+                               required_structure=("title", "toc"))
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return '```json\n{"verdict":"satisfied","rationale":"r","report_body":"r"}\n```'
+        return _leader_stub(prompt)
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("WHD", "withhold", "obj")
+    vault.init_run("WHD", "run-1", "obj")
+    project = Project(code="WHD", name="WHD", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "whd"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub})
+    orch._deliverable_spec = spec
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "book.pdf").write_bytes(b"%PDF-1.7\x00 bound")
+    task = _deliverable_task("WHD", output="book.pdf")
+    orch._assembly_records[task.id] = _assembly.AssemblyRecord(
+        manifest={}, final_checksum="sha256:x", complete=True, strategy="document",
+        digest=digest)
+    goal = Goal(id="WHD-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    goal.max_retries = 0  # exhausted on entry → the withhold path, no redo
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert summary.withheld_deliverables, "a surviving HARD violation must withhold"
+    assert goal.status == GoalStatus.COMPLETED  # goal completes; deliverable withheld
+    assert any("WITHHELD" in r["concern"] for r in summary.recommendations)
+
+
+def test_leader_verify_defer_remediation_records_reservation_no_redo(project):
+    """#80 slices 2/3: a disappointed verdict whose declared remediation is `defer`
+    (the model judged it needs the operator, not a fixable-in-scope shape) records a
+    NAMED reservation and ships — it does NOT self-redo."""
+    def leader_defer(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return (
+                '```json\n{"verdict":"disappointed","rationale":"needs a paid API key",'
+                '"report_body":"r","remediation":{"action":"defer",'
+                '"reason_code":"needs_operator_authority"}}\n```'
+            )
+        return _leader_stub(prompt)
+
+    runners = {
+        "leader": leader_defer, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    orch = Orchestrator(project, runners)
+    summary = orch.kickoff("defer-me")
+
+    goals = store.list_goals(PROJECT_CODE)
+    assert goals[0].status == GoalStatus.COMPLETED
+    assert goals[0].retry_count == 0  # NO redo — the Leader deferred
+    assert any(
+        "deferred" in r["concern"].lower() and "operator" in r["concern"].lower()
+        for r in summary.recommendations
+    )
+
+
+def _window_leader(prompt):
+    if "LEADER GOAL VERIFICATION" in prompt:
+        return (
+            '```json\n{"verdict":"disappointed","rationale":"a fixable gap",'
+            '"report_body":"r","remediation":{"action":"revise_in_place",'
+            '"reason_code":"fixable_goal_gap","window_requested":true}}\n```'
+        )
+    return _leader_stub(prompt)
+
+
+def test_window_block_terminates_the_fix_no_redo(project):
+    """#80 slice 11: with an operator present and the Leader requesting a window, a
+    BLOCK within the window is TERMINAL — the operator took ownership: no redo, no
+    retry_count increment, a named reservation, goal still completes."""
+    from modulatio.orchestration import WindowDecision
+
+    runners = {"leader": _window_leader, "planner": _planner_stub,
+               "drafter": _drafter_stub, "qc": _qc_stub}
+    orch = Orchestrator(project, runners, operator_present=True,
+                        fix_window_callback=lambda n: WindowDecision.BLOCK)
+    summary = orch.kickoff("block-me")
+
+    goals = store.list_goals(PROJECT_CODE)
+    assert goals[0].status == GoalStatus.COMPLETED
+    assert goals[0].retry_count == 0  # operator blocked → no fix attempt
+    assert any("blocked" in r["concern"].lower() and "window" in r["concern"].lower()
+               for r in summary.recommendations)
+
+
+def test_window_proceed_drives_the_fix(project):
+    """#80 slice 11: operator present, window requested, callback PROCEEDs → the fix
+    runs (the redo fires) just as it would headless."""
+    from modulatio.orchestration import WindowDecision
+
+    runners = {"leader": _window_leader, "planner": _planner_stub,
+               "drafter": _drafter_stub, "qc": _qc_stub}
+    orch = Orchestrator(project, runners, operator_present=True,
+                        fix_window_callback=lambda n: WindowDecision.PROCEED)
+    orch.kickoff("proceed-me")
+
+    goals = store.list_goals(PROJECT_CODE)
+    assert goals[0].retry_count >= 1  # PROCEED → the fix dispatched
+
+
+def test_window_block_still_withholds_measured_hard_violation(tmp_path, monkeypatch):
+    """#80 H1 (Hero code review): the operator blocking the FIX does NOT amend the BRIEF.
+    With a measured HARD violation driving the window, a BLOCK must still WITHHOLD the
+    deliverable — the engine can't ship a product it measured as violating an operator-HARD
+    param just because the operator vetoed the fix."""
+    from uuid import uuid4
+    from modulatio import assembly as _assembly, job_templates as _jt, vault
+    from modulatio.orchestration import Orchestrator, RunSummary, WindowDecision
+    from modulatio.types import Goal, GoalStatus, Project
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=2,
+        parts=[{"label": "Story One", "size": 2500}, {"label": "Story Two", "size": 900}],
+        part_size_unit="words", structure={"title": False, "toc": False}, text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=2000, size_unit="words",
+                               required_structure=("title", "toc"))
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return (
+                '```json\n{"verdict":"satisfied","rationale":"r","report_body":"r",'
+                '"remediation":{"action":"revise_in_place","reason_code":"fixable_goal_gap",'
+                '"window_requested":true}}\n```'
+            )
+        return _leader_stub(prompt)
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("HBK", "h1", "obj")
+    vault.init_run("HBK", "run-1", "obj")
+    project = Project(code="HBK", name="HBK", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "hbk"), run_id="run-1")
+    orch = Orchestrator(
+        project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub},
+        operator_present=True, fix_window_callback=lambda n: WindowDecision.BLOCK,
+    )
+    orch._deliverable_spec = spec
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "book.pdf").write_bytes(b"%PDF-1.7\x00 bound")
+    task = _deliverable_task("HBK", output="book.pdf")
+    orch._assembly_records[task.id] = _assembly.AssemblyRecord(
+        manifest={}, final_checksum="sha256:x", complete=True, strategy="document",
+        digest=digest)
+    goal = Goal(id="HBK-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert goal.retry_count == 0  # operator blocked → no fix attempt
+    assert task.id in summary.withheld_deliverables  # but the brief is still unmet → withheld
+    assert any("WITHHELD" in r["concern"] for r in summary.recommendations)
 
 
 def test_empty_deliverable_spec_surfaces_nothing(tmp_path, monkeypatch):

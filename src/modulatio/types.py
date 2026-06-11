@@ -647,6 +647,12 @@ class ActivityEvent:
     phase: str
     task_id: str | None
     timestamp: datetime
+    #: Optional structured payload for richer phases (#80): e.g.
+    #: ``leader_self_fix`` carries the concern + chosen remediation + the
+    #: window outcome; ``leader_fix_window_opened/_closed`` carry the notice /
+    #: decision. Additive + defaulted so every pre-#80 construction and
+    #: subscriber is back-compat by construction.
+    detail: "object | None" = None
 
 
 __all__ = [

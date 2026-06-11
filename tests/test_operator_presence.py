@@ -175,9 +175,13 @@ class TestPresenceGatingTruthTable:
         monkeypatch.delenv(self._ENV[gate], raising=False)
         assert getattr(_orch(project, operator_present=False), gate)() is True
 
-    def test_present_disabled_without_env(self, project, gate, monkeypatch):
+    def test_present_enabled_by_default(self, project, gate, monkeypatch):
+        # #80 slice 7 (Q5 alignment): discovery runs default-on regardless of
+        # presence — presence governs visibility, not discovery-rate. (The
+        # watched-run authority-widening is bound separately, in the revise
+        # handler, not by suppressing discovery.)
         monkeypatch.delenv(self._ENV[gate], raising=False)
-        assert getattr(_orch(project, operator_present=True), gate)() is False
+        assert getattr(_orch(project, operator_present=True), gate)() is True
 
     def test_present_env_forces_on(self, project, gate, monkeypatch):
         monkeypatch.setenv(self._ENV[gate], "1")

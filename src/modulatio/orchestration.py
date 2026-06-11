@@ -21,6 +21,7 @@ import re
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from enum import Enum
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -52,6 +53,129 @@ from modulatio.vault import project_dir, run_dir as _vault_run_dir
 
 
 _logger = logging.getLogger("modulatio.orchestration")
+
+
+# ── #80 Leader self-remediation: the typed remediation gate ──────────────
+# The model DECLARES a `remediation` object on its verify output; the engine
+# VALIDATES it by enum membership + target identity ONLY (it never parses prose
+# to infer intent), fails CLOSED to a named defer, and defaults an absent
+# declaration on a `disappointed` verdict to the one whitelisted safe shape
+# (revise-in-place on the goal's own tasks). See
+# docs/design/leader-self-remediation.md.
+class RemediationAction(str, Enum):
+    REVISE_IN_PLACE = "revise_in_place"
+    DEFER = "defer"
+
+
+#: Valid model-declared reason codes, branched by action. `reason_code` is
+#: surfacing/audit taxonomy only — never an authorization input. Note that
+#: `unrecognized_remediation_shape` / `invalid_remediation_declaration` are the
+#: ENGINE's rejection names and are deliberately NOT in either set, so a model
+#: cannot pre-declare them.
+_REVISE_REASON_CODES = frozenset(
+    {"fixable_goal_gap", "missing_required_content", "off_brief_content"}
+)
+_DEFER_REASON_CODES = frozenset(
+    {"needs_operator_authority", "ambiguous_brief", "outside_run_scope"}
+)
+_INVALID_DECLARATION = "invalid_remediation_declaration"
+
+
+@dataclass(frozen=True)
+class Remediation:
+    """A validated remediation decision. ``rejected`` carries the engine's
+    rejection name when a declaration failed validation (always with
+    ``action == DEFER``); it is ``None`` for a model that validly chose to
+    defer, keeping model-chose-defer and engine-rejected distinct in the audit
+    trail."""
+
+    action: RemediationAction
+    reason_code: "str | None" = None
+    target_task_ids: tuple = ()
+    window_requested: bool = False
+    rejected: "str | None" = None
+
+
+def validate_remediation(data: dict, goal_task_ids: "set[str]") -> Remediation:
+    """Parse + validate the model's declared ``remediation`` object. Fails
+    CLOSED: any malformed/invalid declaration → a DEFER named
+    ``invalid_remediation_declaration`` (never a silent rebind). An absent
+    declaration on a ``disappointed`` verdict defaults to the one whitelisted
+    safe shape — revise-in-place on the goal's OWN tasks (empty targets), which
+    is exactly today's behavior and cannot widen anything."""
+    raw = data.get("remediation")
+    if raw is None:
+        # Back-compat default: the proven-safe shape, goal's own tasks.
+        return Remediation(
+            action=RemediationAction.REVISE_IN_PLACE, reason_code="fixable_goal_gap"
+        )
+    if not isinstance(raw, dict):
+        return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
+    try:
+        action = RemediationAction(raw.get("action"))
+    except ValueError:
+        return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
+    reason = raw.get("reason_code")
+    valid_reasons = (
+        _REVISE_REASON_CODES
+        if action is RemediationAction.REVISE_IN_PLACE
+        else _DEFER_REASON_CODES
+    )
+    if reason is not None and reason not in valid_reasons:
+        return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
+    # Fail closed on a PRESENT-but-malformed target_task_ids — distinguish absent
+    # (default []) from present (must be a list of strings). A falsey non-list
+    # ("" / 0 / false) is an INVALID declaration, not a silent rebind to the safe
+    # shape. (Nemo code-review finding.)
+    if "target_task_ids" in raw:
+        targets_raw = raw["target_task_ids"]
+        if not isinstance(targets_raw, list) or any(
+            not isinstance(t, str) for t in targets_raw
+        ):
+            return Remediation(
+                action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION
+            )
+    else:
+        targets_raw = []
+    targets = tuple(targets_raw)
+    # target_task_ids ⊆ this goal's own tasks — fail closed, never silently rebind.
+    if action is RemediationAction.REVISE_IN_PLACE and not set(targets) <= set(
+        goal_task_ids
+    ):
+        return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
+    return Remediation(
+        action=action,
+        reason_code=reason,
+        target_task_ids=targets,
+        # Only a real JSON `true` requests the window — `bool("false")` is True, so a
+        # malformed string must NOT open a window. (Nemo code-review finding.)
+        window_requested=raw.get("window_requested") is True,
+    )
+
+
+# ── #80 The bounded fix window — a rare, operator-vetoable pause before a
+# self-fix. The governing invariant: the TIMER IS THE ENGINE'S, NEVER THE
+# CALLBACK'S. The TUI shows a countdown; the engine enforces one, and a late
+# answer is discarded. Headless (no operator / no callback) has no window —
+# immediate proceed — so the run can never be gated on an absent operator.
+class WindowDecision(str, Enum):
+    BLOCK = "block"
+    PROCEED = "proceed"
+    # TIMEOUT is never returned by the callback — the engine synthesizes it.
+
+
+@dataclass(frozen=True)
+class FixWindowNotice:
+    """What the operator is shown when the Leader opens a rare fix window."""
+
+    goal_id: str
+    concern: str
+    remediation: str
+    deadline_s: float
+
+
+#: Hard ceiling on the window — config can never turn it into an unbounded gate.
+_FIX_WINDOW_MAX_S = 300.0
 
 
 class AgentRunner(Protocol):
@@ -1636,6 +1760,8 @@ class Orchestrator:
         summarizer_chat_runner_factory: "Callable[[str], Callable[[str], str]] | None" = None,
         activity_callback: "Callable[[ActivityEvent], None] | None" = None,
         operator_present: bool = False,
+        fix_window_callback: "Callable[[FixWindowNotice], WindowDecision] | None" = None,
+        fix_window_s: float = 90.0,
         user_budget_overrides: "dict[str, _ctx_budget_module.BudgetOverride] | None" = None,
         deliver_products: bool = False,
     ):
@@ -1758,16 +1884,21 @@ class Orchestrator:
         #: fire at 6 phases: task_dispatched, task_completed, qc_started,
         #: qc_verdict, leader_verify_started, leader_verify_ended.
         self.activity_callback: Callable[[ActivityEvent], None] | None = activity_callback
-        #: Brick C: standing operator-presence signal — is a human watching
-        #: this whole run? Default False = autonomous/headless (daemon/cron/JT,
-        #: plan-mode); the TUI sets True. Gates the Leader's three decision
-        #: surfaces between JUDGE (autonomous — the Leader is the only check
-        #: past QC) and DEFER (operator present — surface to the human). The
-        #: standing fact; composes with activity_callback (events out) and the
-        #: kickoff ``ask_operator`` callback (questions out — the future
-        #: streaming-TUI/ACP drives the mid-run defer round-trip). See
-        #: ``_autonomous`` / ``_operator_context_block``.
+        #: Standing operator-presence signal — is a human watching this whole
+        #: run? Default False = autonomous/headless (daemon/cron/JT, plan-mode);
+        #: the TUI sets True. #80: presence governs VISIBILITY, not whether the
+        #: Leader self-corrects — it surfaces fixes (and gates the rare 90s fix
+        #: window) when watched, but no longer suppresses discovery or the fix
+        #: decision. Composes with activity_callback (events out) and the kickoff
+        #: ``ask_operator`` callback. See ``_operator_context_block``.
         self.operator_present: bool = operator_present
+        #: #80 the rare fix-window seam — None == headless == no window (immediate
+        #: proceed). The callback returns BLOCK/PROCEED; the engine synthesizes
+        #: TIMEOUT. ``_fix_window_s`` is CLAMPED ≤ 300 so config can never make the
+        #: bounded window an unbounded gate (the never-block-an-absent-operator
+        #: invariant survives a bad settings file).
+        self.fix_window_callback = fix_window_callback
+        self._fix_window_s: float = max(0.0, min(float(fix_window_s), _FIX_WINDOW_MAX_S))
         #: Part A / A2 (#85): engine-authored AssemblyRecord per task that the
         #: engine mechanically assembled. Assembly QC consults it to do the cheap
         #: structural check instead of re-reading the assembled bytes into the
@@ -2299,6 +2430,7 @@ class Orchestrator:
         phase: str,
         task_id: str | None = None,
         agent_id: str | None = None,
+        detail: "object | None" = None,
     ) -> None:
         """Fire an ActivityEvent to the subscriber if one is registered.
 
@@ -2323,16 +2455,72 @@ class Orchestrator:
             phase=phase,
             task_id=task_id,
             timestamp=datetime.now(timezone.utc),
+            detail=detail,
         )
         with self._activity_lock:
             self.activity_callback(event)
 
+    def _await_fix_window(
+        self, notice: "FixWindowNotice"
+    ) -> "tuple[str, WindowDecision]":
+        """Open the rare, operator-vetoable fix window. Returns
+        ``(reason, decision)`` with reason ∈ {headless, block, proceed, timeout,
+        callback_error}.
+
+        INVARIANT: returns in ≤ ``self._fix_window_s``. The timer is the ENGINE's
+        — a DAEMON ``threading.Thread`` + ``join(timeout)`` on the engine's thread
+        — so the callback cannot extend it (a late answer is discarded: the result
+        box is read only if the thread finished in time), cannot skip it (headless
+        short-circuits before any thread spawns), and a wedged callback can neither
+        hold the run hostage nor block interpreter exit (``daemon=True``). A
+        callback that raises or returns a non-decision proceeds but is reported as
+        ``callback_error``, never as an operator ``proceed`` that didn't happen.
+        """
+        if self.fix_window_callback is None or not self.operator_present:
+            return ("headless", WindowDecision.PROCEED)
+        self._emit_activity(
+            role="leader", phase="leader_fix_window_opened",
+            agent_id="leader", detail=notice,
+        )
+        # A DAEMON thread runs the callback. daemon=True so a wedged TUI thread
+        # can never hold the run hostage NOR block interpreter exit; join(timeout)
+        # is the engine's hard deadline; a late answer is discarded because we
+        # read ``box`` only if the thread finished in time.
+        box: "dict[str, object]" = {}
+
+        def _run() -> None:
+            try:
+                box["decision"] = self.fix_window_callback(notice)
+            except Exception:  # noqa: BLE001 — a misbehaving callback must not crash the run
+                box["error"] = True
+
+        t = threading.Thread(target=_run, name="fix-window", daemon=True)
+        t.start()
+        t.join(timeout=self._fix_window_s)
+        if t.is_alive() or ("decision" not in box and "error" not in box):
+            # Deadline hit — the daemon thread's eventual answer is dead on arrival.
+            decision, reason = WindowDecision.PROCEED, "timeout"
+        elif "error" in box or not isinstance(box.get("decision"), WindowDecision):
+            # M1 (Hero): a callback that raised or returned a non-decision proceeds,
+            # but the audit must NOT report an operator "proceed" that never happened.
+            decision, reason = WindowDecision.PROCEED, "callback_error"
+        else:
+            decision = box["decision"]
+            reason = decision.value
+        self._emit_activity(
+            role="leader", phase="leader_fix_window_closed",
+            agent_id="leader", detail=reason,
+        )
+        return (reason, decision)
+
     # ── Brick C: operator-presence-aware Leader behavior ──────────────────
     def _autonomous(self) -> bool:
         """True when no operator is watching this run (headless/daemon/cron/
-        Job-Templates, plan-mode sub-objectives). The Leader then exercises
-        its judgment — it is the only check past QC. False = an operator is
-        present (the TUI / future ACP) and the Leader should DEFER."""
+        Job-Templates, plan-mode sub-objectives). A simple presence accessor —
+        the inverse of ``operator_present``. NOTE (#80): presence no longer gates
+        whether the Leader self-corrects (the discovery seams default-on either
+        way; presence governs VISIBILITY + the fix window, not the fix decision).
+        Kept for tests + readability; it does NOT mean 'defer when watched'."""
         return not self.operator_present
 
     def _operator_context_block(self) -> str:
@@ -2347,9 +2535,10 @@ class Orchestrator:
                 "partners. Surface the calls that matter and your reservations "
                 "to them and let them weigh in rather than deciding "
                 "unilaterally; honor the direction they've set, and run with "
-                "your own judgment where they've left it to you. Lean toward "
-                "continuing and recording concerns over driving a redo on your "
-                "own — your partner is right there to decide with you."
+                "your own judgment where they've left it to you. Act on the "
+                "fixable calls you're authorized to make and surface what "
+                "you're doing as you do it; bring them the calls that need "
+                "their authority or would change what they marked fixed."
             )
         return (
             "ON YOUR OWN — no operator is collaborating on this run, so you are "
@@ -6237,31 +6426,27 @@ class Orchestrator:
         return True  # no project → default ON
 
     def _iterate_enabled(self) -> bool:
-        """Brick C: the between-task iterate gate. Runs by DEFAULT when the
-        run is autonomous (the Leader is the only judgment past QC); stays
-        opt-in via ``MODULATIO_LEADER_ITERATE=1`` when an operator is present.
-        The env var is an explicit force-on override in either mode. Mirrors
-        ``_wave_reflect_enabled``."""
-        return (
-            os.environ.get("MODULATIO_LEADER_ITERATE") == "1"
-            or self._autonomous()
-        )
+        """The between-task iterate gate. #80 slice 7 (Q5 alignment): runs by
+        DEFAULT regardless of operator presence — presence governs VISIBILITY,
+        not whether the Leader discovers fixable concerns. (Pre-#80 this was
+        gated on ``_autonomous()``, which leaked presence into the fix-rate via
+        the discovery-rate.) Watched runs surface their self-correction; they
+        no longer suppress it. Mirrors ``_wave_reflect_enabled``."""
+        return True
 
     def _wave_reflect_enabled(self) -> bool:
         """#151: wave-boundary reflection. After a committed wave merge, the
         Leader may revise/drop ONLY not-yet-dispatched (PENDING) tasks —
         future-wave edits only, never mid-wave mutation (design decision 5).
 
-        Brick C: presence-aware default, mirroring the between-task iterate.
-        When autonomous the Leader is the only judgment past QC, so the
-        reflection runs by default; with an operator present it stays opt-in.
-        ``MODULATIO_WAVE_REFLECT=1`` remains an explicit force-on override in
-        either mode. It rides inside the (off-by-default) concurrent-wave
-        path, so its blast radius stays bounded by that flag regardless."""
-        return (
-            os.environ.get("MODULATIO_WAVE_REFLECT") == "1"
-            or self._autonomous()
-        )
+        #80 slice 7 (Q5 alignment): runs by DEFAULT regardless of operator
+        presence — discovery-rate no longer depends on who is watching. With an
+        operator present the reflection is READ-ONLY with respect to tool
+        authority (it may re-describe and drop pending tasks, but never widen
+        their ``required_skills``; see the revise handler). It rides inside the
+        (off-by-default) concurrent-wave path, so its blast radius stays bounded
+        by that flag regardless."""
+        return True
 
     def _skill_floor_for(self, skill_name: str) -> tuple[str, ...]:
         """Slice #9b skill capability floor, instance-cached. Shared by the
@@ -6844,7 +7029,16 @@ class Orchestrator:
                     t.description = new_desc.strip()
                     changed.append("description")
                 new_skills = edit.get("required_skills")
-                if isinstance(new_skills, list) and all(isinstance(s, str) for s in new_skills):
+                # #80 slice 7: with an operator present, wave-reflect is
+                # READ-ONLY re: tool authority — it may re-describe and drop, but
+                # NEVER widen a pending task's required_skills (which feeds
+                # _task_tool_loadout). Authority-widening re-planning belongs to
+                # the operator-asked surface, not a silent reflection pass.
+                if (
+                    not self.operator_present
+                    and isinstance(new_skills, list)
+                    and all(isinstance(s, str) for s in new_skills)
+                ):
                     t.required_skills = new_skills
                     changed.append("required_skills")
                 if changed:
@@ -6855,6 +7049,14 @@ class Orchestrator:
                         rationale=f"wave-boundary reflection revised {', '.join(changed)}",
                     ))
                     save_task(t)
+                    # Surface the plan move to a watching partner (distinct from
+                    # leader_self_fix — this is plan-shaping, not fixing).
+                    if self.operator_present:
+                        self._emit_activity(
+                            role="leader", phase="plan_reflect_revise",
+                            agent_id="leader",
+                            detail={"task_id": t.id, "changed": changed},
+                        )
             # action == "keep" (or unknown) → no-op
 
     def _run_task_with_redo(
@@ -7819,6 +8021,12 @@ class Orchestrator:
         )
         task_summary_lines = []
         artifact_blocks: list[str] = []
+        # #80 slice 4: the GOAL-LEVEL aggregate of declared-spec (HARD) violations
+        # across ALL digests — the verdict clamp binds from THIS, not the per-task
+        # local `spec_issues` (a naive clamp on the local var would see only the
+        # last digest and let an earlier task's HARD violation ship). One
+        # computation, two consumers: the verifier prompt block AND the clamp.
+        goal_spec_issues: list[str] = []
         for t in tasks:
             line = (
                 f"- {t.id} [{t.status.value}]"
@@ -7848,6 +8056,7 @@ class Orchestrator:
                     # The HRWT verify was BLIND to "6 of 8 under the floor / no title /
                     # inconsistent numbering"; now those facts are in front of it.
                     spec_issues = self._deliverable_spec_issues(rec.digest)
+                    goal_spec_issues.extend(f"{t.id}: {issue}" for issue in spec_issues)
                     if spec_issues:
                         block += (
                             "\n\nDECLARED-SPEC CHECK (engine, deterministic) — this "
@@ -8007,6 +8216,18 @@ class Orchestrator:
             )
             verdict = "disappointed"
 
+        # #80 slice 4: the VERDICT CLAMP — the real Brief enforcer. A declared-spec
+        # (HARD) violation the engine MEASURED cannot ship: clamp any non-disappointed
+        # verdict to "disappointed" so it drives the redo ledger rather than riding out
+        # on the model's say-so. The model still judges fitness everywhere the spec
+        # does not constrain; it just cannot wave through a measured HARD violation.
+        if goal_spec_issues and verdict != "disappointed":
+            summary.errors.append(
+                f"{goal.id}: clamped verdict {verdict}→disappointed — "
+                f"{len(goal_spec_issues)} declared-spec (HARD) violation(s) measured"
+            )
+            verdict = "disappointed"
+
         # Reservations are ADVISORY — gather them for the human-facing
         # Product Quality Report (2026-05-30). They never fail a goal, loop
         # the swarm, edit the work, or block the run; they ride out beside
@@ -8068,22 +8289,141 @@ class Orchestrator:
                 and goal.retry_count >= 1
                 and self._goal_redo_fingerprints.get(goal.id) == fingerprint
             )
+            # #80 slices 2/3: the typed remediation gate. The model DECLARES whether
+            # this is fixable-in-scope (revise_in_place) or needs the operator (defer);
+            # the engine validates by enum + target identity (validate_remediation) and
+            # binds. A MEASURED HARD violation (goal_spec_issues) is the engine's call
+            # and always drives the fix path regardless of the model's declaration — the
+            # model cannot defer what the engine measured. A pure FITNESS gap honors the
+            # declaration: revise_in_place → redo, defer → a named reservation (no redo).
+            remediation = validate_remediation(data, {t.id for t in tasks})
             can_redo = (
                 goal.retry_count < goal.max_retries
                 and not stalled
                 and not deadlocked
+                and (
+                    bool(goal_spec_issues)
+                    or remediation.action is RemediationAction.REVISE_IN_PLACE
+                )
             )
             if can_redo:
-                # Remember what we're handing the producers, so a no-progress
-                # redo is caught next round (only meaningful with deliverables).
-                if has_deliverables:
-                    self._goal_redo_fingerprints[goal.id] = fingerprint
-                self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
-                self._leader_auto_redo(
-                    goal, tasks, rationale, report_path, summary,
+                # #80 slice 11: the rare bounded fix window. The model requests it
+                # (window_requested) and it only opens when an operator is present; the
+                # engine owns the deadline (_await_fix_window), so an absent operator
+                # never gates the run. BLOCK = the operator took ownership: terminal, no
+                # fix, no retry increment, ship with a named reservation. proceed /
+                # timeout / no-window = fix-and-notify (a leader_self_fix event carries
+                # the window outcome). Gate, not wrap: _leader_auto_redo is unchanged.
+                reason, decision = "none", WindowDecision.PROCEED
+                if self.operator_present and remediation.window_requested:
+                    reason, decision = self._await_fix_window(FixWindowNotice(
+                        goal_id=goal.id, concern=rationale[:200],
+                        remediation=remediation.action.value,
+                        deadline_s=self._fix_window_s,
+                    ))
+                if decision is not WindowDecision.BLOCK:
+                    # Remember what we're handing the producers, so a no-progress
+                    # redo is caught next round (only meaningful with deliverables).
+                    if has_deliverables:
+                        self._goal_redo_fingerprints[goal.id] = fingerprint
+                    self._emit_activity(
+                        role="leader", phase="leader_self_fix", agent_id="leader",
+                        detail={"goal_id": goal.id, "window": reason,
+                                "concern": rationale[:200]},
+                    )
+                    self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
+                    self._leader_auto_redo(
+                        goal, tasks, rationale, report_path, summary,
+                    )
+                    return
+                # BLOCK → operator owns the concern. No redo, no retry_count increment;
+                # falls through to the common completion (the elif chain is skipped
+                # because can_redo was taken).
+                if goal_spec_issues:
+                    # H1 (Hero code review): the operator blocked the FIX, not the BRIEF.
+                    # A measured HARD violation must still NOT ship clean — withhold the
+                    # deliverable (the operator can retrieve it from artifacts to ship
+                    # as-is). This keeps both authorities: their veto on the fix AND the
+                    # engine's bind on the brief.
+                    summary.withheld_deliverables.extend(
+                        t.id for t in tasks if getattr(t, "deliverable", False)
+                    )
+                    summary.recommendations.append({
+                        "goal_id": goal.id,
+                        "concern": (
+                            "Operator blocked the Leader's fix within the review window. "
+                            f"The {len(goal_spec_issues)} measured declared-requirement "
+                            "(HARD) violation(s) stand — deliverable WITHHELD (retrieve "
+                            "from artifacts to ship it as-is)."
+                        ),
+                        "suggestion": f"Operator-owned; the brief is still unmet — {rationale}",
+                    })
+                    rationale_text = (
+                        f"leader: operator blocked the fix; measured HARD violation stands, "
+                        f"deliverable WITHHELD: {rationale} | report {report_path.name}"
+                    )
+                else:
+                    summary.recommendations.append({
+                        "goal_id": goal.id,
+                        "concern": (
+                            "Operator blocked the Leader's fix within the review window — "
+                            "they took ownership of this concern."
+                        ),
+                        "suggestion": f"Operator-owned — {rationale}",
+                    })
+                    rationale_text = (
+                        f"leader: operator blocked the fix window: {rationale} "
+                        f"| report {report_path.name}"
+                    )
+            elif goal_spec_issues:
+                # #80 slice 4 (WITHHOLD): a declared-spec (HARD) violation the engine
+                # MEASURED survived the retry budget. Do NOT ship a product the engine
+                # KNOWS violates an operator-HARD param — withhold it. The goal still
+                # COMPLETES (the run is never blocked; independent goals ship), but this
+                # deliverable does not go out clean. HARD means the engine binds.
+                # Store TASK IDs (the identifier the delivery pass keys on) so the
+                # policy withhold survives _deliver_finished_products by id, not a
+                # fragile path match. (Nemo code-review finding.)
+                summary.withheld_deliverables.extend(
+                    t.id for t in tasks if getattr(t, "deliverable", False)
                 )
-                return
-            if stalled:
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        f"WITHHELD: {len(goal_spec_issues)} measured declared-requirement "
+                        f"(HARD) violation(s) survived {goal.retry_count} fix attempt(s) — "
+                        + "; ".join(goal_spec_issues[:5])
+                    ),
+                    "suggestion": (
+                        "This deliverable was WITHHELD, not shipped clean — it does not "
+                        "meet the declared brief. Human action required."
+                    ),
+                })
+                rationale_text = (
+                    f"leader: WITHHELD — {len(goal_spec_issues)} measured HARD "
+                    f"violation(s) after {goal.retry_count} attempt(s): "
+                    f"{rationale} | report {report_path.name}"
+                )
+            elif remediation.action is RemediationAction.DEFER:
+                # #80 slices 2/3: the model declared this concern is NOT a
+                # fixable-in-scope shape (or its declaration failed validation) — it
+                # defers to the operator rather than self-fixing. Record it NAMED and
+                # ship (no redo). `rejected` distinguishes an engine-rejected
+                # declaration from a model-chosen defer in the audit trail.
+                reason = remediation.rejected or remediation.reason_code or "deferred"
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        f"Leader deferred this concern to the operator ({reason}) "
+                        "rather than self-fixing — not a fixable-in-scope remediation."
+                    ),
+                    "suggestion": f"Review and decide — {rationale}",
+                })
+                rationale_text = (
+                    f"leader: deferred to operator ({reason}): {rationale} "
+                    f"| report {report_path.name}"
+                )
+            elif stalled:
                 summary.recommendations.append({
                     "goal_id": goal.id,
                     "concern": (
@@ -8401,6 +8741,12 @@ class Orchestrator:
         # work + the judgment already formed). Previous QC evidence is cleared so
         # the revised draft is re-reviewed clean.
         for t in tasks:
+            # #80 slice 6 (Access invariant): a redo REUSES the task's loadout and
+            # never WIDENS it. required_skills is intentionally untouched in this
+            # loop; snapshot it and pin it back below so a future edit here can't
+            # silently grant a redo task a wider tool grant than its original
+            # dispatch (which _task_tool_loadout would turn into real access).
+            _orig_required_skills = list(t.required_skills)
             draft_path = self._task_artifact_path(t)
             if draft_path is not None:
                 # Build on the existing draft. DIFF for multi-file code, else
@@ -8427,6 +8773,8 @@ class Orchestrator:
             t.retry_count = 0
             t.assigned_agent_id = None
             t.qc_agent_id = None
+            if set(t.required_skills) - set(_orig_required_skills):
+                t.required_skills = _orig_required_skills  # never widen on redo
             t.evidence_provided = []
             # Security/debug review (2026-06-04): a re-opened task has NO live QC
             # pass-mark — the Leader is overriding the prior pass. Clearing it stops
@@ -9866,10 +10214,20 @@ class Orchestrator:
                         stack.extend(getattr(dt, "depends_on", None) or [])
                 return True
 
-            grounded = [(tid, p, f) for (tid, p, f) in all_delivs if _grounded(tid)]
-            summary.withheld_deliverables = [
-                tid for (tid, _p, _f) in all_delivs if tid not in {g[0] for g in grounded}
+            # #80 (Nemo BLOCKER): a pre-existing POLICY withhold (the verify-time
+            # HARD-violation withhold) MUST survive this pass — never ship a deliverable
+            # the engine already withheld, and never blindly reassign over the list.
+            # Exclude policy-withheld task ids from `grounded`, then UNION them into the
+            # final withheld set (don't overwrite).
+            policy_withheld = set(summary.withheld_deliverables)
+            grounded = [
+                (tid, p, f) for (tid, p, f) in all_delivs
+                if _grounded(tid) and tid not in policy_withheld
             ]
+            summary.withheld_deliverables = sorted(
+                policy_withheld
+                | {tid for (tid, _p, _f) in all_delivs if tid not in {g[0] for g in grounded}}
+            )
             # Cross-goal grounding advisory: goals have no explicit dep model, so
             # per-task grounding can't see an IMPLICIT reliance (a shipped goal that
             # read a blocked goal's work via team_canvas with no task edge). Rather
@@ -10672,15 +11030,16 @@ QC's call is a loop, the same trap as the format rule above. A length
 reservation goes to the human in the Product Quality Report, never a
 "disappointed" verdict.
 
-COMPLETE WORK IS REAL OUTPUT — don't flog it. A "disappointed" verdict
-makes the team DESTROY the finished work and rewrite it from scratch, so
-it is reserved for a genuinely MISSING or STUB deliverable. When the
-substantial deliverable is already on disk and merely isn't how you'd have
-done it, that is a JUDGMENT, not a gap — it ships, and your concern goes to
-the human as a reservation. The engine will not rerun the team over present,
-substantial output (it withholds the redo and records your rationale as a
-reservation), so spend "disappointed" only where a from-scratch redo can
-actually add the missing thing.
+COMPLETE WORK IS REVISED, NOT DESTROYED. A "disappointed" verdict sends the
+team to REVISE the deliverable IN PLACE — they build on the existing draft
+with your rationale as the instruction, never regenerating from scratch. So a
+FIXABLE GAP in substantial output — a required section absent, a brief
+requirement unmet — IS a valid "disappointed": the team can close it cheaply
+by revising, and your rationale must name the concrete fix. Reserve restraint
+for pure JUDGMENT: when the deliverable meets the brief, QC passed it, and it
+merely isn't how you'd have done it, that is taste, not a gap — ship it
+("on_the_fence") and send your preference to the human as a reservation. Spend
+"disappointed" on fixable gaps, not on style you would have done differently.
 
 Render one of three verdicts:
 - "satisfied": the right deliverable exists and QC passed it. Goal done.
@@ -10708,10 +11067,25 @@ Respond with a fenced ```json ... ``` block with exactly these keys:
         {{"concern": "<what you don't fully trust / couldn't verify>",
           "suggestion": "<the specific check you'd advise the human to run>"}}
       ],
-      "report_body": "<your human-facing assessment of the finished product, 150-400 words>"
+      "report_body": "<your human-facing assessment of the finished product, 150-400 words>",
+      "remediation": {{
+        "action": "revise_in_place" | "defer",
+        "reason_code": "fixable_goal_gap" | "missing_required_content" | "off_brief_content" | "needs_operator_authority" | "ambiguous_brief" | "outside_run_scope",
+        "window_requested": false
+      }}
     }}
 
-"recommendations" may be empty []. report_body and recommendations are
+On a "disappointed" verdict, declare a "remediation": choose "revise_in_place"
+(reason_code one of fixable_goal_gap / missing_required_content / off_brief_content)
+when the team can fix it by revising the existing work — this drives an in-place
+redo. Choose "defer" (reason_code one of needs_operator_authority / ambiguous_brief
+/ outside_run_scope) only when the concern genuinely needs the operator and is NOT
+something the team can fix within this run — this records a reservation, no redo.
+Set "window_requested": true ONLY on the rare, exceptional fix where a watching
+operator should get a brief veto window before you proceed; default false. Omit
+"remediation" entirely to mean the ordinary revise-in-place. "recommendations" is
+separate (advisory notes). "recommendations" may be empty []. report_body and
+recommendations are
 the Leader's contribution to the **Product Quality Report** that ships to
 the human beside the deliverables — be specific about what was delivered,
 what you stand behind, and what you'd have the human double-check.
