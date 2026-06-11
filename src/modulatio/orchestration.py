@@ -8588,6 +8588,12 @@ class Orchestrator:
         # work + the judgment already formed). Previous QC evidence is cleared so
         # the revised draft is re-reviewed clean.
         for t in tasks:
+            # #80 slice 6 (Access invariant): a redo REUSES the task's loadout and
+            # never WIDENS it. required_skills is intentionally untouched in this
+            # loop; snapshot it and pin it back below so a future edit here can't
+            # silently grant a redo task a wider tool grant than its original
+            # dispatch (which _task_tool_loadout would turn into real access).
+            _orig_required_skills = list(t.required_skills)
             draft_path = self._task_artifact_path(t)
             if draft_path is not None:
                 # Build on the existing draft. DIFF for multi-file code, else
@@ -8614,6 +8620,8 @@ class Orchestrator:
             t.retry_count = 0
             t.assigned_agent_id = None
             t.qc_agent_id = None
+            if set(t.required_skills) - set(_orig_required_skills):
+                t.required_skills = _orig_required_skills  # never widen on redo
             t.evidence_provided = []
             # Security/debug review (2026-06-04): a re-opened task has NO live QC
             # pass-mark — the Leader is overriding the prior pass. Clearing it stops
