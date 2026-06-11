@@ -21,6 +21,7 @@ import re
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from enum import Enum
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -52,6 +53,93 @@ from modulatio.vault import project_dir, run_dir as _vault_run_dir
 
 
 _logger = logging.getLogger("modulatio.orchestration")
+
+
+# ── #80 Leader self-remediation: the typed remediation gate ──────────────
+# The model DECLARES a `remediation` object on its verify output; the engine
+# VALIDATES it by enum membership + target identity ONLY (it never parses prose
+# to infer intent), fails CLOSED to a named defer, and defaults an absent
+# declaration on a `disappointed` verdict to the one whitelisted safe shape
+# (revise-in-place on the goal's own tasks). See
+# docs/design/leader-self-remediation.md.
+class RemediationAction(str, Enum):
+    REVISE_IN_PLACE = "revise_in_place"
+    DEFER = "defer"
+
+
+#: Valid model-declared reason codes, branched by action. `reason_code` is
+#: surfacing/audit taxonomy only — never an authorization input. Note that
+#: `unrecognized_remediation_shape` / `invalid_remediation_declaration` are the
+#: ENGINE's rejection names and are deliberately NOT in either set, so a model
+#: cannot pre-declare them.
+_REVISE_REASON_CODES = frozenset(
+    {"fixable_goal_gap", "missing_required_content", "off_brief_content"}
+)
+_DEFER_REASON_CODES = frozenset(
+    {"needs_operator_authority", "ambiguous_brief", "outside_run_scope"}
+)
+_INVALID_DECLARATION = "invalid_remediation_declaration"
+
+
+@dataclass(frozen=True)
+class Remediation:
+    """A validated remediation decision. ``rejected`` carries the engine's
+    rejection name when a declaration failed validation (always with
+    ``action == DEFER``); it is ``None`` for a model that validly chose to
+    defer, keeping model-chose-defer and engine-rejected distinct in the audit
+    trail."""
+
+    action: RemediationAction
+    reason_code: "str | None" = None
+    target_task_ids: tuple = ()
+    window_requested: bool = False
+    rejected: "str | None" = None
+
+
+def validate_remediation(data: dict, goal_task_ids: "set[str]") -> Remediation:
+    """Parse + validate the model's declared ``remediation`` object. Fails
+    CLOSED: any malformed/invalid declaration → a DEFER named
+    ``invalid_remediation_declaration`` (never a silent rebind). An absent
+    declaration on a ``disappointed`` verdict defaults to the one whitelisted
+    safe shape — revise-in-place on the goal's OWN tasks (empty targets), which
+    is exactly today's behavior and cannot widen anything."""
+    raw = data.get("remediation")
+    if raw is None:
+        # Back-compat default: the proven-safe shape, goal's own tasks.
+        return Remediation(
+            action=RemediationAction.REVISE_IN_PLACE, reason_code="fixable_goal_gap"
+        )
+    if not isinstance(raw, dict):
+        return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
+    try:
+        action = RemediationAction(raw.get("action"))
+    except ValueError:
+        return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
+    reason = raw.get("reason_code")
+    valid_reasons = (
+        _REVISE_REASON_CODES
+        if action is RemediationAction.REVISE_IN_PLACE
+        else _DEFER_REASON_CODES
+    )
+    if reason is not None and reason not in valid_reasons:
+        return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
+    targets_raw = raw.get("target_task_ids") or []
+    if not isinstance(targets_raw, list) or any(
+        not isinstance(t, str) for t in targets_raw
+    ):
+        return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
+    targets = tuple(targets_raw)
+    # target_task_ids ⊆ this goal's own tasks — fail closed, never silently rebind.
+    if action is RemediationAction.REVISE_IN_PLACE and not set(targets) <= set(
+        goal_task_ids
+    ):
+        return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
+    return Remediation(
+        action=action,
+        reason_code=reason,
+        target_task_ids=targets,
+        window_requested=bool(raw.get("window_requested", False)),
+    )
 
 
 class AgentRunner(Protocol):
