@@ -9129,6 +9129,57 @@ def test_leader_verify_clamps_verdict_on_measured_hard_violation(tmp_path, monke
     assert goal.retry_count >= 1
 
 
+def test_leader_verify_withholds_on_hard_violation_at_exhaustion(tmp_path, monkeypatch):
+    """#80 slice 4 (WITHHOLD): when a measured declared-spec (HARD) violation survives
+    the retry budget, the engine WITHHOLDS the deliverable rather than shipping it with
+    a reservation — HARD means the engine binds. The goal still COMPLETES (the run is
+    never blocked); the deliverable just doesn't go out clean. Exhaustion-on-entry via
+    max_retries=0 isolates the withhold path."""
+    from uuid import uuid4
+
+    from modulatio import assembly as _assembly, job_templates as _jt, vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=2,
+        parts=[{"label": "Story One", "size": 2500}, {"label": "Story Two", "size": 900}],
+        part_size_unit="words", structure={"title": False, "toc": False},
+        text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=2000, size_unit="words",
+                               required_structure=("title", "toc"))
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return '```json\n{"verdict":"satisfied","rationale":"r","report_body":"r"}\n```'
+        return _leader_stub(prompt)
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("WHD", "withhold", "obj")
+    vault.init_run("WHD", "run-1", "obj")
+    project = Project(code="WHD", name="WHD", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "whd"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub})
+    orch._deliverable_spec = spec
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "book.pdf").write_bytes(b"%PDF-1.7\x00 bound")
+    task = _deliverable_task("WHD", output="book.pdf")
+    orch._assembly_records[task.id] = _assembly.AssemblyRecord(
+        manifest={}, final_checksum="sha256:x", complete=True, strategy="document",
+        digest=digest)
+    goal = Goal(id="WHD-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    goal.max_retries = 0  # exhausted on entry → the withhold path, no redo
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert summary.withheld_deliverables, "a surviving HARD violation must withhold"
+    assert goal.status == GoalStatus.COMPLETED  # goal completes; deliverable withheld
+    assert any("WITHHELD" in r["concern"] for r in summary.recommendations)
+
+
 def test_empty_deliverable_spec_surfaces_nothing(tmp_path, monkeypatch):
     """B.2 must not over-fire: with NO declared spec (today's default), the verifier sees
     the digest but no DECLARED-SPEC CHECK block — behavior is unchanged."""

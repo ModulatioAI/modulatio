@@ -8289,7 +8289,36 @@ class Orchestrator:
                     goal, tasks, rationale, report_path, summary,
                 )
                 return
-            if stalled:
+            if goal_spec_issues:
+                # #80 slice 4 (WITHHOLD): a declared-spec (HARD) violation the engine
+                # MEASURED survived the retry budget. Do NOT ship a product the engine
+                # KNOWS violates an operator-HARD param — withhold it. The goal still
+                # COMPLETES (the run is never blocked; independent goals ship), but this
+                # deliverable does not go out clean. HARD means the engine binds.
+                withheld = [
+                    (t.output_path or str(self._task_artifact_path(t) or t.id))
+                    for t in tasks
+                    if getattr(t, "deliverable", False)
+                ]
+                summary.withheld_deliverables.extend(withheld)
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        f"WITHHELD: {len(goal_spec_issues)} measured declared-requirement "
+                        f"(HARD) violation(s) survived {goal.retry_count} fix attempt(s) — "
+                        + "; ".join(goal_spec_issues[:5])
+                    ),
+                    "suggestion": (
+                        "This deliverable was WITHHELD, not shipped clean — it does not "
+                        "meet the declared brief. Human action required."
+                    ),
+                })
+                rationale_text = (
+                    f"leader: WITHHELD — {len(goal_spec_issues)} measured HARD "
+                    f"violation(s) after {goal.retry_count} attempt(s): "
+                    f"{rationale} | report {report_path.name}"
+                )
+            elif stalled:
                 summary.recommendations.append({
                     "goal_id": goal.id,
                     "concern": (
