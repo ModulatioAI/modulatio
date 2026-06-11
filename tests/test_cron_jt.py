@@ -147,6 +147,26 @@ def test_heartbeat_passes_on_refused_override_when_set():
     assert seen["on_refused"] == "greenfield"
 
 
+def test_run_now_round_trips_on_refused_override(monkeypatch):
+    """Nemo code-hull BLOCKER 2: manual cron run-now must carry the stored on_refused
+    override, exactly like scheduled dispatch — else a 'greenfield' cron behaves
+    differently under run-now (a policy fork). Assert the enqueued task carries it."""
+    _make_jt("daily-essay", required=())
+    job = cron.add(name="nightly", schedule="daily 09:00", project_code="PHI",
+                   objective="o", jt_id="daily-essay", jt_params={"theme": "x"},
+                   on_refused="greenfield")
+    captured = {}
+    real_add = heartbeat.add_task
+
+    def spy(**kw):
+        captured.update(kw)
+        return real_add(**kw)
+
+    monkeypatch.setattr(heartbeat, "add_task", spy)
+    cron.run_now(job["id"])
+    assert captured.get("on_refused") == "greenfield"
+
+
 def test_recurring_heartbeat_task_preserves_jt_binding():
     # Nemo B3+B4 hull gap #8: a heartbeat-native recurring JT task must carry
     # its binding to the requeued copy (else the 2nd run silently goes greenfield).

@@ -9204,7 +9204,11 @@ class Orchestrator:
 
         Returns ``(ok, reason)``; ``reason`` names the misfit for the refusal.
         A legacy JT with no ``param_schema`` has nothing required → fit passes
-        (back-compat)."""
+        (back-compat). TOTAL over its inputs (Nemo code-hull BLOCKER 1): a
+        non-mapping ``params`` is itself a malformed bind → a clean misfit, never
+        an exception that escapes into the best-effort reset and loses the refusal."""
+        if not isinstance(params, dict):
+            return False, "bind parameters are malformed (expected a mapping of name→value)"
         unfilled = jt.unfilled_required(params)
         if unfilled:
             return False, f"missing required parameter(s): {', '.join(unfilled)}"
@@ -9233,9 +9237,22 @@ class Orchestrator:
         mechanically fill the template (:meth:`_jt_fit`), the corrupt template
         is REFUSED (``_bound_jt`` stays None, ``_jt_refusal`` records why) and
         we return without binding, so the run derives/skips rather than
-        mis-running a wedge every cycle."""
-        params = self._run_jt_interview(jt, bound_params, ask_operator)
-        ok, reason = self._jt_fit(jt, params)
+        mis-running a wedge every cycle.
+
+        Nemo code-hull BLOCKER 1: a malformed (non-mapping) ``bound_params`` is
+        gated BEFORE the interview — it can't be interviewed or fit-checked, so we
+        refuse it cleanly here rather than letting an ``AttributeError`` escape
+        into ``_resolve_job_template``'s best-effort catch (which would reset
+        ``_jt_refusal`` to None and let a malformed cron silently greenfield).
+        Well-formed params are fit-checked AFTER the interview so the JT's own
+        defaults count toward filling required blanks."""
+        if isinstance(bound_params, dict):
+            params = self._run_jt_interview(jt, bound_params, ask_operator)
+            ok, reason = self._jt_fit(jt, params)
+        else:
+            params = {}
+            ok = False
+            reason = "bind parameters are malformed (expected a mapping of name→value)"
         if not ok:
             self._jt_refusal = {"name": jt.name, "reason": reason}
             self._emit_activity(
@@ -9292,9 +9309,14 @@ class Orchestrator:
         JT's setup questions. When present (interactive *refresh*), each
         not-pre-bound param's ``prompt`` is asked and the answer overrides the
         default. When absent (headless / cron *run-as-always*), the defaults
-        stand and nothing is asked. A broken callback can't break a run."""
+        stand and nothing is asked. A broken callback can't break a run.
+
+        Defensive (belt for Nemo BLOCKER 1): a non-mapping ``provided`` is treated
+        as no pre-binds rather than throwing — the gate already refuses a malformed
+        bind upstream, but the interview never crashes on weird input."""
+        provided = provided if isinstance(provided, dict) else {}
         params = dict(jt.defaults())
-        params.update({k: v for k, v in (provided or {}).items() if v is not None})
+        params.update({k: v for k, v in provided.items() if v is not None})
         if ask_operator is None:
             return params
         for pf in jt.param_schema:

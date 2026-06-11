@@ -200,6 +200,31 @@ def test_engine_created_jt_is_gated_end_to_end(env):
     assert o2._jt_refusal is not None and "subject" in o2._jt_refusal["reason"]
 
 
+def test_malformed_bind_params_refuse_not_swallowed(env):
+    """Nemo code-hull BLOCKER 1: malformed bound params (a non-dict) must become a CLEAN
+    refusal — the engine binds the invariant. Previously an AttributeError escaped the
+    interview/gate and the broad best-effort catch reset _jt_refusal to None, so a
+    malformed cron bind silently greenfielded instead of skipping. The param path is now
+    total: non-dict params → refused (never a swallowed crash, never a stale-None state)."""
+    _make_jt(name="brief", schema=(jt.ParamField(name="topic", required=True),))
+    o, pr = _orch(env)
+    _resolve(o, pr, bound_jt_name="brief", bound_jt_params=["not", "a", "dict"])
+    assert o._bound_jt is None                 # refused, not bound
+    assert o._jt_refusal is not None           # refusal preserved (NOT reset to None)
+    assert o._jt_refusal["name"] == "brief"
+
+
+def test_malformed_bind_params_skip_the_slot_fires(env):
+    """The downstream consequence of BLOCKER 1: with on_refused='skip', a malformed cron
+    bind must SKIP the slot (refusal state survives to the skip gate), not run greenfield."""
+    _make_jt(name="brief", schema=(jt.ParamField(name="topic", required=True),))
+    o, pr = _orch(env)
+    summary = o.kickoff(pr.objective, bound_jt_name="brief",
+                        bound_jt_params=["not", "a", "dict"], on_refused="skip")
+    assert summary.skipped_refused_jt == "brief"
+    assert summary.goals == []
+
+
 def test_refused_bind_renders_derive_prompt_in_block(env):
     """The converse surface: a refused bind surfaces a 'derive a fitting one' block
     (the third _job_template_block state), naming the template + the reason."""

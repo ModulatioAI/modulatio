@@ -141,7 +141,11 @@ class JobTemplate:
         — empty. Unlike :meth:`missing_required` (absent/None only, kept for cron.add's
         existing semantics), this catches the present-but-empty bypass (``{"topic": ""}``
         / ``{"competitors": []}``) so an explicit cron/operator bind that literally can't
-        run is refused, not bound."""
+        run is refused, not bound. Total over ``params`` (Nemo code-hull belt):
+        a non-mapping is treated as "nothing supplied" → every required field is
+        unfilled, never an ``AttributeError``."""
+        if not isinstance(params, dict):
+            params = {}
         unfilled: list[str] = []
         for p in self.param_schema:
             if not p.required:
@@ -161,7 +165,10 @@ class JobTemplate:
         every cycle. For a list/tuple value (a per-driver or list-typed field), any
         non-member item flags the field. Absence and emptiness are the presence check's
         job (:meth:`unfilled_required`), not flagged here; a field with no ``enum`` is
-        unconstrained."""
+        unconstrained. Total over ``params`` (belt): a non-mapping → no supplied
+        values → no enum violations (the malformed bind is caught by the gate)."""
+        if not isinstance(params, dict):
+            return []
         violations: list[str] = []
         for p in self.param_schema:
             if not p.enum:

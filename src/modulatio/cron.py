@@ -392,6 +392,7 @@ def run_now(job_id: str) -> Optional[dict]:
             tags=["cron", "manual", job.get("name", "")],
             jt_id=job.get("jt_id"),
             jt_params=job.get("jt_params"),
+            on_refused=job.get("on_refused"),  # #97 R2: manual run honors the stored policy too
         )
     except Exception as e:
         update(job_id, last_run=_now_iso(), last_status=f"error:{e}")
