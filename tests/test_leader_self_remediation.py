@@ -92,3 +92,26 @@ def test_explicit_defer_is_honored_not_rejected():
     assert rem.action is RemediationAction.DEFER
     assert rem.reason_code == "needs_operator_authority"
     assert rem.rejected is None  # model CHOSE to defer — not an engine rejection
+
+
+# ── Slice 8: ActivityEvent.detail (additive payload for self-fix + window events) ──
+
+def test_activity_event_detail_is_optional_and_back_compat():
+    from datetime import datetime, timezone
+
+    from modulatio.types import ActivityEvent
+
+    # Existing 5-field construction still works; detail defaults to None.
+    ev = ActivityEvent(
+        agent_id="leader", role="leader", phase="leader_verify_started",
+        task_id=None, timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    assert ev.detail is None
+
+    # New: detail carries an arbitrary payload (str / dict / dataclass).
+    ev2 = ActivityEvent(
+        agent_id="leader", role="leader", phase="leader_self_fix",
+        task_id=None, timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        detail={"window": "timeout"},
+    )
+    assert ev2.detail == {"window": "timeout"}

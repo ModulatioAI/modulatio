@@ -2387,6 +2387,7 @@ class Orchestrator:
         phase: str,
         task_id: str | None = None,
         agent_id: str | None = None,
+        detail: "object | None" = None,
     ) -> None:
         """Fire an ActivityEvent to the subscriber if one is registered.
 
@@ -2411,6 +2412,7 @@ class Orchestrator:
             phase=phase,
             task_id=task_id,
             timestamp=datetime.now(timezone.utc),
+            detail=detail,
         )
         with self._activity_lock:
             self.activity_callback(event)
