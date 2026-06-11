@@ -270,9 +270,16 @@ bias-to-derive creates. Built right after #97's first cut — so sprawl never ge
   `_dump_param_schema`/`_parse_param_schema` (round-trip, verified).
 - `src/modulatio/job_template_library.py` — `search_job_templates` (98) stays the *ranker*
   (no shape filter this cut — Nemo hole 3).
-- `src/modulatio/_seed_skills/leader-converse.md` — bias-to-derive prose.
-- `src/modulatio/_seed_job_templates/` — the new create-JT interview skill (leave `jt-create.md`).
-- tests: `tests/test_job_templates.py`, `tests/test_orchestration.py`.
+- `src/modulatio/_seed_skills/leader-converse.md` — bias-to-derive prose AND the
+  operator-driven create-JT interview guidance (Part 2b). *Realization note:* the
+  create-JT interview landed as a section in the converse prompt (where the refusal
+  block already points the Leader), not a separate `_seed_job_templates/` file — the
+  recurrence-driven `jt-create.md` is left untouched. The interview is Leader converse
+  behavior, so it lives in the converse prompt; the engine-bound half (param_schema
+  capture + the gate) is what enforces correctness.
+- tests: `tests/test_job_templates.py` (unfilled_required / enum_violations),
+  `tests/test_jt_intake.py` (gate refuse / skip-the-slot / Q6 build-order guard),
+  `tests/test_orchestration.py` (greenfield-vs-skip), `tests/test_cron_jt.py` (override chain).
 
 ## Out of scope (named)
 - The conversational-TUI adopt-and-bind itself, AND the candidate-surface shape filter it needs
