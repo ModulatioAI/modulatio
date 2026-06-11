@@ -9081,6 +9081,54 @@ def test_leader_verify_surfaces_declared_spec_issues(tmp_path, monkeypatch):
     assert "required structure missing: toc" in p
 
 
+def test_leader_verify_clamps_verdict_on_measured_hard_violation(tmp_path, monkeypatch):
+    """#80 slice 4: a measured declared-spec (HARD) violation CLAMPS the verdict off
+    'satisfied' — the engine binds, the model cannot wave it through. The leader keeps
+    saying 'satisfied'; the clamp keeps driving the redo (persistent violation), so the
+    goal redoes at least once rather than shipping the brief-violating product clean."""
+    from uuid import uuid4
+
+    from modulatio import assembly as _assembly, job_templates as _jt, vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=2,
+        parts=[{"label": "Story One", "size": 2500}, {"label": "Story Two", "size": 900}],
+        part_size_unit="words", structure={"title": False, "toc": False},
+        text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=2000, size_unit="words",
+                               required_structure=("title", "toc"))
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return '```json\n{"verdict":"satisfied","rationale":"r","report_body":"r"}\n```'
+        return _leader_stub(prompt)
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("CLP", "clamp", "obj")
+    vault.init_run("CLP", "run-1", "obj")
+    project = Project(code="CLP", name="CLP", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "clp"), run_id="run-1")
+    orch = Orchestrator(project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub})
+    orch._deliverable_spec = spec
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "book.pdf").write_bytes(b"%PDF-1.7\x00 bound")
+    task = _deliverable_task("CLP", output="book.pdf")
+    orch._assembly_records[task.id] = _assembly.AssemblyRecord(
+        manifest={}, final_checksum="sha256:x", complete=True, strategy="document",
+        digest=digest)
+    goal = Goal(id="CLP-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+    orch._leader_verify_goal(goal, [task], summary)
+    # The leader said "satisfied" every round; the engine clamp forced disappointed
+    # → at least one redo, instead of shipping the measured HARD violation clean.
+    assert goal.retry_count >= 1
+
+
 def test_empty_deliverable_spec_surfaces_nothing(tmp_path, monkeypatch):
     """B.2 must not over-fire: with NO declared spec (today's default), the verifier sees
     the digest but no DECLARED-SPEC CHECK block — behavior is unchanged."""

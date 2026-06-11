@@ -8006,6 +8006,12 @@ class Orchestrator:
         )
         task_summary_lines = []
         artifact_blocks: list[str] = []
+        # #80 slice 4: the GOAL-LEVEL aggregate of declared-spec (HARD) violations
+        # across ALL digests — the verdict clamp binds from THIS, not the per-task
+        # local `spec_issues` (a naive clamp on the local var would see only the
+        # last digest and let an earlier task's HARD violation ship). One
+        # computation, two consumers: the verifier prompt block AND the clamp.
+        goal_spec_issues: list[str] = []
         for t in tasks:
             line = (
                 f"- {t.id} [{t.status.value}]"
@@ -8035,6 +8041,7 @@ class Orchestrator:
                     # The HRWT verify was BLIND to "6 of 8 under the floor / no title /
                     # inconsistent numbering"; now those facts are in front of it.
                     spec_issues = self._deliverable_spec_issues(rec.digest)
+                    goal_spec_issues.extend(f"{t.id}: {issue}" for issue in spec_issues)
                     if spec_issues:
                         block += (
                             "\n\nDECLARED-SPEC CHECK (engine, deterministic) — this "
@@ -8191,6 +8198,18 @@ class Orchestrator:
             summary.errors.append(
                 f"{goal.id}: leader returned unknown verdict "
                 f"{verdict!r}; treating as disappointed"
+            )
+            verdict = "disappointed"
+
+        # #80 slice 4: the VERDICT CLAMP — the real Brief enforcer. A declared-spec
+        # (HARD) violation the engine MEASURED cannot ship: clamp any non-disappointed
+        # verdict to "disappointed" so it drives the redo ledger rather than riding out
+        # on the model's say-so. The model still judges fitness everywhere the spec
+        # does not constrain; it just cannot wave through a measured HARD violation.
+        if goal_spec_issues and verdict != "disappointed":
+            summary.errors.append(
+                f"{goal.id}: clamped verdict {verdict}→disappointed — "
+                f"{len(goal_spec_issues)} declared-spec (HARD) violation(s) measured"
             )
             verdict = "disappointed"
 
