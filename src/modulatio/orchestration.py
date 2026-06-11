@@ -2520,9 +2520,10 @@ class Orchestrator:
                 "partners. Surface the calls that matter and your reservations "
                 "to them and let them weigh in rather than deciding "
                 "unilaterally; honor the direction they've set, and run with "
-                "your own judgment where they've left it to you. Lean toward "
-                "continuing and recording concerns over driving a redo on your "
-                "own — your partner is right there to decide with you."
+                "your own judgment where they've left it to you. Act on the "
+                "fixable calls you're authorized to make and surface what "
+                "you're doing as you do it; bring them the calls that need "
+                "their authority or would change what they marked fixed."
             )
         return (
             "ON YOUR OWN — no operator is collaborating on this run, so you are "
@@ -10845,15 +10846,16 @@ QC's call is a loop, the same trap as the format rule above. A length
 reservation goes to the human in the Product Quality Report, never a
 "disappointed" verdict.
 
-COMPLETE WORK IS REAL OUTPUT — don't flog it. A "disappointed" verdict
-makes the team DESTROY the finished work and rewrite it from scratch, so
-it is reserved for a genuinely MISSING or STUB deliverable. When the
-substantial deliverable is already on disk and merely isn't how you'd have
-done it, that is a JUDGMENT, not a gap — it ships, and your concern goes to
-the human as a reservation. The engine will not rerun the team over present,
-substantial output (it withholds the redo and records your rationale as a
-reservation), so spend "disappointed" only where a from-scratch redo can
-actually add the missing thing.
+COMPLETE WORK IS REVISED, NOT DESTROYED. A "disappointed" verdict sends the
+team to REVISE the deliverable IN PLACE — they build on the existing draft
+with your rationale as the instruction, never regenerating from scratch. So a
+FIXABLE GAP in substantial output — a required section absent, a brief
+requirement unmet — IS a valid "disappointed": the team can close it cheaply
+by revising, and your rationale must name the concrete fix. Reserve restraint
+for pure JUDGMENT: when the deliverable meets the brief, QC passed it, and it
+merely isn't how you'd have done it, that is taste, not a gap — ship it
+("on_the_fence") and send your preference to the human as a reservation. Spend
+"disappointed" on fixable gaps, not on style you would have done differently.
 
 Render one of three verdicts:
 - "satisfied": the right deliverable exists and QC passed it. Goal done.

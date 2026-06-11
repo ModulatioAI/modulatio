@@ -226,3 +226,29 @@ def test_window_seconds_clamped_to_ceiling(tmp_path, monkeypatch):
     )
     o = Orchestrator(proj, {"leader": lambda p: ""}, fix_window_s=99999.0)
     assert o._fix_window_s <= 300.0
+
+
+# ── Slice 5: the prompt belt + the prompt-engine coherence guard ────────────
+
+def test_verify_prompt_makes_no_false_claims_about_engine_redo():
+    """The verify prompt must not describe engine redo behavior the engine
+    doesn't have — §3b made redo revise-in-place, not destroy-and-rewrite, and
+    it does NOT withhold the redo on substantial output. Prompts that *describe*
+    the engine drift worse than prompts that *instruct*."""
+    from modulatio.orchestration import _LEADER_VERIFY_PROMPT as p
+
+    low = p.lower()
+    assert "withholds the redo" not in low
+    assert "destroy the finished work" not in low
+    assert "rewrite it from scratch" not in low
+    assert "missing or stub" not in low
+    assert "revise" in low  # it now teaches revise-in-place reality
+
+
+def test_operator_context_block_does_not_suppress_fixes_when_watched(orch):
+    """The belt must not tell a watched Leader to record-concerns-over-redo —
+    that leaked presence into the whether-to-fix decision."""
+    orch.operator_present = True
+    block = orch._operator_context_block().lower()
+    assert "recording concerns over driving a redo" not in block
+    assert "surface" in block  # surface-as-you-fix register
