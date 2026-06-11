@@ -230,6 +230,32 @@ def test_unfilled_required_empty_schema_is_back_compat():
     assert t.unfilled_required({"anything": "here"}) == []
 
 
+def test_enum_violations_flags_out_of_contract_values():
+    """#97 R1 (Hero): a supplied value outside a declared non-empty enum is a
+    present-but-out-of-contract misfit. List/per-driver fields: any non-member item flags.
+    A field with no enum is unconstrained; a not-supplied field is the presence check's job."""
+    t = jt.JobTemplate(
+        name="t", description="d", interview_body="b",
+        param_schema=(
+            jt.ParamField(name="region", type="enum", enum=("NA", "EU", "APAC")),
+            jt.ParamField(name="zones", type="list[str]", enum=("a", "b", "c")),
+            jt.ParamField(name="freeform", type="str"),  # no enum → unconstrained
+        ),
+    )
+    # in-contract scalar + list → no violations
+    assert t.enum_violations({"region": "EU", "zones": ["a", "c"]}) == []
+    # out-of-contract scalar
+    assert t.enum_violations({"region": "Atlantis"}) == ["region"]
+    # any non-member item in a list field flags the field
+    assert t.enum_violations({"zones": ["a", "Atlantis"]}) == ["zones"]
+    # unconstrained field never flags
+    assert t.enum_violations({"freeform": "whatever"}) == []
+    # absent enum field is NOT an enum violation (presence-check owns absence)
+    assert t.enum_violations({}) == []
+    # empty-string against an enum is absence-shaped, left to the presence check, not flagged here
+    assert t.enum_violations({"region": ""}) == []
+
+
 # ── name-dedup hard guard ─────────────────────────────────────────────────
 
 

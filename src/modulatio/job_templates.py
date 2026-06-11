@@ -155,6 +155,25 @@ class JobTemplate:
                 unfilled.append(p.name)
         return unfilled
 
+    def enum_violations(self, params: dict[str, Any]) -> list[str]:
+        """#97 R1 (Hero): names of SUPPLIED params whose value falls outside a declared
+        non-empty ``enum`` — a present-but-out-of-contract misfit a cron would mis-run
+        every cycle. For a list/tuple value (a per-driver or list-typed field), any
+        non-member item flags the field. Absence and emptiness are the presence check's
+        job (:meth:`unfilled_required`), not flagged here; a field with no ``enum`` is
+        unconstrained."""
+        violations: list[str] = []
+        for p in self.param_schema:
+            if not p.enum:
+                continue
+            value = params.get(p.name)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue  # absence/emptiness belongs to unfilled_required
+            items = value if isinstance(value, (list, tuple)) else [value]
+            if any(item not in p.enum for item in items):
+                violations.append(p.name)
+        return violations
+
 
 _EMPTY_JT = JobTemplate(name="", description="", interview_body="")
 
