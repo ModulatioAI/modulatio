@@ -1,229 +1,258 @@
 # Leader self-remediation — fixable-in-scope concerns (#80)
 
-**Status:** DESIGN, held local on `arc/leader-self-remediation` (2026-06-10). Not built.
-**Hero hull rounds 1-3 incorporated** — architecture signed ("sound, build it"). R1: typed-shape
-gate, structural Authority, false-fix backstop, discovery-seam alignment, ActivityEvent payload,
-citation fix. R3 (the residual): the Brief enforcer **detects but did not bind** — added the
-verdict clamp + HARD-exhaustion withhold fork (verified at source: `_deliverable_spec_issues`
-fed only the verifier prompt, 7850). Hero signs with the clamp in. Pending the broader cadre —
-**Nemo (hull) + Lovecraft (coherence)** — then TDD.
+**Status:** DESIGN, reviewer-signed, held local on `arc/leader-self-remediation` (2026-06-10).
+Not built. **Hero (hull): SIGN-OFF** (rounds 1-3 + window code sketch). **Lovecraft (coherence):
+SIGN-OFF** (partnership block closed by the bounded window + framing). **Nemo (hull):** BLOCK →
+four findings resolved below; owes a scoped round-2 on this remediated doc. Then TDD.
+
+This doc folds: Nemo's four binds, Hero's architect rulings, Clif's partnership-window ruling
+(with Hero's implementation sketch), and Lovecraft's framing corrections.
 
 ## What this is, and what grounding corrected
 
-The ticket read "Leader addresses fixable concerns itself (don't punt to human)." Grounding the
-actual engine inverted half of it:
+The ticket read "Leader addresses fixable concerns itself (don't punt to human)." Grounding
+corrected it twice:
 
-- The **disappointed→redo path already self-fixes.** A fixable fitness gap drives
-  `_leader_auto_redo` (revise-in-place, §3b), bounded by the absolute retry cap, and on
-  exhaustion it **ships best-effort with an advisory recommendation — not a blocking human
-  ticket** (`orchestration.py` ~8016-8020). The tickets that *do* exist (`ROSTER_GAP`, env/
-  budget blocks) are genuinely needs-human, not fixable punts.
-- **The real remaining gap is the operator-present DEFER, and it is pure prose.**
-  `_operator_context_block()` (orchestration.py:2338), when `operator_present=True`, injects
-  *"Lean toward continuing and recording concerns over driving a redo on your own — your
-  partner is right there."* That prose **softens the Leader's verdict when a human is
-  watching** → fewer redos → more fixable work dumped on the operator.
+- The **disappointed→redo path self-fixes** (`_leader_auto_redo`, revise-in-place §3b, absolute
+  retry cap) and on exhaustion ships best-effort with an advisory recommendation — *not* a
+  blocking ticket. The real tickets (`ROSTER_GAP`, env/budget) are genuinely needs-human.
+- **But two seams still leak operator presence into the *whether-to-fix* decision:** (1) the
+  prose in `_operator_context_block` (2338) softens the verdict when watched; (2) **the main
+  `_LEADER_VERIFY_PROMPT` (10675-10683) still teaches the obsolete rule** — it claims
+  "disappointed = destroy & rewrite from scratch, reserved for missing/stub; substantial-but-
+  wrong ships with a reservation," which is a **false statement of current engine behavior**
+  (§3b retired the destroy-rewrite guard, 8043-8051) *and* internally contradicts the verdict
+  list below it (which offers "a required section absent" as the canonical `disappointed` case).
+  A model resolving that contradiction obeys the stronger fear-framed paragraph → returns
+  `on_the_fence` → no redo → the fixable defect ships. (Nemo finding 1.)
 
-So #80 is a textbook *prose bends, engine binds*: **operator presence is leaking into the
-*whether-to-fix* decision** (through the prompt, AND through two discovery seams — see §Q5).
-Presence should govern *visibility*, not whether the Leader fixes what it is authorized to fix.
+So #80 is *prose bends, engine binds*: presence (and a stale prompt) leak into whether-to-fix.
+**Presence should govern visibility, not whether the Leader fixes what it is authorized to fix.**
 
-## The principle — presence governs visibility, not whether-to-fix
+## The principle — presence governs visibility *for the proven-safe shape*; everything else defers
 
-- **Judgment (stays the model's):** *is the deliverable wrong? what is the concern?* Fitness is
-  not a structural invariant (the inverse caveat: don't over-mechanize judgment).
-- **Invariant (the engine binds):** *is the remediation a recognized, safe **shape**?* — a
-  boolean the engine evaluates **without interpreting model-authored text** (see the gate
-  reshape below), and it, not operator presence, decides whether the Leader fixes.
+Sharpened per Lovecraft (it must not read as "fix everything, just notify"):
 
-**Decision (Clif, 2026-06-10): (b) transparent autonomy.** A fixable-in-scope remediation runs
-**regardless of operator presence**; when an operator is present the Leader **surfaces**
-"handling X this way" live. Defer-to-human is reserved for remediations the gate does **not**
-recognize as safe. Honors the partnership principle (the partner sees every fix) without
-burdening them with busywork the gate already proved safe.
+- **Judgment (the model's):** *is the deliverable wrong? what is the concern?* Fitness is not a
+  structural invariant.
+- **Invariant (the engine binds):** *is the remediation a recognized, safe **shape**?* For the
+  **one** whitelisted safe shape, presence governs only *visibility* (fix-and-notify, or the
+  rare window). **Every other concern still defers to the operator** — the typed gate routes it
+  there, named. Autonomy is narrow by construction.
 
-## The gate — recognizes typed remediation SHAPES, not proposals (Hero Q2 reshape)
+**Decision (Clif): (b) transparent autonomy, with a bounded intervention window.** A
+recognized-safe remediation runs regardless of presence; the common path is fix-and-notify, and
+on rare Leader judgment a 90s operator-vetoable window precedes the fix (see §The window).
+Defer-to-human is the gate's response to any *unrecognized* shape.
 
-The gate must not evaluate a model-authored *proposal* ("would this fix alter a HARD param?" is
-interpretation — judgment in a boolean costume, on all four conditions). Instead it **recognizes
-whether the chosen remediation is one of a small whitelist of typed *shapes* the engine already
-knows is safe.** Shape-membership is genuinely engine-evaluable — the difference between
-"parse the Leader's intent" and "is this action one of the forms I know is safe."
+## The gate — a typed remediation schema the model DECLARES and the engine VALIDATES
 
-**Today the whitelist has exactly one entry:**
+A free-text proposal can't be classified without parsing prose (judgment-in-a-boolean). So the
+Leader's verify output gains a structured `remediation` object the **model declares** and the
+**engine validates by enum membership + identity only** (Nemo finding 2; Hero's rulings):
 
-> **REVISE-IN-PLACE** — re-run *this goal's own tasks* in `revise`/`diff` mode against each
-> task's *existing bound tool loadout* (the `_leader_auto_redo` path).
+```
+"remediation": {
+  "action":      "revise_in_place" | "defer",
+  "reason_code":                       // enum, branched by action:
+     // revise_in_place: "fixable_goal_gap" | "missing_required_content" | "off_brief_content"
+     // defer:           "needs_operator_authority" | "ambiguous_brief" | "outside_run_scope"
+  "target_task_ids": ["..."],          // optional
+  "window_requested": false            // model's "this is the exceptional case" (see §The window)
+}
+```
 
-Anything that is **not** a recognized shape **fails closed**, deferred and named `unrecognized
-remediation shape`. The four conditions are **not** re-judged per concern at runtime — they
-become (a) the **design-time proof obligation** every shape must clear *once* to earn the
-whitelist, and (b) the **failure-naming taxonomy** for deferrals. New shapes get added only by
-proving them against the four conditions at design time, never by the model re-asserting safety
-per concern.
+Hero's four rulings, binding:
+- **`unrecognized_remediation_shape` is NOT a model `reason_code`** — it is the *engine's* name
+  for a failed validation. The model declares intent; the engine names rejections. A validation
+  failure defers, engine-named **`invalid_remediation_declaration`**, keeping model-chose-defer
+  and engine-rejected-declaration distinct in the audit trail.
+- **Validation fails CLOSED, never silently rebinds.** Enum membership; `target_task_ids ⊆ this
+  goal's own tasks`. Any failure → defer (named). Do *not* "ignore them and bind to current
+  tasks" — silently executing an invalid declaration is the gate trusting itself over the
+  model. A named deferral is cheap and auditable.
+- **Absent `remediation` on `disappointed` → default to the one whitelisted shape**
+  (revise-in-place bound to this goal's own tasks) = exactly today's behavior. Additive,
+  back-compat, no flag day; absence cannot widen anything (the default *is* the proven-safe
+  shape).
+- **`reason_code` is surfacing/audit taxonomy, never authorization input.** Binding = enum
+  membership + target identity + the shape's structural conditions. A model can mislabel its
+  reason; it cannot mislabel past the gate.
 
-### Why REVISE-IN-PLACE earns the whitelist — and each condition's downstream BINDING enforcer
+### The one whitelisted shape, and each condition's downstream BINDING enforcer
 
-A gate that recognizes a shape still only checks a *claim*; the *executed* fix is producer/QC-LLM
-work and can do more than the shape implies. So each condition names the point **downstream of
-the gate** that actually binds it (Hero Q1):
+**REVISE-IN-PLACE** — re-run this goal's own tasks in `revise`/`diff` against each task's
+existing bound loadout. Why it's safe, and what *binds* each claim downstream (Nemo finding 1):
 
-| Condition | Why revise-in-place satisfies it | Binding enforcer (downstream) |
+| Condition | Why the shape satisfies it | Binding enforcer (downstream of the gate) |
 |---|---|---|
-| **Scope** | re-runs only this goal's own tasks | `_leader_auto_redo` resets only this goal's tasks — executor-bound ✓ |
-| **Access** | reuses each task's existing loadout | **invariant to pin:** a redo task's tool loadout is **never wider** than the original (one-line engine assert + test — true by accident today, made true by intent) |
-| **Authority** | revise-in-place needs no escalation/metered authorization | structural — the shape carries no new cost. Any *future* shape that escalates is bound at **execution** by the existing fail-closed, per-task-idempotent metered/escalation authorizes (Hero Q3 — see below) |
-| **Brief** | improves fitness *within* the brief; cannot add/remove a HARD param | **a VERDICT CLAMP at (re)verify** (see below) — *not* the model verdict alone. Per-param true map: floor + required-structure + blank-label at reverify *when an assembly digest exists*; `artifact_kind` at **assembly** (fan-out seal + magic-byte gate); cardinality via **assembly-incompleteness** (deliberately not at verify); title via `required_structure` only if the digest extracts it. **No-digest gap:** a self-fix on a task with no assembly record gets no deterministic Brief check at reverify (produce-time C.1 floor stamps cover part). Proven by TDD slice 6 |
+| **Scope** | re-runs only this goal's own tasks | `_leader_auto_redo` resets only this goal's tasks ✓ |
+| **Access** | reuses each task's existing loadout | invariant: a redo task's loadout is **never wider** than the original (engine assert + test); plus the watched-reflect read-only bind (§Alignment) closes the pre-execution widening path |
+| **Authority** | revise-in-place carries no new cost | **structural** — `comptroller.authorize_escalation` is NOT called at gate time (it mutates the ledger / rubber-stamps unknown cost_class); any escalating shape is bound at **execution** by the existing fail-closed authorizes |
+| **Brief** | improves fitness within the brief | **the VERDICT CLAMP** (below) — a goal-level aggregate, not the model verdict alone |
 
-### The Brief enforcer must BIND, not just surface (Hero round-3 — verified at source)
+### Brief binds via a goal-level verdict clamp (Nemo finding 3; Hero: one aggregate, two consumers)
 
-As the engine stands, `_deliverable_spec_issues` (orchestration.py:8201) runs the #101 check
-and its **only** consumer appends the findings to the verifier's *prompt* (7850-7855,
-"DECLARED-SPEC CHECK"). The verdict is then read straight from the model (7977); nothing clamps
-it. So a measured HARD violation is **detected and surfaced, then the model decides whether it
-fails** — prose-strength enforcement wearing the engine's jacket, the exact failure mode #80
-exists to kill. Two binds close it:
+`_deliverable_spec_issues` (8201) currently feeds only the verifier *prompt* (7850); the verdict
+is read straight from the model (7977) with no clamp — detect-but-not-bind. Fix:
 
-- **Verdict clamp (the real Brief enforcer).** Non-empty `spec_issues` at (re)verify → the
-  engine forces the verdict to **not `satisfied`** (clamp to `disappointed`, which drives the
-  redo ledger). One engine line near the verdict read (7977/8008). The model still judges
-  fitness everywhere the spec does *not* constrain — it just cannot wave through a HARD
-  violation the engine has *measured*. Without this, slice 6's "must fail reverify" holds only
-  when the model cooperates: a stubbed-verdict test passes while the live bind doesn't exist.
-- **Exhaustion forks on HARD.** *Fitness-gap* exhaustion ships best-effort with a reservation
-  (§3b, unchanged). But *spec-violation* exhaustion (`spec_issues` still non-empty at the retry
-  cap) must route to the **withhold/BLOCKER** seam — **do not deliver a product the engine has
-  measured as violating an operator-HARD param.** Shipping it with a reservation memo is the
-  contract breach (HARD means the engine binds). The withhold-on-blocked seam already exists;
-  this routes one more case into it. *(Behavioral delta, accepted: on a HARD-violation
-  exhaustion the run withholds that goal's deliverable instead of shipping-with-reservation;
+- Compute **one** goal-level aggregate `goal_spec_issues` (task-qualified, `f"{t.id}: {issue}"`)
+  across **all** completed digest records — **not** the per-task local `spec_issues`, which a
+  naive clamp near 7977 would read as only the *last* digest (an earlier task's violation slips
+  if the last passed; no-digest → undefined).
+- The **prompt block and the clamp consume the SAME aggregate** (Hero) — one computation, two
+  consumers, or they drift like the prompt drifted from §3b.
+- Non-empty `goal_spec_issues` at (re)verify → engine **clamps the verdict off `satisfied`**
+  (→ `disappointed` → redo ledger). The model still judges fitness everywhere the spec doesn't
+  constrain; it cannot wave through a *measured* HARD violation.
+- **Exhaustion forks on HARD:** a spec violation surviving to the retry cap **withholds** the
+  deliverable (BLOCKER seam), never ships-with-reservation. *(Behavioral delta, accepted:
   independent completed goals still ship.)*
+- Per-param true map: floor/structure/labels at reverify *when a digest exists*; `artifact_kind`
+  at assembly; cardinality via assembly-incompleteness (not at verify); title via
+  `required_structure` if the digest extracts it. **No-digest gap named:** a self-fix on a task
+  with no assembly record gets no deterministic Brief check at reverify (produce-time C.1 floor
+  stamps cover part).
 
-This bind is not #80-specific — it hardens the #101 check for **every** verify, self-fix or
-not. #80 makes it load-bearing: removing the presence suppressor means more autonomous fixes,
-and the clamp is what makes that safe.
+### The stale prompt + the coherence guard (Nemo finding 1; Hero)
 
-**Authority is structural, not consultative (Hero Q3).** The gate does **not** call
-`comptroller.authorize_escalation` — that function *mutates* the daily-budget ledger on every
-allow, rubber-stamps an unknown/absent `cost_class`, and authorizes *producer escalation to a
-cost class*, not a self-fix. Pre-checking it would burn budget for fixes that never run and
-double-count at execution. Instead: the remediation *shape* carries its cost surface
-(revise-in-place = none), and the **existing execution-time authorizes** are the real bind. An
-optional read-only `can_authorize()` (no ledger append) may later enrich a surface-to-operator
-message — nice-to-have, not load-bearing.
+Rewrite `_LEADER_VERIFY_PROMPT` (10675-10683) to revise-in-place reality: `disappointed` routes
+to revise-in-place (not destroy-and-regenerate), and a fixable required-content gap in
+substantial output is **eligible** for redo. Remove the false "withholds the redo" claim and the
+stub-only reservation. Add a **prompt-engine coherence guard** (snapshot test): the verify
+prompt makes **no claims about engine redo behavior the engine doesn't have** (the
+destroy-and-rewrite and withholds-the-redo sentences specifically). Prompts that *describe* the
+engine drift worse than prompts that *instruct* — nobody greps prose when they change the engine.
 
-**No-JT runs: Brief is vacuously true** (Hero sub-finding). On a plain kickoff with no
-`OutputSpec`/`DeliverableSpec`, there are no HARD params, so Brief always holds — autonomy is
-widest exactly where the brief is least structured. With the one-shape whitelist this is safe
-(revise-in-place cannot alter what was never specified), but it is stated here out loud.
+## The window — a bounded, operator-vetoable fix (Clif's ruling; Hero's sketch)
 
-**Anti-masking keystone — fix-then-reverify, never fix-then-assert.** A self-fix re-enters the
-**same** verify gate as a fresh evaluation (no "I already fixed this" memory). A failed
-re-verify is a `retry_count` increment on the **existing** ledger (`_leader_auto_redo`,
-orchestration.py:8371); the deadlock detector (~8042-8118, which reads `operator_present`
-**nowhere** — Hero Q4 verified) backstops the fixed-it-wrong loop. The absolute in-run retry cap
-(8024-8030, no mid-run daily refresh) means eager fixing cannot slip the cap.
+North star: *if the operator is asleep during a large production run, the Leader must never gate
+the run waiting on them.* So the common path is fix-and-notify; the window is rare and
+self-clearing.
 
-## The change (belt + suspenders + surfacing + alignment)
+**Governing insight: the timer is the ENGINE's, never the callback's.** The TUI shows a
+countdown; the engine *enforces* one; late answers are discarded.
 
-1. **Belt — rewrite the operator-present prose.** `_operator_context_block(present=True)` stops
-   instructing "record concerns over driving a redo." New register: *act on the fixable calls
-   you're authorized to make and surface what you're doing as you do it; bring your partner the
-   calls that need their authority or would change what they marked fixed.* Also rewrite the
-   now-stale `_autonomous()` docstring (2335) and the field comment (1765) that still teach the
-   old JUDGE-vs-DEFER rule, or the next reader re-imports the deprecated principle from the code.
-2. **Suspenders — the typed-shape gate (fail-closed) AND the verdict clamp.** Before a concern
-   becomes a human-facing recommendation/reservation, classify the remediation shape. Recognized
-   → run fix-then-reverify. Unrecognized → record/surface, named. **The fix decision no longer
-   reads `operator_present` at all.** And the reverify itself binds: a non-empty `spec_issues`
-   clamps the verdict off `satisfied` (the real Brief enforcer, §"must BIND"), and a HARD-
-   violation that survives to the retry cap **withholds** rather than ships.
-3. **Decision (b) — the transparent self-fix event.** A `leader_self_fix` `ActivityEvent`
-   carrying the concern + chosen shape + attempt N. **Requires a types change** (Hero finding):
-   `ActivityEvent` (types.py:621) has no payload field — add an additive optional
-   `detail: str | None = None` (frozen dataclass + defaulted = back-compat-safe), and pass over
-   every `activity_callback` consumer + the JSONL sidecar writers. Headless runs have no
-   subscriber — same code path, no special-casing.
-4. **Alignment — drop Brick C's discovery asymmetry (Hero Q5, Clif: align).** `_iterate_enabled`
-   (6239) and `_wave_reflect_enabled` (6250) run the Leader's mid-run judgment passes
-   (between-task iterate / wave-boundary reflect) **by default only when autonomous** — so a
-   concern that drives a fix headless is never *discovered* in a watched run. Presence leaking
-   into fix-rate through discovery-rate violates the same principle. Align both to **default-on
-   regardless of presence**; the new `leader_self_fix` surfacing events provide the visibility
-   that originally justified the asymmetry, and decision (b) dissolves its reason. **Cost,
-   accepted by Clif:** more Leader reflection calls during watched runs.
+- **Seam** (new, narrow — does not overload `ask_operator`): `WindowDecision` enum {`BLOCK`,
+  `PROCEED`} (engine synthesizes `TIMEOUT`, the callback never returns it); `FixWindowNotice`
+  {`goal_id`, `concern`, `remediation`, `deadline_s`}; `fix_window_callback:
+  Callable[[FixWindowNotice], WindowDecision] | None` (None == headless == immediate proceed).
+- **The wait** (`_await_fix_window → (reason, decision)`, reason ∈ {headless, block, proceed,
+  timeout}): headless / not-`operator_present` short-circuits to PROCEED before any thread; else
+  `ThreadPoolExecutor(1)` + `fut.result(timeout=self._fix_window_s)`; on `FuturesTimeoutError` →
+  (PROCEED, "timeout") and the late answer is **discarded**; `shutdown(wait=False)` never joins
+  a hung TUI. **Invariant:** returns in ≤ `_fix_window_s` (default 90; ctor param so tests
+  inject 0.05; **CLAMP ≤ 300** in validation so config can't make it an unbounded gate).
+- **Plug point — GATES the redo dispatch, does not wrap it.** At the `can_redo` branch
+  (~8076-8085), before `_leader_auto_redo`. `use_window = operator_present AND
+  remediation.window_requested`. **BLOCK → terminal**: named reservation → PQR, **no
+  `retry_count` increment** (no fix happened), record a **goal-level** `operator_blocked_fix`
+  so the next round can't re-nag, ship/reservation path, return. **default AND proceed/timeout →
+  the same code**: `leader_self_fix` event (`detail.window = reason`) + `_leader_auto_redo`
+  (which stays byte-identical — the window decides only *whether* dispatch happens).
+- `window_requested` is the model's judgment ("exceptional"); the engine honors it **only** when
+  `operator_present` — headless ignores it, so the north star holds *by construction, not config*.
 
-## TDD slices (each: failing test first, then the minimal bind; `ruff` + `pytest` + CI-parity)
+## The change (belt + suspenders + window + alignment)
 
-1. **Shape recognition.** `_remediation_shape(...)` recognizes revise-in-place-on-own-tasks as
-   the one whitelisted shape; any other → `unrecognized remediation shape`, fail-closed.
-2. **Presence no longer gates the fix.** A recognized remediation drives `_leader_auto_redo` for
-   **both** `operator_present=True` and `False` — pins the *engine* path so presence can't
-   suppress an in-scope fix.
-3. **Unrecognized → surfaces, named.** An unrecognized shape records a reservation whose text
-   names the reason and does **not** drive a redo.
-4. **Transparent surfacing (b).** With `operator_present=True` + a subscribed callback, a
-   self-fix emits `leader_self_fix` with `detail` (concern + shape + attempt). Headless: same
-   fix, no subscriber, no crash.
-5. **Prose register.** Snapshot `_operator_context_block(present=True)` lost the "record over
-   redo" steer and gained surface-as-you-fix; `_autonomous` docstring updated. (Light belt
-   guard.)
-6. **False-fix regression (Hero Q1/Q3 — the backstop, end to end).** A self-fix whose *executed*
-   output violates a HARD `OutputSpec`/`DeliverableSpec` param MUST be **clamped non-`satisfied`
-   by the engine** (assert the *clamp*, with a stubbed model verdict of `satisfied` — proves the
-   bind, not the model's cooperation), increment the ledger, and on exhaustion **withhold rather
-   than ship**. Proves the actual anti-masking guarantee end to end; slices 1-5 only prove the
-   gate.
-7. **Access invariant.** A redo task's tool loadout is never wider than the original's (engine
-   assert + test).
-8. **Discovery alignment.** `_iterate_enabled` / `_wave_reflect_enabled` return True regardless
-   of `operator_present`.
-9. **ActivityEvent back-compat.** Existing `activity_callback` consumers + JSONL sidecar writers
-   handle the new optional `detail` field unchanged.
+1. **Belt — rewrite both prompts.** `_operator_context_block(present=True)` (surface-as-you-fix,
+   defer only what needs their authority) **and** `_LEADER_VERIFY_PROMPT` (revise-in-place
+   reality + the coherence guard). Rewrite the stale `_autonomous` docstring (2331) + field
+   comment (1765).
+2. **Suspenders — the typed gate + the verdict clamp.** Schema declare-validate (fail-closed);
+   the goal-level aggregate clamp; HARD-exhaustion withhold. **The fix decision no longer reads
+   `operator_present`.**
+3. **The window** (above) — fix-and-notify default; the rare engine-timed veto window.
+4. **Alignment — option (b), read-only (Nemo finding 4; Hero).** `_iterate_enabled` (6239) /
+   `_wave_reflect_enabled` (6250) default-on regardless of presence, **but watched reflect is
+   read-only** — it finds / steers description / drops (drops only narrow), and **cannot edit
+   `required_skills`** (the only authority-widening edit; `revise` at 6840-6849 →
+   `_task_tool_loadout` at 4989-5021). A new `plan_reflect_revise` event surfaces plan moves.
+   **Three-part Access map:** slice 7 binds redo-vs-original; (b) binds watched-pre-execution;
+   autonomous-pre-execution widening remains legitimate planning authority (the headless Leader
+   is the only judgment — same authority as initial decomposition). Watched re-planning, if ever
+   wanted, belongs to the scoped-out `ask_operator` surface.
+
+## TDD slices (failing test first, then the minimal bind; `ruff` + `pytest` + CI-parity)
+
+1. **Shape recognition / schema validation.** Valid `revise_in_place` declaration with
+   `target_task_ids ⊆ goal` → recognized; enum miss or out-of-goal target → defer, engine-named
+   `invalid_remediation_declaration`; absent `remediation` on `disappointed` → defaults to the
+   safe shape.
+2. **Presence no longer gates the fix.** Recognized remediation drives `_leader_auto_redo` for
+   `operator_present` True and False.
+3. **Defer surfaces, named.** A `defer`/invalid declaration records a named reservation, no redo.
+4. **Verdict clamp (aggregate).** Multi-digest goal where an **earlier** task violates a HARD
+   param and a **later** passes → engine clamps off `satisfied` (assert the *clamp* with a
+   stubbed `satisfied` model verdict), redo ledger increments; on exhaustion **withholds**.
+5. **Stale-prompt coherence guard.** Snapshot: `_LEADER_VERIFY_PROMPT` makes no claim about
+   engine redo behavior the engine lacks; `_operator_context_block(present)` lost the
+   "record over redo" steer.
+6. **Access invariant.** A redo task's loadout is never wider than the original's.
+7. **Discovery alignment, read-only.** `_iterate_enabled`/`_wave_reflect_enabled` return True
+   regardless of presence; **and** a watched reflect pass cannot change any pending task's
+   *effective* `_task_tool_loadout` (assert invariant across the pass).
+8. **ActivityEvent back-compat.** Additive `detail` field; existing consumers + JSONL sidecar
+   writers unchanged; `leader_self_fix` carries `detail.window`.
+9. **Window — never blocks past the cap.** `fix_window_callback = lambda n: sleep(3600)`,
+   `_fix_window_s = 0.05` → redo dispatched, wall-clock < 1s. *The un-bypassable test.*
+10. **Window — late answer discarded.** Callback returns BLOCK after the timeout → fix already
+    dispatched, no reservation, the late decision leaves only a log.
+11. **Window — BLOCK terminal + quiet.** BLOCK → no `_leader_auto_redo`, named reservation in
+    the PQR, `retry_count` unchanged, no window reopen for the same concern next round.
+12. **Window — headless zero-ceremony.** `operator_present=False` / callback None → callback
+    never invoked (spy), no window events, immediate dispatch.
+13. **Window — only on request.** `window_requested` absent/false → default fix-and-notify even
+    when watched.
 
 ## Verification (observed, not reported)
 
-- Unit: shape recognition (recognized + fail-closed) and the Access invariant.
-- **Load-bearing:** presence-independence of the fix decision (slice 2), named-surface on
-  unrecognized (slice 3), and the **false-fix reverify backstop** (slice 6) — these prove the
-  bind, not the dial.
+- **Load-bearing:** presence-independence (2), named-defer (3), the **aggregate clamp + withhold**
+  (4), and the **never-blocks-past-cap** window test (9) — these prove the binds, not the dials.
 - CI-parity: `ruff check src/ tests/` + full `pytest` on the faithful no-tool box before green.
-- No-regress: headless disappointed→redo + ship-with-reservation unchanged bit-for-bit (the one
-  shape is exactly today's revise-in-place); the only headless delta is the discovery-seam
-  alignment (more reflect passes — assert behavior, not token count).
+- No-regress: headless disappointed→redo + ship-with-reservation unchanged bit-for-bit; the only
+  headless deltas are the read-only discovery alignment and the clamp (which only *adds* a
+  bind). `_leader_auto_redo` is byte-identical (the window gates, never wraps).
 
-## Review plan (Message-in-a-Bottle, branch held local)
+## Hull notes carried into the slices (Hero)
 
-- **Hero (hull), round 2:** scoped to the six round-1 findings only (per house rule) — confirm
-  the typed-shape gate fails closed correctly, the false-fix backstop is the real bind, the
-  Access invariant holds, and structural-Authority + the discovery alignment are sound.
-- **Lovecraft (coherence):** does *presence governs visibility, not whether-to-fix* hold end to
-  end now that the discovery seams align too, and does the partnership principle survive.
+- **Clamp `_fix_window_s` ≤ 300** in validation — the invariant survives a bad settings file.
+- **BLOCK is goal-scoped, not run-scoped** — store `operator_blocked_fix` on the goal (e.g. its
+  transitions), so other goals' windows are independent.
+- **Goal-concurrency interaction** — the window pauses ONE goal's verify path; when goal-level
+  concurrency lands, each concurrent goal must own its window without serializing the others.
+  Recorded now as an input to the goal-concurrency design doc.
+
+## Review scorecard
+
+- **Hero (hull): SIGN-OFF** — rounds 1-3 + the window code sketch; closes out on the doc delta.
+- **Lovecraft (coherence): SIGN-OFF** — partnership block closed by the bounded window + framing.
+- **Nemo (hull): owes a scoped round-2** on this remediated doc (his four findings folded above).
 
 ## Out of scope (named)
 
-- **Mid-run `ask_operator` defer round-trip** (conversational ask, ACP/streaming-TUI) — separate
-  surface; #80 only changes fix-vs-surface classification, not the conversational ask.
-- **#97 wedge-vs-derive** — sibling Theme-A item, separate arc.
+- The full conversational `ask_operator` round-trip (the window is its bounded, self-clearing
+  cousin only).
+- #97 wedge-vs-derive — sibling Theme-A item.
+- Watched-run re-planning authority (routes to `ask_operator` if ever wanted).
 
 ## Critical files
 
-- `src/modulatio/orchestration.py` — `_operator_context_block` (2338, belt rewrite),
-  `_autonomous` docstring (2335) + field comment (1765), `_iterate_enabled` (6239) +
-  `_wave_reflect_enabled` (6250, align), `_leader_verify_goal` (~7788-8137, gate plug-in),
-  `_leader_auto_redo` (8337, the one shape + existing ledger + Access invariant),
-  recommendations/reservations sink (~8087-8136), **the verdict read (7977) + unknown-norm
-  (8008) — where the `spec_issues` clamp lands**, `_deliverable_spec_issues` (8201) and its
-  prompt-only consumer (7850, the detect-not-bind site), and the **withhold/BLOCKER seam** the
-  HARD-exhaustion fork routes into.
-- `src/modulatio/assembly.py` — `check_deliverable` (579, what the digest check actually covers:
-  floor / required_structure / blank labels).
-- `src/modulatio/job_templates.py` — `OutputSpec` / `DeliverableSpec` (~66/76, the HARD Brief —
-  *corrected from types.py*).
-- `src/modulatio/types.py` — `ActivityEvent` (621, add `detail` field + `leader_self_fix` phase).
-- JSONL activity-sidecar writers + every `activity_callback` consumer — back-compat pass for
-  `detail`.
-- `src/modulatio/comptroller.py` — `authorize_escalation` (196): **NOT called at gate time**;
-  remains the execution-time bind. Optional read-only `can_authorize()` later.
-- tests: `test_orchestration.py` (gate, presence-independence, false-fix, Access, alignment),
-  an activity-event test (surfacing + back-compat).
+- `src/modulatio/orchestration.py` — `_operator_context_block` (2338) + `_LEADER_VERIFY_PROMPT`
+  (10675-10683) + `_autonomous` docstring (2331) + field comment (1765); the Leader-verify
+  output schema (~10702-10712, add `remediation`); the verdict read (7977) + unknown-norm (8008)
+  — the clamp landing; `_deliverable_spec_issues` (8201) + its prompt consumer (7850) → one
+  aggregate; the withhold/BLOCKER seam; `_iterate_enabled` (6239) + `_wave_reflect_enabled`
+  (6250) + the reflect `revise` path (6840-6849) → read-only bind; `_task_tool_loadout`
+  (4989-5021); `_leader_auto_redo` (8337) + the `can_redo` branch (~8076-8085, window plug) +
+  the Access invariant; recommendations/reservations sink (~8087-8136). **New:** `_await_fix_window`
+  + `fix_window_callback` + the `WindowDecision`/`FixWindowNotice` types.
+- `src/modulatio/job_templates.py` — `OutputSpec` / `DeliverableSpec` (66/76, the HARD Brief).
+- `src/modulatio/assembly.py` — `check_deliverable` (579, what the digest check covers).
+- `src/modulatio/comptroller.py` — `authorize_escalation` (196): NOT at gate time; execution-time
+  bind only.
+- `src/modulatio/types.py` — `ActivityEvent` (621): add `detail`; new phases `leader_self_fix`,
+  `leader_fix_window_opened`/`_closed`, `plan_reflect_revise`.
+- JSONL activity-sidecar writers + every `activity_callback` consumer — `detail` back-compat.
+- tests: `test_orchestration.py` (gate/schema/clamp/access/alignment/window) + an activity-event
+  test (events + back-compat).
