@@ -1962,6 +1962,12 @@ class Orchestrator:
         #: Fuzzy JT matches surfaced to the Leader at intake as candidates it
         #: MAY choose (a nudge, not a bind) — ``(name, description)`` pairs.
         self._jt_candidates: list[tuple[str, str]] = []
+        #: #97 — an explicit/cron bind REFUSED by the fit-gate (the job can't fill
+        #: the template's required blanks / out-of-enum / empty per-driver). The
+        #: corrupt template never binds; this records the refusal so the converse
+        #: surface can offer to derive a fitting one and the cron runner can skip
+        #: the slot. ``{"name": <jt>, "reason": <why>}`` or None.
+        self._jt_refusal: "dict[str, str] | None" = None
         #: Per-role context-budget overrides supplied at the dispatcher
         #: entry point (CLI ``--ctx-budget``, daemon, TUI advanced
         #: settings). Keys are budget_role strings; values are
@@ -9149,6 +9155,7 @@ class Orchestrator:
         self._bound_jt_params = {}
         self._deliverable_spec = DeliverableSpec()
         self._jt_candidates = []
+        self._jt_refusal = None
         try:
             if bound_jt_name:
                 cand = job_template_library.checkout(bound_jt_name, self.project.code)
@@ -9174,6 +9181,37 @@ class Orchestrator:
             self._bound_jt_params = {}
             self._deliverable_spec = DeliverableSpec()
             self._jt_candidates = []
+            self._jt_refusal = None
+
+    @staticmethod
+    def _jt_fit(jt: JobTemplate, params: dict) -> tuple[bool, str]:
+        """#97 — the mechanical-fit gate. A pure boolean over ``jt + params``
+        (no similarity scalar, no objective-prose inference): can this job
+        actually fill this template's required blanks? Three checks, all read
+        only declaration + supplied value on the bind path:
+
+        - **required-presence** (strict, ``unfilled_required``): every required
+          param supplied AND non-empty (catches the ``""`` / ``[]`` bypass);
+        - **enum conformance** (Hero R1, ``enum_violations``): every supplied
+          value within its declared ``enum``;
+        - **per-driver shape**: a ``per-item`` JT's fan-out driver param is a
+          present, non-empty list (the only shape fact derivable here).
+
+        Returns ``(ok, reason)``; ``reason`` names the misfit for the refusal.
+        A legacy JT with no ``param_schema`` has nothing required → fit passes
+        (back-compat)."""
+        unfilled = jt.unfilled_required(params)
+        if unfilled:
+            return False, f"missing required parameter(s): {', '.join(unfilled)}"
+        out_of_enum = jt.enum_violations(params)
+        if out_of_enum:
+            return False, f"parameter(s) outside their allowed values: {', '.join(out_of_enum)}"
+        spec = jt.output_spec
+        if spec.cardinality == "per-item" and spec.per:
+            driver = params.get(spec.per)
+            if not isinstance(driver, (list, tuple)) or len(driver) == 0:
+                return False, f"per-item driver parameter '{spec.per}' is empty"
+        return True, ""
 
     def _bind_job_template(
         self,
@@ -9184,8 +9222,32 @@ class Orchestrator:
     ) -> None:
         """Bind a JT the operator explicitly chose: interview-or-default its
         params, name the output folder, record it, and surface any unmet HARD
-        (required) setup answer as an honest PQR reservation. Never blocks."""
+        (required) setup answer as an honest PQR reservation. Never blocks.
+
+        #97 Decision B: the bind is GATED — if the resolved params can't
+        mechanically fill the template (:meth:`_jt_fit`), the corrupt template
+        is REFUSED (``_bound_jt`` stays None, ``_jt_refusal`` records why) and
+        we return without binding, so the run derives/skips rather than
+        mis-running a wedge every cycle."""
         params = self._run_jt_interview(jt, bound_params, ask_operator)
+        ok, reason = self._jt_fit(jt, params)
+        if not ok:
+            self._jt_refusal = {"name": jt.name, "reason": reason}
+            self._emit_activity(
+                role="leader", phase=f"jt_bind_refused:{jt.name}", agent_id="leader",
+            )
+            summary.recommendations.append({
+                "goal_id": "",
+                "concern": (
+                    f"Job template '{jt.name}' was refused — it doesn't fit this "
+                    f"job: {reason}."
+                ),
+                "suggestion": (
+                    "Derive a fitting template (the create-JT interview), or fix the "
+                    "bind's parameters; the engine did not run the ill-fitting template."
+                ),
+            })
+            return
         self._bound_jt = jt
         self._bound_jt_params = params
         self._deliverable_spec = jt.deliverable_spec  # #101 C.0: bind the declared spec
