@@ -55,6 +55,52 @@ def _resolve(o, pr, **kw):
     return s
 
 
+# ── #97 Part 2: the create-JT tool captures param_schema (the HARD prereq) ──
+
+
+def _create_tool(o):
+    return o._leader_function_tools()["create_job_template"].call
+
+
+def test_create_job_template_tool_captures_param_schema(env):
+    """#97 Part 2 (Nemo hole 5 / Hero Q6): the Leader's create_job_template tool must
+    persist param_schema, or the engine's own JTs ship with no required blanks and the
+    fit-gate is toothless on them forever. The library fn already accepts it; the tool
+    wrapper must thread it through (it used to swallow extras via **_)."""
+    o, pr = _orch(env)
+    msg = _create_tool(o)(
+        name="competitor-brief", description="One brief per competitor",
+        interview="Confirm the competitors and region.", cardinality="per-item", per="competitors",
+        param_schema=[
+            {"name": "competitors", "type": "list[str]", "required": True, "prompt": "Who?"},
+            {"name": "region", "type": "enum", "required": True, "enum": ["NA", "EU", "APAC"]},
+            {"name": "lookback", "type": "int", "required": False, "default": 7},
+        ],
+    )
+    assert "Created job template" in msg
+    loaded = jt.load_with_metadata("competitor-brief", project_code=pr.code)
+    names = {p.name for p in loaded.param_schema}
+    assert names == {"competitors", "region", "lookback"}
+    by = {p.name: p for p in loaded.param_schema}
+    assert by["competitors"].required is True
+    assert by["region"].enum == ("NA", "EU", "APAC")
+    assert by["lookback"].required is False
+    # and the gate now has teeth on this engine-created JT:
+    assert loaded.unfilled_required({"region": "EU"}) == ["competitors"]
+    assert loaded.enum_violations({"competitors": ["x"], "region": "Mars"}) == ["region"]
+
+
+def test_create_job_template_tool_without_param_schema_still_works(env):
+    """Back-compat: omitting param_schema yields a JT with an empty schema (legacy shape)."""
+    o, pr = _orch(env)
+    msg = _create_tool(o)(
+        name="plain-doc", description="A plain doc", interview="Confirm.", cardinality="one",
+    )
+    assert "Created job template" in msg
+    loaded = jt.load_with_metadata("plain-doc", project_code=pr.code)
+    assert loaded.param_schema == ()
+
+
 # ── greenfield (no JT) stays byte-identical ───────────────────────────────
 
 

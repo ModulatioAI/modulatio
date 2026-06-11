@@ -4663,13 +4663,15 @@ class Orchestrator:
         def create_job_template(
             name: str, description: str, interview: str,
             cardinality: str = "", artifact_kind: str = "document",
-            per: str = "", **_: object,
+            per: str = "", param_schema: object = None, **_: object,
         ) -> str:
             """Codify a recurring job as a reusable Job Template (project-local).
             ``interview`` is the prose the Leader uses to gather the job's params
             when the template is run. ``cardinality`` is the job's OUTPUT SHAPE —
             the one thing the engine fans out on; a multi-unit job left at "one"
-            COLLAPSES to a single task (the anthology-as-one-task bug)."""
+            COLLAPSES to a single task (the anthology-as-one-task bug). ``param_schema``
+            (#97) declares the job's variable inputs — which are REQUIRED, their type/
+            enum/default — so the fit-gate can refuse a bind this template can't run."""
             from modulatio.job_templates import OutputSpec
             # Normalize the cardinality to the engine's grammar — CASE-INSENSITIVE
             # and space-tolerant (Nemo hull #12: "Fixed:8" / "fixed: 8" must not slip
@@ -4716,11 +4718,12 @@ class Orchestrator:
                 cardinality=card, per=per_field,
                 artifact_kind=(str(artifact_kind).strip() or "document"),
             )
+            fields = self._jt_paramfields_from_spec(param_schema)
             try:
                 _jt.create_job_template(
                     name=str(name), description=str(description),
                     interview_body=str(interview), output_spec=spec,
-                    project_code=self.project.code,
+                    param_schema=fields, project_code=self.project.code,
                 )
             except FileExistsError:
                 return (f"A job template named {name!r} already exists — pick a "
@@ -4968,6 +4971,32 @@ class Orchestrator:
                                 "For cardinality 'per-item': the list param whose "
                                 "values each yield one deliverable."
                             ),
+                        },
+                        "param_schema": {
+                            "type": "array",
+                            "description": (
+                                "The job's variable inputs (the fill-in-the-blanks). "
+                                "Each item: {name, type ('str'|'int'|'list[str]'|'enum'"
+                                "|'bool'), required (bool — mark the blanks a run CANNOT "
+                                "proceed without), default, enum (allowed values when "
+                                "type='enum'), prompt (the question to ask the operator)}. "
+                                "Declaring required params is what lets the engine REFUSE "
+                                "a future bind that can't fill them, instead of mis-running "
+                                "the template. For 'per-item', include the 'per' list param "
+                                "here and mark it required."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "type": {"type": "string"},
+                                    "required": {"type": "boolean"},
+                                    "default": {},
+                                    "enum": {"type": "array", "items": {"type": "string"}},
+                                    "prompt": {"type": "string"},
+                                },
+                                "required": ["name"],
+                            },
                         },
                     },
                     "required": ["name", "description", "interview", "cardinality"],
