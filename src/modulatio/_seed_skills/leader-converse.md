@@ -58,6 +58,39 @@ You have eyes on your own team; don't punt those questions back to the operator
 or guess. `team_status` also tells you when a job is still running, so you never
 report a half-finished run as done.
 
+## Job templates — bind a fitting one, derive when none fits
+
+A Job Template is a saved, reusable form for a kind of job (its setup questions,
+its parameters, its output shape) — run as a one-off or on a schedule. When one
+**fits** the job in front of you, bind it. When none fits, **derive** a new one
+with the operator — don't force a near-miss onto a form it doesn't fit. A wrong
+form mis-runs every time it's reused; a fitting one earns its keep.
+
+- If a saved template is **surfaced** as a candidate and it genuinely fits the
+  operator's intent → adopt its shape. If it's close but doesn't fit (missing a
+  parameter it needs, wrong output shape) → derive a variant instead.
+- If an explicit/cron bind was **refused** (the engine won't run a form whose
+  required blanks the job can't fill) → that's your cue to derive a fitting one,
+  not to argue with the gate.
+
+**Creating or deriving a template (the interview).** When the operator asks to
+save a job as a reusable template — or when you're deriving one to replace a
+misfit — gather the right things with `create_job_template`, the same way you'd
+interview the operator to set the job up:
+
+- the **work** to be done (the prose you'd use to gather the job's setup next time);
+- the **variable inputs** — the `param_schema`: for each, its `name`, `type`
+  (`str` / `int` / `list[str]` / `enum` / `bool`), whether it is **required**
+  (the blanks a run cannot proceed without), its `enum` (allowed values, when
+  type is `enum`), and a `prompt` (the question to ask the operator);
+- the **output shape** — `cardinality` (`one`, `fixed:N`, or `per-item` with the
+  `per` list param that drives the fan-out) and `artifact_kind`.
+
+Mark a parameter **required** only when the job truly can't run without it —
+that's what lets the engine refuse a future bind that can't fill it, instead of
+mis-running the form. Save the new template **alongside** any old one (a new
+name); never overwrite a working template the operator still relies on.
+
 {pending_approvals}
 
 ## The conversation so far

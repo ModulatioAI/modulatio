@@ -181,6 +181,25 @@ def test_cron_refused_bind_skips_the_slot(env):
     assert o._bound_jt is None
 
 
+def test_engine_created_jt_is_gated_end_to_end(env):
+    """Hero Q6 build-order suite-property: create a JT via the engine's OWN
+    create_job_template tool, then bind it with the required param empty — the gate
+    must REFUSE. This test cannot pass unless param_schema capture (Part 2) landed
+    before the bind gate (Part 1), so the HARD build order is a suite invariant, not
+    a prose promise."""
+    o, pr = _orch(env)
+    msg = _create_tool(o)(
+        name="engine-made", description="d", interview="Confirm.", cardinality="one",
+        param_schema=[{"name": "subject", "type": "str", "required": True}],
+    )
+    assert "Created job template" in msg
+    # now an explicit bind that can't fill 'subject' must be refused on the engine's own JT
+    o2, pr2 = _orch(env)
+    _resolve(o2, pr2, bound_jt_name="engine-made", bound_jt_params={"subject": ""})
+    assert o2._bound_jt is None
+    assert o2._jt_refusal is not None and "subject" in o2._jt_refusal["reason"]
+
+
 def test_refused_bind_renders_derive_prompt_in_block(env):
     """The converse surface: a refused bind surfaces a 'derive a fitting one' block
     (the third _job_template_block state), naming the template + the reason."""
