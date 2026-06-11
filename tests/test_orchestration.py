@@ -9291,6 +9291,60 @@ def test_window_proceed_drives_the_fix(project):
     assert goals[0].retry_count >= 1  # PROCEED → the fix dispatched
 
 
+def test_window_block_still_withholds_measured_hard_violation(tmp_path, monkeypatch):
+    """#80 H1 (Hero code review): the operator blocking the FIX does NOT amend the BRIEF.
+    With a measured HARD violation driving the window, a BLOCK must still WITHHOLD the
+    deliverable — the engine can't ship a product it measured as violating an operator-HARD
+    param just because the operator vetoed the fix."""
+    from uuid import uuid4
+    from modulatio import assembly as _assembly, job_templates as _jt, vault
+    from modulatio.orchestration import Orchestrator, RunSummary, WindowDecision
+    from modulatio.types import Goal, GoalStatus, Project
+
+    digest = _assembly.DeliverableDigest(
+        kind="document", part_count=2,
+        parts=[{"label": "Story One", "size": 2500}, {"label": "Story Two", "size": 900}],
+        part_size_unit="words", structure={"title": False, "toc": False}, text_twin_path=None)
+    spec = _jt.DeliverableSpec(part_floor=2000, size_unit="words",
+                               required_structure=("title", "toc"))
+
+    def leader(prompt):
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return (
+                '```json\n{"verdict":"satisfied","rationale":"r","report_body":"r",'
+                '"remediation":{"action":"revise_in_place","reason_code":"fixable_goal_gap",'
+                '"window_requested":true}}\n```'
+            )
+        return _leader_stub(prompt)
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("HBK", "h1", "obj")
+    vault.init_run("HBK", "run-1", "obj")
+    project = Project(code="HBK", name="HBK", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "hbk"), run_id="run-1")
+    orch = Orchestrator(
+        project, {"leader": leader, "drafter": _drafter_stub, "qc": _qc_stub},
+        operator_present=True, fix_window_callback=lambda n: WindowDecision.BLOCK,
+    )
+    orch._deliverable_spec = spec
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "book.pdf").write_bytes(b"%PDF-1.7\x00 bound")
+    task = _deliverable_task("HBK", output="book.pdf")
+    orch._assembly_records[task.id] = _assembly.AssemblyRecord(
+        manifest={}, final_checksum="sha256:x", complete=True, strategy="document",
+        digest=digest)
+    goal = Goal(id="HBK-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert goal.retry_count == 0  # operator blocked → no fix attempt
+    assert task.id in summary.withheld_deliverables  # but the brief is still unmet → withheld
+    assert any("WITHHELD" in r["concern"] for r in summary.recommendations)
+
+
 def test_empty_deliverable_spec_surfaces_nothing(tmp_path, monkeypatch):
     """B.2 must not over-fire: with NO declared spec (today's default), the verifier sees
     the digest but no DECLARED-SPEC CHECK block — behavior is unchanged."""

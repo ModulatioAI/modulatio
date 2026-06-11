@@ -1884,15 +1884,13 @@ class Orchestrator:
         #: fire at 6 phases: task_dispatched, task_completed, qc_started,
         #: qc_verdict, leader_verify_started, leader_verify_ended.
         self.activity_callback: Callable[[ActivityEvent], None] | None = activity_callback
-        #: Brick C: standing operator-presence signal — is a human watching
-        #: this whole run? Default False = autonomous/headless (daemon/cron/JT,
-        #: plan-mode); the TUI sets True. Gates the Leader's three decision
-        #: surfaces between JUDGE (autonomous — the Leader is the only check
-        #: past QC) and DEFER (operator present — surface to the human). The
-        #: standing fact; composes with activity_callback (events out) and the
-        #: kickoff ``ask_operator`` callback (questions out — the future
-        #: streaming-TUI/ACP drives the mid-run defer round-trip). See
-        #: ``_autonomous`` / ``_operator_context_block``.
+        #: Standing operator-presence signal — is a human watching this whole
+        #: run? Default False = autonomous/headless (daemon/cron/JT, plan-mode);
+        #: the TUI sets True. #80: presence governs VISIBILITY, not whether the
+        #: Leader self-corrects — it surfaces fixes (and gates the rare 90s fix
+        #: window) when watched, but no longer suppresses discovery or the fix
+        #: decision. Composes with activity_callback (events out) and the kickoff
+        #: ``ask_operator`` callback. See ``_operator_context_block``.
         self.operator_present: bool = operator_present
         #: #80 the rare fix-window seam — None == headless == no window (immediate
         #: proceed). The callback returns BLOCK/PROCEED; the engine synthesizes
@@ -2466,14 +2464,17 @@ class Orchestrator:
         self, notice: "FixWindowNotice"
     ) -> "tuple[str, WindowDecision]":
         """Open the rare, operator-vetoable fix window. Returns
-        ``(reason, decision)`` with reason ∈ {headless, block, proceed, timeout}.
+        ``(reason, decision)`` with reason ∈ {headless, block, proceed, timeout,
+        callback_error}.
 
-        INVARIANT: returns in ≤ ``self._fix_window_s``. The timer is the
-        ENGINE's — ``fut.result(timeout=...)`` on the engine's thread — so the
-        callback cannot extend it (a late answer is discarded), cannot skip it
-        (headless short-circuits before any thread spawns), and a wedged TUI
-        thread can't hold the run hostage (``shutdown(wait=False)``). There is no
-        prompt promise anywhere in the chain.
+        INVARIANT: returns in ≤ ``self._fix_window_s``. The timer is the ENGINE's
+        — a DAEMON ``threading.Thread`` + ``join(timeout)`` on the engine's thread
+        — so the callback cannot extend it (a late answer is discarded: the result
+        box is read only if the thread finished in time), cannot skip it (headless
+        short-circuits before any thread spawns), and a wedged callback can neither
+        hold the run hostage nor block interpreter exit (``daemon=True``). A
+        callback that raises or returns a non-decision proceeds but is reported as
+        ``callback_error``, never as an operator ``proceed`` that didn't happen.
         """
         if self.fix_window_callback is None or not self.operator_present:
             return ("headless", WindowDecision.PROCEED)
@@ -2491,19 +2492,20 @@ class Orchestrator:
             try:
                 box["decision"] = self.fix_window_callback(notice)
             except Exception:  # noqa: BLE001 — a misbehaving callback must not crash the run
-                box["decision"] = WindowDecision.PROCEED
+                box["error"] = True
 
         t = threading.Thread(target=_run, name="fix-window", daemon=True)
         t.start()
         t.join(timeout=self._fix_window_s)
-        if t.is_alive() or "decision" not in box:
-            # Deadline hit (or no answer) — engine synthesizes PROCEED; the
-            # daemon thread's eventual answer is dead on arrival.
+        if t.is_alive() or ("decision" not in box and "error" not in box):
+            # Deadline hit — the daemon thread's eventual answer is dead on arrival.
             decision, reason = WindowDecision.PROCEED, "timeout"
+        elif "error" in box or not isinstance(box.get("decision"), WindowDecision):
+            # M1 (Hero): a callback that raised or returned a non-decision proceeds,
+            # but the audit must NOT report an operator "proceed" that never happened.
+            decision, reason = WindowDecision.PROCEED, "callback_error"
         else:
             decision = box["decision"]
-            if not isinstance(decision, WindowDecision):
-                decision = WindowDecision.PROCEED  # malformed answer → proceed
             reason = decision.value
         self._emit_activity(
             role="leader", phase="leader_fix_window_closed",
@@ -2514,9 +2516,11 @@ class Orchestrator:
     # ── Brick C: operator-presence-aware Leader behavior ──────────────────
     def _autonomous(self) -> bool:
         """True when no operator is watching this run (headless/daemon/cron/
-        Job-Templates, plan-mode sub-objectives). The Leader then exercises
-        its judgment — it is the only check past QC. False = an operator is
-        present (the TUI / future ACP) and the Leader should DEFER."""
+        Job-Templates, plan-mode sub-objectives). A simple presence accessor —
+        the inverse of ``operator_present``. NOTE (#80): presence no longer gates
+        whether the Leader self-corrects (the discovery seams default-on either
+        way; presence governs VISIBILITY + the fix window, not the fix decision).
+        Kept for tests + readability; it does NOT mean 'defer when watched'."""
         return not self.operator_present
 
     def _operator_context_block(self) -> str:
@@ -8332,21 +8336,45 @@ class Orchestrator:
                         goal, tasks, rationale, report_path, summary,
                     )
                     return
-                # BLOCK → operator owns the concern. Ship with a named reservation, no
-                # redo, no retry_count increment. Falls through to the common completion
-                # (the elif chain below is skipped because can_redo was taken).
-                summary.recommendations.append({
-                    "goal_id": goal.id,
-                    "concern": (
-                        "Operator blocked the Leader's fix within the review window — "
-                        "they took ownership of this concern."
-                    ),
-                    "suggestion": f"Operator-owned — {rationale}",
-                })
-                rationale_text = (
-                    f"leader: operator blocked the fix window: {rationale} "
-                    f"| report {report_path.name}"
-                )
+                # BLOCK → operator owns the concern. No redo, no retry_count increment;
+                # falls through to the common completion (the elif chain is skipped
+                # because can_redo was taken).
+                if goal_spec_issues:
+                    # H1 (Hero code review): the operator blocked the FIX, not the BRIEF.
+                    # A measured HARD violation must still NOT ship clean — withhold the
+                    # deliverable (the operator can retrieve it from artifacts to ship
+                    # as-is). This keeps both authorities: their veto on the fix AND the
+                    # engine's bind on the brief.
+                    summary.withheld_deliverables.extend(
+                        t.id for t in tasks if getattr(t, "deliverable", False)
+                    )
+                    summary.recommendations.append({
+                        "goal_id": goal.id,
+                        "concern": (
+                            "Operator blocked the Leader's fix within the review window. "
+                            f"The {len(goal_spec_issues)} measured declared-requirement "
+                            "(HARD) violation(s) stand — deliverable WITHHELD (retrieve "
+                            "from artifacts to ship it as-is)."
+                        ),
+                        "suggestion": f"Operator-owned; the brief is still unmet — {rationale}",
+                    })
+                    rationale_text = (
+                        f"leader: operator blocked the fix; measured HARD violation stands, "
+                        f"deliverable WITHHELD: {rationale} | report {report_path.name}"
+                    )
+                else:
+                    summary.recommendations.append({
+                        "goal_id": goal.id,
+                        "concern": (
+                            "Operator blocked the Leader's fix within the review window — "
+                            "they took ownership of this concern."
+                        ),
+                        "suggestion": f"Operator-owned — {rationale}",
+                    })
+                    rationale_text = (
+                        f"leader: operator blocked the fix window: {rationale} "
+                        f"| report {report_path.name}"
+                    )
             elif goal_spec_issues:
                 # #80 slice 4 (WITHHOLD): a declared-spec (HARD) violation the engine
                 # MEASURED survived the retry budget. Do NOT ship a product the engine

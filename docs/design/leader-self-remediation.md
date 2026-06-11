@@ -236,6 +236,18 @@ countdown; the engine *enforces* one; late answers are discarded.
 - #97 wedge-vs-derive — sibling Theme-A item.
 - Watched-run re-planning authority (routes to `ask_operator` if ever wanted).
 
+## Known limitations (Hero code-review hardening notes — backlog, non-gating)
+
+- **L1 — the Access invariant's slice-6 pin is loop-local.** The redo no-widen guard
+  snapshots + restores `required_skills` within the reset loop; a future edit *below* the
+  restore would escape it. The strongest bind would assert at the point access becomes real —
+  `_task_tool_loadout` at dispatch, vs a loadout recorded at first dispatch. Correct as shipped;
+  recorded so the invariant's strength isn't overread.
+- **L2 — watched reflect silently swallows a suppressed re-skill.** When the read-only guard
+  drops a `required_skills` edit under operator presence, nothing surfaces that the reflection
+  *wanted* to re-skill. The partnership lens says the partner should see the suppressed proposal
+  (one recommendation under the guard's else). Backlog.
+
 ## Critical files
 
 - `src/modulatio/orchestration.py` — `_operator_context_block` (2338) + `_LEADER_VERIFY_PROMPT`

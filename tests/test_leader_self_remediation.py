@@ -252,6 +252,27 @@ def test_window_proceed_is_honored(orch):
     assert decision is WindowDecision.PROCEED
 
 
+def test_window_callback_error_is_not_reported_as_proceed(orch):
+    """M1 (Hero): a callback that RAISES proceeds (fail-safe) but must be reported as
+    callback_error — never as an operator 'proceed' that never happened (audit honesty)."""
+    def boom(notice):
+        raise RuntimeError("callback blew up")
+    orch.operator_present = True
+    orch.fix_window_callback = boom
+    reason, decision = orch._await_fix_window(_notice())
+    assert decision is WindowDecision.PROCEED
+    assert reason == "callback_error"
+
+
+def test_window_malformed_return_is_callback_error(orch):
+    """M1 (Hero): a non-WindowDecision return is callback_error, not a spurious proceed."""
+    orch.operator_present = True
+    orch.fix_window_callback = lambda n: "yes please"
+    reason, decision = orch._await_fix_window(_notice())
+    assert decision is WindowDecision.PROCEED
+    assert reason == "callback_error"
+
+
 def test_window_seconds_clamped_to_ceiling(tmp_path, monkeypatch):
     """Config can never turn the bounded window into an unbounded gate."""
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
