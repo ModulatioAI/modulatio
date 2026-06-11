@@ -9209,6 +9209,50 @@ def test_leader_verify_defer_remediation_records_reservation_no_redo(project):
     )
 
 
+def _window_leader(prompt):
+    if "LEADER GOAL VERIFICATION" in prompt:
+        return (
+            '```json\n{"verdict":"disappointed","rationale":"a fixable gap",'
+            '"report_body":"r","remediation":{"action":"revise_in_place",'
+            '"reason_code":"fixable_goal_gap","window_requested":true}}\n```'
+        )
+    return _leader_stub(prompt)
+
+
+def test_window_block_terminates_the_fix_no_redo(project):
+    """#80 slice 11: with an operator present and the Leader requesting a window, a
+    BLOCK within the window is TERMINAL — the operator took ownership: no redo, no
+    retry_count increment, a named reservation, goal still completes."""
+    from modulatio.orchestration import WindowDecision
+
+    runners = {"leader": _window_leader, "planner": _planner_stub,
+               "drafter": _drafter_stub, "qc": _qc_stub}
+    orch = Orchestrator(project, runners, operator_present=True,
+                        fix_window_callback=lambda n: WindowDecision.BLOCK)
+    summary = orch.kickoff("block-me")
+
+    goals = store.list_goals(PROJECT_CODE)
+    assert goals[0].status == GoalStatus.COMPLETED
+    assert goals[0].retry_count == 0  # operator blocked → no fix attempt
+    assert any("blocked" in r["concern"].lower() and "window" in r["concern"].lower()
+               for r in summary.recommendations)
+
+
+def test_window_proceed_drives_the_fix(project):
+    """#80 slice 11: operator present, window requested, callback PROCEEDs → the fix
+    runs (the redo fires) just as it would headless."""
+    from modulatio.orchestration import WindowDecision
+
+    runners = {"leader": _window_leader, "planner": _planner_stub,
+               "drafter": _drafter_stub, "qc": _qc_stub}
+    orch = Orchestrator(project, runners, operator_present=True,
+                        fix_window_callback=lambda n: WindowDecision.PROCEED)
+    orch.kickoff("proceed-me")
+
+    goals = store.list_goals(PROJECT_CODE)
+    assert goals[0].retry_count >= 1  # PROCEED → the fix dispatched
+
+
 def test_empty_deliverable_spec_surfaces_nothing(tmp_path, monkeypatch):
     """B.2 must not over-fire: with NO declared spec (today's default), the verifier sees
     the digest but no DECLARED-SPEC CHECK block — behavior is unchanged."""

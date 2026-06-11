@@ -8292,16 +8292,51 @@ class Orchestrator:
                 )
             )
             if can_redo:
-                # Remember what we're handing the producers, so a no-progress
-                # redo is caught next round (only meaningful with deliverables).
-                if has_deliverables:
-                    self._goal_redo_fingerprints[goal.id] = fingerprint
-                self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
-                self._leader_auto_redo(
-                    goal, tasks, rationale, report_path, summary,
+                # #80 slice 11: the rare bounded fix window. The model requests it
+                # (window_requested) and it only opens when an operator is present; the
+                # engine owns the deadline (_await_fix_window), so an absent operator
+                # never gates the run. BLOCK = the operator took ownership: terminal, no
+                # fix, no retry increment, ship with a named reservation. proceed /
+                # timeout / no-window = fix-and-notify (a leader_self_fix event carries
+                # the window outcome). Gate, not wrap: _leader_auto_redo is unchanged.
+                reason, decision = "none", WindowDecision.PROCEED
+                if self.operator_present and remediation.window_requested:
+                    reason, decision = self._await_fix_window(FixWindowNotice(
+                        goal_id=goal.id, concern=rationale[:200],
+                        remediation=remediation.action.value,
+                        deadline_s=self._fix_window_s,
+                    ))
+                if decision is not WindowDecision.BLOCK:
+                    # Remember what we're handing the producers, so a no-progress
+                    # redo is caught next round (only meaningful with deliverables).
+                    if has_deliverables:
+                        self._goal_redo_fingerprints[goal.id] = fingerprint
+                    self._emit_activity(
+                        role="leader", phase="leader_self_fix", agent_id="leader",
+                        detail={"goal_id": goal.id, "window": reason,
+                                "concern": rationale[:200]},
+                    )
+                    self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
+                    self._leader_auto_redo(
+                        goal, tasks, rationale, report_path, summary,
+                    )
+                    return
+                # BLOCK → operator owns the concern. Ship with a named reservation, no
+                # redo, no retry_count increment. Falls through to the common completion
+                # (the elif chain below is skipped because can_redo was taken).
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        "Operator blocked the Leader's fix within the review window — "
+                        "they took ownership of this concern."
+                    ),
+                    "suggestion": f"Operator-owned — {rationale}",
+                })
+                rationale_text = (
+                    f"leader: operator blocked the fix window: {rationale} "
+                    f"| report {report_path.name}"
                 )
-                return
-            if goal_spec_issues:
+            elif goal_spec_issues:
                 # #80 slice 4 (WITHHOLD): a declared-spec (HARD) violation the engine
                 # MEASURED survived the retry budget. Do NOT ship a product the engine
                 # KNOWS violates an operator-HARD param — withhold it. The goal still
