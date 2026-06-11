@@ -6,6 +6,64 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.6] — 2026-06-11
+
+**The Leader fixes what it can, and the engine refuses a form it can't run.** Two arcs since
+v0.8.4, both reviewed to sign-off (hull + coherence). The first makes the Leader's verify loop
+*fix in place* instead of punting; the second stops a job from being wedged into a saved template
+it doesn't fit. Both follow the same principle: **the engine binds the hard invariant; prose only
+bends the judgment.**
+
+### Leader self-remediation — address fixable concerns, don't punt (#80)
+
+When Leader-verify finds a fixable, in-scope problem, it now **remediates** rather than filing a
+ticket and walking away — and the engine makes the safety rails real, not hoped:
+
+- **A typed remediation gate.** The Leader *declares* a remediation (what it will fix, where) and
+  the engine *validates* the declared shape before any redo runs — a malformed or out-of-scope
+  remediation is rejected, fail-closed, not waved through on prose.
+- **A bounded fix window (engine-owned timeout).** The redo runs under a hard, daemon-thread
+  timeout the engine owns; a wedged fix can't hang the run, and the window can't be talked past.
+- **HARD violations withhold, never ship.** A measured HARD goal-spec violation at exhaustion
+  **withholds** the deliverable (it isn't delivered downstream of unresolved work), and the
+  withhold *survives delivery* — the policy can't be quietly undone when products are rendered.
+- **A redo never widens its reach.** The access invariant holds across a remediation: a redo runs
+  with the same (or narrower) tool loadout as the original — it can't grant itself new powers.
+- **Belt + suspenders.** A prompt-engine coherence guard keeps the prose and the engine telling
+  the operator the same story; discovery alignment defaults on; `ActivityEvent` carries a
+  structured `detail` payload so the surface can explain *why*, not just *what*.
+
+### JT generativity — derive, don't wedge (#97)
+
+A Job Template is a saved, reusable form for a job — run one-off or as a cron (and one cron can
+run several templates in a set order, looping). The matcher picked templates by word-overlap and
+never checked whether the job could actually **fill the template's required blanks**, so a wrong
+form could be bound and then *mis-run every cycle*. This release adds the mechanical-fit gate the
+matcher never had, and makes deriving a fitting template a first-class, guided action:
+
+- **A mechanical-fit gate (engine-bound, no fuzzy scalar).** Before an explicit/cron bind runs, a
+  pure boolean check asks only what it can verify from the template and the supplied params:
+  every **required** blank filled (strictly — an empty string or empty list is *not* filled);
+  every supplied value **within its declared `enum`**; a per-item template's fan-out driver a
+  non-empty list. A bind that fails is **refused**, fail-closed — the engine never runs a form it
+  can't fill.
+- **Refuse the broken form, honor the goal.** A refused explicit bind isn't a dead end: the
+  conversational surface offers to **derive a fitting template** (a guided create-JT interview that
+  captures the right params — which are required, their type/enum/default — and the output shape,
+  saved *alongside* the old, never overwriting it).
+- **Cron skip-the-slot.** A refused bind on a headless cron **skips that slot** (a visible gap +
+  the *reason* in the result, every cycle) rather than improvising unsupervised content — with a
+  per-cron `on_refused: greenfield` override for when continuity is wanted over fidelity. The
+  corrupt form never runs; the pipeline never crashes.
+- **The engine's own templates get teeth.** The create-template tool now captures `param_schema`,
+  so a template the engine creates declares its required blanks — and the fit gate has something to
+  check (a suite property guards that the capture lands before the gate).
+
+Also: removed the `test_memory_tab` ordering flake (#91) and hardened the test harness against it.
+**3046 tests pass** (ruff + full suite, CI-parity). Both arcs cleared independent **hull**
+(Captain Nemo) and **coherence** (Lovecraft) reviews, plus an architecture pass (Hero); every
+BLOCK was remediated to sign-off before merge.
+
 ## [0.8.4] — 2026-06-09
 
 **Verify the WHOLE deliverable against the brief — the missing organ.** A run could
