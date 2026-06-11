@@ -127,7 +127,7 @@ def test_explicit_bind_refused_when_value_out_of_enum(env):
         jt.ParamField(name="region", type="enum", required=True, enum=("NA", "EU", "APAC")),
     ))
     o, pr = _orch(env)
-    s = _resolve(o, pr, bound_jt_name="regional", bound_jt_params={"region": "Atlantis"})
+    _resolve(o, pr, bound_jt_name="regional", bound_jt_params={"region": "Atlantis"})
     assert o._bound_jt is None
     assert o._jt_refusal is not None and "region" in o._jt_refusal["reason"]
 
@@ -141,7 +141,7 @@ def test_explicit_bind_refused_when_per_driver_empty(env):
         project_code=None,
     )
     o, pr = _orch(env)
-    s = _resolve(o, pr, bound_jt_name="per-comp", bound_jt_params={"competitors": []})
+    _resolve(o, pr, bound_jt_name="per-comp", bound_jt_params={"competitors": []})
     assert o._bound_jt is None
     assert o._jt_refusal is not None
 
@@ -163,7 +163,7 @@ def test_legacy_no_schema_jt_still_binds(env):
     """Back-compat: a legacy JT with no param_schema has nothing required → fit passes → binds."""
     jt.create_job_template(name="legacy", description="d", interview_body="b", project_code=None)
     o, pr = _orch(env)
-    s = _resolve(o, pr, bound_jt_name="legacy", bound_jt_params={})
+    _resolve(o, pr, bound_jt_name="legacy", bound_jt_params={})
     assert o._bound_jt is not None and o._bound_jt.name == "legacy"
     assert o._jt_refusal is None
 

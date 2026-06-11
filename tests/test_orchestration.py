@@ -162,7 +162,7 @@ def test_refused_cron_bind_greenfields_by_default_but_skips_when_asked(project: 
     The same refusal under on_refused='skip' (the cron default) skips the slot instead.
     Locks that the default is greenfield (one-off/interactive continuity), not skip."""
     from modulatio import job_templates as jt
-    monkeypatch.setattr(jt, "_JT_ROOT", project_tmp := (Path(project.wiki_path).parent / "jts"))
+    monkeypatch.setattr(jt, "_JT_ROOT", Path(project.wiki_path).parent / "jts")
     jt.create_job_template(
         name="needs-topic", description="d", interview_body="b",
         param_schema=(jt.ParamField(name="topic", required=True),),
