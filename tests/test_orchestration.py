@@ -7891,6 +7891,44 @@ def test_engine_renders_grounded_deliverables_partial(tmp_path, monkeypatch):
     assert summary.product_quality_report is not None
 
 
+def test_policy_withhold_survives_delivery_pass(tmp_path, monkeypatch):
+    """#80 (Nemo BLOCKER): a pre-existing POLICY withhold — the verify-time HARD-violation
+    withhold — must SURVIVE _deliver_finished_products. The violating deliverable is a
+    COMPLETED, otherwise-shippable task; the old code reassigned withheld_deliverables and
+    shipped it. With the fix it is excluded from `grounded` (not rendered) and stays
+    withheld."""
+    from uuid import uuid4
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Project, Task, TaskStatus
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "deliver"))
+    vault.init_project("PWH", "policy withhold", "obj")
+    vault.init_run("PWH", "run-1", "obj")
+    project = Project(code="PWH", name="PWH", objective="obj",
+                      leader_model="stub", wiki_path=str(tmp_path / "pwh"), run_id="run-1")
+    orch = Orchestrator(
+        project, {"leader": _leader_stub, "drafter": _drafter_stub, "qc": _qc_stub},
+        deliver_products=True,
+    )
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "bad.md").write_text("# Brief-violating Product\n\nunder the declared floor.\n")
+
+    t = Task(id="T-bad", project_id=uuid4(), goal_id="PWH-G-001", description="bad")
+    t.status = TaskStatus.COMPLETED
+    t.deliverable = True
+    t.output_path = "bad.md"
+
+    summary = RunSummary(project=project)
+    summary.tasks = [t]
+    summary.withheld_deliverables = ["T-bad"]  # the verify-time HARD-violation withhold
+    orch._deliver_finished_products(summary)
+
+    assert "T-bad" in summary.withheld_deliverables, "policy withhold must survive delivery"
+    assert not summary.rendered_deliverables, "a withheld deliverable must NOT ship"
+
+
 def test_deliver_degrades_to_markdown_when_renderer_absent(tmp_path, monkeypatch):
     """A missing OPTIONAL renderer (pandoc absent — the install-smoke CI case)
     must NOT mean zero delivery: the product ships as Markdown with error=None and

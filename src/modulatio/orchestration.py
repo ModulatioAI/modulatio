@@ -123,11 +123,20 @@ def validate_remediation(data: dict, goal_task_ids: "set[str]") -> Remediation:
     )
     if reason is not None and reason not in valid_reasons:
         return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
-    targets_raw = raw.get("target_task_ids") or []
-    if not isinstance(targets_raw, list) or any(
-        not isinstance(t, str) for t in targets_raw
-    ):
-        return Remediation(action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION)
+    # Fail closed on a PRESENT-but-malformed target_task_ids — distinguish absent
+    # (default []) from present (must be a list of strings). A falsey non-list
+    # ("" / 0 / false) is an INVALID declaration, not a silent rebind to the safe
+    # shape. (Nemo code-review finding.)
+    if "target_task_ids" in raw:
+        targets_raw = raw["target_task_ids"]
+        if not isinstance(targets_raw, list) or any(
+            not isinstance(t, str) for t in targets_raw
+        ):
+            return Remediation(
+                action=RemediationAction.DEFER, rejected=_INVALID_DECLARATION
+            )
+    else:
+        targets_raw = []
     targets = tuple(targets_raw)
     # target_task_ids ⊆ this goal's own tasks — fail closed, never silently rebind.
     if action is RemediationAction.REVISE_IN_PLACE and not set(targets) <= set(
@@ -138,7 +147,9 @@ def validate_remediation(data: dict, goal_task_ids: "set[str]") -> Remediation:
         action=action,
         reason_code=reason,
         target_task_ids=targets,
-        window_requested=bool(raw.get("window_requested", False)),
+        # Only a real JSON `true` requests the window — `bool("false")` is True, so a
+        # malformed string must NOT open a window. (Nemo code-review finding.)
+        window_requested=raw.get("window_requested") is True,
     )
 
 
@@ -8342,12 +8353,12 @@ class Orchestrator:
                 # KNOWS violates an operator-HARD param — withhold it. The goal still
                 # COMPLETES (the run is never blocked; independent goals ship), but this
                 # deliverable does not go out clean. HARD means the engine binds.
-                withheld = [
-                    (t.output_path or str(self._task_artifact_path(t) or t.id))
-                    for t in tasks
-                    if getattr(t, "deliverable", False)
-                ]
-                summary.withheld_deliverables.extend(withheld)
+                # Store TASK IDs (the identifier the delivery pass keys on) so the
+                # policy withhold survives _deliver_finished_products by id, not a
+                # fragile path match. (Nemo code-review finding.)
+                summary.withheld_deliverables.extend(
+                    t.id for t in tasks if getattr(t, "deliverable", False)
+                )
                 summary.recommendations.append({
                     "goal_id": goal.id,
                     "concern": (
@@ -10175,10 +10186,20 @@ class Orchestrator:
                         stack.extend(getattr(dt, "depends_on", None) or [])
                 return True
 
-            grounded = [(tid, p, f) for (tid, p, f) in all_delivs if _grounded(tid)]
-            summary.withheld_deliverables = [
-                tid for (tid, _p, _f) in all_delivs if tid not in {g[0] for g in grounded}
+            # #80 (Nemo BLOCKER): a pre-existing POLICY withhold (the verify-time
+            # HARD-violation withhold) MUST survive this pass — never ship a deliverable
+            # the engine already withheld, and never blindly reassign over the list.
+            # Exclude policy-withheld task ids from `grounded`, then UNION them into the
+            # final withheld set (don't overwrite).
+            policy_withheld = set(summary.withheld_deliverables)
+            grounded = [
+                (tid, p, f) for (tid, p, f) in all_delivs
+                if _grounded(tid) and tid not in policy_withheld
             ]
+            summary.withheld_deliverables = sorted(
+                policy_withheld
+                | {tid for (tid, _p, _f) in all_delivs if tid not in {g[0] for g in grounded}}
+            )
             # Cross-goal grounding advisory: goals have no explicit dep model, so
             # per-task grounding can't see an IMPLICIT reliance (a shipped goal that
             # read a blocked goal's work via team_canvas with no task edge). Rather

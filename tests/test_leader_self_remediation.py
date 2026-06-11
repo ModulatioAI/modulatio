@@ -114,6 +114,42 @@ def test_absent_remediation_on_disappointed_defaults_to_safe_shape():
     assert rem.window_requested is False
 
 
+@pytest.mark.parametrize("bad", ["", 0, False, {"x": 1}, [1, 2]])
+def test_present_but_malformed_target_task_ids_fails_closed(bad):
+    """Nemo finding: a PRESENT-but-malformed target_task_ids ("" / 0 / false / non-list
+    / list-of-non-strings) is an INVALID declaration — fail closed, never a silent
+    rebind to the safe shape."""
+    data = {
+        "verdict": "disappointed",
+        "remediation": {
+            "action": "revise_in_place", "reason_code": "fixable_goal_gap",
+            "target_task_ids": bad,
+        },
+    }
+    rem = validate_remediation(data, GOAL_TASKS)
+    assert rem.action is RemediationAction.DEFER
+    assert rem.rejected == "invalid_remediation_declaration"
+
+
+def test_string_false_window_request_does_not_open_window():
+    """Nemo finding: bool("false") is True — a malformed string must NOT open the
+    operator window. Only a real JSON true requests it."""
+    for wr in ("false", "true", 1, 0, "yes"):
+        data = {
+            "verdict": "disappointed",
+            "remediation": {
+                "action": "revise_in_place", "reason_code": "fixable_goal_gap",
+                "window_requested": wr,
+            },
+        }
+        assert validate_remediation(data, GOAL_TASKS).window_requested is False
+    data_true = {
+        "verdict": "disappointed",
+        "remediation": {"action": "revise_in_place", "window_requested": True},
+    }
+    assert validate_remediation(data_true, GOAL_TASKS).window_requested is True
+
+
 def test_explicit_defer_is_honored_not_rejected():
     data = {
         "verdict": "disappointed",
