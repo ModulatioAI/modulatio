@@ -142,6 +142,31 @@ def validate_remediation(data: dict, goal_task_ids: "set[str]") -> Remediation:
     )
 
 
+# ── #80 The bounded fix window — a rare, operator-vetoable pause before a
+# self-fix. The governing invariant: the TIMER IS THE ENGINE'S, NEVER THE
+# CALLBACK'S. The TUI shows a countdown; the engine enforces one, and a late
+# answer is discarded. Headless (no operator / no callback) has no window —
+# immediate proceed — so the run can never be gated on an absent operator.
+class WindowDecision(str, Enum):
+    BLOCK = "block"
+    PROCEED = "proceed"
+    # TIMEOUT is never returned by the callback — the engine synthesizes it.
+
+
+@dataclass(frozen=True)
+class FixWindowNotice:
+    """What the operator is shown when the Leader opens a rare fix window."""
+
+    goal_id: str
+    concern: str
+    remediation: str
+    deadline_s: float
+
+
+#: Hard ceiling on the window — config can never turn it into an unbounded gate.
+_FIX_WINDOW_MAX_S = 300.0
+
+
 class AgentRunner(Protocol):
     """Anything that takes a prompt and returns a string response."""
 
@@ -1724,6 +1749,8 @@ class Orchestrator:
         summarizer_chat_runner_factory: "Callable[[str], Callable[[str], str]] | None" = None,
         activity_callback: "Callable[[ActivityEvent], None] | None" = None,
         operator_present: bool = False,
+        fix_window_callback: "Callable[[FixWindowNotice], WindowDecision] | None" = None,
+        fix_window_s: float = 90.0,
         user_budget_overrides: "dict[str, _ctx_budget_module.BudgetOverride] | None" = None,
         deliver_products: bool = False,
     ):
@@ -1856,6 +1883,13 @@ class Orchestrator:
         #: streaming-TUI/ACP drives the mid-run defer round-trip). See
         #: ``_autonomous`` / ``_operator_context_block``.
         self.operator_present: bool = operator_present
+        #: #80 the rare fix-window seam — None == headless == no window (immediate
+        #: proceed). The callback returns BLOCK/PROCEED; the engine synthesizes
+        #: TIMEOUT. ``_fix_window_s`` is CLAMPED ≤ 300 so config can never make the
+        #: bounded window an unbounded gate (the never-block-an-absent-operator
+        #: invariant survives a bad settings file).
+        self.fix_window_callback = fix_window_callback
+        self._fix_window_s: float = max(0.0, min(float(fix_window_s), _FIX_WINDOW_MAX_S))
         #: Part A / A2 (#85): engine-authored AssemblyRecord per task that the
         #: engine mechanically assembled. Assembly QC consults it to do the cheap
         #: structural check instead of re-reading the assembled bytes into the
@@ -2416,6 +2450,55 @@ class Orchestrator:
         )
         with self._activity_lock:
             self.activity_callback(event)
+
+    def _await_fix_window(
+        self, notice: "FixWindowNotice"
+    ) -> "tuple[str, WindowDecision]":
+        """Open the rare, operator-vetoable fix window. Returns
+        ``(reason, decision)`` with reason ∈ {headless, block, proceed, timeout}.
+
+        INVARIANT: returns in ≤ ``self._fix_window_s``. The timer is the
+        ENGINE's — ``fut.result(timeout=...)`` on the engine's thread — so the
+        callback cannot extend it (a late answer is discarded), cannot skip it
+        (headless short-circuits before any thread spawns), and a wedged TUI
+        thread can't hold the run hostage (``shutdown(wait=False)``). There is no
+        prompt promise anywhere in the chain.
+        """
+        if self.fix_window_callback is None or not self.operator_present:
+            return ("headless", WindowDecision.PROCEED)
+        self._emit_activity(
+            role="leader", phase="leader_fix_window_opened",
+            agent_id="leader", detail=notice,
+        )
+        # A DAEMON thread runs the callback. daemon=True so a wedged TUI thread
+        # can never hold the run hostage NOR block interpreter exit; join(timeout)
+        # is the engine's hard deadline; a late answer is discarded because we
+        # read ``box`` only if the thread finished in time.
+        box: "dict[str, object]" = {}
+
+        def _run() -> None:
+            try:
+                box["decision"] = self.fix_window_callback(notice)
+            except Exception:  # noqa: BLE001 — a misbehaving callback must not crash the run
+                box["decision"] = WindowDecision.PROCEED
+
+        t = threading.Thread(target=_run, name="fix-window", daemon=True)
+        t.start()
+        t.join(timeout=self._fix_window_s)
+        if t.is_alive() or "decision" not in box:
+            # Deadline hit (or no answer) — engine synthesizes PROCEED; the
+            # daemon thread's eventual answer is dead on arrival.
+            decision, reason = WindowDecision.PROCEED, "timeout"
+        else:
+            decision = box["decision"]
+            if not isinstance(decision, WindowDecision):
+                decision = WindowDecision.PROCEED  # malformed answer → proceed
+            reason = decision.value
+        self._emit_activity(
+            role="leader", phase="leader_fix_window_closed",
+            agent_id="leader", detail=reason,
+        )
+        return (reason, decision)
 
     # ── Brick C: operator-presence-aware Leader behavior ──────────────────
     def _autonomous(self) -> bool:

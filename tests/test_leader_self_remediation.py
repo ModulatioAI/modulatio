@@ -10,10 +10,41 @@ docs/design/leader-self-remediation.md.
 
 from __future__ import annotations
 
-from modulatio.orchestration import RemediationAction, validate_remediation
+import time
+
+import pytest
+
+from modulatio import vault
+from modulatio.orchestration import (
+    FixWindowNotice,
+    Orchestrator,
+    RemediationAction,
+    WindowDecision,
+    validate_remediation,
+)
+from modulatio.types import Project
 
 
 GOAL_TASKS = {"PROJ-T-001", "PROJ-T-002"}
+
+
+@pytest.fixture
+def orch(tmp_path, monkeypatch):
+    """A minimal Orchestrator for unit-testing the fix window in isolation."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("WIN", "window stub", "obj")
+    proj = Project(
+        code="WIN", name="window stub", objective="obj",
+        leader_model="stub", wiki_path=str(tmp_path / "win"),
+    )
+    return Orchestrator(proj, {"leader": lambda p: ""})
+
+
+def _notice():
+    return FixWindowNotice(
+        goal_id="WIN-G-001", concern="missing section",
+        remediation="revise_in_place", deadline_s=0.05,
+    )
 
 
 def test_valid_revise_in_place_is_recognized():
@@ -115,3 +146,83 @@ def test_activity_event_detail_is_optional_and_back_compat():
         detail={"window": "timeout"},
     )
     assert ev2.detail == {"window": "timeout"}
+
+
+# ── Slices 9-13: the bounded fix window (engine-owned timeout) ──────────────
+
+def test_window_never_blocks_past_the_cap(orch):
+    """THE un-bypassable invariant: a hung callback cannot hold the run past
+    the engine's deadline. Real hung callback, real timeout, no cooperation."""
+    orch.operator_present = True
+    orch.fix_window_callback = lambda n: time.sleep(3600)  # never returns
+    orch._fix_window_s = 0.05
+    start = time.monotonic()
+    reason, decision = orch._await_fix_window(_notice())
+    elapsed = time.monotonic() - start
+    assert reason == "timeout"
+    assert decision is WindowDecision.PROCEED
+    assert elapsed < 1.0
+
+
+def test_window_late_answer_is_discarded(orch):
+    """A BLOCK that arrives after the deadline is dead on arrival — the engine
+    already synthesized PROCEED/timeout and never honors the late decision."""
+    def slow_block(notice):
+        time.sleep(0.5)
+        return WindowDecision.BLOCK
+    orch.operator_present = True
+    orch.fix_window_callback = slow_block
+    orch._fix_window_s = 0.05
+    reason, decision = orch._await_fix_window(_notice())
+    assert reason == "timeout"
+    assert decision is WindowDecision.PROCEED
+
+
+def test_window_headless_zero_ceremony(orch):
+    """No operator present → no window exists: callback never invoked, immediate
+    proceed, by construction (the asleep-during-a-production-run north star)."""
+    orch.operator_present = False
+    called = []
+    orch.fix_window_callback = lambda n: called.append(1) or WindowDecision.BLOCK
+    reason, decision = orch._await_fix_window(_notice())
+    assert reason == "headless"
+    assert decision is WindowDecision.PROCEED
+    assert called == []
+
+
+def test_window_no_callback_is_headless(orch):
+    orch.operator_present = True
+    orch.fix_window_callback = None
+    reason, decision = orch._await_fix_window(_notice())
+    assert reason == "headless"
+    assert decision is WindowDecision.PROCEED
+
+
+def test_window_block_is_honored(orch):
+    orch.operator_present = True
+    orch.fix_window_callback = lambda n: WindowDecision.BLOCK
+    orch._fix_window_s = 5
+    reason, decision = orch._await_fix_window(_notice())
+    assert reason == "block"
+    assert decision is WindowDecision.BLOCK
+
+
+def test_window_proceed_is_honored(orch):
+    orch.operator_present = True
+    orch.fix_window_callback = lambda n: WindowDecision.PROCEED
+    orch._fix_window_s = 5
+    reason, decision = orch._await_fix_window(_notice())
+    assert reason == "proceed"
+    assert decision is WindowDecision.PROCEED
+
+
+def test_window_seconds_clamped_to_ceiling(tmp_path, monkeypatch):
+    """Config can never turn the bounded window into an unbounded gate."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("WIN2", "w", "o")
+    proj = Project(
+        code="WIN2", name="w", objective="o",
+        leader_model="stub", wiki_path=str(tmp_path / "win2"),
+    )
+    o = Orchestrator(proj, {"leader": lambda p: ""}, fix_window_s=99999.0)
+    assert o._fix_window_s <= 300.0
