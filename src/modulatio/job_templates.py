@@ -135,6 +135,26 @@ class JobTemplate:
             if p.required and params.get(p.name) is None
         ]
 
+    def unfilled_required(self, params: dict[str, Any]) -> list[str]:
+        """STRICT required check for the #97 fit-gate: names of required params that
+        are absent, None, an empty/whitespace-only string, or — for a list/tuple value
+        — empty. Unlike :meth:`missing_required` (absent/None only, kept for cron.add's
+        existing semantics), this catches the present-but-empty bypass (``{"topic": ""}``
+        / ``{"competitors": []}``) so an explicit cron/operator bind that literally can't
+        run is refused, not bound."""
+        unfilled: list[str] = []
+        for p in self.param_schema:
+            if not p.required:
+                continue
+            value = params.get(p.name)
+            if value is None:
+                unfilled.append(p.name)
+            elif isinstance(value, str) and not value.strip():
+                unfilled.append(p.name)
+            elif isinstance(value, (list, tuple)) and len(value) == 0:
+                unfilled.append(p.name)
+        return unfilled
+
 
 _EMPTY_JT = JobTemplate(name="", description="", interview_body="")
 
