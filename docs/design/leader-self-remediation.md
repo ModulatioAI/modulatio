@@ -1,10 +1,12 @@
 # Leader self-remediation — fixable-in-scope concerns (#80)
 
 **Status:** DESIGN, held local on `arc/leader-self-remediation` (2026-06-10). Not built.
-**Round-1 hull review (Hero) incorporated** — architecture signed ("sound, build it"); six
-design findings folded in below (typed-shape gate, structural Authority, false-fix backstop,
-discovery-seam alignment, ActivityEvent payload, citation fix). Pending Hero round-2 (scoped to
-those findings) + Lovecraft coherence, then TDD.
+**Hero hull rounds 1-3 incorporated** — architecture signed ("sound, build it"). R1: typed-shape
+gate, structural Authority, false-fix backstop, discovery-seam alignment, ActivityEvent payload,
+citation fix. R3 (the residual): the Brief enforcer **detects but did not bind** — added the
+verdict clamp + HARD-exhaustion withhold fork (verified at source: `_deliverable_spec_issues`
+fed only the verifier prompt, 7850). Hero signs with the clamp in. Pending the broader cadre —
+**Nemo (hull) + Lovecraft (coherence)** — then TDD.
 
 ## What this is, and what grounding corrected
 
@@ -71,7 +73,35 @@ the gate** that actually binds it (Hero Q1):
 | **Scope** | re-runs only this goal's own tasks | `_leader_auto_redo` resets only this goal's tasks — executor-bound ✓ |
 | **Access** | reuses each task's existing loadout | **invariant to pin:** a redo task's tool loadout is **never wider** than the original (one-line engine assert + test — true by accident today, made true by intent) |
 | **Authority** | revise-in-place needs no escalation/metered authorization | structural — the shape carries no new cost. Any *future* shape that escalates is bound at **execution** by the existing fail-closed, per-task-idempotent metered/escalation authorizes (Hero Q3 — see below) |
-| **Brief** | improves fitness *within* the brief; cannot add/remove a HARD param | **the soft spot — bound ONLY by the post-fix reverify**, which MUST re-check every HARD param (cardinality, `artifact_kind`, per-part floor, structure, title — the #101 whole-deliverable checks). Proven by TDD slice 6 |
+| **Brief** | improves fitness *within* the brief; cannot add/remove a HARD param | **a VERDICT CLAMP at (re)verify** (see below) — *not* the model verdict alone. Per-param true map: floor + required-structure + blank-label at reverify *when an assembly digest exists*; `artifact_kind` at **assembly** (fan-out seal + magic-byte gate); cardinality via **assembly-incompleteness** (deliberately not at verify); title via `required_structure` only if the digest extracts it. **No-digest gap:** a self-fix on a task with no assembly record gets no deterministic Brief check at reverify (produce-time C.1 floor stamps cover part). Proven by TDD slice 6 |
+
+### The Brief enforcer must BIND, not just surface (Hero round-3 — verified at source)
+
+As the engine stands, `_deliverable_spec_issues` (orchestration.py:8201) runs the #101 check
+and its **only** consumer appends the findings to the verifier's *prompt* (7850-7855,
+"DECLARED-SPEC CHECK"). The verdict is then read straight from the model (7977); nothing clamps
+it. So a measured HARD violation is **detected and surfaced, then the model decides whether it
+fails** — prose-strength enforcement wearing the engine's jacket, the exact failure mode #80
+exists to kill. Two binds close it:
+
+- **Verdict clamp (the real Brief enforcer).** Non-empty `spec_issues` at (re)verify → the
+  engine forces the verdict to **not `satisfied`** (clamp to `disappointed`, which drives the
+  redo ledger). One engine line near the verdict read (7977/8008). The model still judges
+  fitness everywhere the spec does *not* constrain — it just cannot wave through a HARD
+  violation the engine has *measured*. Without this, slice 6's "must fail reverify" holds only
+  when the model cooperates: a stubbed-verdict test passes while the live bind doesn't exist.
+- **Exhaustion forks on HARD.** *Fitness-gap* exhaustion ships best-effort with a reservation
+  (§3b, unchanged). But *spec-violation* exhaustion (`spec_issues` still non-empty at the retry
+  cap) must route to the **withhold/BLOCKER** seam — **do not deliver a product the engine has
+  measured as violating an operator-HARD param.** Shipping it with a reservation memo is the
+  contract breach (HARD means the engine binds). The withhold-on-blocked seam already exists;
+  this routes one more case into it. *(Behavioral delta, accepted: on a HARD-violation
+  exhaustion the run withholds that goal's deliverable instead of shipping-with-reservation;
+  independent completed goals still ship.)*
+
+This bind is not #80-specific — it hardens the #101 check for **every** verify, self-fix or
+not. #80 makes it load-bearing: removing the presence suppressor means more autonomous fixes,
+and the clamp is what makes that safe.
 
 **Authority is structural, not consultative (Hero Q3).** The gate does **not** call
 `comptroller.authorize_escalation` — that function *mutates* the daily-budget ledger on every
@@ -102,10 +132,12 @@ orchestration.py:8371); the deadlock detector (~8042-8118, which reads `operator
    calls that need their authority or would change what they marked fixed.* Also rewrite the
    now-stale `_autonomous()` docstring (2335) and the field comment (1765) that still teach the
    old JUDGE-vs-DEFER rule, or the next reader re-imports the deprecated principle from the code.
-2. **Suspenders — the typed-shape gate (fail-closed).** Before a concern becomes a human-facing
-   recommendation/reservation, classify the remediation shape. Recognized → run fix-then-
-   reverify. Unrecognized → record/surface, named. **The fix decision no longer reads
-   `operator_present` at all.**
+2. **Suspenders — the typed-shape gate (fail-closed) AND the verdict clamp.** Before a concern
+   becomes a human-facing recommendation/reservation, classify the remediation shape. Recognized
+   → run fix-then-reverify. Unrecognized → record/surface, named. **The fix decision no longer
+   reads `operator_present` at all.** And the reverify itself binds: a non-empty `spec_issues`
+   clamps the verdict off `satisfied` (the real Brief enforcer, §"must BIND"), and a HARD-
+   violation that survives to the retry cap **withholds** rather than ships.
 3. **Decision (b) — the transparent self-fix event.** A `leader_self_fix` `ActivityEvent`
    carrying the concern + chosen shape + attempt N. **Requires a types change** (Hero finding):
    `ActivityEvent` (types.py:621) has no payload field — add an additive optional
@@ -136,9 +168,12 @@ orchestration.py:8371); the deadlock detector (~8042-8118, which reads `operator
 5. **Prose register.** Snapshot `_operator_context_block(present=True)` lost the "record over
    redo" steer and gained surface-as-you-fix; `_autonomous` docstring updated. (Light belt
    guard.)
-6. **False-fix regression (Hero Q1 — the backstop).** A self-fix whose *executed* output
-   violates a HARD `OutputSpec`/`DeliverableSpec` param MUST fail re-verify and increment the
-   ledger. Proves the actual anti-masking guarantee; slices 1-5 only prove the gate.
+6. **False-fix regression (Hero Q1/Q3 — the backstop, end to end).** A self-fix whose *executed*
+   output violates a HARD `OutputSpec`/`DeliverableSpec` param MUST be **clamped non-`satisfied`
+   by the engine** (assert the *clamp*, with a stubbed model verdict of `satisfied` — proves the
+   bind, not the model's cooperation), increment the ledger, and on exhaustion **withhold rather
+   than ship**. Proves the actual anti-masking guarantee end to end; slices 1-5 only prove the
+   gate.
 7. **Access invariant.** A redo task's tool loadout is never wider than the original's (engine
    assert + test).
 8. **Discovery alignment.** `_iterate_enabled` / `_wave_reflect_enabled` return True regardless
@@ -177,7 +212,12 @@ orchestration.py:8371); the deadlock detector (~8042-8118, which reads `operator
   `_autonomous` docstring (2335) + field comment (1765), `_iterate_enabled` (6239) +
   `_wave_reflect_enabled` (6250, align), `_leader_verify_goal` (~7788-8137, gate plug-in),
   `_leader_auto_redo` (8337, the one shape + existing ledger + Access invariant),
-  recommendations/reservations sink (~8087-8136).
+  recommendations/reservations sink (~8087-8136), **the verdict read (7977) + unknown-norm
+  (8008) — where the `spec_issues` clamp lands**, `_deliverable_spec_issues` (8201) and its
+  prompt-only consumer (7850, the detect-not-bind site), and the **withhold/BLOCKER seam** the
+  HARD-exhaustion fork routes into.
+- `src/modulatio/assembly.py` — `check_deliverable` (579, what the digest check actually covers:
+  floor / required_structure / blank labels).
 - `src/modulatio/job_templates.py` — `OutputSpec` / `DeliverableSpec` (~66/76, the HARD Brief —
   *corrected from types.py*).
 - `src/modulatio/types.py` — `ActivityEvent` (621, add `detail` field + `leader_self_fix` phase).
