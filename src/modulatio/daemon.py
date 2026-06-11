@@ -399,7 +399,7 @@ def _make_dispatch_callback(*, stub: bool):
         # validated at cron add-time.
         summary = orch.kickoff(objective, bound_jt_name=jt_id, bound_jt_params=jt_params,
                                on_refused=on_refused)
-        if summary.skipped_refused_jt:
+        if getattr(summary, "skipped_refused_jt", None):
             return f"skipped: job template {summary.skipped_refused_jt!r} refused (doesn't fit) — slot skipped"
         return f"goals={len(summary.goals)} tasks={len(summary.tasks)} drafts={len(summary.drafts)} errors={len(summary.errors)}"
 
