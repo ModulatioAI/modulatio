@@ -1,10 +1,12 @@
 # JT generativity — derive-don't-wedge (#97)
 
-**Status:** DESIGN, held local on `arc/jt-generativity` (2026-06-11). Not built. **Lovecraft
-(coherence): SIGN-OFF.** **Nemo (hull): round-1 BLOCK — 5 holes — → round-2 SIGN-OFF** (all five
-sealed against the `370d41b` seams). **Hero (hull): letter out, awaiting reply** (esp. Q5 —
-refused bind in an ordered cron pipeline: greenfield-with-reservation vs halt-the-pipeline). Then
-TDD, then a full-code review. Branch held local; merge = Clif. Plan-approved.
+**Status:** DESIGN, held local on `arc/jt-generativity` (2026-06-11). Not built. **All three
+reviewers in:** Lovecraft (coherence) **SIGN-OFF**; Nemo (hull) round-1 BLOCK (5 holes) → round-2
+**SIGN-OFF**; Hero (hull) **SIGN-WITH-RESERVATIONS** → R1 (enum conformance) + R2 (cron fallback →
+skip-the-slot) + three doc notes all folded. One **named decision open for Clif** (non-blocking):
+R2's default is skip-the-slot; a per-cron `on_refused: greenfield` override is his to enable.
+**Cleared for TDD.** Build order: Part 2 (`param_schema` capture) → Part 1 (gate) → Part 3 (prose).
+Branch held local; merge = Clif. Plan-approved.
 
 ## What this is, and what grounding corrected
 
@@ -52,13 +54,17 @@ form is not. (Lovecraft signed this reconciliation off — coherence pass 2026-0
 
 ## Part 1 — the mechanical-fit gate
 
-> **Hull remediation (Nemo round-1 BLOCK, 2026-06-11).** Nemo's five source-verified holes
-> reshaped this part: the gate is now **bind-time only** (the surface filter is un-wireable from
-> the current index and is deferred — hole 3); shape-fit is narrowed to what's mechanically
-> derivable from the supplied params, NOT inferred job-intent (holes 2); required-presence is
-> made strict against empty string/list (hole 1); the refusal gets a real engine state +
-> downstream behavior (hole 4); and `param_schema` capture is promoted to a HARD build-order
-> prerequisite (hole 5). See "## Hull remediation" below for the trace-by-trace resolution.
+> **Hull remediation (Nemo round-1 BLOCK + Hero round-1 SIGN-WITH-RESERVATIONS, 2026-06-11).**
+> Nemo's five source-verified holes reshaped this part: the gate is now **bind-time only** (the
+> surface filter is un-wireable from the current index and is deferred — hole 3); shape-fit is
+> narrowed to what's mechanically derivable from the supplied params, NOT inferred job-intent
+> (hole 2); required-presence is made strict against empty string/list (hole 1); the refusal gets
+> a real engine state + downstream behavior (hole 4); and `param_schema` capture is promoted to a
+> HARD build-order prerequisite (hole 5). Hero added **R1: enum conformance** (a supplied value
+> outside a declared `enum` is a present-but-out-of-contract misfit — Nemo-hole-1's sibling) and
+> **R2: the headless-cron fallback is SKIP-THE-SLOT, not greenfield** (a refused cron bind is a
+> persistent config error; improvising unsupervised every cycle is a soft re-wedge). See
+> "## Hull remediation" below for the trace-by-trace resolution.
 
 A pure, engine-checkable classifier — **everything it inspects is present on the explicit bind
 path** (`jt` from checkout + `bound_jt_params`); it infers nothing from objective prose:
@@ -73,6 +79,15 @@ _jt_fit(jt, *, params) -> (ok: bool, reason: str)
   is `None`, an empty/whitespace string, or (for a list-typed / per-driver field) an empty list.
   `missing_required` is LEFT UNCHANGED (other callers depend on its absent-only semantics); the
   strict check is fit-local.
+- **Enum conformance (Hero R1).** For every *supplied* param whose `ParamField` declares a
+  non-empty `enum` (`job_templates.py:50-62`, "allowed values when type == enum"), the value MUST
+  be a member — and when the field is list-typed / per-driver, *every item* must be a member. A
+  value outside the contract (`{"region": "Atlantis"}` against `enum=("NA","EU","APAC")`) passes
+  required-presence but mis-runs every cycle; it is a misfit, named in the refusal reason. This is
+  the conformance sibling of Nemo hole 1 (which covers absence/emptiness): both are pure-mechanical,
+  both read only declaration + value on the bind path, neither infers intent. `type` is left
+  **advisory** (the dataclass marks it so) — the gate enforces `required` + `enum` only, and does
+  not silently half-enforce `type`.
 - **Per-driver shape (mechanical only).** When `jt.output_spec.cardinality == "per-item"`, the
   fan-out driver `params[jt.output_spec.per]` MUST be a present, non-empty list — a per-item JT
   with an empty driver can't run. This is the ONLY shape check at bind time, because it is the
@@ -97,11 +112,23 @@ prose. The refusal sets `self._jt_refusal = {"name": <jt>, "reason": <why>}`. Th
 - **Interactive / converse surface:** `_job_template_block` (~10423-10446) gains a third
   renderable state — "explicit template `<name>` refused: `<reason>` — derive a fitting one" —
   and the Leader can invoke the create-JT skill (Part 2) to derive.
-- **Headless cron (no operator to interview):** **fail-closed on the wedge, fail-open on the
-  job** — the corrupt JT never runs, but the job is NOT crashed: it proceeds **greenfield with a
-  named reservation** recording the refusal (so a human sees "template X was refused this cycle,
-  ran greenfield"). This matches the engine's never-wedge / never-crash-a-kickoff posture and
-  keeps a cron pipeline alive rather than silently pretending the bind succeeded.
+- **Headless cron (no operator to interview) — SKIP THE SLOT (Hero R2, reversed from greenfield).**
+  **Fail-closed on the wedge, fail-closed on the improvised substitute, fail-open on the
+  pipeline.** A refused cron bind is a *persistent config error* (the stored cron params and the
+  JT schema have drifted) — it will refuse **every cycle**. Running greenfield would substitute the
+  Leader's unsupervised improvisation for the operator's explicitly-chosen HARD mechanism, every
+  cycle, at full spend, feeding a plausible-but-wrong-shaped artifact into whatever the ordered
+  pipeline runs next — a soft re-wedge of the slot. So the corrupt JT does NOT run AND no greenfield
+  substitute runs: the engine **skips that slot**, records a named reservation every cycle
+  ("template `<name>` refused: `<reason>` — slot skipped"), and the pipeline continues to the next
+  slot (never crash, never gate the pipeline, other slots' work unharmed). In an ordered cron, a
+  visible gap beats a plausible-but-wrong artifact.
+  - *Named decision for Clif (Hero flagged this as the operator's call):* the **default** for an
+    unattended loop is skip-the-slot. If, for a specific cron, Clif weighs output-*continuity* over
+    output-*fidelity*, a per-cron `on_refused: greenfield` override can opt that cron back into
+    greenfield-with-reservation. Default = visible gap; override = Clif's explicit per-cron choice.
+  - *Filed forward (not this cut):* N-consecutive-refusals pauses **that slot** (not the pipeline)
+    pending a human — mirrors the budget-BLOCKER refresh pattern.
 
 **Deferred this cut (Nemo hole 3): the candidate-surface filter.** `search_job_templates`
 returns a `JobTemplateIndexEntry` (`job_template_library.py:31-38`) carrying only
@@ -150,6 +177,16 @@ Async, judged JT-merge consolidation (mirrors the nightly engram-merge in Cowboy
 propose merging near-duplicate JTs, operator/Leader-judged. Handles the recoverable sprawl
 bias-to-derive creates. Built right after #97's first cut — so sprawl never gets ahead of us.
 
+- **Sibling, not prerequisite — but only while derive is operator-gated (Hero Q2).** Derive in
+  this cut runs through the operator interview, so sprawl velocity is human-bounded and the
+  janitor landing right after is safe. **Dependency to honor:** if derive ever becomes autonomous
+  (a future Leader self-derive, the Alfred recurrence loop feeding it, or a TUI one-click), the
+  janitor flips from sibling to **prerequisite** — sprawl could then outrun a human.
+- **Also proposes `param_schema` for legacy JTs (Hero Q1, file-forward).** Legacy forms with no
+  `param_schema` pass the gate forever (back-compat). The janitor is the natural home for a judged
+  migration that *proposes* a `param_schema` for them (same shape as its merge proposals) — so the
+  fleet converges to teeth instead of carrying toothless forms indefinitely.
+
 ## Hull remediation — Nemo round-1 (2026-06-11), trace by trace
 
 1. **Empty-but-present required param (BLOCKER).** `missing_required` is absent-only; `{"topic":
@@ -177,19 +214,47 @@ bias-to-derive creates. Built right after #97's first cut — so sprawl never ge
    no legacy false-refuse), and confirmed the grounding (no current fuzzy auto-wedge; risk is
    explicit/cron bind). Carried as-is.
 
+### Hero round-1 (2026-06-11) — SIGN-WITH-RESERVATIONS, two folds + three notes
+
+- **R1 — enum conformance (fold).** `_jt_fit` checked presence but not the declared `enum`
+  (`ParamField.enum`, `job_templates.py:50-62`). `{"region": "Atlantis"}` vs
+  `enum=("NA","EU","APAC")` passed and mis-ran every cycle. → `_jt_fit` now rejects any supplied
+  value (each item, for list/per-driver fields) outside a declared non-empty `enum`; `type` stays
+  advisory (not enforced). Folded into Part 1.
+- **R2 — cron fallback reversed to skip-the-slot (fold + named decision).** Greenfield-with-
+  reservation would substitute unsupervised improvisation for the operator's HARD mechanism every
+  cycle on a persistent config error. → Default headless-cron fallback is now **skip the slot**
+  (named reservation each cycle, pipeline continues); a per-cron `on_refused: greenfield` override
+  is Clif's explicit opt-in where he wants continuity over fidelity. Folded into Part 1.
+- **Three doc notes (folded):** legacy-`param_schema` migration is filed to the Part-4 janitor
+  (Q1); the janitor flips sibling→prerequisite if derive ever goes autonomous (Q2); the build-order
+  gets a *suite property* — a test that creates a JT via the engine's own tool and asserts the gate
+  refuses an unfillable bind on it (cannot pass unless `param_schema` capture landed first), per
+  Q6 (see Verification).
+
 ## Verification (observed, not reported)
 - **Unit:** `unfilled_required` truth table — absent / `None` / `""` / `"  "` / `[]` for required
   fields all = missing; supplied non-empty = filled; optional-empty = fine; legacy JT (empty
   `param_schema`) → `[]` (no false-refuse). `_jt_fit` per-driver: `per-item` JT with empty/absent
-  `per` driver = misfit, non-empty = fit. `param_schema` round-trips through save→load.
+  `per` driver = misfit, non-empty = fit. **Enum (R1):** a supplied value outside a declared
+  non-empty `enum` = misfit (and, for a list/per-driver field, any non-member item = misfit); a
+  member value = fit; a field with no `enum` is unconstrained; a *not-supplied* enum field is the
+  presence-check's job, not the enum check's. `param_schema` round-trips through save→load.
 - **Load-bearing behavioral:** an explicit/cron bind to a JT with an unfillable required param
-  (absent OR empty-string OR empty-list) is REFUSED (`self._bound_jt` stays None) + sets
-  `self._jt_refusal`; the converse surface renders the refusal state; a *fitting* bind (incl. a
-  legacy no-`param_schema` JT) still binds unchanged (back-compat); **headless cron** with a
-  refused bind proceeds greenfield with a named reservation and does NOT crash the kickoff.
-- **Create skill:** an operator-driven create interview yields a JT whose `param_schema` declares
-  the required blanks (so the gate has teeth on the engine's own output); the tool schema rejects
-  a create that omits required-field structure where the interview gathered it.
+  (absent OR empty-string OR empty-list) OR an out-of-`enum` value is REFUSED (`self._bound_jt`
+  stays None) + sets `self._jt_refusal`; the converse surface renders the refusal state; a
+  *fitting* bind (incl. a legacy no-`param_schema` JT) still binds unchanged (back-compat).
+- **Headless-cron fallback (R2):** a refused cron-slot bind **skips the slot** (no greenfield
+  substitute runs) + records a named reservation + the pipeline continues to the next slot (no
+  crash, no gate); with a per-cron `on_refused: greenfield` override, that same refusal instead
+  runs greenfield-with-reservation.
+- **Create skill + build-order suite property (Q6):** an operator-driven create interview yields a
+  JT whose `param_schema` declares the required blanks (so the gate has teeth on the engine's own
+  output); the tool schema rejects a create that omits required-field structure where the interview
+  gathered it. **Guard test:** create a JT *via the engine's own `create_job_template` tool*, then
+  assert the bind gate refuses an unfillable bind on it — this test cannot pass unless `param_schema`
+  capture (Part 2) landed before the gate (Part 1), making the HARD build order a suite property,
+  not a prose promise.
 - **CI-parity:** `ruff check src/ tests/` + full `pytest` on the faithful no-tool box.
 - **No-regress:** greenfield (no name, no match) byte-identical; fuzzy candidates still surface
   unchanged; the recurrence-driven `jt-create` Alfred loop untouched.
