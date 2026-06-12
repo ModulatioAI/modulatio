@@ -15,8 +15,12 @@ clean. Nemo CODE r2 SIGN-OFF — all 5 cleared @ `0ce8325`** (design + code both
 fallback now CARRIES the deny/crash context in `reason` (caller threads it into the verify
 mark; authorizer-crash also logs) — a misconfigured authorizer is no longer indistinguishable
 from clean; **m2** the `_norm`/`_norm_unit` twin UNIFIED to one canonical helper
-(`review_ledger._norm_unit`, `assembly._norm` aliases it, identity asserted). **Code review:
-Hero r2 fold-confirm pending Clif relay** (last gate) → merge (= Clif).
+(`review_ledger._norm_unit`, `assembly._norm` aliases it, identity asserted). **Hero CODE r2
+SIGN-OFF @ `f78438f`** — both folds verified faithful.
+
+**✅ ALL GATES CLEARED (2026-06-12).** Design: Lovecraft + Nemo + Hero. Code: Nemo r2 + Hero.
+Every reservation folded + verified; full suite 3090 passed, ruff clean. **READY TO MERGE**
+(= Clif; held local on `arc/code-media-deterministic-validation`, off main v0.8.6).
 
 > **Hero remediation (2026-06-12).** SIGN-WITH-RESERVATIONS — Q5 surfaced the collective blind
 > spot: the tool-delegated oracle path skipped two contracts. Folded: **R1a** delegated-oracle
