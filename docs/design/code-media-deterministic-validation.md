@@ -1,11 +1,18 @@
 # Code + media deterministic assembly validation (#100 remainder)
 
 **Status:** DESIGN, held local on `arc/code-media-deterministic-validation` (off main,
-v0.8.6). Not built. **Lovecraft (coherence) SIGNED-OFF 2026-06-12.** **Nemo (hull) SIGNED-OFF
-2026-06-12** (r1 BLOCK → remediated below → r2 close-out cleared all 7). **Hero (hull/arch)
-pending — Clif relays.** Then TDD → code review → merge (= Clif). Nemo's carry-forward (not a
-reopened finding): when built, the new validator must land **behind** the `verify_assembly`
-bulkhead because `orchestration.py:5858-5860` still calls it naked.
+v0.8.6). Not built. **ALL THREE REVIEWERS SIGNED 2026-06-12** — Lovecraft (coherence) clean;
+Nemo (hull) r1 BLOCK → remediated → r2 cleared all 7; Hero (hull/arch) SIGN-WITH-RESERVATIONS,
+all folded below (R1a/R1b + m1/m2/m3). **Cleared for TDD** → code review → merge (= Clif).
+
+> **Hero remediation (2026-06-12).** SIGN-WITH-RESERVATIONS — Q5 surfaced the collective blind
+> spot: the tool-delegated oracle path skipped two contracts. Folded: **R1a** delegated-oracle
+> metered-authorize (`comptroller.authorize_metered_tool`, deny → fall back, free-local
+> unaffected); **R1b** oracle provenance in the verify mark (`AssertionEvidence.check`:
+> `stdlib-zipfile-bytes` vs `external:<tool>@<version>`); **m1** byte/sha256 equality is the
+> bundle spec, CRC only a pre-screen; **m2** reuse the assembler's name normalizer; **m3** the
+> bulkhead reason carries the exception class. Nemo's carry-forward stands: build behind the
+> `verify_assembly` bulkhead (`orchestration.py:5858-5860` calls it naked).
 
 > **Nemo r1 remediation (2026-06-12).** All 4 blockers + 3 reservations addressed by
 > *tightening or honestly demoting* the cheap-PASS conditions — the oracle now proves the
@@ -61,11 +68,32 @@ a deep validator" candor): this is a **structural/wiring + composite-shape** ora
 "independent tools via the user's API keys supersede native construction"). The validator
 **resolves its oracle through the granted-tool registry** so an independent tool the user
 has configured (an API-key'd media-analysis or code-lint service, or a local `ffprobe`/
-`identify`/`zip` resolved via the registry + `shutil.which`) **supersedes** any native
-re-implementation. The local/stdlib checks (`ast.parse`/`py_compile`, `ffprobe`,
+`identify` resolved via the registry + `shutil.which`) **supersedes** any native
+re-implementation. The local/stdlib checks (`zipfile`, `ast.parse`/`py_compile`, `ffprobe`,
 `identify`) are the **default fallback when no independent tool is configured** — Modulatio
 composes the user's tools, it does not rebuild what they already have. The fail-closed
 contract is unchanged: chosen tool absent → full review.
+
+**The delegated-oracle path binds two contracts the native path doesn't** (Hero R1 — the
+blind spot all three prior reviewers missed: this is a *call site that didn't exist* when the
+metered-tier and ledger contracts were written):
+
+- **R1a — metered authorization at verify time.** If the registry resolves the oracle to an
+  **API-key'd / metered** validation service, the QC cheap-path becomes a **new spend channel
+  at verify time.** That call MUST route through the metered-tool tier exactly like any other
+  metered call — `cost_class` + `comptroller.authorize_metered_tool` (per-task idempotent,
+  fail-closed, deny-on-missing-budget; [[project_modulatio_synthesis_assembly_arc]] B4 + #80
+  Authority). On **deny / no-budget → fall back to the stdlib default oracle or the full
+  review, never an unmetered external call.** Free-local defaults (`zipfile`, `ast`,
+  `ffprobe`/`identify` via `shutil.which`) are `cost_class` free → unaffected, no authorize.
+- **R1b — oracle provenance in the verify mark.** A cheap PASS skips the smart model **on the
+  oracle's word** — so the verify mark must record **whose word.** Thread the oracle identity
+  through `AssertionEvidence.check` (and/or the ledger mark): `"stdlib-zipfile-bytes"`,
+  `"ast.parse"`, vs `"external:<tool>@<version>"`. For stdlib oracles it's auditability; for
+  external services (whose behavior can drift under the same config) it's the difference
+  between a reproducible verification and "some tool said yes once." The review-ledger is
+  content-addressed so its marks are trustworthy — a mark that doesn't name its authority is
+  half a mark. The validator API threads the oracle id it already knows; no new resolution.
 
 ## Part 1 — Code-wiring validator (oracle: code is statically checkable)
 
@@ -120,14 +148,27 @@ the cheap path in this cut; **av and image honestly fall back** ("an oracle wher
 For `record.strategy == "media"`, by sub-kind:
 
 - **bundle — the provable case (stdlib `zipfile`, Nemo r1 #7).** The assembler writes the ZIP
-  with stdlib `zipfile.zf.write` (assembly.py:1201-1213) — byte-preserving, no external
-  binary — so containment is *provable*: open with `zipfile`; **member names == the
+  with stdlib `zipfile.zf.write(path, arcname=name)` under `ZIP_DEFLATED` (assembly.py:
+  1201-1213) — byte-preserving (CRC-32 is over the *uncompressed* data; `zipfile.read()`
+  returns the original bytes, so compression never threatens the oracle in either direction,
+  Hero Q2) — so containment is *provable*: open with `zipfile`; **member names == the
   normalized manifest/dependency unit names** (set-equal, **no duplicate names**); **no path
-  traversal / absolute / `..` archive paths**; and **each member's bytes (or CRC-32 / content
-  hash) == the corresponding resolved unit file's** (assembly.py copies them verbatim, so this
-  is exact, not tolerance-based). All hold → cheap PASS. "Count + non-empty" is explicitly
-  rejected as insufficient. Use **stdlib `zipfile`**, never an external `zip`/`unzip` binary,
-  so minimal/CI boxes keep the cheap path.
+  traversal / absolute / `..` archive paths**; and **each member's bytes == the corresponding
+  resolved unit file's** (assembly.py copies them verbatim, so this is exact, not tolerance-
+  based). Two hardenings (Hero m1/m2):
+  - **m1 — byte equality (or sha256) is the SPEC; CRC-32 is only a fast pre-screen.** A PASS
+    that skips the smart model entirely must rest on equality, not a 32-bit checksum — and we
+    read each member via `zipfile.read()` anyway, so the byte compare is the same IO. CRC may
+    gate which members to byte-compare; it never *grants* the PASS alone.
+  - **m2 — reuse the assembler's name normalizer, don't re-derive it.** The member-name
+    comparison uses the **same helper the assembler used to build `resolved`** (imported, not
+    a second implementation). Drift between two normalizers is only a false-FALLBACK (safe)
+    but a silent noisy one; one source of truth removes it.
+
+  All hold → cheap PASS. "Count + non-empty" is explicitly rejected as insufficient. Use
+  **stdlib `zipfile`**, never an external `zip`/`unzip` binary, so minimal/CI boxes keep the
+  cheap path. Failure geometry is safe by construction: a future assembler that *mutated*
+  members makes this a false-FALLBACK (visible, acceptable), never a false-PASS (Hero Q2).
 - **video / audio — INCONCLUSIVE → full review (Nemo r1 #2).** Total duration ≈ Σ and
   stream-count are **not load-bearing**: a buggy assembler that doubles a clip satisfies both.
   Per-segment content provability (packet/stream fingerprints, verified concat-provenance
@@ -150,6 +191,15 @@ any malformed output → fall back to full review, fail-closed** — same contra
 renderers (#87/B); CI (no ffmpeg/ImageMagick) passes by falling back. We **probe the existing
 output, never re-render** it.
 
+**Why the av/image deferral is structural, not a cop-out (Hero Q1).** For lossy composites the
+only place containment is *cheaply knowable* is **at composition time, with the assembler as
+witness** — holding both the units and the composite, it can emit an exact provenance sidecar.
+A *post-hoc* probe of a re-encoded av/image output is tolerance-fragile by nature and can never
+be exact. So the cheap oracle av/image need cannot be a post-hoc probe at all; it must be an
+assembler-emitted sidecar — which is an assembler change deserving its own design. Bundle is
+the exception precisely because its "composition" (stdlib `zipfile`) is *lossless*, so a
+post-hoc probe IS exact. That is the whole reason bundle ships now and av/image defer.
+
 ## Where it plugs in
 
 `review_ledger.verify_assembly()` — replace the two `record.strategy == "code"/"media"`
@@ -171,6 +221,12 @@ call inside `verify_assembly()` is itself wrapped so that *any* unforeseen excep
 degrades to `(False, …)` rather than propagating — preserving the load-bearing invariant that
 `verify_assembly()` **never throws and never fails a task** (it can only withhold the cheap
 path and route to full review).
+
+**m3 (Hero) — the bulkhead's `(False, reason)` carries the exception class + message,** not a
+generic string: `"validator crashed: BadZipFile('File is not a zip file') → full review"`.
+Same lesson as #97's m1 (the engine binding is only half the job — the audit trail needs the
+*why*): a validator silently crashing on *every* assembly looks identical to honest fallback
+unless the reason names the crash. The reason string feeds the same provenance channel as R1b.
 
 ## Verification (observed, not reported)
 
@@ -195,6 +251,17 @@ path and route to full review).
   reason)` → full review — never a false cheap-PASS, never a propagated exception, never a
   task failure. A test injects a raising validator and asserts `verify_assembly` still returns
   `(False, …)` and does not throw.
+- **Bundle hardenings (Hero m1/m2):** a member whose **CRC matches but bytes differ** (CRC-32
+  collision / pre-screen-only) → fall back (asserts byte-equality is the spec, CRC only a
+  pre-screen); the validator's member-name normalization is the **same helper** the assembler
+  used (assert by import identity / shared call, not a duplicated normalizer).
+- **Delegated-oracle contracts (Hero R1):** when the registry resolves the oracle to a
+  **metered** tool, the verify-time call routes through `comptroller.authorize_metered_tool`
+  (assert it's invoked; assert **deny/no-budget → fall back to stdlib oracle or full review**,
+  never an unmetered external call); a **free-local** oracle (`zipfile`/`ast`) does NOT
+  authorize. And the verify mark records oracle provenance — assert `AssertionEvidence.check`
+  carries `"stdlib-zipfile-bytes"` for the local path and `"external:<tool>@<version>"` for a
+  delegated one (R1b); the bulkhead reason carries the **exception class** on a crash (m3).
 - **No-regress:** `document` / `data` cheap path byte-identical; `bundle` uses **stdlib
   `zipfile`** (no external `zip` dependency, Nemo #7).
 - **CI-parity:** `ruff check src/ tests/` + full `pytest` on the faithful no-tool box —
@@ -207,6 +274,10 @@ path and route to full review).
   scope).
 - `src/modulatio/assembly.py` — `_STRATEGIES`, the code + media assemblers (what each
   family *produces* → what the validator checks).
+- `src/modulatio/comptroller.py` — `authorize_metered_tool` + `cost_class` (R1a: the
+  delegated-oracle metered-authorize path; free-local oracles are `cost_class` free).
+- `src/modulatio/review_ledger.py` — `AssertionEvidence.check` (R1b: thread oracle provenance
+  into the verify mark).
 - new: `src/modulatio/assembly_validate.py` (code-wiring + media-composite), or inline.
 - tests: `tests/test_review_ledger.py`, `tests/test_assembly.py`.
 
