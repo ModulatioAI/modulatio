@@ -56,6 +56,14 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# #100 Hero m2: ONE canonical unit-name normalizer, shared by the assembler (here)
+# and the validator (review_ledger.verify_assembly / assembly_validate). Two
+# byte-identical twins normalizing the two sides of the same equality check is the
+# exact drift m2 prohibits — touch one and bundle member names skew, silently
+# stopping the cheap path. review_ledger is the lower-level module (no runtime
+# import of assembly), so it owns the canonical helper; we alias it as `_norm`.
+from modulatio.review_ledger import _norm_unit as _norm
+
 #: Per-unit read ceiling — mirrors run_shell's read cap. A single unit
 #: larger than this is almost certainly a mistake; skip it + surface.
 _MAX_UNIT_BYTES = 4 * 1024 * 1024
@@ -815,10 +823,6 @@ def _assemble_code(manifest: dict, artifacts_root: Path) -> AssemblyResult:
     return AssemblyResult(
         content=content, units_used=used, missing=missing, errors=errors,
     )
-
-
-def _norm(name: str) -> str:
-    return str(name).strip().lstrip("./")
 
 
 def _assemble_data(manifest: dict, artifacts_root: Path) -> AssemblyResult:

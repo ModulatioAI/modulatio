@@ -142,34 +142,34 @@ def _assembly_fixture(tmp_path, *, units=("01.txt", "02.txt", "03.txt"),
 
 def test_verify_assembly_happy_path(tmp_path):
     rec, asm, by_id, root = _assembly_fixture(tmp_path)
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert ok, reason
 
 
 def test_verify_assembly_incomplete_fails(tmp_path):
     rec, asm, by_id, root = _assembly_fixture(tmp_path, complete=False)
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "incomplete" in reason
 
 
 def test_verify_assembly_tampered_output_fails(tmp_path):
     """Output bytes changed after assembly → checksum mismatch → fall back."""
     rec, asm, by_id, root = _assembly_fixture(tmp_path, tamper=True)
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "changed since assembly" in reason
 
 
 def test_verify_assembly_no_deps_falls_back(tmp_path):
     rec, asm, by_id, root = _assembly_fixture(tmp_path)
     asm.depends_on = []  # cross-goal: no authoritative set
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "authoritative dependency set" in reason
 
 
 def test_verify_assembly_unit_not_passed_falls_back(tmp_path):
     rec, asm, by_id, root = _assembly_fixture(tmp_path)
     by_id["U-0"].qc_passed_checksum = None  # one unit never passed QC
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "never passed" in reason
 
 
@@ -179,7 +179,7 @@ def test_verify_assembly_manifest_drops_a_unit(tmp_path):
     rec, asm, by_id, root = _assembly_fixture(
         tmp_path, manifest_units=["01.txt", "02.txt"],  # dropped 03.txt
     )
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "missing=['03.txt']" in reason
 
 
@@ -187,7 +187,7 @@ def test_verify_assembly_manifest_extra_unit(tmp_path):
     rec, asm, by_id, root = _assembly_fixture(
         tmp_path, manifest_units=["01.txt", "02.txt", "03.txt", "99.txt"],
     )
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "extra=['99.txt']" in reason
 
 
@@ -195,7 +195,7 @@ def test_verify_assembly_manifest_duplicate_unit(tmp_path):
     rec, asm, by_id, root = _assembly_fixture(
         tmp_path, manifest_units=["01.txt", "02.txt", "03.txt", "01.txt"],
     )
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "more than once" in reason
 
 
@@ -205,32 +205,173 @@ def test_verify_assembly_reorder_is_allowed(tmp_path):
     rec, asm, by_id, root = _assembly_fixture(
         tmp_path, manifest_units=["03.txt", "01.txt", "02.txt"],
     )
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert ok, reason
 
 
 def test_verify_assembly_oversized_framing_falls_back(tmp_path):
     rec, asm, by_id, root = _assembly_fixture(tmp_path, title="X" * 5000)
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
     assert not ok and "title_page exceeds" in reason
 
 
-def test_verify_assembly_code_strategy_falls_back(tmp_path):
-    """code assembly is not eligible for the cheap pass (no wiring validation) —
-    always falls back to a full review. Nemo #5/#6."""
-    rec, asm, by_id, root = _assembly_fixture(tmp_path)
+def test_verify_assembly_code_nonpython_falls_back(tmp_path):
+    """A code assembly with a non-Python unit can't be parsed → we can't prove
+    wiring → fall back (fail-open, never false-pass). #100."""
+    rec, asm, by_id, root = _assembly_fixture(tmp_path)  # .txt units
     rec.strategy = "code"
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
-    assert not ok and "code assembly" in reason
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "non-Python" in reason and oracle == ""
 
 
-def test_verify_assembly_media_strategy_falls_back(tmp_path):
-    """media assembly composites binary units — no deterministic correctness check
-    the marks can stand in for, so it always gets a full review (B4)."""
+def test_verify_assembly_media_no_output_falls_back(tmp_path):
+    """A media record with no composited output on disk → fall back (the bundle
+    oracle has nothing to probe)."""
     rec, asm, by_id, root = _assembly_fixture(tmp_path)
     rec.strategy = "media"
-    ok, reason = review_ledger.verify_assembly(rec, asm, by_id, root)
-    assert not ok and "media assembly" in reason
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and oracle == ""
+
+
+def test_verify_assembly_document_records_oracle(tmp_path):
+    """R1b: a document cheap-PASS records its structural oracle provenance."""
+    rec, asm, by_id, root = _assembly_fixture(tmp_path)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert ok and oracle == "document-structural"
+
+
+# ── #100 code/media end-to-end through verify_assembly (oracle + shared checks) ──
+
+
+def _code_e2e_fixture(tmp_path):
+    """A clean pure-Python code assembly: .py units + QC-passed deps + a generated
+    INDEX.md output + a code AssemblyRecord. Exercises the code oracle AND the
+    shared structural checks (set-equality, output checksum)."""
+    units = {
+        "app/__init__.py": "",
+        "app/main.py": "from app.util import run\n\nif __name__ == '__main__':\n    run()\n",
+        "app/util.py": "def run():\n    return 1\n",
+    }
+    by_id = {}
+    deps = []
+    for i, (name, src) in enumerate(units.items()):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(src)
+        d = _task(id=f"U-{i}", output_path=name, status=TaskStatus.COMPLETED,
+                  qc_passed_checksum=_engine_checksum(src))
+        deps.append(d)
+        by_id[d.id] = d
+    index = "# Project\n\n3 file(s)\n"
+    (tmp_path / "INDEX.md").write_text(index)
+    asm = _task(id="A-1", output_path="INDEX.md", depends_on=[d.id for d in deps])
+    by_id[asm.id] = asm
+    rec = AssemblyRecord(
+        manifest={"units": list(units), "entrypoint": "app/main.py"},
+        final_checksum=_engine_checksum(index), complete=True, strategy="code",
+    )
+    return rec, asm, by_id, tmp_path
+
+
+def test_verify_assembly_code_happy_path_cheap_passes(tmp_path):
+    rec, asm, by_id, root = _code_e2e_fixture(tmp_path)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert ok, reason
+    assert oracle == "code-wiring:ast"
+
+
+def test_verify_assembly_code_dangling_then_shared_checks_skipped(tmp_path):
+    """A dangling intra-package import fails at the oracle (before the shared
+    checks) → fall back, oracle empty."""
+    rec, asm, by_id, root = _code_e2e_fixture(tmp_path)
+    (root / "app" / "main.py").write_text("from app.gone import run\n\nrun()\n")
+    by_id["U-1"].qc_passed_checksum = _engine_checksum(
+        "from app.gone import run\n\nrun()\n"
+    )
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "absent from the assembled set" in reason and oracle == ""
+
+
+def _bundle_e2e_fixture(tmp_path):
+    """A clean bundle: binary units + QC-passed deps + a real zip output + a media
+    AssemblyRecord. Exercises the bundle oracle AND the shared checks."""
+    import zipfile as _zip
+
+    members = {"a.png": b"\x89PNG-A", "b.bin": b"BINARY-B"}
+    by_id = {}
+    deps = []
+    for i, (name, b) in enumerate(members.items()):
+        (tmp_path / name).write_bytes(b)
+        d = _task(id=f"U-{i}", output_path=name, status=TaskStatus.COMPLETED,
+                  qc_passed_checksum=f"sha256:{hashlib.sha256(b).hexdigest()}")
+        deps.append(d)
+        by_id[d.id] = d
+    out = tmp_path / "bundle.zip"
+    with _zip.ZipFile(out, "w", compression=_zip.ZIP_DEFLATED) as zf:
+        for name, b in members.items():
+            zf.writestr(name, b)
+    asm = _task(id="A-1", output_path="bundle.zip", depends_on=[d.id for d in deps])
+    by_id[asm.id] = asm
+    rec = AssemblyRecord(
+        manifest={"units": list(members), "media_kind": "bundle"},
+        final_checksum=review_ledger.file_checksum(out), complete=True,
+        strategy="media", output_file=out,
+    )
+    return rec, asm, by_id, tmp_path
+
+
+def test_verify_assembly_bundle_happy_path_cheap_passes(tmp_path):
+    rec, asm, by_id, root = _bundle_e2e_fixture(tmp_path)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert ok, reason
+    assert oracle == "stdlib-zipfile-bytes"
+
+
+def test_verify_assembly_bundle_wrong_member_falls_back(tmp_path):
+    """A bundle whose zip contains a member NOT in the unit set → oracle fails."""
+    import zipfile as _zip
+
+    rec, asm, by_id, root = _bundle_e2e_fixture(tmp_path)
+    out = root / "bundle.zip"
+    with _zip.ZipFile(out, "w", compression=_zip.ZIP_DEFLATED) as zf:
+        zf.writestr("a.png", b"\x89PNG-A")
+        zf.writestr("IMPOSTER.bin", b"BINARY-B")  # wrong name, right count
+    rec.final_checksum = review_ledger.file_checksum(out)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "member set != unit set" in reason and oracle == ""
+
+
+def test_verify_assembly_bulkhead_swallows_validator_crash(tmp_path, monkeypatch):
+    """Nemo #6 / Hero m3: verify_assembly is called NAKED by orchestration, so a
+    validator that throws must degrade to (False, reason, '') — never propagate —
+    and the reason must name the crash."""
+    rec, asm, by_id, root = _code_e2e_fixture(tmp_path)
+    from modulatio import assembly_validate
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("oracle exploded")
+
+    monkeypatch.setattr(assembly_validate, "validate_code_assembly", _boom)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "validator crashed" in reason and "RuntimeError" in reason
+    assert oracle == ""
+
+
+def test_verify_assembly_bulkhead_covers_import_failure(tmp_path, monkeypatch):
+    """Nemo code-review #4: the bulkhead must cover the assembly_validate IMPORT too —
+    a packaging skew where the module is absent at import time must degrade to a
+    fall-back, not propagate through the naked caller."""
+    import sys
+
+    import modulatio
+
+    rec, asm, by_id, root = _code_e2e_fixture(tmp_path)
+    # Simulate packaging skew: the submodule is absent — drop the cached package
+    # attribute AND null its sys.modules entry so `from modulatio import
+    # assembly_validate` raises ImportError at the import line inside the bulkhead.
+    monkeypatch.delattr(modulatio, "assembly_validate", raising=False)
+    monkeypatch.setitem(sys.modules, "modulatio.assembly_validate", None)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "validator crashed" in reason and oracle == ""
 
 
 # ── P5: declared-format magic-byte gate (universal fabrication guard) ──────

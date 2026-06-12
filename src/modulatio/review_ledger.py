@@ -48,6 +48,22 @@ _MAX_TITLE_CHARS = 4000
 _MAX_TRAILER_CHARS = 4000
 _MAX_SEPARATOR_CHARS = 200
 
+#: #100 oracle provenance ids — recorded in the verify mark so a cheap PASS names
+#: WHOSE word it rested on (Hero R1b). Canonical here (the low-level module) so
+#: ``assembly_validate`` imports them without a cycle.
+ORACLE_DOCUMENT = "document-structural"
+ORACLE_DATA = "data-structural"
+ORACLE_CODE = "code-wiring:ast"
+ORACLE_BUNDLE = "stdlib-zipfile-bytes"
+#: default oracle id per strategy (code/media are replaced by the family validator's
+#: own provenance on pass; this is the seed + the document/data answer).
+ORACLE_BY_STRATEGY = {
+    "document": ORACLE_DOCUMENT,
+    "data": ORACLE_DATA,
+    "code": ORACLE_CODE,
+    "media": ORACLE_BUNDLE,
+}
+
 
 def _norm_unit(name: str) -> str:
     """Normalize an artifacts-relative unit path for set comparison."""
@@ -193,13 +209,18 @@ def verify_assembly(
     assembly_task: "Task",
     tasks_by_id: "dict[str, Task]",
     artifacts_root: "Path",
-) -> tuple[bool, str]:
-    """The cheap, no-LLM structural check for an assembly deliverable (#85).
+) -> tuple[bool, str, str]:
+    """The cheap, no-LLM structural check for an assembly deliverable (#85, #100).
 
-    Returns ``(True, "")`` only when the assembly is PROVABLY correct — safe to
-    PASS QC without re-reading the assembled bytes into the model. Returns
-    ``(False, reason)`` for anything not provably correct, and the caller then
-    FALLS BACK to a normal full review (fail-closed). It never *fails* a task on
+    Returns ``(True, "", oracle_id)`` only when the assembly is PROVABLY correct —
+    safe to PASS QC without re-reading the assembled bytes into the model — where
+    ``oracle_id`` names which deterministic oracle vouched (recorded in the verify
+    mark, Hero R1b: ``document-structural`` / ``data-structural`` /
+    ``code-wiring:ast`` / ``stdlib-zipfile-bytes``). Returns ``(False, reason, "")``
+    for anything not provably correct, and the caller then FALLS BACK to a normal
+    full review (fail-closed). The ``code`` and ``media`` families gained their
+    deterministic CONTAINMENT oracles in #100 (``assembly_validate``); media's
+    av/image sub-kinds honestly fall back (no cheap post-hoc containment proof). It never *fails* a task on
     its own — a genuinely-broken assembly simply gets the full review, which
     rejects it. This both kills the #85 false-reject (a complete book passes
     cheaply) and Nemo's tautology hole (the expected unit SET is the task graph's
@@ -218,72 +239,92 @@ def verify_assembly(
          the order the engine concatenated, so it is not re-verified here);
       6. the producer-authored framing (title/separator/trailer) is within bounds.
     """
-    # Nemo hull #5/#6: the `code` family currently generates only a wiring INDEX
-    # (no deterministic integration/wiring validation) and its README embeds an
-    # unvalidated producer `entrypoint`. So it is NOT eligible for the cheap
-    # structural pass — fall back to a full review (the index is small, so this
-    # costs nothing). document/data stay cheap. (When code grows real validation,
-    # lift this.)
-    if record.strategy == "code":
-        return False, "code assembly: full review (no deterministic wiring validation yet)"
-    # media (image/audio/video/bundle) joins binary units with an external
-    # compositor — there is no deterministic "is this composite correct" check the
-    # marks can stand in for (the marks cover the INPUTS, not the rendered output).
-    # So media always gets a full review too; document/data stay cheap.
-    if record.strategy == "media":
-        return False, "media assembly: full review (no deterministic composite validation)"
+    # #100: the `code` and `media` families now have deterministic CONTAINMENT
+    # oracles (assembly_validate). They run FIRST; on a provable pass we continue
+    # into the shared structural checks below and the family oracle id is recorded
+    # in the verify mark (R1b). On any inability to prove → fall back to the full
+    # review. document/data carry their existing structural oracle. The family
+    # validators are already total; this call is wrapped as a final bulkhead so a
+    # bug outside the oracle still degrades to a fall-back, never a throw — the
+    # caller invokes verify_assembly naked (Nemo #6, Hero m3).
+    oracle_id = ORACLE_BY_STRATEGY.get(record.strategy, f"{record.strategy}-structural")
+    oracle_note = ""  # Hero f1: a delegated-oracle deny/fallback witness, carried on PASS
+    if record.strategy in ("code", "media"):
+        # The IMPORT is inside the bulkhead too (Nemo code #4): a packaging skew where
+        # assembly_validate is absent / fails at import time must degrade to a
+        # fall-back, not propagate through the naked caller (orchestration.py:5858).
+        try:
+            from modulatio import assembly_validate as _av
+
+            validator = (
+                _av.validate_code_assembly
+                if record.strategy == "code"
+                else _av.validate_media_assembly
+            )
+            fam_ok, fam_reason, fam_oracle = validator(
+                record, assembly_task, artifacts_root
+            )
+        except Exception as exc:  # noqa: BLE001 — bulkhead: never throw to the caller
+            return False, (
+                f"{record.strategy} assembly validator crashed: "
+                f"{type(exc).__name__}({exc}) — full review"
+            ), ""
+        if not fam_ok:
+            return False, fam_reason, ""
+        oracle_id = fam_oracle
+        oracle_note = fam_reason  # nonempty only when a metered oracle fell back (Hero f1)
 
     if not record.complete:
-        return False, "assembly incomplete (missing or errored units)"
+        return False, "assembly incomplete (missing or errored units)", ""
 
     out_rel = assembly_task.output_path
     if not out_rel:
-        return False, "assembly task has no output_path"
+        return False, "assembly task has no output_path", ""
     root = artifacts_root.resolve()
     out = (artifacts_root / out_rel).resolve()
     try:
         out.relative_to(root)
     except ValueError:
-        return False, "assembled output_path escapes artifacts root"
+        return False, "assembled output_path escapes artifacts root", ""
     if not out.is_file():
-        return False, "assembled output missing on disk"
+        return False, "assembled output missing on disk", ""
     try:
         if file_checksum(out) != record.final_checksum:
-            return False, "assembled output changed since assembly (checksum mismatch)"
+            return False, "assembled output changed since assembly (checksum mismatch)", ""
     except (OSError, UnicodeDecodeError) as exc:
-        return False, f"assembled output unreadable: {exc}"
+        return False, f"assembled output unreadable: {exc}", ""
 
     dep_ids = list(assembly_task.depends_on)
     if not dep_ids:
-        return False, "no authoritative dependency set (cross-goal assembly)"
+        return False, "no authoritative dependency set (cross-goal assembly)", ""
     expected: list[str] = []
     for dep_id in dep_ids:
         dep = tasks_by_id.get(dep_id)
         if dep is None:
-            return False, f"dependency task {dep_id} not found"
+            return False, f"dependency task {dep_id} not found", ""
         v = verify_unit(dep, artifacts_root)
         if not v.ok:
-            return False, f"unit {dep_id} ({dep.output_path}): {v.reason}"
+            return False, f"unit {dep_id} ({dep.output_path}): {v.reason}", ""
         expected.append(_norm_unit(dep.output_path or ""))
 
     manifest_units = [_norm_unit(u) for u in record.manifest.get("units", [])]
     if len(manifest_units) != len(set(manifest_units)):
-        return False, "manifest names a unit more than once"
+        return False, "manifest names a unit more than once", ""
     if set(manifest_units) != set(expected):
         missing = set(expected) - set(manifest_units)
         extra = set(manifest_units) - set(expected)
         return False, (
             "manifest unit set != authoritative dependency set "
             f"(missing={sorted(missing)}, extra={sorted(extra)})"
-        )
+        ), ""
 
     m = record.manifest
     if len(str(m.get("title_page") or "")) > _MAX_TITLE_CHARS:
-        return False, "title_page exceeds review-free bound"
+        return False, "title_page exceeds review-free bound", ""
     if len(str(m.get("trailer") or "")) > _MAX_TRAILER_CHARS:
-        return False, "trailer exceeds review-free bound"
+        return False, "trailer exceeds review-free bound", ""
     sep = m.get("separator")
     if sep is not None and len(str(sep)) > _MAX_SEPARATOR_CHARS:
-        return False, "separator exceeds review-free bound"
+        return False, "separator exceeds review-free bound", ""
 
-    return True, ""
+    return True, oracle_note, oracle_id

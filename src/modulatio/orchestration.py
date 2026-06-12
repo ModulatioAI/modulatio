@@ -5855,16 +5855,21 @@ class Orchestrator:
                     self.project.code, run_id=self.project.run_id
                 )
             }
-            ok, reason = _review_ledger.verify_assembly(
+            ok, reason, oracle_id = _review_ledger.verify_assembly(
                 record, task, tasks_by_id, self._artifacts_root()
             )
             if ok:
+                # Hero f1: when a metered oracle was denied/unauthorizable/crashed and a
+                # free-local oracle vouched instead, `reason` carries that witness even on
+                # PASS — thread it into the mark so a misconfigured authorizer is visible.
+                note = f" — {reason}" if reason else ""
                 verdict = AssertionEvidence(
                     producer="qc", primary=True,
                     check=(
                         f"assembly structural verification "
                         f"({record.strategy}): {len(task.depends_on)} unit(s) "
-                        f"present + QC-passed; recipe hash matches"
+                        f"present + QC-passed; recipe hash matches "
+                        f"[oracle: {oracle_id}]{note}"
                     ),
                     passed=True,
                 )
