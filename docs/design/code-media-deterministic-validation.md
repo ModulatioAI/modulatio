@@ -3,9 +3,12 @@
 **Status:** DESIGN, held local on `arc/code-media-deterministic-validation` (off main,
 v0.8.6). Not built. **ALL THREE REVIEWERS SIGNED 2026-06-12** — Lovecraft (coherence) clean;
 Nemo (hull) r1 BLOCK → remediated → r2 cleared all 7; Hero (hull/arch) SIGN-WITH-RESERVATIONS
-→ fold confirmed **SIGNED-FOR-TDD** @ `719ef40` (all R1a/R1b + m1/m2/m3 folded below). **In
-TDD** → code review (Nemo+Hero; Hero will hunt the authorize×fallback branch matrix) → merge
-(= Clif).
+→ fold confirmed **SIGNED-FOR-TDD** @ `719ef40` (all R1a/R1b + m1/m2/m3 folded below).
+**BUILT (TDD) @ `b4377bd`** — `assembly_validate.py` + `verify_assembly` 3-tuple/bulkhead
+wiring; 30 new validator tests (incl. a real CRC-32 collision proving byte-equality is
+load-bearing + the full authorize×fallback matrix) + integration/bulkhead tests; **full suite
+3082 passed, ruff clean.** **In code review** (Nemo hull + Hero; Hero hunts the
+authorize×fallback branch matrix) → merge (= Clif).
 
 > **Hero remediation (2026-06-12).** SIGN-WITH-RESERVATIONS — Q5 surfaced the collective blind
 > spot: the tool-delegated oracle path skipped two contracts. Folded: **R1a** delegated-oracle
