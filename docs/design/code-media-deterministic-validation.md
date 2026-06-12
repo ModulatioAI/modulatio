@@ -1,9 +1,11 @@
 # Code + media deterministic assembly validation (#100 remainder)
 
 **Status:** DESIGN, held local on `arc/code-media-deterministic-validation` (off main,
-v0.8.6). Not built. **Lovecraft (coherence) SIGNED-OFF 2026-06-12.** **Nemo (hull) r1 BLOCK
-2026-06-12 — remediated below (this revision); r2 close-out pending.** Then Hero. Branch held
-local; merge = Clif.
+v0.8.6). Not built. **Lovecraft (coherence) SIGNED-OFF 2026-06-12.** **Nemo (hull) SIGNED-OFF
+2026-06-12** (r1 BLOCK → remediated below → r2 close-out cleared all 7). **Hero (hull/arch)
+pending — Clif relays.** Then TDD → code review → merge (= Clif). Nemo's carry-forward (not a
+reopened finding): when built, the new validator must land **behind** the `verify_assembly`
+bulkhead because `orchestration.py:5858-5860` still calls it naked.
 
 > **Nemo r1 remediation (2026-06-12).** All 4 blockers + 3 reservations addressed by
 > *tightening or honestly demoting* the cheap-PASS conditions — the oracle now proves the
