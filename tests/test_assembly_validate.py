@@ -166,6 +166,73 @@ def test_code_absolute_local_namespace_present_passes(tmp_path):
     assert ok, reason
 
 
+def test_code_from_dot_import_absent_member_falls_back(tmp_path):
+    """Nemo code #1: `from . import missing` (no-module relative) where the member
+    is absent must NOT cheap-PASS."""
+    rec = _code_record(
+        {
+            "app/__init__.py": "",
+            "app/main.py": "from . import missing\n\nprint(missing)\n",
+        },
+        entrypoint="app/main.py", root=tmp_path,
+    )
+    ok, reason, oracle = av.validate_code_assembly(rec, _task(), tmp_path)
+    assert not ok and "absent from the assembled set" in reason and oracle == ""
+
+
+def test_code_from_dot_import_present_submodule_passes(tmp_path):
+    """The legitimate counterpart: `from . import util` where util.py IS present."""
+    rec = _code_record(
+        {
+            "app/__init__.py": "",
+            "app/main.py": "from . import util\n\nif __name__ == '__main__':\n    util.run()\n",
+            "app/util.py": "def run():\n    return 1\n",
+        },
+        entrypoint="app/main.py", root=tmp_path,
+    )
+    ok, reason, oracle = av.validate_code_assembly(rec, _task(), tmp_path)
+    assert ok, reason
+
+
+def test_code_from_localpkg_import_absent_member_falls_back(tmp_path):
+    """Nemo code #2: `from app import missing` where app is a local package but the
+    member is absent must NOT cheap-PASS (the imported name was unchecked before)."""
+    rec = _code_record(
+        {
+            "app/__init__.py": "",
+            "app/main.py": "from app import missing\n\nprint(missing)\n",
+        },
+        entrypoint="app/main.py", root=tmp_path,
+    )
+    ok, reason, oracle = av.validate_code_assembly(rec, _task(), tmp_path)
+    assert not ok and "absent from the assembled set" in reason and oracle == ""
+
+
+def test_code_from_localpkg_import_init_attribute_passes(tmp_path):
+    """The legitimate counterpart: `from app import thing` where `thing` is defined
+    (re-exported) in app/__init__.py → resolves, no false-fallback."""
+    rec = _code_record(
+        {
+            "app/__init__.py": "def thing():\n    return 1\n",
+            "app/main.py": "from app import thing\n\nif __name__ == '__main__':\n    thing()\n",
+        },
+        entrypoint="app/main.py", root=tmp_path,
+    )
+    ok, reason, oracle = av.validate_code_assembly(rec, _task(), tmp_path)
+    assert ok, reason
+
+
+def test_code_import_only_entrypoint_falls_back(tmp_path):
+    """Nemo code #3: an import-only entrypoint is dependency wiring, not 'an app
+    here' → must NOT cheap-PASS."""
+    rec = _code_record(
+        {"main.py": "import stripe\nimport openai\n"},
+        entrypoint="main.py", root=tmp_path,
+    )
+    ok, reason, oracle = av.validate_code_assembly(rec, _task(), tmp_path)
+    assert not ok and "no real body" in reason and oracle == ""
+
+
 # ── bundle oracle (the one provable media sub-kind) ───────────────────────────
 
 

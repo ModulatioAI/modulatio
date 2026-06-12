@@ -209,7 +209,7 @@ def verify_assembly(
     assembly_task: "Task",
     tasks_by_id: "dict[str, Task]",
     artifacts_root: "Path",
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     """The cheap, no-LLM structural check for an assembly deliverable (#85, #100).
 
     Returns ``(True, "", oracle_id)`` only when the assembly is PROVABLY correct —
@@ -249,14 +249,17 @@ def verify_assembly(
     # caller invokes verify_assembly naked (Nemo #6, Hero m3).
     oracle_id = ORACLE_BY_STRATEGY.get(record.strategy, f"{record.strategy}-structural")
     if record.strategy in ("code", "media"):
-        from modulatio import assembly_validate as _av
-
-        validator = (
-            _av.validate_code_assembly
-            if record.strategy == "code"
-            else _av.validate_media_assembly
-        )
+        # The IMPORT is inside the bulkhead too (Nemo code #4): a packaging skew where
+        # assembly_validate is absent / fails at import time must degrade to a
+        # fall-back, not propagate through the naked caller (orchestration.py:5858).
         try:
+            from modulatio import assembly_validate as _av
+
+            validator = (
+                _av.validate_code_assembly
+                if record.strategy == "code"
+                else _av.validate_media_assembly
+            )
             fam_ok, fam_reason, fam_oracle = validator(
                 record, assembly_task, artifacts_root
             )

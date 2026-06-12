@@ -125,25 +125,18 @@ def _run_free_local(oracle: Oracle) -> tuple[bool, str, str]:
 
 
 def _is_trivial_body(tree: ast.Module) -> bool:
-    """True iff the module body is ONLY docstring / ``pass`` / ``...`` — i.e. an
-    empty-shell entrypoint that path-presence alone would wrongly cheap-PASS (Nemo
-    #4). Any other top-level statement (def/class/assignment/call/import/``if
-    __name__``) is a real body. Runnability beyond this is semantic (#101)."""
+    """True iff the module body has NO substantive statement — only docstring /
+    ``pass`` / ``...`` / **imports** (Nemo code #3: an import-only ``main.py`` is
+    dependency wiring, not "an app here"). A real body needs a def/class/assignment/
+    call/``if __name__`` guard — *something that does work*. Runnability beyond that
+    is semantic (#101)."""
     for node in tree.body:
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
             continue  # docstring or a bare constant/`...` expression
-        if isinstance(node, ast.Pass):
-            continue
+        if isinstance(node, (ast.Pass, ast.Import, ast.ImportFrom)):
+            continue  # pass / import-only — not a substantive body
         return False
     return True
-
-
-def _dotted(rel: str) -> str:
-    """``pkg/sub/mod.py`` → ``pkg.sub.mod``; ``pkg/sub/__init__.py`` → ``pkg.sub``."""
-    p = rel[:-3] if rel.endswith(".py") else rel
-    if p.endswith("/__init__"):
-        p = p[: -len("/__init__")]
-    return p.replace("/", ".")
 
 
 def _local_namespaces(py_units: set[str]) -> set[str]:
@@ -166,19 +159,70 @@ def _has_module(py_units: set[str], dotted: str) -> bool:
     return f"{base}.py" in py_units or f"{base}/__init__.py" in py_units
 
 
-def _dangling_ref(unit_rel: str, source: str, py_units: set[str]) -> str | None:
-    """Return a reason iff ``source`` (a Python unit at ``unit_rel``) has a PROVABLE
-    intra-package dangling reference (Nemo #5 — the exact local-vs-external rule):
+def _is_local_package(parts: "list[str]", py_units: set[str]) -> bool:
+    """Is the dotted path ``parts`` a local PACKAGE (has ``__init__.py``) in the set?"""
+    init_rel = "/".join([*parts, "__init__.py"]) if parts else "__init__.py"
+    return init_rel in py_units
 
-      * a **relative** import resolving INSIDE the package root whose target file is
-        absent from the set, OR
-      * an **absolute** import whose top-level prefix IS a local namespace in the set
-        but whose specific target module is absent.
+
+def _pkg_init_names(parts: "list[str]", sources: "dict[str, str]") -> set[str]:
+    """Top-level names BOUND in package ``parts``'s ``__init__.py`` (defs/classes/
+    assignments/import aliases) — the attributes a ``from pkg import NAME`` may
+    legitimately pull WITHOUT a submodule file. Re-exports (``from .x import y`` in
+    the __init__) count. A package with no/empty/unparseable __init__ → empty set."""
+    init_rel = "/".join([*parts, "__init__.py"]) if parts else "__init__.py"
+    src = sources.get(init_rel)
+    if not src:
+        return set()
+    try:
+        tree = ast.parse(src, filename=init_rel)
+    except SyntaxError:
+        return set()
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                names.add((a.asname or a.name).split(".")[0])
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    names.add(t.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
+def _member_resolves(
+    pkg_parts: "list[str]", name: str, py_units: set[str], sources: "dict[str, str]"
+) -> bool:
+    """Does ``name`` resolve under local package ``pkg_parts`` — as a submodule file
+    OR a top-level name bound in the package ``__init__`` (Nemo code #1/#2: prove the
+    member of a ``from pkg import name`` or fall back, never cheap-PASS it unproven)."""
+    sub = "/".join([*pkg_parts, name]) if pkg_parts else name
+    if f"{sub}.py" in py_units or f"{sub}/__init__.py" in py_units:
+        return True  # a real submodule
+    return name in _pkg_init_names(pkg_parts, sources)  # an __init__ attribute/re-export
+
+
+def _dangling_ref(
+    unit_rel: str, sources: "dict[str, str]", py_units: set[str]
+) -> str | None:
+    """Return a reason iff the Python unit at ``unit_rel`` has a PROVABLE intra-package
+    dangling reference (Nemo #5 + code #1/#2 — the exact local-vs-external rule):
+
+      * a **relative** import (``from .[mod] import names``) resolving inside the
+        package root whose target module OR named member is absent, OR
+      * an **absolute** import whose top-level prefix IS a local namespace but whose
+        target module OR (for a local package) named member is absent.
 
     Everything else — stdlib, third-party, SaaS/API-key SDKs, any prefix not present
-    locally, anything ambiguous — is EXTERNAL and is NEVER a failure. Returns ``None``
-    when nothing is provably dangling.
+    locally, ``import *``, anything ambiguous — is EXTERNAL/unprovable and is NEVER a
+    cheap-FAIL. Where a member CANNOT be proven absent it falls back (full review),
+    not pass. Returns ``None`` when nothing is provably dangling.
     """
+    source = sources[unit_rel]
     try:
         tree = ast.parse(source, filename=unit_rel)
     except SyntaxError as exc:
@@ -186,40 +230,64 @@ def _dangling_ref(unit_rel: str, source: str, py_units: set[str]) -> str | None:
     pkg_parts = unit_rel.split("/")[:-1]  # the importing module's package path
     local_ns = _local_namespaces(py_units)
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.level:
-            # relative import — resolve against this module's package
-            base = pkg_parts[: len(pkg_parts) - (node.level - 1)] if node.level > 1 else pkg_parts
-            if len(pkg_parts) - (node.level - 1) < 0:
-                continue  # escapes the assembled root → ambiguous, not a failure
-            target_parts = base + (node.module.split(".") if node.module else [])
-            if not node.module:
-                # `from . import name` — the package itself must resolve; the imported
-                # names live in its __init__, which we don't statically chase.
-                continue
-            dotted = ".".join(target_parts)
-            if not _has_module(py_units, dotted):
-                return (
-                    f"unit {unit_rel!r}: relative import "
-                    f"{'.' * node.level}{node.module} resolves inside the package but "
-                    f"its target {dotted!r} is absent from the assembled set"
-                )
-        elif isinstance(node, ast.Import):
+        if isinstance(node, ast.Import):
             for alias in node.names:
-                _dangle = _check_absolute(alias.name, local_ns, py_units, unit_rel)
-                if _dangle:
-                    return _dangle
-        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
-            _dangle = _check_absolute(node.module, local_ns, py_units, unit_rel)
-            if _dangle:
-                return _dangle
+                dangle = _check_absolute_module(alias.name, local_ns, py_units, unit_rel)
+                if dangle:
+                    return dangle
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+
+        # resolve the base package this `from ... import` targets
+        if node.level:  # relative
+            drop = node.level - 1
+            if drop > len(pkg_parts):
+                continue  # escapes the assembled root → ambiguous, never a fail
+            base = pkg_parts[: len(pkg_parts) - drop]
+        else:  # absolute
+            if not node.module:
+                continue
+            if node.module.split(".")[0] not in local_ns:
+                continue  # external/SaaS — EXPECTED, never a fail
+            base = []
+
+        if node.module:
+            # `from [base.]module import names` — the MODULE must resolve...
+            mod_parts = [*base, *node.module.split(".")]
+            if not _has_module(py_units, ".".join(mod_parts)):
+                return (
+                    f"unit {unit_rel!r}: import 'from {'.' * node.level}{node.module}' "
+                    f"resolves inside a local namespace but the module "
+                    f"{'.'.join(mod_parts)!r} is absent from the assembled set"
+                )
+            chase = mod_parts  # ...and if it's a PACKAGE, chase the named members
+            chase_pkg = _is_local_package(mod_parts, py_units)
+        else:
+            # `from . import names` — names live directly under `base` (a package)
+            chase = base
+            chase_pkg = True
+
+        if chase_pkg:
+            for alias in node.names:
+                if alias.name == "*":
+                    continue  # star import — can't enumerate; never a fail
+                if not _member_resolves(chase, alias.name, py_units, sources):
+                    dots = "." * node.level
+                    mod = node.module or ""
+                    return (
+                        f"unit {unit_rel!r}: 'from {dots}{mod} import {alias.name}' "
+                        f"targets a local package but the member {alias.name!r} is "
+                        f"absent from the assembled set"
+                    )
     return None
 
 
-def _check_absolute(
+def _check_absolute_module(
     name: str, local_ns: set[str], py_units: set[str], unit_rel: str
 ) -> str | None:
-    """An absolute import fails ONLY when its top-level prefix is a local namespace
-    AND the target module is absent. Otherwise (external/ambiguous) → never a fail."""
+    """``import a.b.c`` fails ONLY when its top-level prefix is a local namespace AND
+    the target module is absent. External/ambiguous → never a fail."""
     top = name.split(".")[0]
     if top not in local_ns:
         return None  # external/third-party/SaaS — EXPECTED, never a wiring failure
@@ -268,18 +336,27 @@ def _validate_code(
     if any(not u.endswith(".py") for u in units):
         return False, "code assembly: non-Python unit(s) present — full review (no parser)"
 
-    # 1. entrypoint exists AND is non-trivial (not a path-present empty shell, Nemo #4).
+    # Read every unit ONCE into a name→source map (the __init__ resolution + the
+    # entrypoint check + the dangling-ref walk all read from it).
+    sources: dict[str, str] = {}
+    for norm in units:
+        path = by_name.get(norm)
+        if path is None or not path.is_file():
+            return False, f"code assembly: unit {norm!r} missing on disk — full review"
+        try:
+            sources[norm] = path.read_text()
+        except (OSError, UnicodeDecodeError) as exc:
+            return False, f"code assembly: unit {norm!r} unreadable: {exc}"
+
+    # 1. entrypoint exists AND is non-trivial (not a path-present empty shell, Nemo
+    #    #4; not an import-only shell, Nemo code #3).
     entry = record.manifest.get("entrypoint")
     if not (isinstance(entry, str) and entry.strip()):
         return False, "code assembly: no entrypoint declared — full review"
     entry_norm = _norm_unit(entry.strip())
-    entry_path = by_name.get(entry_norm)
-    if entry_path is None or not entry_path.is_file():
+    if entry_norm not in sources:
         return False, f"code assembly: entrypoint {entry_norm!r} not in the assembled set"
-    try:
-        entry_src = entry_path.read_text()
-    except (OSError, UnicodeDecodeError) as exc:
-        return False, f"code assembly: entrypoint unreadable: {exc}"
+    entry_src = sources[entry_norm]
     if not entry_src.strip():
         return False, f"code assembly: entrypoint {entry_norm!r} is empty — full review"
     try:
@@ -289,24 +366,17 @@ def _validate_code(
     if _is_trivial_body(entry_tree):
         return False, (
             f"code assembly: entrypoint {entry_norm!r} has no real body "
-            f"(docstring/pass only) — full review"
+            f"(docstring/imports/pass only) — full review"
         )
 
     # 2. every unit parses + 3. intra-package references resolve.
     py_set = set(py_rels)
     for norm in units:
-        path = by_name.get(norm)
-        if path is None or not path.is_file():
-            return False, f"code assembly: unit {norm!r} missing on disk — full review"
         try:
-            src = path.read_text()
-        except (OSError, UnicodeDecodeError) as exc:
-            return False, f"code assembly: unit {norm!r} unreadable: {exc}"
-        try:
-            ast.parse(src, filename=norm)
+            ast.parse(sources[norm], filename=norm)
         except SyntaxError as exc:
             return False, f"code assembly: unit {norm!r} does not parse: {exc}"
-        dangle = _dangling_ref(norm, src, py_set)
+        dangle = _dangling_ref(norm, sources, py_set)
         if dangle:
             return False, dangle
     return True, ""

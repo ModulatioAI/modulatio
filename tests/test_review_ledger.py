@@ -356,6 +356,24 @@ def test_verify_assembly_bulkhead_swallows_validator_crash(tmp_path, monkeypatch
     assert oracle == ""
 
 
+def test_verify_assembly_bulkhead_covers_import_failure(tmp_path, monkeypatch):
+    """Nemo code-review #4: the bulkhead must cover the assembly_validate IMPORT too —
+    a packaging skew where the module is absent at import time must degrade to a
+    fall-back, not propagate through the naked caller."""
+    import sys
+
+    import modulatio
+
+    rec, asm, by_id, root = _code_e2e_fixture(tmp_path)
+    # Simulate packaging skew: the submodule is absent — drop the cached package
+    # attribute AND null its sys.modules entry so `from modulatio import
+    # assembly_validate` raises ImportError at the import line inside the bulkhead.
+    monkeypatch.delattr(modulatio, "assembly_validate", raising=False)
+    monkeypatch.setitem(sys.modules, "modulatio.assembly_validate", None)
+    ok, reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok and "validator crashed" in reason and oracle == ""
+
+
 # ── P5: declared-format magic-byte gate (universal fabrication guard) ──────
 
 
