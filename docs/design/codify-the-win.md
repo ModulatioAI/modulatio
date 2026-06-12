@@ -1,8 +1,21 @@
 # Codify-the-win — learn from QC recoveries, not just repeated fails (#81 / Fix F)
 
-**Status:** DESIGN, draft for review. Held local on a fresh branch off main (post-#100,
-`2caa2a5`). Cadence: Nemo (hull) + Lovecraft (coherence) → Hero → TDD → code review → merge
-(= Clif). Branch held local; merge = Clif.
+**Status:** DESIGN. Held local on `arc/codify-the-win` (off main, post-#100 `2caa2a5`).
+**Lovecraft (coherence) SIGN-OFF 2026-06-12.** **Nemo (hull) r1 BLOCK 2026-06-12 — remediated
+below (this revision); r2 close-out pending.** Then Hero → TDD → code review → merge (= Clif).
+
+> **Nemo r1 remediation (2026-06-12).** 5 blockers + 3 reservations, all sound, all folded by
+> tightening the seams against the real tree: (#1) the witness moves to `_attempt_qc_fix_forward`
+> where before/defects/after are actually in scope (`_qc_patch_artifact` returns `patched`); (#2)
+> consumption is parameterized so recovery-ids land in the SEPARATE `_consumed_recoveries` ledger,
+> not `lessons/_consumed`; (#3) replay-safety via an applied-signature frontmatter guard
+> (idempotent across a consume-after-commit failure); (#4) the recovery signature gains a
+> change-shape fingerprint + honest "recurring recovery cluster (not proven technique)" framing,
+> biased against the dangerous false-merge; (#5) the recovery log is guarded at the call site
+> (task completes first; logging can't throw into completion); (#6) `MAX_RECOVERY_EXCERPT_CHARS`
+> write-time truncation on every text field; (#7) the outer hook splits into independent fail/win
+> phases so a clean run still learns wins; (#8) `Skill.provenance` fully round-tripped + the
+> operator recommendation names the non-independent QC-authored source.
 
 ## The thesis this completes
 
@@ -85,59 +98,127 @@ Leader judgment, versioned + git-committed + revertible, consumed-once — with 
 ## Part 1 — witness the recovery (the win-feed source)
 
 At the recovery sites, write a durable **RecoveryRecord** (mirror of the qc-history verdict
-log), capturing the teaching triple:
+log), capturing the teaching triple. **The witness point must be where the triple is actually
+in scope** (Nemo r1 #1):
 
-- **QC-authored fix** — in `_complete_qc_authored_fix` (orchestration.py:7570), after the patch
-  is written: record `{domain/artifact_kind, task_id, defects, before_excerpt, after_excerpt,
-  qc_rationale, kind: "qc_authored"}`. `before`/`after` are **bounded excerpts** (a token cap,
-  not whole artifacts — the *technique* lives in the delta, and the log must stay cheap; the
-  size discipline mirrors `lessons`' ≤280-char rationale).
+- **QC-authored fix — witness in `_attempt_qc_fix_forward`, NOT `_complete_qc_authored_fix`.**
+  At `_complete_qc_authored_fix` (orchestration.py:7570) the original `body` and `defects` are
+  out of scope and the patched file has already overwritten the original on disk — "before" is
+  unrecoverable there. The triple is live only in `_attempt_qc_fix_forward`
+  (orchestration.py:7496–7519): `body` (the producer's rejected draft), `defects` (the QC
+  notes, 7506–7515), and the patch. **Implementation contract:** `_qc_patch_artifact` RETURNS
+  `patched` (it currently returns `None`, 7541–7568); the recovery is recorded in
+  `_attempt_qc_fix_forward` *after* `_complete_qc_authored_fix` settles the task, with
+  `{artifact_kind, task_id, defects, before_excerpt: body, after_excerpt: patched, qc_rationale,
+  kind: "qc_authored"}`.
 - **Redo-recovery** — at the passing verdict when `retry_count > 0` (orchestration.py:7150 +
-  the pass path): record the same shape with `kind: "redo_guided"` and the QC notes from the
-  rejecting verdict that preceded the pass.
+  the pass path): record the same shape with `kind: "redo_guided"`, `before` = the rejected
+  draft body and `defects`/`qc_rationale` = the QC notes from the rejecting verdict that
+  preceded the pass. (See Open Decision 1 — recommended OUT of the first cut.)
+
+- **The call site is GUARDED — logging never fails a recovered task (Nemo r1 #5).** "total
+  `record_recovery`" is a property of a future module, not a hull guarantee at this success-path
+  seam. The task is COMPLETED *first* (`_complete_qc_authored_fix` runs and settles status);
+  only *then* does the recovery write run inside a `try/except` at the call site that mirrors
+  the existing best-effort checksum block (orchestration.py:7586–7591) and the
+  `_codification_skipped` breadcrumb pattern (9481–9492):
+  `try: recoveries.record_recovery(...) except Exception: emit_breadcrumb("recovery_log_failed"); pass`
+  — and the breadcrumb emission is itself guarded. A logging failure can never prevent or
+  reverse a completion.
 
 New module `recoveries.py` (sibling to `lessons.py`): `RecoveryRecord` (frozen),
 `record_recovery(...)`, an append-only per-project log, and the consumed-tracking twin
-(`_consumed_recoveries`). Fail-closed + total: a recovery-logging failure NEVER fails the task
-(it is pure upside capture) — it emits a breadcrumb and moves on, exactly like the fail-loop's
-swallowed-error breadcrumbs.
+(`_consumed_recoveries`, a SEPARATE ledger from `lessons/_consumed` — Nemo r1 #2).
+
+**Bounded excerpts are enforced at WRITE TIME (Nemo r1 #6).** A 300k-token artifact reaches
+`_attempt_qc_fix_forward` as `body` (orchestration.py:7496); a naive record would append it
+whole. `record_recovery` **truncates every text field at write time regardless of the caller**
+to a named hard constant `MAX_RECOVERY_EXCERPT_CHARS` (default 2000 chars — the *technique*
+lives in the delta, not the bulk; chars not tokens, measured on the stored string), applied
+**independently** to `before_excerpt`, `after_excerpt`, `defects`, and `qc_rationale`. The
+caller cannot opt out; the on-disk log size per record is therefore bounded by construction.
 
 ## Part 2 — the win-codification pass (engine floor + Leader judgment)
 
 `unconsumed_recoveries(project_code, limit)` (in `recoveries.py`) returns un-consumed
-RecoveryRecords, newest first.
+RecoveryRecords, newest first, filtered against the **separate** `_consumed_recoveries` ledger.
 
-**Engine-bound recurrence floor (the keystone hardening).** Before any Leader call, the engine
-**clusters** the recoveries by a deterministic **technique-signature** — `(artifact_kind,
-defect_type, normalized-defect-key)` where the defect-key is a cheap normalization of the QC
-rationale (lowercased, stop-stripped, first-N significant tokens — NO LLM, NO embedding; the
-same "cheap + mechanical" discipline as `skill_library.search`). Only clusters with **≥ floor
-(default 3, env-overridable)** members are surfaced to the Leader. A cluster below the floor
-stays un-consumed (eligible later, like an un-codified fail). This is the engine *binding* the
-recurrence invariant — the Leader judges *within* a proven-recurring cluster, it does not get to
-codify a one-off.
+**Engine-bound recurrence floor, biased AGAINST false-merge (Nemo r1 #4).** Before any Leader
+call, the engine **clusters** the recoveries by a deterministic **recovery signature**. A purely
+lexical key (`first-N tokens of the QC rationale`) can collapse three *unrelated* fixes that all
+begin "missing edge case handling…" into one floor-passing cluster → a **wrong generalization
+written into the shared library**. False-merge is the dangerous direction; false-split (delayed
+learning) is safe. So the signature is **deliberately specific**, biased to split:
+`(artifact_kind, defect_type, normalized-rationale-key, change-shape-fingerprint)` where:
+- `normalized-rationale-key` = lowercased, stop-stripped, first-N significant tokens of the QC
+  rationale (cheap, no LLM — the `skill_library.search` discipline), AND
+- `change-shape-fingerprint` = a bounded, mechanical fingerprint of the **before→after delta**
+  (e.g. a normalized category of what changed — added-guard / reordered / type-fix / bounds-fix
+  — derived from a cheap line-shape diff of the bounded excerpts, NOT the rationale prose). Two
+  recoveries cluster only when *both* their rationale-key *and* their change-shape agree.
 
-The Leader is then prompted (a new `win-codify` seed, sibling to `skill-create`) with each
-qualifying cluster: the recurring technique + its evidence excerpts + the existing-skill index.
-It returns the same codification schema the fail-loop uses, with **`action` defaulting to
-`improve`** and a new **`provenance: "win"`** field. `_persist_codification` (reused) appends
-the guidance under a `## Learned (from recovery) — <technique>` header, bumps the version, and
-git-commits with a `codify-win:` prefix. Evidence recovery-ids are marked consumed.
+Only clusters with **≥ floor (default 3, env-overridable)** members are surfaced. A below-floor
+cluster stays un-consumed (eligible later). **Honesty about the claim:** the engine has proven a
+*recurring recovery cluster*, not necessarily a single "technique" — the win-codify seed tells
+the Leader exactly that ("here are N recoveries that mechanically resemble each other; judge
+whether they share ONE teachable technique, and if they split, codify only the coherent subset
+or none"). The engine binds *recurrence*; the Leader still judges *coherence*.
 
-**Where it plugs in:** extend `_post_run_codification` (orchestration.py:9418) to run a second
-phase after the fail phase (or a sibling `_post_run_win_codification` it calls) — same
-kill-switch (`MODULATIO_SKILL_CODIFICATION=0`), same operator-abort guard, same swallowed-error
-breadcrumbs. The two phases are independent: a clean run with recoveries still learns; a run
-with both fails and wins runs both.
+**Replay-safe, consumed-once across partial failure (Nemo r1 #3).** Today consumption runs
+*after* the irreversible skill save+commit (`_persist_codification` order: save 9536–9564 →
+commit 9566–9573 → `mark_consumed` 9574), and the caller swallows persist exceptions (9473–9479)
+— so a `mark_consumed` failure leaves a committed skill with un-consumed evidence → the next run
+re-appends the same lesson. The win path closes this with an **applied-signature guard**: each
+codification records the **cluster signature(s) it consumed** into the skill's frontmatter
+(`learned_from: [<sig>, …]`); before appending a `## Learned (from recovery)` block,
+`_persist_win_codification` checks whether that signature is already present and **skips the
+append if so** (idempotent — a replay after a consume-failure detects the already-applied lesson
+and does not duplicate it). Consumption remains best-effort, but it is no longer the *only*
+guard against replay.
+
+**Consumption is parameterized, not hardwired (Nemo r1 #2).** `_persist_codification` currently
+ends in `lessons.mark_consumed` (the FAIL ledger). The win path must consume from
+`recoveries.mark_consumed` (the recovery ledger) or the recovery-ids are never marked and the
+cluster re-codifies every run. Split it: `_persist_codification(..., *, provenance, consume_fn,
+learned_header, commit_prefix)` (or two thin wrappers `_persist_fail_codification` /
+`_persist_win_codification`). The win wrapper uses `recoveries.mark_consumed`, the
+`## Learned (from recovery) — <cluster>` header, the `codify-win:` commit prefix, and the
+applied-signature guard above. Tests assert recovery-ids land in `_consumed_recoveries`, **never**
+in `lessons/_consumed`.
+
+The Leader is prompted (a new `win-codify` seed, sibling to `skill-create`) with each qualifying
+cluster + the existing-skill index, returning the codification schema with **`action` defaulting
+to `improve`** and **`provenance: "win"`**.
+
+**Where it plugs in — a wrapper that can't let the fail-feed suppress the win-feed (Nemo r1
+#7).** The current `_post_run_codification` returns early on `len(fails) < 3` (9450–9454) — so
+appending win logic after that line would mean a clean run with 0 fails + 3 recoveries learns
+NOTHING. Restructure: the **outer** `_post_run_codification` handles the kill-switch + operator-
+abort guard ONCE, then calls two independent best-effort phases —
+`_post_run_fail_codification(summary)` and `_post_run_win_codification(summary)` — neither of
+which can early-return out of the other. A fail-feed load error or `<3` fails must not suppress
+win codification (only the global kill-switch / abort stops both). Same swallowed-error
+breadcrumbs per phase.
 
 ## Part 3 — provenance + the decay hook (witness + hygiene)
 
-- **Provenance on the codified skill (witness).** Extend the `Skill` model with an optional
-  `provenance` marker (`"fail" | "win" | "user"`), defaulting unset for seeds. A win-derived
-  improvement records `win`; the recommendation surfaced to the operator says so ("the team
-  learned a *technique* from a QC recovery", distinct from "stopped repeating a defect"). This
-  is the [[review_who_is_told_witness_check]] line: the library should name *why* each
-  codification exists.
+- **Provenance on the codified skill is LOAD-BEARING + fully round-tripped (Nemo r1 #8).** It is
+  what keeps codifying-from-a-non-independent-fix honest: without a durable marker, a future
+  reader can't tell "learned from a repeated fail" (independent QC voted 3×) from "learned from a
+  non-independent QC-authored recovery" (same mind judged + wrote it) — and *that* would launder
+  the source. So the full chain is required, not optional:
+  - add `provenance: "fail" | "win" | "user"` to the frozen `Skill` (skills.py:55), default
+    unset for seeds;
+  - `_parse_file` parses it + `save` serializes it to frontmatter (skills.py:168/314) —
+    round-trip tested;
+  - `create_skill` + the improve path thread it (skills.py:365 + orchestration.py:9536–9564);
+  - the win path uses the distinct `## Learned (from recovery) — …` header + `codify-win:`
+    commit prefix; and the operator recommendation **explicitly names the source** — for
+    `kind="qc_authored"`, that the lesson came from a **non-independent QC-authored fix** (the
+    same mind judged and wrote it), not just "a recurring problem."
+
+  This is the [[review_who_is_told_witness_check]] line made structural: the library names *why*
+  each codification exists *and* how trustworthy its origin is.
 - **Usage signal + decay = a NAMED SIBLING TASK, not this cut.** Adding `usage_count` /
   `last_used_at` / win-attribution to a *frozen, content-hashed* `Skill` and a prune/age
   mechanic is a real subsystem (it touches `checkout`, the `base_seed_hash` freshness gate, and
@@ -149,35 +230,49 @@ with both fails and wins runs both.
 
 ## Where it plugs in (files)
 
-- `src/modulatio/recoveries.py` — **new**: `RecoveryRecord`, `record_recovery`,
-  `unconsumed_recoveries`, consumed-tracking, the technique-signature clustering.
-- `src/modulatio/orchestration.py` — `_complete_qc_authored_fix` (7570) + the redo-pass path
-  (7150/7201) emit recoveries; `_post_run_codification` (9418) gains the win phase;
-  `_persist_codification` (9498) reused (provenance + `codify-win:` commit prefix).
-- `src/modulatio/skills.py` — `Skill.provenance` optional field (round-trips through
-  frontmatter); `create_skill`/save path carries it.
-- `src/modulatio/_seed_skills/win-codify.md` — **new** seed: judge a *recurring technique* from
-  recoveries → improve (default) / create; the engine already proved recurrence, so the Leader
-  judges *what to teach*, not *whether it recurred*.
+- `src/modulatio/recoveries.py` — **new**: `RecoveryRecord` (frozen), `record_recovery`
+  (write-time truncation to `MAX_RECOVERY_EXCERPT_CHARS`), `unconsumed_recoveries`,
+  `mark_consumed`/`consumed_ids` (the `_consumed_recoveries` ledger, SEPARATE from
+  `lessons/_consumed`), and the deterministic recovery-signature clustering (rationale-key +
+  change-shape-fingerprint).
+- `src/modulatio/orchestration.py` — `_qc_patch_artifact` (7541) RETURNS `patched`;
+  `_attempt_qc_fix_forward` (7474) records the recovery (guarded, post-completion) with `body`/
+  `defects`/`patched` in scope; the outer `_post_run_codification` (9418) becomes a kill-switch/
+  abort gate that calls independent `_post_run_fail_codification` + `_post_run_win_codification`;
+  `_persist_codification` (9498) split to parameterize `consume_fn`/`provenance`/`learned_header`/
+  `commit_prefix` + the applied-signature idempotency guard.
+- `src/modulatio/skills.py` — `Skill.provenance` field (parsed in `_parse_file` 168, serialized
+  in `save` 314, threaded through `create_skill` 365).
+- `src/modulatio/_seed_skills/win-codify.md` — **new** seed: the engine proved a *recurring
+  recovery cluster*; the Leader judges whether it is ONE coherent teachable technique (and may
+  codify a subset or none), default action `improve`.
 - tests: `tests/test_recoveries.py` (**new**), `tests/test_skill_codification.py` (the win
-  phase + the engine floor + provenance round-trip).
+  phase + the engine floor + provenance round-trip + replay-safety + ledger separation).
 
 ## Verification (observed, not reported)
 
-- **Unit — recoveries:** a QC-authored fix writes a RecoveryRecord with the before/defects/after
-  triple (bounded); a redo-recovery (retry_count>0 → pass) writes one with `redo_guided`; a
-  clean first-try pass writes NONE; `unconsumed_recoveries` excludes consumed + caps; a logging
-  failure emits a breadcrumb and never raises.
-- **Unit — engine floor:** the technique-signature clusters by `(artifact_kind, defect_type,
-  defect-key)` deterministically (no LLM); a cluster `< floor` is NOT surfaced (Leader not
-  called — assert no agent call); `≥ floor` is surfaced; below-floor recoveries stay
-  un-consumed.
-- **Behavioral:** N≥floor recoveries of one technique → the Leader improves the relevant skill
-  (version bump, `## Learned (from recovery)` header, `provenance: win`, `codify-win:` commit,
-  recovery-ids consumed); a single one-off rescue → no codification, evidence retained; the
-  fail-phase and win-phase both run and don't interfere; kill-switch disables both.
-- **Provenance:** a win-codified skill round-trips `provenance: win` through frontmatter; the
-  operator recommendation distinguishes technique-learned from defect-stopped.
+- **Unit — recoveries:** the recovery is written from `_attempt_qc_fix_forward` with the
+  before(`body`)/defects/after(`patched`) triple actually in scope (Nemo #1); a clean first-try
+  pass writes NONE; `unconsumed_recoveries` excludes consumed + caps; **write-time truncation** —
+  a `body` larger than `MAX_RECOVERY_EXCERPT_CHARS` yields an on-disk record bounded on every
+  text field regardless of caller (Nemo #6); a `record_recovery` that raises does NOT propagate
+  out of the completion seam — the task stays COMPLETED and a breadcrumb is emitted (Nemo #5).
+- **Unit — engine floor + signature:** clustering is deterministic, no LLM (Nemo #4); two
+  recoveries with the *same rationale-key but different change-shape* do NOT merge (false-merge
+  guard); a `< floor` cluster is NOT surfaced (assert no Leader agent call) and stays
+  un-consumed; `≥ floor` is surfaced.
+- **Ledger separation + replay-safety (Nemo #2/#3):** a win codification marks recovery-ids in
+  `_consumed_recoveries` and **never** in `lessons/_consumed`; forcing `recoveries.mark_consumed`
+  to raise *after* skill save+commit, then re-running, appends **no duplicate**
+  `## Learned (from recovery)` block (the applied-signature guard catches the replay).
+- **Behavioral:** N≥floor coherent recoveries → the Leader improves the relevant skill (version
+  bump, `## Learned (from recovery)` header, `provenance: win`, `learned_from` signature in
+  frontmatter, `codify-win:` commit, recovery-ids consumed); a one-off rescue → no codification,
+  evidence retained; **a clean run with 0 fails + ≥floor recoveries STILL codifies the win**
+  (the fail early-return cannot suppress it, Nemo #7); kill-switch disables both phases.
+- **Provenance (Nemo #8):** `provenance: "win"` round-trips through frontmatter; the operator
+  recommendation for `kind="qc_authored"` explicitly names the **non-independent QC-authored**
+  source (not merely "a recurring problem").
 - **No-regress:** the existing fail-codification path is byte-identical; a run with zero
   recoveries behaves exactly as today. `ruff check src/ tests/` + full `pytest` on the
   faithful no-tool box.
@@ -195,10 +290,12 @@ with both fails and wins runs both.
    signal (the smart layer wrote the technique). The redo-recovery is weaker (the producer
    authored it, QC only guided) and noisier. Rec: ship **QC-authored-fix only** as Fix F; add
    redo-recoveries behind the same floor if the win-feed proves too thin.
-2. **Recurrence floor value + signature granularity.** Default 3 (matches the fail-loop);
-   signature `(artifact_kind, defect_type, defect-key)`. Coarser → over-clusters distinct
-   techniques; finer → never reaches the floor. Rec: start at 3 + the named signature, tune on
-   observed clusters.
+2. **Recurrence floor value + signature granularity.** Default floor 3 (matches the fail-loop);
+   signature `(artifact_kind, defect_type, rationale-key, change-shape-fingerprint)` —
+   deliberately specific, **biased to false-split** (delayed learning) over false-merge (a wrong
+   generalization in the shared library), per Nemo r1 #4. Rec: ship at 3 + this signature; tune
+   the fingerprint granularity on observed clusters; if it proves too coarse, narrow the
+   fingerprint, never loosen toward merge.
 3. **One codification pass or two?** Fold the win phase into `_post_run_codification` (one
    Leader-judgment surface, fails + wins together) vs a sibling pass (cleaner separation, two
    calls). Rec: **sibling pass** — distinct seed, distinct floor, distinct provenance; the two
