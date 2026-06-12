@@ -1,8 +1,9 @@
 # Codify-the-win — learn from QC recoveries, not just repeated fails (#81 / Fix F)
 
 **Status:** DESIGN. Held local on `arc/codify-the-win` (off main, post-#100 `2caa2a5`).
-**Lovecraft (coherence) SIGN-OFF 2026-06-12.** **Nemo (hull) r1 BLOCK 2026-06-12 — remediated
-below (this revision); r2 close-out pending.** Then Hero → TDD → code review → merge (= Clif).
+**Lovecraft (coherence) SIGN-OFF 2026-06-12.** **Nemo (hull) r1 BLOCK → r2 cleared 7/8; the
+last seam (#3 replay-safety) tightened in this revision** — the applied-signature guard now
+rides a durable `Skill.learned_from` field (r2 close-out pending). Then Hero → TDD → merge (= Clif).
 
 > **Nemo r1 remediation (2026-06-12).** 5 blockers + 3 reservations, all sound, all folded by
 > tightening the seams against the real tree: (#1) the witness moves to `_attempt_qc_fix_forward`
@@ -206,12 +207,21 @@ breadcrumbs per phase.
   what keeps codifying-from-a-non-independent-fix honest: without a durable marker, a future
   reader can't tell "learned from a repeated fail" (independent QC voted 3×) from "learned from a
   non-independent QC-authored recovery" (same mind judged + wrote it) — and *that* would launder
-  the source. So the full chain is required, not optional:
-  - add `provenance: "fail" | "win" | "user"` to the frozen `Skill` (skills.py:55), default
-    unset for seeds;
-  - `_parse_file` parses it + `save` serializes it to frontmatter (skills.py:168/314) —
-    round-trip tested;
-  - `create_skill` + the improve path thread it (skills.py:365 + orchestration.py:9536–9564);
+  the source. So the full chain is required, not optional. **TWO new `Skill` fields** ride the
+  same round-trip (Nemo r1 #8 + r2 #3 — the replay guard is dead unless its signature is durable
+  on the real persistence model):
+  - `provenance: "fail" | "win" | "user"` (default unset for seeds); AND
+  - `learned_from: tuple[str, ...]` — the cluster signatures already consumed into this skill (the
+    applied-signature replay guard, Part 2). Empty for seeds / fail-only skills.
+  - both are added to the frozen `Skill` (skills.py:55), **parsed in `_parse_file`**
+    (skills.py:182–200 — today only known fields round-trip, so a new field MUST be added there or
+    it is silently dropped), **serialized in `save`** (skills.py:327–358), and **threaded through
+    `create_skill` + the improve path** (skills.py:365 + orchestration.py:9536–9564) — both
+    round-trip tested.
+  - `_persist_win_codification` **reads `base.learned_from`, skips the append when the cluster
+    signature is already present, and otherwise appends the signature** to the new skill's
+    `learned_from` as it writes — so a replay after a consume-after-commit failure finds the
+    signature durably recorded and does not duplicate the `## Learned (from recovery)` block.
   - the win path uses the distinct `## Learned (from recovery) — …` header + `codify-win:`
     commit prefix; and the operator recommendation **explicitly names the source** — for
     `kind="qc_authored"`, that the lesson came from a **non-independent QC-authored fix** (the
@@ -241,8 +251,10 @@ breadcrumbs per phase.
   abort gate that calls independent `_post_run_fail_codification` + `_post_run_win_codification`;
   `_persist_codification` (9498) split to parameterize `consume_fn`/`provenance`/`learned_header`/
   `commit_prefix` + the applied-signature idempotency guard.
-- `src/modulatio/skills.py` — `Skill.provenance` field (parsed in `_parse_file` 168, serialized
-  in `save` 314, threaded through `create_skill` 365).
+- `src/modulatio/skills.py` — `Skill.provenance` AND `Skill.learned_from` fields (both parsed in
+  `_parse_file` 182–200, serialized in `save` 327–358, threaded through `create_skill` 365); a
+  field not added to `_parse_file` is silently dropped, so the replay guard's signature lives or
+  dies here (Nemo r2 #3).
 - `src/modulatio/_seed_skills/win-codify.md` — **new** seed: the engine proved a *recurring
   recovery cluster*; the Leader judges whether it is ONE coherent teachable technique (and may
   codify a subset or none), default action `improve`.
@@ -262,9 +274,12 @@ breadcrumbs per phase.
   guard); a `< floor` cluster is NOT surfaced (assert no Leader agent call) and stays
   un-consumed; `≥ floor` is surfaced.
 - **Ledger separation + replay-safety (Nemo #2/#3):** a win codification marks recovery-ids in
-  `_consumed_recoveries` and **never** in `lessons/_consumed`; forcing `recoveries.mark_consumed`
-  to raise *after* skill save+commit, then re-running, appends **no duplicate**
-  `## Learned (from recovery)` block (the applied-signature guard catches the replay).
+  `_consumed_recoveries` and **never** in `lessons/_consumed`; the consumed cluster signature
+  **round-trips durably** in the skill's `learned_from` frontmatter (parse→save→reload asserts
+  the field survives — the guard is worthless if the field is dropped); forcing
+  `recoveries.mark_consumed` to raise *after* skill save+commit, then re-running, appends **no
+  duplicate** `## Learned (from recovery)` block (the durable applied-signature guard catches the
+  replay even though consumption failed).
 - **Behavioral:** N≥floor coherent recoveries → the Leader improves the relevant skill (version
   bump, `## Learned (from recovery)` header, `provenance: win`, `learned_from` signature in
   frontmatter, `codify-win:` commit, recovery-ids consumed); a one-off rescue → no codification,
