@@ -10,7 +10,8 @@ the full authorize×fallback matrix) + integration/bulkhead tests. **Nemo CODE r
 (5 findings — 3 code-oracle cheap-PASS holes + bulkhead import gap + stale annotation; bundle
 hull held) → remediated @ `0ce8325`** (resolve `from pkg import name` members or fall back;
 import-only entrypoint non-trivial; import inside the bulkhead). **Full suite 3088 passed, ruff
-clean.** **In code review** — Nemo r2 close-out driving; Hero pending Clif relay → merge (= Clif).
+clean. Nemo CODE r2 SIGN-OFF — all 5 cleared @ `0ce8325`** (design + code both Nemo-signed).
+**Code review: Hero pending Clif relay** (last gate) → merge (= Clif).
 
 > **Hero remediation (2026-06-12).** SIGN-WITH-RESERVATIONS — Q5 surfaced the collective blind
 > spot: the tool-delegated oracle path skipped two contracts. Folded: **R1a** delegated-oracle
