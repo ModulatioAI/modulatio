@@ -2,8 +2,10 @@
 
 **Status:** DESIGN, held local on `arc/code-media-deterministic-validation` (off main,
 v0.8.6). Not built. **ALL THREE REVIEWERS SIGNED 2026-06-12** — Lovecraft (coherence) clean;
-Nemo (hull) r1 BLOCK → remediated → r2 cleared all 7; Hero (hull/arch) SIGN-WITH-RESERVATIONS,
-all folded below (R1a/R1b + m1/m2/m3). **Cleared for TDD** → code review → merge (= Clif).
+Nemo (hull) r1 BLOCK → remediated → r2 cleared all 7; Hero (hull/arch) SIGN-WITH-RESERVATIONS
+→ fold confirmed **SIGNED-FOR-TDD** @ `719ef40` (all R1a/R1b + m1/m2/m3 folded below). **In
+TDD** → code review (Nemo+Hero; Hero will hunt the authorize×fallback branch matrix) → merge
+(= Clif).
 
 > **Hero remediation (2026-06-12).** SIGN-WITH-RESERVATIONS — Q5 surfaced the collective blind
 > spot: the tool-delegated oracle path skipped two contracts. Folded: **R1a** delegated-oracle
