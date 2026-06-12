@@ -1,8 +1,19 @@
 # Code + media deterministic assembly validation (#100 remainder)
 
 **Status:** DESIGN, held local on `arc/code-media-deterministic-validation` (off main,
-v0.8.6). Not built. Pending Nemo (hull) + Lovecraft (coherence) then Hero. Branch held
+v0.8.6). Not built. **Lovecraft (coherence) SIGNED-OFF 2026-06-12.** **Nemo (hull) r1 BLOCK
+2026-06-12 — remediated below (this revision); r2 close-out pending.** Then Hero. Branch held
 local; merge = Clif.
+
+> **Nemo r1 remediation (2026-06-12).** All 4 blockers + 3 reservations addressed by
+> *tightening or honestly demoting* the cheap-PASS conditions — the oracle now proves the
+> composite **contains the declared units**, not just that it has their shape. (#1) bundle =
+> exact member-name-set + CRC/byte-equality oracle (stdlib `zipfile`); (#2) av demoted to
+> inconclusive→full review; (#3) image montage demoted to inconclusive→full review; (#4)
+> entrypoint must be non-trivial (non-empty + real body), not path-present; (#5) exact
+> local-vs-external import rule so SaaS/API-key imports never cheap-FAIL; (#6) every validator
+> entrypoint is total (catches all env/tool/parser exceptions → `(False, …)`) + a bulkhead
+> wrap so `verify_assembly` never throws; (#7) bundle uses stdlib `zipfile`, no external `zip`.
 
 ## What this is, and what already shipped
 
@@ -58,40 +69,84 @@ contract is unchanged: chosen tool absent → full review.
 
 Before the shared structural checks, for `record.strategy == "code"`:
 
-- **Entry point exists.** The assembled set actually contains the declared `entrypoint`
-  file (today it's an unvalidated producer string embedded in the README — Nemo #5/#6).
+- **Entry point exists *and is non-trivial*** (Nemo r1 #4). Path-presence alone is NOT
+  load-bearing — an empty/whitespace-only `main.py` would `ast.parse` clean and cheap-PASS
+  "there is no app here." The entrypoint is eligible only when, mechanically: it is in the
+  assembled set, its source is **non-empty / non-whitespace**, it **parses**, AND its parsed
+  module body contains **≥1 statement that is not solely a docstring / `pass` / bare
+  ellipsis** (a real top-level body — a def/class/assignment/call/`if __name__` guard).
+  Proving *runnability* beyond that is semantic → out of scope; a runnable-but-trivial-looking
+  entrypoint that clears this bar but is still hollow is the full review's / #101's job, not
+  the oracle's. If the entrypoint can't clear the bar → inconclusive → full review.
 - **Each unit parses** in its language, by extension: Python → `ast.parse` /
   `py_compile`; a per-language parse hook keyed on file extension. A language with **no
   registered parser → fail-OPEN to full review** (never fail the task, never false-pass).
-- **Intra-package references resolve** to the degree *statically* provable: a Python
-  import of a *sibling module in the assembled set* must point at a file that exists.
-  **External dependencies are EXPECTED, never a failure** — stdlib, third-party packages,
-  and especially **SaaS / API-key'd integrations** ([[modulatio_independent_tools_supersede_native]]):
-  an app built to use the user's keys/services (Stripe, a DB client, an LLM API) legitimately
-  imports SDKs that are *not* in the assembled set — that is the app *using* the tool, not a
-  wiring hole, and the assembler just uses it. The check **only** flags a *provable
-  intra-package* dangling reference (a sibling module that should be in the set and isn't);
-  external or ambiguous → not a failure (fall back or pass, never reject).
+- **Intra-package references resolve** to the degree *statically* provable. **External
+  dependencies are EXPECTED, never a failure** — stdlib, third-party packages, and especially
+  **SaaS / API-key'd integrations** ([[modulatio_independent_tools_supersede_native]]): an app
+  built to use the user's keys/services (Stripe, a DB client, an LLM API) legitimately imports
+  SDKs *not* in the assembled set — that is the app *using* the tool, not a wiring hole, and
+  the assembler just uses it. The **exact mechanical local-vs-external rule** (Nemo r1 #5 — no
+  false cheap-FAIL of a SaaS app):
+  - **Relative imports** (`from . import x`, `from .sib import y`) that resolve to a path
+    *inside the assembled package root* and whose target file is **absent** → the only hard
+    dangling case → fail (→ full review).
+  - **Absolute imports** fail **only** when the top-level/package prefix is *itself
+    represented by an assembled local package/module namespace* (the set contains
+    `pkg/__init__.py` or `pkg.py`) **and** the specific target submodule file is absent.
+  - **Everything else — `import stripe`, `import openai`, `from google.cloud import storage`,
+    `from anthropic import Anthropic`, any prefix not present as a local namespace, anything
+    ambiguous — is external/ambiguous and is NEVER a cheap-FAIL** (pass-through or fall back,
+    never reject). External/ambiguous absence is the *expected* shape of a tool-using app.
 
 Pass ALL three → eligible for the cheap path (then run the existing shared checks:
 complete, checksum, deps present, unit-marks, set-equals-deps). Any miss or inconclusive →
 `(False, reason)` → full review, fail-closed.
 
-## Part 2 — Media-composite validator (oracle: probe the rendered output)
+## Part 2 — Media-composite validator (oracle: prove the composite CONTAINS the units)
 
-For `record.strategy == "media"`, probe the **rendered composite** (not the input marks),
-per the media sub-kind:
+Nemo r1 #1/#2/#3 torpedoed the original shape-only design: "valid container + right count +
+duration≈Σ" proves *well-formedness*, **not containment** — a corrupt bundle of N bogus
+non-empty members, an av output that concatenates `clip_a` twice (duration still 20s, right
+streams), or a montage of N blank/duplicate panels at the expected geometry all cheap-PASS a
+shape check yet are the *wrong composite*. A deterministic oracle must prove the composite
+**contains the declared units**, not merely that it has their *shape*. That is cheaply +
+provably attainable for exactly one sub-kind — **bundle** — so that is the only one that wins
+the cheap path in this cut; **av and image honestly fall back** ("an oracle where one
+*provably* exists" — they don't have a cheap content oracle, so they don't get one).
 
-- **video / audio (`ffprobe`):** output is a valid container; **duration ≈ Σ input unit
-  durations** within tolerance (concat demuxer); expected **stream count** (e.g. 1 video
-  + 1 audio); codec sane (advisory).
-- **image montage (`identify`):** output is a valid image; geometry consistent with the
-  N input panels.
-- **bundle (`zip`):** archive opens; member count == unit count; each member non-empty.
+For `record.strategy == "media"`, by sub-kind:
 
-Pass → cheap path. **Probe tool missing → fall back to full review, fail-closed** — the
-same contract as the renderers (#87/B); CI (no ffmpeg/ImageMagick) must pass by falling
-back. We **probe the existing output, never re-render** it.
+- **bundle — the provable case (stdlib `zipfile`, Nemo r1 #7).** The assembler writes the ZIP
+  with stdlib `zipfile.zf.write` (assembly.py:1201-1213) — byte-preserving, no external
+  binary — so containment is *provable*: open with `zipfile`; **member names == the
+  normalized manifest/dependency unit names** (set-equal, **no duplicate names**); **no path
+  traversal / absolute / `..` archive paths**; and **each member's bytes (or CRC-32 / content
+  hash) == the corresponding resolved unit file's** (assembly.py copies them verbatim, so this
+  is exact, not tolerance-based). All hold → cheap PASS. "Count + non-empty" is explicitly
+  rejected as insufficient. Use **stdlib `zipfile`**, never an external `zip`/`unzip` binary,
+  so minimal/CI boxes keep the cheap path.
+- **video / audio — INCONCLUSIVE → full review (Nemo r1 #2).** Total duration ≈ Σ and
+  stream-count are **not load-bearing**: a buggy assembler that doubles a clip satisfies both.
+  Per-segment content provability (packet/stream fingerprints, verified concat-provenance
+  sidecar) is not cheaply attainable in this cut, so av **always falls back to full review** —
+  we do NOT claim a cheap PASS we can't back. (`ffprobe` may still run as an *advisory*
+  valid-container / corruption pre-screen that can only ever *fail* toward full review, never
+  grant a cheap PASS. Door left open: a future per-segment-duration-sequence + fingerprint
+  oracle, or an engine-emitted concat-provenance map, could promote av later — named in Open
+  Decisions, not built here.)
+- **image montage — INCONCLUSIVE → full review (Nemo r1 #3).** Geometry "consistent with N
+  panels" does not prove the panels ARE the declared units (N blank/duplicate panels at the
+  right geometry pass). Cheap pixel-inclusion proof is tolerance-fragile (montage resizes/
+  pads), so image **always falls back to full review** in this cut. (Door left open: an
+  assembler-preserved, machine-checkable panel-layout sidecar + crop-and-hash against the unit
+  images with an explicit bounded tolerance — named in Open Decisions, not built here.)
+
+So the media cheap path is won for **bundle only** (the deterministically provable sub-kind);
+av + image fall back, byte-identical to today. **Any probe tool missing, any inconclusive,
+any malformed output → fall back to full review, fail-closed** — same contract as the
+renderers (#87/B); CI (no ffmpeg/ImageMagick) passes by falling back. We **probe the existing
+output, never re-render** it.
 
 ## Where it plugs in
 
@@ -102,20 +157,44 @@ deterministic helpers live in a sibling module (`assembly_validate.py`) or in
 `review_ledger.py`; they read the assembled output + the unit set from the
 `AssemblyRecord` / deps that `verify_assembly` already resolves.
 
+**Every validator entrypoint is TOTAL (Nemo r1 #6 — explicit exception boundary).** The
+existing caller (`orchestration.py:5858-5879`) invokes `verify_assembly()` directly with **no
+try/except** and relies on it being non-throwing; a validator that raised would crash the run,
+not fall back. So each code/media validator entrypoint **catches every expected
+environmental/tool/parser failure internally** — `OSError`, `FileNotFoundError`,
+`subprocess.TimeoutExpired`, `SyntaxError`/parser exceptions, malformed probe output,
+`zipfile.BadZipFile`/bad-image/bad-media, and any nonzero/garbage tool result — and converts
+**all** of them to `(False, "<reason> → full review")`. As a final bulkhead, the validator
+call inside `verify_assembly()` is itself wrapped so that *any* unforeseen exception still
+degrades to `(False, …)` rather than propagating — preserving the load-bearing invariant that
+`verify_assembly()` **never throws and never fails a task** (it can only withhold the cheap
+path and route to full review).
+
 ## Verification (observed, not reported)
 
-- **Unit — code:** entrypoint-absent → fall back; a unit that doesn't parse → fall back; a
-  clean Python package (entrypoint present, all parse, imports resolve) → pass; a
-  non-Python set → fall back (fail-open). **media:** duration-mismatch → fall back; a valid
-  concat (duration ≈ Σ, right streams) → pass; a corrupt/zero-duration output → fall back;
-  probe-tool-absent → fall back.
-- **Behavioral:** a clean code assembly **skips** the full review (cheap pass); a broken
-  one (missing entrypoint / unparseable unit) gets the full review that rejects it; a clean
-  media composite passes; a corrupt one falls back. Fall-back path is byte-identical to
-  today.
-- **Fail-closed:** missing `ffprobe`/`identify`/`zip`/parser → full review — never a false
-  cheap-PASS, never a task failure.
-- **No-regress:** `document` / `data` cheap path byte-identical.
+- **Unit — code:** entrypoint-absent → fall back; entrypoint present but **empty /
+  whitespace-only / body-is-only-docstring-or-pass → fall back** (Nemo #4); a unit that
+  doesn't parse → fall back; a clean Python package (non-trivial entrypoint, all parse,
+  intra-package imports resolve) → pass; **`import stripe`/`import openai`/`from anthropic …`
+  → NOT a fail** (external/ambiguous, pass-through, Nemo #5); a relative/local-namespace
+  import to an absent sibling → fall back; a non-Python set → fall back (fail-open).
+- **Unit — media bundle (the provable case):** member-name set == unit-name set, no dupes,
+  no traversal/absolute paths, every member's CRC/bytes == its unit file → pass; **same count
+  but bogus/renamed members → fall back** (Nemo #1); a member whose bytes differ from the unit
+  → fall back; bad zip → fall back (caught total). **av + image:** ALWAYS fall back to full
+  review in this cut (Nemo #2/#3) — assert no cheap PASS is ever emitted for `video`/`audio`/
+  `image` sub-kinds regardless of duration/geometry agreement.
+- **Behavioral:** a clean code assembly **skips** the full review (cheap pass); a broken one
+  (missing/empty entrypoint, unparseable unit, dangling local import) gets the full review
+  that rejects it; a clean **bundle** passes cheap; a bundle with wrong members gets the full
+  review; **av/image always get the full review**. Fall-back path is byte-identical to today.
+- **Fail-closed / total validator (Nemo #6):** missing `ffprobe`/`identify`/parser, a thrown
+  `OSError`/`BadZipFile`/`SyntaxError`/`TimeoutExpired`, or garbage tool output → `(False,
+  reason)` → full review — never a false cheap-PASS, never a propagated exception, never a
+  task failure. A test injects a raising validator and asserts `verify_assembly` still returns
+  `(False, …)` and does not throw.
+- **No-regress:** `document` / `data` cheap path byte-identical; `bundle` uses **stdlib
+  `zipfile`** (no external `zip` dependency, Nemo #7).
 - **CI-parity:** `ruff check src/ tests/` + full `pytest` on the faithful no-tool box —
   must pass by failing closed (CI lacks ffmpeg/ImageMagick).
 
@@ -141,7 +220,11 @@ deterministic helpers live in a sibling module (`assembly_validate.py`) or in
 
 1. **Code parse scope:** Python-first + fail-open for other languages (rec — honest +
    cheap), vs a broader multi-language parse set up front.
-2. **Media checks that are load-bearing:** duration±tolerance + stream-count as the core
-   gate, codec advisory (rec) — vs a stricter set. What duration tolerance?
+2. **Media cheap-path scope (post-Nemo-r1):** ship **bundle-only** as the deterministically
+   provable sub-kind; **av + image fall back to full review** this cut (rec — honest, no
+   cheap-PASS we can't back). The stronger av/image oracles are *named, deferred*: av =
+   per-segment-duration-sequence + stream fingerprints / an engine-emitted concat-provenance
+   map; image = an assembler-preserved panel-layout sidecar + crop-and-hash with bounded
+   tolerance. Build later if usage shows the av/image full-review cost matters.
 3. **Validator home:** a new `assembly_validate.py` module (rec — keeps review_ledger
    lean) vs inline in `review_ledger.py`.
