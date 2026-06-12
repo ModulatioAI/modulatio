@@ -11,7 +11,12 @@ the full authorize×fallback matrix) + integration/bulkhead tests. **Nemo CODE r
 hull held) → remediated @ `0ce8325`** (resolve `from pkg import name` members or fall back;
 import-only entrypoint non-trivial; import inside the bulkhead). **Full suite 3088 passed, ruff
 clean. Nemo CODE r2 SIGN-OFF — all 5 cleared @ `0ce8325`** (design + code both Nemo-signed).
-**Code review: Hero pending Clif relay** (last gate) → merge (= Clif).
+**Hero CODE review SIGN-WITH-RESERVATIONS → 2 items folded:** **f1** the metered-oracle
+fallback now CARRIES the deny/crash context in `reason` (caller threads it into the verify
+mark; authorizer-crash also logs) — a misconfigured authorizer is no longer indistinguishable
+from clean; **m2** the `_norm`/`_norm_unit` twin UNIFIED to one canonical helper
+(`review_ledger._norm_unit`, `assembly._norm` aliases it, identity asserted). **Code review:
+Hero r2 fold-confirm pending Clif relay** (last gate) → merge (= Clif).
 
 > **Hero remediation (2026-06-12).** SIGN-WITH-RESERVATIONS — Q5 surfaced the collective blind
 > spot: the tool-delegated oracle path skipped two contracts. Folded: **R1a** delegated-oracle

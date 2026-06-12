@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import ast
 import zipfile
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -46,6 +47,8 @@ if TYPE_CHECKING:
     from modulatio.assembly import AssemblyRecord
     from modulatio.comptroller import Authorization
     from modulatio.types import Task
+
+_log = logging.getLogger(__name__)
 
 #: the cost_class of a local/stdlib oracle — never spends, never authorizes.
 FREE_LOCAL = "free-local"
@@ -74,39 +77,60 @@ def run_oracle(
     * **free-local** (or ``None`` cost_class) → run directly, no authorization.
     * **metered** (paid-cloud/premium-cloud) → it is a verify-time SPEND, so it must
       authorize first via ``authorize`` (bound to ``comptroller.authorize_metered_tool``
-      by the caller). On **deny / no-authorizer → fall back** to ``fallback`` (the
-      stdlib default oracle) if provided, else to the full review — NEVER an unmetered
-      external call.
+      by the caller). On **deny / no-authorizer / authorizer-crash → fall back** to
+      ``fallback`` (the stdlib default oracle) if provided, else to the full review —
+      NEVER an unmetered external call.
 
     Returns ``(ok, reason, oracle_id)``. On a cheap PASS, ``oracle_id`` names the
     oracle that vouched (the provenance recorded in the verify mark, R1b); on any
     fall-back it is ``""`` (no cheap pass was granted on this oracle's word).
+
+    **Hero f1 — the fallback CARRIES the deny/crash context, never swallows it.** When a
+    metered oracle is denied / unauthorizable / crashes the authorizer and we fall back to
+    the free-local oracle, the deny note rides in ``reason`` *even on a fallback PASS* (the
+    field is otherwise ``""`` on pass, so this is additive) — the caller threads it into the
+    verify mark beside ``[oracle: …]``. Otherwise a misconfigured authorizer is
+    indistinguishable from nothing being wrong (the #97 swallowed-state class). The
+    authorizer-CRASH arm additionally logs, because a crashing comptroller is never
+    business-as-usual.
     """
     if oracle.cost_class and oracle.cost_class != FREE_LOCAL:
         if authorize is None:
             deny = (
-                f"metered oracle {oracle.name!r} selected but no authorizer wired "
-                f"— full review"
+                f"metered oracle {oracle.name!r} selected but no authorizer wired"
             )
-            if fallback is not None:
-                return _run_free_local(fallback)
-            return False, deny, ""
+            return _fallback_or_full_review(deny, fallback)
         try:
             auth = authorize()
         except Exception as exc:  # noqa: BLE001 — total: an authorizer crash falls back
-            deny = f"metered-oracle authorization crashed: {type(exc).__name__}({exc}) — full review"
-            if fallback is not None:
-                return _run_free_local(fallback)
-            return False, deny, ""
+            deny = (
+                f"metered-oracle {oracle.name!r} authorization CRASHED: "
+                f"{type(exc).__name__}({exc})"
+            )
+            _log.warning("assembly oracle: %s — falling back to free-local/full review", deny)
+            return _fallback_or_full_review(deny, fallback)
         if not getattr(auth, "allowed", False):
             deny = (
                 f"metered oracle {oracle.name!r} denied: "
-                f"{getattr(auth, 'reason', 'no budget')} — full review"
+                f"{getattr(auth, 'reason', 'no budget')}"
             )
-            if fallback is not None:
-                return _run_free_local(fallback)
-            return False, deny, ""
+            return _fallback_or_full_review(deny, fallback)
     return _run_free_local(oracle)
+
+
+def _fallback_or_full_review(
+    deny: str, fallback: Oracle | None
+) -> tuple[bool, str, str]:
+    """A metered oracle could not run (deny/no-authorizer/crash). Fall back to the
+    free-local ``fallback`` if present, ELSE full review — carrying ``deny`` so the
+    context is never swallowed (Hero f1). On a fallback PASS the deny note rides in
+    ``reason``; on a fallback FAIL it is prefixed; with no fallback it IS the reason."""
+    if fallback is None:
+        return False, f"{deny} — full review", ""
+    ok, reason, oracle_id = _run_free_local(fallback)
+    if ok:
+        return True, f"{deny} — free-local {oracle_id} vouched", oracle_id
+    return False, f"{deny} — {reason}", ""
 
 
 def _run_free_local(oracle: Oracle) -> tuple[bool, str, str]:

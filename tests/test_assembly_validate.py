@@ -405,11 +405,14 @@ def test_run_oracle_metered_allowed_runs():
 
 
 def test_run_oracle_metered_denied_falls_back_to_local():
+    """Hero f1: deny → fall back to free-local, but the deny context RIDES in reason
+    even on the fallback PASS (a misconfigured authorizer must not look clean)."""
     ok, reason, oracle = run_oracle(
         _pass_oracle(), authorize=lambda: _Auth(False, "no budget"),
         fallback=_local_pass(),
     )
     assert ok and oracle == "stdlib-zipfile-bytes"  # fell back to the free-local oracle
+    assert "denied" in reason and "no budget" in reason  # the witness is carried
 
 
 def test_run_oracle_metered_denied_no_fallback_is_full_review():
@@ -422,14 +425,20 @@ def test_run_oracle_metered_denied_no_fallback_is_full_review():
 def test_run_oracle_metered_no_authorizer_falls_back():
     ok, reason, oracle = run_oracle(_pass_oracle(), fallback=_local_pass())
     assert ok and oracle == "stdlib-zipfile-bytes"
+    assert "no authorizer" in reason  # Hero f1: the witness is carried on the PASS
 
 
-def test_run_oracle_authorizer_crash_falls_back_total():
+def test_run_oracle_authorizer_crash_falls_back_total(caplog):
+    """Hero f1: an authorizer CRASH falls back AND is logged AND the crash rides in
+    reason — a down comptroller is never silently business-as-usual."""
     def _boom():
         raise RuntimeError("comptroller down")
 
-    ok, reason, oracle = run_oracle(_pass_oracle(), authorize=_boom, fallback=_local_pass())
+    with caplog.at_level("WARNING"):
+        ok, reason, oracle = run_oracle(_pass_oracle(), authorize=_boom, fallback=_local_pass())
     assert ok and oracle == "stdlib-zipfile-bytes"
+    assert "CRASHED" in reason and "comptroller down" in reason  # carried on the PASS
+    assert any("CRASHED" in r.message for r in caplog.records)  # and logged
 
 
 def test_run_oracle_authorizer_crash_no_fallback_is_full_review():
@@ -437,7 +446,7 @@ def test_run_oracle_authorizer_crash_no_fallback_is_full_review():
         raise RuntimeError("comptroller down")
 
     ok, reason, oracle = run_oracle(_pass_oracle(), authorize=_boom)
-    assert not ok and "authorization crashed" in reason and oracle == ""
+    assert not ok and "CRASHED" in reason and oracle == ""
 
 
 def test_run_oracle_is_total_when_check_raises():
@@ -446,3 +455,27 @@ def test_run_oracle_is_total_when_check_raises():
                  run=lambda: (_ for _ in ()).throw(ValueError("kaboom")))
     ok, reason, oracle = run_oracle(bad)
     assert not ok and "validator crashed: ValueError" in reason and oracle == ""
+
+
+def test_validate_media_metered_denied_carries_note_through_validator(tmp_path):
+    """Hero f1 end-to-end at the validator: a denied metered oracle falls back to the
+    real free-local bundle oracle, which PASSES, and the deny note rides in reason so
+    verify_assembly threads it into the verify mark."""
+    rec = _bundle_record({"a.png": b"AAA", "b.csv": b"BBB"}, root=tmp_path)
+    metered = Oracle(name="external:scanner@2", cost_class="paid-cloud",
+                     run=lambda: (True, ""))
+    ok, reason, oracle = av.validate_media_assembly(
+        rec, _task(), tmp_path,
+        oracle=metered, authorize=lambda: _Auth(False, "no budget"),
+    )
+    assert ok and oracle == "stdlib-zipfile-bytes"
+    assert "denied" in reason and "no budget" in reason
+
+
+def test_norm_normalizer_is_single_canonical_helper():
+    """Hero m2: the assembler and the validator MUST share one normalizer — no
+    byte-identical twin to drift apart (would silently skew bundle member names)."""
+    from modulatio import assembly, review_ledger
+
+    assert assembly._norm is review_ledger._norm_unit
+    assert av._norm_unit is review_ledger._norm_unit

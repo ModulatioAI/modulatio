@@ -248,6 +248,7 @@ def verify_assembly(
     # bug outside the oracle still degrades to a fall-back, never a throw — the
     # caller invokes verify_assembly naked (Nemo #6, Hero m3).
     oracle_id = ORACLE_BY_STRATEGY.get(record.strategy, f"{record.strategy}-structural")
+    oracle_note = ""  # Hero f1: a delegated-oracle deny/fallback witness, carried on PASS
     if record.strategy in ("code", "media"):
         # The IMPORT is inside the bulkhead too (Nemo code #4): a packaging skew where
         # assembly_validate is absent / fails at import time must degrade to a
@@ -271,6 +272,7 @@ def verify_assembly(
         if not fam_ok:
             return False, fam_reason, ""
         oracle_id = fam_oracle
+        oracle_note = fam_reason  # nonempty only when a metered oracle fell back (Hero f1)
 
     if not record.complete:
         return False, "assembly incomplete (missing or errored units)", ""
@@ -325,4 +327,4 @@ def verify_assembly(
     if sep is not None and len(str(sep)) > _MAX_SEPARATOR_CHARS:
         return False, "separator exceeds review-free bound", ""
 
-    return True, "", oracle_id
+    return True, oracle_note, oracle_id
