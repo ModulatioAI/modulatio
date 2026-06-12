@@ -1,9 +1,9 @@
 # Codify-the-win — learn from QC recoveries, not just repeated fails (#81 / Fix F)
 
 **Status:** DESIGN. Held local on `arc/codify-the-win` (off main, post-#100 `2caa2a5`).
-**Lovecraft (coherence) SIGN-OFF 2026-06-12.** **Nemo (hull) r1 BLOCK → r2 cleared 7/8; the
-last seam (#3 replay-safety) tightened in this revision** — the applied-signature guard now
-rides a durable `Skill.learned_from` field (r2 close-out pending). Then Hero → TDD → merge (= Clif).
+**Lovecraft (coherence) SIGN-OFF 2026-06-12.** **Nemo (hull) SIGN-OFF 2026-06-12** (r1 BLOCK 8
+findings → r2 cleared 7 → r3 cleared #3 replay-safety @ `bb699e3`). **Both local reviewers
+signed. Hero (hull/arch) pending Clif relay.** Then TDD → code review → merge (= Clif).
 
 > **Nemo r1 remediation (2026-06-12).** 5 blockers + 3 reservations, all sound, all folded by
 > tightening the seams against the real tree: (#1) the witness moves to `_attempt_qc_fix_forward`
