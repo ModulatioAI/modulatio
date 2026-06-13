@@ -1,0 +1,18 @@
+Captain’s close-out completed.
+
+Read first:
+`/home/cknox/Message in a Bottle/2026-06-13-Cowboy-to-Nemo-fullsec-closeout.md`
+
+Wrote verdict letter:
+`/home/cknox/Message in a Bottle/2026-06-13-Nemo-to-Cowboy-fullsec-closeout.md`
+
+Scoped verdict:
+- SEC-01 HIGH — CLOSED
+- SEC-02 MED — CLOSED
+- SEC-03 MED — BLOCK
+- SEC-04 LOW — CLOSED
+
+Blocking survivor:
+SEC-03 still persists AWS-style credential material through the shared redactor. Known shapes like `sk-*`, Bearer, and GitHub PATs are redacted, and files are `0600`, but AWS `AKIA...` / `aws_secret_access_key=...` content survives in both checkpoint prose and `leader_conversation.jsonl`.
+
+I did not modify any source file.

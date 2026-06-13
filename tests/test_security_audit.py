@@ -487,3 +487,42 @@ def test_leader_conversation_is_0600_and_redacted(tmp_path, monkeypatch):
     body = path.read_text()
     assert "sk-ant-LEAKED" not in body
     assert "<redacted>" in body
+
+
+# --------------------------------------------------------------------------
+# SEC-03 round 2 (Nemo BLOCK) — AWS credential shapes must be redacted
+# --------------------------------------------------------------------------
+
+def test_redact_secrets_covers_aws_credentials():
+    """Nemo's SEC-03 BLOCK: AWS access-key IDs and secret-access-key values
+    pasted/echoed into prose were persisting verbatim."""
+    from modulatio.oauth_refresh import _redact_secrets
+
+    raw = (
+        "aws_access_key_id=AKIAIOSFODNN7EXAMPLE "
+        "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+    )
+    out = _redact_secrets(raw)
+    assert "AKIAIOSFODNN7EXAMPLE" not in out
+    assert "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY" not in out
+    assert "<redacted>" in out
+    # a bare temporary (ASIA) key id is also caught
+    assert "ASIAY34FZKBOKMUTVV7A" not in _redact_secrets("token ASIAY34FZKBOKMUTVV7A here")
+
+
+def test_checkpoint_redacts_aws_prose(tmp_path):
+    """The checkpoint path now strips AWS creds from assistant/user prose."""
+    import json as _json
+
+    from modulatio.context_budget import write_checkpoint
+
+    path = write_checkpoint(
+        "ckaws",
+        [{"role": "user",
+          "content": "creds: aws_secret_access_key=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY and id AKIAIOSFODNN7EXAMPLE"}],
+        model="m", estimated_tokens=9, max_input_tokens=1,
+        checkpoints_dir=tmp_path, redact_secrets=True,
+    )
+    blob = _json.dumps(_json.loads(path.read_text())["messages"])
+    assert "AKIAIOSFODNN7EXAMPLE" not in blob
+    assert "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY" not in blob

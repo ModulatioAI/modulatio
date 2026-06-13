@@ -46,6 +46,9 @@ _TOKEN_PATTERNS = (
     re.compile(r"AIza[A-Za-z0-9_\-]{16,}"),       # Google API keys
     re.compile(r"ya29\.[A-Za-z0-9_\-]{16,}"),     # Google OAuth
     re.compile(r"xoxb-[A-Za-z0-9_\-]{8,}"),       # Slack bot tokens
+    re.compile(r"(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA)[0-9A-Z]{16}"),  # AWS access key IDs (Nemo SEC-03)
+    re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*[\"']?[A-Za-z0-9/+=]{20,}"),  # AWS secret (labeled)
+    re.compile(r"(?i)aws_access_key_id\s*[=:]\s*[\"']?[A-Z0-9]{16,}"),            # AWS key id (labeled)
     re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]{16,}", re.IGNORECASE),
     re.compile(r"eyJ[A-Za-z0-9_\-\.]{20,}"),      # JWTs (heuristic on header start)
 )
