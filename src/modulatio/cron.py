@@ -274,7 +274,12 @@ def add(
         jt = job_template_library.checkout(jt_id, project_code.upper())
         if not jt.name:
             raise ValueError(f"Job template {jt_id!r} not found for project {project_code!r}")
-        missing = jt.missing_required(jt_params or {})
+        # Use the STRICT predicate (the same one the run-time #97 fit-gate
+        # applies, `_jt_fit` → `unfilled_required`): catch a required param that
+        # is present-but-empty (`{"topic": ""}` / `{"competitors": []}`), not
+        # just absent/None. Otherwise a cron could be added here that the
+        # headless dispatch's fit-gate would then refuse every cycle.
+        missing = jt.unfilled_required(jt_params or {})
         if missing:
             raise ValueError(
                 f"Job template {jt_id!r} is missing required parameter(s): "

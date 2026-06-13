@@ -70,6 +70,27 @@ class CronScreen(Vertical):
         table.add_columns("ID", "Name", "Project", "Schedule", "Enabled", "Next run", "Last status")
         yield table
 
+    def focus_project(self, project_code: str) -> None:
+        """Programmatic project filter from the ``/cron <code>`` command
+        (sibling of ``MemoryScreen.focus_agent``). Switches the table to that
+        project's jobs; a blank or unknown code falls back to All projects so
+        the Select widget always stays on a valid option."""
+        code = (project_code or "").strip().upper()
+        self._populate_project_filter()
+        known = {j.get("project_code", "?") for j in cron.list_jobs()}
+        if code and code in known:
+            self._project_filter = code
+        else:
+            self._project_filter = None
+            code = _ALL
+        # Best-effort: reflect the filter in the Select if it's mounted.
+        try:
+            sel = self.query_one("#cron-project-filter", Select)
+            sel.value = code
+        except Exception:
+            pass
+        self._refresh()
+
     def on_mount(self) -> None:
         self._populate_project_filter()
         self._refresh()

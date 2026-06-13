@@ -37,13 +37,12 @@ def isolate(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_switch_tab_cron_invokes_focus_project_with_code():
+async def test_switch_tab_cron_routes_code_to_focus_project():
     """``/cron STA`` → side-effect ``switch_tab:cron:STA`` must forward the
     project code to the cron screen instead of dropping it. app.py routes the
     code to ``CronScreen.focus_project`` (sibling of ``MemoryScreen.focus_agent``).
-    Until that lifecycle-aware method lands in cron.py (see cross_file_needed)
-    we pin the routing: app.py calls ``focus_project(code)`` when present.
-    """
+    Spy on the REAL method (save/restore — never ``del`` it, that would strip the
+    method off the class for the rest of the session)."""
     cron.add(name="a", schedule="weekly mon 09:00", project_code="STA", objective="x")
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
@@ -53,17 +52,43 @@ async def test_switch_tab_cron_invokes_focus_project_with_code():
         from modulatio.tui.screens.cron import CronScreen
 
         captured: list[str] = []
-        # Inject the not-yet-existing method so we can assert app.py routes to it.
-        CronScreen.focus_project = lambda self, code: captured.append(code)  # type: ignore[attr-defined]
+        original = CronScreen.focus_project
+
+        def _spy(self, code):
+            captured.append(code)
+            return original(self, code)
+
+        CronScreen.focus_project = _spy  # type: ignore[assignment]
         try:
             app._apply_side_effect("switch_tab:cron:STA")
-            await pilot.pause()
-            await pilot.pause()
+            # focus_project is invoked via call_after_refresh — pump the loop.
+            for _ in range(6):
+                await pilot.pause()
         finally:
-            del CronScreen.focus_project  # type: ignore[attr-defined]
+            CronScreen.focus_project = original  # type: ignore[assignment]
 
         assert app.query_one("#app-tabs", TabbedContent).active == "tab-cron"
         assert captured == ["STA"], "the project code must reach the cron screen"
+
+
+@pytest.mark.asyncio
+async def test_cron_focus_project_unknown_code_falls_back_to_all():
+    """#85: ``focus_project`` with a blank or unknown code must fall back to All
+    projects (``_project_filter is None``) so the Select stays on a valid option."""
+    cron.add(name="a", schedule="weekly mon 09:00", project_code="STA", objective="x")
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        from modulatio.tui.screens.cron import CronScreen
+
+        screen = app.query_one(CronScreen)
+        screen.focus_project("STA")
+        assert screen._project_filter == "STA"
+        screen.focus_project("NOPE")  # unknown code
+        assert screen._project_filter is None
+        screen.focus_project("")  # blank
+        assert screen._project_filter is None
+        await pilot.pause()
 
 
 @pytest.mark.asyncio

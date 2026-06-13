@@ -68,6 +68,20 @@ def test_add_jt_required_satisfied_ok():
     assert job["jt_id"] == "brief"
 
 
+def test_add_jt_present_but_empty_required_param_raises():
+    """#64: cron.add must use the STRICT predicate (unfilled_required, the same
+    one the run-time #97 fit-gate applies), so a required param supplied as an
+    empty string / empty list is rejected at add time — not bound here and then
+    refused by the fit-gate every headless cycle."""
+    _make_jt("brief", required=("topic",))
+    with pytest.raises(ValueError, match="missing required"):
+        cron.add(name="x", schedule="daily 09:00", project_code="PHI",
+                 objective="o", jt_id="brief", jt_params={"topic": "   "})
+    with pytest.raises(ValueError, match="missing required"):
+        cron.add(name="y", schedule="daily 09:00", project_code="PHI",
+                 objective="o", jt_id="brief", jt_params={"topic": ""})
+
+
 def test_add_without_jt_is_backcompat():
     job = cron.add(name="plain", schedule="daily 09:00", project_code="PHI", objective="o")
     assert job["jt_id"] is None and job["jt_params"] is None
