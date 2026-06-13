@@ -39,8 +39,11 @@ from modulatio import oauth_helpers
 # patterns before the body becomes part of an exception string.
 _TOKEN_PATTERNS = (
     re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}"),     # Anthropic API keys
+    re.compile(r"sk-or-[A-Za-z0-9_\-]{8,}"),      # OpenRouter (before bare sk-)
     re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),        # OpenAI API keys
-    re.compile(r"sk-or-[A-Za-z0-9_\-]{8,}"),      # OpenRouter
+    re.compile(r"xai-[A-Za-z0-9_\-]{8,}"),        # xAI / Grok keys
+    re.compile(r"gh[posru]_[A-Za-z0-9]{16,}"),    # GitHub PATs (ghp_/gho_/...)
+    re.compile(r"AIza[A-Za-z0-9_\-]{16,}"),       # Google API keys
     re.compile(r"ya29\.[A-Za-z0-9_\-]{16,}"),     # Google OAuth
     re.compile(r"xoxb-[A-Za-z0-9_\-]{8,}"),       # Slack bot tokens
     re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]{16,}", re.IGNORECASE),

@@ -166,10 +166,14 @@ class Skill:
     #: real URLs). Default False — the sandbox's network namespace is
     #: unshared. Frontmatter key: ``needs_network: true``.
     needs_network: bool = False
-    #: Sandbox: extra env var names this skill needs forwarded into
-    #: the sandboxed process beyond the static allowlist (e.g.
-    #: ``GITHUB_TOKEN`` for a skill that calls gh CLI). Names matching
-    #: the deny-pattern regex are dropped even when listed here.
+    #: Sandbox: extra NON-SECRET env var names this skill needs forwarded
+    #: into the sandboxed process beyond the static allowlist (e.g. a config
+    #: path like ``MYAPP_CONFIG_DIR`` or ``TOKENIZERS_PARALLELISM``). Secrets
+    #: are categorically refused: any name matching the deny-pattern regex
+    #: (token / secret / key / password / credential / DSN / DB URL / ssh /
+    #: gpg / a provider prefix) is dropped even when listed here — pass_env is
+    #: for configuration, never credentials. A tool that genuinely needs a
+    #: credential belongs behind its own registered tool, not run_shell.
     #: Frontmatter key: ``pass_env: [FOO, BAR]``.
     pass_env: tuple[str, ...] = ()
     sources: tuple[str, ...] = field(default_factory=tuple)

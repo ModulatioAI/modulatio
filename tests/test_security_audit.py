@@ -246,3 +246,67 @@ def test_run_shell_soft_falls_when_sandbox_not_required(tmp_path, monkeypatch):
     rs = tools.make_run_shell(art)
     out = rs(cmd="python3 demo.py", profile="full", timeout=5)
     assert "ran unsandboxed" in out
+
+
+# --------------------------------------------------------------------------
+# M1 — broaden the sandbox env deny-list (secret exfil via pass_env)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [
+    "SECRET_KEY", "PRIVATE_KEY", "MYAPP_KEY", "GH_PAT", "GITHUB_TOKEN",
+    "DATABASE_URL", "REDIS_DSN", "SSH_PRIVATE_KEY", "GPG_KEY", "MY_PASSPHRASE",
+    "DB_PASSWORD", "SOME_CREDENTIAL", "GEMINI_API_KEY", "SESSION_SECRET",
+    "ACCESS_TOKEN", "github_token",
+])
+def test_sandbox_denies_secret_env_names(name):
+    """M1: the deny-list now catches generic secret shapes the original
+    suffix/prefix list missed (key / PAT / DSN / DB URL / ssh / gpg)."""
+    assert sandbox._is_safe_env_name(name) is False
+
+
+@pytest.mark.parametrize("name", [
+    "MY_CONFIG_PATH", "JAVA_HOME", "NODE_ENV", "HTTP_PROXY", "FOO",
+])
+def test_sandbox_allows_nonsecret_env_names(name):
+    """Non-secret config vars are still forwardable via pass_env."""
+    assert sandbox._is_safe_env_name(name) is True
+
+
+# --------------------------------------------------------------------------
+# M2 — redact secrets from surfaced auth-error alerts
+# --------------------------------------------------------------------------
+
+def test_redact_secrets_covers_provider_key_shapes():
+    """M2: the shared redactor now catches xAI / GitHub / Google key shapes
+    in addition to the OpenAI/Anthropic/OAuth set."""
+    from modulatio.oauth_refresh import _redact_secrets
+
+    raw = (
+        "auth failed for sk-ant-ABC123DEF456GHI789 / "
+        "xai-ABC123DEF456GHI789 / ghp_ABCDEF0123456789ABCDEF / "
+        "AIzaABCDEF0123456789ABCD / Bearer ABCDEF0123456789ABCDEF"
+    )
+    out = _redact_secrets(raw)
+    for secret in ("sk-ant-ABC123", "xai-ABC123", "ghp_ABCDEF0123", "AIzaABCDEF0", "Bearer ABCDEF0123"):
+        assert secret not in out
+    assert "<redacted>" in out
+
+
+def test_fire_auth_alert_redacts_key_before_surfacing(monkeypatch):
+    """The auth-alert chokepoint must not surface a raw provider key that the
+    AuthenticationError echoed back."""
+    from modulatio import auth_alerts, runners
+
+    captured = {}
+
+    def _fake_raise_alert(alert_id, *, error_message, auth_type, auth_config):
+        captured["msg"] = error_message
+
+    monkeypatch.setattr(auth_alerts, "raise_alert", _fake_raise_alert)
+    runners._fire_auth_alert(
+        "gpt-4",
+        "401 Unauthorized: key sk-ant-LEAKED12345678901234 rejected",
+        None,
+    )
+    assert "sk-ant-LEAKED" not in captured["msg"]
+    assert "<redacted>" in captured["msg"]

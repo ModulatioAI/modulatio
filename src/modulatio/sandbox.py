@@ -137,20 +137,41 @@ _SAFE_ENV_KEYS: frozenset[str] = frozenset({
 #: ``pass_env`` mistakenly includes one of these names, the sandbox
 #: still strips it. Any env var matching one of these regexes is
 #: considered sensitive and never crosses the boundary.
+#: Security audit M1: the original list was suffix/prefix-specific and missed
+#: whole classes of secret env var — ``SECRET_KEY`` / ``PRIVATE_KEY`` /
+#: ``SSH_*`` keys, ``GH_PAT`` / ``GITHUB_TOKEN`` PATs, ``DATABASE_URL`` /
+#: ``*_DSN`` connection strings (which embed creds), ``~/.netrc`` pointers.
+#: Broadened to substring-match the generic secret words (token / secret /
+#: credential / password / passphrase) case-insensitively and to deny common
+#: key/PAT/DSN/SSH/GPG shapes. Over-denying a non-secret var is cheap (it just
+#: isn't forwarded — the tool falls back to its default); leaking one is not.
 _DENY_ENV_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"_API_KEY$"),
-    re.compile(r"_TOKEN$"),
-    re.compile(r"_SECRET$"),
+    re.compile(r"TOKEN", re.IGNORECASE),
+    re.compile(r"SECRET", re.IGNORECASE),
+    re.compile(r"PASSWORD", re.IGNORECASE),
+    re.compile(r"PASSWD", re.IGNORECASE),
+    re.compile(r"PASSPHRASE", re.IGNORECASE),
+    re.compile(r"CREDENTIAL", re.IGNORECASE),
+    re.compile(r"_API_KEY$", re.IGNORECASE),
+    re.compile(r"_KEY$", re.IGNORECASE),
+    re.compile(r"PRIVATE_KEY", re.IGNORECASE),
+    re.compile(r"_PAT$", re.IGNORECASE),
+    re.compile(r"_DSN$", re.IGNORECASE),
+    re.compile(r"DATABASE_URL", re.IGNORECASE),
+    re.compile(r"NETRC", re.IGNORECASE),
+    re.compile(r"^GH_"),
+    re.compile(r"^GITHUB_"),
+    re.compile(r"^SSH_"),
+    re.compile(r"^GPG_"),
     re.compile(r"^ANTHROPIC_"),
     re.compile(r"^OPENAI_"),
     re.compile(r"^OPENROUTER_"),
     re.compile(r"^XAI_"),
     re.compile(r"^OLLAMA_"),
     re.compile(r"^GOOGLE_"),
+    re.compile(r"^GEMINI_"),
     re.compile(r"^AZURE_"),
     re.compile(r"^AWS_"),
-    re.compile(r"BOT_TOKEN", re.IGNORECASE),
-    re.compile(r"PASSWORD", re.IGNORECASE),
 )
 
 

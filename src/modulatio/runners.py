@@ -700,8 +700,13 @@ def _fire_auth_alert(model_or_preset_key: str, message: str, alert_id: str | Non
             auth_type = preset.get("auth_type", "api_key")
             auth_config = preset.get("auth_config") or {}
     final_id = alert_id or model_or_preset_key
+    # Audit M2: a provider's AuthenticationError string can echo the request
+    # (Bearer header / api_key) back. The alert is surfaced (stderr / file /
+    # Telegram), so redact any token-shaped substring at this single chokepoint
+    # before it leaves the process.
+    from modulatio.oauth_refresh import _redact_secrets
     auth_alerts.raise_alert(
-        final_id, error_message=message,
+        final_id, error_message=_redact_secrets(message),
         auth_type=auth_type, auth_config=auth_config,
     )
 
