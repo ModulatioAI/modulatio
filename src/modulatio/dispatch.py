@@ -315,8 +315,15 @@ def schedule_wave(
         # capacity, the next task falls to the next-best idle producer.
         hint = getattr(task, "preferred_continuity_agent", None)
         pick = None
-        if hint and hint in by_id and remaining.get(hint, 0) > 0:
-            pick = by_id[hint]
+        if hint and remaining.get(hint, 0) > 0:
+            # Mirror ``select_agent``: only honor a hint that points at a
+            # member of ``candidates`` (the producer-only, capability-ranked
+            # pool). A stale/hand-edited hint naming a leader or qc agent must
+            # NOT route producer work to a non-producer (a hint outside the
+            # pool is silently ignored, exactly as in the single-pick path).
+            cand_ids = {a.id for a in candidates}
+            if hint in cand_ids:
+                pick = by_id[hint]
         if pick is None:
             for a in candidates:
                 if remaining.get(a.id, 0) > 0:

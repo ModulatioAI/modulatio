@@ -1507,12 +1507,20 @@ def parse_inbox_proposals(text: str) -> "tuple[str, list[dict]]":
     m = _INBOX_PROPOSALS_HEADING_RE.search(text)
     if m is None:
         return text, []
-    # Find the fenced JSON block that follows the heading.
+    # Find the fenced JSON block that follows the heading. The fence
+    # must IMMEDIATELY follow the heading (only blank lines / horizontal
+    # whitespace between) — the contract is that the producer emits the
+    # block at the very end with the fence right under the heading. A
+    # ``search`` over the whole tail would grab the first fence ANYWHERE
+    # downstream (e.g. an example fence inside trailing prose), splicing
+    # out the wrong region and corrupting the artifact. ``match`` after a
+    # leading-whitespace skip anchors it to the heading instead.
     tail = text[m.end():]
     fence_re = re.compile(
-        r"```(?:json)?\s*\n([\s\S]*?)\n```", re.MULTILINE,
+        r"[ \t]*\n(?:[ \t]*\n)*```(?:json)?[ \t]*\n([\s\S]*?)\n```",
+        re.MULTILINE,
     )
-    fm = fence_re.search(tail)
+    fm = fence_re.match(tail)
     if fm is None:
         # Heading present but no fenced block — strip the heading
         # alone so it doesn't end up in the artifact, but no

@@ -138,6 +138,91 @@ def test_next_pending_returns_none_when_empty():
     assert heartbeat.next_pending() is None
 
 
+# === claim_next_pending — atomic select-and-claim (race fix, finding H8) ===
+
+def test_claim_next_pending_marks_running_and_returns_task():
+    task = heartbeat.add_task(description="t", project_code="X", objective="o")
+    claimed = heartbeat.claim_next_pending()
+    assert claimed is not None
+    assert claimed["id"] == task["id"]
+    assert claimed["status"] == "running"
+    assert claimed["started"] is not None
+    # The on-disk task is now running (claimed), not still pending.
+    assert heartbeat.get_task(task["id"])["status"] == "running"
+
+
+def test_claim_next_pending_returns_none_when_empty():
+    assert heartbeat.claim_next_pending() is None
+
+
+def test_claim_next_pending_is_exclusive_no_double_dispatch():
+    """A single pending task must be claimable exactly once. A second claimer
+    (the concurrent CLI run-once vs. daemon tick) gets a *different* task or
+    None — never the same one twice."""
+    heartbeat.add_task(description="only", project_code="X", objective="o")
+    first = heartbeat.claim_next_pending()
+    second = heartbeat.claim_next_pending()
+    assert first is not None
+    assert second is None  # no other pending task to fall through to
+
+
+def test_claim_next_pending_concurrent_threads_claim_distinct_tasks():
+    """Two threads claiming concurrently against the same on-disk queue must
+    never both claim the same task. Regression for the select-then-claim race
+    where next_pending() released the lock before status flipped to running."""
+    import threading as _threading
+
+    for i in range(8):
+        heartbeat.add_task(
+            description=f"t{i}", project_code="X", objective="o", priority=i,
+        )
+    claimed_ids: list[str] = []
+    lock = _threading.Lock()
+    barrier = _threading.Barrier(4)
+
+    def _worker():
+        barrier.wait()
+        for _ in range(4):
+            t = heartbeat.claim_next_pending()
+            if t is not None:
+                with lock:
+                    claimed_ids.append(t["id"])
+
+    threads = [_threading.Thread(target=_worker) for _ in range(4)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    # Every claim must be of a distinct task — no id claimed twice.
+    assert len(claimed_ids) == len(set(claimed_ids)), "a task was claimed twice"
+    # All 8 tasks got claimed.
+    assert set(claimed_ids) == {t["id"] for t in heartbeat.list_tasks()}
+
+
+# === _new_id — collision resistance under fast dispatch (finding #26) ===
+
+def test_new_id_unique_under_fast_succession():
+    """_new_id() must not collide for ids minted in the same microsecond
+    window. The old strftime(...)[:18] dropped 2 of 6 microsecond digits,
+    giving ~100µs resolution → colliding task/cron ids under fast dispatch."""
+    ids = [heartbeat._new_id() for _ in range(2000)]
+    assert len(ids) == len(set(ids)), "duplicate id minted in tight loop"
+
+
+def test_new_id_starts_with_sortable_utc_timestamp():
+    """Ids stay sortable by creation time — the leading 14 chars are the
+    YYYYMMDDHHMMSS UTC stamp (next_pending tiebreaks on created order)."""
+    import re as _re
+
+    new = heartbeat._new_id()
+    assert _re.match(r"^\d{14}", new), new
+    # Earlier-minted id sorts before a later one.
+    first = heartbeat._new_id()
+    later = heartbeat._new_id()
+    assert first[:14] <= later[:14]
+
+
 # === parse_interval + requeue_recurring ===
 
 @pytest.mark.parametrize("s,expected_seconds", [
@@ -267,3 +352,50 @@ def test_heartbeat_start_stop_lifecycle():
     assert hb.is_running()
     hb.stop(timeout=2.0)
     assert not hb.is_running()
+
+
+# === CLI: heartbeat add --every validation ===
+
+def test_cli_heartbeat_add_rejects_malformed_every():
+    """A malformed --every interval must fail loudly, not queue a task that
+    can never recur (requeue_recurring silently returns None for it)."""
+    from typer.testing import CliRunner
+
+    from modulatio.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "heartbeat", "add", "recurring memo",
+            "--code", "STA",
+            "--objective", "Produce a memo.",
+            "--every", "30minutes",  # bad: parse_interval -> None
+        ],
+    )
+    assert result.exit_code == 1
+    assert "30minutes" in result.output
+    # nothing was queued
+    assert heartbeat.list_tasks() == []
+
+
+def test_cli_heartbeat_add_accepts_valid_every():
+    """A well-formed --every interval queues a recurring task."""
+    from typer.testing import CliRunner
+
+    from modulatio.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "heartbeat", "add", "recurring memo",
+            "--code", "STA",
+            "--objective", "Produce a memo.",
+            "--every", "6h",
+        ],
+    )
+    assert result.exit_code == 0
+    tasks = heartbeat.list_tasks()
+    assert len(tasks) == 1
+    assert tasks[0]["every"] == "6h"

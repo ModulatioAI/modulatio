@@ -13,6 +13,7 @@ can be cached later if it becomes a bottleneck.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from datetime import datetime, timezone
@@ -61,9 +62,53 @@ _TRANSITIONS_RE = re.compile(
 
 _store_lock = threading.Lock()
 
+_log = logging.getLogger("modulatio.store")
+
+# Errors raised while turning a file's bytes back into an entity. A single
+# corrupt file (truncated YAML front-matter, malformed transitions JSON, a
+# record that no longer validates) must never brick the read path for every
+# *other* valid entity in the project — so reads catch this union, quarantine
+# the file, and degrade to "missing" rather than propagating.
+_PARSE_ERRORS = (yaml.YAMLError, json.JSONDecodeError, ValueError, KeyError)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _is_quarantined(path: Path) -> bool:
+    """True for files quarantined by :func:`_quarantine_corrupt`.
+
+    Listings glob ``*.md`` and would otherwise re-pick the ``.broken.md``
+    record we just moved aside, re-fail to parse it, and re-quarantine it
+    under a fresh timestamped name on every read. Skip them outright.
+    """
+    return ".broken" in path.suffixes or path.name.endswith(".broken.md")
+
+
+def _quarantine_corrupt(path: Path, exc: Exception) -> None:
+    """Move a corrupt entity file aside so it stops bricking the read path.
+
+    The file is renamed to ``<name>.broken.md`` (preserving the operator's
+    bytes for manual recovery) and a structured warning is logged. If a
+    prior ``.broken.md`` already exists or the rename fails (read-only FS,
+    file vanished), we swallow the secondary error — the primary goal is
+    that the *read* degrades to "missing", which it does regardless.
+    """
+    _log.warning(
+        "corrupt entity file %s (%s: %s); quarantining as .broken.md and "
+        "treating as missing",
+        path, type(exc).__name__, exc,
+    )
+    try:
+        broken = path.with_suffix(".broken.md")
+        if broken.exists():
+            # Keep an existing quarantine record; stamp this one uniquely so
+            # repeated reads of the same still-corrupt name don't collide.
+            broken = path.with_suffix(f".broken.{int(_utcnow().timestamp())}.md")
+        path.rename(broken)
+    except OSError as move_exc:  # pragma: no cover - best-effort cleanup
+        _log.warning("could not quarantine %s: %s", path, move_exc)
 
 
 def _split_frontmatter(text: str) -> tuple[dict, str]:
@@ -105,10 +150,17 @@ def _read_entity(path: Path, model: type[BaseModel]) -> BaseModel | None:
     if not path.exists():
         return None
     text = path.read_text()
-    meta, body = _split_frontmatter(text)
-    body, transitions = _extract_transitions(body)
-    data = {**meta, "transitions": [t.model_dump() for t in transitions]}
-    entity = model.model_validate(data)
+    try:
+        meta, body = _split_frontmatter(text)
+        body, transitions = _extract_transitions(body)
+        data = {**meta, "transitions": [t.model_dump() for t in transitions]}
+        entity = model.model_validate(data)
+    except _PARSE_ERRORS as exc:
+        # One corrupt file must not take down the whole listing / read.
+        # Quarantine it and degrade to "missing" — callers already treat
+        # a None return (and list_* already skip None) as "not there".
+        _quarantine_corrupt(path, exc)
+        return None
     return entity
 
 
@@ -381,6 +433,8 @@ def list_tickets(
         return []
     results: list[Ticket] = []
     for p in sorted(d.glob(f"{project_code.upper()}-*.md")):
+        if _is_quarantined(p):
+            continue
         t = _read_entity(p, Ticket)
         if t is None:
             continue
@@ -503,6 +557,8 @@ def list_goals(
         return []
     results: list[Goal] = []
     for p in sorted(d.glob("*.md")):
+        if _is_quarantined(p):
+            continue
         g = _read_entity(p, Goal)
         if g is None:
             continue
@@ -544,6 +600,8 @@ def list_tasks(
         return []
     results: list[Task] = []
     for p in sorted(d.glob("*.md")):
+        if _is_quarantined(p):
+            continue
         t = _read_entity(p, Task)
         if t is None:
             continue

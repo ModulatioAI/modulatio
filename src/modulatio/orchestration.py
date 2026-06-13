@@ -1648,7 +1648,9 @@ def _draft_is_multifile(task: "Task", draft_path: "Path") -> bool:
         return True
     try:
         text = draft_path.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # A binary/media draft is not a multi-file text bundle; UnicodeDecodeError
+        # is a ValueError, not OSError. Treat it as single-artifact.
         return False
     return _DIFF_FILE_HEADER_RE.search(text) is not None
 
@@ -1933,6 +1935,11 @@ class Orchestrator:
         #: LLM/producer/QC work — so it doesn't serialize the parallel
         #: window. Uncontended (≈free) on the sequential path.
         self._store_lock = threading.Lock()
+        #: Serializes converse() turns on one project so two concurrent operator
+        #: sessions (e.g. TUI + ACP) don't interleave the durable conversation log
+        #: or read a half-written thread. Held for the whole turn — converse is an
+        #: operator-facing single-flight, never a parallel-wave hot path.
+        self._converse_lock = threading.Lock()
         #: Fix B (2026-06-03): serializes the activity_callback so concurrent wave
         #: workers can fire ActivityEvents LIVE (not buffer-til-merge) without
         #: racing a non-thread-safe subscriber — the operator sees producers work
@@ -2426,7 +2433,15 @@ class Orchestrator:
             response = chat_completion(
                 model=litellm_model, messages=messages, **kwargs,
             )
-            return response.choices[0].message.content
+            # Coalesce None content (a vision refusal, a safety stop, or a
+            # tool-call-only response all return content=None) and a missing
+            # choices list to "" — mirroring runners.run_llm_with_tools — so the
+            # caller never appends None into the conversation log (which would
+            # raise TypeError in _redact_secrets).
+            choices = getattr(response, "choices", None) or []
+            if not choices:
+                return ""
+            return choices[0].message.content or ""
 
     def _emit_ticket_opened(self, ticket, *, role: str) -> None:
         """Fire a ``ticket_opened`` ActivityEvent. Called from every
@@ -4657,9 +4672,18 @@ class Orchestrator:
             lines.append(f"- `{t.id}` [{t.priority.value}] {t.title}")
         return "\n".join(lines)
 
+    #: How many recent conversation turns the converse prompt carries. The
+    #: durable log keeps the full history; the PROMPT is windowed so it doesn't
+    #: grow unbounded across a long-lived session (every turn would otherwise
+    #: re-send the entire transcript, eventually overflowing the context budget).
+    _CONVERSE_PROMPT_WINDOW = 40
+
     def _build_converse_prompt(
         self, thread: list[dict], message: str, attachments: list | None = None
     ) -> str:
+        # Window to the most recent turns so the prompt is bounded.
+        if len(thread) > self._CONVERSE_PROMPT_WINDOW:
+            thread = thread[-self._CONVERSE_PROMPT_WINDOW:]
         lines = []
         for turn in thread:
             who = "Operator" if turn.get("role") == "operator" else "You (Leader)"
@@ -4851,8 +4875,20 @@ class Orchestrator:
                 return ("No job has run yet for this project — there's nothing for "
                         "the team to show. The operator can start one with "
                         "`/kickoff … /end`.")
-            goals = store.list_goals(self.project.code, run_id=run_id)
-            tasks = store.list_tasks(self.project.code, run_id=run_id)
+            # Best-effort observability: a single corrupt/half-written goal or
+            # task file must not darken the WHOLE team view (the read helpers
+            # raise on a malformed entity). Degrade to an empty list + a note.
+            read_warning = ""
+            try:
+                goals = store.list_goals(self.project.code, run_id=run_id)
+            except Exception as exc:
+                goals = []
+                read_warning += f"  (could not read goals: {exc})\n"
+            try:
+                tasks = store.list_tasks(self.project.code, run_id=run_id)
+            except Exception as exc:
+                tasks = []
+                read_warning += f"  (could not read tasks: {exc})\n"
             live = self._kickoff_active
             lines = [
                 f"Run {run_id} — "
@@ -4900,6 +4936,10 @@ class Orchestrator:
                 lines.append("Open tickets:")
                 for t in open_t[:10]:
                     lines.append(f"  - {t.id} [{t.priority.value}] {t.title}")
+            if read_warning:
+                lines.append("")
+                lines.append("Note — some state could not be read:")
+                lines.append(read_warning.rstrip())
             return "\n".join(lines)
 
         def read_deliverable(path: str, **_: object) -> str:
@@ -5146,59 +5186,81 @@ class Orchestrator:
         stub mode) returns a plain acknowledgement so the UI flow still works.
         """
         attachments = attachments or []
-        thread = self._load_conversation()
-        prompt = self._build_converse_prompt(thread, message, attachments)
-        op_record = message
-        if attachments:
-            op_record += "  [attached: " + ", ".join(
-                a.name for a in attachments) + "]"
-        self._append_conversation("operator", op_record)
-        self._emit_activity(role="leader", phase="leader_thinking", agent_id="leader")
+        # Serialize the whole turn so two concurrent operator sessions on one
+        # project can't interleave the durable log or race on shared state.
+        with self._converse_lock:
+            thread = self._load_conversation()
+            prompt = self._build_converse_prompt(thread, message, attachments)
+            op_record = message
+            if attachments:
+                op_record += "  [attached: " + ", ".join(
+                    a.name for a in attachments) + "]"
+            self._append_conversation("operator", op_record)
+            self._emit_activity(role="leader", phase="leader_thinking", agent_id="leader")
 
-        has_image = any(getattr(a, "kind", None) == "image" for a in attachments)
-        if self._resolve_chat_runner("leader") is None:
-            reply = (
-                "(offline — no leader model is wired here, so I can't think this "
-                f"through yet. You said: {message})"
-            )
-        elif has_image:
-            # Vision turn: a single multimodal completion (no tool-loop this
-            # turn — content blocks aren't carried through the text tool-loop).
-            reply = self._run_multimodal_leader(
-                prompt=prompt, attachments=attachments, chat_completion=None,
-            )
-        else:
-            from modulatio import vault as _vault
-            transcript = (
-                _vault.project_dir(self.project.code)
-                / "tool_calls" / "leader_converse.jsonl"
-            )
-            # Augment the registry with the Leader's own functions (run_job,
-            # …) for the duration of the loop. _run_chat_loop reads the
-            # registry through _active_tool_registry(), which honors this
-            # thread-local override.
-            augmented = dict(self._active_tool_registry())
-            augmented.update(self._leader_function_tools())
-            self._tls.tool_registry_override = augmented
+            has_image = any(getattr(a, "kind", None) == "image" for a in attachments)
+            # Pair the operator turn with a leader turn UNCONDITIONALLY: if the
+            # model call raises (API error, budget exhaustion, None-content
+            # TypeError, network), we still append a synthetic leader-error turn
+            # before re-raising so the durable log never ends on an unanswered
+            # operator turn (which would put two consecutive Operator turns in the
+            # next prompt).
             try:
-                reply = self._run_chat_loop(
-                    prompt=prompt,
-                    tool_loadout=tuple(augmented.keys()),
-                    role="leader",
-                    agent_id="leader",
-                    task_id="conversation",
-                    transcript_path=transcript,
-                    skill_name="leader-converse",
-                    needs_network=True,
-                    budget_role="leader-chat",
-                    permission_callback=permission_callback,
+                if self._resolve_chat_runner("leader") is None:
+                    reply = (
+                        "(offline — no leader model is wired here, so I can't think "
+                        f"this through yet. You said: {message})"
+                    )
+                elif has_image:
+                    # Vision turn: a single multimodal completion (no tool-loop this
+                    # turn — content blocks aren't carried through the text tool-loop).
+                    reply = self._run_multimodal_leader(
+                        prompt=prompt, attachments=attachments, chat_completion=None,
+                    )
+                else:
+                    from modulatio import vault as _vault
+                    transcript = (
+                        _vault.project_dir(self.project.code)
+                        / "tool_calls" / "leader_converse.jsonl"
+                    )
+                    # Augment the registry with the Leader's own functions (run_job,
+                    # …) for the duration of the loop. _run_chat_loop reads the
+                    # registry through _active_tool_registry(), which honors this
+                    # thread-local override.
+                    augmented = dict(self._active_tool_registry())
+                    augmented.update(self._leader_function_tools())
+                    self._tls.tool_registry_override = augmented
+                    try:
+                        reply = self._run_chat_loop(
+                            prompt=prompt,
+                            tool_loadout=tuple(augmented.keys()),
+                            role="leader",
+                            agent_id="leader",
+                            task_id="conversation",
+                            transcript_path=transcript,
+                            skill_name="leader-converse",
+                            needs_network=True,
+                            budget_role="leader-chat",
+                            permission_callback=permission_callback,
+                        )
+                    finally:
+                        self._tls.tool_registry_override = None
+            except Exception as exc:
+                self._append_conversation(
+                    "leader",
+                    f"(the turn failed before I could reply: {exc})",
                 )
-            finally:
-                self._tls.tool_registry_override = None
+                self._emit_activity(
+                    role="leader", phase="leader_answered", agent_id="leader",
+                )
+                raise
 
-        self._append_conversation("leader", reply)
-        self._emit_activity(role="leader", phase="leader_answered", agent_id="leader")
-        return reply
+            # Defensive: never persist None (a misbehaving runner path) — keep the
+            # log a clean string thread.
+            reply = reply if reply is not None else ""
+            self._append_conversation("leader", reply)
+            self._emit_activity(role="leader", phase="leader_answered", agent_id="leader")
+            return reply
 
     def _leader_verify_tool_loadout_skill(self) -> "skills.Skill | None":
         """Return the ``leader-verify`` skill if it declares a non-empty
@@ -7522,7 +7584,10 @@ class Orchestrator:
             return False
         try:
             body = draft_path.read_text()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # A binary/media artifact (zip/mp4/rendered pdf/docx) isn't
+            # text-patchable; UnicodeDecodeError is a ValueError, not OSError.
+            # Fall through to the caller's graceful terminal.
             return False
         if len(body.strip()) < self._QC_FIX_TRIVIAL_DRAFT_CHARS:
             # Nothing coherent to patch (e.g. a no-commit storm). The
@@ -8934,6 +8999,42 @@ class Orchestrator:
         # budget-exhausted-BLOCKER.
         if any(t.status == TaskStatus.COMPLETED for t in tasks):
             self._leader_verify_goal(goal, tasks, summary)
+        else:
+            # The redo produced ZERO completed tasks (every task landed
+            # QC_REJECTED/BLOCKED again). Re-verify is skipped — there is nothing
+            # for the Leader to judge — but the goal must STILL reach a terminal
+            # state. Without this it stays permanently IN_PROGRESS: the caller in
+            # _leader_verify_goal already returned right after dispatching us, so
+            # the COMPLETED transition there is never reached. Settle it here with
+            # a reservation so the goal terminates and surfaces in the PQR rather
+            # than silently hanging the run.
+            if goal.status not in (GoalStatus.COMPLETED, GoalStatus.BLOCKED):
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        "The Leader auto-redo produced no completed work (every "
+                        "task was rejected again). The goal is settled as-is; the "
+                        f"Leader's concern stands: {leader_rationale[:200]}"
+                    ),
+                    "suggestion": "Human review REQUIRED before relying on this goal.",
+                })
+                goal.transitions.append(
+                    StateTransition(
+                        from_state=goal.status.value,
+                        to_state=GoalStatus.COMPLETED.value,
+                        actor="leader",
+                        rationale=(
+                            "leader auto-redo settled: no task completed on the "
+                            f"redo pass | {leader_rationale[:160]} | report "
+                            f"{report_path.name}"
+                        ),
+                    )
+                )
+                goal.status = GoalStatus.COMPLETED
+                store.save_goal(self.project.code, goal, run_id=self.project.run_id)
+                self._emit_activity(
+                    role="leader", phase="leader_verify_ended", agent_id="leader",
+                )
 
     def _task_artifact_path(self, task: "Task") -> "Path | None":
         """The on-disk path of a task's produced artifact, via the two-tier
@@ -8961,7 +9062,11 @@ class Orchestrator:
             return None
         try:
             return candidate.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # A binary/media deliverable raises UnicodeDecodeError (a ValueError,
+            # not OSError); treat it as "no readable artifact" so the redo-stall
+            # fingerprint and any caller degrade gracefully. Mirrors the guard in
+            # _goal_blind_deliverables.
             return None
 
     # ── §4: Leader team-observability read helpers ──────────────────────────
@@ -10345,6 +10450,82 @@ class Orchestrator:
 
         return redo_goal_ids
 
+    def _run_reopened_tasks(
+        self,
+        goal: Goal,
+        tasks: list[Task],
+        summary: RunSummary,
+        *,
+        initial_corrective_notes: str = "",
+    ) -> None:
+        """Execute a goal's reopened tasks dependency-aware, mirroring the
+        initial pass + ``_leader_auto_redo`` (not store-list order).
+
+        The two re-run lanes (decline-driven ``_reexecute_goal`` and the
+        budget-refresh ``_auto_resume_refreshable_goals``) historically iterated
+        tasks in store-list order and called ``_run_task_with_redo`` directly —
+        with NO dependency ordering and NO dep-failure cascade, so a task could
+        run before its upstream had (re)produced its artifact, drafting against
+        stale/missing input. Route both through the SAME machinery the initial
+        pass uses: the concurrent wave executor (dep-gated, cascades failures)
+        when enabled, else a topological sort with a live dep-gate.
+        """
+        if self._concurrent_waves_enabled(self.project):
+            task_map = {t.id: t for t in tasks}
+            self._run_task_waves(
+                goal, tasks, summary, task_map,
+                initial_corrective_notes=initial_corrective_notes,
+            )
+            return
+
+        # Sequential fallback: order topologically and gate each task on its
+        # deps. A task whose dep FAILED (terminal-fail) cascades to BLOCKED with
+        # no producer call; a task whose dep merely hasn't completed is skipped
+        # this pass (the topo order means that should not happen for runnable
+        # tasks, but the gate keeps us honest against a dep that failed earlier
+        # in the same pass).
+        task_map = {t.id: t for t in tasks}
+        try:
+            ordered = _topological_sort(tasks)
+        except _DependencyError:
+            # A cycle/unknown-ref here mirrors the initial-pass validator; fall
+            # back to store order rather than aborting the resume entirely.
+            ordered = list(tasks)
+        for t in ordered:
+            if self.abort_event.is_set():
+                self._record_abort(summary)
+                return
+            if not _runnable(t):
+                continue
+            fd = _dep_failed(t, task_map)
+            if fd:
+                t.transitions.append(StateTransition(
+                    from_state=t.status.value,
+                    to_state=TaskStatus.BLOCKED.value,
+                    actor="planner",
+                    rationale=f"dependency failed: {fd}; producer skipped",
+                ))
+                t.status = TaskStatus.BLOCKED
+                summary.errors.append(
+                    f"{t.id}: blocked by failed dependency {fd}"
+                )
+                store.save_task(self.project.code, t, run_id=self.project.run_id)
+                continue
+            # A dep that hasn't COMPLETED yet (e.g. itself reopened but ordered
+            # after) keeps this task waiting — skip it this pass rather than
+            # draft against missing input.
+            unready = [
+                d for d in t.depends_on
+                if task_map.get(d) is not None
+                and task_map[d].status != TaskStatus.COMPLETED
+            ]
+            if unready:
+                continue
+            self._run_task_with_redo(
+                t, summary, initial_corrective_notes=initial_corrective_notes,
+            )
+            store.save_task(self.project.code, t, run_id=self.project.run_id)
+
     def _reexecute_goal(self, goal: Goal, summary: RunSummary) -> None:
         """Re-run PENDING tasks for ``goal`` and re-verify. Used by the
         step 6 wind-down loop to handle decline-driven redo within the
@@ -10378,8 +10559,14 @@ class Orchestrator:
                 )
             )
             store.save_task(self.project.code, t, run_id=self.project.run_id)
+
+        # NOTE (0.9.0 debug): the wave-1 ultracode fix routed these through a
+        # dependency-gated _run_reopened_tasks helper, but that implementation
+        # was botched (it triggered a fix-window thread leak that hung the suite).
+        # Reverted to the original serial redo; the dependency-ordering finding is
+        # real and re-filed for a careful dedicated fix.
+        for t in pending:
             self._run_task_with_redo(t, summary)
-            store.save_task(self.project.code, t, run_id=self.project.run_id)
 
         # Reload tasks to reflect status changes from execution.
         tasks = store.list_tasks(self.project.code, goal_id=goal.id, run_id=self.project.run_id)
@@ -10487,9 +10674,10 @@ class Orchestrator:
                     t.producer_mode = "generate"
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
 
+            # NOTE (0.9.0 debug): reverted from the botched _run_reopened_tasks
+            # helper (see _reexecute_goal) to the original serial redo.
             for t in tasks:
                 self._run_task_with_redo(t, summary)
-                store.save_task(self.project.code, t, run_id=self.project.run_id)
 
             if any(t.status == TaskStatus.COMPLETED for t in tasks):
                 self._leader_verify_goal(goal, tasks, summary)
@@ -10915,13 +11103,30 @@ class Orchestrator:
         # Slice #7e: before decomposing a new objective, resume any
         # previously-blocked goals whose retry budget has refreshed.
         # Keeps work moving overnight without human intervention.
-        self._auto_resume_refreshable_goals(summary)
+        #
+        # Both intake scans read PRIOR-run goal/task/ticket entities the
+        # operator may have hand-edited or that were half-written by a crashed
+        # run. A single corrupt entity raises from the store's read path and —
+        # unprotected — aborts the ENTIRE kickoff before any new work begins.
+        # Degrade to a recorded warning so the new objective still decomposes;
+        # the corrupt resume/drain is surfaced, not silently swallowed.
+        try:
+            self._auto_resume_refreshable_goals(summary)
+        except Exception as exc:
+            summary.errors.append(
+                f"auto-resume skipped — could not read prior state: {exc}"
+            )
 
         # Step 5: pick up any human decisions made on approval-required
         # tickets between runs — approvals close their goals before this
         # kickoff plans new work, declines close the ticket while leaving
         # the goal/task redo-ready (state set by the store on decision).
-        self._drain_decided_tickets(summary)
+        try:
+            self._drain_decided_tickets(summary)
+        except Exception as exc:
+            summary.errors.append(
+                f"ticket drain skipped — could not read prior state: {exc}"
+            )
 
         goals = self._leader_decompose(
             objective, attachments=attachments, chat_completion=chat_completion,

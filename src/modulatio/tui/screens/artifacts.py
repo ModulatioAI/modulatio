@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Button, Label, ListItem, ListView, Static
@@ -176,14 +177,23 @@ class ArtifactsScreen(Vertical):
         path = self._paths[idx]
         preview = self.query_one("#artifact-preview", Static)
         try:
-            text = path.read_text()
-        except OSError as exc:
+            # errors="replace" so a surfaced non-UTF-8 file (e.g. a
+            # latin-1 .csv or a .txt with stray binary bytes) renders a
+            # best-effort preview instead of raising UnicodeDecodeError
+            # (a ValueError, not OSError) up through the highlight/select
+            # handler and crashing the app.
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError) as exc:
             preview.update(f"(could not read {path.name}: {exc})")
             return
         # Truncate long files for preview — full content is still on disk.
         if len(text) > 2000:
             text = text[:2000] + "\n…"
-        preview.update(text)
+        # Wrap in a Rich Text so file content is rendered VERBATIM and is
+        # never re-parsed as console markup — bracket sequences like
+        # ``[/]`` (ubiquitous in code/regex/JSON paths) would otherwise
+        # raise MarkupError and crash the preview.
+        preview.update(Text(text))
 
     # ── Export panel toggle ─────────────────────────────────────────────
 

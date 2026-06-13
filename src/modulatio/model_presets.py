@@ -38,7 +38,6 @@ Modulatio ships agnostic; users add what they want via setup wizard or
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 from modulatio import config
@@ -80,13 +79,13 @@ def load_presets() -> dict[str, dict[str, Any]]:
 
 
 def save_presets(presets: dict[str, dict[str, Any]]) -> None:
-    """Atomic write of the registry. chmod 600 (auth_config may carry env
-    var names users consider sensitive)."""
-    config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = PRESETS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(presets, indent=2))
-    os.replace(tmp, PRESETS_FILE)
-    PRESETS_FILE.chmod(0o600)
+    """Atomic write of the registry, 0o600 throughout (auth_config may carry
+    env var names users consider sensitive).
+
+    Routes through :func:`config.write_secret_file`: the temp file is opened
+    with mode 0o600 directly (no world-readable window between create and
+    chmod) and unlinked on write failure (no leaked ``.tmp``)."""
+    config.write_secret_file(PRESETS_FILE, json.dumps(presets, indent=2))
 
 
 def add_preset(

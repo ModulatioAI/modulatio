@@ -243,3 +243,59 @@ def test_run_now_dispatches_immediately_without_advancing_next_run():
 
 def test_run_now_unknown_job_returns_none():
     assert cron.run_now("not-a-real-id") is None
+
+
+# === Interval drift regression (ledger finding #27) ===
+
+def test_dispatch_due_interval_no_drift_from_scheduled_time():
+    """Interval jobs must advance from the SCHEDULED next_run, not the dispatch
+    instant — otherwise each coarse-poll fire pushes the schedule later forever."""
+    j = cron.add(name="hourly_job", schedule="1h", project_code="X", objective="o")
+    # Scheduled to run at T; the daemon only notices it 40s late at `now`.
+    scheduled = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=40)
+    now = scheduled + timedelta(seconds=40)
+    cron.update(j["id"], next_run=scheduled.isoformat(timespec="seconds"))
+
+    cron.dispatch_due(now=now)
+
+    refreshed = cron.get(j["id"])
+    new_next = datetime.fromisoformat(refreshed["next_run"])
+    # Anchored to the scheduled time, so exactly one interval later — NOT now+1h.
+    assert new_next == scheduled + timedelta(hours=1)
+    # And critically NOT drifted by the 40s dispatch lag.
+    assert new_next != now + timedelta(hours=1)
+
+
+def test_dispatch_due_interval_no_cumulative_drift_over_many_fires():
+    """Over repeated fires with a constant poll lag, the schedule must stay on
+    the original grid rather than accumulate the lag each time."""
+    j = cron.add(name="grid", schedule="30m", project_code="X", objective="o")
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    cron.update(j["id"], next_run=start.isoformat(timespec="seconds"))
+
+    lag = timedelta(seconds=17)
+    expected = start
+    for _ in range(5):
+        expected = expected + timedelta(minutes=30)
+        # daemon polls `lag` after the slot became due
+        scheduled = datetime.fromisoformat(cron.get(j["id"])["next_run"])
+        cron.dispatch_due(now=scheduled + lag)
+        assert datetime.fromisoformat(cron.get(j["id"])["next_run"]) == expected
+
+
+def test_dispatch_due_interval_catches_up_past_now_after_downtime():
+    """After a long daemon outage, the advanced next_run must be strictly in the
+    future (skip missed slots) — not stuck in the past causing immediate refire."""
+    j = cron.add(name="catchup", schedule="10m", project_code="X", objective="o")
+    scheduled = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=3)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    cron.update(j["id"], next_run=scheduled.isoformat(timespec="seconds"))
+
+    cron.dispatch_due(now=now)
+
+    refreshed = cron.get(j["id"])
+    new_next = datetime.fromisoformat(refreshed["next_run"])
+    assert new_next > now
+    # Still on the original 10-minute grid relative to the anchor.
+    secs_from_anchor = (new_next - scheduled).total_seconds()
+    assert secs_from_anchor % 600 == 0

@@ -191,6 +191,61 @@ def test_task_roundtrip_and_filter(project: Path):
     assert all(t.description.startswith("draft essay") for t in tasks)
 
 
+def test_corrupt_task_file_does_not_brick_listing(project: Path):
+    """F1 (minimax): a single corrupt entity file must not take down the read
+    path for every *other* valid entity. Corrupt one task's YAML front-matter
+    out of three; list_tasks must still return the two valid ones, get_task on
+    the corrupt id degrades to None, and the bad file is quarantined."""
+    from uuid import uuid4
+    pid = uuid4()
+    for tid in ("TST-T-A", "TST-T-B", "TST-T-C"):
+        store.save_task(
+            PROJECT_CODE,
+            Task(id=tid, project_id=pid, goal_id="TST-G-001", description="d"),
+        )
+
+    # Corrupt ONLY T-B's front-matter (unclosed flow sequence -> YAMLError).
+    bad_path = store._task_path(PROJECT_CODE, "TST-T-B")
+    tail = bad_path.read_text().split("---", 2)[-1]
+    bad_path.write_text("---\nbroken: [unclosed\n---\n" + tail)
+
+    tasks = store.list_tasks(PROJECT_CODE)
+    assert sorted(t.id for t in tasks) == ["TST-T-A", "TST-T-C"]
+
+    # The corrupt one degrades to "missing" rather than raising.
+    assert store.get_task(PROJECT_CODE, "TST-T-B") is None
+
+    # And it has been quarantined out of the way (original gone, .broken kept).
+    assert not bad_path.exists()
+    assert bad_path.with_suffix(".broken.md").exists()
+
+
+def test_corrupt_transitions_json_quarantined(project: Path):
+    """The transitions JSON block is a second parse seam; malformed JSON there
+    must degrade the same way as bad front-matter, not raise."""
+    from uuid import uuid4
+    pid = uuid4()
+    g = Goal(
+        id="TST-G-J",
+        project_id=pid,
+        description="g",
+        success_criteria="c",
+    )
+    store.save_goal(PROJECT_CODE, g)
+    path = store._goal_path(PROJECT_CODE, "TST-G-J")
+    # Append a malformed transitions block.
+    path.write_text(
+        path.read_text()
+        + "\n<!-- modulatio:transitions -->\n```json\n{not valid json,\n```\n"
+        "<!-- /modulatio:transitions -->\n"
+    )
+
+    assert store.get_goal(PROJECT_CODE, "TST-G-J") is None
+    assert store.list_goals(PROJECT_CODE) == []
+    assert not path.exists()
+    assert path.with_suffix(".broken.md").exists()
+
+
 def test_task_omits_deprecated_assignee_specialist_on_dump():
     """D2: new tasks never emit assignee_specialist (Field exclude=True)."""
     import json as _json

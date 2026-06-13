@@ -935,6 +935,13 @@ def heartbeat_add(
 ) -> None:
     """Queue an objective for the heartbeat to dispatch."""
     deps = [d.strip() for d in depends_on.split(",") if d.strip()] if depends_on else []
+    if every is not None and heartbeat.parse_interval(every) is None:
+        typer.echo(
+            f"Invalid --every interval {every!r}. "
+            "Expected a value like 30m, 6h, or 1d.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     task = heartbeat.add_task(
         description=description,
         project_code=code,

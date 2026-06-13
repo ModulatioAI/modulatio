@@ -1488,7 +1488,18 @@ def _run_execution_loop(
                                 project.code, project.run_id
                             ) or ""
                         )
-                        _pressure = len(_prior_state.split()) / reflect_effective_cap
+                        # Token-native pressure: numerator and denominator
+                        # MUST share units. The denominator
+                        # (reflect_effective_cap) is a model TOKEN budget, so
+                        # the numerator must be the model-aware token count of
+                        # the accumulated state — not a whitespace word count,
+                        # which diverges arbitrarily by artifact (code/JSON/CJK)
+                        # and silently under-fires the gate. The TOKEN is the
+                        # unit; producers/artifacts are agnostic.
+                        _prior_tokens = tool_summarization.count_tokens(
+                            project.leader_model, text=_prior_state
+                        )
+                        _pressure = _prior_tokens / reflect_effective_cap
                         if _pressure < project.compression_pressure_threshold:
                             _pressure_skip = True
                     if _pressure_skip:

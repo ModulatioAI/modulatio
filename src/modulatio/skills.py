@@ -306,12 +306,26 @@ def load_with_metadata(name: str, project_code: str | None = None) -> Skill:
 def _maybe_supersede(name: str, override: Skill, seed_path: Path) -> Skill:
     """Return ``override`` unless it is a STALE codification — a machine
     codification whose stamped ``base_seed_hash`` no longer matches the
-    current bundled seed — in which case return the seed (task #84)."""
+    current bundled seed — in which case return the seed (task #84).
+
+    A WIN/USER codification (``provenance in ('win', 'user')``, #81/#H18) is
+    EXEMPT: it carries genuinely-learned content (a ``## Learned (from
+    recovery)`` technique block) appended on top of the seed, so a seed bump
+    must never discard it. Only a mechanical FAIL codification is refreshable
+    by a newer seed."""
     if not seed_path.exists():
         return override
     if not _is_codified(override) or override.base_seed_hash is None:
         # User override, or a legacy codification with no provenance stamp:
         # honor it. (Legacy ones can't be proven stale; preserve learning.)
+        return override
+    if override.provenance in ("win", "user"):
+        # A WIN codification appends a genuinely-learned recovery technique
+        # ('## Learned (from recovery)') on top of the seed body — it is NOT a
+        # mechanical fail-codification the seed can refresh. Superseding it on a
+        # seed change would silently discard learned work (the same money the
+        # win loop spent earning it). Treat win/user provenance as sacred, like
+        # an explicit ``user_override`` — a seed bump never destroys it.
         return override
     current = seed_content_hash(name)
     if override.base_seed_hash == current:

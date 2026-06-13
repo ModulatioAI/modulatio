@@ -151,6 +151,21 @@ def _load_existing_state() -> dict:
     if any(v is not None for v in pre_caps.values()):
         state["budget_caps"] = pre_caps
 
+    # Re-invocation pre-fill for the agents step (step 4). Split the saved
+    # team template into the structural pair (Leader + QC) and the producer
+    # pool by ``tier``, so the agent step starts on the current picks with
+    # edit/keep semantics instead of an empty re-provision. Tier-based (not
+    # positional) so it stays robust to template ordering. Unknown tiers are
+    # dropped from the pre-fill rather than misclassified.
+    team = config.load_team_template()
+    if team:
+        triad = [a for a in team if a.get("tier") in ("leader", "qc")]
+        workers = [a for a in team if a.get("tier") == "producer"]
+        if triad:
+            state["triad_agents"] = triad
+        if workers:
+            state["worker_agents"] = workers
+
     return state
 
 

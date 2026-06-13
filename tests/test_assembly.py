@@ -742,6 +742,64 @@ def test_framing_toc_matches_renumbered_body(tmp_path):
     assert "# Story 1" in r.content and "# Story 2" in r.content and "# Story 7" not in r.content
 
 
+def test_framing_toc_excludes_missing_unit(tmp_path):
+    """The TOC must list only units that land in the body — a missing/unresolved unit
+    appears in neither (no phantom Contents entry for content that isn't there)."""
+    _units(tmp_path, **{"a.md": "# Alpha\n\nx", "c.md": "# Gamma\n\nz"})
+    # b.md is declared but never written → missing.
+    m = assembly.apply_framing({"units": ["a.md", "b.md", "c.md"]}, tmp_path,
+                               "document", title="Anthology",
+                               required_structure=("title", "toc"))
+    tp = m["title_page"]
+    assert "Alpha" in tp and "Gamma" in tp and "Beta" not in tp
+    # Exactly two Contents entries, renumbered 1..2 to match the body's two blocks.
+    assert "1. Alpha" in tp and "2. Gamma" in tp and "3." not in tp
+    r = assembly.assemble(m, tmp_path)
+    assert "# Alpha" in r.content and "# Gamma" in r.content
+    assert r.missing == ["b.md"]
+
+
+def test_framing_toc_excludes_oversized_unit(tmp_path, monkeypatch):
+    """A unit over the per-unit byte cap is skipped by the body — the TOC must skip it
+    too, so the two never diverge."""
+    monkeypatch.setattr(assembly, "_MAX_UNIT_BYTES", 20)
+    _units(tmp_path, **{
+        "a.md": "# Alpha\n\nx",
+        "big.md": "# Huge\n\n" + ("y" * 100),   # > 20 bytes → skipped by the body
+        "c.md": "# Gamma\n\nz",
+    })
+    m = assembly.apply_framing({"units": ["a.md", "big.md", "c.md"]}, tmp_path,
+                               "document", title="Anthology",
+                               required_structure=("title", "toc"))
+    tp = m["title_page"]
+    assert "Alpha" in tp and "Gamma" in tp and "Huge" not in tp
+    r = assembly.assemble(m, tmp_path)
+    assert "# Huge" not in r.content
+    # TOC headings == body headings (both exclude the oversized unit).
+    assert "1. Alpha" in tp and "2. Gamma" in tp
+
+
+def test_framing_toc_truncates_at_total_cap_like_body(tmp_path, monkeypatch):
+    """When the total-byte cap stops the body before the last units, the TOC stops at
+    the SAME point — it never lists units the cap truncated out of the body."""
+    monkeypatch.setattr(assembly, "_MAX_TOTAL_BYTES", 40)
+    _units(tmp_path, **{
+        "a.md": "# Alpha\n\n" + ("x" * 15),
+        "b.md": "# Beta\n\n" + ("y" * 15),
+        "c.md": "# Gamma\n\n" + ("z" * 15),   # pushes total over 40 → dropped
+    })
+    m = assembly.apply_framing(
+        {"units": ["a.md", "b.md", "c.md"], "separator": "\n"}, tmp_path,
+        "document", title="Anthology", required_structure=("title", "toc"))
+    tp = m["title_page"]
+    assert "Alpha" in tp and "Gamma" not in tp
+    r = assembly.assemble(m, tmp_path)
+    assert "# Gamma" not in r.content
+    # The body kept Alpha (and possibly Beta); the TOC lists exactly those, not Gamma.
+    body_has_beta = "# Beta" in r.content
+    assert ("Beta" in tp) == body_has_beta
+
+
 def test_document_digest_fail_open_on_missing_unit(tmp_path):
     d = assembly.build_deliverable_digest(
         {"units": ["ghost.md"]}, ["ghost.md"], tmp_path, strategy="document")

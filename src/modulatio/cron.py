@@ -206,6 +206,42 @@ def compute_next_run(parsed: dict, *, after: Optional[datetime] = None) -> datet
     raise ValueError(f"Unknown schedule kind: {kind}")
 
 
+def _advance_next_run(parsed: dict, prev_next_run: Optional[str], now: datetime) -> datetime:
+    """Advance an already-due job's ``next_run`` without drift.
+
+    Calendar kinds (daily/weekly/monthly/hourly) anchor to wall-clock, so
+    ``compute_next_run(after=now)`` already lands on the correct slot. But
+    **interval** kinds advance by a fixed delta — anchoring that delta to the
+    dispatch instant (``now``) makes the schedule drift later on every fire,
+    because the daemon polls coarsely and only notices a due job some seconds
+    after its scheduled time. Anchor the next interval to the *scheduled*
+    ``prev_next_run`` instead, then skip forward in whole intervals until we
+    land strictly after ``now`` (catches up cleanly after daemon downtime
+    without firing the missed slots in a tight loop).
+    """
+    if parsed["kind"] != "interval":
+        return compute_next_run(parsed, after=now)
+
+    step = parsed["interval_seconds"]
+    # A zero/negative interval can't be anchored sanely — fall back to now+delta.
+    if step <= 0 or not prev_next_run:
+        return compute_next_run(parsed, after=now)
+    try:
+        anchor = datetime.fromisoformat(prev_next_run)
+    except (ValueError, TypeError):
+        return compute_next_run(parsed, after=now)
+
+    delta = timedelta(seconds=step)
+    candidate = anchor + delta
+    if candidate <= now:
+        # Skip whole intervals forward in one jump (no per-slot loop).
+        missed = (now - anchor).total_seconds() // step
+        candidate = anchor + delta * (int(missed) + 1)
+        while candidate <= now:  # guard against float rounding on huge gaps
+            candidate += delta
+    return candidate
+
+
 # === Job CRUD ===
 
 def add(
@@ -371,7 +407,7 @@ def dispatch_due(*, now: Optional[datetime] = None) -> list[dict]:
         # Advance next_run regardless — a failed dispatch shouldn't pin us at the same minute forever
         parsed = parse_schedule(job["schedule"])
         if parsed is not None:
-            new_next = compute_next_run(parsed, after=now)
+            new_next = _advance_next_run(parsed, job.get("next_run"), now)
             update(job["id"], last_run=now.isoformat(timespec="seconds"), last_status="ok", next_run=new_next.isoformat(timespec="seconds"))
         fired.append(job)
     return fired

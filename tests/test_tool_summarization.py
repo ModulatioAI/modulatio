@@ -574,6 +574,49 @@ def test_truncate_tool_result_handles_dense_tokenization():
     assert ts.count_tokens("gpt-4o", text=out) <= 500
 
 
+def test_truncate_tool_result_fits_extremely_dense_tokenization(monkeypatch) -> None:
+    """Regression (opus #25): the tighten loop must terminate on FIT, not on a
+    fixed iteration count. With a tokenizer that packs several tokens per char,
+    the old 8-step ×0.8 shrink exits while still over budget (seed max_tokens*4
+    chars -> ~2× over after 8 steps). The fix loops until the kept head genuinely
+    fits, so the returned head never exceeds ``max_tokens``."""
+    from modulatio import tool_summarization as ts
+
+    # 3 tokens per character — far denser than the 4-chars/token seed assumes.
+    def dense_count(model, *, text=None, messages=None):
+        if text is not None:
+            return len(text) * 3
+        return sum(len(str(m.get("content") or "")) for m in (messages or [])) * 3
+
+    monkeypatch.setattr(ts, "count_tokens", dense_count)
+
+    big = "X" * 50_000
+    max_tokens = 400
+    out = ts.truncate_tool_result(big, call_id="dense", max_tokens=max_tokens, model="gpt-4o")
+    # Recover the kept head (everything after the marker block) and assert it
+    # genuinely fits under the same dense counter the function used.
+    head = out.split("\n\n", 1)[-1]
+    assert dense_count("gpt-4o", text=head) <= max_tokens
+    assert "read_tool_result" in out and "dense" in out
+
+
+def test_truncate_tool_result_impossible_budget_drops_head(monkeypatch) -> None:
+    """If even a single char exceeds ``max_tokens`` (pathologically tiny budget),
+    the loop must not spin — it drops the head and still returns the pointer."""
+    from modulatio import tool_summarization as ts
+
+    def dense_count(model, *, text=None, messages=None):
+        if text is not None:
+            return max(1, len(text) * 1000)  # one char already blows any budget
+        return 1
+
+    monkeypatch.setattr(ts, "count_tokens", dense_count)
+    out = ts.truncate_tool_result("payload" * 100, call_id="z", max_tokens=1, model=None)
+    head = out.split("\n\n", 1)[-1]
+    assert head == ""
+    assert "read_tool_result" in out and "z" in out
+
+
 def test_runner_truncates_large_result_when_no_summarizer(tmp_path: Path) -> None:
     """The live Iran scenario: enabled config, tool_calls_dir set, but NO
     summarizer_model. A large fetch must be TRUNCATED on arrival (not kept

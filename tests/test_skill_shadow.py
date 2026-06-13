@@ -158,3 +158,52 @@ def test_save_round_trips_user_override(dirs):
     written = (shared / "s.md").read_text()
     assert "user_override: true" in written
     assert skills.load_with_metadata("s").user_override is True
+
+
+# ── #H18: win-codified learning is sacred against a seed change ────────────
+
+
+def test_win_codification_not_superseded_by_seed(dirs):
+    """A WIN codification (version + STALE base_seed_hash + provenance:win)
+    carries a genuinely-learned '## Learned (from recovery)' technique appended
+    on the seed body. A seed bump must NOT discard it — the seed can refresh a
+    mechanical FAIL codification, but never a win. Regression for H18."""
+    seed, shared = dirs
+    _write(seed, "s", "NEW IMPROVED SEED BODY")
+    _write(shared, "s",
+           "SEED BODY\n\n## Learned (from recovery)\n\nUse a context manager.",
+           version="2", base_seed_hash="deadbeefdeadbeef",
+           provenance="win", learned_from="sig|x|y|z")
+    loaded = skills.load_with_metadata("s")
+    assert "## Learned (from recovery)" in loaded.prompt_template
+    assert "Use a context manager." in loaded.prompt_template
+
+
+def test_win_codification_sacred_when_project_local(tmp_path, monkeypatch):
+    """The win path writes PROJECT-LOCAL. A stale project-local win codification
+    is honored over the seed too (the win path is the real-world trigger)."""
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    monkeypatch.setattr(skills, "_SEED_SKILLS_ROOT", seed)
+    skills._WARNED_SUPERSEDED.clear()
+    _write(seed, "coding", "NEW SEED BODY")
+
+    proj = tmp_path / "proj" / "PROJ"
+    (proj / "skills").mkdir(parents=True)
+    monkeypatch.setattr(skills, "project_dir", lambda code: proj)
+    _write(proj / "skills", "coding",
+           "OLD SEED\n\n## Learned (from recovery)\n\nGuard the fork.",
+           version="2", base_seed_hash="deadbeefdeadbeef", provenance="win")
+
+    loaded = skills.load_with_metadata("coding", project_code="PROJ")
+    assert "Guard the fork." in loaded.prompt_template
+
+
+def test_fail_codification_still_superseded_by_seed(dirs):
+    """A FAIL codification (no win/user provenance) is still refreshable by a
+    newer seed — the H18 fix must not over-spare mechanical codifications."""
+    seed, shared = dirs
+    _write(seed, "s", "NEW IMPROVED SEED BODY")
+    _write(shared, "s", "OLD FAIL CODIFIED BODY",
+           version="2", base_seed_hash="deadbeefdeadbeef", provenance="fail")
+    assert skills.load_with_metadata("s").prompt_template.strip() == "NEW IMPROVED SEED BODY"

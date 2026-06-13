@@ -821,10 +821,22 @@ class ModulatioApp(App):
             self.push_screen(BugReportModal())
             return
         if side_effect == "refresh_all_tabs":
-            # Best-effort: trigger on_show on every screen with that hook.
-            for screen in self.query("Screen"):
+            # Best-effort: trigger ``on_show`` on every tab panel that defines
+            # it. The tab panels are ``Vertical`` subclasses (not Textual
+            # ``Screen`` widgets), so querying ``"Screen"`` matched only the
+            # app's screen container and refreshed nothing. Walk the whole
+            # widget tree and invoke ``on_show`` on any widget whose own class
+            # defines it — product/panel-agnostic, no hardcoded tab list.
+            seen: set[int] = set()
+            for widget in self.query("*"):
+                if id(widget) in seen:
+                    continue
+                seen.add(id(widget))
+                hook = type(widget).__dict__.get("on_show")
+                if hook is None:
+                    continue
                 try:
-                    screen.on_show()
+                    hook(widget)
                 except Exception:
                     pass
             return

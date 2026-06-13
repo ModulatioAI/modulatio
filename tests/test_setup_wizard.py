@@ -440,6 +440,31 @@ def test_load_existing_state_empty_when_no_defaults():
     assert state == {}
 
 
+def test_load_existing_state_prepopulates_team_from_template():
+    """Re-invocation must pre-fill the agents step (triad + workers) from the
+    saved team template so its edit/keep semantics are live, not dead."""
+    config.save_team_template([
+        {"id": "leader", "tier": "leader", "model": "anthropic/opus", "template_origin": "leader"},
+        {"id": "qc", "tier": "qc", "model": "anthropic/sonnet", "template_origin": "qc"},
+        {"id": "producer_1", "tier": "producer", "model": "openrouter/fast"},
+        {"id": "producer_2", "tier": "producer", "model": "openrouter/cheap"},
+    ])
+
+    from modulatio import setup_wizard
+    state = setup_wizard._load_existing_state()
+
+    assert [a["id"] for a in state["triad_agents"]] == ["leader", "qc"]
+    assert [a["id"] for a in state["worker_agents"]] == ["producer_1", "producer_2"]
+
+
+def test_load_existing_state_no_team_keys_when_template_absent():
+    """No template on disk → no triad/worker keys (step provisions fresh)."""
+    from modulatio import setup_wizard
+    state = setup_wizard._load_existing_state()
+    assert "triad_agents" not in state
+    assert "worker_agents" not in state
+
+
 # === first_project_step ===
 
 def test_validate_code_accepts_typical():

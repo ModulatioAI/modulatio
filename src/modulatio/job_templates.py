@@ -231,9 +231,40 @@ def _parse_param_schema(raw: str) -> tuple[ParamField, ...]:
     return tuple(fields)
 
 
+def _normalize_cardinality(raw: str, per: str | None) -> str:
+    """Coerce a stored ``cardinality`` string to the engine's grammar —
+    ``one`` | ``fixed:N`` (N>=1) | ``per-item`` — mirroring the create-time
+    validation (orchestration ``create_job_template``). Case-insensitive and
+    space-tolerant (``Fixed: 8`` → ``fixed:8``; a bare ``8`` → ``fixed:8``).
+    Anything unrecognized — including ``fixed:0``/``fixed:-1`` and a ``per-item``
+    with no ``per`` to fan over — degrades to ``one`` (the safe default), so a
+    hand-edited or migrated template can't smuggle a literal the engine branches
+    on into the run; the only thing the engine fans out on stays well-formed."""
+    norm = (raw or "").strip()
+    low = norm.lower()
+    if norm.isdigit():
+        card = f"fixed:{norm}"
+    elif low.startswith("fixed:"):
+        card = "fixed:" + norm.split(":", 1)[1].strip()
+    elif low.startswith("per-item"):
+        card = "per-item"
+    elif low == "one":
+        card = "one"
+    else:
+        return "one"
+    if card.startswith("fixed:"):
+        n = card.split(":", 1)[1]
+        return card if (n.isdigit() and int(n) >= 1) else "one"
+    if card == "per-item":
+        return "per-item" if per else "one"
+    return card
+
+
 def _parse_output_spec(raw: str) -> OutputSpec:
     """Parse the single-line JSON ``output_spec`` value. Best-effort → default
-    (``cardinality: one``) on anything malformed."""
+    (``cardinality: one``) on anything malformed — including a cardinality that
+    doesn't match the engine's grammar (it normalizes the same way the create
+    tool validates, so the load path can't bypass create-time validation)."""
     raw = raw.strip()
     if not raw:
         return OutputSpec()
@@ -243,9 +274,10 @@ def _parse_output_spec(raw: str) -> OutputSpec:
         return OutputSpec()
     if not isinstance(data, dict):
         return OutputSpec()
+    per = str(data["per"]) if data.get("per") else None
     return OutputSpec(
-        cardinality=str(data.get("cardinality", "one")),
-        per=str(data["per"]) if data.get("per") else None,
+        cardinality=_normalize_cardinality(str(data.get("cardinality", "one")), per),
+        per=per,
         artifact_kind=str(data.get("artifact_kind", "document")),
         naming=str(data.get("naming", "")),
     )
@@ -266,8 +298,16 @@ def _parse_deliverable_spec(raw: str) -> DeliverableSpec:
         return DeliverableSpec()
 
     def _int(v: Any) -> int | None:
+        # A JSON bool is a Python int subclass — `part_floor: true` must NOT
+        # silently become a floor of 1 (and `false` a 0). A non-integral float
+        # (`2.9`) must not silently truncate to 2 either: these are author
+        # mistakes, not constraints — drop them like any other malformed value.
+        if isinstance(v, bool) or v is None:
+            return None
+        if isinstance(v, float):
+            return int(v) if v.is_integer() else None
         try:
-            return int(v) if v is not None else None
+            return int(v)
         except (ValueError, TypeError):
             return None
 

@@ -153,6 +153,39 @@ async def test_stub_kickoff_updates_response_text(tui_vault):
     assert "draft" in app.last_summary_text.lower()
 
 
+async def test_refresh_all_tabs_invokes_panel_on_show(tui_vault):
+    """Regression: ``/refresh`` (side-effect ``refresh_all_tabs``) must
+    actually re-run each tab panel's ``on_show`` hook. The panels are
+    ``Vertical`` subclasses, NOT Textual ``Screen`` widgets — the old
+    ``query("Screen")`` matched only the app's screen container and
+    refreshed nothing. We spy on a real panel's ``on_show`` and assert
+    the refresh reaches it."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.memory import MemoryScreen
+
+    app = ModulatioApp(project_code="TST", stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # The dispatcher resolves ``on_show`` from the panel *class*; spy on
+        # the class hook so we observe the refresh reaching a real panel.
+        marker: list[type] = []
+        real = MemoryScreen.on_show
+
+        def _cls_spy(self, _real=real):  # noqa: ANN001
+            marker.append(MemoryScreen)
+            return _real(self)
+
+        MemoryScreen.on_show = _cls_spy  # type: ignore[method-assign]
+        try:
+            app._apply_side_effect("refresh_all_tabs")
+            await pilot.pause()
+        finally:
+            MemoryScreen.on_show = real  # type: ignore[method-assign]
+
+        assert marker, "refresh_all_tabs did not invoke any panel's on_show"
+
+
 async def test_empty_objective_does_not_run_kickoff(tui_vault):
     """Empty input shouldn't silently kick off a no-op run — surface
     a nudge to the user instead."""

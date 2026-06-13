@@ -306,3 +306,46 @@ def test_metered_idempotency_is_per_task_not_global(project_vault):
     a2 = comptroller.authorize_metered_tool(
         PROJECT_CODE, "paid-cloud", "render", "T-2", "samekey", "agent-1")
     assert not a2.allowed and "budget exhausted" in a2.reason
+
+
+# ── shared daily cap across escalation + metered streams (H5) ──────────────
+
+
+def test_escalation_then_metered_share_one_daily_cap(project_vault):
+    """H5: the declared daily cap is ONE real-money budget per cost_class.
+    An agent escalation and a metered-tool call both debit it — the second
+    stream must NOT get a fresh full cap. With paid_cloud=1, one escalation
+    exhausts the budget, so the metered call is denied (and vice-versa)."""
+    _set_budget(project_vault, paid=1)
+    esc = comptroller.authorize_escalation(PROJECT_CODE, "paid-cloud", "agent-1")
+    assert esc.allowed
+    metered = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "k1", "agent-1")
+    assert not metered.allowed and "budget exhausted" in metered.reason
+    assert metered.refresh_at is not None
+
+
+def test_metered_then_escalation_share_one_daily_cap(project_vault):
+    """H5 symmetric: a metered call first spends the cap, so a subsequent
+    agent escalation under the same cost_class is denied."""
+    _set_budget(project_vault, paid=1)
+    metered = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "k1", "agent-1")
+    assert metered.allowed
+    esc = comptroller.authorize_escalation(PROJECT_CODE, "paid-cloud", "agent-1")
+    assert not esc.allowed and "budget exhausted" in esc.reason
+    assert esc.refresh_at is not None
+
+
+def test_shared_cap_respects_cost_class_isolation(project_vault):
+    """The shared count is per cost_class: a premium-cloud metered call must
+    not consume the paid-cloud budget. With paid=1/premium=1, one paid
+    escalation + one premium metered call both fit."""
+    _set_budget(project_vault, paid=1, premium=1)
+    assert comptroller.authorize_escalation(
+        PROJECT_CODE, "paid-cloud", "agent-1").allowed
+    assert comptroller.authorize_metered_tool(
+        PROJECT_CODE, "premium-cloud", "render", "T-1", "k1", "agent-1").allowed
+    # paid-cloud budget now exhausted by the escalation
+    assert not comptroller.authorize_escalation(
+        PROJECT_CODE, "paid-cloud", "agent-2").allowed

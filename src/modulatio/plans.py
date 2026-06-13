@@ -407,7 +407,12 @@ _NEXT_SECTION_RE = re.compile(r"^#{2,3}\s+\S", re.MULTILINE)
 _SUB_OBJECTIVE_ITEM_RE = re.compile(
     # Numbered list items in the leader-plan skill's required format:
     # "**N. <action-verb noun phrase>** — 1-line description."
-    r"^\s{0,3}\*\*\s*(\d+)\.\s*([^*]+?)\*\*[\s—–\-:]*(.+?)$",
+    # The description is OPTIONAL: a title-only item ("**N. Foo**")
+    # must still match (the loop defaults description to the title).
+    # The separator class deliberately excludes newline whitespace
+    # (uses [ \t] not \s) so a title-only line never borrows the
+    # next item's line as its description and swallows it.
+    r"^[ \t]{0,3}\*\*\s*(\d+)\.\s*([^*]+?)\*\*[ \t—–\-:]*(.*)$",
     re.MULTILINE,
 )
 

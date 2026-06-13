@@ -92,6 +92,11 @@ class ModelPicker(Vertical):
         self.app.call_from_thread(self._on_loaded, models)
 
     def _on_loaded(self, models: list[pc.CatalogModel]) -> None:
+        # The fetch runs on a worker thread; the operator may have navigated
+        # away (picker unmounted) before it completes. Touching query_one on a
+        # detached widget raises NoMatches on the main thread — bail quietly.
+        if not self.is_mounted:
+            return
         # role-relevant text models drive the picker; note any other modalities.
         self._models = pc.of_modality(models, "text")
         others = len(models) - len(self._models)

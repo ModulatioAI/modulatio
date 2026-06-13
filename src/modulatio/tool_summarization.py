@@ -275,14 +275,24 @@ def truncate_tool_result(
     agent can pull it back with ``read_tool_result`` when it needs more."""
     if count_tokens(model, text=text) <= max_tokens:
         return text
-    # First cut by the ~4-chars/token heuristic, then tighten — a few bounded
-    # steps absorb dense tokenization (e.g. code/markup) without an unbounded
-    # loop, so the kept head genuinely fits ``max_tokens``.
+    # First cut by the ~4-chars/token heuristic, then tighten until the kept
+    # head GENUINELY fits ``max_tokens`` — termination is keyed on fit, not on a
+    # fixed iteration budget. Dense tokenization (code/markup, CJK, odd byte
+    # runs) can pack far more tokens per char than the 4:1 estimate, so a fixed
+    # step count could exit while still over budget. The shrink is monotone (the
+    # head strictly loses length while it doesn't fit and isn't a lone char), so
+    # the loop is bounded by the head length; the ``len(head) <= 1`` guard caps
+    # the degenerate single-char case so we never spin.
     head = text[: max(1, max_tokens * 4)]
-    for _ in range(8):
-        if not head or count_tokens(model, text=head) <= max_tokens:
+    while head and count_tokens(model, text=head) > max_tokens:
+        nxt = max(1, int(len(head) * 0.8))
+        if nxt >= len(head):
+            # int(len*0.8) stops shrinking at len==1 (0.8->0->max(1,0)==1);
+            # a single char still over budget means max_tokens is too small to
+            # ever fit — drop the head entirely rather than loop forever.
+            head = ""
             break
-        head = head[: max(1, int(len(head) * 0.8))]
+        head = head[:nxt]
     dropped = len(text) - len(head)
     return (
         f"[truncated: call_id={call_id} — kept ~{max_tokens} tokens of a "

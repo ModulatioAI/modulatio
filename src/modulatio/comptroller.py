@@ -160,6 +160,51 @@ def _count_today(project_code: str, cost_class: str) -> int:
     return count
 
 
+def _count_metered_cost_today(project_code: str, cost_class: str) -> int:
+    """Count today's metered-tool ledger lines for ``cost_class``.
+
+    Mirrors ``_count_today`` for the metered stream so the shared daily
+    cap can sum both accounting streams. A metered line is
+    ``<iso-ts> metered <cost_class> <agent_id> <task_id> <key>`` — field 1
+    is the literal ``metered``, field 2 is the cost_class.
+    """
+    ledger = _ledger_path(project_code)
+    if not ledger.exists():
+        return 0
+    today = datetime.now(timezone.utc).date()
+    count = 0
+    for line in ledger.read_text().splitlines():
+        parts = line.strip().split()
+        if len(parts) < 3 or parts[1] != "metered":
+            continue
+        ts_raw, _kind, entry_cost = parts[0], parts[1], parts[2]
+        if entry_cost != cost_class:
+            continue
+        try:
+            ts = datetime.fromisoformat(ts_raw)
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts.astimezone(timezone.utc).date() == today:
+            count += 1
+    return count
+
+
+def _count_daily_spend(project_code: str, cost_class: str) -> int:
+    """Total of today's paid-cloud/premium-cloud spend for ``cost_class``
+    across BOTH accounting streams (agent escalations *and* metered-tool
+    calls). The daily cap declared in ``comptroller.md`` is a single
+    real-money budget per cost_class; both ``authorize_escalation`` and
+    ``authorize_metered_tool`` debit it, so the cap check must see the
+    combined count. Counting only one stream lets the other slip a second
+    full budget's worth of paid calls through under one declared cap.
+    """
+    return _count_today(project_code, cost_class) + _count_metered_cost_today(
+        project_code, cost_class
+    )
+
+
 def _append_ledger(project_code: str, cost_class: str, agent_id: str) -> None:
     ledger = _ledger_path(project_code)
     ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -244,9 +289,12 @@ def authorize_escalation(
         )
 
     # Lock the count→check→append so concurrent escalations can't both
-    # slip under the cap and overshoot the daily budget.
+    # slip under the cap and overshoot the daily budget. ``spent`` sums
+    # BOTH the escalation and metered-tool streams: the declared cap is one
+    # shared real-money budget per cost_class, so the gate must see every
+    # paid call against it (else escalation + metered each spend a full cap).
     with _ledger_lock(project_code):
-        spent = _count_today(project_code, cost_class)
+        spent = _count_daily_spend(project_code, cost_class)
         if spent >= cap:
             return Authorization(
                 allowed=False,
@@ -393,20 +441,24 @@ def authorize_metered_tool(
                     f"({task_count}/{per_task_cap} for this task)"
                 ),
             )
-        if cost_count >= cap:
+        # The daily cap is one shared budget per cost_class: count BOTH the
+        # metered-tool spend and the agent-escalation spend against it (else
+        # the two streams each spend a full cap under one declared budget).
+        daily_spend = cost_count + _count_today(project_code, cost_class)
+        if daily_spend >= cap:
             return Authorization(
                 allowed=False,
                 refresh_at=_tomorrow_utc_midnight(),
                 reason=(
                     f"metered tool {tool_name!r}: daily {cost_class} budget exhausted "
-                    f"({cost_count}/{cap} used); refreshes at UTC midnight"
+                    f"({daily_spend}/{cap} used); refreshes at UTC midnight"
                 ),
             )
         _append_metered_ledger(project_code, cost_class, agent_id, task_id, idempotency_key)
     return Authorization(
         allowed=True,
         refresh_at=None,
-        reason=f"metered tool {tool_name!r} authorized ({cost_count + 1}/{cap} {cost_class} today)",
+        reason=f"metered tool {tool_name!r} authorized ({daily_spend + 1}/{cap} {cost_class} today)",
     )
 
 

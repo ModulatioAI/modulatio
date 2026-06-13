@@ -22,13 +22,73 @@ subscriptionType, account_id) survive untouched.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
+import threading
 import time
 from typing import Any
 
 import httpx
 
 from modulatio import oauth_helpers
+
+try:  # POSIX-only; absent on Windows. Cross-process file lock is best-effort.
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None  # type: ignore[assignment]
+
+
+# Single-flight refresh.
+#
+# Daemon mode runs several callers concurrently (heartbeat + cron + Telegram
+# listener), and providers rotate (invalidate) the refresh token on each
+# successful exchange. If two threads/processes both read the SAME refresh
+# token and both POST it, the second exchange is rejected by the provider and
+# the two writers race the credential file — the loser persists a dead refresh
+# token and overnight refresh is permanently broken. We serialize refresh per
+# provider so only one exchange of a given refresh token can happen, with an
+# in-process lock (thread-vs-thread) AND a cross-process file lock
+# (daemon-vs-cron-vs-listener), then re-check inside the lock so a caller that
+# arrives after a fresh token was just written returns it instead of POSTing a
+# now-consumed refresh token.
+_PROVIDER_LOCKS: dict[str, threading.Lock] = {
+    "anthropic": threading.Lock(),
+    "openai": threading.Lock(),
+}
+
+
+@contextlib.contextmanager
+def _single_flight(provider: str, lock_path):
+    """Hold the per-provider in-process lock and a cross-process file lock.
+
+    *lock_path* is a sidecar ``.lock`` file beside the credential file. The
+    file lock is best-effort: if flock is unavailable (non-POSIX) or the lock
+    file can't be opened, in-process serialization still applies.
+    """
+    with _PROVIDER_LOCKS[provider]:
+        if fcntl is None:
+            yield
+            return
+        fd = None
+        try:
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            # Couldn't acquire a file lock (e.g. unwritable dir). Fall back to
+            # in-process serialization only rather than blocking refresh.
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                fd = None
+        try:
+            yield
+        finally:
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    os.close(fd)
 
 
 # Provider error responses are echoed into RefreshError messages. Those
@@ -115,6 +175,32 @@ def refresh_anthropic_token(*, timeout: float = 30.0) -> str:
     if not isinstance(refresh_token, str) or not refresh_token:
         raise RefreshError("Anthropic credentials lack a refresh token — re-run `claude login`")
 
+    lock_path = str(oauth_helpers.ANTHROPIC_CREDENTIALS_FILE) + ".lock"
+    with _single_flight("anthropic", lock_path):
+        # Re-read under the lock: another flight may have already rotated the
+        # refresh token and written a fresh access token. If so, don't POST the
+        # now-consumed refresh_token — return the freshly-written access token.
+        fresh = oauth_helpers.read_anthropic_credentials()
+        if fresh:
+            fresh_refresh = fresh.get("refreshToken")
+            fresh_access = fresh.get("accessToken")
+            if (
+                isinstance(fresh_access, str)
+                and fresh_access
+                and fresh_refresh != refresh_token
+                and not anthropic_needs_refresh()
+            ):
+                return fresh_access
+            creds = fresh
+            rt = fresh.get("refreshToken")
+            if isinstance(rt, str) and rt:
+                refresh_token = rt
+        return _do_refresh_anthropic(creds, refresh_token, timeout=timeout)
+
+
+def _do_refresh_anthropic(creds: dict[str, Any], refresh_token: str, *, timeout: float) -> str:
+    """Perform the actual Anthropic token exchange + write-back. Caller holds
+    the single-flight lock."""
     try:
         response = httpx.post(
             _ANTHROPIC_TOKEN_URL,
@@ -177,6 +263,36 @@ def refresh_openai_token(*, timeout: float = 30.0) -> str:
     if not isinstance(refresh_token, str) or not refresh_token:
         raise RefreshError("OpenAI Codex credentials lack a refresh token — re-run `codex login`")
 
+    lock_path = str(oauth_helpers.OPENAI_CODEX_CREDENTIALS_FILE) + ".lock"
+    with _single_flight("openai", lock_path):
+        # Re-read under the lock. Codex's auth.json has no expiry field, so we
+        # detect a just-completed concurrent refresh by the refresh token having
+        # rotated. If it changed, another flight already exchanged the token we
+        # read; return its fresh access token rather than POSTing a dead one.
+        fresh = oauth_helpers.read_openai_credentials()
+        fresh_tokens = fresh.get("tokens") if isinstance(fresh, dict) else None
+        if isinstance(fresh_tokens, dict):
+            fresh_refresh = fresh_tokens.get("refresh_token")
+            fresh_access = fresh_tokens.get("access_token")
+            if (
+                isinstance(fresh_access, str)
+                and fresh_access
+                and isinstance(fresh_refresh, str)
+                and fresh_refresh
+                and fresh_refresh != refresh_token
+            ):
+                return fresh_access
+            creds = fresh  # type: ignore[assignment]
+            tokens = fresh_tokens
+            refresh_token = fresh_refresh if isinstance(fresh_refresh, str) and fresh_refresh else refresh_token
+        return _do_refresh_openai(creds, tokens, refresh_token, timeout=timeout)
+
+
+def _do_refresh_openai(
+    creds: dict[str, Any], tokens: dict[str, Any], refresh_token: str, *, timeout: float
+) -> str:
+    """Perform the actual Codex token exchange + write-back. Caller holds the
+    single-flight lock."""
     try:
         response = httpx.post(
             _OPENAI_TOKEN_URL,

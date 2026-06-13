@@ -377,11 +377,22 @@ def build_deliverable_digest(
 # only what is absent).
 
 
-def _unit_headings(units: "list", artifacts_root: Path) -> "list[str]":
-    """The display heading of each readable unit, in order (document family helper —
-    reuses :func:`_first_heading`). Unreadable/missing units are skipped, never
-    fabricated."""
+def _unit_headings(
+    units: "list", artifacts_root: Path, *, separator: str = _DEFAULT_SEPARATOR,
+) -> "list[str]":
+    """The display heading of each unit that will actually land in the assembled
+    body, in order (document family helper — reuses :func:`_first_heading`).
+
+    This MIRRORS :func:`_assemble_document`'s unit-selection exactly: a unit is
+    listed only if it is readable AND survives the per-unit size cap AND fits
+    before the total-byte cap (at which point the body stops dropping the rest).
+    Without that, a TOC built here would list units the body never includes
+    (missing/overflow/cap-truncated) — the TOC and body headings would diverge.
+    Unreadable/missing/over-cap units are skipped, never fabricated."""
     out: list[str] = []
+    sep_bytes = len(separator.encode())
+    total = 0
+    emitted = False
     for name in units or []:
         if not isinstance(name, str):
             continue
@@ -389,9 +400,23 @@ def _unit_headings(units: "list", artifacts_root: Path) -> "list[str]":
         if path is None or not path.is_file():
             continue
         try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if size > _MAX_UNIT_BYTES:
+            continue
+        # Account for the separator that precedes every block after the first,
+        # exactly as the body's running total does — so the cap stops the TOC at
+        # the same unit the body stops at.
+        added = size + (sep_bytes if emitted else 0)
+        if total + added > _MAX_TOTAL_BYTES:
+            break
+        try:
             heading = _first_heading(path.read_text())
         except (OSError, UnicodeDecodeError):
             continue
+        total += added
+        emitted = True
         if heading:
             out.append(heading)
     return out
@@ -418,7 +443,14 @@ def _document_head(
         lines.append(f"# {str(title).strip()}")
     out = dict(manifest)
     if want_toc:
-        headings = _unit_headings(manifest.get("units", []), artifacts_root)
+        # Mirror the body's separator so _unit_headings applies the same total-byte
+        # cap math the assembler does — the TOC must list ONLY the units that survive
+        # into the body (not the missing/overflow/cap-truncated ones).
+        sep = manifest.get("separator")
+        sep = sep if isinstance(sep, str) else _DEFAULT_SEPARATOR
+        headings = _unit_headings(
+            manifest.get("units", []), artifacts_root, separator=sep,
+        )
         # #101 Part D: the TOC lists the NORMALIZED sequence, so it agrees with the body
         # the assembler renumbers (both pass through the same document normalizer).
         headings, _ = continuity_headings(headings, "document")
