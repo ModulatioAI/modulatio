@@ -508,6 +508,11 @@ def test_redact_secrets_covers_aws_credentials():
     assert "<redacted>" in out
     # a bare temporary (ASIA) key id is also caught
     assert "ASIAY34FZKBOKMUTVV7A" not in _redact_secrets("token ASIAY34FZKBOKMUTVV7A here")
+    # Nemo SEC-03 r2: a labeled value with non-alphanumeric / abbreviated chars
+    # must not leave the AKIA prefix behind, nor a quoted value its content.
+    assert "AKIA" not in _redact_secrets("aws_access_key_id=AKIAIO...MPLE")
+    assert "AKIA" not in _redact_secrets('aws_access_key_id="AKIAIOSFODNN7EXAMPLE"')
+    assert "sk_live_" not in _redact_secrets("stripe sk_live_ABCDEF0123456789 here")
 
 
 def test_checkpoint_redacts_aws_prose(tmp_path):
