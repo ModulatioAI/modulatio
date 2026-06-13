@@ -6,6 +6,64 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.8] — 2026-06-12
+
+**The engine learns to trust a provable result — and to learn from its own rescues.** Two arcs
+since v0.8.6, both reviewed to sign-off (hull + coherence + architecture). The first lets QC
+*skip* re-reading an assembly it can prove correct; the second lets the team *learn* the
+techniques its smart reviewer keeps having to apply. Both extend the same north star — cheap
+producers generate, the smart QC reviews cheaply and patches only the errors, and the cost curve
+bends toward the cheap model over time.
+
+### Code + media deterministic assembly validation (#100)
+
+QC can pass an assembled deliverable *cheaply* — without re-reading the assembled bytes back into
+the model — when it is **provably** correct. The `document` and `data` families already had that
+structural oracle; `code` and `media` did not, so they paid for a full smart-model review every
+time. They now have one, under one rule (Captain Nemo's hull review): **an oracle proves the
+composite CONTAINS the declared units, not merely that it has their shape.**
+
+- **Code — wiring is statically checkable.** A non-trivial entry point, every unit parses
+  (Python-first; an unparseable language falls back, never false-passes), and intra-package
+  references resolve. **External / SaaS / API-key'd imports are EXPECTED** — an app *using* the
+  user's keys is using a tool, not a wiring hole — so they are never a false failure.
+- **Media — prove containment where it's provable.** A `bundle` (stdlib `zipfile`, lossless) is
+  verified by exact member-name-set + per-member **byte equality**, so a corrupt or wrong-content
+  archive can't cheap-pass. `video` / `audio` / `image` composites are *lossy* — their only exact
+  cheap oracle is an assembler-emitted sidecar at composition time — so they **honestly fall back**
+  to the full review rather than claim a proof they can't back.
+- **Tool-delegated, fail-closed, witnessed.** An oracle resolved to a metered tool authorizes
+  through the Comptroller before it spends; denial falls back to the free-local oracle, never an
+  unmetered call. The verify mark records *which* oracle vouched (`stdlib-zipfile-bytes` vs
+  `external:<tool>@<version>`). Honest scope throughout: this is a structural/composite oracle,
+  **not** a "does it fulfil the brief" check (that stays the full review's job).
+
+### Codify-the-win — learn from QC recoveries, not just repeated fails (#81)
+
+The self-codification loop only ever learned from **failures** — repeated QC rejections the Leader
+distils into a skill. But when the smart QC *rescues* a cheap producer — writing the patch the
+producer couldn't — that patch encodes a **technique the producer lacked**, and the loop threw it
+away. Codify-the-win closes the other half: failures teach *what-not-to-do*; recoveries teach
+*how-to-do-it*.
+
+- **Witness the recovery.** The before / defects / after triple of a QC-authored fix is captured
+  (bounded, write-time-truncated), guarded so a logging failure can never reverse a completed task.
+- **The engine binds recurrence; the Leader judges coherence.** Recoveries cluster by a
+  deterministic, **false-merge-resistant** signature (artifact kind + defect class + a normalized
+  rationale key + an artifact-kind-aware change-shape fingerprint); only a cluster that genuinely
+  recurs (≥ a floor) is surfaced. The Leader then decides whether it's *one* teachable technique —
+  and may codify a subset, or none.
+- **Honest about a non-independent source.** A recovery is the same mind that judged it also
+  writing the fix, so a win-codification writes **project-local** (not the shared library — that
+  needs cross-project recurrence), carries `provenance: win`, and surfaces a **louder** operator
+  recommendation: *learned from a non-independent QC fix; most worth a spot-check.* Idempotent
+  across a partial-failure replay via a durable applied-signature guard.
+
+Both arcs cleared independent **hull** (Captain Nemo) + **coherence** (Lovecraft) reviews and an
+**architecture** pass (Hero); every BLOCK was remediated to sign-off before merge — including a
+live-proven containment-leak and a regression the full suite caught that a targeted run missed.
+**3118 tests pass.**
+
 ## [0.8.6] — 2026-06-11
 
 **The Leader fixes what it can, and the engine refuses a form it can't run.** Two arcs since
