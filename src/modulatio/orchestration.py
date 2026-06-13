@@ -4735,19 +4735,22 @@ class Orchestrator:
                 artifact_kind=(str(artifact_kind).strip() or "document"),
             )
             fields = self._jt_paramfields_from_spec(param_schema)
+            # Slug to a safe registry slug (belt); the library re-validates
+            # (suspenders) so a traversal name is impossible regardless.
+            slug = self._slug_skill(str(name))
             try:
                 _jt.create_job_template(
-                    name=str(name), description=str(description),
+                    name=slug, description=str(description),
                     interview_body=str(interview), output_spec=spec,
                     param_schema=fields, project_code=self.project.code,
                 )
             except FileExistsError:
-                return (f"A job template named {name!r} already exists — pick a "
+                return (f"A job template named {slug!r} already exists — pick a "
                         "different name, or improve the existing one.")
             except Exception as exc:
                 return f"Couldn't create the template: {type(exc).__name__}: {exc}"
             return (
-                f"Created job template {name!r} (cardinality={spec.cardinality}, "
+                f"Created job template {slug!r} (cardinality={spec.cardinality}, "
                 f"{spec.artifact_kind}) for this project."
             )
 
@@ -4756,17 +4759,21 @@ class Orchestrator:
         ) -> str:
             """Teach the team a new durable skill (shared library)."""
             from modulatio import skills as _skills
+            # Slug the Leader-supplied name to a safe registry slug (belt); the
+            # library re-validates (suspenders) so traversal is impossible
+            # regardless. An all-punctuation name slugs to "" → refused there.
+            slug = self._slug_skill(str(name))
             try:
                 _skills.create_skill(
-                    name=str(name), description=str(description),
+                    name=slug, description=str(description),
                     prompt_template=str(prompt), project_code=None,
                 )
             except FileExistsError:
-                return (f"A skill named {name!r} already exists — use improve_skill "
+                return (f"A skill named {slug!r} already exists — use improve_skill "
                         "to refine it.")
             except Exception as exc:
                 return f"Couldn't create the skill: {type(exc).__name__}: {exc}"
-            return f"Created skill {name!r} in the shared library."
+            return f"Created skill {slug!r} in the shared library."
 
         def improve_skill(name: str, guidance: str, **_: object) -> str:
             """Refine an existing skill by appending learned guidance + bumping

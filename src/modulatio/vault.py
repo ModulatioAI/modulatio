@@ -50,6 +50,40 @@ def validate_project_code(code: str) -> str:
     return code
 
 
+#: A registry entry (a skill or job-template) is always stored at
+#: ``<root>/<name>.md``. The name therefore must be a plain slug — anything
+#: with a path separator, ``..``, an absolute prefix, a leading dot, or a
+#: control character would let a Leader-supplied (or upstream-artifact-driven)
+#: name escape the registry root and write/read another project's library
+#: (security audit H1). Hyphens + mixed case + underscores are allowed because
+#: every legitimate skill/JT name (seeds, ``_slug_skill`` codifications, user
+#: skills) already fits — so this never rejects a real name.
+_REGISTRY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def validate_registry_name(name: str) -> str:
+    """Strict validator for a skill / job-template file name. Return ``name``
+    unchanged on success; raise ``ValueError`` on anything that could escape
+    the registry root.
+
+    This is the engine-bound half of the H1 fix: callers that accept a name
+    from the Leader (the ``create_skill`` / ``create_job_template`` tools) slug
+    it first for usability, but every registry write/read also routes through
+    here so a path-traversal name is *impossible*, not merely discouraged. A
+    name is the bare stem (no ``.md``, no directory) and must match
+    ``[A-Za-z0-9][A-Za-z0-9_-]{0,63}``.
+    """
+    if not isinstance(name, str):
+        raise ValueError(f"registry name must be str, got {type(name).__name__}")
+    if not _REGISTRY_NAME_RE.match(name):
+        raise ValueError(
+            f"invalid registry name {name!r}: must start with an alphanumeric, "
+            "contain only [A-Za-z0-9_-], and be 1–64 chars (no path separators, "
+            "no '..', no leading dot)."
+        )
+    return name
+
+
 def reload() -> None:
     """Re-read ``config.get_vault_root()`` and rebind ``VAULT_ROOT``.
 

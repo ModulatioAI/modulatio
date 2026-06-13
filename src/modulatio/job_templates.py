@@ -35,9 +35,17 @@ from pathlib import Path
 from typing import Any
 
 from modulatio import config
-from modulatio.vault import project_dir
+from modulatio.vault import project_dir, validate_registry_name
 
 _JT_ROOT = config.get_shared_resources_path() / "job_templates"
+
+
+def _fm(value: object) -> str:
+    """Collapse CR/LF in a front-matter SCALAR value to a space so a value
+    can't forge an extra front-matter line (security audit H2). The parser is
+    line-based; a newline in a Leader-supplied ``description`` would otherwise
+    inject a forged ``version`` / ``last_verified_at`` key."""
+    return str(value).replace("\r", " ").replace("\n", " ")
 
 #: Package-bundled seed JTs (read-only canonical defaults — e.g. the Leader's
 #: ``jt-create`` drafting template, added in Brick B4). Resolved last, after the
@@ -357,6 +365,12 @@ def load_with_metadata(name: str, project_code: str | None = None) -> JobTemplat
 
     Missing in all three → empty JT (``.name == ""``), not an error.
     """
+    # H1: a traversal name resolves to the empty JT (safe not-found) rather
+    # than a read outside the registry root.
+    try:
+        validate_registry_name(name)
+    except ValueError:
+        return _EMPTY_JT
     if project_code is not None:
         local = project_dir(project_code) / "job_templates" / f"{name}.md"
         if local.exists():
@@ -392,6 +406,7 @@ def list_job_templates(project_code: str | None = None) -> list[str]:
 def save(jt: JobTemplate, project_code: str | None = None) -> Path:
     """Write a JT to shared (no project_code) or the project's override dir.
     Nested schema/output written as single-line JSON. Returns the written path."""
+    validate_registry_name(jt.name)  # H1: no path-traversal write
     if project_code is not None:
         root = project_dir(project_code) / "job_templates"
     else:
@@ -399,19 +414,22 @@ def save(jt: JobTemplate, project_code: str | None = None) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{jt.name}.md"
 
+    # H2: scalar values are newline-collapsed (``_fm``) so a Leader-supplied
+    # field can't forge a front-matter key. The nested specs are single-line
+    # JSON (newlines already escaped), so they're injection-safe as-is.
     fm_lines: list[str] = [
         f"name: {jt.name}",
-        f"description: {jt.description}",
-        f"capability_preferences: {', '.join(jt.capability_preferences)}",
+        f"description: {_fm(jt.description)}",
+        f"capability_preferences: {_fm(', '.join(jt.capability_preferences))}",
         f"param_schema: {_dump_param_schema(jt.param_schema)}",
         f"output_spec: {_dump_output_spec(jt.output_spec)}",
     ]
     if not jt.deliverable_spec.is_empty():
         fm_lines.append(f"deliverable_spec: {_dump_deliverable_spec(jt.deliverable_spec)}")
     if jt.version is not None:
-        fm_lines.append(f"version: {jt.version}")
+        fm_lines.append(f"version: {_fm(jt.version)}")
     if jt.last_verified_at is not None:
-        fm_lines.append(f"last_verified_at: {jt.last_verified_at}")
+        fm_lines.append(f"last_verified_at: {_fm(jt.last_verified_at)}")
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + jt.interview_body.rstrip() + "\n"
     path.write_text(content)
@@ -435,6 +453,7 @@ def create_job_template(
     Idempotency: raises ``FileExistsError`` if a JT with the same name exists
     at the target scope (the name-dedup hard guard; Brick B4's codification
     flips create→improve on collision rather than colliding here)."""
+    validate_registry_name(name)  # H1: no path-traversal write
     if project_code is not None:
         root = project_dir(project_code) / "job_templates"
     else:

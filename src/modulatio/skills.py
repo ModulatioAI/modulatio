@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from modulatio import config
-from modulatio.vault import project_dir
+from modulatio.vault import project_dir, validate_registry_name
 
 logger = logging.getLogger("modulatio.skills")
 
@@ -50,6 +50,19 @@ _SKILLS_ROOT = config.get_shared_resources_path() / "skills"
 _SEED_SKILLS_ROOT = Path(__file__).parent / "_seed_skills"
 
 _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+def _fm(value: object) -> str:
+    """Collapse any CR/LF in a front-matter SCALAR value to a single space so
+    a value can never forge an extra front-matter line (security audit H2).
+
+    The front-matter parser is line-based (``key: value`` per line), so a
+    Leader-supplied ``description`` containing ``"\\nneeds_network: true"``
+    would otherwise self-grant the sandbox network (and ``pass_env`` a secret).
+    Stripping the newline at the single serialization chokepoint binds the
+    invariant deterministically, regardless of how the ``Skill`` was built.
+    """
+    return str(value).replace("\r", " ").replace("\n", " ")
 
 
 @dataclass(frozen=True)
@@ -266,6 +279,13 @@ def load_with_metadata(name: str, project_code: str | None = None) -> Skill:
     preserved as-is (we can't prove it stale); it gets stamped the next time
     it's re-codified.
     """
+    # H1: a traversal name resolves to the empty skill (safe not-found) rather
+    # than a read outside the registry root. Trusted internal names (the task
+    # graph) always pass; only a hostile name is short-circuited.
+    try:
+        validate_registry_name(name)
+    except ValueError:
+        return _EMPTY_SKILL
     seed_path = _SEED_SKILLS_ROOT / f"{name}.md"
     if project_code is not None:
         local = project_dir(project_code) / "skills" / f"{name}.md"
@@ -333,6 +353,7 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
     Routing fields are serialized as comma-separated values in
     front-matter. Body is the prompt template. Returns the written path.
     """
+    validate_registry_name(skill.name)  # H1: no path-traversal write
     if project_code is not None:
         root = project_dir(project_code) / "skills"
     else:
@@ -340,19 +361,21 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{skill.name}.md"
 
+    # H2: every interpolated value is newline-collapsed (``_fm``) so a scalar
+    # field can't forge a privilege-granting front-matter key.
     fm_lines: list[str] = [
         f"name: {skill.name}",
-        f"description: {skill.description}",
-        f"tool_loadout: {', '.join(skill.tool_loadout)}",
-        f"standards_domain: {skill.standards_domain or ''}",
-        f"model_tier: {skill.model_tier or ''}",
-        f"cost_class: {skill.cost_class or ''}",
-        f"capability_tags: {', '.join(skill.capability_tags)}",
-        f"required_capabilities: {', '.join(skill.required_capabilities)}",
-        f"executor: {skill.executor}",
+        f"description: {_fm(skill.description)}",
+        f"tool_loadout: {_fm(', '.join(skill.tool_loadout))}",
+        f"standards_domain: {_fm(skill.standards_domain or '')}",
+        f"model_tier: {_fm(skill.model_tier or '')}",
+        f"cost_class: {_fm(skill.cost_class or '')}",
+        f"capability_tags: {_fm(', '.join(skill.capability_tags))}",
+        f"required_capabilities: {_fm(', '.join(skill.required_capabilities))}",
+        f"executor: {_fm(skill.executor)}",
     ]
     if skill.version is not None:
-        fm_lines.append(f"version: {skill.version}")
+        fm_lines.append(f"version: {_fm(skill.version)}")
     # task #84: stamp the seed this codification derives from so a later seed
     # improvement can supersede it instead of being shadowed. Auto-derive when
     # the skill is codified (has a version), a seed exists, and the caller
@@ -361,21 +384,21 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
     if base_seed_hash is None and skill.version is not None:
         base_seed_hash = seed_content_hash(skill.name)
     if base_seed_hash is not None:
-        fm_lines.append(f"base_seed_hash: {base_seed_hash}")
+        fm_lines.append(f"base_seed_hash: {_fm(base_seed_hash)}")
     if skill.user_override:  # task #90: persist the sacred-override marker
         fm_lines.append("user_override: true")
     if skill.provenance is not None:  # #81: fail | win | user provenance
-        fm_lines.append(f"provenance: {skill.provenance}")
+        fm_lines.append(f"provenance: {_fm(skill.provenance)}")
     if skill.learned_from:  # #81: the recovery cluster signatures already codified
-        fm_lines.append(f"learned_from: {', '.join(skill.learned_from)}")
+        fm_lines.append(f"learned_from: {_fm(', '.join(skill.learned_from))}")
     if skill.freshness_class is not None:
-        fm_lines.append(f"freshness_class: {skill.freshness_class}")
+        fm_lines.append(f"freshness_class: {_fm(skill.freshness_class)}")
     if skill.last_verified_at is not None:
-        fm_lines.append(f"last_verified_at: {skill.last_verified_at}")
+        fm_lines.append(f"last_verified_at: {_fm(skill.last_verified_at)}")
     if skill.needs_network:
         fm_lines.append("needs_network: true")
     if skill.pass_env:
-        fm_lines.append(f"pass_env: {', '.join(skill.pass_env)}")
+        fm_lines.append(f"pass_env: {_fm(', '.join(skill.pass_env))}")
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + skill.prompt_template.rstrip() + "\n"
     path.write_text(content)
@@ -410,6 +433,7 @@ def create_skill(
     name already exists at the target scope — wizards should validate
     against ``list_skills`` before calling.
     """
+    validate_registry_name(name)  # H1: no path-traversal write
     if project_code is not None:
         root = project_dir(project_code) / "skills"
     else:
