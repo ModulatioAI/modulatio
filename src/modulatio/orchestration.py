@@ -10458,27 +10458,24 @@ class Orchestrator:
         *,
         initial_corrective_notes: str = "",
     ) -> None:
-        """Execute a goal's reopened tasks dependency-aware, mirroring the
-        initial pass + ``_leader_auto_redo`` (not store-list order).
+        """Execute a goal's reopened tasks dependency-ordered (not store-list
+        order), serially — same execution semantics as the original redo.
 
         The two re-run lanes (decline-driven ``_reexecute_goal`` and the
         budget-refresh ``_auto_resume_refreshable_goals``) historically iterated
         tasks in store-list order and called ``_run_task_with_redo`` directly —
         with NO dependency ordering and NO dep-failure cascade, so a task could
         run before its upstream had (re)produced its artifact, drafting against
-        stale/missing input. Route both through the SAME machinery the initial
-        pass uses: the concurrent wave executor (dep-gated, cascades failures)
-        when enabled, else a topological sort with a live dep-gate.
-        """
-        if self._concurrent_waves_enabled(self.project):
-            task_map = {t.id: t for t in tasks}
-            self._run_task_waves(
-                goal, tasks, summary, task_map,
-                initial_corrective_notes=initial_corrective_notes,
-            )
-            return
+        stale/missing input. This adds a topological sort + a live dep-gate
+        around the SAME serial ``_run_task_with_redo`` calls.
 
-        # Sequential fallback: order topologically and gate each task on its
+        Deliberately NOT routed through the concurrent wave executor
+        (``_run_task_waves``): the original redo lanes were always serial, and
+        the wave path's fix-window threads contributed to the 0.9.0 suite hang
+        (re-filed finding #1). Dependency ORDERING is the only behavior change
+        here — the fix-window/redo path semantics are left exactly as they were.
+        """
+        # Order topologically and gate each task on its
         # deps. A task whose dep FAILED (terminal-fail) cascades to BLOCKED with
         # no producer call; a task whose dep merely hasn't completed is skipped
         # this pass (the topo order means that should not happen for runnable
@@ -10560,13 +10557,10 @@ class Orchestrator:
             )
             store.save_task(self.project.code, t, run_id=self.project.run_id)
 
-        # NOTE (0.9.0 debug): the wave-1 ultracode fix routed these through a
-        # dependency-gated _run_reopened_tasks helper, but that implementation
-        # was botched (it triggered a fix-window thread leak that hung the suite).
-        # Reverted to the original serial redo; the dependency-ordering finding is
-        # real and re-filed for a careful dedicated fix.
-        for t in pending:
-            self._run_task_with_redo(t, summary)
+        # Re-run the reopened tasks dependency-ordered (topo-sort + dep-gate),
+        # still serially through _run_task_with_redo — the original redo
+        # semantics, just no longer in arbitrary store-list order (re-filed #1).
+        self._run_reopened_tasks(goal, pending, summary)
 
         # Reload tasks to reflect status changes from execution.
         tasks = store.list_tasks(self.project.code, goal_id=goal.id, run_id=self.project.run_id)
@@ -10674,10 +10668,9 @@ class Orchestrator:
                     t.producer_mode = "generate"
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
 
-            # NOTE (0.9.0 debug): reverted from the botched _run_reopened_tasks
-            # helper (see _reexecute_goal) to the original serial redo.
-            for t in tasks:
-                self._run_task_with_redo(t, summary)
+            # Re-run all the goal's reset tasks dependency-ordered, serially
+            # (re-filed #1) — same execution path as the original serial redo.
+            self._run_reopened_tasks(goal, tasks, summary)
 
             if any(t.status == TaskStatus.COMPLETED for t in tasks):
                 self._leader_verify_goal(goal, tasks, summary)

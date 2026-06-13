@@ -173,6 +173,46 @@ def test_run_reopened_tasks_cascades_dep_failure(project: Project):
     assert t2.status == TaskStatus.BLOCKED
 
 
+def test_reexecute_goal_routes_reopened_tasks_dependency_ordered(project: Project):
+    """Re-filed #1 lane wiring: _reexecute_goal must re-run the reopened
+    (PENDING) tasks through the dependency-ordered _run_reopened_tasks path —
+    not the old arbitrary store-list order.
+
+    store.list_tasks returns tasks id-sorted, so T-001 comes first by store
+    order. We make T-001 DEPEND ON T-002, so topological order is the REVERSE
+    of store order: the buggy store-order lane would run T-001 (against its
+    not-yet-run dependency) first; the fix must run T-002 first."""
+    orch = _orch(project)
+    pid = project.id
+    goal = _make_goal(pid)
+    goal.status = GoalStatus.IN_PROGRESS
+    t1 = _make_task(pid, "STB-T-001", depends_on=["STB-T-002"])
+    t2 = _make_task(pid, "STB-T-002")
+    t1.status = TaskStatus.PENDING
+    t2.status = TaskStatus.PENDING
+    store.save_goal(PROJECT_CODE, goal, run_id=project.run_id)
+    store.save_task(PROJECT_CODE, t1, run_id=project.run_id)
+    store.save_task(PROJECT_CODE, t2, run_id=project.run_id)
+
+    ran: list[str] = []
+
+    def _run(t, summary, initial_corrective_notes=""):
+        ran.append(t.id)
+        t.status = TaskStatus.COMPLETED
+
+    orch._run_task_with_redo = _run  # type: ignore[assignment]
+    orch._leader_verify_goal = lambda *a, **k: None  # type: ignore[assignment]
+
+    from modulatio.orchestration import RunSummary
+
+    orch._reexecute_goal(goal, RunSummary(project=project))
+
+    assert ran == ["STB-T-002", "STB-T-001"], (
+        "the decline-driven re-run lane must honor dependency order, not "
+        "store-list (id-sorted) order"
+    )
+
+
 # ── #3: QC-as-fixer survives a binary artifact ───────────────────────────────
 def test_qc_fix_forward_survives_binary_artifact(project: Project, tmp_path: Path):
     """_attempt_qc_fix_forward must not crash (UnicodeDecodeError) on a binary
