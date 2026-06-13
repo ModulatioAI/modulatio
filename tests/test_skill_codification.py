@@ -429,9 +429,10 @@ def test_recovery_log_failure_never_reverses_completion(proj, monkeypatch):
     last_qc = (
         AssertionEvidence(producer="qc", primary=True, check="null guard", passed=False),
         "add a null guard",
-        "substantive",  # #81 3-tuple: (verdict, notes, defect_type) — Hero BLOCKER 2
     )
-    out = o._attempt_qc_fix_forward(t, draft, last_qc, RunSummary(project=pr))
+    out = o._attempt_qc_fix_forward(
+        t, draft, last_qc, RunSummary(project=pr), defect_type="substantive"
+    )
     assert out is True                       # the rescue still reached its terminal
     assert t.status == TaskStatus.COMPLETED  # the log failure did not reverse completion
 
@@ -496,8 +497,10 @@ def test_recovery_records_real_defect_type_from_tuple(proj, monkeypatch):
         lambda *a, **k: "def f(x):\n    if x is None:\n        return 0\n    return x + 1\n",
     )
     last_qc = (AssertionEvidence(producer="qc", primary=True, check="c", passed=False),
-               "notes", "mechanical")
-    o._attempt_qc_fix_forward(t, draft, last_qc, RunSummary(project=pr))
+               "notes")
+    o._attempt_qc_fix_forward(
+        t, draft, last_qc, RunSummary(project=pr), defect_type="mechanical"
+    )
     recs = recoveries.load_recoveries(proj)
     assert len(recs) == 1 and recs[0].defect_type == "mechanical"
 

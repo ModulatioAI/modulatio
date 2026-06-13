@@ -7131,6 +7131,7 @@ class Orchestrator:
         """
         corrective_notes = initial_corrective_notes
         last_qc: tuple[AssertionEvidence, str] | None = None  # (verdict, notes)
+        rescue_defect_type: str | None = None  # #81: last QC defect class for the witness
         last_exc: Exception | None = None
         last_breaker_abort: Exception | None = None  # QC-as-fixer Slice 2
 
@@ -7238,11 +7239,13 @@ class Orchestrator:
                     )
                     return
 
-                # QC rejected — prepare corrective notes for next attempt. Carry the
-                # parsed defect_type too (Hero code BLOCKER 2): it's a real component
-                # of the recovery signature, and AssertionEvidence can't hold it.
-                last_qc = (qc_verdict, qc_notes, defect_type)
+                # QC rejected — prepare corrective notes for next attempt. ``last_qc``
+                # stays a 2-tuple (the escalation helper depends on that shape); the
+                # parsed defect_type rides to the recovery witness as a separate param
+                # (Hero code BLOCKER 2 — no instance state, race-free across waves).
+                last_qc = (qc_verdict, qc_notes)
                 last_exc = None
+                rescue_defect_type = defect_type
                 corrective_notes = qc_notes or qc_verdict.check
                 # QC-as-fixer Slice 1: route the next attempt by an explicit,
                 # tested policy (edit/diff/generate) rather than a bare
@@ -7335,7 +7338,7 @@ class Orchestrator:
             # storm has nothing to patch and falls through).
             if self._attempt_qc_fix_forward(
                 t, self._resolve_draft_path(t), None, summary,
-                breaker_abort=last_breaker_abort,
+                breaker_abort=last_breaker_abort, defect_type=rescue_defect_type,
             ):
                 return
             self._settle_breaker_aborted(t, last_breaker_abort, summary)
@@ -7377,7 +7380,8 @@ class Orchestrator:
         # the last rejected artifact (flag-gated; falls through when off or
         # nothing salvageable).
         if self._attempt_qc_fix_forward(
-            t, self._resolve_draft_path(t), (qc_verdict, qc_notes), summary
+            t, self._resolve_draft_path(t), (qc_verdict, qc_notes), summary,
+            defect_type=rescue_defect_type,
         ):
             return
 
@@ -7477,10 +7481,11 @@ class Orchestrator:
         self,
         t: Task,
         draft_path: "Path | None",
-        last_qc: "tuple[AssertionEvidence, str, str | None] | None",
+        last_qc: "tuple[AssertionEvidence, str] | None",
         summary: RunSummary,
         *,
         breaker_abort: Exception | None = None,
+        defect_type: "str | None" = None,
     ) -> bool:
         """Try a QC-authored rescue. Returns True when it reached a terminal
         (caller must NOT settle its own), False to fall through to the
@@ -7505,15 +7510,15 @@ class Orchestrator:
             # caller's graceful terminal.
             return False
 
-        # Assemble the defects the QC fixer should target. ``last_qc`` is
-        # ``(verdict, notes, defect_type)`` (Hero code BLOCKER 2 — defect_type is a
-        # real signature component; AssertionEvidence has no such field, so it must
-        # ride the tuple, not a getattr off the verdict).
+        # Assemble the defects the QC fixer should target. ``last_qc`` is the 2-tuple
+        # ``(verdict, notes)``; the real QC ``defect_type`` (Hero code BLOCKER 2) rides
+        # the separate ``defect_type`` param — AssertionEvidence has no such field, and
+        # widening last_qc would break the escalation helper that shares its shape.
         if last_qc is not None:
-            qc_verdict, qc_notes, qc_defect = last_qc
+            qc_verdict, qc_notes = last_qc
             defects = (qc_notes or "").strip() or qc_verdict.check
         else:
-            qc_verdict, qc_notes, qc_defect = None, "", ""
+            qc_verdict, qc_notes = None, ""
             reason = getattr(breaker_abort, "summary", "") or "no committable result"
             defects = (
                 f"The producer could not converge ({reason}). Make the "
@@ -7557,7 +7562,7 @@ class Orchestrator:
                     self.project.code,
                     kind="qc_authored",
                     artifact_kind=t.artifact_kind or "",
-                    defect_type=qc_defect or "",
+                    defect_type=defect_type or "",
                     task_id=t.id,
                     defects=defects,
                     before=body,
