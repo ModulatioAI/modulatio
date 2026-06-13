@@ -181,6 +181,16 @@ runs**; `YOLO_GOAL` → yolo-access + delegated judgment. Access grants never by
 
 ---
 
+## Deferred refinements (reviewer-noted, not blocking — fold into a later slice)
+
+- **Per-origin deny backoff** (Lovecraft code-review). `_denied_this_session` is
+  per-capability; making it per-(capability + origin) is a finer anti-nag scope.
+  Design didn't specify granularity — an implementation choice for §2.
+- **Real public-suffix list** (MiniMax M3 code-review M3). `_COMPOUND_SUFFIXES` is a
+  curated list; a `tldextract`-style PSL would derive the registrable domain for
+  any suffix. The current fallback (unknown suffix → host-only) is *safe* (never
+  broader than session), so this is convenience, not security.
+
 ## Build order
 
 1. **§1 — the four scoped access questions (`permissions.py` core, §6.B/C/D-aligned)

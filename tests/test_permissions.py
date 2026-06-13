@@ -386,3 +386,19 @@ def test_coerce_rejects_hostile_stringifiable_object():
         def __str__(self):
             return "always"
     assert Decision.coerce(Evil()) is Decision.DENY
+
+
+# ── MiniMax M3 code-review minors ───────────────────────────────────────────
+def test_capability_for_tolerates_non_dict_args():
+    """M1: a direct call with non-dict args must not crash (public API)."""
+    cap = capability_for("http_get", "not a dict")
+    assert cap.kind == "network"
+    assert capability_for("run_shell", None).kind == "shell"
+
+
+def test_trailing_dot_host_normalized():
+    """M2: safe.com. and safe.com derive the same session/always keys."""
+    a = capability_for("http_get", {"url": "https://safe.com./x"})
+    b = capability_for("http_get", {"url": "https://safe.com/x"})
+    assert a.scoped_key(Decision.ALLOW_SESSION) == b.scoped_key(Decision.ALLOW_SESSION)
+    assert a.scoped_key(Decision.ALLOW_ALWAYS) == b.scoped_key(Decision.ALLOW_ALWAYS)

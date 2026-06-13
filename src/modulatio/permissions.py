@@ -160,8 +160,11 @@ class Capability:
 
 
 def _host_of(url: str) -> str:
+    # rstrip('.') normalizes a trailing-dot FQDN ("safe.com." → "safe.com") so the
+    # session/host and always/domain keys derive from the same host string
+    # (MiniMax M3 code-review M2 — safe before, just surprising).
     try:
-        return (urlparse(url).hostname or "").lower()
+        return (urlparse(url).hostname or "").lower().rstrip(".")
     except ValueError:
         return ""
 
@@ -212,8 +215,13 @@ def _registrable_domain(host: str) -> str:
 
 
 def capability_for(tool_name: str, args: "dict | None" = None) -> Capability:
-    """Map a tool call to its typed, scope-aware Capability (§6.B)."""
-    args = args or {}
+    """Map a tool call to its typed, scope-aware Capability (§6.B).
+
+    ``Capability.label``/``detail`` are the HUMAN utterance a surface speaks in the
+    Leader's voice ("access the internet"), never the policy key — the key is the
+    typed ``scoped_key`` (Lovecraft code-review nit). ``args`` is defensively
+    coerced to a dict so a direct/public call can't crash (MiniMax M3 M1)."""
+    args = args if isinstance(args, dict) else {}
     name = (tool_name or "").strip()
     if name in ("http_get", "web_search"):
         url = str(args.get("url") or "").strip()
