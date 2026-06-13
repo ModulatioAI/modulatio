@@ -30,3 +30,6 @@ scripts/eval/*/.vault/
 .vault/
 scripts/smoke/*/run.log
 /cliftest/
+
+# internal reviewer-session logs (hermes/lovecraft stdout) — never published
+scripts/smoke/security-audit/

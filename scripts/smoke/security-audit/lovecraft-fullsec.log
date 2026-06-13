@@ -1,5 +1,0 @@
-The full independent security code audit is complete. Report written to:
-
-`/home/cknox/Message in a Bottle/2026-06-13-Lovecraft-to-Cowboy-fullsec-audit.md`
-
-All nine vectors were exercised via direct file reads, greps, and section inspections of the real source (orchestration.py, sandbox.py:build_sandboxed_argv + _build_env + _DENY_ENV_PATTERNS, tools.py:run_shell + http_get + _NoRedirectHandler, assembly.py, skills.py, job_template_library.py, runners.py, acp/server.py, etc.). No source was modified.

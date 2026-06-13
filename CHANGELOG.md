@@ -6,6 +6,51 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.9] — 2026-06-13
+
+**Security hardening release.** A full-codebase security audit of the agent engine, then
+**two independent mirror-audits** (an adversarial hull pass and a coherence pass, each a
+different model reviewing the whole tree fresh) to catch what one pass would miss. Nine findings
+were confirmed and closed; the most important — a tool-call authorization bypass — was found by
+the independent hull pass, not the first. No functional behavior changes for a normal run; this is
+defense-in-depth on the surfaces a hostile model (prompt-injected via a fetched page or a poisoned
+artifact) could otherwise reach. The guiding rule throughout: *a permission is a key to a door
+inside the ship; it never opens the sea valves* — every fix is an engine-bound invariant, not
+prompt guidance.
+
+### Closed
+
+- **Tool-call authorization now respects the skill's `tool_loadout` (SEC-01, the keystone).** The
+  tool-dispatch loop gated on registry membership, so a model could call a privileged tool
+  (`run_shell`, `write_artifact`) that was in the registry even when it wasn't in the running
+  skill's declared loadout. Dispatch now refuses any call outside the loadout — a web-only skill
+  can no longer reach the shell.
+- **Skill / job-template names can't escape their registry (H1).** A model-supplied name with a
+  path separator / `..` / absolute prefix is rejected at every write and resolves to a safe
+  not-found at every read — closing a cross-project library-poisoning + out-of-root read.
+- **Front-matter can't forge a privilege (H2).** A newline-injected `description` could otherwise
+  forge `needs_network: true` / `pass_env: <secret>` into a created skill; scalar fields are now
+  newline-collapsed at the single serialization point.
+- **`run_shell` is contained (H3).** Child resource limits (address space / file size / core),
+  process-group reaping so a timeout can't leave orphaned background processes, and an opt-in
+  fail-closed sandbox (`MODULATIO_REQUIRE_SANDBOX=1`) for multi-user / daemon hosts that refuses to
+  run unsandboxed rather than silently falling open.
+- **The sandbox env deny-list is broader (M1).** It now strips the generic secret shapes it missed
+  (`*_KEY`, `DATABASE_URL`, `GH_PAT`, `SSH_*`, AWS creds, …) — `pass_env` is for configuration,
+  never credentials.
+- **Secrets are redacted before they surface (M2 + SEC-03).** Provider auth-error alerts, context
+  checkpoints, and the Leader↔operator conversation log are swept for token-shaped secrets
+  (OpenAI/Anthropic/xAI/GitHub/Google/Slack/AWS/Stripe) before they're written or shown; durable
+  logs are created `0600`.
+- **ACP attachments are confined (SEC-02).** A client-supplied attachment path is restricted to an
+  allowed root (CWD by default, `MODULATIO_ACP_ATTACHMENT_ROOTS` to widen) and dotfiles/secret
+  files are refused — an editor plugin can't read arbitrary local files into the model context.
+- **Tool timeouts are clamped (SEC-04).** Caller-supplied `run_shell` / `http_get` timeouts are
+  bounded (and NaN/inf rejected) so a hostile value can't tie up a worker.
+
+Both independent audits cleared the fixes; the hull pass signed each finding closed. **3211 tests
+pass.**
+
 ## [0.8.8] — 2026-06-12
 
 **The engine learns to trust a provable result — and to learn from its own rescues.** Two arcs
