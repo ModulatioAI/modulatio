@@ -6,8 +6,11 @@ r2 7 → r3 #3); Hero (hull/arch, SIGN-WITH-RESERVATIONS → R1/R2/R3 folded →
 **Design CLEARED FOR TDD** → **BUILT (TDD)** (recoveries.py + Skill fields + orchestration
 wiring + win-codify seed; 23 new tests; **full suite 3115 passed, ruff clean**) → **CODE REVIEW:
 Lovecraft (coherence) SIGN-OFF + Nemo (hull) SIGN-OFF** (r1 BLOCK 2 — phase-independence seal +
-truncated-rationale signature → r2 cleared). **Hero (code) pending Clif relay** (clean framing)
-→ merge (= Clif). Held local on `arc/codify-the-win`.
+truncated-rationale signature → r2 cleared). **Hero (code) r1 BLOCK** (2 blockers proven live: R2 side-door leak + dead defect_type
+signature component; + moderate + 2 minors) **→ all folded; r2 fold-confirm pending Clif relay.**
+Post-Hero `defect_type` threading rippled into the escalation helper → reworked to keep
+`last_qc` a 2-tuple (regression caught by the FULL suite, not the targeted one). **Full suite
+3118 passed, ruff clean.** → merge (= Clif). Held local on `arc/codify-the-win`.
 
 > **Hero remediation (2026-06-12).** SIGN-WITH-RESERVATIONS — three design-level holes, all the
 > "does the right thing and forgets to say so / claims a safety it hasn't mechanized" shape; the
