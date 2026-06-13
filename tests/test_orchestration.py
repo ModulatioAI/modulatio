@@ -7242,7 +7242,8 @@ def test_qc_fix_forward_completes_on_qc_patch(project, monkeypatch):
     summary = RunSummary(project=project)
 
     handled = orch._attempt_qc_fix_forward(
-        task, draft, (_rejected_verdict(), "fix the section"), summary
+        task, draft, (_rejected_verdict(), "fix the section"), summary,
+        defect_type="substantive",
     )
     assert handled is True
     assert task.status == TaskStatus.COMPLETED
@@ -7253,6 +7254,13 @@ def test_qc_fix_forward_completes_on_qc_patch(project, monkeypatch):
     assert task.id in summary.qc_authored_fixes
     assert draft in summary.drafts
     assert "PATCHED ARTIFACT BODY" in draft.read_text()  # QC did patch in place
+    # #81: the rescue WITNESSES the recovery through the real call path, carrying the
+    # threaded defect_type (a 2-tuple last_qc + a separate param — Hero code BLOCKER 2
+    # + the escalation-tuple regression). A direct unit test never exercised this.
+    from modulatio import recoveries
+    recs = recoveries.load_recoveries(project.code)
+    assert len(recs) == 1 and recs[0].kind == "qc_authored"
+    assert recs[0].defect_type == "substantive"
 
 
 def test_breaker_trips_in_diff_mode(project, monkeypatch):
