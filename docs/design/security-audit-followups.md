@@ -206,6 +206,79 @@ about its edges.
 
 ---
 
+## Third pass — Lovecraft's independent full code audit
+
+Per Clif, Lovecraft (a third, independent reviewer on a different model than
+Nemo and the first pass) ran his own full-codebase *code-level* security review.
+His letter: `2026-06-13-Lovecraft-to-Cowboy-fullsec-audit.md`; my dispositions:
+`2026-06-13-Cowboy-to-Lovecraft-fullsec-reply.md`.
+
+His pass produced **no new actionable patch** — each concrete escalation was
+already bound (and is checkable at file:line):
+- *SSRF private-IP/metadata guard* — present at `tools.py:223-290` (rejects
+  metadata hostnames + every resolved private/loopback/link-local IP *before*
+  the fetch; `_NoRedirectHandler` blocks a later redirect). Verified by probe.
+- *Assembly path traversal* — model-supplied unit names route through
+  `assembly.py:208 _safe_unit_path` (resolve-under-root + reject absolute/`..`/
+  escape + reject C0 control chars incl. the ffmpeg concat-list `\n` vector).
+- *Skill-poisoning capability self-grants* (`needs_network` / `pass_env` a
+  secret) — closed by H2 (front-matter can't be forged) + M1 (the secret is
+  stripped from `pass_env` regardless).
+
+But the pass earned its keep by surfacing **two real design tensions** — not
+bugs, *posture choices* — which are now first-class open decisions below.
+
+---
+
+## Open design decisions (surfaced by the independent audits — Clif's call)
+
+These are not vulnerabilities with a clear right answer; they are trade-offs
+where the safe choice costs convenience, so the owner decides. Both reviewers
+independently pointed at them.
+
+### OD-1 — Should the sandbox fail CLOSED by default on a host with no bwrap?
+
+**Today:** if bubblewrap is missing/non-functional, `run_shell` *soft-falls* to
+unsandboxed execution (so macOS/CI/single-user dev keep working), and
+`MODULATIO_REQUIRE_SANDBOX=1` is the opt-in that flips it to a hard refusal.
+
+**The tension:** that default is fail-OPEN — a box that *should* be sandboxed but
+isn't (bwrap silently broke, a misconfigured container) runs the model's shell
+commands with the full parent environment and filesystem. A hostile model can't
+*cause* this (it can't remove bwrap or set the bypass env), but a sloppy
+deployment can leave the door open without anyone noticing.
+
+**The decision:** keep soft-fall as the universal default (favor "it runs") — or
+make `require_sandbox` the **default specifically in daemon / multi-user mode**
+(favor "it's safe"), where the soft-fall is most dangerous and least needed,
+while leaving interactive single-user dev soft by default. Recommendation:
+the latter — default-safe where the blast radius is shared, default-easy where
+it's just you.
+
+### OD-2 — Should a codified skill be re-reviewed before a later run trusts it?
+
+**Today:** the self-codification ("Alfred") + recovery ("win") loops let the
+Leader write durable, git-tracked skill guidance from model output, and a
+*later* run (even in another project, for shared skills) executes that guidance
+with **no QC re-review** — the "Leader-authoritative codification" stance (the
+Leader is the smartest seat; git keeps full, revertible history).
+
+**The tension:** the *capability* self-grants are now bound (a codified skill
+can't forge `needs_network`/`pass_env`), but the *body* — the prompt text the
+later producer follows — is trusted on the strength of the Leader's one-time
+judgment. A subtly-poisoned instruction codified once influences every future
+run that loads it, with no second look.
+
+**The decision:** accept the stance (codification is cheap, git is the safety
+net, a re-review tax would blunt the learning loop) — or add a lightweight gate
+on *load* of a codified skill (a QC sanity-check, or a "promote to shared needs a
+second sign-off" step, which the win-loop already half-implements for the
+shared→project boundary). Recommendation: leave task-local codifications as-is;
+consider the second-sign-off gate only at the **shared-library promotion**
+boundary, where one poisoned skill reaches the most future runs.
+
+---
+
 ## Verification (observed, not reported)
 
 - TDD: `tests/test_security_audit.py` reproduces each confirmed vector and
@@ -215,14 +288,28 @@ about its edges.
   refuse-when-required + soft-fall-when-not, the broadened deny-list truth
   table, and the auth-alert redaction.
 - CI parity: `ruff check src/ tests/` clean; full `pytest` green
-  (3179+ tests) after each fix — run on the real box (the rlimit/orphan tests
+  (3211 tests) after each fix — run on the real box (the rlimit/orphan tests
   exercise real subprocesses).
+
+## Reviewer cadence (mirroring the #80 pattern)
+
+Three independent passes drove this arc:
+- **First pass (Cowboy):** the 9-vector audit → H1/H2/H3/M1/M2.
+- **Nemo (hull, GPT-5.5):** independent full audit mirroring the first → found
+  SEC-01..04 → scoped close-out: SEC-01/02/04 CLOSED, SEC-03 BLOCK ×2 (AWS
+  redaction) then CLOSED on round 3. All four **signed off**.
+- **Lovecraft (code, Grok-4.3):** independent full code audit → no new patch
+  (each escalation already bound, with file:line) → surfaced OD-1 / OD-2.
 
 ## Commits on the branch
 
 1. `security: bind skill/JT name + front-matter against H1/H2`
 2. `security: contain run_shell — child rlimits, process-group reap, fail-closed (H3)`
-3. *(this doc + M1/M2)* — `security: broaden env deny-list + redact auth-error secrets (M1/M2)`
+3. `security: broaden env deny-list + redact auth-error secrets (M1/M2)` (+ this doc)
+4. `security: fix Nemo's independent-audit findings SEC-01..04`
+5. `security: redact AWS credential shapes (Nemo SEC-03 BLOCK close-out)`
+6. `security: redact labeled AWS creds greedily (Nemo SEC-03 r2 close-out)`
 
 Held local — this patches already-public v0.8.8 code, so any public push is a
-separate Gate-2 step (Clif's call).
+separate Gate-2 step (Clif's call). **OD-1 and OD-2 above are open decisions
+awaiting Clif's direction.**
