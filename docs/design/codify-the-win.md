@@ -3,8 +3,10 @@
 **Status:** DESIGN. Held local on `arc/codify-the-win` (off main, post-#100 `2caa2a5`).
 **✅ ALL THREE REVIEWERS SIGNED 2026-06-12** — Lovecraft (coherence); Nemo (hull, r1 BLOCK 8 →
 r2 7 → r3 #3); Hero (hull/arch, SIGN-WITH-RESERVATIONS → R1/R2/R3 folded → SIGN-OFF @ `35eb859`).
-**Design CLEARED FOR TDD** → code review (Nemo+Hero) → merge (= Clif). Held local on
-`arc/codify-the-win`.
+**Design CLEARED FOR TDD** → **BUILT (TDD) @ `aabf39a`+`51adeaa`+`9416cee`** (recoveries.py +
+Skill fields + orchestration wiring + win-codify seed; 21 new tests; **full suite 3113 passed,
+ruff clean**) → **IN CODE REVIEW** (Nemo hull + Lovecraft coherence driving; Hero relayed) →
+merge (= Clif). Held local on `arc/codify-the-win`.
 
 > **Hero remediation (2026-06-12).** SIGN-WITH-RESERVATIONS — three design-level holes, all the
 > "does the right thing and forgets to say so / claims a safety it hasn't mechanized" shape; the
