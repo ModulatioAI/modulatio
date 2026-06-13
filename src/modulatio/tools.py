@@ -365,6 +365,42 @@ _PYTHON_BINS = ("python", "python3", "python3.11", "python3.12")
 _DEFAULT_RUN_SHELL_TIMEOUT_SECONDS = 30.0
 _RUN_SHELL_MAX_OUTPUT_BYTES = 8000
 
+# Security audit H3a — resource ceilings applied to every run_shell child
+# (and inherited by its sandboxed grandchildren). bwrap confines the
+# filesystem + network but does NOT bound memory / disk / core dumps, so a
+# skill that opted into run_shell could exhaust them from inside the sandbox.
+# Ceilings are generous (real tools — pandoc, ffmpeg, python probes — fit
+# comfortably) and only ever LOWERED, never raised, to avoid EPERM. CPU is
+# intentionally bounded by the wall-clock timeout + process-group kill below
+# rather than RLIMIT_CPU (which false-kills legitimate parallel builds);
+# RLIMIT_NPROC is omitted deliberately — without a user-namespace UID remap it
+# is enforced per real-UID and would refuse to fork when the host is already
+# busy (a future hardening once the sandbox remaps the UID).
+_RUN_SHELL_RLIMIT_AS_BYTES = 4 * 1024**3      # 4 GiB address space (mem bomb)
+_RUN_SHELL_RLIMIT_FSIZE_BYTES = 2 * 1024**3   # 2 GiB max single file (disk fill)
+
+
+def _apply_child_rlimits() -> None:  # pragma: no cover - runs in forked child
+    """``preexec_fn`` for the run_shell child: clamp address space, max file
+    size, and core-dump size. POSIX-only; a no-op where ``resource`` is
+    unavailable (e.g. Windows). Each limit is lowered to ``min(target,
+    current_hard)`` so an unprivileged process never raises its own hard
+    limit (which would raise ``ValueError``/EPERM)."""
+    try:
+        import resource
+    except ImportError:
+        return
+
+    def _clamp(which: int, target: int) -> None:
+        soft, hard = resource.getrlimit(which)
+        new_hard = target if hard == resource.RLIM_INFINITY else min(hard, target)
+        new_soft = new_hard if soft == resource.RLIM_INFINITY else min(soft, new_hard)
+        resource.setrlimit(which, (new_soft, new_hard))
+
+    _clamp(resource.RLIMIT_AS, _RUN_SHELL_RLIMIT_AS_BYTES)
+    _clamp(resource.RLIMIT_FSIZE, _RUN_SHELL_RLIMIT_FSIZE_BYTES)
+    _clamp(resource.RLIMIT_CORE, 0)
+
 
 def _is_safe_relative_file_arg(arg: str) -> bool:
     """True iff ``arg`` is a relative path with no dotfile components
@@ -946,22 +982,54 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
             run_argv, run_env = _sandbox.build_sandboxed_argv(
                 exec_argv, artifacts_root, profile=_profile,
             )
+        elif _sandbox.is_sandbox_required():
+            # H3c: operator demanded a working sandbox (MODULATIO_REQUIRE_SANDBOX=1)
+            # but bwrap is missing/non-functional and no explicit bypass was set.
+            # Fail CLOSED — refuse to run unconfined rather than fall open.
+            raise RuntimeError(
+                "run_shell refused: MODULATIO_REQUIRE_SANDBOX=1 but the bwrap "
+                "sandbox is unavailable on this host. Install/repair bubblewrap, "
+                "or set MODULATIO_RUN_SHELL_UNSAFE=1 to accept unsandboxed "
+                "execution explicitly."
+            )
         else:
             _sandbox.warn_unsandboxed_once()
         try:
-            result = subprocess.run(
+            # H3a/H3b: own process group (start_new_session) + child rlimits so a
+            # wall-clock timeout reaps the WHOLE tree (orphaned background
+            # grandchildren included), and a memory/disk bomb is bounded. We use
+            # Popen+communicate rather than subprocess.run because run() SIGKILLs
+            # only the direct child on timeout, leaving an unsandboxed
+            # background process alive.
+            import signal as _signal
+
+            proc = subprocess.Popen(
                 run_argv,
                 cwd=str(wd),
-                timeout=timeout,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 shell=False,
                 env=run_env,
+                start_new_session=True,
+                preexec_fn=_apply_child_rlimits,
             )
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # Kill the entire process group, then drain. killpg targets the
+                # session we created above so no grandchild survives.
+                try:
+                    os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                stdout, stderr = proc.communicate()
+                stderr = (stderr or "") + f"\n[TIMEOUT after {timeout}s]"
+                return _format_run_shell_result(-1, stdout or "", stderr)
             return _format_run_shell_result(
-                result.returncode,
-                result.stdout or "",
-                result.stderr or "",
+                proc.returncode,
+                stdout or "",
+                stderr or "",
             )
         except FileNotFoundError as exc:
             # Binary not on PATH (and, for python -m <tool> shapes, the
@@ -977,11 +1045,6 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
                 f"error: {exc}"
             )
             return _format_run_shell_result(-1, "", stderr)
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, (bytes, bytearray)) else (exc.stdout or "")
-            stderr_raw = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, (bytes, bytearray)) else (exc.stderr or "")
-            stderr = stderr_raw + f"\n[TIMEOUT after {timeout}s]"
-            return _format_run_shell_result(-1, stdout, stderr)
 
     return run_shell
 

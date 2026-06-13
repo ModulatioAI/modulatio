@@ -180,6 +180,28 @@ def is_bypass_requested() -> bool:
     return os.environ.get(_SANDBOX_BYPASS_ENV, "").strip() == "1"
 
 
+_SANDBOX_REQUIRED_ENV = "MODULATIO_REQUIRE_SANDBOX"
+
+
+def is_sandbox_required() -> bool:
+    """True if the operator demands a working sandbox via
+    ``MODULATIO_REQUIRE_SANDBOX=1`` (security audit H3c).
+
+    The default ``run_shell`` policy *soft-falls* to unsandboxed execution
+    when ``bwrap`` is missing or non-functional — deliberate, so macOS/CI
+    and single-user dev boxes still run. But a multi-user or otherwise
+    untrusted host wants the opposite: if the sandbox can't confine the
+    child, **refuse to run it** rather than execute with the parent's full
+    env and filesystem. Setting this flag turns the fail-OPEN fallback into
+    a fail-CLOSED refusal. An explicit ``MODULATIO_RUN_SHELL_UNSAFE=1`` /
+    ``profile=off`` bypass still wins (the operator accepted that risk
+    knowingly); this only governs the *implicit* missing-bwrap path.
+
+    See the Multi-user host hardening ops guide.
+    """
+    return os.environ.get(_SANDBOX_REQUIRED_ENV, "").strip() == "1"
+
+
 def is_sandbox_installed() -> bool:
     """True if the ``bwrap`` binary is on PATH (regardless of whether
     it can actually create namespaces). Use this when you need to
@@ -481,6 +503,7 @@ __all__ = [
     "is_bypass_requested",
     "is_sandbox_available",
     "is_sandbox_installed",
+    "is_sandbox_required",
     "reset_sandbox_probe_cache",
     "skill_context",
     "warn_unsandboxed_once",

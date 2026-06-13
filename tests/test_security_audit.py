@@ -23,9 +23,11 @@ are closed at the engine chokepoints, not in prompt prose.
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from modulatio import job_templates, skills
+from modulatio import job_templates, sandbox, skills, tools
 from modulatio import vault
 
 
@@ -154,3 +156,93 @@ def test_save_blocks_jt_frontmatter_injection(tmp_path, monkeypatch):
     # No forged version line took.
     assert reloaded.version != "99"
     assert "\n" not in reloaded.description
+
+
+# --------------------------------------------------------------------------
+# H3 — run_shell containment: resource limits, orphan reaping, fail-closed
+# --------------------------------------------------------------------------
+
+def _artifacts(tmp_path):
+    art = tmp_path / "artifacts"
+    art.mkdir()
+    return art
+
+
+def test_run_shell_applies_resource_limits(tmp_path):
+    """H3a: the child (and any sandboxed grandchild) runs under a bounded
+    address space + zero core-dump size, so a memory bomb is contained even
+    though bwrap doesn't cgroup-limit memory."""
+    art = _artifacts(tmp_path)
+    (art / "limits.py").write_text(
+        "import resource\n"
+        "soft_as, _ = resource.getrlimit(resource.RLIMIT_AS)\n"
+        "soft_core, _ = resource.getrlimit(resource.RLIMIT_CORE)\n"
+        "print(f'AS={soft_as} CORE={soft_core}')\n"
+    )
+    rs = tools.make_run_shell(art)
+    out = rs(cmd="python3 limits.py", profile="full", timeout=10)
+    # parse the reported soft limits
+    line = [ln for ln in out.splitlines() if ln.startswith("AS=")][0]
+    as_val = int(line.split("AS=")[1].split(" ")[0])
+    core_val = int(line.split("CORE=")[1])
+    # address space is now a finite ceiling (not RLIM_INFINITY == -1) and at
+    # or below our 4 GiB clamp; core dumps are disabled.
+    assert as_val != -1
+    assert as_val <= 4 * 1024**3
+    assert core_val == 0
+
+
+def test_run_shell_reaps_orphaned_background_child_on_timeout(tmp_path):
+    """H3b: a command that spawns a background child which outlives the
+    parent must NOT survive the wall-clock timeout — the whole process group
+    is killed (or the sandbox PID namespace is torn down). Proven by a marker
+    a surviving child would write ~2s in: after a 1s timeout it must never
+    appear."""
+    art = _artifacts(tmp_path)
+    (art / "orphan.py").write_text(
+        "import subprocess, sys, time, os\n"
+        "child = (\n"
+        "    'import time, pathlib; time.sleep(2); "
+        "pathlib.Path(\"orphan_marker\").write_text(\"survived\")'\n"
+        ")\n"
+        "subprocess.Popen([sys.executable, '-c', child], cwd=os.getcwd())\n"
+        "time.sleep(60)\n"
+    )
+    rs = tools.make_run_shell(art)
+    out = rs(cmd="python3 orphan.py", profile="full", timeout=1)
+    assert "TIMEOUT" in out
+    # give a surviving orphan well past its 2s write window
+    time.sleep(3.5)
+    assert not (art / "orphan_marker").exists(), (
+        "orphaned background child survived the timeout — process group not reaped"
+    )
+
+
+def test_run_shell_fails_closed_when_sandbox_required_but_unavailable(
+    tmp_path, monkeypatch
+):
+    """H3c: with MODULATIO_REQUIRE_SANDBOX=1 and no working bwrap (and no
+    explicit bypass), run_shell REFUSES rather than running unconfined."""
+    art = _artifacts(tmp_path)
+    (art / "demo.py").write_text("print('should not run')\n")
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "is_sandbox_required", lambda: True)
+    rs = tools.make_run_shell(art)
+    with pytest.raises(RuntimeError, match="refused"):
+        rs(cmd="python3 demo.py", profile="full", timeout=5)
+
+
+def test_run_shell_soft_falls_when_sandbox_not_required(tmp_path, monkeypatch):
+    """The default (no MODULATIO_REQUIRE_SANDBOX) still soft-falls to
+    unsandboxed execution when bwrap is missing — dev/CI must keep working."""
+    art = _artifacts(tmp_path)
+    (art / "demo.py").write_text("print('ran unsandboxed')\n")
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "is_sandbox_required", lambda: False)
+    rs = tools.make_run_shell(art)
+    out = rs(cmd="python3 demo.py", profile="full", timeout=5)
+    assert "ran unsandboxed" in out
