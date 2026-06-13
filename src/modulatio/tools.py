@@ -403,6 +403,9 @@ def _clamp_timeout(value: object, *, lo: float, hi: float, default: float) -> fl
 # busy (a future hardening once the sandbox remaps the UID).
 _RUN_SHELL_RLIMIT_AS_BYTES = 4 * 1024**3      # 4 GiB address space (mem bomb)
 _RUN_SHELL_RLIMIT_FSIZE_BYTES = 2 * 1024**3   # 2 GiB max single file (disk fill)
+# Cap the post-timeout pipe drain so a re-parented double-forking grandchild
+# holding the pipes open can't hang run_shell after the process-group kill.
+_RUN_SHELL_DRAIN_TIMEOUT = 5.0
 
 
 def _apply_rlimits_to_pid(pid: int) -> None:
@@ -645,15 +648,24 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
             ):
                 return True
     if head == "ruff":
-        # ruff check  /  ruff check <path>
+        # ruff check  /  ruff check <path>...  — any path arg must be confined
+        # to the artifacts root, else the lint error output leaks arbitrary
+        # source. Bare `ruff check` lints the (already-confined) cwd.
         if len(argv) >= 2 and argv[1] == "check":
-            return True
+            if all(_is_safe_file_arg(a, root) for a in argv[2:]):
+                return True
     if head == "mypy":
-        # mypy <file.py>  or  mypy <file.py> <file.py>...
-        if len(argv) >= 2 and all(a.endswith(".py") for a in argv[1:]):
+        # mypy <file.py>  or  mypy <file.py> <file.py>...  — confine each path
+        # (a lint tool echoes offending source lines, so an unconfined path is
+        # an arbitrary-file read).
+        if len(argv) >= 2 and all(
+            a.endswith(".py") and _is_safe_file_arg(a, root) for a in argv[1:]
+        ):
             return True
     if head == "pyflakes":
-        if len(argv) >= 2 and all(a.endswith(".py") for a in argv[1:]):
+        if len(argv) >= 2 and all(
+            a.endswith(".py") and _is_safe_file_arg(a, root) for a in argv[1:]
+        ):
             return True
     # ── Read-only filesystem inspection (cwd already confined) ──────
     # The agent often wants to confirm what's in the workspace before
@@ -1076,7 +1088,19 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
                     os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     proc.kill()
-                stdout, stderr = proc.communicate()
+                # Bounded drain: a double-forking grandchild that re-parented
+                # away from our process group can keep the stdout/stderr pipes
+                # open after the killpg, so an unbounded communicate() would
+                # hang run_shell forever. Cap the drain; on a second timeout,
+                # kill again and give up on the leftover output.
+                try:
+                    stdout, stderr = proc.communicate(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        stdout, stderr = proc.communicate(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        stdout, stderr = "", ""
                 stderr = (stderr or "") + f"\n[TIMEOUT after {timeout}s]"
                 return _format_run_shell_result(-1, stdout or "", stderr)
             return _format_run_shell_result(

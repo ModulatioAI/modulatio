@@ -1383,6 +1383,83 @@ def test_run_shell_not_installed_is_recoverable_not_raised(tmp_path):
         assert "exit_code:" in out
 
 
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "mypy ../../../etc/passwd.py",
+        "mypy /etc/shadow.py",
+        "pyflakes ../../secret.py",
+        "ruff check /etc",
+        "ruff check ../../sibling",
+    ],
+)
+def test_run_shell_passive_lint_refuses_paths_outside_artifacts(tmp_path, cmd):
+    """Re-filed #3: ruff/mypy/pyflakes echo offending source lines in their
+    output, so an unconfined path arg is an arbitrary-file read. The passive
+    allowlist must confine lint path args to the artifacts root just like
+    cat/head/tail — a traversal or absolute path is refused before spawn."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    with pytest.raises(ValueError, match="not allowed"):
+        rs(cmd=cmd, profile="passive")
+
+
+def test_run_shell_passive_lint_allows_confined_path(tmp_path):
+    """A lint path INSIDE the artifacts root still passes the allowlist (the
+    tool may or may not be installed in the test env — either way the command
+    is accepted, not refused as unsafe)."""
+    art = _make_artifacts(tmp_path)
+    (art / "ok.py").write_text("x = 1\n")
+    rs = tools.make_run_shell(art)
+    for cmd in ("mypy ok.py", "pyflakes ok.py", "ruff check ok.py"):
+        out = rs(cmd=cmd, profile="passive", timeout=5)
+        # Accepted by the allowlist → real exit code or friendly [INFO], never
+        # the "not allowed" refusal.
+        assert "exit_code:" in out
+        assert "not allowed" not in out
+
+
+def test_run_shell_timeout_drain_is_bounded_against_reparented_child(tmp_path, monkeypatch):
+    """Re-filed #4: after the wall-clock timeout kills the process group, a
+    double-forking grandchild that called setsid() escapes the group and keeps
+    the inherited stdout pipe open — an unbounded proc.communicate() drain would
+    then block run_shell forever. The drain is now bounded; run_shell must
+    return promptly with a TIMEOUT result even though the grandchild lives on."""
+    import os
+    import time as _time
+
+    if not hasattr(os, "fork") or not hasattr(os, "setsid"):
+        pytest.skip("POSIX fork/setsid required")
+
+    # Shrink the drain cap so the test is fast; default is 5s.
+    monkeypatch.setattr(tools, "_RUN_SHELL_DRAIN_TIMEOUT", 1.0)
+
+    art = _make_artifacts(tmp_path)
+    # P (the Popen target) forks G; G escapes the process group via setsid and
+    # holds stdout open while sleeping well past the timeout. P sleeps so the
+    # initial timeout fires with P alive. killpg reaps P but not G; the bounded
+    # drain must not wait out G's full sleep.
+    (art / "reparent.py").write_text(
+        "import os, sys, time\n"
+        "pid = os.fork()\n"
+        "if pid > 0:\n"
+        "    time.sleep(60)\n"
+        "    sys.exit(0)\n"
+        "os.setsid()        # G escapes P's process group\n"
+        "time.sleep(20)     # hold the inherited stdout pipe open\n"
+    )
+    rs = tools.make_run_shell(art)
+
+    start = _time.monotonic()
+    out = rs(cmd="python3 reparent.py", profile="full", timeout=1)
+    elapsed = _time.monotonic() - start
+
+    assert "TIMEOUT" in out
+    # 1s timeout + two ~1s bounded drains ≈ 3s. Unbounded would block ~20s on
+    # G's open pipe. Generous ceiling that still proves the drain is capped.
+    assert elapsed < 12, f"drain was not bounded: {elapsed:.1f}s"
+
+
 # ── write_artifact tool ────────────────────────────────────────────────────
 #
 # Engineer agents reach for ``cat > file << EOF`` to write files
