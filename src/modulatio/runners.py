@@ -828,6 +828,7 @@ def run_llm_with_tools(
     summarizer_chat_runner_factory: Callable[[str], Callable[..., str]] | None = None,
     model: str | None = None,
     permission_callback: Callable[[str, dict], bool] | None = None,
+    permission_broker: "object | None" = None,
     metered_authorizer: Callable[[str, dict], "tuple[bool, str]"] | None = None,
 ) -> str:
     """Run a function-calling loop. Returns the model's final text.
@@ -895,6 +896,20 @@ def run_llm_with_tools(
     # name isn't in the declared loadout — otherwise a web-only skill reaches
     # run_shell / write_artifact / read_tool_result whenever they're registered.
     allowed_tools = set(tool_loadout)
+
+    def _permission_denied(call) -> bool:
+        # The scoped PermissionBroker (§6) is the gate when present — it asks the
+        # four access questions, honors remembered/preauthorized grants, and binds
+        # the substrate preflight. It takes precedence over the legacy bool
+        # callback (kept for the ACP allow/deny path). No gate wired → no check
+        # (the operator/admin compatibility default; daemon/headless paths supply
+        # a deny-or-preauth broker per §6.C).
+        if permission_broker is not None:
+            return not permission_broker.authorize(call.name, dict(call.args))
+        if permission_callback is not None:
+            return not permission_callback(call.name, dict(call.args))
+        return False
+
     messages: list[dict] = [{"role": "user", "content": prompt}]
     # W5-lite F9 audit follow-up: a 20-iteration tool loop that
     # sits in the soft-warn band would otherwise emit 20 identical
@@ -972,15 +987,14 @@ def run_llm_with_tools(
                     f"ERROR: tool {call.name!r} is not available to this skill. "
                     f"Allowed tools for this skill: {list(tool_loadout)!r}."
                 )
-            elif (
-                permission_callback is not None
-                and not permission_callback(call.name, dict(call.args))
-            ):
-                # The operator (via an ACP client) declined this tool. Feed the
-                # denial back as the tool result so the model can re-plan — same
-                # contract as an error string. Fail-closed: the tool never runs.
+            elif _permission_denied(call):
+                # The operator declined this capability (via the scoped
+                # PermissionBroker — once/session/always/no — or the legacy ACP
+                # allow/deny callback). Feed the denial back so the model re-plans
+                # within what it's allowed. Fail-closed: the tool never runs.
                 result = (
-                    f"DENIED: the operator declined to run tool {call.name!r}."
+                    f"DENIED: the operator's permission policy declined "
+                    f"{call.name!r}."
                 )
             elif getattr(tool, "cost_class", None) in ("paid-cloud", "premium-cloud"):
                 # Metered tool (Part B4): gate the spend BEFORE the call. The engine
