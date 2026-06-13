@@ -246,3 +246,33 @@ def test_kill_switch_disables_codification(proj, monkeypatch):
     o, pr = _orch(proj, decision)
     o._post_run_codification(RunSummary(project=pr))
     assert skills.load_with_metadata("nope").name == ""
+
+
+# ── #81 Fix F: provenance + learned_from round-trip (Nemo r3 / Hero R1·R2) ──────
+
+
+def test_skill_provenance_and_learned_from_roundtrip(tmp_path, monkeypatch):
+    """The win loop's honesty + replay guard both die if these fields don't survive
+    a save→reload. provenance='win' + the consumed cluster signatures must persist."""
+    from modulatio import skills
+
+    # isolate the shared library to a tmp dir (CI runs pytest-randomly — never write
+    # to the real shared skills root, and don't depend on another test's leftover).
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", tmp_path / "shared" / "skills")
+    sk = skills.create_skill(
+        name="codify-win-roundtrip", description="d", prompt_template="body",
+        version="2", provenance="win",
+        learned_from=("python_code|substantive|null-guard|code:add=S:rm=0:ctrl=+:lit=0",),
+        project_code=None,
+    )
+    assert sk.provenance == "win" and len(sk.learned_from) == 1
+    reloaded = skills.load_with_metadata("codify-win-roundtrip")
+    assert reloaded.provenance == "win"
+    assert reloaded.learned_from == sk.learned_from  # the applied-signature survives
+
+
+def test_skill_seed_has_no_provenance_or_learned_from():
+    from modulatio import skills
+
+    qc = skills.load_with_metadata("qc")
+    assert qc.provenance is None and qc.learned_from == ()
