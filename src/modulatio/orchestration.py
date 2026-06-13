@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
-from modulatio import comptroller, dispatch, job_template_library, job_templates, kickoff_history, lessons, qc_history, qc_notes, research, roster, skill_git, skills, standards, standards_proposals, store, tools
+from modulatio import comptroller, dispatch, job_template_library, job_templates, kickoff_history, lessons, qc_history, qc_notes, recoveries, research, roster, skill_git, skills, standards, standards_proposals, store, tools
 from modulatio.job_templates import DeliverableSpec, JobTemplate
 from modulatio import context_budget as _ctx_budget_module
 from modulatio import dispatch_breaker as _dispatch_breaker_module
@@ -7131,6 +7131,7 @@ class Orchestrator:
         """
         corrective_notes = initial_corrective_notes
         last_qc: tuple[AssertionEvidence, str] | None = None  # (verdict, notes)
+        rescue_defect_type: str | None = None  # #81: last QC defect class for the witness
         last_exc: Exception | None = None
         last_breaker_abort: Exception | None = None  # QC-as-fixer Slice 2
 
@@ -7238,9 +7239,13 @@ class Orchestrator:
                     )
                     return
 
-                # QC rejected — prepare corrective notes for next attempt.
+                # QC rejected — prepare corrective notes for next attempt. ``last_qc``
+                # stays a 2-tuple (the escalation helper depends on that shape); the
+                # parsed defect_type rides to the recovery witness as a separate param
+                # (Hero code BLOCKER 2 — no instance state, race-free across waves).
                 last_qc = (qc_verdict, qc_notes)
                 last_exc = None
+                rescue_defect_type = defect_type
                 corrective_notes = qc_notes or qc_verdict.check
                 # QC-as-fixer Slice 1: route the next attempt by an explicit,
                 # tested policy (edit/diff/generate) rather than a bare
@@ -7333,7 +7338,7 @@ class Orchestrator:
             # storm has nothing to patch and falls through).
             if self._attempt_qc_fix_forward(
                 t, self._resolve_draft_path(t), None, summary,
-                breaker_abort=last_breaker_abort,
+                breaker_abort=last_breaker_abort, defect_type=rescue_defect_type,
             ):
                 return
             self._settle_breaker_aborted(t, last_breaker_abort, summary)
@@ -7375,7 +7380,8 @@ class Orchestrator:
         # the last rejected artifact (flag-gated; falls through when off or
         # nothing salvageable).
         if self._attempt_qc_fix_forward(
-            t, self._resolve_draft_path(t), (qc_verdict, qc_notes), summary
+            t, self._resolve_draft_path(t), (qc_verdict, qc_notes), summary,
+            defect_type=rescue_defect_type,
         ):
             return
 
@@ -7479,6 +7485,7 @@ class Orchestrator:
         summary: RunSummary,
         *,
         breaker_abort: Exception | None = None,
+        defect_type: "str | None" = None,
     ) -> bool:
         """Try a QC-authored rescue. Returns True when it reached a terminal
         (caller must NOT settle its own), False to fall through to the
@@ -7503,11 +7510,15 @@ class Orchestrator:
             # caller's graceful terminal.
             return False
 
-        # Assemble the defects the QC fixer should target.
+        # Assemble the defects the QC fixer should target. ``last_qc`` is the 2-tuple
+        # ``(verdict, notes)``; the real QC ``defect_type`` (Hero code BLOCKER 2) rides
+        # the separate ``defect_type`` param — AssertionEvidence has no such field, and
+        # widening last_qc would break the escalation helper that shares its shape.
         if last_qc is not None:
             qc_verdict, qc_notes = last_qc
             defects = (qc_notes or "").strip() or qc_verdict.check
         else:
+            qc_verdict, qc_notes = None, ""
             reason = getattr(breaker_abort, "summary", "") or "no committable result"
             defects = (
                 f"The producer could not converge ({reason}). Make the "
@@ -7516,7 +7527,7 @@ class Orchestrator:
 
         # QC authors the patch in place (same task output path).
         try:
-            self._qc_patch_artifact(t, draft_path, defects, body)
+            patched = self._qc_patch_artifact(t, draft_path, defects, body)
         except Exception as exc:  # noqa: BLE001 — patch failure is non-fatal
             # Couldn't author a fix → fall through to the normal terminal.
             self._emit_activity(
@@ -7536,14 +7547,45 @@ class Orchestrator:
         # risks recreating the same judgment or an unintended loop). The
         # artifact stays flagged ``qc_authored_fix`` for transparency.
         self._complete_qc_authored_fix(t, draft_path, summary)
+        # #81 codify-the-win: witness the recovery — the before(body)/defects/after
+        # (patched) triple is the TECHNIQUE the cheap producer lacked. The task is
+        # ALREADY COMPLETED above; this is pure upside capture, so it is GUARDED at
+        # the call site (Nemo r1 #5) — a recovery-logging throw must NEVER reverse a
+        # completion. record_recovery truncates every field at write time (Nemo #6).
+        try:
+            from modulatio import recoveries as _recoveries
+
+            # Serialize the append like its sibling qc-history log (Hero MINOR 5) —
+            # wave-parallel rescues must not interleave a multi-KB JSON line.
+            with self._store_lock:
+                _recoveries.record_recovery(
+                    self.project.code,
+                    kind="qc_authored",
+                    artifact_kind=t.artifact_kind or "",
+                    defect_type=defect_type or "",
+                    task_id=t.id,
+                    defects=defects,
+                    before=body,
+                    after=patched,
+                    qc_rationale=(qc_verdict.check if qc_verdict is not None else defects),
+                )
+        except Exception:  # noqa: BLE001 — never fail a completed task on a log write
+            try:
+                self._emit_activity(
+                    role="qc", phase="recovery_log_failed",
+                    task_id=t.id, agent_id=t.qc_agent_id,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return True
 
     def _qc_patch_artifact(
         self, t: Task, draft_path: "Path", defects: str, body: str
-    ) -> None:
+    ) -> str:
         """QC writes a targeted patch of the rejected artifact to the SAME
         task output path. Reuses the producer artifact-cleanup pipeline so
-        the saved file matches normal-path expectations."""
+        the saved file matches normal-path expectations. Returns the patched
+        text (the 'after' of the recovery triple, #81)."""
         domain_standards = standards.load(
             t.artifact_kind, project_code=self.project.code
         )
@@ -7566,6 +7608,7 @@ class Orchestrator:
             raise ValueError("QC patch produced an empty artifact")
         draft_path.write_text(patched)
         self._record_artifact_write(draft_path)  # #151/e2e Blocker 2 staging merge
+        return patched
 
     def _complete_qc_authored_fix(
         self,
@@ -9436,12 +9479,32 @@ class Orchestrator:
         if not self._codification_enabled():
             return
         # task #84: never codify from an operator-aborted run. A killed run's
-        # QC fails reflect an interrupted (often half-produced / flailing) state,
-        # not a real recurring weakness to learn from — codifying from it can
+        # QC fails / recoveries reflect an interrupted (often half-produced / flailing)
+        # state, not a real recurring weakness to learn from — codifying from it can
         # bake a regression into the skill library.
         if self.abort_event.is_set():
             self._codification_skipped("run_aborted")
             return
+        # #81: the kill-switch + abort guard run ONCE here, then the fail phase and the
+        # win phase run INDEPENDENTLY. The fail phase's early returns (load error, <3
+        # fails) must NOT suppress the win phase — a clean run with no fails but ≥floor
+        # QC recoveries still learns its win (Nemo r1 #7). Each phase is wrapped in its
+        # OWN guard so an unguarded raise inside one phase can neither suppress the other
+        # nor propagate out of this best-effort hook to the caller (Nemo code #1 — the
+        # phase-independence promise must be SEALED at the seam, not just asserted).
+        try:
+            self._post_run_fail_codification(summary)
+        except Exception:  # noqa: BLE001 — a fail-phase error must never suppress the win phase
+            self._codification_skipped("fail_phase_failed")
+        try:
+            self._post_run_win_codification(summary)
+        except Exception:  # noqa: BLE001 — best-effort; never propagate to the run
+            self._codification_skipped("win_phase_failed")
+
+    def _post_run_fail_codification(self, summary: RunSummary) -> None:
+        """The FAIL half of the Alfred loop: codify a skill so producers stop
+        repeating an independently-REJECTED defect (≥3 unconsumed QC fails the Leader
+        judges). Shared library; provenance ``fail``. Best-effort."""
         try:
             fails = lessons.unconsumed_fails(self.project.code)
         except Exception:  # noqa: BLE001
@@ -9478,6 +9541,73 @@ class Orchestrator:
                     self._codification_skipped("persist_failed")
                     continue
 
+    def _post_run_win_codification(self, summary: RunSummary) -> None:
+        """The WIN half of the Alfred loop (#81 codify-the-win): the Leader codifies a
+        TECHNIQUE from a RECURRING QC recovery — the smart QC's fix encodes what the
+        cheap producer lacked. The ENGINE binds recurrence (clusters by a deterministic
+        false-merge-resistant signature, only ≥floor clusters surface); the LEADER
+        judges coherence. Because a win is NON-independent (the same mind judged + wrote
+        the fix), it writes PROJECT-LOCAL (Hero R2), carries ``provenance: win``, and
+        surfaces a LOUDER spot-check recommendation (Hero R1b). Best-effort."""
+        try:
+            recs = recoveries.unconsumed_recoveries(self.project.code)
+            clusters = recoveries.cluster_recoveries(recs, floor=_WIN_CODIFY_FLOOR)
+        except Exception:  # noqa: BLE001
+            self._codification_skipped("recovery_feed_failed")
+            return
+        if not clusters:
+            return  # nothing recurred enough — not a failure
+        existing_index, existing_names = self._existing_skill_index()
+        for cluster in clusters:
+            sig = cluster[0].signature
+            cluster_ids = [r.entry_id for r in cluster]
+            feed = "\n".join(
+                f"- [{r.entry_id}] ({r.artifact_kind}) defect: {r.defects[:200]} "
+                f"|| QC fix rationale: {r.qc_rationale[:200]}"
+                for r in cluster
+            )
+            prompt = self._prompt("win-codify", _WIN_CODIFY_PROMPT).format(
+                recovery_cluster=feed, existing_skills=existing_index,
+            )
+            try:
+                decision = _extract_json(self._run_agent_call(None, "leader", prompt))
+            except Exception:  # noqa: BLE001
+                self._codification_skipped("win_leader_call_failed")
+                continue
+            codifications = (
+                decision.get("codifications") if isinstance(decision, dict) else None
+            )
+            if not isinstance(codifications, list):
+                self._codification_skipped("win_leader_output_unparsable")
+                continue
+            persist_failed = False
+            for spec in codifications:
+                if isinstance(spec, dict):
+                    # the ENGINE owns the evidence set (the cluster it PROVED), not the
+                    # model's echo — override evidence_ids with the cluster's ids.
+                    try:
+                        self._persist_codification(
+                            {**spec, "evidence_ids": cluster_ids}, existing_names, summary,
+                            provenance="win", consume_fn=recoveries.mark_consumed,
+                            project_code=self.project.code, commit_prefix="codify-win",
+                            cluster_signature=sig,
+                        )
+                    except Exception:  # noqa: BLE001 — one can't stop the rest
+                        self._codification_skipped("win_persist_failed")
+                        persist_failed = True
+                        continue
+            # Consume the cluster only when it was JUDGED and no spec FAILED to persist
+            # (Hero MODERATE 3). A DECLINED cluster (empty decision) consumes — bounds
+            # re-prompting; new same-signature recoveries can still re-cluster. But a
+            # transient persist failure (git/disk) must NOT consume — else the skill
+            # never lands yet the evidence is gone (technique lost). Retain → retry next
+            # run. (A codified spec already consumed via persist; this is idempotent.)
+            if not persist_failed:
+                try:
+                    recoveries.mark_consumed(self.project.code, cluster_ids)
+                except Exception:  # noqa: BLE001
+                    self._codification_skipped("win_consume_failed")
+
     def _codification_skipped(self, reason: str) -> None:
         """Raise-safe observability breadcrumb for a swallowed codification
         path. The hook is best-effort and its call site is unwrapped, so this
@@ -9496,7 +9626,13 @@ class Orchestrator:
         return re.sub(r"[^a-z0-9]+", "-", (raw or "").lower()).strip("-")[:60]
 
     def _persist_codification(
-        self, spec: dict, existing_names: list[str], summary: RunSummary
+        self, spec: dict, existing_names: list[str], summary: RunSummary,
+        *,
+        provenance: "str | None" = None,
+        consume_fn=None,
+        project_code: "str | None" = None,
+        commit_prefix: str = "codify",
+        cluster_signature: "str | None" = None,
     ) -> None:
         """Persist ONE Leader-proposed codification (versioned, git-committed)
         and consume its evidence so it isn't re-codified. NO QC verification:
@@ -9504,7 +9640,15 @@ class Orchestrator:
         skill is authoritative — the same way a QC-authored fix isn't re-checked
         by the Leader. The engine binds the safety net (every codification is
         git-versioned and revertible; the runtime QC still reviews the ARTIFACTS
-        the skill influences). Only cheap mechanical guards apply here."""
+        the skill influences). Only cheap mechanical guards apply here.
+
+        #81 — parameterized for the WIN path (``provenance="win"``): writes
+        PROJECT-LOCAL (``project_code``), consumes from the recovery ledger
+        (``consume_fn``), guards against replay via the durable ``learned_from``
+        applied-signature (``cluster_signature``), and surfaces a louder spot-check
+        recommendation. Defaults reproduce the FAIL path byte-for-byte."""
+        consume = consume_fn or lessons.mark_consumed
+        is_win = provenance == "win"
         action = str(spec.get("action", "")).strip().lower()
         name = self._slug_skill(str(spec.get("name", "")))
         guidance = str(spec.get("guidance", "") or "").strip()
@@ -9533,25 +9677,52 @@ class Orchestrator:
         # double-count the same QC. The engine binds the safety net (versioned +
         # git-committed = revertible; runtime QC still reviews the artifacts the
         # skill influences).
+        learned_header = "## Learned (from recovery)" if is_win else "## Learned"
         if action == "create":
             new_skill = skills.create_skill(
                 name=name,
                 description=description or f"Codified from a recurring problem: {problem}.",
                 prompt_template=guidance, capability_tags=tags, version="1",
-                project_code=None,
+                provenance=provenance,
+                learned_from=(cluster_signature,) if (is_win and cluster_signature) else (),
+                project_code=project_code,
             )
         else:  # improve — append the learned guidance, bump the version.
-            base = skills.load_with_metadata(name, project_code=self.project.code)
-            if not base.name:
+            # Hero code BLOCKER 1 — the base read MUST match the write scope, or a
+            # FAIL improve (write-shared, project_code=None) that names a project-local
+            # WIN skill would load the win body as its base and lift it — provenance,
+            # learned_from, recovery content and all — into the SHARED library, voiding
+            # R2 containment one function away. Read at the write target's scope.
+            base = skills.load_with_metadata(name, project_code=project_code)
+            if not base.name and project_code is not None:
+                # a WIN improve may legitimately extend a SHARED base into a
+                # project-local variant — fall back to the shared/seed chain.
                 base = skills.load_with_metadata(name)
+            if not base.name:
+                # the named base does not exist at the write scope (e.g. a shared
+                # write naming a project-local-only skill). Refuse — never lift
+                # project-local content into shared, never shallow-create. Breadcrumb.
+                self._codification_skipped(f"improve_base_absent_at_scope:{name}")
+                return
+            # Replay guard (Nemo r2 #3): if this recovery cluster was already codified
+            # into the skill, do NOT append again — idempotent across a consume-after-
+            # commit failure. Still consume (the lesson IS applied), then return.
+            if is_win and cluster_signature and cluster_signature in base.learned_from:
+                consume(self.project.code, evidence_ids)
+                return
             try:
                 next_v = str(int(base.version) + 1) if base.version else "2"
             except ValueError:
                 next_v = "2"
             improved_body = (
                 base.prompt_template.rstrip()
-                + f"\n\n## Learned — {problem or 'recurring defect'}\n\n{guidance}\n"
+                + f"\n\n{learned_header} — {problem or 'recurring defect'}\n\n{guidance}\n"
             )
+            merged_learned_from = base.learned_from
+            if is_win and cluster_signature:
+                merged_learned_from = tuple(
+                    dict.fromkeys((*base.learned_from, cluster_signature))
+                )
             new_skill = skills.Skill(
                 name=base.name or name, description=base.description or description,
                 prompt_template=improved_body, tool_loadout=base.tool_loadout,
@@ -9560,29 +9731,47 @@ class Orchestrator:
                 capability_tags=tuple(dict.fromkeys((*base.capability_tags, *tags))),
                 required_capabilities=base.required_capabilities,
                 executor=base.executor, version=next_v,
+                provenance=provenance or base.provenance,
+                learned_from=merged_learned_from,
             )
-            skills.save(new_skill, project_code=None)
+            skills.save(new_skill, project_code=project_code)
 
         # git-commit (history = "never lose what was earned"), consume, report.
-        skill_path = skills._SKILLS_ROOT / f"{new_skill.name}.md"
-        skill_git.ensure_repo(skills._SKILLS_ROOT)
+        # The repo is the SHARED library (fail) or the PROJECT-LOCAL skills dir (win).
+        skill_root = (
+            (project_dir(project_code) / "skills")
+            if project_code else skills._SKILLS_ROOT
+        )
+        skill_path = skill_root / f"{new_skill.name}.md"
+        skill_git.ensure_repo(skill_root)
         skill_git.commit_paths(
-            skills._SKILLS_ROOT, [skill_path],
-            f"codify: {new_skill.name} v{new_skill.version or '1'} ({action}) "
+            skill_root, [skill_path],
+            f"{commit_prefix}: {new_skill.name} v{new_skill.version or '1'} ({action}) "
             f"— {problem[:60]}",
         )
-        lessons.mark_consumed(self.project.code, evidence_ids)
-        summary.recommendations.append({
-            "goal_id": "",
-            "concern": (
+        consume(self.project.code, evidence_ids)
+        if is_win:
+            concern = (
+                f"LEARNED A TECHNIQUE into skill '{new_skill.name}' (v{new_skill.version}, "
+                f"{action}, project-local) from a recurring QC RECOVERY: {problem}."
+            )
+            suggestion = (
+                "⚠ This was codified from a NON-INDEPENDENT QC-authored fix (the same mind "
+                "judged AND wrote it) — it is the class of change most worth a spot-check. "
+                "It's git-versioned in this project's skill library; review or revert it."
+            )
+        else:
+            concern = (
                 f"Autonomously codified skill '{new_skill.name}' "
                 f"(v{new_skill.version}, {action}) from a recurring problem: {problem}."
-            ),
-            "suggestion": (
+            )
+            suggestion = (
                 "The team learned this on its own — it's in your git-versioned "
                 "skill library. Review or revert it if it overreaches."
-            ),
-        })
+            )
+        summary.recommendations.append(
+            {"goal_id": "", "concern": concern, "suggestion": suggestion}
+        )
         self._emit_activity(
             role="leader", phase="skill_codified", agent_id="leader",
             task_id=new_skill.name,
@@ -12285,6 +12474,59 @@ Respond ONLY with a JSON object fenced in ```json ... ```:
     }}
 
 Return {{"codifications": []}} when nothing recurred enough to codify.
+"""
+
+
+#: #81 codify-the-win: the engine recurrence floor for a win cluster (env-overridable).
+_WIN_CODIFY_FLOOR = int(os.environ.get("MODULATIO_WIN_CODIFY_FLOOR", "3") or "3")
+
+#: Fallback for the `win-codify` seed (the Leader's recovery-technique-drafting
+#: template). The ENGINE has already proven RECURRENCE (it surfaced a cluster of
+#: ≥floor recoveries whose artifact-kind + defect + change-shape mechanically agree);
+#: the Leader's job is to judge COHERENCE — is this ONE teachable technique? — and
+#: write the durable rule. NOT whether it recurred (the engine bound that).
+_WIN_CODIFY_PROMPT = """\
+The team's smart QC RESCUED several cheap-producer outputs by writing the fix the
+producer couldn't. Each rescue encodes a TECHNIQUE the producer lacked. The engine
+has already grouped these into ONE mechanically-similar cluster (same artifact kind,
+same defect class, same shape of change) — so the recurrence is established. Your job
+is to judge whether they truly share ONE teachable technique, and if so, codify it so
+the cheap producer learns to do it itself next time (fewer rescues → cheaper).
+
+The recurring recovery cluster (each `[id] (kind) defect || QC fix rationale`):
+
+{recovery_cluster}
+
+Skills that already exist (name — description):
+
+{existing_skills}
+
+IMPORTANT — these fixes were authored by QC reviewing its OWN findings (NON-independent:
+the same mind judged and wrote them). So codify a TECHNIQUE only when the cluster
+coheres into one clear, generalizable rule. If the cluster is actually several unrelated
+fixes that merely look alike, codify only the coherent subset, or return an empty list.
+
+Prefer IMPROVE — a recovery means the producer HAD the capability but lacked a technique,
+so teach the EXISTING skill that owns this work; CREATE only when none fits. Write the
+guidance as a GENERAL RULE the producer follows to APPLY the technique itself —
+imperative, concrete, short, artifact-agnostic within its domain.
+
+Respond ONLY with a JSON object fenced in ```json ... ```:
+
+    {{
+      "codifications": [
+        {{
+          "action": "improve" | "create",
+          "name": "<kebab skill name — the EXISTING skill to improve, or the NEW skill>",
+          "description": "<one-line — required for create>",
+          "capability_tags": ["<general capability tags>"],
+          "recurring_problem": "<one line: the technique this cluster teaches>",
+          "guidance": "<the durable rule(s) — whole body for create, guidance to ADD for improve>"
+        }}
+      ]
+    }}
+
+Return {{"codifications": []}} when the cluster does not cohere into a teachable technique.
 """
 
 

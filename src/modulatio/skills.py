@@ -132,6 +132,20 @@ class Skill:
     #: never superseded — regardless of leftover codification stamps. (Removing
     #: ``version``/``base_seed_hash`` does the same; this is the explicit way.)
     user_override: bool = False
+    #: Codification provenance (#81 Fix F): ``"fail"`` (codified from repeated QC
+    #: rejections — independently validated), ``"win"`` (codified from a QC-authored
+    #: RECOVERY — the same mind judged + wrote the fix, so NON-independent and most
+    #: worth a spot-check), or ``"user"``. ``None`` for seeds. Load-bearing for
+    #: honesty: it lets a reader tell an independently-validated lesson from a
+    #: non-independent one — without it, codifying from a QC fix would launder the
+    #: source (Hero R1 / #81).
+    provenance: str | None = None
+    #: The recovery cluster SIGNATURES already codified into this skill (#81 Fix F,
+    #: Nemo r2 #3). The win loop appends a signature here as it codifies; before
+    #: appending a ``## Learned (from recovery)`` block it checks this list and SKIPS
+    #: if the signature is present — so a replay after a consume-after-commit failure
+    #: is idempotent (the applied-signature guard). Empty for seeds / fail-only skills.
+    learned_from: tuple[str, ...] = ()
     freshness_class: str | None = None
     last_verified_at: str | None = None
     #: Sandbox: skill explicitly opts in to network access for its
@@ -193,6 +207,8 @@ def _parse_file(path: Path) -> Skill:
         version=meta.get("version") or None,
         base_seed_hash=meta.get("base_seed_hash") or None,
         user_override=str(meta.get("user_override", "")).strip().lower() in ("true", "yes", "1"),
+        provenance=meta.get("provenance") or None,
+        learned_from=_parse_csv(meta.get("learned_from", "")),
         freshness_class=meta.get("freshness_class") or None,
         last_verified_at=meta.get("last_verified_at") or None,
         needs_network=str(meta.get("needs_network", "")).strip().lower() in ("true", "yes", "1"),
@@ -348,6 +364,10 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
         fm_lines.append(f"base_seed_hash: {base_seed_hash}")
     if skill.user_override:  # task #90: persist the sacred-override marker
         fm_lines.append("user_override: true")
+    if skill.provenance is not None:  # #81: fail | win | user provenance
+        fm_lines.append(f"provenance: {skill.provenance}")
+    if skill.learned_from:  # #81: the recovery cluster signatures already codified
+        fm_lines.append(f"learned_from: {', '.join(skill.learned_from)}")
     if skill.freshness_class is not None:
         fm_lines.append(f"freshness_class: {skill.freshness_class}")
     if skill.last_verified_at is not None:
@@ -375,6 +395,8 @@ def create_skill(
     required_capabilities: tuple[str, ...] = (),
     executor: str = "llm",
     version: str | None = None,
+    provenance: str | None = None,
+    learned_from: tuple[str, ...] = (),
     project_code: str | None = None,
 ) -> Skill:
     """Create a new skill file, shared or project-local.
@@ -411,6 +433,8 @@ def create_skill(
         required_capabilities=required_capabilities,
         executor=executor,
         version=version,
+        provenance=provenance,
+        learned_from=learned_from,
     )
     save(skill, project_code)
     return skill

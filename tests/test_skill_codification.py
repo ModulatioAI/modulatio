@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from modulatio import lessons, qc_history, skill_git, skills, vault
+from modulatio import lessons, qc_history, recoveries, skill_git, skills, vault
 from modulatio.orchestration import Orchestrator, RunSummary
 from modulatio.types import Project
 
@@ -246,3 +246,276 @@ def test_kill_switch_disables_codification(proj, monkeypatch):
     o, pr = _orch(proj, decision)
     o._post_run_codification(RunSummary(project=pr))
     assert skills.load_with_metadata("nope").name == ""
+
+
+# ── #81 Fix F: provenance + learned_from round-trip (Nemo r3 / Hero R1·R2) ──────
+
+
+def test_skill_provenance_and_learned_from_roundtrip(tmp_path, monkeypatch):
+    """The win loop's honesty + replay guard both die if these fields don't survive
+    a save→reload. provenance='win' + the consumed cluster signatures must persist."""
+    from modulatio import skills
+
+    # isolate the shared library to a tmp dir (CI runs pytest-randomly — never write
+    # to the real shared skills root, and don't depend on another test's leftover).
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", tmp_path / "shared" / "skills")
+    sk = skills.create_skill(
+        name="codify-win-roundtrip", description="d", prompt_template="body",
+        version="2", provenance="win",
+        learned_from=("python_code|substantive|null-guard|code:add=S:rm=0:ctrl=+:lit=0",),
+        project_code=None,
+    )
+    assert sk.provenance == "win" and len(sk.learned_from) == 1
+    reloaded = skills.load_with_metadata("codify-win-roundtrip")
+    assert reloaded.provenance == "win"
+    assert reloaded.learned_from == sk.learned_from  # the applied-signature survives
+
+
+def test_skill_seed_has_no_provenance_or_learned_from():
+    from modulatio import skills
+
+    qc = skills.load_with_metadata("qc")
+    assert qc.provenance is None and qc.learned_from == ()
+
+
+# ── #81 codify-the-win — the WIN half of the Alfred loop ──────────────────────
+
+_GUARD_BEFORE = "def f(x):\n    return x\n"
+_GUARD_AFTER = "def f(x):\n    if x is None:\n        return 0\n    return x\n"
+
+
+def _seed_recovery(code, *, before=_GUARD_BEFORE, after=_GUARD_AFTER,
+                   rationale="missing null guard on input", task_id="T",
+                   artifact_kind="python_code", defect_type="substantive"):
+    return recoveries.record_recovery(
+        code, kind="qc_authored", artifact_kind=artifact_kind,
+        defect_type=defect_type, task_id=task_id, defects="d",
+        before=before, after=after, qc_rationale=rationale,
+    )
+
+
+def test_win_codifies_project_local_with_provenance_and_consumes_recovery_ledger(proj):
+    """The keystone: ≥floor coherent recoveries → a PROJECT-LOCAL skill with
+    provenance=win + the cluster signature in learned_from + a codify-win commit +
+    recovery-ids consumed in the RECOVERY ledger, NEVER in lessons."""
+    for i in range(3):
+        _seed_recovery(proj, task_id=f"R{i}")
+    decision = {"codifications": [{
+        "action": "create", "name": "null-guard-inputs",
+        "description": "Guard inputs before use.", "capability_tags": ["code"],
+        "recurring_problem": "unguarded None inputs",
+        "guidance": "Guard against None inputs before dereferencing them."}]}
+    o, pr = _orch(proj, decision)
+    summary = RunSummary(project=pr)
+    o._post_run_win_codification(summary)
+
+    sk = skills.load_with_metadata("null-guard-inputs", project_code=proj)
+    assert sk.name == "null-guard-inputs" and sk.provenance == "win"
+    assert len(sk.learned_from) == 1  # the cluster signature is recorded
+    # PROJECT-LOCAL, not the shared library (Hero R2)
+    assert not (skills._SKILLS_ROOT / "null-guard-inputs.md").exists()
+    # recovery ids consumed in the SEPARATE recovery ledger, never lessons (Nemo #2)
+    assert recoveries.unconsumed_recoveries(proj) == []
+    assert lessons.consumed_ids(proj) == set()
+    # the loud, non-independent spot-check recommendation (Hero R1b)
+    blob = " ".join(r["concern"] + r["suggestion"] for r in summary.recommendations)
+    assert "NON-INDEPENDENT" in blob and "spot-check" in blob
+
+
+def test_clean_run_zero_fails_still_learns_the_win(proj):
+    """Nemo r1 #7: the fail phase's <3 early-return must NOT suppress the win phase.
+    A run with ZERO fails but ≥floor recoveries still codifies its win."""
+    for i in range(3):
+        _seed_recovery(proj, task_id=f"R{i}")
+    # NO fails seeded at all
+    decision = {"codifications": [{
+        "action": "create", "name": "win-from-clean-run", "description": "d",
+        "capability_tags": [], "recurring_problem": "x", "guidance": "g"}]}
+    o, pr = _orch(proj, decision)
+    o._post_run_codification(RunSummary(project=pr))  # the OUTER hook (both phases)
+    assert skills.load_with_metadata("win-from-clean-run", project_code=proj).name \
+        == "win-from-clean-run"
+
+
+def test_win_replay_guard_skips_duplicate_block(proj):
+    """Nemo r2 #3: if the cluster signature is already in the skill's learned_from,
+    the improve append is SKIPPED (idempotent across a consume-after-commit replay)."""
+    sig = "python_code|substantive|missing-null-guard-input|code:add=S:rm=0:ctrl=+:lit=0"
+    skills.create_skill(name="guarded", description="d", prompt_template="ORIGINAL BODY",
+                        version="1", provenance="win", learned_from=(sig,),
+                        project_code=proj)
+    spec = {"action": "improve", "name": "guarded", "recurring_problem": "x",
+            "guidance": "DUPLICATE GUIDANCE", "capability_tags": [], "evidence_ids": ["r1"]}
+    o, pr = _orch(proj, {"codifications": []})
+    o._persist_codification(
+        spec, ["guarded"], RunSummary(project=pr),
+        provenance="win", consume_fn=recoveries.mark_consumed, project_code=proj,
+        commit_prefix="codify-win", cluster_signature=sig,
+    )
+    sk = skills.load_with_metadata("guarded", project_code=proj)
+    assert "DUPLICATE GUIDANCE" not in sk.prompt_template  # the append was skipped
+    assert sk.version == "1"  # not bumped
+    assert recoveries.consumed_ids(proj) == {"r1"}  # still consumed (lesson IS applied)
+
+
+def test_win_below_floor_no_codify_no_consume(proj):
+    for i in range(2):  # below floor 3
+        _seed_recovery(proj, task_id=f"R{i}")
+    decision = {"codifications": [{"action": "create", "name": "should-not-exist",
+                "description": "d", "capability_tags": [], "recurring_problem": "x",
+                "guidance": "g"}]}
+    o, pr = _orch(proj, decision)
+    o._post_run_win_codification(RunSummary(project=pr))
+    assert skills.load_with_metadata("should-not-exist", project_code=proj).name == ""
+    assert len(recoveries.unconsumed_recoveries(proj)) == 2  # NOT consumed, eligible later
+
+
+def test_win_false_merge_never_reaches_leader(proj):
+    """Hero R3: three GENUINELY different fixes sharing a rationale-key do NOT cluster,
+    so no ≥floor cluster forms, the Leader is never called, and nothing is codified."""
+    _seed_recovery(proj, task_id="R0", before=_GUARD_BEFORE, after=_GUARD_AFTER,
+                   rationale="missing edge case handling here")
+    _seed_recovery(proj, task_id="R1", before="def g():\n    return 1\n",
+                   after="def g():\n    a=1\n    b=2\n    c=3\n    d=4\n    e=5\n    return a+b+c+d+e\n",
+                   rationale="missing edge case handling here")
+    _seed_recovery(proj, task_id="R2", before="x = '5'\n", after="x = 5\n",
+                   rationale="missing edge case handling here")
+    calls = {"n": 0}
+    decision = {"codifications": [{"action": "create", "name": "wrong-merge",
+                "description": "d", "capability_tags": [], "recurring_problem": "x",
+                "guidance": "g"}]}
+    o, pr = _orch(proj, decision)
+    base = o.runners["leader"]
+    o.runners["leader"] = lambda p: (calls.__setitem__("n", calls["n"] + 1), base(p))[1]
+    o._post_run_win_codification(RunSummary(project=pr))
+    assert calls["n"] == 0  # no cluster reached the floor → Leader never consulted
+    assert skills.load_with_metadata("wrong-merge", project_code=proj).name == ""
+
+
+def test_win_kill_switch_disables_both_phases(proj, monkeypatch):
+    monkeypatch.setenv("MODULATIO_SKILL_CODIFICATION", "0")
+    for i in range(3):
+        _seed_recovery(proj, task_id=f"R{i}")
+    decision = {"codifications": [{"action": "create", "name": "nope", "description": "d",
+                "capability_tags": [], "recurring_problem": "x", "guidance": "g"}]}
+    o, pr = _orch(proj, decision)
+    o._post_run_codification(RunSummary(project=pr))  # outer gate honors the kill-switch
+    assert skills.load_with_metadata("nope", project_code=proj).name == ""
+    assert len(recoveries.unconsumed_recoveries(proj)) == 3  # untouched
+
+
+def test_recovery_log_failure_never_reverses_completion(proj, monkeypatch):
+    """Nemo r1 #5: the recovery is logged AFTER the task completes, guarded at the
+    call site — a record_recovery throw must NOT reverse a completion."""
+    from uuid import uuid4
+
+    from modulatio.types import AssertionEvidence, Task, TaskStatus
+
+    o, pr = _orch(proj, {"codifications": []})
+    draft = vault.project_dir(proj) / "draft.py"
+    draft.write_text("def f(x):\n    return x + 1  # a real non-trivial committed draft\n")
+    t = Task(id="T-rec", project_id=uuid4(), goal_id="G", description="fix it",
+             artifact_kind="python_code", qc_agent_id="qc")
+    # avoid a real LLM patch call
+    monkeypatch.setattr(
+        o, "_qc_patch_artifact",
+        lambda *a, **k: "def f(x):\n    if x is None:\n        return 0\n    return x + 1\n",
+    )
+    # force the recovery log to explode
+    def _boom(*a, **k):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(recoveries, "record_recovery", _boom)
+
+    last_qc = (
+        AssertionEvidence(producer="qc", primary=True, check="null guard", passed=False),
+        "add a null guard",
+    )
+    out = o._attempt_qc_fix_forward(
+        t, draft, last_qc, RunSummary(project=pr), defect_type="substantive"
+    )
+    assert out is True                       # the rescue still reached its terminal
+    assert t.status == TaskStatus.COMPLETED  # the log failure did not reverse completion
+
+
+def test_fail_phase_exception_does_not_suppress_win(proj, monkeypatch):
+    """Nemo code #1: an unguarded raise in the fail phase must NOT suppress the win
+    phase, and must not propagate out of the best-effort outer hook."""
+    for i in range(3):
+        _seed_recovery(proj, task_id=f"R{i}")
+    decision = {"codifications": [{"action": "create", "name": "win-survives-fail-error",
+                "description": "d", "capability_tags": [], "recurring_problem": "x",
+                "guidance": "g"}]}
+    o, pr = _orch(proj, decision)
+
+    def boom(summary):
+        raise RuntimeError("fail phase boom")
+    monkeypatch.setattr(o, "_post_run_fail_codification", boom)
+
+    o._post_run_codification(RunSummary(project=pr))  # must NOT raise
+    assert skills.load_with_metadata("win-survives-fail-error", project_code=proj).name \
+        == "win-survives-fail-error"
+
+
+def test_fail_improve_of_project_local_win_skill_does_not_leak_to_shared(proj):
+    """Hero BLOCKER 1: a FAIL-loop improve (write-shared) that names a PROJECT-LOCAL
+    win skill must NOT load the win body as its base and lift it into the shared
+    library — the base read must match the write scope."""
+    sig = "python_code|substantive|null-guard|code:add=s:rm=0:ctrl=+:lit=0:id=+"
+    skills.create_skill(
+        name="null-guard-inputs", description="win skill",
+        prompt_template="WIN BODY\n\n## Learned (from recovery) — x\n\nguidance",
+        version="1", provenance="win", learned_from=(sig,), project_code=proj)
+    for i in range(3):
+        _seed_fail(proj, "code", f"bad {i}", f"f{i}")
+    decision = {"codifications": [{"action": "improve", "name": "null-guard-inputs",
+                "recurring_problem": "x", "evidence_ids": ["f0", "f1", "f2"],
+                "capability_tags": [], "guidance": "fail guidance"}]}
+    o, pr = _orch(proj, decision)
+    o._post_run_codification(RunSummary(project=pr))
+    # the win content never reaches the shared library
+    shared = skills._SKILLS_ROOT / "null-guard-inputs.md"
+    assert (not shared.exists()) or ("provenance: win" not in shared.read_text())
+    # the project-local win skill is untouched
+    sk = skills.load_with_metadata("null-guard-inputs", project_code=proj)
+    assert sk.provenance == "win" and sk.version == "1"
+
+
+def test_recovery_records_real_defect_type_from_tuple(proj, monkeypatch):
+    """Hero BLOCKER 2: defect_type rides the last_qc tuple (AssertionEvidence has no
+    such field), so a witnessed recovery records the real QC defect class."""
+    from uuid import uuid4
+
+    from modulatio.types import AssertionEvidence, Task
+
+    o, pr = _orch(proj, {"codifications": []})
+    draft = vault.project_dir(proj) / "draft.py"
+    draft.write_text("def f(x):\n    return x + 1  # a real non-trivial committed draft\n")
+    t = Task(id="T-dt", project_id=uuid4(), goal_id="G", description="d",
+             artifact_kind="python_code", qc_agent_id="qc")
+    monkeypatch.setattr(
+        o, "_qc_patch_artifact",
+        lambda *a, **k: "def f(x):\n    if x is None:\n        return 0\n    return x + 1\n",
+    )
+    last_qc = (AssertionEvidence(producer="qc", primary=True, check="c", passed=False),
+               "notes")
+    o._attempt_qc_fix_forward(
+        t, draft, last_qc, RunSummary(project=pr), defect_type="mechanical"
+    )
+    recs = recoveries.load_recoveries(proj)
+    assert len(recs) == 1 and recs[0].defect_type == "mechanical"
+
+
+def test_win_persist_failure_does_not_consume_cluster(proj, monkeypatch):
+    """Hero MODERATE 3: a transient persist failure must NOT consume the cluster —
+    the technique is retained for retry, not lost."""
+    for i in range(3):
+        _seed_recovery(proj, task_id=f"R{i}")
+    decision = {"codifications": [{"action": "create", "name": "win-x", "description": "d",
+                "capability_tags": [], "recurring_problem": "x", "guidance": "g"}]}
+    o, pr = _orch(proj, decision)
+
+    def boom(*a, **k):
+        raise RuntimeError("git hiccup")
+    monkeypatch.setattr(o, "_persist_codification", boom)
+    o._post_run_win_codification(RunSummary(project=pr))
+    assert len(recoveries.unconsumed_recoveries(proj)) == 3  # retained for retry
