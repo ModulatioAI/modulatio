@@ -1,9 +1,10 @@
 # Codify-the-win — learn from QC recoveries, not just repeated fails (#81 / Fix F)
 
 **Status:** DESIGN. Held local on `arc/codify-the-win` (off main, post-#100 `2caa2a5`).
-**Lovecraft (coherence) SIGN-OFF.** **Nemo (hull) SIGN-OFF** (r1 BLOCK 8 → r2 7 → r3 #3 @
-`bb699e3`). **Hero (hull/arch) SIGN-WITH-RESERVATIONS 2026-06-12 → R1/R2/R3 folded (this
-revision); r2 fold-confirm pending Clif relay.** Then TDD → code review → merge (= Clif).
+**✅ ALL THREE REVIEWERS SIGNED 2026-06-12** — Lovecraft (coherence); Nemo (hull, r1 BLOCK 8 →
+r2 7 → r3 #3); Hero (hull/arch, SIGN-WITH-RESERVATIONS → R1/R2/R3 folded → SIGN-OFF @ `35eb859`).
+**Design CLEARED FOR TDD** → code review (Nemo+Hero) → merge (= Clif). Held local on
+`arc/codify-the-win`.
 
 > **Hero remediation (2026-06-12).** SIGN-WITH-RESERVATIONS — three design-level holes, all the
 > "does the right thing and forgets to say so / claims a safety it hasn't mechanized" shape; the
