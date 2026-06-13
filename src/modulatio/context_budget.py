@@ -334,26 +334,32 @@ def _redact_messages_for_checkpoint(messages: Sequence[dict]) -> list[dict]:
        identifiers. Pre-F14 only role==tool was redacted; assistant
        turns went through verbatim and the arguments leaked.
 
-    Other channels (user / system / assistant prose) are NOT redacted
-    — Leader's decomposition / recovery pass needs the prompt shape
-    to reason, and a model that echoes a tool response into its
-    assistant turn is a separate problem (regex sweep deferred to
-    the next release). The persisted JSON's ``redaction_policy`` field names
-    exactly which channels were redacted so consumers don't
-    overstate safety.
+    SEC-03 (security audit, Nemo): assistant / user *prose* is additionally
+    swept with the shared token redactor (``oauth_refresh._redact_secrets``) —
+    only token-SHAPED substrings (``sk-…`` / ``Bearer …`` / JWTs / provider
+    keys) are masked, so the prompt shape Leader's recovery pass reasons over is
+    preserved while a secret echoed into an assistant turn no longer persists
+    verbatim. The persisted JSON's ``redaction_policy`` field names exactly
+    which channels were redacted so consumers don't overstate safety.
 
     Returns a new list — the original is not mutated.
     """
+    from modulatio.oauth_refresh import _redact_secrets
+
     redacted: list[dict] = []
     for msg in messages:
         new_msg = dict(msg)
-        if msg.get("role") == "tool":
+        role = msg.get("role")
+        if role == "tool":
             content = msg.get("content")
             char_count = len(content) if isinstance(content, str) else 0
             new_msg["content"] = f"[redacted: {char_count} chars]"
-        elif msg.get("role") == "assistant" and isinstance(
-            msg.get("tool_calls"), list
-        ):
+            redacted.append(new_msg)
+            continue
+        # SEC-03: token-shaped sweep over assistant/user prose content.
+        if role in ("assistant", "user") and isinstance(msg.get("content"), str):
+            new_msg["content"] = _redact_secrets(msg["content"])
+        if role == "assistant" and isinstance(msg.get("tool_calls"), list):
             # Redact each tool_call's function.arguments while
             # preserving the call id and function name. Leader-side
             # recovery still needs to know WHICH tool the model was
@@ -430,7 +436,12 @@ def write_checkpoint(
     # user-content scrubs) can extend the list without breaking
     # consumers.
     redaction_policy = (
-        ["tool.content", "assistant.tool_calls.function.arguments"]
+        [
+            "tool.content",
+            "assistant.tool_calls.function.arguments",
+            "assistant.content",  # SEC-03: token-shaped sweep
+            "user.content",       # SEC-03: token-shaped sweep
+        ]
         if redact_secrets
         else []
     )

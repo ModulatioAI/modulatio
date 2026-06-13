@@ -314,6 +314,10 @@ def http_get(url: str, timeout: float = _DEFAULT_HTTP_TIMEOUT_SECONDS) -> str:
     (``_HTTP_GET_MAX_CHARS``) with a truncation marker — a single page
     must not be able to blow a producer's role context budget.
     """
+    timeout = _clamp_timeout(
+        timeout, lo=_HTTP_MIN_TIMEOUT_SECONDS, hi=_HTTP_MAX_TIMEOUT_SECONDS,
+        default=_DEFAULT_HTTP_TIMEOUT_SECONDS,
+    )  # SEC-04
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(
@@ -364,6 +368,27 @@ def http_get(url: str, timeout: float = _DEFAULT_HTTP_TIMEOUT_SECONDS) -> str:
 _PYTHON_BINS = ("python", "python3", "python3.11", "python3.12")
 _DEFAULT_RUN_SHELL_TIMEOUT_SECONDS = 30.0
 _RUN_SHELL_MAX_OUTPUT_BYTES = 8000
+
+# Security audit SEC-04 (Nemo): the model/tool caller supplies `timeout`. Left
+# unclamped, a hostile model can pass a huge (or non-finite) value to tie up a
+# worker/turn far past the intended bound. Clamp to a sane range and reject
+# NaN/inf — the ceilings are generous enough for legitimate QC builds / fetches.
+_RUN_SHELL_MIN_TIMEOUT_SECONDS = 0.1
+_RUN_SHELL_MAX_TIMEOUT_SECONDS = 600.0
+_HTTP_MIN_TIMEOUT_SECONDS = 1.0
+_HTTP_MAX_TIMEOUT_SECONDS = 30.0
+
+
+def _clamp_timeout(value: object, *, lo: float, hi: float, default: float) -> float:
+    """Coerce a caller-supplied timeout into ``[lo, hi]``; a non-numeric or
+    non-finite value (NaN/inf) falls back to ``default``."""
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    if v != v or v in (float("inf"), float("-inf")):  # NaN / ±inf
+        return default
+    return max(lo, min(hi, v))
 
 # Security audit H3a — resource ceilings applied to every run_shell child
 # (and inherited by its sandboxed grandchildren). bwrap confines the
@@ -940,6 +965,11 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
         cwd: str = "",
         timeout: float = _DEFAULT_RUN_SHELL_TIMEOUT_SECONDS,
     ) -> str:
+        timeout = _clamp_timeout(
+            timeout, lo=_RUN_SHELL_MIN_TIMEOUT_SECONDS,
+            hi=_RUN_SHELL_MAX_TIMEOUT_SECONDS,
+            default=_DEFAULT_RUN_SHELL_TIMEOUT_SECONDS,
+        )  # SEC-04
         check = _PROFILE_CHECKS.get(profile)
         if check is None:
             raise ValueError(
@@ -1361,6 +1391,8 @@ def build_registry(
                     "timeout": {
                         "type": "number",
                         "description": "Seconds before giving up. Default 10.",
+                        "minimum": _HTTP_MIN_TIMEOUT_SECONDS,
+                        "maximum": _HTTP_MAX_TIMEOUT_SECONDS,
                     },
                 },
                 "required": ["url"],
@@ -1563,6 +1595,8 @@ def build_registry(
                     "timeout": {
                         "type": "number",
                         "description": "Seconds before kill. Default 30.",
+                        "minimum": _RUN_SHELL_MIN_TIMEOUT_SECONDS,
+                        "maximum": _RUN_SHELL_MAX_TIMEOUT_SECONDS,
                     },
                 },
                 "required": ["cmd"],

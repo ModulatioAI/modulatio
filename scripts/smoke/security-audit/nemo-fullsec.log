@@ -1,0 +1,18 @@
+Captain Nemo’s full security audit is complete.
+
+Findings letter written to:
+`/home/cknox/Message in a Bottle/2026-06-12-Nemo-to-Cowboy-fullsec-audit.md`
+
+Verification:
+- File size: 26,746 bytes
+- Source tree not modified
+- Git status still only shows the pre-existing untracked directory:
+  `?? scripts/smoke/security-audit/`
+
+Summary of ranked findings included in the letter:
+1. HIGH — Tool-call authorization bypass: returned tool calls are checked against registry membership, not the skill’s declared `tool_loadout`.
+2. MEDIUM — ACP attachments can read arbitrary local readable document paths.
+3. MEDIUM — Persistence redaction gaps for assistant prose and conversation logs.
+4. LOW — Caller-controlled `run_shell` / `http_get` timeouts are not clamped.
+
+I also documented the safe/false-positive dispositions across all nine commissioned vectors, with source file:line evidence and concrete verification traces.

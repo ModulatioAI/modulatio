@@ -4599,14 +4599,27 @@ class Orchestrator:
         return turns
 
     def _append_conversation(self, role: str, content: str) -> None:
+        # SEC-03 (security audit, Nemo): the Leader↔operator log is durable and
+        # was written world-default-mode + verbatim. Create it 0600 (owner-only,
+        # like the tool-call transcripts) and sweep token-shaped secrets from the
+        # content so a pasted/echoed key doesn't persist in the clear.
+        from modulatio.oauth_refresh import _redact_secrets
+
         path = self._conversation_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a") as f:
+        existed = path.exists()
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
             f.write(json.dumps({
                 "role": role,
-                "content": content,
+                "content": _redact_secrets(content),
                 "ts": datetime.now(timezone.utc).isoformat(),
             }) + "\n")
+        if existed:  # tighten a legacy file created before this guard
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
 
     def _constitution_block(self) -> str:
         """The Leader's constitution (values), injected ONLY into the

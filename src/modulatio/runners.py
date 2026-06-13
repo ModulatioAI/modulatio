@@ -888,6 +888,13 @@ def run_llm_with_tools(
             )
 
     tools_schema = build_tools_schema(tool_loadout, tool_registry)
+    # SEC-01 (security audit, Nemo): the skill's tool_loadout is the authority
+    # boundary, not registry membership. build_tools_schema only HIDES the other
+    # tools from a well-behaved model; a prompt-injected/hostile model can still
+    # emit a tool_call for any registered tool. Dispatch must refuse a call whose
+    # name isn't in the declared loadout — otherwise a web-only skill reaches
+    # run_shell / write_artifact / read_tool_result whenever they're registered.
+    allowed_tools = set(tool_loadout)
     messages: list[dict] = [{"role": "user", "content": prompt}]
     # W5-lite F9 audit follow-up: a 20-iteration tool loop that
     # sits in the soft-warn band would otherwise emit 20 identical
@@ -956,10 +963,13 @@ def run_llm_with_tools(
             iter_suffix = ""
 
         for call in response.tool_calls:
-            tool = tool_registry.get(call.name)
+            # SEC-01: enforce the loadout authority boundary. An unlisted tool
+            # resolves to the same safe deny path as an unknown one — refused,
+            # never executed, fed back so the model can re-plan within its tools.
+            tool = tool_registry.get(call.name) if call.name in allowed_tools else None
             if tool is None:
                 result = (
-                    f"ERROR: tool {call.name!r} is not available. "
+                    f"ERROR: tool {call.name!r} is not available to this skill. "
                     f"Allowed tools for this skill: {list(tool_loadout)!r}."
                 )
             elif (

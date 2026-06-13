@@ -109,6 +109,69 @@ shapes), so no token-shaped substring leaves the process.
 
 ---
 
+## Second pass — Captain Nemo's independent full audit (mirroring mine)
+
+Per Clif, Nemo ran his own full-codebase security review across the same nine
+vectors, fresh and unanchored (I deliberately did not hand him my findings).
+His letter:
+`/home/cknox/Message in a Bottle/2026-06-12-Nemo-to-Cowboy-fullsec-audit.md`.
+
+He **independently corroborated all five fixes above** (H1/H2/H3/M1/M2) plus the
+SSRF guard, path-traversal/write confinement, raw-tool-result persistence, and
+external-tool resolution — each with his own exploit probe, all SAFE. He then
+found **four findings I had missed**, all since fixed in this cut:
+
+### SEC-01 — tool-call authorization bypass  **HIGH**
+
+`run_llm_with_tools` dispatched any tool present in the *registry*, checking
+only `tool is None` — not membership in the skill's declared `tool_loadout`.
+`build_tools_schema` only *hides* the other tools from a well-behaved model; a
+prompt-injected model emits a `run_shell` / `write_artifact` call and it
+executes. This is the framework's central least-authority boundary, and it's
+the bypass that *reaches* the very `run_shell` H3 hardens — so it's the keystone.
+
+**Fix** (`runners.py`): bind `allowed_tools = set(tool_loadout)` and resolve
+`tool = registry.get(name) if name in allowed_tools else None`, so an unlisted
+call falls to the existing safe deny path (refused, fed back, never executed,
+never metered). Verified with Nemo's own exploit stub inverted to assert
+`executed_unlisted_tool False`.
+
+### SEC-02 — ACP attachments read arbitrary local paths  **MEDIUM**
+
+`acp/server._parse_prompt` passed a client-supplied `Path(block["path"])`
+straight to `build_attachment` with no confinement — a malicious editor plugin
+reads `/etc/hostname` / `~/.ssh/id_rsa` into model context.
+
+**Fix** (`acp/server.py`): `_validate_attachment_path` confines the resolved
+path to an allowed root (CWD by default, widenable via
+`MODULATIO_ACP_ATTACHMENT_ROOTS`) and rejects any dotfile/secret component below
+it; a rejected path is dropped, not read.
+
+### SEC-03 — persistence redaction gaps  **MEDIUM**
+
+Checkpoint redaction wholesale-masked tool bodies + assistant tool-call args but
+passed assistant/user *prose* verbatim; `leader_conversation.jsonl` was written
+default-mode and unredacted.
+
+**Fix:** `context_budget._redact_messages_for_checkpoint` now sweeps token-shaped
+secrets from assistant/user prose with the shared `oauth_refresh._redact_secrets`
+(prose shape preserved; policy list extended). `orchestration._append_conversation`
+creates the log `0600` and token-redacts content.
+
+### SEC-04 — caller-controlled timeouts unclamped  **LOW**
+
+`run_shell` / `http_get` passed the model-supplied `timeout` straight into the
+blocking call → a huge/non-finite value ties up a worker.
+
+**Fix** (`tools.py`): `_clamp_timeout` bounds run_shell to `[0.1, 600]` and
+http_get to `[1, 30]`, rejects NaN/inf, and the JSON schemas declare the bounds.
+
+> Nemo's pass is the value of an independent reviewer: my 9-vector audit was
+> thorough on the data/filesystem/secret surfaces but under-weighted the
+> **tool-dispatch authority** surface, where SEC-01 (a real HIGH) lived.
+
+---
+
 ## Disproved (recorded so it isn't re-found)
 
 - **"The vault `.env` (API keys) is readable inside the sandbox."** FALSE. The

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Callable
@@ -27,6 +28,51 @@ PROTOCOL_VERSION = 1
 #: How long a server-initiated request (permission / input) waits for the
 #: client before giving up and failing closed.
 _REQUEST_TIMEOUT_SECONDS = 600.0
+
+
+def _attachment_roots() -> list[Path]:
+    """The directory subtree(s) an ACP client may attach files from. Defaults
+    to the server's CWD (the editor's open project); an operator widens it with
+    ``MODULATIO_ACP_ATTACHMENT_ROOTS`` (os.pathsep-separated)."""
+    raw = os.environ.get("MODULATIO_ACP_ATTACHMENT_ROOTS", "").strip()
+    if raw:
+        roots = []
+        for p in raw.split(os.pathsep):
+            if p.strip():
+                try:
+                    roots.append(Path(p).expanduser().resolve())
+                except (OSError, RuntimeError):
+                    continue
+        if roots:
+            return roots
+    return [Path.cwd().resolve()]
+
+
+def _validate_attachment_path(raw_path: str) -> Path:
+    """SEC-02 (security audit, Nemo): an ACP client supplies a local file path
+    that the server reads into model context. Confine it — resolve symlinks,
+    require the result inside an allowed root, and reject any dotfile/secret
+    component (``.env`` / ``.ssh`` / ``.netrc`` / ``.git`` …) below that root.
+    Without this a malicious editor plugin reads ``/etc/hostname`` or
+    ``~/.ssh/id_rsa`` into the prompt."""
+    try:
+        resolved = Path(raw_path).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"unresolvable attachment path {raw_path!r}") from exc
+    for root in _attachment_roots():
+        try:
+            rel = resolved.relative_to(root)
+        except ValueError:
+            continue
+        if any(part.startswith(".") for part in rel.parts):
+            raise ValueError(
+                f"attachment path rejected (dotfile/secret component): {raw_path!r}"
+            )
+        return resolved
+    raise ValueError(
+        f"attachment path {raw_path!r} is outside the allowed root(s); set "
+        "MODULATIO_ACP_ATTACHMENT_ROOTS to widen."
+    )
 
 
 def _parse_prompt(params: dict) -> tuple[str, list]:
@@ -51,8 +97,9 @@ def _parse_prompt(params: dict) -> tuple[str, list]:
             elif block.get("path"):
                 kind = "image" if btype == "image" else "document"
                 try:
+                    safe_path = _validate_attachment_path(block["path"])  # SEC-02
                     attachments.append(
-                        build_attachment(Path(block["path"]), kind=kind))
+                        build_attachment(safe_path, kind=kind))
                 except Exception as exc:  # a bad attachment shouldn't sink the turn
                     import sys
                     print(f"acp: dropped attachment {block.get('path')!r}: "

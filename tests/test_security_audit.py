@@ -310,3 +310,180 @@ def test_fire_auth_alert_redacts_key_before_surfacing(monkeypatch):
     )
     assert "sk-ant-LEAKED" not in captured["msg"]
     assert "<redacted>" in captured["msg"]
+
+
+# --------------------------------------------------------------------------
+# SEC-01 (Nemo, HIGH) — tool-call authorization bypass: dispatch must check
+# the skill's tool_loadout, not just registry membership.
+# --------------------------------------------------------------------------
+
+def test_run_llm_with_tools_denies_tool_outside_loadout(tmp_path):
+    """A model that returns a tool call NOT in the skill's declared
+    tool_loadout must be refused — even when that tool exists in the
+    registry. Mirrors Nemo's exploit: a web-only skill must not reach
+    run_shell."""
+    from modulatio import tools
+    from modulatio.runners import ChatResponse, ToolCall, run_llm_with_tools
+
+    art = tmp_path / "artifacts"
+    art.mkdir()
+    (art / "pwn.py").write_text("print('BYPASS_EXECUTED')\n")
+    reg = tools.build_registry(
+        artifacts_root=art, tool_calls_dir=art / "tool_calls"
+    )
+    assert "run_shell" in reg  # the privileged tool is in the registry
+    seen_schema = []
+    tool_results = []
+
+    def runner(*, messages, tools):
+        seen_schema.append([t["function"]["name"] for t in tools])
+        if len(seen_schema) == 1:
+            # hostile/injected model emits an unlisted privileged tool call
+            return ChatResponse(
+                content="",
+                tool_calls=(ToolCall(
+                    id="tc1", name="run_shell",
+                    args={"cmd": "python3 pwn.py", "profile": "full", "timeout": 5},
+                ),),
+            )
+        # capture the tool-role result fed back after dispatch
+        tool_results.append(messages[-1]["content"])
+        return ChatResponse(content="done", tool_calls=())
+
+    run_llm_with_tools(
+        chat_runner=runner, prompt="x",
+        tool_loadout=("http_get",), tool_registry=reg,
+    )
+    # the model only ever saw http_get
+    assert seen_schema[0] == ["http_get"]
+    # the unlisted run_shell was REFUSED, not executed
+    assert "BYPASS_EXECUTED" not in tool_results[0]
+    assert "run_shell" in tool_results[0]  # named in the deny message
+    assert not (art / "BYPASS").exists()
+
+
+# --------------------------------------------------------------------------
+# SEC-04 (Nemo, LOW) — clamp caller-supplied timeouts
+# --------------------------------------------------------------------------
+
+def test_clamp_timeout_bounds_and_nonfinite():
+    from modulatio.tools import _clamp_timeout
+
+    assert _clamp_timeout(5, lo=1, hi=30, default=10) == 5
+    assert _clamp_timeout(1e9, lo=1, hi=30, default=10) == 30      # over -> hi
+    assert _clamp_timeout(0.0001, lo=1, hi=30, default=10) == 1    # under -> lo
+    assert _clamp_timeout(float("nan"), lo=1, hi=30, default=10) == 10
+    assert _clamp_timeout(float("inf"), lo=1, hi=30, default=10) == 10
+    assert _clamp_timeout("not-a-number", lo=1, hi=30, default=10) == 10
+
+
+def test_run_shell_sanitizes_nonfinite_timeout(tmp_path):
+    """A NaN timeout would otherwise reach subprocess and misbehave; the clamp
+    coerces it to the default so the command runs normally."""
+    from modulatio import tools
+
+    art = tmp_path / "artifacts"
+    art.mkdir()
+    (art / "demo.py").write_text("print('ok')\n")
+    rs = tools.make_run_shell(art)
+    out = rs(cmd="python3 demo.py", profile="full", timeout=float("nan"))
+    assert "ok" in out
+    assert "exit_code: 0" in out
+
+
+# --------------------------------------------------------------------------
+# SEC-02 (Nemo, MEDIUM) — ACP attachments confined to an allowed root
+# --------------------------------------------------------------------------
+
+def test_acp_attachment_path_rejects_outside_root(tmp_path, monkeypatch):
+    from modulatio.acp import server
+
+    monkeypatch.setenv("MODULATIO_ACP_ATTACHMENT_ROOTS", str(tmp_path))
+    # a legit file under the root resolves
+    good = tmp_path / "doc.txt"
+    good.write_text("hi")
+    assert server._validate_attachment_path(str(good)) == good.resolve()
+    # outside the root → refused
+    with pytest.raises(ValueError):
+        server._validate_attachment_path("/etc/hostname")
+    # a dotfile/secret under the root → refused
+    secret = tmp_path / ".env"
+    secret.write_text("OPENAI_API_KEY=sk-xxx")
+    with pytest.raises(ValueError):
+        server._validate_attachment_path(str(secret))
+    # traversal that escapes the root → refused
+    with pytest.raises(ValueError):
+        server._validate_attachment_path(str(tmp_path / ".." / "etc" / "passwd"))
+
+
+def test_acp_parse_prompt_drops_unauthorized_attachment(tmp_path, monkeypatch):
+    """An ACP client supplying an out-of-root absolute path gets the attachment
+    dropped, not read into context."""
+    from modulatio.acp import server
+
+    monkeypatch.setenv("MODULATIO_ACP_ATTACHMENT_ROOTS", str(tmp_path))
+    text, atts = server._parse_prompt(
+        {"prompt": [{"type": "resource", "path": "/etc/hostname"}]}
+    )
+    assert atts == []
+
+
+# --------------------------------------------------------------------------
+# SEC-03 (Nemo, MEDIUM) — persistence redaction gaps
+# --------------------------------------------------------------------------
+
+def test_checkpoint_redacts_assistant_prose(tmp_path):
+    """SEC-03a: a secret echoed into assistant PROSE (not just tool args) must
+    not persist verbatim in a checkpoint."""
+    import json as _json
+
+    from modulatio.context_budget import write_checkpoint
+
+    path = write_checkpoint(
+        "ck1",
+        [
+            {"role": "assistant",
+             "content": "the key it gave back was sk-ant-LEAKED1234567890ABCD ok"},
+            {"role": "user", "content": "here is Bearer ABCDEF0123456789ABCDEF"},
+        ],
+        model="m", estimated_tokens=999, max_input_tokens=1,
+        checkpoints_dir=tmp_path, redact_secrets=True,
+    )
+    data = _json.loads(path.read_text())
+    blob = _json.dumps(data["messages"])
+    assert "sk-ant-LEAKED" not in blob
+    assert "Bearer ABCDEF0123456789ABCDEF" not in blob
+    assert "<redacted>" in blob
+    # prose around the secret is preserved (Leader's reasoning shape intact)
+    assert "the key it gave back was" in blob
+    assert "assistant.content" in data["redaction_policy"]
+    assert "user.content" in data["redaction_policy"]
+
+
+def test_leader_conversation_is_0600_and_redacted(tmp_path, monkeypatch):
+    """SEC-03b: the Leader↔operator log is owner-only and token-redacted."""
+    from modulatio import vault
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project, ProjectState
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("SEC", "sec fixture", "obj")
+    project = Project(
+        code="SEC", name="sec fixture", objective="obj",
+        state=ProjectState.ACTIVE, leader_model="stub",
+        wiki_path=str(vault.project_dir("SEC")),
+    )
+    runners = {
+        "leader": lambda p: "", "planner": lambda p: "```json\n[]\n```",
+        "drafter": lambda p: "", "qc": lambda p: "",
+    }
+    orch = Orchestrator(project, runners)
+    orch._append_conversation("operator", "my token is sk-ant-LEAKED1234567890ABCD")
+
+    path = orch._conversation_path()
+    import stat as _stat
+    mode = _stat.S_IMODE(path.stat().st_mode)
+    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+    body = path.read_text()
+    assert "sk-ant-LEAKED" not in body
+    assert "<redacted>" in body
