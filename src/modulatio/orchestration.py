@@ -7238,8 +7238,10 @@ class Orchestrator:
                     )
                     return
 
-                # QC rejected — prepare corrective notes for next attempt.
-                last_qc = (qc_verdict, qc_notes)
+                # QC rejected — prepare corrective notes for next attempt. Carry the
+                # parsed defect_type too (Hero code BLOCKER 2): it's a real component
+                # of the recovery signature, and AssertionEvidence can't hold it.
+                last_qc = (qc_verdict, qc_notes, defect_type)
                 last_exc = None
                 corrective_notes = qc_notes or qc_verdict.check
                 # QC-as-fixer Slice 1: route the next attempt by an explicit,
@@ -7475,7 +7477,7 @@ class Orchestrator:
         self,
         t: Task,
         draft_path: "Path | None",
-        last_qc: "tuple[AssertionEvidence, str] | None",
+        last_qc: "tuple[AssertionEvidence, str, str | None] | None",
         summary: RunSummary,
         *,
         breaker_abort: Exception | None = None,
@@ -7503,11 +7505,15 @@ class Orchestrator:
             # caller's graceful terminal.
             return False
 
-        # Assemble the defects the QC fixer should target.
+        # Assemble the defects the QC fixer should target. ``last_qc`` is
+        # ``(verdict, notes, defect_type)`` (Hero code BLOCKER 2 — defect_type is a
+        # real signature component; AssertionEvidence has no such field, so it must
+        # ride the tuple, not a getattr off the verdict).
         if last_qc is not None:
-            qc_verdict, qc_notes = last_qc
+            qc_verdict, qc_notes, qc_defect = last_qc
             defects = (qc_notes or "").strip() or qc_verdict.check
         else:
+            qc_verdict, qc_notes, qc_defect = None, "", ""
             reason = getattr(breaker_abort, "summary", "") or "no committable result"
             defects = (
                 f"The producer could not converge ({reason}). Make the "
@@ -7544,17 +7550,20 @@ class Orchestrator:
         try:
             from modulatio import recoveries as _recoveries
 
-            _recoveries.record_recovery(
-                self.project.code,
-                kind="qc_authored",
-                artifact_kind=t.artifact_kind or "",
-                defect_type=(getattr(last_qc[0], "defect_type", "") or "") if last_qc else "",
-                task_id=t.id,
-                defects=defects,
-                before=body,
-                after=patched,
-                qc_rationale=(last_qc[0].check if last_qc else defects),
-            )
+            # Serialize the append like its sibling qc-history log (Hero MINOR 5) —
+            # wave-parallel rescues must not interleave a multi-KB JSON line.
+            with self._store_lock:
+                _recoveries.record_recovery(
+                    self.project.code,
+                    kind="qc_authored",
+                    artifact_kind=t.artifact_kind or "",
+                    defect_type=qc_defect or "",
+                    task_id=t.id,
+                    defects=defects,
+                    before=body,
+                    after=patched,
+                    qc_rationale=(qc_verdict.check if qc_verdict is not None else defects),
+                )
         except Exception:  # noqa: BLE001 — never fail a completed task on a log write
             try:
                 self._emit_activity(
@@ -9566,6 +9575,7 @@ class Orchestrator:
             if not isinstance(codifications, list):
                 self._codification_skipped("win_leader_output_unparsable")
                 continue
+            persist_failed = False
             for spec in codifications:
                 if isinstance(spec, dict):
                     # the ENGINE owns the evidence set (the cluster it PROVED), not the
@@ -9579,14 +9589,19 @@ class Orchestrator:
                         )
                     except Exception:  # noqa: BLE001 — one can't stop the rest
                         self._codification_skipped("win_persist_failed")
+                        persist_failed = True
                         continue
-            # the cluster was surfaced + JUDGED (parseable decision) — consume its ids so
-            # a declined/coherent cluster isn't re-prompted every run (idempotent; the
-            # persist path already consumed them on a codified spec). mark_consumed dedups.
-            try:
-                recoveries.mark_consumed(self.project.code, cluster_ids)
-            except Exception:  # noqa: BLE001
-                self._codification_skipped("win_consume_failed")
+            # Consume the cluster only when it was JUDGED and no spec FAILED to persist
+            # (Hero MODERATE 3). A DECLINED cluster (empty decision) consumes — bounds
+            # re-prompting; new same-signature recoveries can still re-cluster. But a
+            # transient persist failure (git/disk) must NOT consume — else the skill
+            # never lands yet the evidence is gone (technique lost). Retain → retry next
+            # run. (A codified spec already consumed via persist; this is idempotent.)
+            if not persist_failed:
+                try:
+                    recoveries.mark_consumed(self.project.code, cluster_ids)
+                except Exception:  # noqa: BLE001
+                    self._codification_skipped("win_consume_failed")
 
     def _codification_skipped(self, reason: str) -> None:
         """Raise-safe observability breadcrumb for a swallowed codification
@@ -9668,9 +9683,22 @@ class Orchestrator:
                 project_code=project_code,
             )
         else:  # improve — append the learned guidance, bump the version.
-            base = skills.load_with_metadata(name, project_code=self.project.code)
-            if not base.name:
+            # Hero code BLOCKER 1 — the base read MUST match the write scope, or a
+            # FAIL improve (write-shared, project_code=None) that names a project-local
+            # WIN skill would load the win body as its base and lift it — provenance,
+            # learned_from, recovery content and all — into the SHARED library, voiding
+            # R2 containment one function away. Read at the write target's scope.
+            base = skills.load_with_metadata(name, project_code=project_code)
+            if not base.name and project_code is not None:
+                # a WIN improve may legitimately extend a SHARED base into a
+                # project-local variant — fall back to the shared/seed chain.
                 base = skills.load_with_metadata(name)
+            if not base.name:
+                # the named base does not exist at the write scope (e.g. a shared
+                # write naming a project-local-only skill). Refuse — never lift
+                # project-local content into shared, never shallow-create. Breadcrumb.
+                self._codification_skipped(f"improve_base_absent_at_scope:{name}")
+                return
             # Replay guard (Nemo r2 #3): if this recovery cluster was already codified
             # into the skill, do NOT append again — idempotent across a consume-after-
             # commit failure. Still consume (the lesson IS applied), then return.

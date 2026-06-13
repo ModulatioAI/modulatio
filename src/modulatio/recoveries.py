@@ -139,13 +139,26 @@ def _count_literals(lines: "list[str]") -> int:
     return sum(len(re.findall(r"'[^']*'|\"[^\"]*\"|\b\d+\b", ln)) for ln in lines)
 
 
+def _count_identifiers(lines: "list[str]") -> int:
+    """Identifier-like tokens (names) in the diff lines, EXCLUDING control-flow
+    keywords (counted separately as ``ctrl``). The third token class the design
+    pins (Hero MINOR 4 — omitting it coarsens the signature toward false-merge)."""
+    return sum(
+        1
+        for ln in lines
+        for tok in re.findall(r"[A-Za-z_]\w*", ln)
+        if tok not in _CTRL_KEYWORDS
+    )
+
+
 def _code_shape(before: str, after: str) -> str:
     added, removed = _diff_lines(before, after)
     ctrl = _count_ctrl(added) - _count_ctrl(removed)
     lit = _count_literals(added) - _count_literals(removed)
+    idn = _count_identifiers(added) - _count_identifiers(removed)
     return (
         f"code:add={_band(len(added))}:rm={_band(len(removed))}"
-        f":ctrl={_sign(ctrl)}:lit={_sign(lit)}"
+        f":ctrl={_sign(ctrl)}:lit={_sign(lit)}:id={_sign(idn)}"
     )
 
 
@@ -203,12 +216,20 @@ def recovery_signature(
     artifact_kind: str, defect_type: str, rationale: str, change_shape_str: str
 ) -> str:
     """``(artifact_kind, defect_type, rationale-key, change-shape)`` — two recoveries
-    cluster only when ALL FOUR agree. Biased to false-split (safe) over false-merge."""
+    cluster only when ALL FOUR agree. Biased to false-split (safe) over false-merge.
+
+    Commas are stripped from every component (Hero note): the signature round-trips
+    through the skill's ``learned_from`` frontmatter as a COMMA-separated list, so a
+    comma inside a component would split the entry and silently disarm the replay guard
+    for that skill."""
+    def _safe(s: str) -> str:
+        return str(s or "").strip().lower().replace(",", ";")
+
     return "|".join([
-        (artifact_kind or "").strip().lower(),
-        (defect_type or "").strip().lower(),
-        _rationale_key(rationale),
-        change_shape_str,
+        _safe(artifact_kind),
+        _safe(defect_type),
+        _safe(_rationale_key(rationale)),
+        _safe(change_shape_str),
     ])
 
 

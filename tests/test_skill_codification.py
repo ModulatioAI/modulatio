@@ -429,6 +429,7 @@ def test_recovery_log_failure_never_reverses_completion(proj, monkeypatch):
     last_qc = (
         AssertionEvidence(producer="qc", primary=True, check="null guard", passed=False),
         "add a null guard",
+        "substantive",  # #81 3-tuple: (verdict, notes, defect_type) — Hero BLOCKER 2
     )
     out = o._attempt_qc_fix_forward(t, draft, last_qc, RunSummary(project=pr))
     assert out is True                       # the rescue still reached its terminal
@@ -452,3 +453,66 @@ def test_fail_phase_exception_does_not_suppress_win(proj, monkeypatch):
     o._post_run_codification(RunSummary(project=pr))  # must NOT raise
     assert skills.load_with_metadata("win-survives-fail-error", project_code=proj).name \
         == "win-survives-fail-error"
+
+
+def test_fail_improve_of_project_local_win_skill_does_not_leak_to_shared(proj):
+    """Hero BLOCKER 1: a FAIL-loop improve (write-shared) that names a PROJECT-LOCAL
+    win skill must NOT load the win body as its base and lift it into the shared
+    library — the base read must match the write scope."""
+    sig = "python_code|substantive|null-guard|code:add=s:rm=0:ctrl=+:lit=0:id=+"
+    skills.create_skill(
+        name="null-guard-inputs", description="win skill",
+        prompt_template="WIN BODY\n\n## Learned (from recovery) — x\n\nguidance",
+        version="1", provenance="win", learned_from=(sig,), project_code=proj)
+    for i in range(3):
+        _seed_fail(proj, "code", f"bad {i}", f"f{i}")
+    decision = {"codifications": [{"action": "improve", "name": "null-guard-inputs",
+                "recurring_problem": "x", "evidence_ids": ["f0", "f1", "f2"],
+                "capability_tags": [], "guidance": "fail guidance"}]}
+    o, pr = _orch(proj, decision)
+    o._post_run_codification(RunSummary(project=pr))
+    # the win content never reaches the shared library
+    shared = skills._SKILLS_ROOT / "null-guard-inputs.md"
+    assert (not shared.exists()) or ("provenance: win" not in shared.read_text())
+    # the project-local win skill is untouched
+    sk = skills.load_with_metadata("null-guard-inputs", project_code=proj)
+    assert sk.provenance == "win" and sk.version == "1"
+
+
+def test_recovery_records_real_defect_type_from_tuple(proj, monkeypatch):
+    """Hero BLOCKER 2: defect_type rides the last_qc tuple (AssertionEvidence has no
+    such field), so a witnessed recovery records the real QC defect class."""
+    from uuid import uuid4
+
+    from modulatio.types import AssertionEvidence, Task
+
+    o, pr = _orch(proj, {"codifications": []})
+    draft = vault.project_dir(proj) / "draft.py"
+    draft.write_text("def f(x):\n    return x + 1  # a real non-trivial committed draft\n")
+    t = Task(id="T-dt", project_id=uuid4(), goal_id="G", description="d",
+             artifact_kind="python_code", qc_agent_id="qc")
+    monkeypatch.setattr(
+        o, "_qc_patch_artifact",
+        lambda *a, **k: "def f(x):\n    if x is None:\n        return 0\n    return x + 1\n",
+    )
+    last_qc = (AssertionEvidence(producer="qc", primary=True, check="c", passed=False),
+               "notes", "mechanical")
+    o._attempt_qc_fix_forward(t, draft, last_qc, RunSummary(project=pr))
+    recs = recoveries.load_recoveries(proj)
+    assert len(recs) == 1 and recs[0].defect_type == "mechanical"
+
+
+def test_win_persist_failure_does_not_consume_cluster(proj, monkeypatch):
+    """Hero MODERATE 3: a transient persist failure must NOT consume the cluster —
+    the technique is retained for retry, not lost."""
+    for i in range(3):
+        _seed_recovery(proj, task_id=f"R{i}")
+    decision = {"codifications": [{"action": "create", "name": "win-x", "description": "d",
+                "capability_tags": [], "recurring_problem": "x", "guidance": "g"}]}
+    o, pr = _orch(proj, decision)
+
+    def boom(*a, **k):
+        raise RuntimeError("git hiccup")
+    monkeypatch.setattr(o, "_persist_codification", boom)
+    o._post_run_win_codification(RunSummary(project=pr))
+    assert len(recoveries.unconsumed_recoveries(proj)) == 3  # retained for retry

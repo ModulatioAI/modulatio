@@ -185,11 +185,13 @@ artifact-agnostic discipline). Each categorizer is cheap + deterministic + no-LL
 stdlib `difflib` line diff of the (already-bounded) excerpts:
 - **code** → `f"code:add={band}:rm={band}:ctrl={sign}:lit={sign}:id={sign}"` — added/removed line
   counts bucketed into coarse bands (0 / 1–2 / 3–8 / 9+), plus the sign (+/0/−) of the delta in
-  three token classes (control-flow keywords `if/for/while/try/return/raise/…`, literals,
-  identifiers) counted over the diff hunks.
-- **document / prose** → `f"doc:sent={band}:head={sign}"` — sentence-count delta band + heading
-  (`^#`/blank-line-section) count delta sign.
-- **data** → `f"data:rows={band}:cols={sign}"` — row-count delta band + column delta sign.
+  **all three** token classes (control-flow keywords `if/for/while/try/return/raise/…`, literals,
+  and identifiers) counted over the diff hunks. (The `id` class is load-bearing — omitting it
+  coarsens toward false-merge, Hero MINOR 4.)
+- **document / prose** → `f"doc:sent={band}:dir={sign}:head={sign}"` — sentence-count delta band +
+  its direction sign + heading (`^#`) count delta sign.
+- **data** → `f"data:rows={band}:dir={sign}:cols={sign}"` — row-count delta band + direction +
+  column delta sign.
 - **media / unknown kind / a categorizer that can't classify** → a **UNIQUE sentinel**
   `f"unclassified:{recovery_id}"`. Because it embeds the recovery's own id, it can **never equal
   another recovery's fingerprint** → such a recovery is a permanent singleton → it can never
