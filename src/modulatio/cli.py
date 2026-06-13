@@ -425,6 +425,23 @@ def kickoff(
         qc_model=qc_model,
     )
 
+    # Validate + build attachments BEFORE any disk side-effect (project
+    # init, roster seed, run-folder creation). build_attachment is
+    # independent of project/run state, so doing it here means a
+    # missing/unreadable --attach fails fast without leaving an orphan
+    # net-new project + seeded roster and runs/<run_id>/ folder on disk.
+    _atts = []
+    for _p in (attach or []):
+        _path = Path(_p).expanduser()
+        try:
+            _atts.append(build_attachment(_path, kind="document"))
+        except FileNotFoundError:
+            typer.echo(f"  ! --attach: file not found: {_path}", err=True)
+            raise typer.Exit(1)
+        except (ValueError, UnicodeDecodeError) as _e:
+            typer.echo(f"  ! --attach: cannot attach {_path}: {_e}", err=True)
+            raise typer.Exit(1)
+
     wiki = project_dir(code)
     net_new = not wiki.exists()
     vault.init_project(code, pname, objective, exist_ok=True)
@@ -538,17 +555,6 @@ def kickoff(
         ),
         user_budget_overrides=user_budget_overrides or None,
     )
-    _atts = []
-    for _p in (attach or []):
-        _path = Path(_p).expanduser()
-        try:
-            _atts.append(build_attachment(_path, kind="document"))
-        except FileNotFoundError:
-            typer.echo(f"  ! --attach: file not found: {_path}", err=True)
-            raise typer.Exit(1)
-        except (ValueError, UnicodeDecodeError) as _e:
-            typer.echo(f"  ! --attach: cannot attach {_path}: {_e}", err=True)
-            raise typer.Exit(1)
     if _atts:
         names = ", ".join(a.name for a in _atts)
         typer.echo(f"  In-place edit — improving: {names}")
@@ -660,6 +666,15 @@ def models_add(
             typer.echo("--env-var is required when --auth-type=api_key", err=True)
             raise typer.Exit(code=1)
         auth_config = {"env_var": env_var.upper()}
+    elif env_var:
+        # env_var only applies to api_key auth; for any other auth_type it
+        # would be silently dropped. Fail loud so the operator notices the
+        # mismatched --auth-type rather than a silently keyless entry.
+        typer.echo(
+            f"--env-var only applies to --auth-type=api_key (got auth_type={auth_type!r}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     try:
         entry = model_presets.add_preset(
             key,
@@ -1068,6 +1083,12 @@ def cron_add(
     answers. Without ``--jt`` the cron runs the raw objective as before."""
     _jt_params = None
     if jt_params:
+        if not jt:
+            # --jt-params without --jt has nothing to bind to; the params
+            # would be silently dropped. Fail loud so the operator notices
+            # the missing --jt rather than scheduling a JT-less raw job.
+            typer.echo("--jt-params requires --jt (there is no template to bind them to).", err=True)
+            raise typer.Exit(code=1)
         import json as _json
         try:
             _jt_params = _json.loads(jt_params)
@@ -1426,6 +1447,13 @@ def project_clean(
     only ``runs/<run_id>/`` subfolders are removed.
     """
     import shutil
+
+    if keep_last < 0:
+        # A negative keep_last falls through to the "delete all" branch below
+        # (it's neither > 0 nor >= len(runs)), silently wiping every run when
+        # the operator almost certainly meant to preserve some. Refuse it.
+        typer.echo("--keep-last cannot be negative.", err=True)
+        raise typer.Exit(code=2)
 
     runs = vault.list_runs(code)
     if not runs:

@@ -392,10 +392,22 @@ def _price_is_zero(value: object) -> bool:
     return str(value) in ("0", "0.0", "0.00")
 
 
+# Pricing fields that, when present and non-zero, mean the model bills the
+# operator even with zero prompt/completion rates (per-request, per-image, etc.).
+# A missing/None field is treated as zero (most models omit the ones they don't
+# charge for).
+_EXTRA_PRICE_FIELDS = ("request", "image", "web_search", "internal_reasoning")
+
+
 def _is_free(model: dict, free_detect: str) -> bool:
     if free_detect == "pricing_zero":
         p = model.get("pricing") or {}
-        return _price_is_zero(p.get("prompt")) and _price_is_zero(p.get("completion"))
+        if not (_price_is_zero(p.get("prompt")) and _price_is_zero(p.get("completion"))):
+            return False
+        # A zero token rate isn't truly free if another billed dimension is set.
+        return all(
+            p.get(f) is None or _price_is_zero(p.get(f)) for f in _EXTRA_PRICE_FIELDS
+        )
     if free_detect == "suffix_free":
         return str(model.get("id", "")).endswith(":free")
     if free_detect == "all":
@@ -550,7 +562,13 @@ def curated_default(
     the newest of the rest — capped at ``limit``. Search reaches everything
     else; this is a default, not a wall."""
     pins = provider.pinned_models
-    pinned = [m for m in models if m.id in pins]
+    by_id = {m.id: m for m in models}
+    # Keep every pin (in declared order), synthesizing a stub for any the feed
+    # dropped — consistent with apply_pinned, so a pin can't silently vanish.
+    pinned = [
+        by_id.get(pid) or CatalogModel(id=pid, name=pid, provider_id=provider.id)
+        for pid in pins
+    ]
     rest = [m for m in models if m.id not in pins]
 
     def is_flagship(m: CatalogModel) -> bool:

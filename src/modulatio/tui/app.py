@@ -770,12 +770,16 @@ class ModulatioApp(App):
         status = self._lane_status("stream-leader-status")
         if status is not None:
             status.set_idle()
-        # Belt: once the converse worker returns, any job it ran (run_job) is
+        # Belt: once the converse worker returns, any job IT ran (run_job) is
         # over, so the TEAM spinner must not read "running". kickoff_ended
         # normally settles it; this covers an error path that never emitted it.
-        team_status = self._lane_status("stream-team-status")
-        if team_status is not None:
-            team_status.set_done()
+        # Guard: a *separate* kickoff (button/F5) may still be in flight on its
+        # own worker — settling its spinner to "done" here would lie about the
+        # live floor. Only force-settle when nothing is actually running.
+        if self._running_job_orchestrator() is None:
+            team_status = self._lane_status("stream-team-status")
+            if team_status is not None:
+                team_status.set_done()
 
     def _handle_slash_command(self, text: str) -> None:
         """Route a `/cmd args` input to the commands.py dispatcher and apply
@@ -807,14 +811,29 @@ class ModulatioApp(App):
                 tabbed.active = tab_id
             except Exception:
                 return
-            # Optional agent focus argument (e.g. switch_tab:memory:writer-a)
-            if len(parts) == 3 and tab_short == "memory":
-                try:
-                    from modulatio.tui.screens.memory import MemoryScreen
-                    mem = self.query_one(MemoryScreen)
-                    mem.focus_agent(parts[2])
-                except Exception:
-                    pass
+            # Optional focus/filter argument after the tab name.
+            if len(parts) == 3 and parts[2]:
+                # memory:<agent> → focus that agent's pane.
+                if tab_short == "memory":
+                    try:
+                        from modulatio.tui.screens.memory import MemoryScreen
+                        mem = self.query_one(MemoryScreen)
+                        mem.focus_agent(parts[2])
+                    except Exception:
+                        pass
+                # cron:<code> → apply the project filter. The CronScreen needs a
+                # lifecycle-aware ``focus_project`` (sibling of
+                # ``MemoryScreen.focus_agent``) for this to stick; see
+                # cross_file_needed. Calling it here once that lands:
+                elif tab_short == "cron":
+                    try:
+                        from modulatio.tui.screens.cron import CronScreen
+                        screen = self.query_one(CronScreen)
+                        focus = getattr(screen, "focus_project", None)
+                        if callable(focus):
+                            self.call_after_refresh(focus, parts[2])
+                    except Exception:
+                        pass
             return
         if side_effect == "open_bug_report":
             from modulatio.tui.widgets.bug_report_modal import BugReportModal

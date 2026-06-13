@@ -313,7 +313,7 @@ def test_converse_with_image_none_content_does_not_crash(
             content="unused", tool_calls=())},
     )
 
-    def fake_multimodal(*, prompt, attachments, chat_completion):
+    def fake_multimodal(*, prompt, attachments, chat_completion, budget_role="leader-decompose"):
         return ""  # the coalesced None
 
     monkeypatch.setattr(orch, "_run_multimodal_leader", fake_multimodal)

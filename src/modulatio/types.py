@@ -9,6 +9,7 @@ cross-cutting.md in the design vault for context.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -354,6 +355,13 @@ class Ticket(BaseModel):
 #: this process. Validator drops repeats to DEBUG to keep TUI/status
 #: polling from spamming the log.
 _SEEN_UNKNOWN_BUDGET_ROLES: set[tuple[str, ...]] = set()
+#: Guards the check-then-act on ``_SEEN_UNKNOWN_BUDGET_ROLES``. Project
+#: validation runs on concurrent wave-executor threads (waves are ON by
+#: default), so an unsynchronized "in?-then-add" can let two threads both
+#: miss and both emit the first-sighting WARN. The lock makes the
+#: first-sighting/repeat decision deterministic — exactly one WARN per
+#: unknown tuple — without changing what gets logged.
+_SEEN_UNKNOWN_BUDGET_ROLES_LOCK = threading.Lock()
 
 
 class Project(BaseModel):
@@ -528,14 +536,19 @@ class Project(BaseModel):
             logger = logging.getLogger("modulatio.context_budget")
             # First sighting of this exact unknown-tuple gets WARN; later
             # round-trips (TUI render, daemon poll, status command) drop
-            # to DEBUG so the noise floor stays usable.
-            if unknown in _SEEN_UNKNOWN_BUDGET_ROLES:
+            # to DEBUG so the noise floor stays usable. The check-then-act
+            # is locked: concurrent wave threads must not both treat the
+            # same tuple as a first sighting (double-WARN).
+            with _SEEN_UNKNOWN_BUDGET_ROLES_LOCK:
+                first_sighting = unknown not in _SEEN_UNKNOWN_BUDGET_ROLES
+                if first_sighting:
+                    _SEEN_UNKNOWN_BUDGET_ROLES.add(unknown)
+            if not first_sighting:
                 logger.debug(
                     "Project.context_budgets unknown budget_role(s) %s "
                     "(repeat).", list(unknown),
                 )
             else:
-                _SEEN_UNKNOWN_BUDGET_ROLES.add(unknown)
                 logger.warning(
                     "Project.context_budgets contains unknown budget_role(s) "
                     "%s — preserved across round-trip but will not be applied "

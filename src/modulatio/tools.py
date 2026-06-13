@@ -510,6 +510,31 @@ def _is_safe_file_arg(arg: str, root: Path | None) -> bool:
     return _is_safe_relative_file_arg(arg)
 
 
+def _is_safe_go_target(arg: str, root: Path | None) -> bool:
+    """True iff ``arg`` is a Go vet target that cannot leak a file outside
+    the artifacts root. Go package patterns (``.``, ``./...``,
+    ``./pkg/...``) legitimately begin with ``.`` and address the confined
+    cwd, so they are accepted. An absolute path or any ``..`` traversal
+    segment can escape ``root`` (go vet quotes offending source lines in
+    its diagnostics), so those are refused.
+    """
+    if not arg:
+        return False
+    # Flag-style args (e.g. ``-json``) are not paths and never leak source.
+    if arg.startswith("-"):
+        return True
+    if arg.startswith("/") or arg.startswith("\\"):
+        # An absolute path is only safe if it resolves under root.
+        return _is_safe_file_arg(arg, root)
+    parts = arg.replace("\\", "/").split("/")
+    # Reject traversal segments; a lone leading ``.`` (the Go package marker)
+    # is fine, but ``..`` would climb out of the confined cwd.
+    for p in parts:
+        if p == "..":
+            return False
+    return True
+
+
 def resolve_under_roots(arg: str, roots: "list[Path]") -> "Path | None":
     """Resolve a caller-supplied relative path and return it ONLY if it lands on
     a real FILE inside one of ``roots`` (after following symlinks). Returns
@@ -635,9 +660,16 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
         # go version  (subcommand style — Go uses bare `version`, not --version)
         if len(argv) == 2 and argv[1] in ("version", "--version", "-version"):
             return True
-        # go vet [args]  (static analyzer, read-only)
+        # go vet [pkg-or-file ...]  (static analyzer, read-only).
+        # go vet echoes offending source lines in its diagnostics, so an
+        # unconfined path arg is an arbitrary-file read — confine every arg
+        # like the other linters (gofmt/ruff/mypy). Go package patterns
+        # (``./...``, ``.``, ``./pkg/...``) legitimately start with ``.`` and
+        # so are accepted explicitly; only absolute paths and ``..`` traversal
+        # (which can escape the artifacts root) are refused.
         if len(argv) >= 2 and argv[1] == "vet":
-            return True
+            if all(_is_safe_go_target(a, root) for a in argv[2:]):
+                return True
     if head == "gofmt":
         # gofmt -l <file>.go  (lists files needing reformat; no modification)
         # gofmt -d <file>.go  (shows diff; no modification)

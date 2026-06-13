@@ -970,45 +970,51 @@ def _merge_csv(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[st
     real ``csv.Error`` (not silently normalized — Nemo hull #3). Header mismatch
     AND row-arity mismatch are recorded errors → the assembly is incomplete
     (fail-closed), never silently merging mismatched/garbage schemas."""
-    csv.field_size_limit(_MAX_UNIT_BYTES)
-    header: list[str] | None = None
-    rows: list[list[str]] = []
-    errors: list[str] = []
-    for name, text in items:
-        try:
-            parsed = [r for r in csv.reader(io.StringIO(text), strict=True) if r]
-        except (csv.Error, ValueError) as exc:
-            errors.append(f"{name}: invalid CSV ({exc})")
-            continue
-        if not parsed:
-            continue
-        if header is None:
-            header = parsed[0]
-        elif parsed[0] != header:
-            errors.append(f"{name}: CSV header mismatch (expected {header})")
-            continue
-        width = len(header)
-        for row in parsed[1:]:
-            if len(row) != width:
-                errors.append(f"{name}: CSV row arity {len(row)} != header {width}")
+    # ``field_size_limit`` is process-wide global parser state; raise it only for
+    # the span of this merge and ALWAYS restore the prior value (even on error /
+    # early return) so we don't leak our ceiling onto unrelated CSV parsing.
+    _prev_field_limit = csv.field_size_limit(_MAX_UNIT_BYTES)
+    try:
+        header: list[str] | None = None
+        rows: list[list[str]] = []
+        errors: list[str] = []
+        for name, text in items:
+            try:
+                parsed = [r for r in csv.reader(io.StringIO(text), strict=True) if r]
+            except (csv.Error, ValueError) as exc:
+                errors.append(f"{name}: invalid CSV ({exc})")
                 continue
-            rows.append(row)
-    if dedupe:
-        seen: set[str] = set()
-        out: list[list[str]] = []
-        for r in rows:
-            key = _dedupe_key("\x00".join(r))
-            if key not in seen:
-                seen.add(key)
-                out.append(r)
-        rows = out
-    if header is None:
-        return "", errors
-    buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(header)
-    writer.writerows(rows)
-    return _capped(buf.getvalue(), errors, "CSV")
+            if not parsed:
+                continue
+            if header is None:
+                header = parsed[0]
+            elif parsed[0] != header:
+                errors.append(f"{name}: CSV header mismatch (expected {header})")
+                continue
+            width = len(header)
+            for row in parsed[1:]:
+                if len(row) != width:
+                    errors.append(f"{name}: CSV row arity {len(row)} != header {width}")
+                    continue
+                rows.append(row)
+        if dedupe:
+            seen: set[str] = set()
+            out: list[list[str]] = []
+            for r in rows:
+                key = _dedupe_key("\x00".join(r))
+                if key not in seen:
+                    seen.add(key)
+                    out.append(r)
+            rows = out
+        if header is None:
+            return "", errors
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator="\n")
+        writer.writerow(header)
+        writer.writerows(rows)
+        return _capped(buf.getvalue(), errors, "CSV")
+    finally:
+        csv.field_size_limit(_prev_field_limit)
 
 
 #: External-compositor wall-clock ceiling. A media join that can't finish in this

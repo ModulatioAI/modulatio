@@ -391,7 +391,7 @@ def get_default_budget_caps() -> dict:
     out: dict = {k: None for k in _BUDGET_CAP_KEYS}
     if not isinstance(raw, dict):
         return out
-    if isinstance(raw.get("max_wall_clock_min"), (int, float)):
+    if isinstance(raw.get("max_wall_clock_min"), (int, float)) and not isinstance(raw.get("max_wall_clock_min"), bool):
         out["max_wall_clock_min"] = float(raw["max_wall_clock_min"])
     if isinstance(raw.get("max_tokens"), int) and not isinstance(raw.get("max_tokens"), bool):
         out["max_tokens"] = int(raw["max_tokens"])

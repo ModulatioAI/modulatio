@@ -47,6 +47,26 @@ def _derive_default_models(structural: list[dict], workers: list[dict]) -> dict[
     return out
 
 
+def _derive_providers(state: dict) -> list[str]:
+    """Provider names for the summary line, derived from the keys the wizard
+    actually stages. The provider step never writes a ``configured_providers``
+    key (models are self-contained endpoint+auth+id entries), so the prior read
+    of that phantom key always rendered ``(none)``. ``staged_api_keys`` is keyed
+    by env var (``OPENAI_API_KEY`` → ``openai``); strip the ``_API_KEY`` suffix
+    and lowercase. Provider-agnostic: nothing is hardcoded — whatever the user
+    staged appears. Returns a sorted, de-duplicated list.
+    """
+    providers: set[str] = set()
+    for env_var in state.get("staged_api_keys", {}):
+        name = str(env_var).strip()
+        if name.upper().endswith("_API_KEY"):
+            name = name[: -len("_API_KEY")]
+        name = name.strip("_").lower()
+        if name:
+            providers.add(name)
+    return sorted(providers)
+
+
 def confirm(state: dict) -> Any:
     """Show summary + ask for final confirmation. Returns True/BACK/QUIT."""
     print()
@@ -55,7 +75,7 @@ def confirm(state: dict) -> Any:
     print(f"    Vault root:    {theme.color(state.get('vault_root', '?'), 'accent')}")
     print(f"    Shared res:    {theme.color(state.get('shared_resources_path', '?'), 'accent')}")
     print(f"    Pandoc:        {'✓ installed' if state.get('pandoc_installed') else '✗ skipped'}")
-    print(f"    Providers:     {', '.join(state.get('configured_providers', [])) or '(none)'}")
+    print(f"    Providers:     {', '.join(_derive_providers(state)) or '(none)'}")
     print(f"    Models:        {len(state.get('configured_models', []))} curated")
     print(f"    API keys:      {len(state.get('staged_api_keys', {}))} staged")
     # ``triad_agents`` holds the structural roles — Leader + QC only
@@ -171,4 +191,4 @@ def commit(state: dict, *, version: str) -> None:
     theme.success(f"Setup completed and recorded at {setup_state.SETUP_STATE_FILE}")
 
 
-__all__ = ["confirm", "commit"]
+__all__ = ["confirm", "commit", "_derive_providers"]

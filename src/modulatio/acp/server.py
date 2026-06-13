@@ -209,7 +209,13 @@ class ACPServer:
             elif method == "session/prompt":
                 self._prompt(req_id, params)  # responds from the worker thread
             elif method == "session/cancel":
-                self._cancel(params)  # notification — no response
+                # Spec'd as a notification (no id). If a non-compliant client
+                # sends it as a request (with an id), still ACK it — otherwise
+                # that client blocks forever awaiting a response that, by the
+                # notification contract, would never come.
+                self._cancel(params)
+                if req_id is not None:
+                    self._respond(req_id, None)
             elif req_id is not None:
                 self._error(req_id, rpc.METHOD_NOT_FOUND, f"unknown method {method!r}")
         except Exception as exc:  # never let a handler kill the loop

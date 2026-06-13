@@ -827,15 +827,13 @@ def _write_artifact_0600(path: Path, text: str) -> None:
             _os.O_CREAT | _os.O_TRUNC | _os.O_WRONLY,
             0o600,
         )
-        try:
-            with _os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(text)
-        except Exception:
-            try:
-                _os.close(fd)
-            except OSError:
-                pass
-            raise
+        # ``fdopen`` takes ownership of ``fd``: its context manager
+        # closes the descriptor on exit, including the exception path.
+        # Do NOT close ``fd`` manually here — a second ``os.close`` on
+        # the already-closed (and possibly reused) descriptor is the
+        # double-close that the surrounding fallback must not depend on.
+        with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
     except OSError:
         # Windows / read-only mounts / odd POSIX behavior — fall back
         # to ``write_text`` so the experiment still completes.
@@ -1287,6 +1285,27 @@ def _read_usage_rows(usage_log_path: Path | None) -> list[dict]:
                 "skipping malformed usage line in %s: %s", usage_log_path, exc,
             )
     return rows
+
+
+def _usage_cost_total(usage_log_path: Path | None) -> float:
+    """Best-effort cost (USD) recorded in a plan-local usage log.
+
+    Mirrors the cost computation in :func:`extract_metric_snapshot`
+    (the last usage row carries the running ``cost_total``) but reads
+    nothing else, so a replicate that CRASHED after issuing LLM calls
+    still surfaces the money it spent. Returns ``0.0`` when the path
+    is unknown / absent / unparseable so it can never raise on the
+    failure path."""
+    try:
+        usage_rows = _read_usage_rows(usage_log_path)
+    except Exception:  # noqa: BLE001 — never raise on the failure path
+        return 0.0
+    if not usage_rows:
+        return 0.0
+    try:
+        return float(usage_rows[-1].get("cost_total") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # ─── Per-replicate metric extraction ─────────────────────────────────────
@@ -1829,6 +1848,10 @@ def run_experiment(
     arm_b_manifest_paths: list[str] = []
     n_attempted_a = 0
     n_attempted_b = 0
+    # Money spent by replicates that CRASHED after issuing LLM calls.
+    # Those produce no snapshot, so their cost is otherwise omitted
+    # from ``total_cost`` (it's only summed over successful snapshots).
+    crashed_cost = 0.0
 
     for arm, replicate_index in replicate_order:
         if arm == "a":
@@ -2014,6 +2037,11 @@ def run_experiment(
                 arm, replicate_index, error_str,
             )
 
+            # Account for money already spent before the crash. No
+            # snapshot is produced for a failed replicate, so without
+            # this its cost would silently vanish from ``total_cost``.
+            crashed_cost += _usage_cost_total(usage_log_path)
+
             # Best-effort failure manifest
             fail_manifest = ReplicateManifest(
                 arm=arm,
@@ -2099,7 +2127,7 @@ def run_experiment(
     duration_seconds = _wall_clock_now() - started_wall
     total_cost = sum(
         s.cost_usd for s in arm_a_snapshots + arm_b_snapshots
-    )
+    ) + crashed_cost
 
     report = ExperimentReport(
         experiment_id=experiment_id,

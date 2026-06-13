@@ -34,7 +34,7 @@ import difflib
 import json
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -78,17 +78,21 @@ class RecoveryRecord:
     """A witnessed QC recovery — the teaching triple, bounded. ``signature`` is the
     deterministic cluster key (computed at write time)."""
 
-    entry_id: str
-    timestamp: str
-    kind: str            # "qc_authored" | "redo_guided"
-    artifact_kind: str
-    defect_type: str     # "mechanical" | "substantive" | "environmental" | ""
-    task_id: str
-    defects: str
-    before_excerpt: str
-    after_excerpt: str
-    qc_rationale: str
-    signature: str
+    # Every field carries a default (#81): a future schema addition must not make
+    # historical lines (which lack the new key) raise TypeError on load and silently
+    # drop the ENTIRE recovery feed. Defaults + known-key filtering in
+    # load_recoveries make the record forward- AND backward-compatible.
+    entry_id: str = ""
+    timestamp: str = ""
+    kind: str = ""           # "qc_authored" | "redo_guided"
+    artifact_kind: str = ""
+    defect_type: str = ""    # "mechanical" | "substantive" | "environmental" | ""
+    task_id: str = ""
+    defects: str = ""
+    before_excerpt: str = ""
+    after_excerpt: str = ""
+    qc_rationale: str = ""
+    signature: str = ""
 
 
 def _truncate(s: object) -> str:
@@ -189,6 +193,11 @@ def change_shape(before: object, after: object, artifact_kind: str) -> "str | No
     toks = _kind_tokens(artifact_kind)
     try:
         b, a = str(before), str(after)
+        # A no-delta "recovery" taught nothing (empty→empty, or before == after):
+        # there is no technique to fingerprint, so fail open to a unique singleton
+        # (#80) rather than emit a stable shape that could false-merge across tasks.
+        if b == a:
+            return None
         if any(t in _CODE_KIND_TOKENS for t in toks):
             return _code_shape(b, a)
         if any(t in _DOC_KIND_TOKENS for t in toks):
@@ -301,13 +310,20 @@ def load_recoveries(project_code: str) -> "list[RecoveryRecord]":
     if not p.exists():
         return []
     out: list[RecoveryRecord] = []
+    known = {f.name for f in fields(RecoveryRecord)}
     try:
         for line in p.read_text().splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
-                out.append(RecoveryRecord(**json.loads(line)))
+                obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    continue
+                # Drop only UNKNOWN keys (a since-removed schema field); missing keys
+                # fall back to field defaults (#81). The historical feed survives any
+                # schema add/remove instead of being wholesale discarded.
+                out.append(RecoveryRecord(**{k: v for k, v in obj.items() if k in known}))
             except (ValueError, TypeError):
                 continue  # a malformed line never blocks the feed
     except OSError:

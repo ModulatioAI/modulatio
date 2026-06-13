@@ -180,8 +180,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# Disambiguates ids minted within the same truncated-microsecond window.
+# The strftime prefix only has 10us resolution after the [:18] slice, so two
+# write()/propose() calls (e.g. concurrent wave workers) landing in the same
+# window would otherwise collide and silently overwrite each other's file.
+_ID_LOCK = threading.Lock()
+_ID_COUNTER = 0
+
+
 def _new_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")[:18]
+    global _ID_COUNTER
+    prefix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")[:18]
+    with _ID_LOCK:
+        _ID_COUNTER = (_ID_COUNTER + 1) % 1000000
+        seq = _ID_COUNTER
+    return f"{prefix}{seq:06d}"
 
 
 # ── Public write API (ACL-enforced) ───────────────────────────────────────
@@ -515,20 +528,27 @@ def recall(
     # nested _ensure_vectors acquire is free).
     import lancedb
 
+    def _recency_fallback() -> list[tuple[MemoryEntry, float]]:
+        # Markdown is the source of truth; LanceDB is a rebuildable cache.
+        # When the cache is unavailable (missing path / table / empty table)
+        # but the metadata-filtered markdown set is non-empty, surface those
+        # entries by recency rather than dropping real precedent on the floor.
+        ranked = sorted(filtered, key=lambda r: r.timestamp, reverse=True)
+        return [(r, 1.0) for r in ranked[:top_k]]
+
     with _vector_lock(project_code):
         _ensure_vectors(project_code, embedder)
 
         path = _db_path(project_code)
         if not path.exists():
-            filtered.sort(key=lambda r: r.timestamp, reverse=True)
-            return [(r, 1.0) for r in filtered[:top_k]]
+            return _recency_fallback()
 
         db = lancedb.connect(path)
         if "team_memory" not in db.list_tables().tables:
-            return []
+            return _recency_fallback()
         table = db.open_table("team_memory")
         if table.count_rows() == 0:
-            return []
+            return _recency_fallback()
 
         filtered_ids = {r.entry_id for r in filtered}
         by_id = {r.entry_id: r for r in filtered}

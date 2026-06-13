@@ -508,13 +508,16 @@ def litellm_runner(
 
         try:
             resp = completion(model=litellm_model, messages=msgs, **call_kwargs)
-        except RateLimitError:
+        except RateLimitError as initial_err:
             # Key-pool failover: rotate to the next key and retry, bounded by
             # the pool size. No pool / single key → nothing to fail over to.
             if _pool_count(pool_base) <= 1:
                 raise
             resp = None
-            last_err = None
+            # Seed with the original 429 so a TOCTOU pool-shrink (the pool
+            # emptied between the guard check and ``range()`` → zero retries)
+            # re-raises a real error, never ``raise None``.
+            last_err: RateLimitError = initial_err
             for _ in range(_pool_count(pool_base)):
                 retry_kwargs = dict(kwargs)
                 rk = _rotated_pool_key(pool_base)  # next key
@@ -1142,12 +1145,14 @@ def litellm_chat_runner(
 
         try:
             resp = _call()
-        except RateLimitError:
+        except RateLimitError as initial_err:
             # Key-pool failover on the tool-loop path: rotate + retry, bounded.
             if _pool_count(pool_base) <= 1:
                 raise
             resp = None
-            last_err = None
+            # Seed with the original 429 so a TOCTOU pool-shrink (zero retries)
+            # re-raises a real error, never ``raise None``.
+            last_err: RateLimitError = initial_err
             for _ in range(_pool_count(pool_base)):
                 try:
                     resp = _call()

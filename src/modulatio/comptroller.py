@@ -86,13 +86,22 @@ def _ledger_path(project_code: str) -> Path:
 
 
 def _parse_int(raw: str) -> int | None:
+    """Parse a declared daily cap. Empty, non-integer, or **negative**
+    → ``None`` (treated as unconfigured). A negative cap is invalid
+    config: it would deny every call (``spent >= cap`` is always true)
+    yet still promise a UTC-midnight refresh that never helps, silently
+    bricking the tier. ``0`` is preserved — it's a legitimate "disable
+    this tier explicitly" value (deny-all with an honest 0/0 reason)."""
     s = raw.strip()
     if not s:
         return None
     try:
-        return int(s)
+        value = int(s)
     except ValueError:
         return None
+    if value < 0:
+        return None
+    return value
 
 
 def load_budget(project_code: str) -> Budget:

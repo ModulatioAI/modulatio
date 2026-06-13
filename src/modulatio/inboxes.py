@@ -56,9 +56,14 @@ _INBOXES_ENV = "MODULATIO_INBOXES"
 
 
 #: Once-per-recipient WARN dedup for soft-cap pressure. Keyed by the
-#: full recipient identity tuple so per-agent and per-role pressure
-#: don't share a token.
-_WARNED_SOFT_CAP: set[tuple[str, str | None, str | None]] = set()
+#: run_id PLUS the full recipient identity tuple so per-agent and
+#: per-role pressure don't share a token — and, critically, so a
+#: warning fired for a recipient in one run does NOT suppress the same
+#: recipient's warning in a later, distinct run sharing this process
+#: (the daemon / JT / cron paths reuse the interpreter across runs).
+#: The run_id also scopes growth: entries belong to a bounded run
+#: rather than accumulating for the process lifetime.
+_WARNED_SOFT_CAP: set[tuple[str, str, str | None, str | None]] = set()
 
 
 #: Recipient key regex. Rejects path-traversal primitives (``/``,
@@ -586,6 +591,7 @@ def _maybe_supersede(
 
 def _soft_cap_warn_once(
     *,
+    run_id: str,
     target_scope: str,
     target_agent_id: str | None,
     target_runner_role: str | None,
@@ -593,12 +599,14 @@ def _soft_cap_warn_once(
     soft_cap: int,
     hard_cap: int,
 ) -> None:
-    """Emit a once-per-recipient WARN when live-note count enters
-    ``[soft_cap, hard_cap)``. Same dedup pattern as the
-    context_budget warnings."""
+    """Emit a once-per-recipient-per-run WARN when live-note count
+    enters ``[soft_cap, hard_cap)``. Same dedup pattern as the
+    context_budget warnings, but the dedup key carries ``run_id`` so a
+    warning in one run can't suppress the same recipient's warning in a
+    later run sharing this process (daemon / JT / cron reuse)."""
     if live_count < soft_cap or live_count >= hard_cap:
         return
-    key = (target_scope, target_agent_id, target_runner_role)
+    key = (run_id, target_scope, target_agent_id, target_runner_role)
     if key in _WARNED_SOFT_CAP:
         return
     _WARNED_SOFT_CAP.add(key)
@@ -1007,6 +1015,7 @@ def enqueue(
         audit_path=audit_path,
     )
     _soft_cap_warn_once(
+        run_id=run_id_,
         target_scope=target_scope,
         target_agent_id=target_agent_id,
         target_runner_role=target_runner_role,

@@ -136,7 +136,9 @@ def search_skills(
         if score:
             scored.append((score, entry))
     scored.sort(key=lambda pair: (-pair[0], pair[1].name))
-    return [entry for _, entry in scored[: max(1, limit)]]
+    if limit <= 0:
+        return []
+    return [entry for _, entry in scored[:limit]]
 
 
 def checkout(name: str, project_code: str | None = None) -> skills.Skill:

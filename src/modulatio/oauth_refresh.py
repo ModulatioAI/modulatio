@@ -229,9 +229,19 @@ def _do_refresh_anthropic(creds: dict[str, Any], refresh_token: str, *, timeout:
     if not isinstance(new_access, str) or not new_access:
         raise RefreshError("Anthropic refresh response missing access_token")
 
-    # expires_in is seconds; Claude CLI stores expiresAt as Unix ms.
-    expires_in = payload.get("expires_in", 28800)  # 8h default
-    new_expires_at = int(time.time() * 1000) + int(expires_in) * 1000
+    # expires_in is seconds; Claude CLI stores expiresAt as Unix ms. A provider
+    # could return it non-numeric (string/None/list) or non-positive — int()
+    # on that would raise outside the RefreshError contract, or persist an
+    # already-expired token. Coerce defensively and fall back to the 8h default.
+    _DEFAULT_EXPIRES_IN = 28800  # 8h
+    raw_expires_in = payload.get("expires_in", _DEFAULT_EXPIRES_IN)
+    try:
+        expires_in = int(raw_expires_in)
+    except (TypeError, ValueError):
+        expires_in = _DEFAULT_EXPIRES_IN
+    if expires_in <= 0:
+        expires_in = _DEFAULT_EXPIRES_IN
+    new_expires_at = int(time.time() * 1000) + expires_in * 1000
 
     updated: dict[str, Any] = {**creds}
     updated["accessToken"] = new_access
@@ -352,6 +362,8 @@ def try_refresh(auth_type: str) -> str | None:
             return refresh_anthropic_token()
         if auth_type == "oauth_openai":
             return refresh_openai_token()
+        if auth_type == "oauth_xai":
+            return refresh_xai_token()
     except RefreshError:
         return None
     return None

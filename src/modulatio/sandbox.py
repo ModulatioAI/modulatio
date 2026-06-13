@@ -129,8 +129,16 @@ pass_env_var: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
 #: process. Anything else is stripped. PATH is constrained to
 #: ``/usr/bin:/usr/local/bin`` so an attacker can't inject arbitrary
 #: binaries via PATH manipulation in the parent.
+#:
+#: #84: ``PWD`` is deliberately NOT forwarded. The child runs with its own
+#: ``cwd`` (the caller passes ``cwd=`` to ``subprocess.run`` — the validated
+#: artifacts dir), so forwarding the *parent's* ``PWD`` would inject a stale
+#: value that disagrees with the real working directory AND leaks the
+#: parent's path into the sandbox. POSIX shells regenerate ``$PWD`` on the
+#: first ``cd`` and ``getcwd()``-based tools read the kernel cwd directly, so
+#: an absent ``PWD`` is correct where a stale one is a bug.
 _SAFE_ENV_KEYS: frozenset[str] = frozenset({
-    "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "PWD",
+    "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
 })
 
 #: Pattern-based deny list. Defense in depth: even if a skill's

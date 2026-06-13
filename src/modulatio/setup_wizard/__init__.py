@@ -216,8 +216,27 @@ def run_setup() -> bool:
         theme.exit_dark_screen()
 
 
+def _presets_snapshot() -> dict:
+    """On-disk model_presets.json contents, or {} if unreadable/absent.
+
+    The models step persists model_presets.json *immediately* (add_preset /
+    remove_preset write through), before finalize. So an abort in a later
+    step still leaves any presets added during this run on disk. Snapshotting
+    at start lets the abort message tell the truth about what survived rather
+    than blanket-claiming "No changes written." Never raises — a missing or
+    malformed presets file is treated as an empty snapshot.
+    """
+    from modulatio import model_presets
+
+    try:
+        return dict(model_presets.load_presets())
+    except Exception:
+        return {}
+
+
 def _run_setup_body() -> bool:
     state = _load_existing_state()
+    presets_at_start = _presets_snapshot()
 
     step_order = [
         "pandoc",
@@ -240,7 +259,18 @@ def _run_setup_body() -> bool:
             pop_state=_pop_state,
         )
     except steps.WizardAborted:
-        theme.muted("Setup aborted. No changes written.")
+        # The models step writes model_presets.json through immediately, so an
+        # abort here may still leave presets on disk. Only claim "No changes
+        # written" when the on-disk presets are unchanged from wizard start;
+        # otherwise be honest that the configured models persist (intended —
+        # presets survive re-invocation by design).
+        if _presets_snapshot() != presets_at_start:
+            theme.muted(
+                "Setup aborted. Configured models were saved and remain available; "
+                "no other settings were written."
+            )
+        else:
+            theme.muted("Setup aborted. No changes written.")
         return False
 
     finalize.commit(state, version=WIZARD_VERSION)

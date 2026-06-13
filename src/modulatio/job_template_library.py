@@ -85,7 +85,12 @@ def build_index(project_code: str | None = None) -> list[JobTemplateIndexEntry]:
         meta = _read_frontmatter(path)
         entries.append(
             JobTemplateIndexEntry(
-                name=meta.get("name") or name,
+                # The entry name IS the checkout handle: ``checkout(name)`` ->
+                # ``load_with_metadata(name)`` resolves ``<name>.md`` by filename
+                # stem, so the index must expose the stem, not the frontmatter
+                # ``name`` (a hand-authored file can diverge the two, yielding a
+                # search hit that can't be checked out).
+                name=name,
                 description=meta.get("description", ""),
                 capability_preferences=job_templates._parse_csv(
                     meta.get("capability_preferences", "")

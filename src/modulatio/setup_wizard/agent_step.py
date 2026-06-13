@@ -198,22 +198,41 @@ def _provision_triad(state: dict, default_models: dict[str, str]) -> Any:
     structural: list[dict] = state.get("triad_agents", [])
     by_tier = {a["tier"]: a for a in structural}
 
-    for tier in ("leader", "qc"):
+    # Walk the roles by index so BACK steps back ONE role rather than
+    # bubbling out of the whole agents step (which would discard a
+    # just-chosen Leader). BACK on the first role (Leader) bubbles up to the
+    # previous wizard step; QUIT always bubbles up. Prior picks are preserved
+    # via ``by_tier`` so stepping back re-seeds the picker's default.
+    tiers = ("leader", "qc")
+    i = 0
+    while i < len(tiers):
+        tier = tiers[i]
         theme.clear_screen()
         label = "Leader (plans + decides)" if tier == "leader" else "Quality Control (verifier)"
         theme.step_header(4, 7, f"Structural role — {label} (mandatory)")
 
         current_template = by_tier.get(tier, {}).get("template_origin")
         template_id = _pick_template_for_tier(tier, current=current_template)
-        if template_id in (steps.BACK, steps.QUIT):
-            return template_id
+        if template_id is steps.QUIT:
+            return steps.QUIT
+        if template_id is steps.BACK:
+            if i == 0:
+                return steps.BACK
+            i -= 1
+            continue
 
         current_model = by_tier.get(tier, {}).get("model")
         model = _pick_model(tier, default_models, staged_keys=state.get("staged_api_keys"), current=current_model)
-        if model in (steps.BACK, steps.QUIT):
-            return model
+        if model is steps.QUIT:
+            return steps.QUIT
+        if model is steps.BACK:
+            if i == 0:
+                return steps.BACK
+            i -= 1
+            continue
 
         by_tier[tier] = _build_agent_from_template(template_id, model)
+        i += 1
 
     state["triad_agents"] = [by_tier["leader"], by_tier["qc"]]
     return "configured"

@@ -450,13 +450,34 @@ def append_activity(
     anchor = "### Recent Activity"
     if anchor not in body:
         return path  # leave the file alone; caller can decide
-    # Insert immediately after the anchor's first line.
+    # Append at the END of the Recent Activity block so the on-disk
+    # order matches render_state's oldest-first/newest-last ordering
+    # (push_activity appends to the tail; render iterates in order).
+    # Inserting newest-first here would desync the two writers, so the
+    # displayed order would flip depending on which last touched the file.
     head, _, tail = body.partition(anchor)
     if "\n" in tail:
         first_line, rest = tail.split("\n", 1)
     else:
         first_line, rest = tail, ""
-    new_block = head + anchor + first_line + "\n" + entry.render() + "\n" + rest
+    # Split the section body (entries) from the remainder (next "###"
+    # heading and beyond). Entries run until the first blank line or the
+    # next section heading, whichever comes first.
+    section_lines: list[str] = []
+    remainder_lines: list[str] = []
+    in_section = True
+    for line in rest.split("\n"):
+        if in_section and (line.startswith("### ") or line == ""):
+            in_section = False
+        if in_section:
+            section_lines.append(line)
+        else:
+            remainder_lines.append(line)
+    # Drop a "- (none)" placeholder; the new entry supersedes it.
+    section_lines = [ln for ln in section_lines if ln.strip() != "- (none)"]
+    section_lines.append(entry.render())
+    new_rest = "\n".join(section_lines + remainder_lines)
+    new_block = head + anchor + first_line + "\n" + new_rest
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(new_block)
     tmp.replace(path)

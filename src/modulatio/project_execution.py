@@ -1875,6 +1875,16 @@ def tick(
         fresh = plans.load(record.id, code)
         if fresh is None or fresh.status != "approved":
             continue
+        # Plan size for the error-path ExecutionResults below. Derive it
+        # from the freshest plan body so a dispatch that fails before
+        # start_execution still reports the real total (not 0, which —
+        # paired with completed=current_index — misrepresents plan size
+        # to the daemon). Defensive: a malformed body yields [] → 0, the
+        # same honest answer the success path gives for an empty plan.
+        try:
+            _plan_total = len(plans.extract_sub_objectives(fresh.body))
+        except Exception:  # pragma: no cover — defensive
+            _plan_total = 0
         try:
             project = project_loader(code)
         except Exception as exc:
@@ -1883,7 +1893,7 @@ def tick(
                 plan_id=record.id, project_code=code,
                 final_status="executing",
                 sub_objectives_completed=record.current_index,
-                sub_objectives_total=0,
+                sub_objectives_total=_plan_total,
                 error=f"project_loader failed: {exc}",
             ))
             continue
@@ -1894,7 +1904,7 @@ def tick(
                 plan_id=record.id, project_code=code,
                 final_status="executing",
                 sub_objectives_completed=record.current_index,
-                sub_objectives_total=0,
+                sub_objectives_total=_plan_total,
                 error=f"runners_for failed: {exc}",
             ))
             continue
@@ -1920,7 +1930,7 @@ def tick(
                 plan_id=record.id, project_code=code,
                 final_status=actual_status,
                 sub_objectives_completed=record.current_index,
-                sub_objectives_total=0,
+                sub_objectives_total=_plan_total,
                 error=f"start_execution raised: {exc}",
             ))
             continue

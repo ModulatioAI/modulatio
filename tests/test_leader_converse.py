@@ -132,8 +132,9 @@ def test_converse_with_image_routes_to_multimodal(
 
     captured: dict = {}
 
-    def fake_multimodal(*, prompt, attachments, chat_completion):
+    def fake_multimodal(*, prompt, attachments, chat_completion, budget_role="leader-decompose"):
         captured["attachments"] = attachments
+        captured["budget_role"] = budget_role
         return "I can see the image."
 
     orch = Orchestrator(
@@ -144,6 +145,8 @@ def test_converse_with_image_routes_to_multimodal(
     monkeypatch.setattr(orch, "_run_multimodal_leader", fake_multimodal)
     reply = orch.converse("what's in this?", attachments=[att])
     assert reply == "I can see the image."
+    # #68: a vision converse turn bills against leader-chat, not leader-decompose.
+    assert captured["budget_role"] == "leader-chat"
     assert captured["attachments"][0].kind == "image"
 
 

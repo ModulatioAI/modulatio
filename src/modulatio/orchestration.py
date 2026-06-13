@@ -2369,12 +2369,19 @@ class Orchestrator:
         prompt: str,
         attachments: list,
         chat_completion: "Callable[..., Any] | None",
+        budget_role: str = "leader-decompose",
     ) -> str:
-        """Vision-in-kickoff path: dispatch the Leader's decompose call
-        through ``litellm.completion`` (or an injected stub) with image
+        """Vision path: dispatch a Leader multimodal call through
+        ``litellm.completion`` (or an injected stub) with image
         attachments as content blocks. Documents are already inlined in
         the ``prompt`` text. Returns the raw response text — caller
         parses JSON the same way the single-shot path does.
+
+        ``budget_role`` keys the context-budget telemetry/limits to the
+        calling lane: ``leader-decompose`` for vision-in-kickoff (the
+        default), ``leader-chat`` for a vision converse turn — so a
+        conversational image turn isn't billed against the decompose
+        budget.
 
         Model resolution chain (Phase 2.2): ``agent_models["leader"]``
         first, then ``leader_model`` for back-compat. Either resolves
@@ -2408,7 +2415,7 @@ class Orchestrator:
         # Multimodal Leader: image content blocks aren't tokenizable
         # by the budget gate, so this path emits a one-shot
         # status='unsupported_multimodal' telemetry row and does NOT
-        # enforce. budget_role stays 'leader-decompose' (only the
+        # enforce. budget_role follows the calling lane (only the
         # modality differs); the explicit unsupported_reason kwarg
         # keeps model= available without overloading it as a
         # multimodal signal.
@@ -2418,13 +2425,13 @@ class Orchestrator:
             else None
         )
         with _ctx_budget_module.dispatch_context(
-            budget_role="leader-decompose",
+            budget_role=budget_role,
             runner_role="leader",
             model=litellm_model,
             project_code=self.project.code,
             run_id=self.project.run_id,
             agent_id="leader",
-            user_override=self._user_override_for("leader-decompose"),
+            user_override=self._user_override_for(budget_role),
             project_overrides=project_overrides,
             unsupported_reason="multimodal_token_estimation",
             audit_path=self._scope_root() / "audit.jsonl",
@@ -5216,6 +5223,7 @@ class Orchestrator:
                     # turn — content blocks aren't carried through the text tool-loop).
                     reply = self._run_multimodal_leader(
                         prompt=prompt, attachments=attachments, chat_completion=None,
+                        budget_role="leader-chat",
                     )
                 else:
                     from modulatio import vault as _vault
@@ -6512,6 +6520,16 @@ class Orchestrator:
                     role=self.default_producer_role, phase="task_settled",
                     task_id=t.id, agent_id=t.assigned_agent_id,
                 )
+        except BaseException:
+            # An UNEXPECTED escape (engine bug — producer/QC failures are caught
+            # inside the redo loop) propagates out and never returns a result, so
+            # the main-thread merge records a synthetic BLOCKED result with NO
+            # staging_root and `_merge_wave_artifacts` never tears this dir down.
+            # Remove the orphaned per-task staging tree here before re-raising so
+            # a crashed worker doesn't leak it under ``.staging/``.
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
         finally:
             self._tls.deferred_writes = None
             self._tls.artifact_writes = None
@@ -7224,7 +7242,13 @@ class Orchestrator:
             agent_id=t.assigned_agent_id,
         )
 
-        for attempt in range(t.max_retries + 1):
+        # A task always gets at least ONE attempt: a misconfigured non-positive
+        # ``max_retries`` (operator/JT-settable, no lower bound on the field)
+        # would otherwise make ``range`` empty, skip the loop body entirely, and
+        # leave ``last_qc`` None — which then crashes the escalation unpack with a
+        # TypeError instead of producing a real verdict. Clamp the budget to >= 0.
+        retry_budget = max(t.max_retries, 0)
+        for attempt in range(retry_budget + 1):
             # Fix C hardening (Nemo BLOCK): the operator stopped the run — do not
             # launch another producer/QC attempt on an already-started task. The
             # in-flight call (if any) finishes; we bail before the NEXT one.
@@ -10891,8 +10915,11 @@ class Orchestrator:
             content = a.content
             if content is None:
                 try:
+                    # A document attachment is text by contract; a binary file
+                    # (e.g. a .docx) fails to decode (UnicodeDecodeError <:
+                    # ValueError) — skip it rather than crash the pin step.
                     content = Path(a.path).read_text()
-                except OSError:
+                except (OSError, ValueError):
                     continue
             try:  # same confinement rule as a producer output_path
                 rel = _validate_output_path(a.name, artifacts_root)
@@ -10901,8 +10928,11 @@ class Orchestrator:
             dest = artifacts_root / rel
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                # write_text raises TypeError on non-str content (a binary
+                # attachment that arrived as bytes) — guard it too so one bad
+                # attachment doesn't abort pinning the rest.
                 dest.write_text(content)
-            except OSError:
+            except (OSError, TypeError):
                 continue
             self._pinned_files.append(rel)
         if self._pinned_files:
