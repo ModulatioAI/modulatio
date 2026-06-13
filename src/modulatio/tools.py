@@ -405,22 +405,43 @@ _RUN_SHELL_RLIMIT_AS_BYTES = 4 * 1024**3      # 4 GiB address space (mem bomb)
 _RUN_SHELL_RLIMIT_FSIZE_BYTES = 2 * 1024**3   # 2 GiB max single file (disk fill)
 
 
-def _apply_child_rlimits() -> None:  # pragma: no cover - runs in forked child
-    """``preexec_fn`` for the run_shell child: clamp address space, max file
-    size, and core-dump size. POSIX-only; a no-op where ``resource`` is
-    unavailable (e.g. Windows). Each limit is lowered to ``min(target,
-    current_hard)`` so an unprivileged process never raises its own hard
-    limit (which would raise ``ValueError``/EPERM)."""
+def _apply_rlimits_to_pid(pid: int) -> None:
+    """Clamp a just-spawned run_shell child's address space / file size / core
+    dump FROM THE PARENT via ``prlimit`` (Linux) — NOT a ``preexec_fn``.
+
+    A ``preexec_fn`` runs Python in the forked child between ``fork()`` and
+    ``exec()``; in a multithreaded process (the concurrent-wave workers, or any
+    caller on a worker thread) a lock another thread holds at fork time can
+    deadlock the child — and that wedged the PARENT's own thread creation in
+    turn, hanging the process (0.9.0 full-suite hang). ``prlimit`` from the
+    parent has no fork hazard, so ``run_shell`` is safe to call from a thread.
+
+    Best-effort + Linux-only: a non-Linux host (no ``resource.prlimit``) or an
+    already-exited child simply skips — the bwrap sandbox + the wall-clock
+    timeout + process-group kill remain the primary bounds. The cap lands within
+    microseconds of spawn (long before a child could allocate gigabytes), so the
+    sub-millisecond window before it applies is immaterial for a coarse cap. Each
+    limit is only LOWERED (``min(target, current_hard)``) — never raised — so an
+    unprivileged target never hits EPERM."""
     try:
         import resource
     except ImportError:
         return
+    prlimit = getattr(resource, "prlimit", None)
+    if prlimit is None:  # not Linux (macOS/CI dev fallback — already degraded)
+        return
 
     def _clamp(which: int, target: int) -> None:
-        soft, hard = resource.getrlimit(which)
+        try:
+            soft, hard = prlimit(pid, which)
+        except (OSError, ValueError):  # child gone, EPERM, or unknown resource
+            return
         new_hard = target if hard == resource.RLIM_INFINITY else min(hard, target)
         new_soft = new_hard if soft == resource.RLIM_INFINITY else min(soft, new_hard)
-        resource.setrlimit(which, (new_soft, new_hard))
+        try:
+            prlimit(pid, which, (new_soft, new_hard))
+        except (OSError, ValueError):
+            pass
 
     _clamp(resource.RLIMIT_AS, _RUN_SHELL_RLIMIT_AS_BYTES)
     _clamp(resource.RLIMIT_FSIZE, _RUN_SHELL_RLIMIT_FSIZE_BYTES)
@@ -1042,8 +1063,10 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
                 shell=False,
                 env=run_env,
                 start_new_session=True,
-                preexec_fn=_apply_child_rlimits,
             )
+            # Apply the resource caps from the PARENT (fork-safe), not a
+            # preexec_fn (fork-from-multithreaded deadlock hazard — the 0.9.0 hang).
+            _apply_rlimits_to_pid(proc.pid)
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
