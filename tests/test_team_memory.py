@@ -276,3 +276,73 @@ def test_render_for_prompt_credits_proposer_when_promoted():
     rendered = team_memory.render_for_prompt(hits)
     assert "writer-a" in rendered
     assert "approved by qc-1" in rendered
+
+
+# === Concurrency — LanceDB rebuild/read race (re-filed finding #5) ===
+
+class _FakeEmbedder:
+    """Deterministic, dependency-free embedder so the semantic recall path
+    (which builds + reads the LanceDB index) runs without the real model."""
+
+    dim = 8
+
+    def _vec(self, text: str):
+        h = abs(hash(text))
+        return [float((h >> (i * 4)) & 0xF) for i in range(self.dim)]
+
+    def embed_text(self, text: str):
+        return self._vec(text)
+
+    def embed_texts(self, texts):
+        return [self._vec(t) for t in texts]
+
+
+def test_recall_concurrent_semantic_path_is_thread_safe():
+    """Re-filed #5: _ensure_vectors does a destructive drop_table+create_table
+    rebuild and recall() then reads the shared LanceDB table. Without
+    serialization, concurrent wave workers can drop/recreate the table mid-read
+    (or both rebuild at once) → raise or corrupt results. Fire many recalls
+    simultaneously through a barrier so they collide on the rebuild, and require
+    every one to succeed with the same hit set."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    for i in range(6):
+        team_memory.write(
+            writer_id="qc-1", writer_tier="qc",
+            body=f"Defect pattern number {i}: watch the seam.",
+            project_code=PROJECT_CODE, artifact_kind="report",
+        )
+
+    embedder = _FakeEmbedder()
+    n = 12
+    barrier = threading.Barrier(n)
+    errors: list[Exception] = []
+    counts: list[int] = []
+    lock = threading.Lock()
+
+    def _do():
+        barrier.wait()  # release all threads together to maximize collision
+        try:
+            hits = team_memory.recall(
+                project_code=PROJECT_CODE,
+                artifact_kind="report",
+                task_description="seam defect pattern",
+                embedder=embedder,
+                top_k=5,
+            )
+            with lock:
+                counts.append(len(hits))
+        except Exception as exc:  # noqa: BLE001 - the race manifests as a raise
+            with lock:
+                errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        futures = [ex.submit(_do) for _ in range(n)]
+        for f in futures:
+            f.result(timeout=60)
+
+    assert not errors, f"concurrent recall raised: {errors[:3]}"
+    assert len(counts) == n
+    # All threads see the same fully-built index — identical hit count.
+    assert len(set(counts)) == 1, f"inconsistent results across threads: {set(counts)}"

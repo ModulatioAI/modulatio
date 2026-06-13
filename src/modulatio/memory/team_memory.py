@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,26 @@ from modulatio.vault import project_dir
 
 # Single source of truth lives in config.get_embedding_model().
 _EMBED_MODEL = config.get_embedding_model()
+
+# Per-project reentrant lock guarding the LanceDB index. Concurrent wave
+# workers call recall() before every dispatch; _ensure_vectors() does a
+# destructive drop_table+create_table rebuild, and recall() then reads the
+# table. Without serialization one thread can drop/recreate the shared table
+# while another is mid-search (or both rebuild at once), corrupting results or
+# raising. Reentrant so recall() can hold it across both _ensure_vectors() and
+# its own read. Per-project so unrelated projects don't contend. (A plain
+# threading lock — no fork interaction, unlike the run_shell rlimit hazard.)
+_VECTOR_LOCKS: dict[str, threading.RLock] = {}
+_VECTOR_LOCKS_GUARD = threading.Lock()
+
+
+def _vector_lock(project_code: str) -> threading.RLock:
+    with _VECTOR_LOCKS_GUARD:
+        lock = _VECTOR_LOCKS.get(project_code)
+        if lock is None:
+            lock = threading.RLock()
+            _VECTOR_LOCKS[project_code] = lock
+        return lock
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _BODY_RE = re.compile(r"## Body\s*\n\n(.*?)\Z", re.DOTALL)
@@ -389,50 +410,55 @@ def _save_meta(project_code: str, meta: dict) -> None:
 
 def _ensure_vectors(project_code: str, embedder: Embedder) -> list[MemoryEntry]:
     """Build/refresh the LanceDB index from the markdown source. Returns
-    the current record list."""
-    records = list_entries(project_code)
-    new_hash = _config_hash(records)
-    meta = _load_meta(project_code)
+    the current record list.
 
-    if (
-        meta.get("records_hash") == new_hash
-        and meta.get("embedding_model") == _EMBED_MODEL
-        and meta.get("embed_dim") == embedder.dim
-    ):
-        return records
+    Serialized per project: the drop_table+create_table rebuild is destructive
+    and must not interleave with another thread's rebuild or read.
+    """
+    with _vector_lock(project_code):
+        records = list_entries(project_code)
+        new_hash = _config_hash(records)
+        meta = _load_meta(project_code)
 
-    import lancedb
-    import pyarrow as pa
+        if (
+            meta.get("records_hash") == new_hash
+            and meta.get("embedding_model") == _EMBED_MODEL
+            and meta.get("embed_dim") == embedder.dim
+        ):
+            return records
 
-    _cache_dir(project_code).mkdir(parents=True, exist_ok=True)
-    db = lancedb.connect(_db_path(project_code))
-    if "team_memory" in db.list_tables().tables:
-        db.drop_table("team_memory")
+        import lancedb
+        import pyarrow as pa
 
-    if not records:
+        _cache_dir(project_code).mkdir(parents=True, exist_ok=True)
+        db = lancedb.connect(_db_path(project_code))
+        if "team_memory" in db.list_tables().tables:
+            db.drop_table("team_memory")
+
+        if not records:
+            _save_meta(project_code, {
+                "records_hash": new_hash,
+                "embedding_model": _EMBED_MODEL,
+                "embed_dim": embedder.dim,
+                "record_count": 0,
+            })
+            return records
+
+        texts = [r.body for r in records]
+        vectors = embedder.embed_texts(texts)
+        rows = [{"vector": v, "entry_id": r.entry_id} for r, v in zip(records, vectors)]
+        schema = pa.schema([
+            pa.field("vector", pa.list_(pa.float32(), embedder.dim)),
+            pa.field("entry_id", pa.string()),
+        ])
+        db.create_table("team_memory", data=rows, schema=schema)
         _save_meta(project_code, {
             "records_hash": new_hash,
             "embedding_model": _EMBED_MODEL,
             "embed_dim": embedder.dim,
-            "record_count": 0,
+            "record_count": len(records),
         })
         return records
-
-    texts = [r.body for r in records]
-    vectors = embedder.embed_texts(texts)
-    rows = [{"vector": v, "entry_id": r.entry_id} for r, v in zip(records, vectors)]
-    schema = pa.schema([
-        pa.field("vector", pa.list_(pa.float32(), embedder.dim)),
-        pa.field("entry_id", pa.string()),
-    ])
-    db.create_table("team_memory", data=rows, schema=schema)
-    _save_meta(project_code, {
-        "records_hash": new_hash,
-        "embedding_model": _EMBED_MODEL,
-        "embed_dim": embedder.dim,
-        "record_count": len(records),
-    })
-    return records
 
 
 def recall(
@@ -483,50 +509,55 @@ def recall(
         filtered.sort(key=lambda r: r.timestamp, reverse=True)
         return [(r, 1.0) for r in filtered[:top_k]]
 
-    # Semantic retrieval within filtered subset.
-    _ensure_vectors(project_code, embedder)
+    # Semantic retrieval within filtered subset. Hold the per-project lock
+    # across the rebuild AND the read so no concurrent wave worker drops/
+    # recreates the shared table mid-search (the lock is reentrant, so the
+    # nested _ensure_vectors acquire is free).
     import lancedb
 
-    path = _db_path(project_code)
-    if not path.exists():
-        filtered.sort(key=lambda r: r.timestamp, reverse=True)
-        return [(r, 1.0) for r in filtered[:top_k]]
+    with _vector_lock(project_code):
+        _ensure_vectors(project_code, embedder)
 
-    db = lancedb.connect(path)
-    if "team_memory" not in db.list_tables().tables:
-        return []
-    table = db.open_table("team_memory")
-    if table.count_rows() == 0:
-        return []
+        path = _db_path(project_code)
+        if not path.exists():
+            filtered.sort(key=lambda r: r.timestamp, reverse=True)
+            return [(r, 1.0) for r in filtered[:top_k]]
 
-    filtered_ids = {r.entry_id for r in filtered}
-    by_id = {r.entry_id: r for r in filtered}
+        db = lancedb.connect(path)
+        if "team_memory" not in db.list_tables().tables:
+            return []
+        table = db.open_table("team_memory")
+        if table.count_rows() == 0:
+            return []
 
-    query_vec = embedder.embed_text(task_description)
-    # Pull more than top_k from LanceDB so the post-filter has slack.
-    raw_results = (
-        table.search(query_vec)
-        .metric("cosine")
-        .limit(top_k * 4)
-        .to_list()
-    )
+        filtered_ids = {r.entry_id for r in filtered}
+        by_id = {r.entry_id: r for r in filtered}
 
-    hits: list[tuple[MemoryEntry, float]] = []
-    for row in raw_results:
-        eid = row.get("entry_id")
-        if eid not in filtered_ids:
-            continue
-        rec = by_id.get(eid)
-        if rec is None:
-            continue
-        distance = float(row.get("_distance", 1.0))
-        similarity = 1.0 - distance
-        if similarity < min_similarity:
-            continue
-        hits.append((rec, similarity))
-        if len(hits) >= top_k:
-            break
-    return hits
+        query_vec = embedder.embed_text(task_description)
+        # Pull more than top_k from LanceDB so the post-filter has slack.
+        raw_results = (
+            table.search(query_vec)
+            .metric("cosine")
+            .limit(top_k * 4)
+            .to_list()
+        )
+
+        hits: list[tuple[MemoryEntry, float]] = []
+        for row in raw_results:
+            eid = row.get("entry_id")
+            if eid not in filtered_ids:
+                continue
+            rec = by_id.get(eid)
+            if rec is None:
+                continue
+            distance = float(row.get("_distance", 1.0))
+            similarity = 1.0 - distance
+            if similarity < min_similarity:
+                continue
+            hits.append((rec, similarity))
+            if len(hits) >= top_k:
+                break
+        return hits
 
 
 def render_for_prompt(hits: list[tuple[MemoryEntry, float]]) -> str:
