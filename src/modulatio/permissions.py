@@ -108,7 +108,12 @@ class Decision(enum.Enum):
         (§6.C fail-closed)."""
         if isinstance(value, Decision):
             return value
-        key = str(value).strip().lower()
+        # Nemo code-review r1 (minor): don't stringify arbitrary objects — a hostile
+        # object whose __str__ returns "always" must not allow. The ask bridge
+        # answers with a Decision, a str, or None; anything else is DENY.
+        if value is not None and not isinstance(value, str):
+            return cls.DENY
+        key = ("" if value is None else value).strip().lower()
         return {
             "once": cls.ALLOW_ONCE, "allow_once": cls.ALLOW_ONCE, "allow": cls.ALLOW_ONCE,
             "session": cls.ALLOW_SESSION, "allow_session": cls.ALLOW_SESSION,
@@ -161,11 +166,49 @@ def _host_of(url: str) -> str:
         return ""
 
 
+# Nemo code-review r1 Major B: a coarse last-two-labels rule collapses a host on a
+# multi-label public suffix (``x.co.uk`` → ``co.uk``) into a registrar-wide grant.
+# Without a full public-suffix-list dependency, we derive a registrable domain ONLY
+# when we're confident, and otherwise return "" so an ``always`` grant falls back to
+# the exact HOST (never broader than a session grant — the §6.B floor).
+_COMPOUND_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "net.uk", "sch.uk", "ltd.uk", "plc.uk",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
+    "co.jp", "or.jp", "ne.jp", "go.jp", "ac.jp",
+    "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz",
+    "co.za", "org.za", "gov.za", "ac.za",
+    "com.br", "net.br", "org.br", "gov.br",
+    "co.in", "net.in", "org.in", "gov.in", "ac.in",
+    "co.kr", "or.kr", "go.kr",
+    "com.cn", "net.cn", "org.cn", "gov.cn",
+    "com.mx", "com.ar", "com.tr", "com.sg", "com.hk", "com.tw", "com.my", "com.ph",
+    "com.pl", "com.ua", "co.il", "co.id", "co.th", "com.vn", "com.sa", "com.ng", "co.ke",
+})
+#: Single-label TLDs we trust to give a clean eTLD+1 from the last two labels.
+_KNOWN_TLDS = frozenset({
+    "com", "org", "net", "edu", "gov", "mil", "int", "io", "ai", "co", "dev", "app",
+    "xyz", "info", "biz", "me", "tv", "us", "uk", "de", "fr", "nl", "eu", "ca", "au",
+    "jp", "cn", "in", "br", "ru", "ch", "se", "no", "es", "it", "gg", "sh", "to", "cc",
+})
+
+
 def _registrable_domain(host: str) -> str:
-    """Coarse eTLD+1 (last two labels). Good enough for a per-domain grant; not a
-    full public-suffix list (a later refinement if UX demands sub-domain precision)."""
+    """Best-confident eTLD+1, or "" when uncertain (so the grant stays host-narrow).
+
+    - last two labels are a known compound public suffix (``co.uk``) → the
+      registrable domain is the **last three** labels (``x.co.uk``), so two
+      registrants on the same suffix never share a grant;
+    - otherwise the final label is a known single TLD → last two labels;
+    - anything else (unknown/novel suffix) → "" — never broaden past the host.
+    """
     parts = [p for p in host.split(".") if p]
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+    if len(parts) < 2:
+        return ""
+    if ".".join(parts[-2:]) in _COMPOUND_SUFFIXES:
+        return ".".join(parts[-3:]) if len(parts) >= 3 else ""
+    if parts[-1] in _KNOWN_TLDS:
+        return ".".join(parts[-2:])
+    return ""
 
 
 def capability_for(tool_name: str, args: "dict | None" = None) -> Capability:
@@ -339,20 +382,23 @@ class PermissionBroker:
         """Return True iff this tool call may proceed."""
         cap = capability_for(tool_name, args or {})
 
-        # §6.A: a sandbox-requiring capability with no live substrate cannot be
-        # AUTO-granted (yolo) and cannot run on a remembered/preauth grant either —
-        # it must surface (ask) or deny. The operator's explicit unsafe posture
-        # (chosen outside the model path) is the only override.
-        substrate_ok = (not cap.requires_sandbox) or self._sandbox_available() or self.unsafe_posture
+        # §6.A — the substrate is the HULL, not a preflight (Nemo code-review r1
+        # Blocker A). A sandbox-requiring capability cannot run without a live
+        # sandbox by ANY path — not yolo, not a remembered/preauthorized grant, and
+        # NOT a fresh operator ALLOW through the ask. The ONLY override is an
+        # explicit unsafe posture chosen out-of-band (never via the model path).
+        # Denying here also means nothing is recorded from an unsafe state.
+        if cap.requires_sandbox and not (self._sandbox_available() or self.unsafe_posture):
+            self._emit(cap, Decision.DENY)
+            return False
 
-        # /yolo: auto-grant the ASK — but only if the substrate holds (§6.A).
-        if self.mode.auto_grants_capabilities and substrate_ok:
+        # /yolo: auto-grant the ASK (the substrate is already guaranteed above).
+        if self.mode.auto_grants_capabilities:
             return self._granted(cap, Decision.ALLOW_ONCE)
 
-        # Remembered / baked-in grants (scope-aware) — skip re-asking. Still gated
-        # on substrate for sandbox-requiring caps.
+        # Remembered / baked-in grants (scope-aware) — skip re-asking.
         preauth_hit = any(k in self.preauthorized for k in cap.covering_keys())
-        if substrate_ok and (preauth_hit or self.grants.remembered(cap)):
+        if preauth_hit or self.grants.remembered(cap):
             return self._granted(cap, Decision.ALLOW_SESSION)
 
         # Must ask. Headless (no ask) → fail-closed deny (§6.C).

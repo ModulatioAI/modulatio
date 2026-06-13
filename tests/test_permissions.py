@@ -206,16 +206,18 @@ def test_broker_goal_still_asks_capabilities():
 
 
 def test_broker_yolo_cannot_auto_run_shell_without_sandbox():
-    """§6.A: yolo skips the ask, never the substrate. run_shell (requires_sandbox)
-    on a host with no live sandbox must NOT auto-run — it falls to the ask."""
+    """§6.A (Nemo r1 Blocker A): the substrate is the HULL. run_shell
+    (requires_sandbox) on a host with no live sandbox is DENIED outright — not
+    auto-granted, and not even surfaced as a grantable ask. Only an out-of-band
+    unsafe posture overrides."""
     asked = []
     broker = PermissionBroker(
         mode=RunMode.YOLO,
         sandbox_available=lambda: False,
-        ask=lambda cap: (asked.append(cap.kind), Decision.DENY)[1],
+        ask=lambda cap: (asked.append(cap.kind), Decision.ALLOW_ONCE)[1],
     )
     assert broker.authorize("run_shell", {"cmd": "python3 x.py", "profile": "full"}) is False
-    assert asked == ["shell"]  # yolo did NOT auto-grant; it surfaced the ask
+    assert asked == []  # denied at the substrate gate, before any ask
 
 
 def test_broker_yolo_shell_headless_no_sandbox_denies():
@@ -330,3 +332,57 @@ def test_run_llm_with_tools_broker_yolo_allows(tmp_path):
                        tool_loadout=("run_shell",), tool_registry=reg,
                        permission_broker=broker)
     assert "RAN_OK" in results[0]
+
+
+# ── Nemo code-review r1 remediations ────────────────────────────────────────
+@pytest.mark.parametrize("answer", [
+    Decision.ALLOW_ONCE, Decision.ALLOW_SESSION, Decision.ALLOW_ALWAYS,
+    "once", "session", "always",
+])
+def test_broker_substrate_gates_even_an_allowing_ask(answer, tmp_path):
+    """Blocker A: a requires_sandbox capability must NOT run when the sandbox is
+    down even if the operator answers ALLOW — only an out-of-band unsafe posture
+    overrides. And nothing is recorded from that unsafe state."""
+    store = GrantStore(tmp_path / "g.json")
+    broker = PermissionBroker(
+        mode=RunMode.DEFAULT, grants=store,
+        sandbox_available=lambda: False, unsafe_posture=False,
+        ask=lambda cap: answer,
+    )
+    assert broker.authorize("run_shell", {"cmd": "id", "profile": "full"}) is False
+    # nothing recorded from the denied-while-down state
+    assert store.grants_view() == {"session": [], "always": []}
+
+
+def test_broker_substrate_gate_overridden_by_unsafe_posture():
+    broker = PermissionBroker(
+        mode=RunMode.DEFAULT, sandbox_available=lambda: False, unsafe_posture=True,
+        ask=lambda cap: Decision.ALLOW_ONCE,
+    )
+    assert broker.authorize("run_shell", {"cmd": "ls", "profile": "passive"}) is True
+
+
+def test_compound_suffix_always_does_not_cover_other_registrant(tmp_path):
+    """Major B: an always grant for x.co.uk must NOT cover bank.co.uk."""
+    store = GrantStore(tmp_path / "g.json")
+    store.record(capability_for("http_get", {"url": "https://x.co.uk/a"}), Decision.ALLOW_ALWAYS)
+    # same registrant covered, different registrant on the same suffix NOT covered
+    assert store.remembered(capability_for("http_get", {"url": "https://x.co.uk/other"})) is True
+    assert store.remembered(capability_for("http_get", {"url": "https://bank.co.uk/login"})) is False
+
+
+def test_unknown_suffix_always_falls_back_to_host(tmp_path):
+    """An always grant on an unrecognized suffix records the HOST, never broader."""
+    store = GrantStore(tmp_path / "g.json")
+    store.record(capability_for("http_get", {"url": "https://a.noveltld/x"}), Decision.ALLOW_ALWAYS)
+    view = store.grants_view()["always"]
+    assert view == ["network:host=a.noveltld"]  # host, not a domain
+    # a different host on the same novel suffix is NOT covered
+    assert store.remembered(capability_for("http_get", {"url": "https://b.noveltld/y"})) is False
+
+
+def test_coerce_rejects_hostile_stringifiable_object():
+    class Evil:
+        def __str__(self):
+            return "always"
+    assert Decision.coerce(Evil()) is Decision.DENY
