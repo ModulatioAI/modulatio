@@ -9474,9 +9474,18 @@ class Orchestrator:
         # #81: the kill-switch + abort guard run ONCE here, then the fail phase and the
         # win phase run INDEPENDENTLY. The fail phase's early returns (load error, <3
         # fails) must NOT suppress the win phase — a clean run with no fails but ≥floor
-        # QC recoveries still learns its win (Nemo r1 #7). Each phase is best-effort.
-        self._post_run_fail_codification(summary)
-        self._post_run_win_codification(summary)
+        # QC recoveries still learns its win (Nemo r1 #7). Each phase is wrapped in its
+        # OWN guard so an unguarded raise inside one phase can neither suppress the other
+        # nor propagate out of this best-effort hook to the caller (Nemo code #1 — the
+        # phase-independence promise must be SEALED at the seam, not just asserted).
+        try:
+            self._post_run_fail_codification(summary)
+        except Exception:  # noqa: BLE001 — a fail-phase error must never suppress the win phase
+            self._codification_skipped("fail_phase_failed")
+        try:
+            self._post_run_win_codification(summary)
+        except Exception:  # noqa: BLE001 — best-effort; never propagate to the run
+            self._codification_skipped("win_phase_failed")
 
     def _post_run_fail_codification(self, summary: RunSummary) -> None:
         """The FAIL half of the Alfred loop: codify a skill so producers stop

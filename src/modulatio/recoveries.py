@@ -245,8 +245,13 @@ def record_recovery(
     record. The caller guards this; it is pure upside capture."""
     eid = entry_id or uuid.uuid4().hex
     ts = timestamp or datetime.now(timezone.utc).isoformat()
+    # Truncate EVERY text field up front, and compute the signature from the TRUNCATED
+    # rationale (Nemo code #2 — the signature's rationale-key must derive from the
+    # bounded stored text, not the raw input that could carry a sentinel past the cap).
     before_x = _truncate(before)
     after_x = _truncate(after)
+    defects_x = _truncate(defects)
+    qc_rationale_x = _truncate(qc_rationale)
     shape = change_shape(before_x, after_x, artifact_kind)
     if shape is None:
         shape = f"unclassified:{eid}"  # permanent singleton — can never false-merge
@@ -257,11 +262,11 @@ def record_recovery(
         artifact_kind=str(artifact_kind or ""),
         defect_type=str(defect_type or ""),
         task_id=str(task_id or ""),
-        defects=_truncate(defects),
+        defects=defects_x,
         before_excerpt=before_x,
         after_excerpt=after_x,
-        qc_rationale=_truncate(qc_rationale),
-        signature=recovery_signature(artifact_kind, defect_type, qc_rationale, shape),
+        qc_rationale=qc_rationale_x,
+        signature=recovery_signature(artifact_kind, defect_type, qc_rationale_x, shape),
     )
     p = _log_path(project_code)
     p.parent.mkdir(parents=True, exist_ok=True)

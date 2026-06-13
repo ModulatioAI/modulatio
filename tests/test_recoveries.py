@@ -193,3 +193,17 @@ def test_cluster_floor_and_false_merge(tmp_path, monkeypatch):
              qc_rationale="missing edge case handling here"),
     ]
     assert recoveries.cluster_recoveries(diff, floor=3) == []
+
+
+def test_signature_rationale_key_uses_truncated_rationale(tmp_path, monkeypatch):
+    """Nemo code #2: the signature's rationale-key must derive from the TRUNCATED
+    rationale — a meaningful token sitting past the cap must NOT leak into the key."""
+    monkeypatch.setattr(recoveries, "project_dir", lambda pc: tmp_path)
+    cap = recoveries.MAX_RECOVERY_EXCERPT_CHARS
+    rationale = ("the " * cap) + "SENTINELPASTCAP"  # first real token is past the cap
+    rec = recoveries.record_recovery(
+        "P", kind="qc_authored", artifact_kind="python_code", defect_type="substantive",
+        task_id="T", defects="d", before="a", after="b", qc_rationale=rationale,
+    )
+    assert "sentinelpastcap" not in rec.signature.lower()
+    assert "sentinelpastcap" not in rec.qc_rationale.lower()

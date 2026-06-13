@@ -433,3 +433,22 @@ def test_recovery_log_failure_never_reverses_completion(proj, monkeypatch):
     out = o._attempt_qc_fix_forward(t, draft, last_qc, RunSummary(project=pr))
     assert out is True                       # the rescue still reached its terminal
     assert t.status == TaskStatus.COMPLETED  # the log failure did not reverse completion
+
+
+def test_fail_phase_exception_does_not_suppress_win(proj, monkeypatch):
+    """Nemo code #1: an unguarded raise in the fail phase must NOT suppress the win
+    phase, and must not propagate out of the best-effort outer hook."""
+    for i in range(3):
+        _seed_recovery(proj, task_id=f"R{i}")
+    decision = {"codifications": [{"action": "create", "name": "win-survives-fail-error",
+                "description": "d", "capability_tags": [], "recurring_problem": "x",
+                "guidance": "g"}]}
+    o, pr = _orch(proj, decision)
+
+    def boom(summary):
+        raise RuntimeError("fail phase boom")
+    monkeypatch.setattr(o, "_post_run_fail_codification", boom)
+
+    o._post_run_codification(RunSummary(project=pr))  # must NOT raise
+    assert skills.load_with_metadata("win-survives-fail-error", project_code=proj).name \
+        == "win-survives-fail-error"
