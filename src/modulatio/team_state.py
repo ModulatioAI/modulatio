@@ -137,7 +137,7 @@ def load_body(project_code: str, run_id: str | None) -> str:
     if not path.exists():
         return ""
     try:
-        return path.read_text().strip()
+        return path.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return ""
 
@@ -469,7 +469,7 @@ def append_activity(
     if not path.exists():
         return None
     try:
-        body = path.read_text()
+        body = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     anchor = "### Recent Activity"

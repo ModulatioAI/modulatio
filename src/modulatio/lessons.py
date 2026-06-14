@@ -46,7 +46,7 @@ def consumed_ids(project_code: str) -> set[str]:
     if not p.exists():
         return set()
     try:
-        return {ln.strip() for ln in p.read_text().splitlines() if ln.strip()}
+        return {ln.strip() for ln in p.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()}
     except OSError:
         return set()
 
