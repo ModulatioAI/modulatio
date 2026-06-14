@@ -96,6 +96,20 @@ def _ledger_path(project_code: str) -> Path:
     return project_dir(project_code) / "comptroller-ledger.md"
 
 
+def _read_ledger_lines(ledger: Path) -> list[str]:
+    """Read the append-only ledger leniently. A non-UTF8 byte (e.g. a torn
+    multibyte write from a crashed appender) must degrade to skippable lines,
+    not raise UnicodeDecodeError out of the count path and defeat the budget
+    gate's degrade-open posture. ``errors='replace'`` keeps every well-formed
+    line intact; only the corrupt run becomes replacement chars, which then
+    fail the per-line field/timestamp checks and are ignored. An OSError on the
+    read degrades to no lines (counted as zero spend, matching missing-ledger)."""
+    try:
+        return ledger.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+
 def _parse_int(raw: str) -> int | None:
     """Parse a declared daily cap. Empty, non-integer, or **negative**
     → ``None`` (treated as unconfigured). A negative cap is invalid
@@ -121,7 +135,14 @@ def load_budget(project_code: str) -> Budget:
     path = _config_path(project_code)
     if not path.exists():
         return Budget()
-    text = path.read_text()
+    # Degrade-open on a corrupt/non-UTF8 config: a bad byte must not crash the
+    # whole budget-gated path (which would defeat escalation degrade-open). The
+    # contract is "missing file/field → unlimited"; an unreadable file is, for
+    # gating purposes, equivalent — read leniently rather than raise.
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return Budget()
     m = _OWN_FRONTMATTER_RE.match(text)
     if not m:
         return Budget()
@@ -162,7 +183,7 @@ def _count_today(project_code: str, cost_class: str) -> int:
         return 0
     today = datetime.now(timezone.utc).date()
     count = 0
-    for line in ledger.read_text().splitlines():
+    for line in _read_ledger_lines(ledger):
         parts = line.strip().split(maxsplit=2)
         if len(parts) < 2:
             continue
@@ -193,9 +214,13 @@ def _count_metered_cost_today(project_code: str, cost_class: str) -> int:
         return 0
     today = datetime.now(timezone.utc).date()
     count = 0
-    for line in ledger.read_text().splitlines():
+    for line in _read_ledger_lines(ledger):
         parts = line.strip().split()
-        if len(parts) < 3 or parts[1] != "metered":
+        # Require the full 6-field metered shape, matching _scan_metered_today,
+        # so a corrupt/truncated metered line is ignored identically by both
+        # scanners (else this scanner counts a 3-5 field fragment the other one
+        # drops, double-charging the daily cap inconsistently).
+        if len(parts) < 6 or parts[1] != "metered":
             continue
         ts_raw, _kind, entry_cost = parts[0], parts[1], parts[2]
         if entry_cost != cost_class:
@@ -398,7 +423,7 @@ def _scan_metered_today(
     cost_count = 0
     task_count = 0
     key_seen = False
-    for line in ledger.read_text().splitlines():
+    for line in _read_ledger_lines(ledger):
         parts = line.strip().split()
         if len(parts) < 6 or parts[1] != "metered":
             continue
@@ -413,7 +438,13 @@ def _scan_metered_today(
             continue
         if entry_cost == cost_class:
             cost_count += 1
-        if entry_task == task_id:
+        # Scope the per-task count to the cost_class being authorized, mirroring
+        # cost_count above. Without the cost_class guard, a task that issues a
+        # paid-cloud metered call and then a premium-cloud one (two distinct
+        # tools / budgets) would have the second spuriously denied: task_count
+        # would already include the first, unrelated, cost_class. The per-task
+        # cap bounds runaway loops within ONE budget, not across budgets.
+        if entry_cost == cost_class and entry_task == task_id:
             task_count += 1
         # Nemo B4 #1: idempotency is scoped to THIS (cost_class, task, key) — a
         # DIFFERENT task with the same pinned inputs is a separate, chargeable spend

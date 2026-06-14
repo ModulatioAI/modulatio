@@ -1290,6 +1290,13 @@ def parse_cli_override_specs(
     by_role: dict[str, CliOverrideSpec] = {}
     warnings: list[str] = []
 
+    #: Back-compat aliases collapse to their canonical budget_role at parse
+    #: time so the override registers under the SAME key the dispatch layer
+    #: looks up (Orchestrator binds budget_role="research"; an override stored
+    #: under "researcher" would silently never be found). The alias stays a
+    #: VALID flag (validated above) but is normalized here.
+    _BUDGET_ROLE_ALIASES = {"researcher": "research"}
+
     for flag in flags:
         if "=" not in flag:
             raise ValueError(
@@ -1307,6 +1314,13 @@ def parse_cli_override_specs(
                 f"--ctx-budget {flag!r}: unknown role {role!r}. Valid roles: "
                 f"{', '.join(sorted(valid_roles))}"
             )
+        canonical = _BUDGET_ROLE_ALIASES.get(role)
+        if canonical is not None:
+            warnings.append(
+                f"--ctx-budget {role}: alias normalized to {canonical!r} "
+                f"(the canonical budget role the dispatch layer enforces)"
+            )
+            role = canonical
         cleaned = raw_value.replace("_", "").replace(",", "")
         try:
             tokens = int(cleaned)

@@ -116,3 +116,20 @@ def test_load_body_returns_empty_on_unreadable_file(isolated_vault, monkeypatch)
 
     monkeypatch.setattr(Path, "read_text", boom)
     assert design_intent.load_body("tst") == ""
+
+
+def test_load_body_returns_empty_on_non_utf8_file(isolated_vault):
+    """A non-UTF-8 design-intent file (UnicodeDecodeError, a ValueError
+    subclass — NOT an OSError) must degrade to empty body, not crash
+    render_for_prompt and the four producer/decompose/QC/Leader call
+    sites. Mirrors constitution/qc_persona defensive contract."""
+    p = design_intent.design_intent_path("tst")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # Invalid UTF-8 continuation byte → read_text(encoding="utf-8") raises
+    # UnicodeDecodeError.
+    p.write_bytes(b"---\ntype: design-intent\n---\n\nbroken \xff\xfe body\n")
+
+    assert design_intent.load_body("tst") == ""
+    # And the rendered prompt slot falls back to the neutral marker.
+    rendered = design_intent.render_for_prompt("tst")
+    assert "No design-intent file authored" in rendered

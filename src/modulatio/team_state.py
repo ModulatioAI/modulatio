@@ -55,7 +55,9 @@ Hard caps:
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -387,19 +389,45 @@ def _render_with(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write *content* to *path* via a UNIQUE temp file + atomic rename.
+
+    A fixed ``<name>.tmp`` is shared across writers: two writers for the
+    SAME run racing (e.g. a structured ``write_state`` from Leader-reflect
+    against a markdown-splice ``append_activity``) would clobber each
+    other's temp bytes and interleave the rename, corrupting the doc.
+    ``tempfile.mkstemp`` gives each writer its own temp name in the
+    target's parent directory (so the rename stays atomic on POSIX), and
+    a failed write unlinks its own temp instead of leaving a stale one.
+    Mirrors ``config.write_secret_file`` (minus the 0o600 — state docs are
+    not secrets).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(content)
+        os.replace(tmp_name, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def write_state(project_code: str, run_id: str, state: TeamState) -> Path:
     """Render + persist the state doc. Replaces the prior file
-    atomically (write to ``.tmp``, then rename) so a crash mid-write
+    atomically (write to a unique temp, then rename) so a crash mid-write
     leaves the previous-good version on disk.
 
     Returns the path written.
     """
     path = state_path(project_code, run_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
     rendered = render_state(state)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(rendered)
-    tmp.replace(path)
+    _atomic_write_text(path, rendered)
     return path
 
 
@@ -413,10 +441,7 @@ def write_body(project_code: str, run_id: str, body: str) -> Path:
     the prior version intact.
     """
     path = state_path(project_code, run_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(body if body.endswith("\n") else body + "\n")
-    tmp.replace(path)
+    _atomic_write_text(path, body if body.endswith("\n") else body + "\n")
     return path
 
 
@@ -489,9 +514,7 @@ def append_activity(
         section_lines = [ln for i, ln in enumerate(section_lines) if i not in drop]
     new_rest = "\n".join(section_lines + remainder_lines)
     new_block = head + anchor + first_line + "\n" + new_rest
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(new_block)
-    tmp.replace(path)
+    _atomic_write_text(path, new_block)
     return path
 
 

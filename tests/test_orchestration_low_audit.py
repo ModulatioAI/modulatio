@@ -163,11 +163,15 @@ def test_negative_max_retries_runs_one_attempt(project: Project):
     assert attempts == [0], "a task must always get at least one attempt"
 
 
-# ── #71: a crashed wave worker tears down its staging dir ─────────────────────
-def test_crashed_wave_worker_cleans_staging(project: Project):
-    """If _run_task_with_redo escapes with an unexpected exception, the
-    per-task staging directory must be removed (not leaked) before the
-    exception propagates to the wave collector."""
+# ── #71/#6643: a crashed wave worker recovers its buffers + lets the merge ────
+# tear down its staging dir, rather than re-raising and dropping side effects ──
+def test_crashed_wave_worker_recovers_buffers_and_blocks(project: Project):
+    """If _run_task_with_redo escapes with an unexpected exception, the worker
+    must NOT re-raise and silently drop its already-accumulated deferred store
+    writes / decompose children (#6643). It marks the task BLOCKED and returns a
+    result carrying those buffers + the staging root, so the deterministic merge
+    commits them and tears the staging dir down."""
+    from modulatio.types import TaskStatus
     orch = _orch(project)
     pid = project.id
     task = _make_task(pid, "LOW-T-009", deliverable=True)
@@ -175,15 +179,45 @@ def test_crashed_wave_worker_cleans_staging(project: Project):
     staging_dir = orch._scope_root() / ".staging" / task.id
 
     def _boom(t, summary, initial_corrective_notes=""):
-        # The staging dir exists at this point (seeded by the caller).
+        # The staging dir exists at this point (seeded by the caller). Stash a
+        # deferred write + a child task the way real worker code would, then
+        # crash with an unexpected engine bug.
         assert staging_dir.exists()
+        orch._tls.deferred_writes.append(("save_task", t))
+        orch._tls.child_tasks.append("LOW-T-009-child")
         raise RuntimeError("engine bug in the worker")
 
     orch._run_task_with_redo = _boom  # type: ignore[assignment]
 
-    with pytest.raises(RuntimeError, match="engine bug"):
-        orch._execute_task_isolated(task, "")
+    # No longer raises — the crash is recovered into a result.
+    result = orch._execute_task_isolated(task, "")
 
-    assert not staging_dir.exists(), (
-        "a crashed worker must not leak its staging directory"
+    assert result.task.status == TaskStatus.BLOCKED
+    assert result.deferred_writes == [("save_task", task)], (
+        "the worker's deferred store writes must survive the crash"
     )
+    assert result.child_tasks == ["LOW-T-009-child"], (
+        "the worker's decompose children must survive the crash"
+    )
+    assert result.staging_root == staging_dir, (
+        "staging is handed to the merge to clean, not torn down inline"
+    )
+    assert any("crashed" in e for e in result.errors)
+
+
+def test_crashed_wave_worker_propagates_keyboardinterrupt(project: Project):
+    """A KeyboardInterrupt/SystemExit is runtime teardown, not a recoverable
+    worker crash — it must still propagate and clean staging inline."""
+    orch = _orch(project)
+    pid = project.id
+    task = _make_task(pid, "LOW-T-010", deliverable=True)
+    staging_dir = orch._scope_root() / ".staging" / task.id
+
+    def _boom(t, summary, initial_corrective_notes=""):
+        raise KeyboardInterrupt
+
+    orch._run_task_with_redo = _boom  # type: ignore[assignment]
+
+    with pytest.raises(KeyboardInterrupt):
+        orch._execute_task_isolated(task, "")
+    assert not staging_dir.exists()

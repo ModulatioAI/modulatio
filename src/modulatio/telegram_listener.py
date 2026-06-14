@@ -260,7 +260,15 @@ class TelegramListener:
         if not parts:
             return
         cmd = parts[0]
-        args_text = text[len(cmd):].strip()
+        # Derive args from the ORIGINAL text by stripping its first
+        # whitespace-delimited token, not by slicing `len(cmd)` chars.
+        # shlex unquotes parts[0], so when the command token itself carried
+        # quotes/escapes (e.g. `/fo"o" arg`), the unquoted `cmd` is shorter
+        # than the raw token and `text[len(cmd):]` would bleed leftover
+        # command bytes into args_text. Splitting the raw text on its first
+        # run of whitespace recovers the args verbatim regardless of quoting.
+        raw_split = text.split(maxsplit=1)
+        args_text = raw_split[1].strip() if len(raw_split) > 1 else ""
         try:
             response = self._on_command(cmd, args_text)
         except Exception as e:

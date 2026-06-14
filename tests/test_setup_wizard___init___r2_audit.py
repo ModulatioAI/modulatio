@@ -117,6 +117,69 @@ def test_already_present_tool_not_reported_as_installed():
     assert muted == ["Setup aborted. No changes written."]
 
 
+def test_abort_after_preset_removal_does_not_claim_saved_and_available():
+    """Pre-ship MEDIUM: remove_preset() writes through immediately, so deleting
+    a preexisting preset then aborting flips presets_changed True. The abort
+    message must NOT claim the (now-deleted) models 'were saved and remain
+    available' — it must acknowledge the removal honestly."""
+    result, muted = _run_with(
+        pandoc_seq=[True, True],
+        clipboard_seq=[True, True],
+        # a preset existed at start, gone at abort -> a removal happened
+        presets_seq=[{"old": {"label": "x"}}, {}],
+    )
+    assert result is False
+    assert len(muted) == 1
+    msg = muted[0]
+    assert "No changes written" not in msg
+    assert "remain available" not in msg
+    assert "removal" in msg.lower() or "written to disk" in msg.lower()
+
+
+def test_abort_after_preset_replacement_with_removal_is_honest():
+    """A delta that both adds and drops a key still counts as a removal (a
+    preexisting preset went away), so the additive 'remain available' wording
+    must not be used."""
+    result, muted = _run_with(
+        pandoc_seq=[True, True],
+        clipboard_seq=[True, True],
+        presets_seq=[{"old": {"label": "x"}}, {"new": {"label": "y"}}],
+    )
+    assert result is False
+    msg = muted[0]
+    assert "remain available" not in msg
+    assert "removal" in msg.lower() or "written to disk" in msg.lower()
+
+
+def test_abort_purely_additive_presets_keeps_saved_and_available_wording():
+    """Regression guard: a purely additive preset delta (no preexisting key
+    dropped) keeps the original 'saved and remain available' wording."""
+    result, muted = _run_with(
+        pandoc_seq=[True, True],
+        clipboard_seq=[True, True],
+        presets_seq=[{}, {"m": {"label": "x"}}],
+    )
+    assert result is False
+    msg = muted[0]
+    assert "saved and remain available" in msg
+    assert "removal" not in msg.lower()
+
+
+def test_abort_removal_plus_system_install_reports_both_honestly():
+    """When a removal AND a system install both happened, the abort message
+    acknowledges the removal (not 'remain available') alongside the install."""
+    result, muted = _run_with(
+        pandoc_seq=[False, True],
+        clipboard_seq=[True, True],
+        presets_seq=[{"old": {"label": "x"}}, {}],
+    )
+    assert result is False
+    msg = muted[0]
+    assert "pandoc" in msg
+    assert "remain available" not in msg
+    assert "removal" in msg.lower() or "written to disk" in msg.lower()
+
+
 def test_system_tools_snapshot_swallows_probe_errors():
     """A probe that raises is treated as 'absent' so the abort path can't
     crash on a flaky is_installed()."""

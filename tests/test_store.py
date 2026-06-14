@@ -378,3 +378,155 @@ def test_old_vault_task_json_with_assignee_specialist_still_parses():
     t = Task.model_validate(data)
     assert t.id == "X-T-2"
     assert t.description == "old task"
+
+
+# ── Pre-ship sweep regressions (store-types) ─────────────────────────────────
+
+def test_non_ascii_entity_reads_under_c_locale_not_quarantined(
+    project: Path, monkeypatch
+):
+    """MED/error-path (store.py:184): the writer forces utf-8 but the reader
+    used the process-locale default. Under a bare C/POSIX env (no LANG —
+    common cron/systemd) that locale is ASCII, so a well-formed utf-8 entity
+    carrying any non-ASCII byte (em-dash, accented name) would falsely
+    UnicodeDecodeError and be quarantined as corrupt. Simulate the C-locale by
+    forcing read_text to decode as ASCII whenever the caller does NOT pass an
+    explicit encoding; the explicit utf-8 read must survive."""
+    from uuid import uuid4
+    # Non-ASCII in the BODY (the frontmatter is yaml-escaped to ASCII by
+    # safe_dump, but _compose writes the body raw): em-dash + accented name +
+    # curly quotes land as real multibyte utf-8 on disk.
+    store.save_task(
+        PROJECT_CODE,
+        Task(
+            id="TST-T-NONASCII",
+            project_id=uuid4(),
+            goal_id="TST-G-001",
+            description="d",
+        ),
+        body="Brief — by Renée, “curly quotes”",
+    )
+    p = store._task_path(PROJECT_CODE, "TST-T-NONASCII")
+    # Sanity: the file genuinely carries non-ASCII bytes a C-locale read trips on.
+    assert any(b > 0x7F for b in p.read_bytes())
+
+    orig_read = Path.read_text
+
+    def _ascii_locale_read(self, *a, **k):
+        # Mimic locale.getpreferredencoding()==ASCII when no encoding is given.
+        if "encoding" not in k and not a:
+            k = {**k, "encoding": "ascii"}
+        return orig_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _ascii_locale_read)
+
+    got = store.get_task(PROJECT_CODE, "TST-T-NONASCII")
+    assert got is not None and got.id == "TST-T-NONASCII"
+    # NOT quarantined: the explicit utf-8 read decodes the file fine despite the
+    # simulated ASCII locale. With the buggy locale-default read this would
+    # UnicodeDecodeError -> quarantine -> get_task returns None.
+    assert p.exists() and not p.with_suffix(".broken.md").exists()
+
+
+def test_approval_plan_flip_failure_does_not_propagate_or_strand_ticket(
+    project: Path, monkeypatch
+):
+    """MED/error-path (store.py:~373): the ticket is committed RESOLVED before
+    the linked-plan flip, which only swallowed FileNotFoundError. A plan flip
+    failing with anything else (corrupt plan = ValueError, disallowed
+    transition, RuntimeError) propagated out of update_ticket_approval, leaving
+    the ticket RESOLVED but the call raising — caller can't tell it half
+    landed. Now it's tolerated + recorded as an audit transition."""
+    from uuid import uuid4
+    from modulatio import plans as _plans
+
+    pid = uuid4()
+    t = store.create_ticket(
+        project_id=pid,
+        project_code=PROJECT_CODE,
+        priority=TicketPriority.BLOCKER,
+        title="plan approval",
+        affected_plan_id="PLAN-XYZ",
+        approval_required=True,
+    )
+
+    def _boom_mark_approved(*a, **k):
+        raise ValueError("simulated corrupt plan / disallowed transition")
+
+    monkeypatch.setattr(_plans, "mark_approved", _boom_mark_approved)
+
+    # Must NOT raise even though the plan flip blows up with a ValueError.
+    decided = store.update_ticket_approval(
+        PROJECT_CODE, t.id,
+        decision="approved", decided_by="operator",
+    )
+    assert decided.status == TicketStatus.RESOLVED
+    assert decided.approval_decision == "approved"
+    # Persisted, and the divergence is recorded in the audit trail.
+    reread = store.get_ticket(PROJECT_CODE, t.id)
+    assert reread is not None and reread.status == TicketStatus.RESOLVED
+    assert any(
+        "unreconciled" in tr.rationale for tr in reread.transitions
+    )
+
+
+def test_next_ticket_number_skips_over_quarantined_highest(project: Path):
+    """LOW/correctness (store.py:245): quarantining the highest-numbered ticket
+    must not let _next_ticket_number reuse that ID (which would clobber the
+    preserved-but-broken record). It now counts quarantined siblings."""
+    from uuid import uuid4
+    pid = uuid4()
+    t1 = store.create_ticket(
+        project_id=pid, project_code=PROJECT_CODE,
+        priority=TicketPriority.MINOR, title="one",
+    )
+    t2 = store.create_ticket(
+        project_id=pid, project_code=PROJECT_CODE,
+        priority=TicketPriority.MINOR, title="two",
+    )
+    assert (t1.id, t2.id) == (f"{PROJECT_CODE}-1", f"{PROJECT_CODE}-2")
+
+    # Quarantine the HIGHEST ticket by corrupting it then reading it.
+    bad = store._ticket_path(PROJECT_CODE, t2.id)
+    bad.write_text("---\nbroken: [unclosed\n---\nbody\n")
+    assert store.get_ticket(PROJECT_CODE, t2.id) is None  # -> quarantined
+    assert bad.with_suffix(".broken.md").exists()
+
+    # The next ticket must be -3, NOT a reuse of -2.
+    t3 = store.create_ticket(
+        project_id=pid, project_code=PROJECT_CODE,
+        priority=TicketPriority.MINOR, title="three",
+    )
+    assert t3.id == f"{PROJECT_CODE}-3"
+
+
+def test_same_second_quarantines_do_not_overwrite(project: Path, monkeypatch):
+    """LOW/race (store.py:110): the collision-proof quarantine suffix used a
+    second-resolution timestamp. The FIRST distinct corrupt file at a base name
+    goes to '.broken.md'; the second and third both land on
+    '.broken.<same-ts>.md' under a frozen clock and silently overwrite each
+    other. Pin the clock to one second, quarantine THREE distinct corrupt
+    records sharing the base name — all three preserved records must survive."""
+    from datetime import datetime, timezone
+
+    # Freeze _utcnow so any timestamp-derived name collides across calls.
+    fixed = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(store, "_utcnow", lambda: fixed)
+
+    tickets_dir = store._scope_dir(PROJECT_CODE, None) / "tickets"
+    tickets_dir.mkdir(parents=True, exist_ok=True)
+    base = tickets_dir / f"{PROJECT_CODE}-9.md"
+
+    for marker in ("first", "second", "third"):
+        # A fresh distinct corrupt file keeps re-appearing at the same base name
+        # (e.g. a producer keeps rewriting a record that keeps failing to parse).
+        base.write_text(f"---\nbroken: [unclosed\n---\n{marker}\n")
+        store._quarantine_corrupt(base, ValueError(marker))
+
+    # All three preserved records must coexist (one '.broken.md' + two uniquely
+    # tokenized siblings) — none overwrote another.
+    broken_files = sorted(tickets_dir.glob(f"{PROJECT_CODE}-9.broken*.md"))
+    assert len(broken_files) == 3
+    bodies = {p.read_text(encoding="utf-8").split("---", 2)[-1].strip()
+              for p in broken_files}
+    assert bodies == {"first", "second", "third"}

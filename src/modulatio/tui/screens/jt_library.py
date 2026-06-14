@@ -22,6 +22,8 @@ via the Leader. ``r`` refreshes.
 """
 from __future__ import annotations
 
+from rich.markup import escape
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -104,7 +106,12 @@ class JTLibraryScreen(Vertical):
         )
         for e in entries:
             caps = ", ".join(e.capability_preferences) if e.capability_preferences else "—"
-            table.add_row(e.name, e.description or "—", caps, key=e.name)
+            table.add_row(
+                escape(e.name),
+                escape(e.description) if e.description else "—",
+                escape(caps),
+                key=e.name,
+            )
         if table.row_count > 0:
             first = list(table.rows.keys())[0].value
             if first:

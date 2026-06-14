@@ -67,6 +67,29 @@ def _save_json(path: Path, data: list) -> None:
     path.write_text(json.dumps(data, indent=2, default=str))
 
 
+# Per-file read-modify-write lock. add_episodic/get_episodic/add_semantic/
+# decay_episodic all load the whole JSON, mutate, and rewrite the entire file;
+# without a lock two concurrent operations on the same (agent_id, project_code)
+# — e.g. a chat turn appending while a parallel wave worker bumps access_count —
+# can lose updates (last writer wins on the full-file rewrite). Mirror of
+# team_memory._vector_lock: a per-key reentrant threading lock (a plain
+# in-process lock, no fork interaction). Keyed by the resolved file path so each
+# episodic/semantic store serializes independently and unrelated stores never
+# contend. Reentrant so a future caller can nest helpers under one hold.
+_FILE_LOCKS: dict[str, threading.RLock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+def _file_lock(path: Path) -> threading.RLock:
+    key = str(path)
+    with _FILE_LOCKS_GUARD:
+        lock = _FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _FILE_LOCKS[key] = lock
+        return lock
+
+
 # === Entry dataclass ===
 
 @dataclass
@@ -158,12 +181,13 @@ def add_episodic(
 ) -> MemoryEntry:
     """Add an episodic memory entry. Auto-prunes when over EPISODIC_MAX_ENTRIES."""
     path = _episodic_path(agent_id, project_code)
-    entries = _load_json(path)
     entry = _create_entry(content, source=source, entry_type=entry_type, confidence=confidence, tags=tags)
-    entries.append(entry.to_dict())
-    if len(entries) > EPISODIC_MAX_ENTRIES:
-        entries = entries[-EPISODIC_MAX_ENTRIES:]
-    _save_json(path, entries)
+    with _file_lock(path):
+        entries = _load_json(path)
+        entries.append(entry.to_dict())
+        if len(entries) > EPISODIC_MAX_ENTRIES:
+            entries = entries[-EPISODIC_MAX_ENTRIES:]
+        _save_json(path, entries)
     return entry
 
 
@@ -177,21 +201,22 @@ def get_episodic(
 ) -> list[MemoryEntry]:
     """Retrieve recent episodic memories. Updates access_count + last_accessed."""
     path = _episodic_path(agent_id, project_code)
-    raw = _load_json(path)
-    entries = [MemoryEntry.from_dict(e) for e in raw]
-    if active_only:
-        entries = [e for e in entries if e.state == "active"]
-    if tags:
-        entries = [e for e in entries if any(t in e.tags for t in tags)]
-    result = entries[-limit:]
-    if result:
-        accessed_ids = {e.id for e in result}
-        now = _now_iso()
-        for e in raw:
-            if e.get("id") in accessed_ids:
-                e["access_count"] = int(e.get("access_count") or 0) + 1
-                e["last_accessed"] = now
-        _save_json(path, raw)
+    with _file_lock(path):
+        raw = _load_json(path)
+        entries = [MemoryEntry.from_dict(e) for e in raw]
+        if active_only:
+            entries = [e for e in entries if e.state == "active"]
+        if tags:
+            entries = [e for e in entries if any(t in e.tags for t in tags)]
+        result = entries[-limit:]
+        if result:
+            accessed_ids = {e.id for e in result}
+            now = _now_iso()
+            for e in raw:
+                if e.get("id") in accessed_ids:
+                    e["access_count"] = int(e.get("access_count") or 0) + 1
+                    e["last_accessed"] = now
+            _save_json(path, raw)
     return result
 
 
@@ -211,18 +236,24 @@ def add_semantic(
     """Add a semantic (long-term) memory entry. Optionally supersedes an
     earlier entry by content fragment match."""
     path = _semantic_path(agent_id, project_code)
-    entries = _load_json(path)
-    if supersedes:
-        for e in entries:
-            if supersedes.lower() in (e.get("content") or "").lower():
-                e["state"] = "superseded"
     entry = _create_entry(content, source="promotion", entry_type=entry_type, confidence=confidence, scope=scope, tags=tags)
-    entries.append(entry.to_dict())
-    if len(entries) > SEMANTIC_MAX_ENTRIES:
-        active = [e for e in entries if e.get("state") == "active"]
-        inactive = [e for e in entries if e.get("state") != "active"]
-        entries = inactive[-(SEMANTIC_MAX_ENTRIES // 5):] + active[-SEMANTIC_MAX_ENTRIES:]
-    _save_json(path, entries)
+    with _file_lock(path):
+        entries = _load_json(path)
+        if supersedes:
+            for e in entries:
+                if supersedes.lower() in (e.get("content") or "").lower():
+                    e["state"] = "superseded"
+        entries.append(entry.to_dict())
+        if len(entries) > SEMANTIC_MAX_ENTRIES:
+            active = [e for e in entries if e.get("state") == "active"]
+            inactive = [e for e in entries if e.get("state") != "active"]
+            # Keep a slice of inactive (audit tail) plus the freshest active, but
+            # never exceed SEMANTIC_MAX_ENTRIES overall: when active alone exceeds
+            # the cap, inactive[-MAX//5:] + active[-MAX:] would overshoot, so cap
+            # the combined result. Active is favored (kept last → survives the
+            # final trim) over the inactive audit tail.
+            entries = (inactive[-(SEMANTIC_MAX_ENTRIES // 5):] + active)[-SEMANTIC_MAX_ENTRIES:]
+        _save_json(path, entries)
     return entry
 
 
@@ -267,15 +298,16 @@ def decay_episodic(agent_id: str, *, project_code: str) -> int:
     """Mark episodic entries older than EPISODIC_STALE_DAYS as stale.
     Returns count of newly-staled entries."""
     path = _episodic_path(agent_id, project_code)
-    entries = _load_json(path)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=EPISODIC_STALE_DAYS)).isoformat(timespec="seconds")
-    staled = 0
-    for e in entries:
-        if e.get("state") == "active" and (e.get("when") or "") < cutoff:
-            e["state"] = "stale"
-            staled += 1
-    if staled:
-        _save_json(path, entries)
+    with _file_lock(path):
+        entries = _load_json(path)
+        staled = 0
+        for e in entries:
+            if e.get("state") == "active" and (e.get("when") or "") < cutoff:
+                e["state"] = "stale"
+                staled += 1
+        if staled:
+            _save_json(path, entries)
     return staled
 
 

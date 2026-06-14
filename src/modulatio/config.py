@@ -195,20 +195,38 @@ def set_env_secret(name: str, value: str) -> Path:
 
     Used by the Configuration tab when the operator enters an API key — the
     key persists across sessions (loaded by ``load_modulatio_env``) and is live
-    this session. Existing lines are preserved; the named key is updated or
-    appended. Returns the env file path."""
+    this session. The named key is updated in place when already present, or
+    appended; ALL other lines — including comments and blanks — are preserved
+    verbatim (mirroring ``remove_env_secret``'s preserve-and-rewrite). Returns
+    the env file path.
+
+    A newline (``\\n``/``\\r``) anywhere in *name* or *value* would let a
+    crafted key value inject a second ``KEY=...`` assignment into the file, so
+    such inputs are rejected fail-closed rather than written. An ``=`` is fine
+    in the value (readers split on the first ``=``) but not in the key name.
+    """
+    if "\n" in name or "\r" in name or "\n" in value or "\r" in value:
+        raise ValueError("env secret name/value must not contain newlines")
+    if "=" in name or not name.strip():
+        raise ValueError("env secret name must be non-empty and contain no '='")
     env_path = get_vault_root() / ".env"
-    existing: dict[str, str] = {}
+    out_lines: list[str] = []
+    replaced = False
     if env_path.exists():
         for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                existing[k.strip()] = v.strip()
-    existing[name] = value
-    write_secret_file(
-        env_path, "\n".join(f"{k}={v}" for k, v in existing.items()) + "\n"
-    )
+            stripped = line.strip()
+            if (stripped and not stripped.startswith("#") and "=" in stripped
+                    and stripped.split("=", 1)[0].strip() == name):
+                # Update the existing assignment in place; preserve position.
+                if not replaced:
+                    out_lines.append(f"{name}={value}")
+                    replaced = True
+                # Drop any later duplicate assignments of the same key.
+                continue
+            out_lines.append(line)  # comment, blank, or unrelated kv — verbatim
+    if not replaced:
+        out_lines.append(f"{name}={value}")
+    write_secret_file(env_path, "\n".join(out_lines) + "\n")
     os.environ[name] = value
     return env_path
 

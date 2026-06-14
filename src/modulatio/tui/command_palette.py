@@ -74,7 +74,12 @@ class ModulatioCommands(Provider):
         def _switch_to_tab() -> None:
             from textual.widgets import TabbedContent
             try:
-                tabs = self.app.query_one(TabbedContent)
+                # Scope to the top-level tab container: the composed tree
+                # holds several TabbedContent widgets (#console-streams,
+                # #config-flip), so a bare query_one(TabbedContent) raises
+                # TooManyMatches and silently no-ops. Mirror app.py's
+                # switch_tab side-effect, which targets #app-tabs.
+                tabs = self.app.query_one("#app-tabs", TabbedContent)
                 tabs.active = tab_id
             except Exception:
                 pass

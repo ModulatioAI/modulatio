@@ -13,6 +13,7 @@ the flow against stub LLMs before spending real tokens.
 
 from __future__ import annotations
 
+import collections
 import contextvars
 import hashlib
 import json
@@ -384,14 +385,14 @@ def _opt_str(v) -> str | None:
 
 
 # A DOCUMENT deliverable is authored as Markdown; the export pipeline renders
-# .docx/.pdf/.pptx/etc. from the .md at DELIVERY — producers never emit binary
+# .docx/.pdf/etc. from the .md at DELIVERY — producers never emit binary
 # Office formats. So a DOCUMENT goal/evidence path naming a render format points
 # at a file that does NOT exist during the run; live (run 6b3234) that made the
 # Leader reject QC-passed .md work and loop the goal to its retry cap. Rewriting
 # render-format PATHS to their .md source makes the run-time contract match what
 # the team actually produces.
 #
-# But .docx/pdf/pptx/odt/rtf/epub are AMBIGUOUS: they are ALSO genuine
+# But .docx/pdf/odt/rtf/epub are AMBIGUOUS: they are ALSO genuine
 # MEDIA-assembled binaries (a slideshow built from images, an epub, a zip/video)
 # that media-assembly produces DIRECTLY and that DO exist mid-run (#73). So this
 # rewrite is applied **family-aware, per task** (via `_build_requirement(...,
@@ -401,8 +402,16 @@ def _opt_str(v) -> str | None:
 # anymore: at that stage no artifact_kind exists yet, and rewriting there both
 # mis-handled media and erased the container cue the planner needs to route a
 # media goal. Goal prose keeps the user-requested name (truthful intent).
+#
+# The set is kept IN LOCK-STEP with what the document family can ACTUALLY render
+# (``_DOC_RENDER_EXTS`` / pandoc's direct formats + the pdf bridge). ``pptx`` is
+# deliberately EXCLUDED: the document family cannot render a .pptx (pandoc has no
+# direct pptx writer and there's no bridge), so rewriting ``deck.pptx`` → .md for
+# a document contract whose deliverable stays ``deck.pptx`` strands it in a P5
+# reject loop (#404). A .pptx deliverable keeps its real extension and routes as
+# a media composite. Never rewrite an extension the doc family can't produce.
 _RENDER_DELIVERABLE_RE = re.compile(
-    r"(\S+?)\.(?:docx|pdf|pptx|odt|rtf|epub)\b", re.IGNORECASE
+    r"(\S+?)\.(?:docx|pdf|odt|rtf|epub)\b", re.IGNORECASE
 )
 
 
@@ -3375,6 +3384,20 @@ class Orchestrator:
             # the parent's artifact_kind / required_skills / deps /
             # evidence, differing only in id, description, and
             # output_path.
+            artifact_kind = str(item.get("artifact_kind") or "text")
+            # #73: the effective assembly family (and the rewritten evidence it
+            # gates) is identical for every sub-task of this spec — it keys only
+            # off artifact_kind + required_skills, which are spec-level. Compute
+            # it (and the evidence list) ONCE per spec instead of re-reading +
+            # reparsing the standards file per sub-task × per evidence item.
+            spec_family = _effective_assembly_family(
+                artifact_kind, required_skills, self.project.code
+            )
+            spec_evidence_required = [
+                _build_requirement(req, family=spec_family)
+                for req in item.get("evidence_required", [])
+            ]
+            spec_deliverable = bool(item.get("deliverable", False))
             for sub_idx, (output_path, sub_desc) in enumerate(plan):
                 tid = index_to_ids[i][sub_idx]
                 t = Task(
@@ -3382,7 +3405,7 @@ class Orchestrator:
                     project_id=self.project.id,
                     goal_id=goal.id,
                     description=sub_desc,
-                    artifact_kind=str(item.get("artifact_kind") or "text"),
+                    artifact_kind=artifact_kind,
                     research_topics=research_topics,
                     required_skills=required_skills,
                     required_capabilities=required_capabilities,
@@ -3392,21 +3415,13 @@ class Orchestrator:
                     # Finished-product tag from the Leader's plan. Whole
                     # spec-group inherits it (an ``artifacts: [...]`` group
                     # that's a deliverable delivers each rendered piece).
-                    deliverable=bool(item.get("deliverable", False)),
-                    # #73: rewrite render-format evidence paths to .md ONLY for
+                    deliverable=spec_deliverable,
+                    # #73: render-format evidence paths rewritten to .md ONLY for
                     # the document family — keyed off the EFFECTIVE assembly family
-                    # (required_skills first, then artifact_kind's standards), so a
-                    # media deliverable's evidence keeps its real binary extension.
+                    # (computed once above), so a media deliverable's evidence keeps
+                    # its real binary extension.
                     evidence_required=[
-                        _build_requirement(
-                            req,
-                            family=_effective_assembly_family(
-                                str(item.get("artifact_kind") or "text"),
-                                required_skills,
-                                self.project.code,
-                            ),
-                        )
-                        for req in item.get("evidence_required", [])
+                        req.model_copy() for req in spec_evidence_required
                     ],
                     status=TaskStatus.PENDING,
                 )
@@ -4221,7 +4236,17 @@ class Orchestrator:
 
         Returns ``(path, checksum, token_count)`` like the other producers."""
         producer_role = self.default_producer_role
-        current = path.read_text()
+        try:
+            current = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # The iteration target isn't readable text (a binary file mis-routed
+            # to patch mode, or a non-UTF-8 locale write). A bare read_text() here
+            # raised UnicodeDecodeError that surfaced as a confusing BLOCKED with
+            # no actionable message. Degrade to a clean generate instead: with no
+            # existing text to anchor SEARCH blocks against, any blocks fail to
+            # match (file left unchanged for QC) and a full-file producer response
+            # writes fresh content — the safe regenerate path.
+            current = ""
         prompt = self._prompt("drafter-patch", _DRAFTER_PATCH_PROMPT).format(
             task_id=task.id,
             artifact_kind=task.artifact_kind,
@@ -4701,7 +4726,6 @@ class Orchestrator:
         path = self._conversation_path()
         if not path.exists():
             return []
-        turns: list[dict] = []
         # Read defensively: the conversation log is a durable, user-facing,
         # hand-editable artifact. A single non-UTF-8 byte (crash mid-write of a
         # future non-ASCII write, an operator paste/edit, external tooling) must
@@ -4711,12 +4735,20 @@ class Orchestrator:
             raw = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return []
+        # Only the most recent turns are ever consumed (the prompt windows to
+        # ``_CONVERSE_PROMPT_WINDOW``); a long-lived project's log would otherwise
+        # materialize the ENTIRE transcript into memory on every turn (#4700).
+        # Keep a bounded window with a deque so memory stays O(window), not
+        # O(history). The durable file still holds the full history for the user.
+        # A small headroom multiplier tolerates interleaved malformed lines.
+        window = max(self._CONVERSE_PROMPT_WINDOW * 2, self._CONVERSE_PROMPT_WINDOW)
+        turns: "collections.deque[dict]" = collections.deque(maxlen=window)
         for line in raw.splitlines():
             try:
                 turns.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-        return turns
+        return list(turns)
 
     def _append_conversation(self, role: str, content: str) -> None:
         # SEC-03 (security audit, Nemo): the Leader↔operator log is durable and
@@ -5322,8 +5354,22 @@ class Orchestrator:
             # before re-raising so the durable log never ends on an unanswered
             # operator turn (which would put two consecutive Operator turns in the
             # next prompt).
+            # The offline guard must reflect the model the chosen branch will
+            # ACTUALLY dispatch through (#5326): the text path resolves a chat
+            # runner, but the vision path bypasses chat_runner entirely and
+            # resolves `agent_models['leader'] or leader_model` directly. Checking
+            # only the chat runner falsely reports "offline" for an image turn
+            # whose multimodal model IS wired (and only the text runner is unset).
+            if has_image:
+                multimodal_model = (
+                    self.project.agent_models.get("leader")
+                    or self.project.leader_model
+                )
+                branch_offline = not multimodal_model
+            else:
+                branch_offline = self._resolve_chat_runner("leader") is None
             try:
-                if self._resolve_chat_runner("leader") is None:
+                if branch_offline:
                     reply = (
                         "(offline — no leader model is wired here, so I can't think "
                         f"this through yet. You said: {message})"
@@ -5376,7 +5422,21 @@ class Orchestrator:
             # Defensive: never persist None (a misbehaving runner path) — keep the
             # log a clean string thread.
             reply = reply if reply is not None else ""
-            self._append_conversation("leader", reply)
+            # The success append must not be able to leave the durable log ending
+            # on an unanswered operator turn (#5379): if writing the reply fails
+            # (disk error, encoding), record a placeholder leader turn so the next
+            # prompt never sees two consecutive operator turns. Best-effort — a
+            # second failure is swallowed (the reply is still returned to the
+            # caller in memory).
+            try:
+                self._append_conversation("leader", reply)
+            except Exception:  # noqa: BLE001 — never let log-write failure lose the turn
+                try:
+                    self._append_conversation(
+                        "leader", "(reply produced but the durable log write failed)"
+                    )
+                except Exception:  # noqa: BLE001 — give up; in-memory reply still returned
+                    pass
             self._emit_activity(role="leader", phase="leader_answered", agent_id="leader")
             return reply
 
@@ -6640,16 +6700,46 @@ class Orchestrator:
                     role=self.default_producer_role, phase="task_settled",
                     task_id=t.id, agent_id=t.assigned_agent_id,
                 )
-        except BaseException:
+        except BaseException as exc:
             # An UNEXPECTED escape (engine bug — producer/QC failures are caught
-            # inside the redo loop) propagates out and never returns a result, so
-            # the main-thread merge records a synthetic BLOCKED result with NO
-            # staging_root and `_merge_wave_artifacts` never tears this dir down.
-            # Remove the orphaned per-task staging tree here before re-raising so
-            # a crashed worker doesn't leak it under ``.staging/``.
-            import shutil
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
+            # inside the redo loop). The buffers this worker already accumulated —
+            # deferred store-writes (block-path tickets / task saves) and decompose
+            # CHILD tasks — are in scope here; if we re-raise, the main-thread
+            # crash handler rebuilds a synthetic BLOCKED result with EMPTY buffers
+            # and those committed-but-undelivered side effects are silently lost
+            # (#6643). Carry them back instead: mark the task BLOCKED and return a
+            # result that preserves the deferred writes, child tasks, drafts/errors
+            # AND the staging tree, so the deterministic main-thread merge commits
+            # them and `_merge_wave_artifacts` tears the staging dir down normally.
+            # A KeyboardInterrupt/SystemExit must still propagate (operator/runtime
+            # teardown is not a recoverable worker crash).
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                import shutil
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+            t.status = TaskStatus.BLOCKED
+            local_summary.errors.append(
+                f"wave worker crashed: {type(exc).__name__}: {exc}"
+            )
+            _logger.exception(
+                "wave worker for task %s crashed; recovering deferred writes "
+                "(%d) and child tasks (%d), recorded as BLOCKED",
+                t.id, len(deferred), len(child_tasks),
+            )
+            self._emit_activity(
+                role=self.default_producer_role, phase="task_settled",
+                task_id=t.id, agent_id=t.assigned_agent_id,
+            )
+            return TaskExecutionResult(
+                task=t,
+                drafts=list(local_summary.drafts),
+                errors=list(local_summary.errors),
+                deferred_writes=deferred,
+                qc_authored_fixes=list(local_summary.qc_authored_fixes),
+                staging_root=staging,
+                artifact_writes=artifact_writes,
+                child_tasks=child_tasks,
+            )
         finally:
             self._tls.deferred_writes = None
             self._tls.artifact_writes = None
@@ -8386,22 +8476,6 @@ class Orchestrator:
         tomorrow = (now + timedelta(days=1)).date()
         return datetime.combine(tomorrow, time.min, tzinfo=timezone.utc)
 
-    @staticmethod
-    def _budget_fresh_today(goal: Goal) -> bool:
-        """True when the goal's retry_count pertains to today's window.
-        If the date rolled over, the orchestrator treats the budget as
-        fresh (callers should reset ``retry_count`` to 0 before using)."""
-        return goal.retry_count_date == date.today()
-
-    def _refresh_daily_budget_if_new_day(self, goal: Goal) -> None:
-        """If the goal's retry_count_date is stale (None or before
-        today), reset the counter and stamp today. Called before any
-        auto-redo attempt — it's the "daily refresh" semantics the
-        business-harness budget pattern exposes."""
-        if not self._budget_fresh_today(goal):
-            goal.retry_count = 0
-            goal.retry_count_date = date.today()
-
     # ── Leader goal verification (slice #7d + auto-redo #7e) ────────────
     def _leader_verify_goal(
         self,
@@ -8591,10 +8665,27 @@ class Orchestrator:
             data = _extract_json(response)
         except (ValueError, KeyError) as exc:
             # Parse failure is rare but not impossible. Don't crash the
-            # run — surface the error, leave goal status alone, and move
-            # on. Human can read summary.errors.
+            # run — surface the error and move on. Previously this returned
+            # leaving goal status untouched, which STRANDED the goal IN_PROGRESS
+            # on a normal finish (#8592): the driving ticket is already resolved,
+            # the wind-down loop won't re-pick it, and only an F8 teardown ever
+            # finalized it. Drive it to a terminal state with a PQR reservation so
+            # it surfaces for human review instead of hanging the run (mirrors the
+            # zero-completed settle used by the redo lanes).
             summary.errors.append(
                 f"{goal.id}: leader verify failed to parse verdict: {exc}"
+            )
+            self._settle_zero_completed(
+                goal, summary,
+                concern=(
+                    "The Leader's verify response could not be parsed into a "
+                    "verdict, so the goal was settled as-is without an automated "
+                    f"quality judgment. Parse error: {exc}"
+                ),
+                rationale=(
+                    "leader verify settled: verdict response unparseable "
+                    f"({type(exc).__name__})"
+                ),
             )
             self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
             return
@@ -9082,6 +9173,17 @@ class Orchestrator:
         human-facing recommendations (the Product Quality Report). Tolerant
         of dict items ({concern, suggestion}) or bare strings. Advisory only
         — never affects goal status or run flow."""
+        # The §3b redo path re-enters _leader_verify_goal recursively, so for a
+        # goal that redoes N-1 times the verifier (which calls this UNCONDITIONALLY
+        # before the verdict branch) runs N times and would append that round's
+        # reservations to the shared PQR each pass — the same (goal, concern,
+        # suggestion) reservation rendered N times in the human-facing report
+        # (#8651). Dedup against what's already recorded for this goal so a redo
+        # loop doesn't multiply identical reservations.
+        existing = {
+            (rec.get("goal_id"), rec.get("concern"), rec.get("suggestion"))
+            for rec in summary.recommendations
+        }
         for r in raw or []:
             if isinstance(r, dict):
                 concern = str(r.get("concern", "") or "").strip()
@@ -9089,6 +9191,10 @@ class Orchestrator:
             else:
                 concern, suggestion = str(r or "").strip(), ""
             if concern or suggestion:
+                key = (goal.id, concern, suggestion)
+                if key in existing:
+                    continue
+                existing.add(key)
                 summary.recommendations.append({
                     "goal_id": goal.id,
                     "concern": concern,
@@ -9389,10 +9495,21 @@ class Orchestrator:
             (t for t in tasks if getattr(t, "deliverable", False)),
             key=lambda t: t.id,
         ):
-            body = self._read_task_artifact(t) or ""
             h.update(t.id.encode())
             h.update(b"\0")
-            h.update(body.encode("utf-8", "replace"))
+            # Fingerprint the actual on-disk BYTES, not the text-decoded body
+            # (#9392): _read_task_artifact returns None for any non-utf-8 file, so
+            # a binary/media deliverable (a .pptx/.pdf/.png) used to collapse to ""
+            # every round — the loop-breaker then saw an UNCHANGED fingerprint and
+            # forced a false "stalled" after a single redo, regardless of whether
+            # the redo actually changed the artifact. Hashing the raw bytes makes
+            # the loop-breaker see real content changes for every artifact class.
+            path = self._task_artifact_path(t)
+            if path is not None:
+                try:
+                    h.update(path.read_bytes())
+                except OSError:
+                    pass
             h.update(b"\0")
         return h.hexdigest()
 
@@ -10751,11 +10868,26 @@ class Orchestrator:
         # tasks, but the gate keeps us honest against a dep that failed earlier
         # in the same pass).
         task_map = {t.id: t for t in tasks}
+        # Order ONLY on the intra-goal dependency edges. A reopened goal's task
+        # can legitimately depend on a task in ANOTHER goal (a cross-goal id not
+        # present in `tasks`); feeding that id to _topological_sort makes it raise
+        # _DependencyError("unknown dependency ids") → the whole sort collapses to
+        # store order and the goal's REAL intra-goal ordering is silently lost
+        # (#10755). Sort over copies whose deps are filtered to ids in this set;
+        # the cross-goal deps stay enforced below by the live _dep_failed / unready
+        # gate (which already tolerates a dep not in task_map).
+        order_view = [
+            t.model_copy(
+                update={"depends_on": [d for d in t.depends_on if d in task_map]}
+            )
+            for t in tasks
+        ]
         try:
-            ordered = _topological_sort(tasks)
+            ordered_view = _topological_sort(order_view)
+            ordered = [task_map[v.id] for v in ordered_view]
         except _DependencyError:
-            # A cycle/unknown-ref here mirrors the initial-pass validator; fall
-            # back to store order rather than aborting the resume entirely.
+            # A genuine cycle among the intra-goal edges mirrors the initial-pass
+            # validator; fall back to store order rather than aborting the resume.
             ordered = list(tasks)
         for t in ordered:
             if self.abort_event.is_set():
@@ -11214,10 +11346,13 @@ class Orchestrator:
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 # write_text raises TypeError on non-str content (a binary
-                # attachment that arrived as bytes) — guard it too so one bad
-                # attachment doesn't abort pinning the rest.
-                dest.write_text(content)
-            except (OSError, TypeError):
+                # attachment that arrived as bytes), and UnicodeEncodeError (a
+                # ValueError) under a non-UTF-8 process locale for legitimate
+                # non-ASCII content — guard both so one bad attachment doesn't
+                # abort pinning the rest. Write UTF-8 explicitly to match the
+                # read side and avoid locale-dependent encode failures.
+                dest.write_text(content, encoding="utf-8")
+            except (OSError, TypeError, ValueError):
                 continue
             self._pinned_files.append(rel)
         if self._pinned_files:

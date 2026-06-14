@@ -8,6 +8,7 @@ successful create so the new agent shows immediately.
 """
 from __future__ import annotations
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Button, DataTable, Label
@@ -45,11 +46,11 @@ class AgentsScreen(Vertical):
         code = self.app.project_code  # type: ignore[attr-defined]
         for agent in roster.list_agents(code):
             table.add_row(
-                agent.id,
-                agent.name,
-                agent.tier,
-                agent.model or "",
-                ", ".join(agent.skills),
+                escape(agent.id),
+                escape(agent.name),
+                escape(agent.tier),
+                escape(agent.model or ""),
+                escape(", ".join(agent.skills)),
                 key=agent.id,
             )
 

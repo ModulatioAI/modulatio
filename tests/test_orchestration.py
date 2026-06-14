@@ -7841,10 +7841,16 @@ def test_qc_review_no_band_runs_qc_without_size_block(project, tmp_path):
 
 def test_normalize_render_paths_rewrites_only_render_formats():
     from modulatio.orchestration import _normalize_render_paths
-    # document render formats → .md
+    # document render formats the engine can ACTUALLY render → .md
     assert _normalize_render_paths("out/intro.docx") == "out/intro.md"
     assert _normalize_render_paths("reports/Q3.pdf") == "reports/Q3.md"
-    assert _normalize_render_paths("deck.pptx") == "deck.md"
+    assert _normalize_render_paths("book.epub") == "book.md"
+    assert _normalize_render_paths("note.rtf") == "note.md"
+    assert _normalize_render_paths("doc.odt") == "doc.md"
+    # pptx is NOT a document-renderable format (#404): the doc family has no
+    # pptx writer, so rewriting deck.pptx → deck.md (while the deliverable stays
+    # deck.pptx) strands the goal in a P5 reject loop. Keep the real extension.
+    assert _normalize_render_paths("deck.pptx") == "deck.pptx"
     # code/data authored directly → untouched
     assert _normalize_render_paths("src/app.py") == "src/app.py"
     assert _normalize_render_paths("data/out.csv") == "data/out.csv"
@@ -7904,23 +7910,28 @@ def test_effective_assembly_family_priority():
 
 
 def test_build_requirement_family_aware():
-    """#73: render-path rewrite (.pptx → .md) fires ONLY for the document family;
+    """#73: render-path rewrite (.docx → .md) fires ONLY for the document family;
     media/code/data and the empty/unknown (decompose) family keep the real path."""
     from modulatio.orchestration import _build_requirement
-    raw = {"kind": "artifact", "description": "d", "target": "out/deck.pptx",
-           "source": "src/deck.pptx"}
+    raw = {"kind": "artifact", "description": "d", "target": "out/book.docx",
+           "source": "src/book.docx"}
     # document → rewrite to .md source
     doc = _build_requirement(raw, family="document")
-    assert doc.target == "out/deck.md" and doc.source == "src/deck.md"
-    # media → keep the binary extension (the deliverable IS the .pptx)
+    assert doc.target == "out/book.md" and doc.source == "src/book.md"
+    # media → keep the binary extension (the deliverable IS the .docx)
     media = _build_requirement(raw, family="media")
-    assert media.target == "out/deck.pptx" and media.source == "src/deck.pptx"
+    assert media.target == "out/book.docx" and media.source == "src/book.docx"
     # code/data → never rewrite a natural output to .md
     assert _build_requirement({"target": "a.csv"}, family="data").target == "a.csv"
     # empty family (decompose, before artifact_kind exists) → no rewrite
-    assert _build_requirement(raw, family="").target == "out/deck.pptx"
+    assert _build_requirement(raw, family="").target == "out/book.docx"
     # default (back-compat) is document
-    assert _build_requirement(raw).target == "out/deck.md"
+    assert _build_requirement(raw).target == "out/book.md"
+    # #404/#73: pptx is NOT doc-renderable — even the document family keeps it,
+    # so a .pptx deliverable's evidence is never wrongly pointed at a .md.
+    pptx = {"target": "out/deck.pptx", "source": "src/deck.pptx"}
+    assert _build_requirement(pptx, family="document").target == "out/deck.pptx"
+    assert _build_requirement(pptx, family="document").source == "src/deck.pptx"
 
 
 def _evidence_of(orch, planner_item: dict):

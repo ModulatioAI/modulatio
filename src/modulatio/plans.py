@@ -375,7 +375,12 @@ def load(plan_id: str, project_code: str) -> Optional[PlanRecord]:
     target = _plans_dir(code) / f"{plan_id}.md"
     if not target.exists():
         return None
-    raw = target.read_text()
+    # Mirror the UTF-8 write path (persist() opens with encoding="utf-8"
+    # and yaml allow_unicode=True). Without an explicit encoding, read_text
+    # defaults to the process locale and a daemon/cron run under a non-UTF-8
+    # locale (e.g. C/POSIX) raises UnicodeDecodeError on a legitimate
+    # non-ASCII title/body, bricking the load + the whole project listing.
+    raw = target.read_text(encoding="utf-8")
     m = _FRONTMATTER_RE.match(raw)
     if m is None:
         return None
@@ -450,11 +455,15 @@ _SUB_OBJECTIVE_ITEM_RE = re.compile(
     # (uses [ \t] not \s) so a title-only line never borrows the
     # next item's line as its description and swallows it.
     # Title capture is line-anchored ($ + MULTILINE keeps it on one line)
-    # and lazy, so it tolerates inner markdown emphasis (``*draft*`` /
-    # nested ``**bold**``) inside the bold title without dropping the
-    # item — a negated-asterisk class would silently omit any such
-    # sub-objective from the parsed list.
-    r"^[ \t]{0,3}\*\*\s*(\d+)\.\s*(.+?)\*\*[ \t—–\-:]*(.*)$",
+    # and GREEDY (``.+`` not ``.+?``), so the closing ``**`` binds to the
+    # LAST ``**`` on the line. That tolerates inner markdown emphasis
+    # (``*draft*``) AND nested ``**bold**`` inside the bold title without
+    # truncating it: a lazy match would stop at the first inner ``**`` and
+    # silently corrupt the title/description (``**1. Do the **important**
+    # thing**`` → title ``Do the ``), and a negated-asterisk class would
+    # drop the item entirely. Greedy + the line anchor keeps the match on
+    # one line, so a title-only item never borrows the next line.
+    r"^[ \t]{0,3}\*\*\s*(\d+)\.\s*(.+)\*\*[ \t—–\-:]*(.*)$",
     re.MULTILINE,
 )
 #: Line-starts that look like a numbered bold sub-objective item. Used
@@ -499,10 +508,18 @@ def extract_sub_objectives(plan_body: str) -> list[dict]:
     if line_starts != len(items):
         _logger.warning(
             "extract_sub_objectives parsed %d items but found %d "
-            "numbered-item line-starts; a sub-objective may have been "
-            "dropped by the item regex",
+            "numbered-item line-starts; a sub-objective was dropped by "
+            "the item regex — returning EMPTY to fail closed (the "
+            "dispatcher pauses for human revision rather than running a "
+            "short list and reporting an approved objective done)",
             len(items), line_starts,
         )
+        # Fail closed: a detected drop means we cannot trust this list to
+        # be complete. Returning the short list would silently skip a
+        # user-approved sub-objective and report the plan done. An empty
+        # return routes start_execution to its no-sub-objectives branch,
+        # which flips the plan to 'paused' and opens a revision ticket.
+        return []
     for i, m in enumerate(items):
         title = m.group(2).strip()
         first_line = m.group(3).strip()
@@ -594,7 +611,9 @@ def set_status(
     target = _plans_dir(code) / f"{plan_id}.md"
     if not target.exists():
         raise FileNotFoundError(f"plan file not found: {target}")
-    raw = target.read_text()
+    # UTF-8 to mirror the write path; a non-UTF-8 process locale must not
+    # turn a legitimate non-ASCII plan into a UnicodeDecodeError brick.
+    raw = target.read_text(encoding="utf-8")
     m = _FRONTMATTER_RE.match(raw)
     if m is None:
         raise ValueError(f"plan file {target} has no frontmatter")
@@ -791,7 +810,9 @@ def update_execution_state(
     target = _plans_dir(code) / f"{plan_id}.md"
     if not target.exists():
         raise FileNotFoundError(f"plan file not found: {target}")
-    raw = target.read_text()
+    # UTF-8 to mirror the write path; a non-UTF-8 process locale must not
+    # turn a legitimate non-ASCII plan into a UnicodeDecodeError brick.
+    raw = target.read_text(encoding="utf-8")
     m = _FRONTMATTER_RE.match(raw)
     if m is None:
         raise ValueError(f"plan file {target} has no frontmatter")

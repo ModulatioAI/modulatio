@@ -46,6 +46,26 @@ def test_project_overrides_shared(iso):
     assert qc_persona.load_qc_persona("OTHER") == "SHARED"
 
 
+def test_non_utf8_project_persona_degrades_to_shared(iso):
+    """A user pasting a non-UTF-8 byte into qc_persona.md must NOT crash the QC
+    review prompt-build. read_text(encoding='utf-8') raises UnicodeDecodeError
+    (a ValueError subclass, not OSError); the loader must catch it and fall
+    through to the next candidate. Regression for the 0.9.0 pre-ship sweep."""
+    (iso / "shared" / "qc_persona.md").write_text("SHARED PERSONA", encoding="utf-8")
+    proj = iso / "proj" / "TST"
+    proj.mkdir(parents=True)
+    (proj / "qc_persona.md").write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+    # Before the fix this propagated UnicodeDecodeError; now it degrades.
+    assert qc_persona.load_qc_persona("TST") == "SHARED PERSONA"
+
+
+def test_non_utf8_shared_persona_degrades_to_seed(iso):
+    """Same defensive contract on the shared candidate: a corrupt shared file
+    falls through to the package seed instead of crashing."""
+    (iso / "shared" / "qc_persona.md").write_bytes(b"\xff\xfe garbage \x80")
+    assert qc_persona.load_qc_persona() == "SEED PERSONA"
+
+
 def test_seed_default_carries_the_constructive_register():
     """The shipped seed actually encodes Clif's register: constructive,
     complimentary of what's right, actionable, peer-voiced, still honest."""

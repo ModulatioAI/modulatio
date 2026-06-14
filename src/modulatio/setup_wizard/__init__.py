@@ -310,17 +310,30 @@ def _run_setup_body() -> bool:
             for name, present in tools_at_end.items()
             if present and not tools_at_start.get(name, False)
         ]
-        presets_changed = _presets_snapshot() != presets_at_start
+        presets_at_end = _presets_snapshot()
+        presets_changed = presets_at_end != presets_at_start
+        # remove_preset() writes through immediately too, so an abort after a
+        # removal also flips presets_changed. Distinguish a purely-additive
+        # delta (only safe to call "saved and remain available") from one that
+        # dropped a preexisting preset — comparing key sets tells them apart.
+        presets_removed = bool(set(presets_at_start) - set(presets_at_end))
+
+        def _preset_clause() -> str:
+            if presets_removed:
+                return "model changes (including removals) were written to disk"
+            return "Configured models were saved and remain available"
 
         if presets_changed and newly_installed:
+            clause = _preset_clause()
             theme.muted(
-                "Setup aborted. Configured models were saved and remain available, "
+                f"Setup aborted. {clause[0].upper()}{clause[1:]}, "
                 f"and {_join_tool_names(newly_installed)} was installed on your system; "
                 "no other settings were written."
             )
         elif presets_changed:
+            clause = _preset_clause()
             theme.muted(
-                "Setup aborted. Configured models were saved and remain available; "
+                f"Setup aborted. {clause[0].upper()}{clause[1:]}; "
                 "no other settings were written."
             )
         elif newly_installed:

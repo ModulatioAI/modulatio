@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from pathlib import Path
 from typing import Callable, Optional, Protocol
 
@@ -54,7 +55,37 @@ def _cache_root() -> Path:
 # wizards / overrides land in one place. Computed at import is fine —
 # the value is stable for the process lifetime.
 _EMBED_MODEL = _config.get_embedding_model()
-_EMBED_DIM = 384
+
+# Fallback dimension for the default MiniLM model — used only when
+# fastembed isn't importable or the model isn't in its catalog (e.g. a
+# wizard-set custom model fastembed doesn't recognize). The real value
+# is derived from the model itself in ``_embed_dim_for_model`` so the
+# LanceDB schema width always matches the vectors the embedder emits.
+_DEFAULT_EMBED_DIM = 384
+
+
+def _embed_dim_for_model(model_name: str) -> int:
+    """Resolve the output vector length for ``model_name`` from
+    fastembed's catalog. The wizard can override the embedding model to
+    any supported model (e.g. a 768-dim bge model); the static 384 was a
+    silent mismatch that produced a LanceDB schema narrower/wider than
+    the actual vectors. Falls back to the MiniLM default if fastembed is
+    unavailable or the model is unknown."""
+    try:
+        from fastembed import TextEmbedding
+
+        for m in TextEmbedding.list_supported_models():
+            if m.get("model") == model_name:
+                dim = m.get("dim")
+                if isinstance(dim, int) and dim > 0:
+                    return dim
+                break
+    except Exception:
+        pass
+    return _DEFAULT_EMBED_DIM
+
+
+_EMBED_DIM = _embed_dim_for_model(_EMBED_MODEL)
 
 
 # ── Embedder protocol + impls ──────────────────────────────────────────────
@@ -91,19 +122,34 @@ class FastEmbedder:
 
     def __init__(self) -> None:
         self._model = None
+        # A single FastEmbedder is shared across all vector subsystems
+        # (routing matcher, qc_history, team_memory) and touched
+        # concurrently by wave workers in a ThreadPoolExecutor. Two
+        # locks: ``_load_lock`` makes the lazy model load happen exactly
+        # once (double-checked), and ``_infer_lock`` serializes ONNX
+        # inference so concurrent embed calls don't race the same
+        # underlying session.
+        self._load_lock = threading.Lock()
+        self._infer_lock = threading.Lock()
 
     def _get(self):
         if self._model is None:
-            from fastembed import TextEmbedding
-            from fastembed.common.types import Device
-            self._model = TextEmbedding(_EMBED_MODEL, cuda=Device.CPU)
+            with self._load_lock:
+                if self._model is None:
+                    from fastembed import TextEmbedding
+                    from fastembed.common.types import Device
+                    self._model = TextEmbedding(_EMBED_MODEL, cuda=Device.CPU)
         return self._model
 
     def embed_text(self, text: str) -> list[float]:
-        return next(self._get().embed([text])).tolist()
+        model = self._get()
+        with self._infer_lock:
+            return next(model.embed([text])).tolist()
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        return [v.tolist() for v in self._get().embed(texts)]
+        model = self._get()
+        with self._infer_lock:
+            return [v.tolist() for v in model.embed(texts)]
 
 
 class StubEmbedder:

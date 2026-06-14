@@ -366,7 +366,10 @@ def load_recoveries(project_code: str) -> "list[RecoveryRecord]":
                 out.append(RecoveryRecord(**{k: v for k, v in obj.items() if k in known}))
             except (ValueError, TypeError):
                 continue  # a malformed line never blocks the feed
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # A non-UTF-8 log (truncated multibyte write, foreign locale) must fail
+        # OPEN, not propagate — UnicodeDecodeError is a ValueError subclass, not
+        # an OSError, so it is named explicitly to honor the module contract.
         return []
     return out
 
@@ -380,7 +383,10 @@ def consumed_ids(project_code: str) -> "set[str]":
         return set()
     try:
         return {ln.strip() for ln in p.read_text().splitlines() if ln.strip()}
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # Fail OPEN on a non-UTF-8 consumed ledger (UnicodeDecodeError is a
+        # ValueError subclass, not an OSError) — an unreadable ledger must not
+        # block the win loop; the worst case is a recovery re-witnessed once.
         return set()
 
 

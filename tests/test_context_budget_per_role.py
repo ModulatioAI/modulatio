@@ -749,6 +749,33 @@ def test_31_cli_parser_accepts_well_formed_flags(flag, want):
     assert specs[0].role == "producer"
 
 
+def test_31b_researcher_alias_normalized_to_research():
+    """Pre-ship: `--ctx-budget researcher=N` validated but registered under
+    key 'researcher', while the Orchestrator looks up budget_role='research'
+    -> silent no-op. The alias must collapse to the canonical 'research' role
+    at parse time so the override lands on the key dispatch enforces."""
+    specs, warns = cb.parse_cli_override_specs(["researcher=40000"])
+    assert len(specs) == 1
+    # Spec key is the canonical role -> overrides[spec.role] == "research",
+    # which _user_override_for("research") will find.
+    assert specs[0].role == "research"
+    assert specs[0].max_input_tokens == 40_000
+    # The operator is told the alias was normalized.
+    assert any("research" in w and "researcher" in w for w in warns)
+
+
+def test_31c_researcher_alias_collides_with_research_last_wins():
+    """After normalization, `researcher=` and `research=` share one key so
+    last-wins dedup applies (they're the same budget role)."""
+    specs, warns = cb.parse_cli_override_specs(
+        ["research=30000", "researcher=50000"],
+    )
+    assert len(specs) == 1
+    assert specs[0].role == "research"
+    assert specs[0].max_input_tokens == 50_000
+    assert any("duplicate" in w for w in warns)
+
+
 # ─── Debug round 1 — new bound-check coverage ─────────────────────────────
 
 

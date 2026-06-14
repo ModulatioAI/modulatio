@@ -78,9 +78,19 @@ _INBOXES_ENV = "MODULATIO_INBOXES"
 #: warning fired for a recipient in one run does NOT suppress the same
 #: recipient's warning in a later, distinct run sharing this process
 #: (the daemon / JT / cron paths reuse the interpreter across runs).
-#: The run_id also scopes growth: entries belong to a bounded run
-#: rather than accumulating for the process lifetime.
+#: Because run_id is part of the key, each new run contributes fresh
+#: entries that are never explicitly torn down — so in a long-lived
+#: daemon the set would otherwise grow without bound. It is hard-capped
+#: at :data:`_WARNED_SOFT_CAP_MAX`; on overflow the oldest-style dedup
+#: state is dropped wholesale (the only consequence is a recipient may
+#: get one more soft-cap WARN — purely a log-dedup, never correctness).
 _WARNED_SOFT_CAP: set[tuple[str, str, str | None, str | None]] = set()
+
+#: Upper bound on :data:`_WARNED_SOFT_CAP`. Generous (a single run
+#: contributes at most one entry per distinct recipient), so reaching
+#: it implies many thousands of runs in one process — at which point
+#: clearing the dedup state is the right trade vs. unbounded growth.
+_WARNED_SOFT_CAP_MAX = 4096
 
 
 #: Recipient key regex. Rejects path-traversal primitives (``/``,
@@ -666,6 +676,12 @@ def _soft_cap_warn_once(
     key = (run_id, target_scope, target_agent_id, target_runner_role)
     if key in _WARNED_SOFT_CAP:
         return
+    # Bound the dedup set so a long-lived daemon serving many runs can't
+    # accumulate run-scoped entries for the process lifetime. On
+    # overflow drop the accumulated state wholesale; the worst case is a
+    # repeat WARN for an in-flight recipient (cosmetic).
+    if len(_WARNED_SOFT_CAP) >= _WARNED_SOFT_CAP_MAX:
+        _WARNED_SOFT_CAP.clear()
     _WARNED_SOFT_CAP.add(key)
     _LOGGER.warning(
         "inbox soft-cap pressure: recipient=%r live=%d (soft=%d, hard=%d). "
@@ -788,8 +804,15 @@ def _emit_inbox_event(
             audit_path.chmod(0o600)
         except OSError:
             pass
-        with audit_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(base, default=str, ensure_ascii=True) + "\n")
+        # Serialize under the same reentrant lock that guards
+        # _append_jsonl_row so concurrent wave-worker audit emissions
+        # cannot interleave and tear a JSONL line. The lock is reentrant,
+        # so callers already holding it (e.g. the decay/tombstone path)
+        # are unaffected.
+        line = json.dumps(base, default=str, ensure_ascii=True) + "\n"
+        with _APPEND_LOCK:
+            with audit_path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
     except Exception as exc:
         _LOGGER.warning(
             "inbox audit-write failed (path=%s, event=%s): %s",
@@ -1317,6 +1340,42 @@ def _candidate_terminal_ids(
     return terminal
 
 
+def _abandon_candidate_once(
+    *,
+    run_dir: Path,
+    candidate: InboxCandidate,
+    current_turn: int,
+    audit_path: Path | None,
+) -> bool:
+    """Atomically mark ``candidate`` abandoned: record the durable
+    terminal row and emit the audit event exactly once, even when
+    ``list_pending_candidates`` and ``sweep_abandoned_candidates`` race
+    for the same candidate/turn (or run back-to-back in one turn).
+
+    The terminal-id set is re-read under :data:`_APPEND_LOCK`
+    immediately before recording, so a candidate that another caller
+    already drove terminal between the caller's stale snapshot and this
+    point is skipped instead of double-emitting the terminal + audit
+    rows. Returns ``True`` when this call performed the transition,
+    ``False`` when it was already terminal (no rows written here).
+    The lock is reentrant, so it composes with the appends underneath."""
+    with _APPEND_LOCK:
+        if candidate.candidate_id in _candidate_terminal_ids(
+            run_dir=run_dir, audit_path=audit_path
+        ):
+            return False
+        # M1: durable terminal-state write first; audit row second.
+        _record_candidate_terminal(
+            run_dir=run_dir, candidate_id=candidate.candidate_id,
+            terminal="abandoned", current_turn=current_turn,
+        )
+        _emit_inbox_event(
+            audit_path=audit_path, event="propose_abandoned",
+            candidate=candidate, current_turn=current_turn,
+        )
+        return True
+
+
 def list_pending_candidates(
     *,
     run_dir: Path,
@@ -1358,18 +1417,16 @@ def list_pending_candidates(
             current_turn - cand.created_at_turn
             >= INBOX_CANDIDATE_ABANDON_AFTER_TURNS
         ):
-            # M1 (Nemo round 2): record durable terminal state BEFORE
-            # the best-effort audit row. If the state write fails, the
-            # exception propagates and the candidate stays pending —
-            # safer than the inverse, where a successful audit row
-            # would falsely report the candidate as abandoned.
-            _record_candidate_terminal(
-                run_dir=run_dir, candidate_id=cand.candidate_id,
-                terminal="abandoned", current_turn=current_turn,
-            )
-            _emit_inbox_event(
-                audit_path=audit_path, event="propose_abandoned",
-                candidate=cand, current_turn=current_turn,
+            # Atomic check-and-record under _APPEND_LOCK (re-reads the
+            # terminal set inside the lock) so a concurrent
+            # sweep_abandoned_candidates for the same candidate/turn
+            # cannot double-emit the terminal + audit rows. The terminal
+            # write precedes the best-effort audit row (M1): if the
+            # state write fails the exception propagates and the
+            # candidate stays pending — safer than the inverse.
+            _abandon_candidate_once(
+                run_dir=run_dir, candidate=cand,
+                current_turn=current_turn, audit_path=audit_path,
             )
             continue
         pending.append(cand)
@@ -1410,16 +1467,16 @@ def sweep_abandoned_candidates(
         if (current_turn - cand.created_at_turn
                 < INBOX_CANDIDATE_ABANDON_AFTER_TURNS):
             continue
-        # M1: durable terminal-state write first; audit row second.
-        _record_candidate_terminal(
-            run_dir=run_dir, candidate_id=cand.candidate_id,
-            terminal="abandoned", current_turn=current_turn,
-        )
-        _emit_inbox_event(
-            audit_path=audit_path, event="propose_abandoned",
-            candidate=cand, current_turn=current_turn,
-        )
-        count += 1
+        # Atomic check-and-record under _APPEND_LOCK so a concurrent
+        # list_pending_candidates sweep for the same candidate/turn
+        # can't double-emit. Only count candidates THIS call transitioned
+        # — one already driven terminal by the racing caller returns
+        # False and must not be re-counted.
+        if _abandon_candidate_once(
+            run_dir=run_dir, candidate=cand,
+            current_turn=current_turn, audit_path=audit_path,
+        ):
+            count += 1
     return count
 
 

@@ -60,6 +60,26 @@ app = typer.Typer(
 )
 
 
+#: Extensions routed to ``kind='image'`` so vision-capable producers can
+#: improve a picture, not just text. Product-agnostic: the attachment kind
+#: follows the artifact's class, never a hardcoded "document" assumption.
+_IMAGE_ATTACH_EXTS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
+)
+
+
+def _infer_attachment_kind(path: Path) -> str:
+    """Infer the attachment kind from the path extension.
+
+    Images route to ``kind='image'`` (path-only, resolved at multimodal
+    dispatch); everything else stays ``kind='document'`` (utf-8 text read).
+    A non-image binary still fails the utf-8 read in build_attachment — the
+    caller surfaces an artifact-class-aware message instead of an opaque
+    codec error.
+    """
+    return "image" if path.suffix.lower() in _IMAGE_ATTACH_EXTS else "document"
+
+
 def _version_callback(value: bool) -> None:
     if not value:
         return
@@ -437,12 +457,24 @@ def kickoff(
     _atts = []
     for _p in (attach or []):
         _path = Path(_p).expanduser()
+        _kind = _infer_attachment_kind(_path)
         try:
-            _atts.append(build_attachment(_path, kind="document"))
+            _atts.append(build_attachment(_path, kind=_kind))
         except FileNotFoundError:
             typer.echo(f"  ! --attach: file not found: {_path}", err=True)
             raise typer.Exit(1)
-        except (ValueError, UnicodeDecodeError, OSError) as _e:
+        except UnicodeDecodeError:
+            # A non-image binary (PDF, zip, compiled, media) read as a utf-8
+            # document. Surface an artifact-class-aware message rather than the
+            # opaque "'utf-8' codec can't decode byte ..." stack of digits.
+            typer.echo(
+                f"  ! --attach: cannot attach {_path}: not a text/image "
+                "artifact (binary documents like PDF/zip/media aren't "
+                "supported via --attach yet — convert to text first).",
+                err=True,
+            )
+            raise typer.Exit(1)
+        except (ValueError, OSError) as _e:
             # OSError covers a directory passed as --attach (IsADirectoryError)
             # and an unreadable file (PermissionError) — both surface as a clean
             # message instead of an uncaught stack trace.
@@ -1139,7 +1171,7 @@ def cron_list(
     if not jobs:
         typer.echo("(no cron jobs)")
         return
-    jobs.sort(key=lambda j: (not j.get("enabled"), j.get("next_run", "")))
+    jobs.sort(key=lambda j: (not j.get("enabled"), j.get("next_run") or ""))
     for j in jobs:
         flag = "✓" if j.get("enabled") else "✗"
         typer.echo(

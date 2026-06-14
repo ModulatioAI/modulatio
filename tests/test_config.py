@@ -29,14 +29,24 @@ def isolate_config(tmp_path, monkeypatch):
     XDG_* to a temp dir to isolate Modulatio state, which surfaces this
     if the fixture isn't scrubbing.
     """
+    import os as _os
+
     cfg_dir = tmp_path / "config"
     monkeypatch.setattr(config, "CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(config, "DEFAULTS_FILE", cfg_dir / "defaults.json")
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    # Snapshot env so set_env_secret tests (which write real os.environ keys)
+    # don't leak into sibling tests.
+    _env_snapshot = dict(_os.environ)
     config.reload()
     yield
     config.reload()
+    for _k in list(_os.environ):
+        if _k not in _env_snapshot:
+            del _os.environ[_k]
+    for _k, _v in _env_snapshot.items():
+        _os.environ[_k] = _v
 
 
 # === defaults_exist + load + save + reload ===
@@ -328,3 +338,103 @@ def test_write_secret_file_concurrent_same_path_no_corruption(tmp_path):
     assert target.read_text() == payload, "concurrent writers must not corrupt the secret"
     assert target.stat().st_mode & 0o777 == 0o600
     assert not list(target.parent.glob("*.tmp")), "no temp debris after concurrent writes"
+
+
+# === set_env_secret / remove_env_secret (0.9.0 LOW: comment+blank
+# preservation; newline/= injection) =====================================
+
+def _point_vault_at(tmp_path):
+    """Persist a vault_root so .env writes land in the test's tmp dir."""
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True, exist_ok=True)
+    config.save_defaults({"vault_root": str(vault)})
+    return vault
+
+
+def test_set_env_secret_appends_when_absent(tmp_path):
+    vault = _point_vault_at(tmp_path)
+    p = config.set_env_secret("OPENAI_API_KEY", "sk-abc")
+    assert p == vault / ".env"
+    assert "OPENAI_API_KEY=sk-abc" in p.read_text().splitlines()
+    assert config.os.environ["OPENAI_API_KEY"] == "sk-abc"
+
+
+def test_set_env_secret_preserves_comments_and_blank_lines(tmp_path):
+    """0.9.0 LOW: rewrite must keep comment/blank lines, not just kv pairs."""
+    vault = _point_vault_at(tmp_path)
+    env = vault / ".env"
+    env.write_text(
+        "# Modulatio secrets\n"
+        "\n"
+        "ANTHROPIC_API_KEY=sk-existing\n"
+        "# trailing note\n"
+    )
+    config.set_env_secret("OPENAI_API_KEY", "sk-new")
+    lines = env.read_text().splitlines()
+    # Comments + blank survive
+    assert "# Modulatio secrets" in lines
+    assert "" in lines
+    assert "# trailing note" in lines
+    # Untouched existing key survives, new key appended
+    assert "ANTHROPIC_API_KEY=sk-existing" in lines
+    assert "OPENAI_API_KEY=sk-new" in lines
+
+
+def test_set_env_secret_updates_in_place_preserving_position(tmp_path):
+    vault = _point_vault_at(tmp_path)
+    env = vault / ".env"
+    env.write_text(
+        "# header\n"
+        "A_KEY=one\n"
+        "B_KEY=two\n"
+    )
+    config.set_env_secret("A_KEY", "updated")
+    lines = env.read_text().splitlines()
+    assert lines == ["# header", "A_KEY=updated", "B_KEY=two"]
+
+
+def test_set_env_secret_rejects_newline_in_value(tmp_path):
+    """0.9.0 LOW: a newline in the value would inject a second KEY=... line.
+    Reject fail-closed and leave the file untouched."""
+    vault = _point_vault_at(tmp_path)
+    env = vault / ".env"
+    env.write_text("EXISTING=safe\n")
+    with pytest.raises(ValueError, match="newline"):
+        config.set_env_secret("EVIL", "sk-good\nINJECTED=pwned")
+    # File untouched, no injected line, env var not set
+    assert env.read_text() == "EXISTING=safe\n"
+    assert "EVIL" not in config.os.environ
+    assert "INJECTED" not in config.os.environ
+
+
+def test_set_env_secret_rejects_carriage_return_in_value(tmp_path):
+    _point_vault_at(tmp_path)
+    with pytest.raises(ValueError, match="newline"):
+        config.set_env_secret("EVIL", "a\rb")
+
+
+def test_set_env_secret_rejects_equals_in_name(tmp_path):
+    _point_vault_at(tmp_path)
+    with pytest.raises(ValueError, match="name"):
+        config.set_env_secret("BAD=NAME", "value")
+
+
+def test_set_env_secret_allows_equals_in_value(tmp_path):
+    """An '=' in the value is legitimate (base64 padding, query strings).
+    Readers split on the FIRST '=', so it round-trips intact."""
+    vault = _point_vault_at(tmp_path)
+    config.set_env_secret("TOKEN", "abc==def=")
+    env = (vault / ".env")
+    # Re-reading via set_env_secret's own parse must preserve the value.
+    config.set_env_secret("OTHER", "x")
+    body = env.read_text()
+    assert "TOKEN=abc==def=" in body.splitlines()
+
+
+def test_set_env_secret_no_duplicate_keys_on_repeated_set(tmp_path):
+    vault = _point_vault_at(tmp_path)
+    config.set_env_secret("K", "v1")
+    config.set_env_secret("K", "v2")
+    lines = (vault / ".env").read_text().splitlines()
+    assert lines.count("K=v2") == 1
+    assert "K=v1" not in lines

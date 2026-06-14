@@ -169,10 +169,11 @@ def _setup_pool(tmp_path, monkeypatch, *, pool, keys, preset_key="pooled"):
     captured-api_key list. Exercises the REAL runner-call seam (Nemo, hull)."""
     import litellm
 
-    from modulatio import provider_keys
+    from modulatio import provider_keys, runners
 
     monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
     provider_keys._pool_cursor.clear()
+    runners._pool_rr_cursor.clear()  # _rotated_pool_key now owns the RR cursor
     preset = _pooled_preset("TESTPOOL_KEY", pool=pool)
     monkeypatch.setattr("modulatio.model_presets.load_presets",
                         lambda: {preset_key: preset})
@@ -288,11 +289,12 @@ def test_pool_429_failover_retries_with_the_next_key(tmp_path, monkeypatch):
     import litellm
     from litellm.exceptions import RateLimitError
 
-    from modulatio import provider_keys
+    from modulatio import provider_keys, runners
     from modulatio.runners import litellm_runner
 
     monkeypatch.setattr(provider_keys, "LABELS_FILE", tmp_path / "labels.json")
     provider_keys._pool_cursor.clear()
+    runners._pool_rr_cursor.clear()  # _rotated_pool_key owns the RR cursor now
     preset = _pooled_preset("TESTPOOL_KEY", pool=True)
     monkeypatch.setattr("modulatio.model_presets.load_presets",
                         lambda: {"pooled": preset})

@@ -175,17 +175,42 @@ def _build_prompt(
                     f"[vision content blocks land in a future slice]"
                 )
             else:  # document
+                content = att.content or ""
                 parts.append(f"## Attached document: `{att.name}`")
                 parts.append("")
-                parts.append("```")
-                parts.append(att.content or "")
-                parts.append("```")
+                # Fence with a backtick run longer than any run in the
+                # content so a document's own fences can't break out of
+                # the wrapper and bleed into instruction context
+                # (CommonMark info-string rule). Mirrors multimodal.py's
+                # _render_user_text.
+                fence = "`" * (_longest_backtick_run(content) + 1)
+                if len(fence) < 3:
+                    fence = "```"
+                parts.append(fence)
+                parts.append(content)
+                parts.append(fence)
         parts.append("")
     parts.append("# New user message")
     parts.append(message)
     parts.append("")
     parts.append("Respond concisely and helpfully as your role.")
     return "\n".join(parts)
+
+
+def _longest_backtick_run(text: str) -> int:
+    """Return the length of the longest consecutive run of backticks in
+    ``text`` (0 when there are none). Used to size the document fence so
+    a document's own backtick fences can't break out of the wrapper."""
+    longest = 0
+    current = 0
+    for ch in text:
+        if ch == "`":
+            current += 1
+            if current > longest:
+                longest = current
+        else:
+            current = 0
+    return longest
 
 
 def _load_agent_skill_bodies(

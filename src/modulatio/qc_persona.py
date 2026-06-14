@@ -63,7 +63,10 @@ def load_qc_persona(project_code: str | None = None) -> str:
         try:
             if path and path.exists():
                 return _strip_frontmatter(path.read_text(encoding="utf-8")).strip()
-        except OSError:
+        except (OSError, ValueError):
+            # A non-UTF-8 file raises UnicodeDecodeError (a ValueError subclass),
+            # not OSError — degrade to the next candidate rather than crash the
+            # QC review prompt-build, mirroring qc_notes.load_standing_notes.
             continue
     return ""
 

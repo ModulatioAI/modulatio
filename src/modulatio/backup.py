@@ -138,6 +138,18 @@ def _walk_vault(vault_root: Path, code: str) -> tuple[dict[str, str], list[str]]
         if any(part in (".cache", "_proposals", "lance.db") for part in f.parts):
             continue
         rel = str(f.relative_to(project))
+        # Skip files with a dot-prefixed path component (e.g. .obsidian/*).
+        # import_backup validates every captured rel_path with
+        # tools._is_safe_relative_file_arg, which REJECTS any dotfile
+        # component and raises — aborting the WHOLE restore. Capturing such
+        # files here would make the backup un-restorable, so we exclude them
+        # at export time and count them in ``skipped`` so the lossiness is
+        # visible (mirrors the import-side contract; the two halves must
+        # agree). Compared against the project-relative parts so dotted
+        # files anywhere in the tree are caught.
+        if any(part.startswith(".") for part in f.relative_to(project).parts):
+            skipped.append(rel)
+            continue
         try:
             too_big = f.stat().st_size > _MAX_VAULT_FILE_BYTES
         except OSError:

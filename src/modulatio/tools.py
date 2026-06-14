@@ -495,6 +495,16 @@ def _is_safe_file_arg(arg: str, root: Path | None) -> bool:
     # 2026-05-31).
     if arg == "-":
         return False
+    # A leading dash is a flag, not a file. The passive ls/cat/head/tail
+    # branches validate their file args purely through this helper, so a
+    # token like ``-R`` / ``--color=always`` / ``-A`` would otherwise slip
+    # through as a "file" and re-admit recursive / behavior-changing flags
+    # the per-head allowlists are meant to gate. Dedicated flag positions
+    # (e.g. ``head -n``, ``head -5``) are checked with their own
+    # ``startswith('-')`` guards before this helper sees the FILE arg, so
+    # rejecting dash-leading args here costs no legitimate read form.
+    if arg.startswith("-"):
+        return False
     if arg.startswith("/") or arg.startswith("\\"):
         if root is None:
             return False
@@ -520,8 +530,22 @@ def _is_safe_go_target(arg: str, root: Path | None) -> bool:
     """
     if not arg:
         return False
-    # Flag-style args (e.g. ``-json``) are not paths and never leak source.
+    # Flag-style args. A blanket accept here is a hole: ``go vet`` honors
+    # ``-vettool=<binary>`` (which makes go vet EXECUTE that binary — a direct
+    # violation of the no-execution passive contract) and ``-flag=<path>``
+    # shapes whose value is a path that can leak source outside the root.
     if arg.startswith("-"):
+        # ``-vettool`` (and any ``-vettool=...``) execs an arbitrary binary —
+        # never passive. Refuse outright.
+        bare = arg.split("=", 1)[0]
+        if bare in ("-vettool", "--vettool"):
+            return False
+        # ``-flag=value`` — confine the value like a positional target so a
+        # path payload (e.g. ``-tags=../../etc``) can't escape the root. A
+        # value-less flag (``-json``) carries no path and is accepted.
+        if "=" in arg:
+            value = arg.split("=", 1)[1]
+            return _is_safe_go_target(value, root)
         return True
     if arg.startswith("/") or arg.startswith("\\"):
         # An absolute path is only safe if it resolves under root.
@@ -1153,6 +1177,17 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
                     try:
                         stdout, stderr = proc.communicate(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
                     except subprocess.TimeoutExpired:
+                        # A grandchild that re-parented away still holds the
+                        # pipes open; the final communicate() never closed them,
+                        # so close our pipe ends explicitly to avoid leaking fds
+                        # across repeated timeouts (Popen.__del__ is not
+                        # guaranteed to run promptly under the chat loop's GC).
+                        for _pipe in (proc.stdout, proc.stderr):
+                            if _pipe is not None:
+                                try:
+                                    _pipe.close()
+                                except OSError:
+                                    pass
                         stdout, stderr = "", ""
                 stderr = (stderr or "") + f"\n[TIMEOUT after {timeout}s]"
                 return _format_run_shell_result(-1, stdout or "", stderr)

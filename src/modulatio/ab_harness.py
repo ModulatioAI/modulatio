@@ -1254,7 +1254,12 @@ def _read_audit_rows(audit_path: Path) -> list[dict]:
     if not audit_path.exists():
         return []
     rows: list[dict] = []
-    for line in audit_path.read_text(encoding="utf-8").splitlines():
+    # ``errors="replace"`` so a truncated multibyte char (a crash mid-write
+    # to audit.jsonl) degrades to a single unparseable line that is skipped
+    # below, instead of a UnicodeDecodeError that loses the whole replicate.
+    for line in audit_path.read_text(
+        encoding="utf-8", errors="replace"
+    ).splitlines():
         line = line.strip()
         if not line:
             continue
@@ -1274,7 +1279,11 @@ def _read_usage_rows(usage_log_path: Path | None) -> list[dict]:
     if usage_log_path is None or not usage_log_path.exists():
         return []
     rows: list[dict] = []
-    for line in usage_log_path.read_text(encoding="utf-8").splitlines():
+    # ``errors="replace"`` — same robustness posture as _read_audit_rows: a
+    # corrupt byte becomes one skipped line, never a lost replicate.
+    for line in usage_log_path.read_text(
+        encoding="utf-8", errors="replace"
+    ).splitlines():
         line = line.strip()
         if not line:
             continue

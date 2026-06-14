@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Static, TabbedContent, TabPane, TextArea
@@ -231,7 +232,7 @@ class PromptScreen(Vertical):
             att = build_attachment(path, kind=kind)
         except (FileNotFoundError, UnicodeDecodeError) as exc:
             self.query_one("#prompt-response", Static).update(
-                f"[bold red]Attach failed:[/] {exc}"
+                f"[bold red]Attach failed:[/] {escape(str(exc))}"
             )
             return
         self._kickoff_attachments.append(att)
@@ -252,7 +253,7 @@ class PromptScreen(Vertical):
             att = build_attachment(path, kind=kind)
         except (FileNotFoundError, UnicodeDecodeError) as exc:
             self.query_one("#prompt-response", Static).update(
-                f"[bold red]Attach failed:[/] {exc}"
+                f"[bold red]Attach failed:[/] {escape(str(exc))}"
             )
             return
         self._chatbox_attachments.append(att)

@@ -25,14 +25,21 @@ Preserved from v1.3:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import re
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX (Windows): flock is a no-op.
+    fcntl = None  # type: ignore[assignment]
 
 from modulatio import config
 
@@ -60,7 +67,48 @@ def _output_dir() -> Path:
 # the heartbeat background thread, the daemon, and CLI commands may all
 # mutate the queue. Without this lock, a concurrent write can produce a
 # partial/empty JSON file and silently lose every queued task.
+#
+# `_queue_lock` (an in-process RLock) only serializes threads WITHIN one
+# process. The select-and-claim in `claim_next_pending` ALSO has to be
+# exclusive ACROSS processes — a daemon tick and a separate `modulatio
+# heartbeat run-once` CLI invocation are distinct OS processes sharing the
+# same on-disk queue, and an RLock cannot see across that boundary. For the
+# claim we additionally hold a POSIX `flock` on a sidecar lock file, which
+# attaches to the open file description and therefore serializes across both
+# threads and processes. This mirrors the comptroller-ledger / compaction
+# flock idiom already used elsewhere in the engine.
 _queue_lock = threading.RLock()
+
+
+def _claim_lock_file() -> Path:
+    return _queue_file().with_suffix(".json.lock")
+
+
+@contextlib.contextmanager
+def _cross_process_claim_lock() -> Iterator[None]:
+    """Hold an exclusive POSIX ``flock`` across the select-and-claim window.
+
+    A fresh fd is opened per acquisition so the exclusive lock serializes
+    across both threads and processes (``flock`` attaches to the open file
+    description, not the process). POSIX-only: when ``fcntl`` is unavailable
+    (Windows) the lock is a no-op — the in-process ``_queue_lock`` still
+    serializes the single-process case (mirrors the compaction-lock posture).
+    """
+    if fcntl is None:  # pragma: no cover — non-POSIX no-op
+        yield
+        return
+    lock_path = _claim_lock_file()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:  # pragma: no cover — best-effort release
+            pass
+        os.close(fd)
 
 
 def _load_queue() -> list:
@@ -206,6 +254,32 @@ def update_task(task_id: str, **updates) -> Optional[dict]:
         return None
 
 
+def finalize_task(task_id: str, **updates) -> Optional[dict]:
+    """Write a terminal result (done/failed) UNLESS the task was cancelled
+    out-of-band mid-dispatch.
+
+    ``_run_task`` dispatches a claimed task (status ``running``) and then writes
+    its outcome. If an operator cancels that task while it is in flight (a
+    ``cancel_task`` flips it to ``cancelled`` under the lock), a plain
+    ``update_task(status="done"/"failed")`` would clobber that cancel and
+    resurrect the task into a terminal-but-not-cancelled state. This reads the
+    current status under the queue lock and skips the write when the task has
+    already been moved to ``cancelled``, so the operator's intent wins the race.
+    Returns the task (updated, or left as-is if already cancelled), or None if
+    the task no longer exists.
+    """
+    with _queue_lock:
+        tasks = _load_queue()
+        for t in tasks:
+            if t.get("id") == task_id:
+                if t.get("status") == "cancelled":
+                    return t
+                t.update(updates)
+                _save_queue(tasks)
+                return t
+        return None
+
+
 def cancel_task(task_id: str) -> bool:
     """Mark a task as cancelled. Returns True if found + updated."""
     return update_task(task_id, status="cancelled", completed=_now_iso()) is not None
@@ -282,11 +356,18 @@ def _select_next_pending(all_tasks: list) -> Optional[dict]:
                 if now < datetime.fromisoformat(nr):
                     continue
             except (ValueError, TypeError):
+                # An unparseable next_run must NOT be treated as eligible-now:
+                # a recurring task whose schedule stamp got corrupted would
+                # then dispatch immediately on every tick, silently bypassing
+                # (and busy-looping) its recurrence. Fail closed — skip it so a
+                # human/recovery path can inspect the bad stamp rather than the
+                # daemon firing it perpetually.
                 logger.warning(
-                    "Task %s: unparseable next_run=%r; running now",
+                    "Task %s: unparseable next_run=%r; skipping (not eligible)",
                     t.get("id"),
                     nr,
                 )
+                continue
         deps = t.get("depends_on") or []
         if deps:
             blocked = False
@@ -330,18 +411,27 @@ def claim_next_pending() -> Optional[dict]:
     Holding the lock across the read-decide-write makes the claim exclusive:
     the loser re-reads the queue, sees the task already ``running``, and
     selects a different one (or None).
+
+    Because the daemon and the CLI are separate OS processes, the in-process
+    ``_queue_lock`` alone cannot make the claim exclusive across them — so the
+    read-decide-write is ALSO wrapped in a cross-process POSIX ``flock``
+    (``_cross_process_claim_lock``). The flock is acquired OUTSIDE the RLock to
+    keep a single, consistent lock-acquisition order everywhere (no path nests
+    these two in the opposite order), so it cannot deadlock against another
+    queue operation.
     """
-    with _queue_lock:
-        tasks = _load_queue()
-        task = _select_next_pending(tasks)
-        if task is None:
-            return None
-        task["status"] = "running"
-        task["started"] = _now_iso()
-        _save_queue(tasks)
-        # Return a copy so a caller mutating the dict can't corrupt the
-        # just-saved on-disk state out-of-band.
-        return dict(task)
+    with _cross_process_claim_lock():
+        with _queue_lock:
+            tasks = _load_queue()
+            task = _select_next_pending(tasks)
+            if task is None:
+                return None
+            task["status"] = "running"
+            task["started"] = _now_iso()
+            _save_queue(tasks)
+            # Return a copy so a caller mutating the dict can't corrupt the
+            # just-saved on-disk state out-of-band.
+            return dict(task)
 
 
 # === Recurrence ===
@@ -552,7 +642,7 @@ class Heartbeat:
                 # Bump retries; remain pending so next tick picks it up.
                 update_task(task["id"], retries=retries, status="pending", started=None)
             else:
-                update_task(
+                finalize_task(
                     task["id"],
                     status="failed",
                     completed=_now_iso(),
@@ -567,12 +657,17 @@ class Heartbeat:
         except Exception as e:
             logger.warning("Heartbeat task %s: output save failed: %s", task["id"], e)
             output_path = None
-        update_task(
+        finalized = finalize_task(
             task["id"],
             status="done",
             completed=_now_iso(),
             result=str(output_path) if output_path else result[:200],
         )
+        # If the task was cancelled out-of-band mid-dispatch, finalize_task
+        # left it cancelled — honor that intent and do NOT spin up the next
+        # recurring instance (a cancel of the running slot ends the chain).
+        if finalized is not None and finalized.get("status") == "cancelled":
+            return finalized
         # Recurrence: queue the next instance
         try:
             requeue_recurring(task)
@@ -587,6 +682,7 @@ __all__ = [
     "get_task",
     "list_tasks",
     "update_task",
+    "finalize_task",
     "cancel_task",
     "clear_done",
     "next_pending",

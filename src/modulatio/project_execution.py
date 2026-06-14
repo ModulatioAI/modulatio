@@ -985,6 +985,18 @@ def start_execution(
                 ),
             )
 
+        # Resume state authority: from here on use ``fresh`` (the
+        # under-lock reload), NOT the pre-lock ``plan`` snapshot loaded
+        # at the top of the function. Under a daemon race the pre-lock
+        # snapshot can be stale — a concurrent claimer may have advanced
+        # current_index / appended kickoffs / accumulated token+cost
+        # totals before we won the lock. Resuming from the stale plan
+        # would re-run already-completed sub-objectives and reset the
+        # budget tracker to an earlier total (double-counting). The CAS
+        # above guarantees nobody else holds the lock now; fresh is the
+        # authoritative state for the rest of this run.
+        plan = fresh
+
         # Stamp execution_started_at FIRST, then flip status to
         # 'executing'. Order matters: if we crash between the two writes
         # plan stays in 'approved' with started_at populated — re-scan
@@ -1931,7 +1943,16 @@ def tick(
         return []
 
     results: list[ExecutionResult] = []
-    for code, record in discovered[:max_per_tick]:
+    # Cap AFTER the staleness skip, not before: if we sliced
+    # ``discovered[:max_per_tick]`` first, a stale lowest-id plan
+    # (already claimed by another daemon since the scan) would consume
+    # the slot and the tick would do no real work — starving every
+    # other approved plan that iteration. Instead walk the full ordered
+    # list, skip stale entries, and stop once ``max_per_tick`` plans
+    # have actually been dispatched.
+    for code, record in discovered:
+        if len(results) >= max_per_tick:
+            break
         # TOCTOU guard: another daemon (or a manual `modulatio kickoff`)
         # may have claimed the plan since `find_approved_plans` scanned.
         # Reload status from disk and skip if it's no longer 'approved'.
@@ -1957,9 +1978,12 @@ def tick(
             project = project_loader(code)
         except Exception as exc:
             # Couldn't construct project — log via the result and skip.
+            # The plan never started: report its real on-disk status
+            # (still 'approved' — we hold the freshest read above) rather
+            # than a misleading 'executing' the dispatch never reached.
             results.append(ExecutionResult(
                 plan_id=record.id, project_code=code,
-                final_status="executing",
+                final_status=fresh.status,
                 sub_objectives_completed=record.current_index,
                 sub_objectives_total=_plan_total,
                 error=f"project_loader failed: {exc}",
@@ -1968,9 +1992,11 @@ def tick(
         try:
             runners = runners_for(project)
         except Exception as exc:
+            # Same as the loader-failure path: the plan never started, so
+            # report its real on-disk status, not a hardcoded 'executing'.
             results.append(ExecutionResult(
                 plan_id=record.id, project_code=code,
-                final_status="executing",
+                final_status=fresh.status,
                 sub_objectives_completed=record.current_index,
                 sub_objectives_total=_plan_total,
                 error=f"runners_for failed: {exc}",

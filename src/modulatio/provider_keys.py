@@ -87,13 +87,16 @@ def list_keys(base_env_var: str) -> list[KeySlot]:
     with index / env_var / label / is_set; never the value."""
     labels = _load_labels()
     pins = _load_pins()
+    # Snapshot env names once: a concurrent config edit can mutate os.environ
+    # mid-scan ("dict changed size during iteration").
+    env_names = list(os.environ.keys())
     indices: set[int] = set()
     # #1 — the base var, if set or labelled
     if os.environ.get(base_env_var) or base_env_var in labels:
         indices.add(1)
     # #2.. — scan env + labels for "<base>_<digits>"
     prefix = base_env_var + "_"
-    for source in (os.environ.keys(), labels.keys()):
+    for source in (env_names, labels.keys()):
         for name in source:
             if name.startswith(prefix):
                 suffix = name[len(prefix):]

@@ -51,6 +51,20 @@ def _log_file() -> Path:
     return config.CONFIG_DIR / "daemon.log"
 
 
+def _open_log_for_append():
+    """Open the daemon log for append, ensuring CONFIG_DIR exists first.
+
+    On a fresh install ``~/.config/modulatio/`` may not yet exist — nothing in
+    the daemon-start path or config.py mkdirs it. Opening ``_log_file()`` for
+    append before the directory exists raises FileNotFoundError; that happens
+    inside the forked child AFTER the parent already returned the (now-doomed)
+    pid, so ``daemon on`` would report success while the daemon silently dies.
+    Create the directory first so the log open always succeeds on a clean box.
+    """
+    config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    return open(_log_file(), "a", buffering=1)
+
+
 # === Lifecycle (CLI-facing) ===
 
 def is_running() -> bool:
@@ -112,7 +126,7 @@ def start(*, stub: bool = True) -> int:
     # controlling-terminal fds they hold) leak for the daemon's lifetime.
     _old_stdin, _old_stdout, _old_stderr = sys.stdin, sys.stdout, sys.stderr
     _new_stdin = open(os.devnull, "r")
-    _new_stdout = open(_log_file(), "a", buffering=1)
+    _new_stdout = _open_log_for_append()
     sys.stdin = _new_stdin
     sys.stdout = _new_stdout
     sys.stderr = _new_stdout
@@ -220,6 +234,11 @@ def _signal_handler(signum, _frame):
 
 
 def _run_daemon(*, stub: bool) -> None:
+    # Clear any leftover shutdown state from a prior run in this process.
+    # _shutdown is a module-global Event; a fork-free re-invocation (tests,
+    # or an in-process restart) would otherwise inherit a set() flag and exit
+    # the loop immediately. Idempotent in the normal forked-child path.
+    _shutdown.clear()
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 

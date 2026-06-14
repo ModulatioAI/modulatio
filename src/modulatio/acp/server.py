@@ -172,6 +172,10 @@ class ACPServer:
             ok, value = self._pending.wait(rid, timeout)
             return value if ok else None
         finally:
+            # If write_message raised before wait() popped the slot, wait()
+            # never ran and the _pending slot would leak. wait(rid, 0) pops it
+            # immediately and is a harmless no-op when already popped (M, leak).
+            self._pending.wait(rid, 0)
             if sid is not None:
                 with self._session_pending_lock:
                     ids = self._session_pending.get(sid)
@@ -214,6 +218,13 @@ class ACPServer:
                 # that client blocks forever awaiting a response that, by the
                 # notification contract, would never come.
                 self._cancel(params)
+                if req_id is not None:
+                    self._respond(req_id, None)
+            elif method == "session/close":
+                # Explicit teardown signal: drop the session so _sessions /
+                # _session_pending don't grow unbounded across a long-lived
+                # server (cancel keeps a session reusable; close ends it).
+                self._close(params)
                 if req_id is not None:
                     self._respond(req_id, None)
             elif req_id is not None:
@@ -290,6 +301,22 @@ class ACPServer:
             ids = list(self._session_pending.get(sid, ()))
         for rid in ids:
             self._pending.resolve(rid, None)
+
+    def _close(self, params: dict) -> None:
+        """Tear down a session on an explicit ``session/close``: unblock any of
+        its in-flight permission/input requests (fail-closed), then drop it from
+        ``_sessions`` and ``_session_pending`` so neither grows unbounded over a
+        long-lived server. A still-running prompt worker's finally is a no-op on
+        an already-dropped session."""
+        sid = params.get("sessionId")
+        session = self._sessions.get(sid)
+        if session is not None:
+            session.cancelled = True
+        with self._session_pending_lock:
+            ids = list(self._session_pending.pop(sid, ()))
+        for rid in ids:
+            self._pending.resolve(rid, None)
+        self._sessions.pop(sid, None)
 
     # ── real Orchestrator construction (mirrors the TUI converse path) ───
     def _build_orchestrator(self, session: ACPSession):

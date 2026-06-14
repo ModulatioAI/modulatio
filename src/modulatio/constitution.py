@@ -55,7 +55,11 @@ def load_constitution(project_code: str | None = None) -> str:
         try:
             if path and path.exists():
                 return _strip_frontmatter(path.read_text(encoding="utf-8")).strip()
-        except OSError:
+        except (OSError, ValueError):
+            # OSError = unreadable file; ValueError covers UnicodeDecodeError
+            # (a non-UTF-8 byte in a user-editable constitution) so a broken
+            # file degrades to the next candidate rather than crashing the
+            # Leader's prompt-build. Mirrors qc_notes.load_standing_notes.
             continue
     return ""
 

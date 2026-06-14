@@ -67,3 +67,76 @@ def test_app_commands_preserves_textual_defaults():
     # Every default Textual provider should still be registered.
     for provider in App.COMMANDS:
         assert provider in ModulatioApp.COMMANDS
+
+
+# ─── Tab-switch callback (pre-ship regression) ──────────────────────────────
+
+
+class _FakeTabbedContent:
+    def __init__(self) -> None:
+        self.active: str | None = None
+
+
+class _MultiTabbedApp:
+    """Mimics the composed TUI DOM where several TabbedContent widgets
+    coexist (#app-tabs, #console-streams, #config-flip).
+
+    query_one(Type) with no id raises TooManyMatches, exactly as Textual
+    does — so the callback must scope by the #app-tabs id to work.
+    """
+
+    def __init__(self) -> None:
+        self.app_tabs = _FakeTabbedContent()
+
+    def query_one(self, selector, expect_type=None):  # noqa: ANN001
+        from textual.css.query import TooManyMatches
+
+        if expect_type is not None and not isinstance(selector, str):
+            # Bare query_one(TabbedContent) — ambiguous in the real tree.
+            raise TooManyMatches(
+                "multiple TabbedContent widgets present"
+            )
+        if selector == "#app-tabs":
+            return self.app_tabs
+        raise AssertionError(f"unexpected selector {selector!r}")
+
+
+def _switch_callback_for(tab_id: str):
+    """Build the _switch_to_tab callback for a given tab id without a
+    live Textual app, by driving _make_hit directly."""
+
+    class _StubMatcher:
+        def highlight(self, label):  # noqa: ANN001
+            return label
+
+    provider = ModulatioCommands.__new__(ModulatioCommands)
+    hit = provider._make_hit(
+        score=1.0,
+        label="Switch",
+        tab_id=tab_id,
+        help_text="help",
+        matcher=_StubMatcher(),
+    )
+    return hit.command, provider
+
+
+def test_switch_to_tab_scopes_to_app_tabs_not_bare_type():
+    """The tab-switch callback must target #app-tabs, not a bare
+    query_one(TabbedContent) — the latter raises TooManyMatches in the
+    composed tree, silently no-op'ing the command (#27 pre-ship)."""
+    fake_app = _MultiTabbedApp()
+    callback, provider = _switch_callback_for("tab-cron")
+
+    # Provider.app resolves via self.__screen.app (name-mangled). Wire a
+    # minimal screen stub so the callback's self.app is our fake app.
+    class _ScreenStub:
+        def __init__(self, app):  # noqa: ANN001
+            self.app = app
+
+    provider._Provider__screen = _ScreenStub(fake_app)
+
+    # If the callback used a bare query_one(TabbedContent), the
+    # TooManyMatches would be swallowed and active would stay None.
+    callback()
+
+    assert fake_app.app_tabs.active == "tab-cron"

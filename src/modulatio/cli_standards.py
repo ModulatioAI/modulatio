@@ -32,13 +32,25 @@ def list_cmd(
 ) -> None:
     """List pending proposals for a project. One line per proposal:
     id, domain, title. Empty when nothing is pending."""
-    proposals = standards_proposals.list_proposals(code)
-    ids = standards_proposals.list_ids(code)
-    if not proposals:
+    # Single directory scan so each id (filename stem) stays paired with the
+    # proposal parsed from that same file. Calling list_proposals() and
+    # list_ids() separately re-globs the dir twice; a proposal staged or
+    # resolved between the two scans would misalign the zip and print a wrong
+    # id next to a body (the operator would then approve/reject the wrong
+    # file). A file vanishing mid-scan is tolerated (skipped), not crashed.
+    pairs: list[tuple[str, standards_proposals.Proposal]] = []
+    root = standards_proposals._proposals_dir(code)
+    if root.exists():
+        for path in sorted(root.glob("*.md")):
+            try:
+                pairs.append((path.stem, standards_proposals._parse_file(path)))
+            except FileNotFoundError:
+                continue
+    if not pairs:
         typer.echo(f"No pending proposals for project {code}.")
         return
     typer.echo(f"Pending standards proposals for {code}:")
-    for pid, p in zip(ids, proposals):
+    for pid, p in pairs:
         typer.echo(f"  [{pid}] ({p.domain}) {p.title}")
         if p.rationale:
             typer.echo(f"      rationale: {p.rationale}")

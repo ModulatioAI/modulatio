@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -106,8 +107,20 @@ def _quarantine_corrupt(path: Path, exc: Exception) -> None:
         broken = path.with_suffix(".broken.md")
         if broken.exists():
             # Keep an existing quarantine record; stamp this one uniquely so
-            # repeated reads of the same still-corrupt name don't collide.
-            broken = path.with_suffix(f".broken.{int(_utcnow().timestamp())}.md")
+            # repeated reads of the same still-corrupt name don't collide. A
+            # second-resolution timestamp is NOT collision-proof — two distinct
+            # corrupt files quarantined in the same wall-clock second would pick
+            # the same name and one would silently overwrite (clobber) the
+            # other's preserved bytes. Use a short random token and probe for a
+            # free name so every quarantine keeps its own record.
+            for _ in range(64):
+                token = secrets.token_hex(4)
+                candidate = path.with_suffix(f".broken.{token}.md")
+                if not candidate.exists():
+                    broken = candidate
+                    break
+            else:  # pragma: no cover - astronomically unlikely 64x collision
+                broken = path.with_suffix(f".broken.{secrets.token_hex(8)}.md")
         path.rename(broken)
     except OSError as move_exc:  # pragma: no cover - best-effort cleanup
         _log.warning("could not quarantine %s: %s", path, move_exc)
@@ -180,8 +193,13 @@ def _read_entity(path: Path, model: type[BaseModel]) -> BaseModel | None:
     try:
         # read_text is INSIDE the try: a binary / non-UTF-8 file raises
         # UnicodeDecodeError (a ValueError ∈ _PARSE_ERRORS), which must flow to
-        # quarantine — not escape and brick the whole listing.
-        text = _normalize_entity_text(path.read_text())
+        # quarantine — not escape and brick the whole listing. Read with the
+        # SAME explicit utf-8 the writer uses (_write_entity opens the temp file
+        # encoding='utf-8'); without it read_text defaults to the process locale
+        # (ASCII under a bare C/POSIX cron/systemd env), so a well-formed utf-8
+        # entity carrying any non-ASCII byte (em-dash, accented agent name,
+        # curly quote) would falsely UnicodeDecodeError and be quarantined.
+        text = _normalize_entity_text(path.read_text(encoding="utf-8"))
         meta, body = _split_frontmatter(text)
         body, transitions = _extract_transitions(body)
         data = {**meta, "transitions": [t.model_dump() for t in transitions]}
@@ -248,9 +266,20 @@ def _next_ticket_number(code: str, run_id: str | None = None) -> int:
         return 1
     highest = 0
     prefix = f"{code.upper()}-"
-    for p in d.glob(f"{prefix}*.md"):
-        stem = p.stem
-        tail = stem[len(prefix):]
+    # Glob the broader '{prefix}*' (not just '*.md') so QUARANTINED siblings
+    # count too: a corrupt 'TST-5.md' is renamed to 'TST-5.broken.md' (or
+    # 'TST-5.broken.<ts>.md'), whose stem 'TST-5.broken' fails .isdigit() and
+    # would otherwise drop the highest number — letting the next create reuse
+    # ID TST-5 and clobber the operator's preserved-but-broken record. Strip a
+    # trailing '.broken[.<ts>]' before the digit check so the number is honored.
+    for p in d.glob(f"{prefix}*"):
+        tail = p.name[len(prefix):]
+        # Peel the canonical '.md' suffix and any quarantine '.broken[.<ts>].md'
+        # decoration down to the bare numeric tail.
+        if tail.endswith(".md"):
+            tail = tail[: -len(".md")]
+        if ".broken" in tail:
+            tail = tail.split(".broken", 1)[0]
         if tail.isdigit():
             highest = max(highest, int(tail))
     return highest + 1
@@ -388,6 +417,40 @@ def update_ticket_approval(
                 # the ticket update. Keeps the ticket layer working
                 # even if a plan was deleted out of band.
                 pass
+            except Exception as plan_exc:
+                # The ticket is ALREADY committed RESOLVED on disk (line ~355).
+                # If the plan flip blows up with anything else — a corrupt /
+                # un-parseable plan file (pydantic ValidationError = ValueError),
+                # set_status raising ValueError on a disallowed transition, a
+                # RuntimeError if the plan vanished mid-write — letting it
+                # propagate leaves the ticket RESOLVED but the plan unflipped
+                # AND raises out of update_ticket_approval, so the caller can't
+                # tell the decision half-landed. Tolerate it the same way
+                # FileNotFoundError is tolerated, but record an audit transition
+                # noting the un-reconciled plan so the divergence is legible and
+                # recoverable rather than silent.
+                _log.warning(
+                    "ticket %s decided %s but linked plan %s flip failed "
+                    "(%s: %s); ticket stays RESOLVED, plan unreconciled",
+                    ticket_id, decision, ticket.affected_plan_id,
+                    type(plan_exc).__name__, plan_exc,
+                )
+                ticket.transitions.append(
+                    StateTransition(
+                        from_state=TicketStatus.RESOLVED.value,
+                        to_state=TicketStatus.RESOLVED.value,
+                        actor="system",
+                        rationale=(
+                            f"linked plan {ticket.affected_plan_id} flip failed "
+                            f"({type(plan_exc).__name__}); plan left unreconciled"
+                        ),
+                    )
+                )
+                ticket.updated_at = _utcnow()
+                _write_entity(
+                    _ticket_path(project_code, ticket_id, run_id=run_id),
+                    ticket, ticket.body,
+                )
 
         return ticket
 

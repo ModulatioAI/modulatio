@@ -26,6 +26,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from modulatio.export import ExportError, ExportFormat, export_artifact
+from modulatio.review_ledger import (
+    _FORMAT_MAGIC,
+    _FTYP_EXTS,
+    verify_declared_format,
+)
 
 #: Default finished-product format. Producers write Markdown; the engine
 #: renders to this. DOCX is the chosen default (editable, wraps correctly,
@@ -268,6 +273,15 @@ def _looks_binary(source: Path) -> bool:
         return True
 
 
+def _is_signatured_format(source: Path) -> bool:
+    """True iff ``source``'s extension declares a format with a known magic
+    signature (the shared ``review_ledger`` fabrication-gate scope). Used to
+    distinguish a real, already-rendered deliverable from a Markdown blob merely
+    *named* with a doc extension — the latter has no signature and must render."""
+    ext = source.suffix.lower().lstrip(".")
+    return ext in _FORMAT_MAGIC or ext in _FTYP_EXTS
+
+
 def _is_prose_source(source: Path) -> bool:
     """True iff ``source`` should flow through the Markdown render path. Prose
     means: a text/markdown extension, OR a doc extension (``.pdf``/``.docx``)
@@ -276,6 +290,20 @@ def _is_prose_source(source: Path) -> bool:
     so delivery copies its bytes verbatim instead of corrupting them."""
     if source.suffix.lower() not in _PROSE_SUFFIXES:
         return False
+    # A genuinely-rendered deliverable that DECLARES a known format must ship
+    # verbatim, not be re-rendered. ``_looks_binary`` catches the binary doc
+    # formats (``.pdf``/``.docx``/``.odt`` — NUL bytes or non-UTF-8), but a
+    # TEXT-based rendered format (RTF, ``{\rtf1\ansi...}``: pure ASCII, no NUL,
+    # valid UTF-8) sails past it and would be corrupted by a second render.
+    # Gate those on the format's own magic signature: if the extension is a
+    # declared rendered format AND the bytes carry that format's signature, it
+    # is a real, already-rendered deliverable — NOT prose. A Markdown blob
+    # merely *named* ``.rtf`` lacks the ``{\rtf`` signature, so
+    # ``verify_declared_format`` returns False for it and it still renders.
+    if _is_signatured_format(source):
+        ok_format, _ = verify_declared_format(source)
+        if ok_format:
+            return False
     return not _looks_binary(source)
 
 

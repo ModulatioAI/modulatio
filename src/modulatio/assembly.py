@@ -1030,7 +1030,11 @@ def _merge_csv(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[st
                 seen: set[str] = set()
                 out: list[list[str]] = []
                 for r in rows:
-                    key = _dedupe_key("\x00".join(r))
+                    # Serialize the row as a list so field boundaries are
+                    # unambiguous: a NUL-join collides differently-shaped values
+                    # (``["a\x00b","c"]`` and ``["a","b\x00c"]`` both yield
+                    # ``a\x00b\x00c``). json.dumps escapes/encodes each cell.
+                    key = _dedupe_key(json.dumps(r))
                     if key not in seen:
                         seen.add(key)
                         out.append(r)
@@ -1232,20 +1236,26 @@ def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path
             return out, f"rendered .{fmt} via pandoc"
         if fmt == "pdf":
             docx_tmp = _media_out(artifacts_root, ".docx")
-            _run_doc_tool(["pandoc", str(src), "-o", str(docx_tmp)], tool="pandoc")
+            # libreoffice writes ``<docx_stem>.pdf`` into artifacts_root. Name it up
+            # front so a partial/garbage PDF left behind by a soffice failure (or an
+            # over-cap output) is always unlinked on the failure path, not orphaned
+            # to pollute artifact scans (mirrors the pandoc-direct branch hygiene).
+            pdf_out = docx_tmp.with_suffix(".pdf")
             try:
                 _run_doc_tool(
                     ["soffice", "--headless", "--convert-to", "pdf",
                      "--outdir", str(artifacts_root), str(docx_tmp)],
                     tool="libreoffice",
                 )
-                pdf_out = docx_tmp.with_suffix(".pdf")
                 if not pdf_out.is_file():
                     raise _DocToolError("libreoffice produced no PDF")
                 _check_output_size(pdf_out)
-                return pdf_out, "rendered .pdf via pandoc+libreoffice"
+            except (_DocToolError, _MediaToolError):
+                pdf_out.unlink(missing_ok=True)
+                raise
             finally:
                 docx_tmp.unlink(missing_ok=True)
+            return pdf_out, "rendered .pdf via pandoc+libreoffice"
         raise _DocToolError(f"unsupported document render format {fmt!r}")
     finally:
         src.unlink(missing_ok=True)
