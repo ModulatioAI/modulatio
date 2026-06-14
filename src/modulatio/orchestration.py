@@ -4667,7 +4667,7 @@ class Orchestrator:
                 agent_id=agent_id,
             )
             try:
-                with transcript_path.open("a") as f:
+                with transcript_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({
                         "task_id": task_id,
                         "role": role,
@@ -4789,7 +4789,7 @@ class Orchestrator:
         path.parent.mkdir(parents=True, exist_ok=True)
         existed = path.exists()
         fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a") as f:
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps({
                 "role": role,
                 "content": _redact_secrets(content),
@@ -11923,6 +11923,11 @@ class Orchestrator:
                 TaskStatus.QC_REJECTED,
                 TaskStatus.ABANDONED,
             }
+            # Live status of this goal's CROSS-GOAL deps (prior goals' tasks), so
+            # the sequential fallback cascade-blocks on a terminal-FAILED
+            # prior-goal input — the third execution path joining the wave
+            # executor and the resume gate (#1437 / #11951).
+            cross_goal_status = self._cross_goal_dep_status(tasks)
             # Core rebuild B4: when the concurrent wave executor is enabled
             # (default ON since §5 — kill-switch MODULATIO_CONCURRENT_WAVES=0
             # forces sequential), it runs ALL of this goal's tasks in parallel
@@ -11948,12 +11953,10 @@ class Orchestrator:
                     store.save_task(self.project.code, t, run_id=self.project.run_id)
                     continue
 
-                # Slice #7a: cascade dep failure to successor.
-                failed_deps = [
-                    dep_id for dep_id in t.depends_on
-                    if task_map.get(dep_id) is not None
-                    and task_map[dep_id].status in _TERMINAL_FAIL
-                ]
+                # Slice #7a: cascade dep failure to successor — including a
+                # CROSS-GOAL dep (a prior goal's task) that terminal-FAILED,
+                # via the shared _dep_failed gate (#11951).
+                failed_deps = _dep_failed(t, task_map, cross_goal_status)
                 if failed_deps:
                     t.transitions.append(
                         StateTransition(

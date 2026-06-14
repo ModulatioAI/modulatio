@@ -254,7 +254,7 @@ def _append_ledger(project_code: str, cost_class: str, agent_id: str) -> None:
     ledger = _ledger_path(project_code)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with ledger.open("a") as f:
+    with ledger.open("a", encoding="utf-8") as f:
         f.write(f"{ts} {cost_class} {agent_id}\n")
 
 
@@ -463,7 +463,7 @@ def _append_metered_ledger(
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     # agent_id/task_id/key are single-token by construction (ids + a hex hash); no
     # spaces, so the space-delimited scan stays unambiguous.
-    with ledger.open("a") as f:
+    with ledger.open("a", encoding="utf-8") as f:
         f.write(f"{ts} metered {cost_class} {agent_id} {task_id} {idempotency_key}\n")
 
 

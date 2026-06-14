@@ -62,7 +62,7 @@ def _open_log_for_append():
     Create the directory first so the log open always succeeds on a clean box.
     """
     config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    return open(_log_file(), "a", buffering=1)
+    return open(_log_file(), "a", buffering=1, encoding="utf-8")
 
 
 # === Lifecycle (CLI-facing) ===

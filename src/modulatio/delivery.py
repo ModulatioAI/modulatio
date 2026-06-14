@@ -369,7 +369,7 @@ def deliver_product(
     # PROSE: render through a ``.md`` temp so pandoc always treats the producer's
     # content as Markdown, regardless of the artifact's on-disk extension
     # (a deliverable the Leader named ``report.pdf`` is still Markdown text).
-    text = source_md.read_text(errors="replace")
+    text = source_md.read_text(encoding="utf-8", errors="replace")
     name = human_name_from_markdown(text, fallback=fallback_name or task_id)
     ext = "md" if fmt == "markdown" else fmt
     dest = dest_dir / f"{name}.{ext}"

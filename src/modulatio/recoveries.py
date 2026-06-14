@@ -340,7 +340,7 @@ def record_recovery(
     )
     p = _log_path(project_code)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a") as f:
+    with p.open("a", encoding="utf-8") as f:
         f.write(json.dumps(asdict(rec)) + "\n")
     return rec
 
@@ -399,7 +399,7 @@ def mark_consumed(project_code: str, entry_ids) -> None:
     have = consumed_ids(project_code)
     new = [e for e in ids if e not in have]
     if new:
-        with p.open("a") as f:
+        with p.open("a", encoding="utf-8") as f:
             for e in new:
                 f.write(e + "\n")
 

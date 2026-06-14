@@ -178,7 +178,7 @@ def write_secret_file(path: Path, content: str) -> None:
         dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)
         os.replace(tmp_name, str(path))
     except Exception:

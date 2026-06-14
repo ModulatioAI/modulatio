@@ -187,7 +187,7 @@ def persist_raw_result(call_id: str, text: str, tool_calls_dir: Path) -> Path:
         candidate, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600,
     )
     try:
-        with _os.fdopen(fd, "w") as fh:
+        with _os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
     except Exception:
         try:

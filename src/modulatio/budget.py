@@ -127,7 +127,7 @@ class BudgetTracker:
                 "cost_total": round(self.cost_usd_used, 6),
             }
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.log_path.open("a") as f:
+            with self.log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
         except OSError:
             # Filesystem unavailable / permission denied / disk full —

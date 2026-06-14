@@ -226,7 +226,7 @@ def _plan_lock(plan_id: str, project_code: str, *, timeout: float | None = None)
 
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.touch()
-    fh = open(lock_path, "w")
+    fh = open(lock_path, "w", encoding="utf-8")
     try:
         deadline = time.monotonic() + timeout
         while True:

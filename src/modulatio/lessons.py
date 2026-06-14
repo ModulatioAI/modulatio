@@ -60,7 +60,7 @@ def mark_consumed(project_code: str, entry_ids) -> None:
     have = consumed_ids(project_code)
     new = [e for e in ids if e not in have]
     if new:
-        with p.open("a") as f:
+        with p.open("a", encoding="utf-8") as f:
             for e in new:
                 f.write(e + "\n")
 

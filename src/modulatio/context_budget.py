@@ -470,7 +470,7 @@ def write_checkpoint(
         path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
     )
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, default=str)
     except Exception:
         # If the write fails partway, ensure the partial file isn't

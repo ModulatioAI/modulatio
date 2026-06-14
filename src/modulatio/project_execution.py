@@ -751,7 +751,7 @@ def _append_audit_entries(
         path = _run_dir(project_code, run_id) / "audit.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now(timezone.utc).isoformat()
-        with path.open("a") as fh:
+        with path.open("a", encoding="utf-8") as fh:
             for entry in entries:
                 payload = dict(entry)
                 payload.setdefault("timestamp", now)
