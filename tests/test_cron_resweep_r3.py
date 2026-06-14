@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from modulatio import config, cron
+from tests._thread_check import run_threads_checked
 
 
 @pytest.fixture(autouse=True)
@@ -75,9 +76,7 @@ def test_add_holds_cross_process_lock_during_rmw(monkeypatch):
         def probe():
             result["blocked"] = _nonblocking_flock_is_blocked()
 
-        t = threading.Thread(target=probe)
-        t.start()
-        t.join()
+        run_threads_checked([probe])
         observed["blocked_during_save"] = result["blocked"]
         return real_save(jobs)
 
@@ -98,9 +97,7 @@ def test_update_holds_cross_process_lock_during_rmw(monkeypatch):
         def probe():
             result["blocked"] = _nonblocking_flock_is_blocked()
 
-        t = threading.Thread(target=probe)
-        t.start()
-        t.join()
+        run_threads_checked([probe])
         observed["blocked_during_save"] = result["blocked"]
         return real_save(jobs)
 
@@ -121,9 +118,7 @@ def test_remove_holds_cross_process_lock_during_rmw(monkeypatch):
         def probe():
             result["blocked"] = _nonblocking_flock_is_blocked()
 
-        t = threading.Thread(target=probe)
-        t.start()
-        t.join()
+        run_threads_checked([probe])
         observed["blocked_during_save"] = result["blocked"]
         return real_save(jobs)
 
@@ -150,12 +145,18 @@ def test_dispatch_due_does_not_deadlock_on_nested_update(monkeypatch):
 
     result = {}
 
+    _errs = []
+
     def run():
-        result["fired"] = cron.dispatch_due()
+        try:
+            result["fired"] = cron.dispatch_due()
+        except BaseException as _e:  # noqa: BLE001 — surface to assert, no ghost warning
+            _errs.append(_e)
 
     t = threading.Thread(target=run)
     t.start()
     t.join(timeout=10)
+    assert not _errs, f"dispatch_due thread raised: {_errs!r}"
     assert not t.is_alive(), "dispatch_due deadlocked on the nested update flock"
     assert len(result["fired"]) == 1
 

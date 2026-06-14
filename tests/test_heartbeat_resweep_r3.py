@@ -99,15 +99,20 @@ def test_queue_file_never_torn_under_concurrent_writers(tmp_path):
     qf = heartbeat._queue_file()
     stop = threading.Event()
     torn = []
+    _terrs = []
 
     def writer():
-        while not stop.is_set():
-            heartbeat.update_task(
-                heartbeat.list_tasks()[0]["id"], description="bump"
-            )
+        try:
+            while not stop.is_set():
+                heartbeat.update_task(
+                    heartbeat.list_tasks()[0]["id"], description="bump"
+                )
+        except BaseException as _e:  # noqa: BLE001
+            _terrs.append(_e)
 
     def reader():
-        while not stop.is_set():
+        try:
+          while not stop.is_set():
             try:
                 raw = qf.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -118,6 +123,8 @@ def test_queue_file_never_torn_under_concurrent_writers(tmp_path):
                 json.loads(raw)
             except json.JSONDecodeError:
                 torn.append(raw[:80])
+        except BaseException as _e:  # noqa: BLE001
+            _terrs.append(_e)
 
     ws = [threading.Thread(target=writer) for _ in range(4)]
     rs = [threading.Thread(target=reader) for _ in range(2)]
@@ -127,6 +134,7 @@ def test_queue_file_never_torn_under_concurrent_writers(tmp_path):
     stop.set()
     for t in ws + rs:
         t.join(timeout=10)
+    assert not _terrs, f"writer/reader thread raised: {_terrs!r}"
     assert not torn, f"reader observed a torn queue file: {torn[:3]}"
 
 
@@ -140,18 +148,25 @@ def test_cross_process_lock_is_reentrant(tmp_path):
     Nest two acquisitions directly and require the inner one not to hang."""
     done = threading.Event()
 
+    _rerrs = []
+
     def run():
-        with heartbeat._cross_process_claim_lock():
+        try:
             with heartbeat._cross_process_claim_lock():
-                # If non-reentrant, the inner acquire blocks forever here.
-                heartbeat.add_task(
-                    description="x", project_code="STA", objective="o"
-                )
-        done.set()
+                with heartbeat._cross_process_claim_lock():
+                    # If non-reentrant, the inner acquire blocks forever here.
+                    heartbeat.add_task(
+                        description="x", project_code="STA", objective="o"
+                    )
+            done.set()
+        except BaseException as _e:  # noqa: BLE001
+            _rerrs.append(_e)
+            done.set()
 
     th = threading.Thread(target=run, daemon=True)
     th.start()
     th.join(timeout=10)
+    assert not _rerrs, f"nested-lock thread raised: {_rerrs!r}"
     assert done.is_set(), (
         "nested cross-process lock acquisition deadlocked (not reentrant)"
     )

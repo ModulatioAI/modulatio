@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from modulatio import budget
+from tests._thread_check import run_threads_checked
 
 
 def test_record_is_atomic_under_concurrent_shared_workers():
@@ -39,11 +40,7 @@ def test_record_is_atomic_under_concurrent_shared_workers():
         for _ in range(calls_per_thread):
             tracker.record(input_tokens=in_t, output_tokens=out_t, cost_usd=cost)
 
-    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
-    for th in threads:
-        th.start()
-    for th in threads:
-        th.join()
+    run_threads_checked([worker] * n_threads)
 
     total_calls = n_threads * calls_per_thread
     assert tracker.tokens_used == total_calls * (in_t + out_t)
@@ -71,14 +68,7 @@ def test_concurrent_log_lines_are_intact_and_consistent(tmp_path: Path):
                 cost_usd=cost, model=name,
             )
 
-    threads = [
-        threading.Thread(target=worker, args=(f"m{i}",))
-        for i in range(n_threads)
-    ]
-    for th in threads:
-        th.start()
-    for th in threads:
-        th.join()
+    run_threads_checked([(lambda i=i: worker(f"m{i}")) for i in range(n_threads)])
 
     total_calls = n_threads * calls_per_thread
     lines = log_path.read_text().splitlines()

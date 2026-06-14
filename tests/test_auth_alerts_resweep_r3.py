@@ -18,6 +18,7 @@ import threading
 import pytest
 
 from modulatio import auth_alerts, config
+from tests._thread_check import run_threads_checked
 
 
 @pytest.fixture(autouse=True)
@@ -69,8 +70,13 @@ def test_interleaved_save_does_not_clobber(monkeypatch):
 
     monkeypatch.setattr(auth_alerts, "load_alerts", stalling_load)
 
+    _errs = []
+
     def main_writer():
-        auth_alerts.raise_alert("primary_provider", error_message="primary", auth_type="api_key")
+        try:
+            auth_alerts.raise_alert("primary_provider", error_message="primary", auth_type="api_key")
+        except BaseException as _e:  # noqa: BLE001 — surface to assert, no ghost warning
+            _errs.append(_e)
 
     t = threading.Thread(target=main_writer)
     t.start()
@@ -82,7 +88,10 @@ def test_interleaved_save_does_not_clobber(monkeypatch):
     monkeypatch.setattr(auth_alerts, "load_alerts", real_load)
 
     def concurrent_writer():
-        auth_alerts.raise_alert("concurrent_provider", error_message="conc", auth_type="api_key")
+        try:
+            auth_alerts.raise_alert("concurrent_provider", error_message="conc", auth_type="api_key")
+        except BaseException as _e:  # noqa: BLE001
+            _errs.append(_e)
 
     ct = threading.Thread(target=concurrent_writer)
     ct.start()
@@ -93,6 +102,7 @@ def test_interleaved_save_does_not_clobber(monkeypatch):
     t.join(timeout=5)
     ct.join(timeout=5)
 
+    assert not _errs, f"writer thread raised: {_errs!r}"
     final = real_load()
     assert "primary_provider" in final
     assert "concurrent_provider" in final
@@ -110,11 +120,7 @@ def test_concurrent_raises_all_persist(monkeypatch):
         barrier.wait()
         auth_alerts.raise_alert(f"prov_{i}", error_message=f"e{i}", auth_type="api_key")
 
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    run_threads_checked([(lambda i=i: worker(i)) for i in range(n)])
 
     final = auth_alerts.load_alerts()
     assert len(final) == n
@@ -137,12 +143,7 @@ def test_concurrent_clears_do_not_resurrect(monkeypatch):
         barrier.wait()
         auth_alerts.clear_alert("to_clear")
 
-    threads = [threading.Thread(target=raiser, args=(i,)) for i in range(n)]
-    threads.append(threading.Thread(target=clearer))
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    run_threads_checked([(lambda i=i: raiser(i)) for i in range(n)] + [clearer])
 
     final = auth_alerts.load_alerts()
     assert "to_clear" not in final
