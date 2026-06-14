@@ -383,15 +383,24 @@ def _opt_str(v) -> str | None:
     return v if isinstance(v, str) else str(v)
 
 
-# Document deliverables are authored as Markdown; the export pipeline renders
+# A DOCUMENT deliverable is authored as Markdown; the export pipeline renders
 # .docx/.pdf/.pptx/etc. from the .md at DELIVERY — producers never emit binary
-# Office formats (task-plan: "NEVER ask a producer to emit PDF/DOCX directly").
-# So a goal/evidence path naming a render format points at a file that does NOT
-# exist during the run; live (run 6b3234) that made the Leader reject QC-passed
-# .md work and loop the goal to its retry cap. Normalize render-format
-# deliverable PATHS to their .md source so the run-time contract matches what
-# the team actually produces. Code/data artifacts (.py/.csv/.json/...) are
-# authored directly and are deliberately NOT touched.
+# Office formats. So a DOCUMENT goal/evidence path naming a render format points
+# at a file that does NOT exist during the run; live (run 6b3234) that made the
+# Leader reject QC-passed .md work and loop the goal to its retry cap. Rewriting
+# render-format PATHS to their .md source makes the run-time contract match what
+# the team actually produces.
+#
+# But .docx/pdf/pptx/odt/rtf/epub are AMBIGUOUS: they are ALSO genuine
+# MEDIA-assembled binaries (a slideshow built from images, an epub, a zip/video)
+# that media-assembly produces DIRECTLY and that DO exist mid-run (#73). So this
+# rewrite is applied **family-aware, per task** (via `_build_requirement(...,
+# family=...)` keyed off `_effective_assembly_family`) — ONLY for the document
+# family. Media/code/data evidence keeps the real extension (the deliverable IS
+# the artifact). The rewrite is NOT applied at decompose (goal text/evidence)
+# anymore: at that stage no artifact_kind exists yet, and rewriting there both
+# mis-handled media and erased the container cue the planner needs to route a
+# media goal. Goal prose keeps the user-requested name (truthful intent).
 _RENDER_DELIVERABLE_RE = re.compile(
     r"(\S+?)\.(?:docx|pdf|pptx|odt|rtf|epub)\b", re.IGNORECASE
 )
@@ -399,9 +408,10 @@ _RENDER_DELIVERABLE_RE = re.compile(
 
 def _normalize_render_paths(text: str | None) -> str | None:
     """Rewrite document render-format deliverable paths (``X.docx`` → ``X.md``)
-    so a goal/task contract names the Markdown source the team authors, not the
-    rendered artifact that only exists post-delivery. None-safe; bare mentions
-    with no path stem ("a .docx file") are left for the Leader-verify rule."""
+    so a DOCUMENT-family contract names the Markdown source the team authors, not
+    the rendered artifact that only exists post-delivery. None-safe; bare mentions
+    with no path stem ("a .docx file") are left for the Leader-verify rule. Apply
+    ONLY when the effective assembly family is ``document`` (#73)."""
     if not text:
         return text
     return _RENDER_DELIVERABLE_RE.sub(lambda m: f"{m.group(1)}.md", text)
@@ -475,6 +485,36 @@ def _select_assembler_skill(tasks: "list[Task]", project_code: str | None) -> No
             ]
 
 
+def _effective_assembly_family(
+    artifact_kind: str,
+    required_skills: "list[str]",
+    project_code: str | None,
+) -> str:
+    """The assembly family the engine will ACTUALLY route this work to —
+    ``media`` / ``document`` / ``code`` / ``data`` — used to gate render-path
+    normalization (#73, Nemo design review). Priority:
+
+    (a) an explicit assembler skill the planner named in ``required_skills`` WINS
+        — this closes the planner-forgot-``artifact_kind`` seam: a task with
+        ``required_skills=["media-assembly"]`` but ``artifact_kind="text"`` is
+        media work and its evidence must NOT be document-normalized to ``.md``;
+    (b) else the standards-declared ``assembler_skill`` for ``artifact_kind``
+        (the same single authority ``_select_assembler_skill`` uses);
+    (c) else the safe ``document`` default (also on any standards lookup error).
+    """
+    for skill in required_skills:
+        if skill in _ASSEMBLER_STRATEGY:
+            return _ASSEMBLER_STRATEGY[skill]
+    try:
+        entry = standards.load_with_metadata(artifact_kind, project_code=project_code)
+        skill = entry.assembler_skill
+        if skill and skill in _ASSEMBLER_STRATEGY:
+            return _ASSEMBLER_STRATEGY[skill]
+    except Exception:  # noqa: BLE001 — safe document default on any lookup error
+        pass
+    return "document"
+
+
 def _wire_assembler_dependencies(tasks: list["Task"]) -> None:
     """Engine bind (Part A / A2, #85): give each assembler task in a goal an
     AUTHORITATIVE dependency on the sibling unit tasks it combines, when it
@@ -504,12 +544,20 @@ def _wire_assembler_dependencies(tasks: list["Task"]) -> None:
         a.depends_on = deps
 
 
-def _build_requirement(raw: dict) -> EvidenceRequirement:
+def _build_requirement(raw: dict, *, family: str = "document") -> EvidenceRequirement:
+    """Build an EvidenceRequirement, rewriting render-format target/source paths
+    to their ``.md`` source ONLY for the DOCUMENT family (#73). A media/code/data
+    deliverable IS the artifact itself, so its evidence keeps the real extension;
+    an empty/unknown ``family`` (e.g. at decompose, before artifact_kind exists)
+    also skips the rewrite — it's deferred to the per-task call where the family
+    is known. The rewrite never touches evidence ``kind``/count (the planner's
+    artifact-count cardinality gate stays intact — Nemo)."""
+    _norm = _normalize_render_paths if family == "document" else (lambda x: x)
     return EvidenceRequirement(
         kind=_coerce_evidence_kind(raw.get("kind", "report")),
         description=_opt_str(raw.get("description")) or "",
-        target=_normalize_render_paths(_opt_str(raw.get("target"))),
-        source=_normalize_render_paths(_opt_str(raw.get("source"))),
+        target=_norm(_opt_str(raw.get("target"))),
+        source=_norm(_opt_str(raw.get("source"))),
     )
 
 
@@ -2990,10 +3038,15 @@ class Orchestrator:
             g = Goal(
                 id=gid,
                 project_id=self.project.id,
-                description=_normalize_render_paths(item["description"]),
-                success_criteria=_normalize_render_paths(item["success_criteria"]),
+                # #73: no render-path rewrite at decompose — no artifact_kind/
+                # family exists yet here, so rewriting would mis-handle media and
+                # erase the container cue the planner needs. Goal prose keeps the
+                # user-requested name (truthful intent); the family-aware rewrite
+                # happens per task (below) where the family IS known.
+                description=item["description"],
+                success_criteria=item["success_criteria"],
                 evidence_required=[
-                    _build_requirement(req)
+                    _build_requirement(req, family="")
                     for req in item.get("evidence_required", [])
                 ],
                 status=GoalStatus.PENDING,
@@ -3329,8 +3382,19 @@ class Orchestrator:
                     # spec-group inherits it (an ``artifacts: [...]`` group
                     # that's a deliverable delivers each rendered piece).
                     deliverable=bool(item.get("deliverable", False)),
+                    # #73: rewrite render-format evidence paths to .md ONLY for
+                    # the document family — keyed off the EFFECTIVE assembly family
+                    # (required_skills first, then artifact_kind's standards), so a
+                    # media deliverable's evidence keeps its real binary extension.
                     evidence_required=[
-                        _build_requirement(req)
+                        _build_requirement(
+                            req,
+                            family=_effective_assembly_family(
+                                str(item.get("artifact_kind") or "text"),
+                                required_skills,
+                                self.project.code,
+                            ),
+                        )
                         for req in item.get("evidence_required", [])
                     ],
                     status=TaskStatus.PENDING,

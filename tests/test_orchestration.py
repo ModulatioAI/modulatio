@@ -7877,6 +7877,124 @@ def test_leader_verify_prompt_carries_the_md_satisfies_render_rule():
     assert "satisfies" in body
 
 
+# ── #73: family-aware render-path normalization ──────────────────────────────
+
+def test_effective_assembly_family_priority():
+    """#73 (Nemo design): the EFFECTIVE family — required_skills assembler skill
+    wins (closes the planner-forgot-artifact_kind seam), then artifact_kind's
+    standards, then the safe document default."""
+    from modulatio.orchestration import _effective_assembly_family as fam
+    # (a) explicit assembler skill in required_skills wins
+    assert fam("text", ["media-assembly"], None) == "media"
+    assert fam("text", ["document-assembly"], None) == "document"
+    assert fam("text", ["code-assembly"], None) == "code"
+    assert fam("text", ["data-assembly"], None) == "data"
+    # (a) WINS over artifact_kind — a media task that forgot artifact_kind=image
+    assert fam("text", ["media-assembly"], None) == "media"
+    # (b) standards-declared family for artifact_kind (seed image/video → media)
+    assert fam("image", [], None) == "media"
+    assert fam("video", [], None) == "media"
+    assert fam("text", [], None) == "document"
+    # (c) unknown kind / lookup error → safe document default
+    assert fam("zzz-nope", [], None) == "document"
+
+
+def test_build_requirement_family_aware():
+    """#73: render-path rewrite (.pptx → .md) fires ONLY for the document family;
+    media/code/data and the empty/unknown (decompose) family keep the real path."""
+    from modulatio.orchestration import _build_requirement
+    raw = {"kind": "artifact", "description": "d", "target": "out/deck.pptx",
+           "source": "src/deck.pptx"}
+    # document → rewrite to .md source
+    doc = _build_requirement(raw, family="document")
+    assert doc.target == "out/deck.md" and doc.source == "src/deck.md"
+    # media → keep the binary extension (the deliverable IS the .pptx)
+    media = _build_requirement(raw, family="media")
+    assert media.target == "out/deck.pptx" and media.source == "src/deck.pptx"
+    # code/data → never rewrite a natural output to .md
+    assert _build_requirement({"target": "a.csv"}, family="data").target == "a.csv"
+    # empty family (decompose, before artifact_kind exists) → no rewrite
+    assert _build_requirement(raw, family="").target == "out/deck.pptx"
+    # default (back-compat) is document
+    assert _build_requirement(raw).target == "out/deck.md"
+
+
+def _evidence_of(orch, planner_item: dict):
+    """Run _plan_tasks with a single-task planner emitting ``planner_item`` and
+    return the first built task's first EvidenceRequirement."""
+    from uuid import uuid4
+
+    from modulatio.types import Goal, GoalStatus
+    orch.runners["planner"] = lambda prompt: f"```json\n{json.dumps([planner_item])}\n```"
+    goal = Goal(id=f"{PROJECT_CODE}-G-001", project_id=uuid4(),
+                description="make the deliverable", success_criteria="it exists",
+                status=GoalStatus.PENDING)
+    tasks = orch._plan_tasks(goal)
+    assert tasks and tasks[0].evidence_required
+    return tasks[0].evidence_required[0]
+
+
+def test_plan_tasks_media_evidence_keeps_container_extension(project: Project):
+    """#73 behavioral: a MEDIA task — even one whose planner FORGOT artifact_kind
+    (defaulted to text) but declared required_skills=['media-assembly'] — keeps
+    its real binary extension in evidence, NOT document-normalized to .md."""
+    orch = Orchestrator(project, {"leader": _leader_stub, "planner": _planner_stub,
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    ev = _evidence_of(orch, {
+        "description": "composite the slideshow",
+        "artifact_kind": "text",                 # planner forgot the media kind
+        "required_skills": ["media-assembly"],   # but declared the assembler
+        "output_path": "deck.pptx",
+        "deliverable": True,
+        "evidence_required": [
+            {"kind": "artifact", "description": "the slideshow", "target": "decks/deck.pptx"},
+        ],
+    })
+    assert ev.target == "decks/deck.pptx", "media evidence must keep the binary extension"
+
+
+def test_plan_tasks_document_evidence_normalizes_to_md(project: Project):
+    """#73 behavioral: a DOCUMENT task's evidence still rewrites the render-format
+    path to the authored .md source (verify checks the source; delivery renders
+    the container off output_path, which is untouched)."""
+    orch = Orchestrator(project, {"leader": _leader_stub, "planner": _planner_stub,
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    ev = _evidence_of(orch, {
+        "description": "write the report",
+        "artifact_kind": "report",
+        "output_path": "report.pdf",            # render target — untouched
+        "deliverable": True,
+        "evidence_required": [
+            {"kind": "artifact", "description": "the report", "target": "out/report.pdf"},
+        ],
+    })
+    assert ev.target == "out/report.md", "document evidence names the authored .md source"
+
+
+def test_decompose_keeps_goal_prose_unnormalized(project: Project):
+    """#73: decompose no longer rewrites goal prose — the goal names the
+    user-requested deliverable (truthful intent); the family-aware rewrite is
+    deferred to the per-task evidence."""
+    def _media_leader(prompt: str) -> str:
+        goals = [{
+            "description": "produce slides.pptx from the images",
+            "success_criteria": "a slides.pptx deck exists",
+            "evidence_required": [
+                {"kind": "artifact", "description": "the deck", "target": "slides.pptx"},
+            ],
+        }]
+        return f"```json\n{json.dumps(goals)}\n```"
+
+    orch = Orchestrator(project, {"leader": _media_leader, "planner": _planner_stub,
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    goals = orch._leader_decompose("make a slideshow")
+    assert goals
+    assert "slides.pptx" in goals[0].description, "goal prose keeps the user-requested name"
+    assert "slides.pptx" in goals[0].success_criteria
+    # decompose-level evidence is also left un-normalized (family unknown there)
+    assert goals[0].evidence_required[0].target == "slides.pptx"
+
+
 # ── §2: deliverable render in the ENGINE (every run path delivers) ───────────
 
 def test_engine_renders_grounded_deliverables_partial(tmp_path, monkeypatch):
