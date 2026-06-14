@@ -5,8 +5,8 @@ download, no ONNX. The real ``FastEmbedder`` is exercised by manual
 smoke tests after install, not by the unit suite (80MB download +
 ~200ms per embed would be CI-hostile).
 
-``_CACHE_ROOT`` is monkeypatched to ``tmp_path`` so tests never touch
-``~/.cache/modulatio/semantic/``.
+``config.get_cache_root`` is monkeypatched to ``tmp_path`` so tests never
+touch ``~/.cache/modulatio/semantic/``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-from modulatio import roster, semantic_router, vault
+from modulatio import config, roster, semantic_router, vault
 from modulatio.semantic_router import StubEmbedder
 from modulatio.types import Task
 
@@ -27,7 +27,7 @@ PROJECT_CODE = "TST"
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch) -> str:
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
-    monkeypatch.setattr(semantic_router, "_CACHE_ROOT", tmp_path / "cache")
+    monkeypatch.setattr(config, "get_cache_root", lambda: tmp_path / "cache")
     vault.init_project(PROJECT_CODE, "Test", "test")
     return PROJECT_CODE
 

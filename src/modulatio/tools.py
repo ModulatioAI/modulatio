@@ -403,24 +403,48 @@ def _clamp_timeout(value: object, *, lo: float, hi: float, default: float) -> fl
 # busy (a future hardening once the sandbox remaps the UID).
 _RUN_SHELL_RLIMIT_AS_BYTES = 4 * 1024**3      # 4 GiB address space (mem bomb)
 _RUN_SHELL_RLIMIT_FSIZE_BYTES = 2 * 1024**3   # 2 GiB max single file (disk fill)
+# Cap the post-timeout pipe drain so a re-parented double-forking grandchild
+# holding the pipes open can't hang run_shell after the process-group kill.
+_RUN_SHELL_DRAIN_TIMEOUT = 5.0
 
 
-def _apply_child_rlimits() -> None:  # pragma: no cover - runs in forked child
-    """``preexec_fn`` for the run_shell child: clamp address space, max file
-    size, and core-dump size. POSIX-only; a no-op where ``resource`` is
-    unavailable (e.g. Windows). Each limit is lowered to ``min(target,
-    current_hard)`` so an unprivileged process never raises its own hard
-    limit (which would raise ``ValueError``/EPERM)."""
+def _apply_rlimits_to_pid(pid: int) -> None:
+    """Clamp a just-spawned run_shell child's address space / file size / core
+    dump FROM THE PARENT via ``prlimit`` (Linux) — NOT a ``preexec_fn``.
+
+    A ``preexec_fn`` runs Python in the forked child between ``fork()`` and
+    ``exec()``; in a multithreaded process (the concurrent-wave workers, or any
+    caller on a worker thread) a lock another thread holds at fork time can
+    deadlock the child — and that wedged the PARENT's own thread creation in
+    turn, hanging the process (0.9.0 full-suite hang). ``prlimit`` from the
+    parent has no fork hazard, so ``run_shell`` is safe to call from a thread.
+
+    Best-effort + Linux-only: a non-Linux host (no ``resource.prlimit``) or an
+    already-exited child simply skips — the bwrap sandbox + the wall-clock
+    timeout + process-group kill remain the primary bounds. The cap lands within
+    microseconds of spawn (long before a child could allocate gigabytes), so the
+    sub-millisecond window before it applies is immaterial for a coarse cap. Each
+    limit is only LOWERED (``min(target, current_hard)``) — never raised — so an
+    unprivileged target never hits EPERM."""
     try:
         import resource
     except ImportError:
         return
+    prlimit = getattr(resource, "prlimit", None)
+    if prlimit is None:  # not Linux (macOS/CI dev fallback — already degraded)
+        return
 
     def _clamp(which: int, target: int) -> None:
-        soft, hard = resource.getrlimit(which)
+        try:
+            soft, hard = prlimit(pid, which)
+        except (OSError, ValueError):  # child gone, EPERM, or unknown resource
+            return
         new_hard = target if hard == resource.RLIM_INFINITY else min(hard, target)
         new_soft = new_hard if soft == resource.RLIM_INFINITY else min(soft, new_hard)
-        resource.setrlimit(which, (new_soft, new_hard))
+        try:
+            prlimit(pid, which, (new_soft, new_hard))
+        except (OSError, ValueError):
+            pass
 
     _clamp(resource.RLIMIT_AS, _RUN_SHELL_RLIMIT_AS_BYTES)
     _clamp(resource.RLIMIT_FSIZE, _RUN_SHELL_RLIMIT_FSIZE_BYTES)
@@ -484,6 +508,31 @@ def _is_safe_file_arg(arg: str, root: Path | None) -> bool:
                 return False
         return True
     return _is_safe_relative_file_arg(arg)
+
+
+def _is_safe_go_target(arg: str, root: Path | None) -> bool:
+    """True iff ``arg`` is a Go vet target that cannot leak a file outside
+    the artifacts root. Go package patterns (``.``, ``./...``,
+    ``./pkg/...``) legitimately begin with ``.`` and address the confined
+    cwd, so they are accepted. An absolute path or any ``..`` traversal
+    segment can escape ``root`` (go vet quotes offending source lines in
+    its diagnostics), so those are refused.
+    """
+    if not arg:
+        return False
+    # Flag-style args (e.g. ``-json``) are not paths and never leak source.
+    if arg.startswith("-"):
+        return True
+    if arg.startswith("/") or arg.startswith("\\"):
+        # An absolute path is only safe if it resolves under root.
+        return _is_safe_file_arg(arg, root)
+    parts = arg.replace("\\", "/").split("/")
+    # Reject traversal segments; a lone leading ``.`` (the Go package marker)
+    # is fine, but ``..`` would climb out of the confined cwd.
+    for p in parts:
+        if p == "..":
+            return False
+    return True
 
 
 def resolve_under_roots(arg: str, roots: "list[Path]") -> "Path | None":
@@ -611,9 +660,16 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
         # go version  (subcommand style — Go uses bare `version`, not --version)
         if len(argv) == 2 and argv[1] in ("version", "--version", "-version"):
             return True
-        # go vet [args]  (static analyzer, read-only)
+        # go vet [pkg-or-file ...]  (static analyzer, read-only).
+        # go vet echoes offending source lines in its diagnostics, so an
+        # unconfined path arg is an arbitrary-file read — confine every arg
+        # like the other linters (gofmt/ruff/mypy). Go package patterns
+        # (``./...``, ``.``, ``./pkg/...``) legitimately start with ``.`` and
+        # so are accepted explicitly; only absolute paths and ``..`` traversal
+        # (which can escape the artifacts root) are refused.
         if len(argv) >= 2 and argv[1] == "vet":
-            return True
+            if all(_is_safe_go_target(a, root) for a in argv[2:]):
+                return True
     if head == "gofmt":
         # gofmt -l <file>.go  (lists files needing reformat; no modification)
         # gofmt -d <file>.go  (shows diff; no modification)
@@ -624,15 +680,28 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
             ):
                 return True
     if head == "ruff":
-        # ruff check  /  ruff check <path>
+        # ruff check  /  ruff check <path>...  — read-only lint only. Reject any
+        # flag (leading '-'): the passive tier must NOT admit mutating flags like
+        # --fix / --fix-only / --add-noqa, which REWRITE files in place (a flag
+        # also slips past _is_safe_file_arg, which treats '--fix' as a filename).
+        # Path args are confined to the artifacts root so lint error output can't
+        # leak arbitrary source; bare `ruff check` lints the (confined) cwd.
         if len(argv) >= 2 and argv[1] == "check":
-            return True
+            rest = argv[2:]
+            if all(not a.startswith("-") and _is_safe_file_arg(a, root) for a in rest):
+                return True
     if head == "mypy":
-        # mypy <file.py>  or  mypy <file.py> <file.py>...
-        if len(argv) >= 2 and all(a.endswith(".py") for a in argv[1:]):
+        # mypy <file.py>  or  mypy <file.py> <file.py>...  — confine each path
+        # (a lint tool echoes offending source lines, so an unconfined path is
+        # an arbitrary-file read).
+        if len(argv) >= 2 and all(
+            a.endswith(".py") and _is_safe_file_arg(a, root) for a in argv[1:]
+        ):
             return True
     if head == "pyflakes":
-        if len(argv) >= 2 and all(a.endswith(".py") for a in argv[1:]):
+        if len(argv) >= 2 and all(
+            a.endswith(".py") and _is_safe_file_arg(a, root) for a in argv[1:]
+        ):
             return True
     # ── Read-only filesystem inspection (cwd already confined) ──────
     # The agent often wants to confirm what's in the workspace before
@@ -1039,21 +1108,52 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # errors="replace": a child can emit non-UTF-8/binary bytes on
+                # stdout/stderr (a probe that dumps a binary, a tool that writes
+                # latin-1 diagnostics). With text=True the default 'strict'
+                # decoder would raise UnicodeDecodeError inside communicate() —
+                # which is caught by NEITHER the TimeoutExpired nor the
+                # FileNotFoundError handler, so it would propagate and discard
+                # ALL captured output (and crash the chat loop). Substitute the
+                # undecodable bytes so the model still sees a best-effort body.
+                errors="replace",
                 shell=False,
                 env=run_env,
                 start_new_session=True,
-                preexec_fn=_apply_child_rlimits,
             )
+            # Apply the resource caps from the PARENT (fork-safe), not a
+            # preexec_fn (fork-from-multithreaded deadlock hazard — the 0.9.0 hang).
+            _apply_rlimits_to_pid(proc.pid)
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 # Kill the entire process group, then drain. killpg targets the
-                # session we created above so no grandchild survives.
+                # session we created above (start_new_session). For an
+                # UNSANDBOXED child this is what reaps grandchildren. Under the
+                # bwrap sandbox the payload runs in its own PID namespace
+                # (--unshare-pid) whose grandchildren are NOT in our session, so
+                # killpg reaps the bwrap process itself and the kernel then tears
+                # down the whole PID namespace; --die-with-parent is the belt
+                # that also kills the sandbox if we are reaped first. The
+                # bounded drain below covers a double-forking grandchild that
+                # re-parented away and kept the pipes open.
                 try:
                     os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     proc.kill()
-                stdout, stderr = proc.communicate()
+                # Bounded drain: a double-forking grandchild that re-parented
+                # away from our process group can keep the stdout/stderr pipes
+                # open after the killpg, so an unbounded communicate() would
+                # hang run_shell forever. Cap the drain; on a second timeout,
+                # kill again and give up on the leftover output.
+                try:
+                    stdout, stderr = proc.communicate(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        stdout, stderr = proc.communicate(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        stdout, stderr = "", ""
                 stderr = (stderr or "") + f"\n[TIMEOUT after {timeout}s]"
                 return _format_run_shell_result(-1, stdout or "", stderr)
             return _format_run_shell_result(
@@ -1097,8 +1197,20 @@ _WRITE_ARTIFACT_MAX_BYTES = 1_048_576  # 1 MiB
 _WRITE_ARTIFACT_BLOCKED_PREFIXES = ("tool_calls/", "tool_calls\\")
 
 
-def make_write_artifact(artifacts_root: Path) -> Callable[..., str]:
+def make_write_artifact(
+    artifacts_root: Path,
+    on_write: "Callable[[Path], None] | None" = None,
+) -> Callable[..., str]:
     """Return a ``write_artifact`` callable bound to ``artifacts_root``.
+
+    ``on_write`` (optional): a callback invoked with the absolute target Path
+    after a successful write. The concurrent-wave orchestrator passes
+    ``_record_artifact_write`` here so a tool-written file in the per-task
+    staging tree is recorded for the merge — without it, a producer's
+    ``write_artifact`` sidecar is written to staging, passes QC there, then
+    deleted with staging and never copied to the shared tree (Nemo R2 HIGH).
+    None (the sequential path / CLI) makes it a no-op; those writes already land
+    directly in the shared artifacts root.
 
     Returned callable signature::
 
@@ -1168,6 +1280,9 @@ def make_write_artifact(artifacts_root: Path) -> Callable[..., str]:
             ) from exc
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
+        if on_write is not None:
+            # Record the write for the concurrent-wave merge (no-op safe).
+            on_write(target)
         rel = target.relative_to(artifacts_root.resolve())
         return (
             f"[OK] wrote {len(encoded)} bytes to artifacts/{rel}"
@@ -1357,6 +1472,7 @@ def build_registry(
     artifacts_root: Path | None = None,
     tool_calls_dir: Path | None = None,
     project_code: str | None = None,
+    on_artifact_write: "Callable[[Path], None] | None" = None,
 ) -> dict[str, Tool]:
     """Return a fresh dict of builtin tools. Callers (CLI / tests)
     merge their own tools in and pass the result into the
@@ -1627,7 +1743,7 @@ def build_registry(
                 "Best practice: write_artifact for probing, AND emit "
                 "the same content as your final response."
             ),
-            call=make_write_artifact(artifacts_root),
+            call=make_write_artifact(artifacts_root, on_write=on_artifact_write),
             params_schema={
                 "type": "object",
                 "properties": {

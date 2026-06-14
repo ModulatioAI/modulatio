@@ -897,3 +897,57 @@ def test_persist_writes_cap_fields_only_when_set(
     assert "max_wall_clock_min" not in raw
     assert "max_tokens" not in raw
     assert "max_cost_usd" not in raw
+
+
+# ── extract_sub_objectives — title-only items (regression H6) ─────────────
+
+
+def test_extract_sub_objectives_title_only_middle_item_not_dropped():
+    """A sub-objective with no same-line description (title-only)
+    must NOT be dropped, and must NOT swallow the next item's line.
+
+    Regression for the bug where the separator class included \\s
+    (matching a newline): a title-only middle item borrowed the next
+    line as its description, dropping the following item entirely and
+    corrupting both index sequence and raw chunk.
+    """
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. A** — do a.\n"
+        "**2. B**\n"
+        "**3. C** — do c.\n"
+    )
+    out = plans.extract_sub_objectives(body)
+    # All three items survive, in order, with a contiguous index run.
+    assert [s["index"] for s in out] == [1, 2, 3]
+    assert [s["title"] for s in out] == ["A", "B", "C"]
+    # Title-only item defaults description to its title (existing
+    # fallback) and does NOT absorb item 3's line.
+    assert out[1]["description"] == "B"
+    assert out[1]["raw"] == "**2. B**"
+    # Item 3 keeps its own description, not item 2's.
+    assert out[2]["description"] == "do c."
+
+
+def test_extract_sub_objectives_title_only_final_item_not_dropped():
+    """A title-only item as the LAST item also parses (no following
+    line to borrow, but the old required-description tail dropped it)."""
+    body = "### Sub-objectives\n\n**1. A** — do a.\n**2. Final step**\n"
+    out = plans.extract_sub_objectives(body)
+    assert [s["index"] for s in out] == [1, 2]
+    assert out[1]["title"] == "Final step"
+    assert out[1]["description"] == "Final step"
+    assert out[1]["raw"] == "**2. Final step**"
+
+
+def test_extract_sub_objectives_normal_descriptions_unchanged():
+    """Items with same-line descriptions keep their prior behavior."""
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. Alpha** — first.\n"
+        "**2. Beta** — second.\n"
+    )
+    out = plans.extract_sub_objectives(body)
+    assert [s["index"] for s in out] == [1, 2]
+    assert out[0]["description"] == "first."
+    assert out[1]["description"] == "second."

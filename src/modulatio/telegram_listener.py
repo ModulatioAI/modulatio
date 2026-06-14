@@ -31,12 +31,14 @@ Commands surface (`/help` shows the live list):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shlex
 import threading
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Callable, Optional
 
 logger = logging.getLogger("modulatio.telegram_listener")
@@ -52,6 +54,40 @@ MAX_GETUPDATES_BYTES = 1 * 1024 * 1024
 # is both a DoS shape (bytes through urllib) and an LLM cost shape (every
 # byte goes into a prompt). 4 KiB covers any reasonable command + body.
 MAX_INBOUND_TEXT_BYTES = 4 * 1024
+
+
+# ── getUpdates offset persistence ────────────────────────────────────────
+#
+# The offset is keyed on the bot token so two different bots (or a token
+# rotation) never share an offset. We store a short token digest, not the
+# token itself, so the filename leaks nothing sensitive.
+
+def _offset_state_path(bot_token: str) -> Path:
+    from modulatio import config
+    digest = hashlib.sha256(bot_token.encode("utf-8")).hexdigest()[:16]
+    return config.get_data_file(f"telegram-offset-{digest}.json")
+
+
+def _load_offset(path: Path) -> int:
+    try:
+        data = json.loads(path.read_text())
+        offset = int(data.get("last_update_id", 0))
+        return offset if offset > 0 else 0
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        return 0
+
+
+def _save_offset(path: Path, last_update_id: int) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps({"last_update_id": int(last_update_id)}))
+        tmp.replace(path)
+    except OSError as e:
+        # A failed persist must not crash the poll loop — worst case we
+        # replay on restart (the bug we're guarding against), but the
+        # listener keeps serving live commands.
+        logger.warning("Failed to persist Telegram offset to %s: %s", path, e)
 
 
 class TelegramListener:
@@ -83,7 +119,14 @@ class TelegramListener:
         self.poll_interval = poll_interval
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._last_update_id = 0
+        # getUpdates offset MUST survive a daemon restart. Telegram retains
+        # an un-acked update for ~24h and re-delivers it on the next poll
+        # whose offset <= update_id; an in-memory-only offset means a
+        # restart replays (and re-dispatches) every command from that
+        # window — duplicate kickoffs, duplicate heartbeat tasks, burned
+        # cost. Persist it to a per-bot state file and reload on construct.
+        self._offset_path = _offset_state_path(self.bot_token)
+        self._last_update_id = _load_offset(self._offset_path)
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -142,8 +185,22 @@ class TelegramListener:
             logger.warning("Telegram getUpdates failed: %s", e)
             return
 
-        for update in data.get("result", []):
-            self._last_update_id = max(self._last_update_id, update.get("update_id", 0))
+        updates = data.get("result", [])
+        # Ack-before-handle: advance + persist the offset across the whole
+        # batch BEFORE dispatching any command. Telegram considers an
+        # update consumed once the next getUpdates carries offset >
+        # update_id, so persisting first guarantees that a crash mid-batch
+        # never re-delivers an already-seen update (at most we drop the
+        # in-flight one — preferable to re-running a /kickoff).
+        if updates:
+            batch_max = max(
+                (u.get("update_id", 0) for u in updates),
+                default=self._last_update_id,
+            )
+            self._last_update_id = max(self._last_update_id, batch_max)
+            _save_offset(self._offset_path, self._last_update_id)
+
+        for update in updates:
             msg = update.get("message") or {}
             chat = msg.get("chat") or {}
             sender = msg.get("from") or {}
@@ -215,12 +272,34 @@ class TelegramListener:
     def _reply(self, text: str) -> None:
         # Lazy import to avoid pulling notify config into the listener.
         from modulatio import telegram_notify
-        telegram_notify.send_message(
-            text,
-            parse_mode="Markdown",
-            bot_token=self.bot_token,
-            chat_id=self.chat_id,
-        )
+        # Handler output interpolates raw user/error text into Markdown
+        # (backtick/underscore framing). An unbalanced entity — a stray
+        # `_`/`*`/`` ` `` in a project code, an exception string, a parse
+        # error echo — makes Telegram reject the whole message with HTTP
+        # 400, and send_message returns False: the reply is silently lost.
+        # Fall back to a plain-text send so the user ALWAYS gets a reply.
+        #
+        # Chunk HERE and fall back PER CHUNK. send_message splits a long
+        # reply into 4000-char chunks and reports False if ANY chunk fails;
+        # a blanket plaintext re-send of the whole text would then deliver
+        # every already-succeeded chunk a SECOND time. By chunking first and
+        # retrying only the chunk that actually failed, the user never sees
+        # a duplicate. Each chunk is already <= the split size, so
+        # send_message treats it as a single message (no re-splitting).
+        for chunk in telegram_notify._split_chunks(text):
+            ok = telegram_notify.send_message(
+                chunk,
+                parse_mode="Markdown",
+                bot_token=self.bot_token,
+                chat_id=self.chat_id,
+            )
+            if not ok:
+                telegram_notify.send_message(
+                    chunk,
+                    parse_mode=None,
+                    bot_token=self.bot_token,
+                    chat_id=self.chat_id,
+                )
 
 
 # === Default command dispatcher ===

@@ -41,7 +41,15 @@ from modulatio.types import Task
 
 from modulatio import config as _config
 
-_CACHE_ROOT = Path.home() / ".cache" / "modulatio" / "semantic"
+def _cache_root() -> Path:
+    """Resolve the semantic-routing cache root from current config.
+    Honors the wizard's ``cache_root`` override and ``$XDG_CACHE_HOME``;
+    falls back to the package default. Per-call resolution means tests +
+    runtime config changes both work without restart (mirrors
+    ``qc_history._cache_root``)."""
+    return _config.get_cache_root() / "semantic"
+
+
 # Single source of truth lives in config.get_embedding_model() so
 # wizards / overrides land in one place. Computed at import is fine —
 # the value is stable for the process lifetime.
@@ -147,7 +155,7 @@ class StubEmbedder:
 # ── Index (LanceDB) ────────────────────────────────────────────────────────
 
 def _cache_dir(project_code: str) -> Path:
-    return _CACHE_ROOT / project_code.lower()
+    return _cache_root() / project_code.lower()
 
 
 def _meta_path(project_code: str) -> Path:

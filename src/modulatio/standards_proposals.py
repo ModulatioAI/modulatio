@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from modulatio.vault import project_dir
+from modulatio.vault import project_dir, validate_registry_name
 
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
@@ -77,6 +77,15 @@ def _proposal_id(now: datetime, title: str) -> str:
     return f"{stamp}__{_slug(title)}"
 
 
+def _fm_safe(value: str) -> str:
+    """Collapse newlines/carriage returns in a value before it is interpolated
+    into a frontmatter line, so an attacker-controlled field (domain / title /
+    rationale from a producer's proposal) cannot inject its own YAML keys —
+    e.g. a title of ``x\\ndomain: ../../etc`` overriding the real domain on
+    re-parse, which then steers the approve()-time write path."""
+    return " ".join(str(value).splitlines()).strip()
+
+
 def save(proposal: Proposal, project_code: str) -> Path:
     """Persist a proposal to ``<vault>/standards-proposals/<id>.md``.
 
@@ -88,13 +97,24 @@ def save(proposal: Proposal, project_code: str) -> Path:
     now = datetime.now(timezone.utc)
     pid = _proposal_id(now, proposal.title)
     path = root / f"{pid}.md"
-    evidence_line = ", ".join(proposal.evidence_refs)
+    # Same-second + same-title proposals would otherwise collide on the id and
+    # silently overwrite the earlier one. Append a short disambiguating suffix
+    # so each proposal keeps a distinct file (and a distinct stem-as-id).
+    if path.exists():
+        seq = 1
+        while True:
+            candidate = root / f"{pid}-{seq}.md"
+            if not candidate.exists():
+                path = candidate
+                break
+            seq += 1
+    evidence_line = ", ".join(_fm_safe(r) for r in proposal.evidence_refs)
     content = (
         f"---\n"
-        f"domain: {proposal.domain}\n"
-        f"title: {proposal.title}\n"
+        f"domain: {_fm_safe(proposal.domain)}\n"
+        f"title: {_fm_safe(proposal.title)}\n"
         f"evidence_refs: {evidence_line}\n"
-        f"rationale: {proposal.rationale}\n"
+        f"rationale: {_fm_safe(proposal.rationale)}\n"
         f"proposed_at: {now.isoformat(timespec='seconds')}\n"
         f"---\n\n"
         f"{proposal.rule_body.rstrip()}\n"
@@ -180,7 +200,13 @@ def approve(proposal_id: str, project_code: str) -> Path:
     Returns the path of the standards file that received the rule.
     """
     proposal = load(proposal_id, project_code)
-    domain_file = _standards_dir(project_code) / f"{proposal.domain}.md"
+    # Engine-bound invariant: the domain becomes a standards FILE NAME, so it
+    # must be a safe single component — never a path-traversal that escapes the
+    # standards/ root. validate_registry_name raises on anything with a
+    # separator / '..' / leading dot, so a malicious or injected domain is
+    # refused (fail-closed) rather than steering an arbitrary write.
+    safe_domain = validate_registry_name(proposal.domain)
+    domain_file = _standards_dir(project_code) / f"{safe_domain}.md"
     _append_to_team_section(domain_file, proposal.title, proposal.rule_body)
     # One-shot disposition — remove the proposal file.
     (_proposals_dir(project_code) / f"{proposal_id}.md").unlink()

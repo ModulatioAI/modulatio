@@ -191,3 +191,37 @@ def test_reject_missing_proposal_raises(project_vault):
     """Symmetric with approve: unknown id surfaces as error."""
     with pytest.raises(FileNotFoundError):
         standards_proposals.reject("ghost", project_code=PROJECT_CODE)
+
+
+# ── Security: frontmatter injection → path-traversal write (0.9.0 MED) ─────────
+
+def test_approve_refuses_path_traversal_domain(project_vault):
+    """A proposal whose domain is a path-traversal must be REFUSED at approve
+    (fail-closed) — the domain becomes a standards file name and must never
+    escape the standards/ root and steer an arbitrary write."""
+    proposal = standards_proposals.Proposal(
+        domain="../../../tmp/evil",
+        title="malicious",
+        rule_body="payload",
+        evidence_refs=("h-1",),
+    )
+    proposal_id = standards_proposals.save(proposal, project_code=PROJECT_CODE).stem
+    with pytest.raises(ValueError):
+        standards_proposals.approve(proposal_id, project_code=PROJECT_CODE)
+    # Nothing written outside the standards root.
+    assert not (project_vault.parent / "tmp" / "evil.md").exists()
+
+
+def test_save_neutralizes_frontmatter_key_injection(project_vault):
+    """A title/rationale carrying a newline + a fake `domain:` line must NOT
+    inject its own frontmatter key — the persisted proposal still parses to the
+    REAL domain, so the injection can't redirect the approve-time write."""
+    proposal = standards_proposals.Proposal(
+        domain="text",
+        title="legit\ndomain: ../../escape",
+        rule_body="body",
+        evidence_refs=("h-1",),
+    )
+    proposal_id = standards_proposals.save(proposal, project_code=PROJECT_CODE).stem
+    reloaded = standards_proposals.load(proposal_id, project_code=PROJECT_CODE)
+    assert reloaded.domain == "text", "injected domain key must not override the real domain"

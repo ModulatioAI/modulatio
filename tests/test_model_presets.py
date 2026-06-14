@@ -8,6 +8,8 @@ No built-ins; load_presets() returns ``{}`` when no user config exists.
 from __future__ import annotations
 
 import json
+import os
+
 import pytest
 
 from modulatio import config, model_presets, oauth_helpers
@@ -191,6 +193,49 @@ def test_save_is_atomic_no_tmp_file_left_behind():
     assert not tmp.exists()
 
 
+def test_save_never_world_readable_during_write(monkeypatch):
+    """Regression: the temp file must be created 0o600 from the start, not
+    chmod'd afterward — otherwise it is briefly world-readable. Inspect the
+    file mode at os.replace time (mid-write) to prove there is no window."""
+    observed_modes: list[int] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst):
+        observed_modes.append(os.stat(src).st_mode & 0o777)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(config.os, "replace", spy_replace)
+    model_presets.save_presets({"k": {"label": "L"}})
+
+    assert observed_modes, "save_presets did not perform an atomic replace"
+    # No group/other read bit at any point during the write.
+    for mode in observed_modes:
+        assert mode & 0o077 == 0, f"temp file was {oct(mode)} mid-write"
+    assert model_presets.PRESETS_FILE.stat().st_mode & 0o777 == 0o600
+
+
+def test_save_unlinks_tmp_on_write_failure(monkeypatch):
+    """Regression: a failing rename/write must not leak the .tmp file."""
+    # Pre-seed a good file so we can confirm it is left untouched on failure.
+    model_presets.save_presets({"keep": {"label": "Keep"}})
+
+    real_replace = os.replace
+
+    def boom_replace(src, dst):
+        # Simulate a failure after the temp file has been written.
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config.os, "replace", boom_replace)
+    with pytest.raises(OSError):
+        model_presets.save_presets({"new": {"label": "New"}})
+
+    monkeypatch.setattr(config.os, "replace", real_replace)
+    tmp = model_presets.PRESETS_FILE.with_suffix(".json.tmp")
+    assert not tmp.exists(), "leaked .tmp file after write failure"
+    # Original content survives the failed write.
+    assert json.loads(model_presets.PRESETS_FILE.read_text()) == {"keep": {"label": "Keep"}}
+
+
 # === is_available ===
 
 def test_is_available_false_when_preset_absent():
@@ -237,3 +282,17 @@ def test_is_available_oauth_anthropic_checks_credential_file(tmp_path, monkeypat
     assert model_presets.is_available("anth") is False
     creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "x"}}))
     assert model_presets.is_available("anth") is True
+
+
+def test_update_preset_rejects_raw_secret_in_auth_config(tmp_path, monkeypatch):
+    """Cross-file (R2): update_preset must run the SAME secret-leak keel as
+    add_preset — a raw key/token in auth_config must be refused, not persisted
+    (configuration.register()'s add→update fallback reaches this path)."""
+    import pytest
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "presets.json")
+    model_presets.add_preset(
+        key="m1", label="M1", api_format="openai",
+        base_url="https://x/v1", model="m", auth_type="none",
+    )
+    with pytest.raises(ValueError, match="raw secret"):
+        model_presets.update_preset("m1", auth_config={"api_key": "sk-leaked"})

@@ -1952,3 +1952,46 @@ def test_make_default_kickoff_builds_and_passes_agent_runners(isolated, monkeypa
     # The tool-using producer channel (chat runners) is also per-agent here.
     chat_models = captured["kwargs"].get("chat_runner_models") or {}
     assert chat_models.get("custom-agent") == "custom/pe-model"
+
+
+# ── #151 conditional-compression pressure gate (H4: token-native) ──────
+
+
+def test_compression_pressure_gate_uses_token_count_not_word_count():
+    """H4 regression: the #151 pressure gate must measure accumulated
+    state size in MODEL TOKENS (matching the token-budget denominator
+    ``reflect_effective_cap``), not whitespace word count.
+
+    Mixing units (``str.split()`` words / token cap) is artifact-
+    dependent: a dense, whitespace-sparse state doc (code/JSON/CJK)
+    collapses to a near-zero word count and silently under-fires the
+    gate, skipping compaction under real context pressure. The unit is
+    the TOKEN; producers/artifacts are agnostic.
+    """
+    import inspect
+
+    from modulatio import tool_summarization
+
+    src = inspect.getsource(project_execution._run_execution_loop)
+    # The gate numerator must be the model-aware token count, and must
+    # NOT fall back to a whitespace word count.
+    assert "tool_summarization.count_tokens(" in src
+    assert "len(_prior_state.split())" not in src
+
+    # Demonstrate the unit mismatch the fix removes: a whitespace-sparse
+    # doc with a genuinely high token load. Word count would read ~0
+    # pressure; token count reads true pressure.
+    dense_state = "语" * 4000          # ~4000 tokens, ~1 whitespace "word"
+    cap = 8000                          # token budget (reflect_effective_cap)
+    threshold = 0.5
+
+    word_pressure = len(dense_state.split()) / cap
+    token_pressure = tool_summarization.count_tokens(
+        "stub", text=dense_state
+    ) / cap
+
+    # Old (buggy) word-count gate under-fires: pressure ≈ 0 → skips.
+    assert word_pressure < threshold
+    # Fixed token-native gate correctly registers pressure ≥ threshold
+    # → compaction fires.
+    assert token_pressure >= threshold

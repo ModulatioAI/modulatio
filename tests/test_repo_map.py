@@ -293,3 +293,23 @@ def test_unreadable_python_falls_through(tmp_path: Path, monkeypatch: pytest.Mon
     # Doesn't raise; lists the file as unreadable
     assert "r.py" in out
     assert "unreadable" in out
+
+
+def test_build_repo_map_listing_lines_respect_cap(tmp_path):
+    """Cross-file (R2): once the map cap is reached, the per-file 'listed only'
+    lines must NOT bypass it — on a repo with many files the map stays bounded
+    (previously the name-only lines were appended uncounted, growing it without
+    limit)."""
+    from modulatio import repo_map
+    art = tmp_path / "artifacts"
+    art.mkdir()
+    # Many small python files, each big enough to individually trip the per-file
+    # add but small enough to accumulate into a long name-only tail.
+    body = "def f():\n    return 1\n" * 80
+    for i in range(400):
+        (art / f"mod_{i:03d}.py").write_text(body)
+    out = repo_map.build_repo_map(art)
+    # Bounded: cap is 16k chars; allow generous slack for the final summary line
+    # but it must NOT be the ~400-line uncounted tail (which was many KB over).
+    assert len(out) < repo_map.MAX_MAP_CHARS * 1.5
+    assert "more file(s) omitted" in out

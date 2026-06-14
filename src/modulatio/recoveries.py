@@ -34,7 +34,7 @@ import difflib
 import json
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +42,13 @@ from modulatio.vault import project_dir
 
 #: Hard write-time cap on every stored text field (Nemo #6) — chars, not tokens.
 MAX_RECOVERY_EXCERPT_CHARS = 2000
+
+#: Bound on the delta-window the change-shape fingerprint is computed over (chars).
+#: The STORED excerpts stay clipped at ``MAX_RECOVERY_EXCERPT_CHARS``; the fingerprint
+#: is computed from a delta-CENTERED window so a tail-only fix on a large artifact still
+#: yields a stable shape (and so two head-identical artifacts don't collapse to a false
+#: no-delta singleton) — while still bounding difflib's cost on a pathological artifact.
+_MAX_SHAPE_WINDOW_CHARS = 200_000
 
 #: How many significant rationale tokens make the lexical half of the signature.
 _RATIONALE_KEY_TOKENS = 8
@@ -78,21 +85,52 @@ class RecoveryRecord:
     """A witnessed QC recovery — the teaching triple, bounded. ``signature`` is the
     deterministic cluster key (computed at write time)."""
 
-    entry_id: str
-    timestamp: str
-    kind: str            # "qc_authored" | "redo_guided"
-    artifact_kind: str
-    defect_type: str     # "mechanical" | "substantive" | "environmental" | ""
-    task_id: str
-    defects: str
-    before_excerpt: str
-    after_excerpt: str
-    qc_rationale: str
-    signature: str
+    # Every field carries a default (#81): a future schema addition must not make
+    # historical lines (which lack the new key) raise TypeError on load and silently
+    # drop the ENTIRE recovery feed. Defaults + known-key filtering in
+    # load_recoveries make the record forward- AND backward-compatible.
+    entry_id: str = ""
+    timestamp: str = ""
+    kind: str = ""           # "qc_authored" | "redo_guided"
+    artifact_kind: str = ""
+    defect_type: str = ""    # "mechanical" | "substantive" | "environmental" | ""
+    task_id: str = ""
+    defects: str = ""
+    before_excerpt: str = ""
+    after_excerpt: str = ""
+    qc_rationale: str = ""
+    signature: str = ""
 
 
 def _truncate(s: object) -> str:
     return str(s or "")[:MAX_RECOVERY_EXCERPT_CHARS]
+
+
+def _delta_window(before: object, after: object) -> "tuple[str, str]":
+    """Strip the shared common prefix and suffix from ``before``/``after`` and bound
+    the residual changed region to ``_MAX_SHAPE_WINDOW_CHARS`` each. The change-shape
+    fingerprint is computed over THIS window, not a head-truncated copy: a real fix in
+    the TAIL of a >``MAX_RECOVERY_EXCERPT_CHARS`` artifact would otherwise leave the two
+    head-truncated excerpts identical (``before == after``) and flip a genuinely
+    recurring technique to a permanent ``unclassified`` singleton that never clusters.
+
+    O(n) prefix/suffix scan — no difflib over the full artifact — so this also caps the
+    fingerprint cost on a pathological (300k-token) artifact."""
+    b, a = str(before), str(after)
+    if b == a:
+        return b, a
+    n = min(len(b), len(a))
+    # common prefix length
+    i = 0
+    while i < n and b[i] == a[i]:
+        i += 1
+    # common suffix length (not crossing into the already-matched prefix)
+    j = 0
+    while j < (n - i) and b[len(b) - 1 - j] == a[len(a) - 1 - j]:
+        j += 1
+    bw = b[i: len(b) - j]
+    aw = a[i: len(a) - j]
+    return bw[:_MAX_SHAPE_WINDOW_CHARS], aw[:_MAX_SHAPE_WINDOW_CHARS]
 
 
 # ── change-shape fingerprint (artifact-kind-aware, Hero R3) ────────────────────
@@ -189,6 +227,11 @@ def change_shape(before: object, after: object, artifact_kind: str) -> "str | No
     toks = _kind_tokens(artifact_kind)
     try:
         b, a = str(before), str(after)
+        # A no-delta "recovery" taught nothing (empty→empty, or before == after):
+        # there is no technique to fingerprint, so fail open to a unique singleton
+        # (#80) rather than emit a stable shape that could false-merge across tasks.
+        if b == a:
+            return None
         if any(t in _CODE_KIND_TOKENS for t in toks):
             return _code_shape(b, a)
         if any(t in _DOC_KIND_TOKENS for t in toks):
@@ -273,7 +316,13 @@ def record_recovery(
     after_x = _truncate(after)
     defects_x = _truncate(defects)
     qc_rationale_x = _truncate(qc_rationale)
-    shape = change_shape(before_x, after_x, artifact_kind)
+    # Fingerprint the CHANGED region of the FULL artifact, not a head-truncated copy
+    # (R2 edge-case): a tail-only fix on a >MAX_RECOVERY_EXCERPT_CHARS artifact leaves
+    # before_x == after_x, which would flip a real recurring technique to a permanent
+    # ``unclassified`` singleton that never clusters. The window is delta-centered and
+    # bounded, so the stored excerpts stay clipped while the shape stays meaningful.
+    shape_before, shape_after = _delta_window(before, after)
+    shape = change_shape(shape_before, shape_after, artifact_kind)
     if shape is None:
         shape = f"unclassified:{eid}"  # permanent singleton — can never false-merge
     rec = RecoveryRecord(
@@ -301,13 +350,20 @@ def load_recoveries(project_code: str) -> "list[RecoveryRecord]":
     if not p.exists():
         return []
     out: list[RecoveryRecord] = []
+    known = {f.name for f in fields(RecoveryRecord)}
     try:
         for line in p.read_text().splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
-                out.append(RecoveryRecord(**json.loads(line)))
+                obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    continue
+                # Drop only UNKNOWN keys (a since-removed schema field); missing keys
+                # fall back to field defaults (#81). The historical feed survives any
+                # schema add/remove instead of being wholesale discarded.
+                out.append(RecoveryRecord(**{k: v for k, v in obj.items() if k in known}))
             except (ValueError, TypeError):
                 continue  # a malformed line never blocks the feed
     except OSError:
@@ -342,12 +398,24 @@ def mark_consumed(project_code: str, entry_ids) -> None:
                 f.write(e + "\n")
 
 
-def unconsumed_recoveries(project_code: str, limit: int = 30) -> "list[RecoveryRecord]":
-    """Un-consumed recoveries, most-recent first, capped — the raw material the win
-    loop clusters + the Leader judges."""
+def unconsumed_recoveries(
+    project_code: str, limit: "int | None" = None
+) -> "list[RecoveryRecord]":
+    """Un-consumed recoveries, most-recent first — the raw material the win loop
+    clusters + the Leader judges.
+
+    ``limit`` defaults to ``None`` (the FULL unconsumed feed). The recurrence count is
+    computed by :func:`cluster_recoveries` over whatever this returns, so a hard cap
+    here can STARVE a genuinely recurring technique (R2 correctness): with >cap diverse
+    signatures, an older technique with ``>= floor`` members can be sliced out of the
+    window and never reach the floor. Apply the display/evidence cap at the SURFACE
+    (per-cluster), not here. A positive ``limit`` still caps for callers that want a
+    bounded preview; the loaded feed is already write-time-bounded per record."""
     consumed = consumed_ids(project_code)
     rows = [r for r in load_recoveries(project_code) if r.entry_id not in consumed]
     rows.sort(key=lambda r: r.timestamp, reverse=True)
+    if limit is None:
+        return rows
     return rows[: max(1, limit)]
 
 

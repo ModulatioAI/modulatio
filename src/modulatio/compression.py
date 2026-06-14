@@ -61,15 +61,22 @@ get overwritten via temp+replace).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+
+try:  # POSIX-only; absent on Windows (single-process deployment there).
+    import fcntl
+except ImportError:  # pragma: no cover — exercised only on non-POSIX
+    fcntl = None  # type: ignore[assignment]
 
 _logger = logging.getLogger("modulatio.compression")
 
@@ -336,6 +343,54 @@ def current_state_path(run_dir: Path) -> Path:
     copy of the latest compressed state. Same contract as the
     pre-team_state writer; existing readers unchanged."""
     return run_dir / "current_state.md"
+
+
+def _compaction_lock_path(run_dir: Path) -> Path:
+    """Sidecar lock file guarding the read-version → write-manifest
+    critical section of :func:`emit_compaction`. Lives inside
+    ``compressed_state/`` so it shares the manifest's directory and is
+    cleaned up with the run."""
+    return compressed_state_dir(run_dir) / ".compaction.lock"
+
+
+@contextlib.contextmanager
+def _compaction_lock(run_dir: Path) -> Iterator[None]:
+    """Hold a POSIX exclusive ``flock`` across one compaction's
+    version-allocation-to-manifest-write window.
+
+    ``emit_compaction`` reads ``manifest.latest_version``, computes
+    ``+1`` via :func:`_next_version`, then writes the
+    state/diff/parsed/manifest quadruple. Two concurrent attempts on
+    the SAME ``run_dir`` (e.g. a daemon reflect turn racing a manual
+    ``kickoff``'s reflect) could both read the same latest_version,
+    allocate the same next version, and clobber each other's quadruple
+    / corrupt the monotonic version sequence. The outer plan-claim
+    lock serializes execution in the normal single-claimer path, but
+    this guard makes the manifest-sequence invariant hold even if that
+    assumption is ever violated (defense in depth — mirrors the
+    comptroller ledger flock).
+
+    A fresh fd is opened per acquisition so the exclusive lock
+    serializes across both threads and processes (``flock`` attaches to
+    the open file description, not the process). POSIX-only: when
+    ``fcntl`` is unavailable the lock is a no-op — single-process
+    Windows is the only documented deployment shape there (mirrors the
+    plan-claim lock posture)."""
+    if fcntl is None:  # pragma: no cover — non-POSIX no-op
+        yield
+        return
+    lock_path = _compaction_lock_path(run_dir)
+    _ensure_parent_0700(lock_path)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:  # pragma: no cover — best-effort release
+            pass
+        os.close(fd)
 
 
 # ─── Atomic write helpers ────────────────────────────────────────────────
@@ -1336,7 +1391,18 @@ def emit_compaction(
     # fill. An `echo_corrected` row fires ONLY when Leader emitted a
     # non-empty value that diverges from the source. Empty / absent
     # ⇒ silent fill (no drift to report).
-    leader_echo = parsed_state.get("original_user_goal", "") or ""
+    # The echo is orchestrator-owned and is NOT validated by
+    # validate_state_doc (see Step 2), so this field carries arbitrary
+    # LLM-controlled JSON: a Leader-reflect response may emit a list /
+    # int / null here. A non-string value would crash `.strip()` (and
+    # later `EchoCorrection.leader_value_sha256`), silently aborting the
+    # whole compaction with zero forensic trace. Treat any non-string
+    # echo as ABSENT → silent fill with the source value, matching the
+    # empty-echo branch. The engine sanitizes the orchestrator-owned
+    # echo deterministically rather than trusting its type.
+    leader_echo = parsed_state.get("original_user_goal")
+    if not isinstance(leader_echo, str):
+        leader_echo = ""
     correction: EchoCorrection | None = None
     if leader_echo.strip() and leader_echo.strip() != original_user_goal_source.strip():
         correction = EchoCorrection(
@@ -1348,98 +1414,104 @@ def emit_compaction(
     # absent, the canonical state doc must carry the user goal.
     parsed_state = {**parsed_state, "original_user_goal": original_user_goal_source}
 
-    # Step 4: compute next version
-    prev_manifest = read_manifest(run_dir)
-    version = _next_version(run_dir)
+    # Steps 4–9 (version allocation → manifest write → current_state
+    # copy) run under an exclusive per-run lock so concurrent attempts
+    # on the same run_dir can't both read the same latest_version,
+    # allocate the same next version, and clobber each other's
+    # state/diff/parsed/manifest quadruple. See _compaction_lock.
+    with _compaction_lock(run_dir):
+        # Step 4: compute next version
+        prev_manifest = read_manifest(run_dir)
+        version = _next_version(run_dir)
 
-    # Step 5: load previous state markdown + parsed dict for diffing.
-    # M1 close-out (Nemo Round-2 implementation sweep): the parsed
-    # dict is read from the persisted compressed_state/parsed/NNN.json
-    # so the structured diff against the prior version is REAL, not
-    # a "everything added from scratch" placeholder. Legacy runs from
-    # before this commit have no parsed.json on disk — _read_parsed_state
-    # returns None there, and compute_diff falls back to its first-
-    # turn shape (added-only) as before. New runs from c16 onward
-    # always have parsed.json available because every emit writes it.
-    prev_state_body: str | None = None
-    prev_parsed: dict | None = None
-    if prev_manifest is not None:
-        prev_path = state_version_path(run_dir, prev_manifest.latest_version)
-        if prev_path.exists():
-            prev_state_body = prev_path.read_text(encoding="utf-8")
-        prev_parsed = _read_parsed_state(
-            run_dir, prev_manifest.latest_version,
+        # Step 5: load previous state markdown + parsed dict for diffing.
+        # M1 close-out (Nemo Round-2 implementation sweep): the parsed
+        # dict is read from the persisted compressed_state/parsed/NNN.json
+        # so the structured diff against the prior version is REAL, not
+        # a "everything added from scratch" placeholder. Legacy runs from
+        # before this commit have no parsed.json on disk — _read_parsed_state
+        # returns None there, and compute_diff falls back to its first-
+        # turn shape (added-only) as before. New runs from c16 onward
+        # always have parsed.json available because every emit writes it.
+        prev_state_body: str | None = None
+        prev_parsed: dict | None = None
+        if prev_manifest is not None:
+            prev_path = state_version_path(run_dir, prev_manifest.latest_version)
+            if prev_path.exists():
+                prev_state_body = prev_path.read_text(encoding="utf-8")
+            prev_parsed = _read_parsed_state(
+                run_dir, prev_manifest.latest_version,
+            )
+
+        # Step 6: compute the diff
+        diff_payload = compute_diff(
+            prev_state=prev_parsed,
+            curr_state=parsed_state,
+            version=version,
+            previous_version=(
+                prev_manifest.latest_version if prev_manifest else None
+            ),
         )
 
-    # Step 6: compute the diff
-    diff_payload = compute_diff(
-        prev_state=prev_parsed,
-        curr_state=parsed_state,
-        version=version,
-        previous_version=(
-            prev_manifest.latest_version if prev_manifest else None
-        ),
-    )
-
-    # Step 7: no-material-change detection.
-    # M2 close-out (Nemo Round-2 implementation sweep): if Leader
-    # emitted a divergent original_user_goal echo on the SAME turn
-    # that produces a no_material_change skip, the echo correction
-    # is still a forensic event worth recording. Emit
-    # compression_echo_corrected BEFORE the skipped row so both
-    # share the same call_scope_id and compaction-attempt window.
-    curr_body = render_state_doc(parsed_state)
-    if prev_state_body is not None and prev_state_body == curr_body:
-        if correction is not None:
-            emit_echo_corrected(
+        # Step 7: no-material-change detection.
+        # M2 close-out (Nemo Round-2 implementation sweep): if Leader
+        # emitted a divergent original_user_goal echo on the SAME turn
+        # that produces a no_material_change skip, the echo correction
+        # is still a forensic event worth recording. Emit
+        # compression_echo_corrected BEFORE the skipped row so both
+        # share the same call_scope_id and compaction-attempt window.
+        curr_body = render_state_doc(parsed_state)
+        if prev_state_body is not None and prev_state_body == curr_body:
+            if correction is not None:
+                emit_echo_corrected(
+                    audit_path=audit_path,
+                    project_code=project_code, run_id=run_id, plan_id=plan_id,
+                    after_sub_objective=after_sub_objective,
+                    call_scope_id=call_scope_id, call_id=call_id,
+                    correction=correction,
+                )
+            emit_compaction_skipped(
                 audit_path=audit_path,
                 project_code=project_code, run_id=run_id, plan_id=plan_id,
                 after_sub_objective=after_sub_objective,
                 call_scope_id=call_scope_id, call_id=call_id,
-                correction=correction,
+                skip_reason="no_material_change",
+                pre_compaction_id=prev_manifest.latest_compaction_id,
+                pre_state_sha256=prev_manifest.latest_state_sha256,
             )
-        emit_compaction_skipped(
-            audit_path=audit_path,
-            project_code=project_code, run_id=run_id, plan_id=plan_id,
-            after_sub_objective=after_sub_objective,
-            call_scope_id=call_scope_id, call_id=call_id,
-            skip_reason="no_material_change",
-            pre_compaction_id=prev_manifest.latest_compaction_id,
-            pre_state_sha256=prev_manifest.latest_state_sha256,
+            return CompactionOutcome(
+                record=None, skip_reason="no_material_change",
+                missing_fields=None, echo_correction=correction,
+            )
+
+        # Step 8: state → diff → parsed → manifest (atomic each, in
+        # order). Manifest stays LAST: a crash before manifest leaves
+        # orphan state/diff/parsed for the next attempt to overwrite;
+        # a crash after manifest leaves the new triple as the live
+        # version. M1 (Nemo Round-2): parsed.json lands between diff
+        # and manifest so the next compaction's _read_parsed_state finds
+        # it cleanly.
+        state_path = _write_state_version(run_dir, version, curr_body)
+        diff_file_path = _write_diff(run_dir, version, diff_payload)
+        _write_parsed_state(run_dir, version, parsed_state)
+
+        post_state_sha256 = _content_sha256(curr_body)
+        diff_sha256 = _content_sha256(
+            diff_file_path.read_text(encoding="utf-8")
         )
-        return CompactionOutcome(
-            record=None, skip_reason="no_material_change",
-            missing_fields=None, echo_correction=correction,
+
+        compaction_id = _make_compaction_id()
+        new_manifest = Manifest(
+            latest_version=version,
+            latest_compaction_id=compaction_id,
+            latest_state_sha256=post_state_sha256,
+            latest_state_path=str(state_path.relative_to(run_dir)),
+            updated_at=_utcnow_iso(),
         )
+        _write_manifest(run_dir, new_manifest)
 
-    # Step 8: state → diff → parsed → manifest (atomic each, in
-    # order). Manifest stays LAST: a crash before manifest leaves
-    # orphan state/diff/parsed for the next attempt to overwrite;
-    # a crash after manifest leaves the new triple as the live
-    # version. M1 (Nemo Round-2): parsed.json lands between diff
-    # and manifest so the next compaction's _read_parsed_state finds
-    # it cleanly.
-    state_path = _write_state_version(run_dir, version, curr_body)
-    diff_file_path = _write_diff(run_dir, version, diff_payload)
-    _write_parsed_state(run_dir, version, parsed_state)
-
-    post_state_sha256 = _content_sha256(curr_body)
-    diff_sha256 = _content_sha256(
-        diff_file_path.read_text(encoding="utf-8")
-    )
-
-    compaction_id = _make_compaction_id()
-    new_manifest = Manifest(
-        latest_version=version,
-        latest_compaction_id=compaction_id,
-        latest_state_sha256=post_state_sha256,
-        latest_state_path=str(state_path.relative_to(run_dir)),
-        updated_at=_utcnow_iso(),
-    )
-    _write_manifest(run_dir, new_manifest)
-
-    # Step 9: current_state.md back-compat copy
-    _copy_to_current_state(run_dir, curr_body)
+        # Step 9: current_state.md back-compat copy
+        _copy_to_current_state(run_dir, curr_body)
 
     # Step 10: emit echo-correction (if any) + compaction_emit
     if correction is not None:

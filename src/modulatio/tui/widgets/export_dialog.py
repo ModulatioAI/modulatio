@@ -21,6 +21,7 @@ from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.widgets import Button, Input, Label, Select, Static
 
 from modulatio.export import ExportError, ExportResult, export_artifact
@@ -100,18 +101,20 @@ class ExportDialog(Vertical):
         try:
             result = export_artifact(self._source, Path(dest_str), format=fmt)  # type: ignore[arg-type]
         except ExportError as exc:
-            self.query_one("#export-status", Static).update(f"[red]{exc}[/red]")
+            self.query_one("#export-status", Static).update(f"[red]{escape(str(exc))}[/red]")
             return None
         except Exception as exc:  # defense against unexpected subprocess issues
-            self.query_one("#export-status", Static).update(f"[red]Export failed: {exc}[/red]")
+            self.query_one("#export-status", Static).update(
+                f"[red]Export failed: {escape(str(exc))}[/red]"
+            )
             return None
         if result.error:
             self.query_one("#export-status", Static).update(
-                f"[red]Export failed: {result.error}[/red]"
+                f"[red]Export failed: {escape(str(result.error))}[/red]"
             )
         else:
             self.query_one("#export-status", Static).update(
-                f"[green]Exported to {result.dest}[/green]"
+                f"[green]Exported to {escape(str(result.dest))}[/green]"
             )
         return result
 

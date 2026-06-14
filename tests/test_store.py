@@ -191,6 +191,171 @@ def test_task_roundtrip_and_filter(project: Path):
     assert all(t.description.startswith("draft essay") for t in tasks)
 
 
+def test_corrupt_task_file_does_not_brick_listing(project: Path):
+    """F1 (minimax): a single corrupt entity file must not take down the read
+    path for every *other* valid entity. Corrupt one task's YAML front-matter
+    out of three; list_tasks must still return the two valid ones, get_task on
+    the corrupt id degrades to None, and the bad file is quarantined."""
+    from uuid import uuid4
+    pid = uuid4()
+    for tid in ("TST-T-A", "TST-T-B", "TST-T-C"):
+        store.save_task(
+            PROJECT_CODE,
+            Task(id=tid, project_id=pid, goal_id="TST-G-001", description="d"),
+        )
+
+    # Corrupt ONLY T-B's front-matter (unclosed flow sequence -> YAMLError).
+    bad_path = store._task_path(PROJECT_CODE, "TST-T-B")
+    tail = bad_path.read_text().split("---", 2)[-1]
+    bad_path.write_text("---\nbroken: [unclosed\n---\n" + tail)
+
+    tasks = store.list_tasks(PROJECT_CODE)
+    assert sorted(t.id for t in tasks) == ["TST-T-A", "TST-T-C"]
+
+    # The corrupt one degrades to "missing" rather than raising.
+    assert store.get_task(PROJECT_CODE, "TST-T-B") is None
+
+    # And it has been quarantined out of the way (original gone, .broken kept).
+    assert not bad_path.exists()
+    assert bad_path.with_suffix(".broken.md").exists()
+
+
+def test_corrupt_transitions_json_quarantined(project: Path):
+    """The transitions JSON block is a second parse seam; malformed JSON there
+    must degrade the same way as bad front-matter, not raise."""
+    from uuid import uuid4
+    pid = uuid4()
+    g = Goal(
+        id="TST-G-J",
+        project_id=pid,
+        description="g",
+        success_criteria="c",
+    )
+    store.save_goal(PROJECT_CODE, g)
+    path = store._goal_path(PROJECT_CODE, "TST-G-J")
+    # Append a malformed transitions block.
+    path.write_text(
+        path.read_text()
+        + "\n<!-- modulatio:transitions -->\n```json\n{not valid json,\n```\n"
+        "<!-- /modulatio:transitions -->\n"
+    )
+
+    assert store.get_goal(PROJECT_CODE, "TST-G-J") is None
+    assert store.list_goals(PROJECT_CODE) == []
+    assert not path.exists()
+    assert path.with_suffix(".broken.md").exists()
+
+
+# ── Cluster A: store-read resilience (Opus H5/H6 + MiniMax BOM/CRLF) ──────────
+
+def _seed_tasks(*ids: str):
+    from uuid import uuid4
+    pid = uuid4()
+    for tid in ids:
+        store.save_task(
+            PROJECT_CODE,
+            Task(id=tid, project_id=pid, goal_id="TST-G-001", description="d"),
+        )
+
+
+def test_binary_entity_file_does_not_brick_listing(project: Path):
+    """Opus H5: a binary / non-UTF-8 entity file raises UnicodeDecodeError from
+    read_text. Because read_text is now INSIDE the parse try, it flows to
+    quarantine instead of escaping and bricking the whole listing."""
+    _seed_tasks("TST-T-A", "TST-T-C")
+    bad = store._task_path(PROJECT_CODE, "TST-T-B")
+    bad.write_bytes(b"\xff\xfe binary not utf-8 \x80\x81")
+
+    tasks = store.list_tasks(PROJECT_CODE)
+    assert sorted(t.id for t in tasks) == ["TST-T-A", "TST-T-C"]
+    assert store.get_task(PROJECT_CODE, "TST-T-B") is None
+    assert not bad.exists()
+    assert bad.with_suffix(".broken.md").exists()
+
+
+@pytest.mark.parametrize("frontmatter", ["- a\n- b", "just a scalar string", "42"])
+def test_non_dict_frontmatter_quarantined_not_bricked(project: Path, frontmatter: str):
+    """Opus H6: valid YAML but non-dict frontmatter (list/scalar) would raise
+    TypeError on the {**meta} spread. _split_frontmatter now coerces it to a
+    legible ValueError, and TypeError is in _PARSE_ERRORS as a belt — either
+    way the file quarantines instead of bricking the listing."""
+    _seed_tasks("TST-T-A", "TST-T-C")
+    bad = store._task_path(PROJECT_CODE, "TST-T-B")
+    bad.write_text(f"---\n{frontmatter}\n---\nbody\n")
+
+    tasks = store.list_tasks(PROJECT_CODE)
+    assert sorted(t.id for t in tasks) == ["TST-T-A", "TST-T-C"]
+    assert store.get_task(PROJECT_CODE, "TST-T-B") is None
+    assert bad.with_suffix(".broken.md").exists()
+
+
+def test_bom_prefixed_entity_reads_back_not_quarantined(project: Path):
+    """MiniMax HIGH: a UTF-8 BOM (Excel/Notepad/PowerShell) must NOT wrongly
+    quarantine a well-formed entity — the BOM is stripped before frontmatter
+    parsing."""
+    _seed_tasks("TST-T-BOM")
+    p = store._task_path(PROJECT_CODE, "TST-T-BOM")
+    p.write_text("\ufeff" + p.read_text(), encoding="utf-8")
+
+    got = store.get_task(PROJECT_CODE, "TST-T-BOM")
+    assert got is not None and got.id == "TST-T-BOM"
+    assert p.exists() and not p.with_suffix(".broken.md").exists()
+
+
+def test_crlf_entity_reads_back_not_quarantined(project: Path):
+    """MiniMax (same root as BOM): CRLF line endings must not break the
+    ^---\\n-anchored frontmatter regex and wrongly quarantine the entity."""
+    _seed_tasks("TST-T-CRLF")
+    p = store._task_path(PROJECT_CODE, "TST-T-CRLF")
+    p.write_text(p.read_text().replace("\n", "\r\n"))
+
+    got = store.get_task(PROJECT_CODE, "TST-T-CRLF")
+    assert got is not None and got.id == "TST-T-CRLF"
+    assert not p.with_suffix(".broken.md").exists()
+
+
+def test_unreadable_entity_degrades_to_missing_without_quarantine(
+    project: Path, monkeypatch
+):
+    """Opus H5 (OSError branch): a transient/permission read failure is NOT
+    corruption — degrade to 'missing' WITHOUT renaming a file we couldn't even
+    read."""
+    _seed_tasks("TST-T-OK", "TST-T-LOCKED")
+    locked = store._task_path(PROJECT_CODE, "TST-T-LOCKED")
+
+    orig_read = Path.read_text
+
+    def _boom(self, *a, **k):
+        if self.name == locked.name:
+            raise OSError("simulated unreadable file")
+        return orig_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+
+    assert store.get_task(PROJECT_CODE, "TST-T-LOCKED") is None
+    # NOT quarantined — the bytes may be fine, we just couldn't read them.
+    assert locked.exists()
+    assert not locked.with_suffix(".broken.md").exists()
+    # A sibling still reads.
+    assert store.get_task(PROJECT_CODE, "TST-T-OK") is not None
+
+
+def test_write_entity_is_atomic_no_partial_or_leftover_tmp(project: Path):
+    """Store MED: _write_entity writes via a temp sibling + os.replace so a
+    concurrent reader never sees a torn file. Sanity: repeated saves leave no
+    .tmp debris and the file stays valid/complete."""
+    _seed_tasks("TST-T-ATOMIC")
+    for i in range(5):
+        t = store.get_task(PROJECT_CODE, "TST-T-ATOMIC")
+        t.description = f"rev {i}"
+        store.save_task(PROJECT_CODE, t)
+    tasks_dir = store._task_path(PROJECT_CODE, "TST-T-ATOMIC").parent
+    assert not list(tasks_dir.glob("*.tmp"))
+    assert not list(tasks_dir.glob(".*tmp*"))
+    final = store.get_task(PROJECT_CODE, "TST-T-ATOMIC")
+    assert final is not None and final.description == "rev 4"
+
+
 def test_task_omits_deprecated_assignee_specialist_on_dump():
     """D2: new tasks never emit assignee_specialist (Field exclude=True)."""
     import json as _json

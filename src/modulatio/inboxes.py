@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,6 +50,22 @@ from typing import Iterable, Literal
 _LOGGER = logging.getLogger("modulatio.inboxes")
 
 
+#: Process-local lock serializing every shared-file JSONL append in
+#: this module. The read-side decay pass (render_for_prompt ->
+#: read_for_dispatch -> _tombstone_expired -> _tombstone -> append) is
+#: reached from parallel wave workers (orchestration._inbox_block_for
+#: runs inside _execute_task_isolated's ThreadPoolExecutor), where the
+#: enqueue/propose/accept paths' self._store_lock does NOT apply. Two
+#: hazards this lock closes: (a) N concurrent reads of the same expired
+#: note each appending a duplicate ``decayed`` tombstone (the in-memory
+#: ``tombstoned`` set is per-worker, so it can't dedup across threads);
+#: (b) interleaved appends from separate open handles tearing a JSONL
+#: line. Reentrant so the decay loop can re-read tombstoned ids under
+#: the same lock before appending. This is a within-process guard; the
+#: orchestrator does not run two interpreters against one run-dir.
+_APPEND_LOCK = threading.RLock()
+
+
 #: Environment variable that disables the inbox API. When set to "0"
 #: (or unset / "false" / "no"), enqueue / read_for_dispatch / propose
 #: become no-ops returning safe-default values. Default is ON.
@@ -56,9 +73,14 @@ _INBOXES_ENV = "MODULATIO_INBOXES"
 
 
 #: Once-per-recipient WARN dedup for soft-cap pressure. Keyed by the
-#: full recipient identity tuple so per-agent and per-role pressure
-#: don't share a token.
-_WARNED_SOFT_CAP: set[tuple[str, str | None, str | None]] = set()
+#: run_id PLUS the full recipient identity tuple so per-agent and
+#: per-role pressure don't share a token — and, critically, so a
+#: warning fired for a recipient in one run does NOT suppress the same
+#: recipient's warning in a later, distinct run sharing this process
+#: (the daemon / JT / cron paths reuse the interpreter across runs).
+#: The run_id also scopes growth: entries belong to a bounded run
+#: rather than accumulating for the process lifetime.
+_WARNED_SOFT_CAP: set[tuple[str, str, str | None, str | None]] = set()
 
 
 #: Recipient key regex. Rejects path-traversal primitives (``/``,
@@ -363,9 +385,15 @@ def _open_append_0600(path: Path):
 def _append_jsonl_row(path: Path, row: dict) -> None:
     """Write one JSONL line. ``ensure_ascii=True`` prevents future
     control-char content from breaking the JSONL contract; ``default=str``
-    handles Path / datetime / etc. without explicit coercion."""
-    with _open_append_0600(path) as fh:
-        fh.write(json.dumps(row, default=str, ensure_ascii=True) + "\n")
+    handles Path / datetime / etc. without explicit coercion.
+
+    Serialized under :data:`_APPEND_LOCK` so concurrent wave-worker
+    appends to the shared tombstones / audit / recipient files cannot
+    interleave and tear a JSONL line."""
+    line = json.dumps(row, default=str, ensure_ascii=True) + "\n"
+    with _APPEND_LOCK:
+        with _open_append_0600(path) as fh:
+            fh.write(line)
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -417,8 +445,21 @@ def _tombstone_to_row(t: InboxTombstone) -> dict:
 
 
 def _load_notes(path: Path) -> list[InboxNote]:
-    """Load all notes from a per-recipient JSONL file."""
-    return [_row_to_note(r) for r in _load_jsonl(path)]
+    """Load all notes from a per-recipient JSONL file.
+
+    Per-row best-effort: a malformed row (schema drift, a hand-edit, a
+    field renamed across versions) is skipped rather than failing the
+    whole load — mirroring the candidate path
+    (:func:`list_pending_candidates` / :func:`sweep_abandoned_candidates`),
+    so one bad note can't brick a recipient's entire inbox read."""
+    notes: list[InboxNote] = []
+    for r in _load_jsonl(path):
+        try:
+            notes.append(_row_to_note(r))
+        except Exception:  # noqa: BLE001 — skip malformed rows
+            _LOGGER.debug("skipping malformed inbox note row in %s", path)
+            continue
+    return notes
 
 
 def _load_tombstoned_ids(path: Path) -> set[str]:
@@ -488,11 +529,31 @@ def _tombstone_expired(
     """For every note whose decay window has passed and is not already
     tombstoned, append a ``decayed`` tombstone. Returns the updated
     tombstoned-id set. Idempotent — replaying with the same inputs
-    appends no rows the second time."""
-    for note in notes:
-        if note.note_id in tombstoned:
-            continue
-        if _is_expired(note, current_turn):
+    appends no rows the second time.
+
+    Concurrency: this read-side decay pass runs from parallel wave
+    workers (see :data:`_APPEND_LOCK`). The in-memory ``tombstoned``
+    set is per-worker, so a check against it alone cannot dedup against
+    a tombstone another worker wrote moments ago. We therefore hold
+    :data:`_APPEND_LOCK` across the whole pass and re-read the on-disk
+    tombstoned-id set immediately before each append, so two workers
+    racing on the same expired note write exactly one ``decayed`` row
+    rather than one each."""
+    expiring = [
+        n for n in notes
+        if n.note_id not in tombstoned and _is_expired(n, current_turn)
+    ]
+    if not expiring:
+        return tombstoned
+    with _APPEND_LOCK:
+        on_disk = _load_tombstoned_ids(tombstones_path_)
+        for note in expiring:
+            if note.note_id in tombstoned or note.note_id in on_disk:
+                # Another worker (or an earlier source in this read)
+                # already tombstoned it — record locally, skip the
+                # duplicate append.
+                tombstoned.add(note.note_id)
+                continue
             _tombstone(
                 tombstones_path_,
                 note=note,
@@ -501,6 +562,7 @@ def _tombstone_expired(
                 audit_path=audit_path,
             )
             tombstoned.add(note.note_id)
+            on_disk.add(note.note_id)
     return tombstoned
 
 
@@ -586,6 +648,7 @@ def _maybe_supersede(
 
 def _soft_cap_warn_once(
     *,
+    run_id: str,
     target_scope: str,
     target_agent_id: str | None,
     target_runner_role: str | None,
@@ -593,12 +656,14 @@ def _soft_cap_warn_once(
     soft_cap: int,
     hard_cap: int,
 ) -> None:
-    """Emit a once-per-recipient WARN when live-note count enters
-    ``[soft_cap, hard_cap)``. Same dedup pattern as the
-    context_budget warnings."""
+    """Emit a once-per-recipient-per-run WARN when live-note count
+    enters ``[soft_cap, hard_cap)``. Same dedup pattern as the
+    context_budget warnings, but the dedup key carries ``run_id`` so a
+    warning in one run can't suppress the same recipient's warning in a
+    later run sharing this process (daemon / JT / cron reuse)."""
     if live_count < soft_cap or live_count >= hard_cap:
         return
-    key = (target_scope, target_agent_id, target_runner_role)
+    key = (run_id, target_scope, target_agent_id, target_runner_role)
     if key in _WARNED_SOFT_CAP:
         return
     _WARNED_SOFT_CAP.add(key)
@@ -1007,6 +1072,7 @@ def enqueue(
         audit_path=audit_path,
     )
     _soft_cap_warn_once(
+        run_id=run_id_,
         target_scope=target_scope,
         target_agent_id=target_agent_id,
         target_runner_role=target_runner_role,
@@ -1507,12 +1573,20 @@ def parse_inbox_proposals(text: str) -> "tuple[str, list[dict]]":
     m = _INBOX_PROPOSALS_HEADING_RE.search(text)
     if m is None:
         return text, []
-    # Find the fenced JSON block that follows the heading.
+    # Find the fenced JSON block that follows the heading. The fence
+    # must IMMEDIATELY follow the heading (only blank lines / horizontal
+    # whitespace between) — the contract is that the producer emits the
+    # block at the very end with the fence right under the heading. A
+    # ``search`` over the whole tail would grab the first fence ANYWHERE
+    # downstream (e.g. an example fence inside trailing prose), splicing
+    # out the wrong region and corrupting the artifact. ``match`` after a
+    # leading-whitespace skip anchors it to the heading instead.
     tail = text[m.end():]
     fence_re = re.compile(
-        r"```(?:json)?\s*\n([\s\S]*?)\n```", re.MULTILINE,
+        r"[ \t]*\n(?:[ \t]*\n)*```(?:json)?[ \t]*\n([\s\S]*?)\n```",
+        re.MULTILINE,
     )
-    fm = fence_re.search(tail)
+    fm = fence_re.match(tail)
     if fm is None:
         # Heading present but no fenced block — strip the heading
         # alone so it doesn't end up in the artifact, but no

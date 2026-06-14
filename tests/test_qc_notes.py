@@ -81,3 +81,48 @@ def test_load_standing_notes_is_domain_scoped(project):
     )
     assert "Code guidance" not in qc_notes.load_standing_notes("essay", project)
     assert "Essay guidance" not in qc_notes.load_standing_notes("code", project)
+
+
+# --- r2 audit regressions (qc_notes.py) ---
+
+
+def test_load_standing_notes_survives_non_utf8_file(project):
+    """A non-UTF-8 / corrupt sidecar degrades to empty, never raises.
+
+    Regression for the error-path finding: the bare ``read_text()`` raised
+    UnicodeDecodeError on the QC hot path, which the redo loop swallowed into
+    a retry-to-exhaustion → BLOCKED even though the artifact was fine.
+    """
+    path = vault.VAULT_ROOT / "tst" / "qc-notes" / "essay.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe binary garbage not utf-8")
+    # Must not raise; standing notes are best-effort.
+    assert qc_notes.load_standing_notes("essay", project) == ""
+
+
+def test_load_standing_notes_rejects_path_traversal_domain(project, tmp_path):
+    """A non-slug domain (path traversal) reads as absent — fail-closed.
+
+    Regression for the security finding: ``artifact_kind`` flowed unvalidated
+    into ``qc-notes/<domain>.md`` so a domain like ``../../...`` could read an
+    arbitrary ``.md`` outside the qc-notes dir.
+    """
+    # Plant a file that a traversal domain would otherwise reach.
+    secret = vault.VAULT_ROOT / "tst" / "secret.md"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text("SECRET STANDING NOTES\n")
+    # ../secret targets <project>/secret.md from <project>/qc-notes/.
+    assert qc_notes.load_standing_notes("../secret", project) == ""
+    # Other non-conforming domains are also rejected.
+    for bad in ("../../etc/passwd", "foo/bar", "Essay", ".hidden", "", "a" * 33):
+        assert qc_notes.load_standing_notes(bad, project) == ""
+
+
+def test_load_standing_notes_accepts_conforming_slug_domains(project):
+    """Valid slug domains (lowercase, digits, _ and -) still load normally."""
+    for good in ("essay", "code_review", "data-set", "v2"):
+        _write(
+            vault.VAULT_ROOT / "tst" / "qc-notes" / f"{good}.md",
+            f"Guidance for {good}.\n",
+        )
+        assert "Guidance for" in qc_notes.load_standing_notes(good, project)

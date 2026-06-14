@@ -38,8 +38,10 @@ skip the ledger entirely (no API cost to gate).
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import re
+import time as _time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -49,6 +51,15 @@ from modulatio.vault import project_dir
 
 
 _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+_log = logging.getLogger(__name__)
+
+# Max seconds to wait for the ledger lock before giving up. The critical
+# section is a tiny count→check→append (no LLM/network), so contention
+# should clear in milliseconds; this deadline only guards against a wedged
+# holder so a single stuck call can't block every budget-gated call on the
+# host forever. Env-overridable for ops; non-positive/invalid → default.
+_LOCK_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -86,13 +97,22 @@ def _ledger_path(project_code: str) -> Path:
 
 
 def _parse_int(raw: str) -> int | None:
+    """Parse a declared daily cap. Empty, non-integer, or **negative**
+    → ``None`` (treated as unconfigured). A negative cap is invalid
+    config: it would deny every call (``spent >= cap`` is always true)
+    yet still promise a UTC-midnight refresh that never helps, silently
+    bricking the tier. ``0`` is preserved — it's a legitimate "disable
+    this tier explicitly" value (deny-all with an honest 0/0 reason)."""
     s = raw.strip()
     if not s:
         return None
     try:
-        return int(s)
+        value = int(s)
     except ValueError:
         return None
+    if value < 0:
+        return None
+    return value
 
 
 def load_budget(project_code: str) -> Budget:
@@ -160,12 +180,72 @@ def _count_today(project_code: str, cost_class: str) -> int:
     return count
 
 
+def _count_metered_cost_today(project_code: str, cost_class: str) -> int:
+    """Count today's metered-tool ledger lines for ``cost_class``.
+
+    Mirrors ``_count_today`` for the metered stream so the shared daily
+    cap can sum both accounting streams. A metered line is
+    ``<iso-ts> metered <cost_class> <agent_id> <task_id> <key>`` — field 1
+    is the literal ``metered``, field 2 is the cost_class.
+    """
+    ledger = _ledger_path(project_code)
+    if not ledger.exists():
+        return 0
+    today = datetime.now(timezone.utc).date()
+    count = 0
+    for line in ledger.read_text().splitlines():
+        parts = line.strip().split()
+        if len(parts) < 3 or parts[1] != "metered":
+            continue
+        ts_raw, _kind, entry_cost = parts[0], parts[1], parts[2]
+        if entry_cost != cost_class:
+            continue
+        try:
+            ts = datetime.fromisoformat(ts_raw)
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts.astimezone(timezone.utc).date() == today:
+            count += 1
+    return count
+
+
+def _count_daily_spend(project_code: str, cost_class: str) -> int:
+    """Total of today's paid-cloud/premium-cloud spend for ``cost_class``
+    across BOTH accounting streams (agent escalations *and* metered-tool
+    calls). The daily cap declared in ``comptroller.md`` is a single
+    real-money budget per cost_class; both ``authorize_escalation`` and
+    ``authorize_metered_tool`` debit it, so the cap check must see the
+    combined count. Counting only one stream lets the other slip a second
+    full budget's worth of paid calls through under one declared cap.
+    """
+    return _count_today(project_code, cost_class) + _count_metered_cost_today(
+        project_code, cost_class
+    )
+
+
 def _append_ledger(project_code: str, cost_class: str, agent_id: str) -> None:
     ledger = _ledger_path(project_code)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with ledger.open("a") as f:
         f.write(f"{ts} {cost_class} {agent_id}\n")
+
+
+def _lock_timeout_seconds() -> float:
+    """Effective lock-acquire deadline. ``MODULATIO_COMPTROLLER_LOCK_TIMEOUT``
+    overrides the default; a non-positive or unparseable value falls back to
+    the default so a bad env can't disable the guard."""
+    raw = os.environ.get("MODULATIO_COMPTROLLER_LOCK_TIMEOUT")
+    if raw:
+        try:
+            v = float(raw)
+        except ValueError:
+            return _LOCK_TIMEOUT_SECONDS
+        if v > 0:
+            return v
+    return _LOCK_TIMEOUT_SECONDS
 
 
 @contextmanager
@@ -180,16 +260,44 @@ def _ledger_lock(project_code: str):
     fd, so the exclusive lock serializes across both threads and processes
     (flock locks attach to the open file description, not the process).
     POSIX-only, which matches the deployment target.
+
+    Yields ``True`` when the exclusive lock was acquired (critical section
+    runs serialized), or ``False`` when it could not be acquired within the
+    deadline. Rather than block forever on a wedged holder — which would
+    freeze *every* budget-gated call on the host — we bound the wait with a
+    non-blocking acquire loop. On timeout the caller decides its fail
+    posture (escalation degrades open, metered fails closed), so a stuck
+    lock is observable and bounded instead of a silent global wedge.
     """
     ledger = _ledger_path(project_code)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     lock_path = ledger.with_suffix(".lock")
     fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    acquired = False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        deadline = _time.monotonic() + _lock_timeout_seconds()
+        backoff = 0.005
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if _time.monotonic() >= deadline:
+                    _log.warning(
+                        "comptroller ledger lock not acquired within %.1fs for "
+                        "project %s (lock=%s); proceeding without serialization",
+                        _lock_timeout_seconds(),
+                        project_code,
+                        lock_path,
+                    )
+                    break
+                _time.sleep(backoff)
+                backoff = min(backoff * 2, 0.1)
+        yield acquired
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
@@ -244,9 +352,16 @@ def authorize_escalation(
         )
 
     # Lock the count→check→append so concurrent escalations can't both
-    # slip under the cap and overshoot the daily budget.
-    with _ledger_lock(project_code):
-        spent = _count_today(project_code, cost_class)
+    # slip under the cap and overshoot the daily budget. ``spent`` sums
+    # BOTH the escalation and metered-tool streams: the declared cap is one
+    # shared real-money budget per cost_class, so the gate must see every
+    # paid call against it (else escalation + metered each spend a full cap).
+    with _ledger_lock(project_code) as locked:
+        # If the lock couldn't be acquired (wedged holder), escalation keeps
+        # its degrade-OPEN posture: still do the count→check→append, accepting
+        # the small unserialized-overshoot risk the lock guards against rather
+        # than wedging the producer. The warning is logged inside _ledger_lock.
+        spent = _count_daily_spend(project_code, cost_class)
         if spent >= cap:
             return Authorization(
                 allowed=False,
@@ -257,6 +372,7 @@ def authorize_escalation(
                 ),
             )
         _append_ledger(project_code, cost_class, agent_id)
+        _ = locked  # posture is identical whether or not the lock was held
     return Authorization(
         allowed=True,
         refresh_at=None,
@@ -374,7 +490,20 @@ def authorize_metered_tool(
                 "comptroller.md to enable metered use)"
             ),
         )
-    with _ledger_lock(project_code):
+    with _ledger_lock(project_code) as locked:
+        if not locked:
+            # Metered spends real money and fails CLOSED: if we can't serialize
+            # the count→check→append (wedged holder), deny rather than risk an
+            # unserialized double-charge. refresh_at = UTC midnight so the
+            # auto-resume pattern retries on the normal cadence.
+            return Authorization(
+                allowed=False,
+                refresh_at=_tomorrow_utc_midnight(),
+                reason=(
+                    f"metered tool {tool_name!r}: ledger lock unavailable "
+                    "(busy/wedged) — denied (fail closed); retries at UTC midnight"
+                ),
+            )
         cost_count, task_count, key_seen = _scan_metered_today(
             project_code, cost_class, task_id, idempotency_key
         )
@@ -393,20 +522,24 @@ def authorize_metered_tool(
                     f"({task_count}/{per_task_cap} for this task)"
                 ),
             )
-        if cost_count >= cap:
+        # The daily cap is one shared budget per cost_class: count BOTH the
+        # metered-tool spend and the agent-escalation spend against it (else
+        # the two streams each spend a full cap under one declared budget).
+        daily_spend = cost_count + _count_today(project_code, cost_class)
+        if daily_spend >= cap:
             return Authorization(
                 allowed=False,
                 refresh_at=_tomorrow_utc_midnight(),
                 reason=(
                     f"metered tool {tool_name!r}: daily {cost_class} budget exhausted "
-                    f"({cost_count}/{cap} used); refreshes at UTC midnight"
+                    f"({daily_spend}/{cap} used); refreshes at UTC midnight"
                 ),
             )
         _append_metered_ledger(project_code, cost_class, agent_id, task_id, idempotency_key)
     return Authorization(
         allowed=True,
         refresh_at=None,
-        reason=f"metered tool {tool_name!r} authorized ({cost_count + 1}/{cap} {cost_class} today)",
+        reason=f"metered tool {tool_name!r} authorized ({daily_spend + 1}/{cap} {cost_class} today)",
     )
 
 

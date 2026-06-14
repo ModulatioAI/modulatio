@@ -311,6 +311,21 @@ COMMANDS: tuple[Command, ...] = (
 
 # === Dispatcher ===
 
+# Commands whose single argument is a filesystem path (or other free-form
+# remainder) must NOT be shlex-tokenized: posix shlex.split silently eats
+# backslashes, corrupting Windows-style paths (e.g. ``/open C:\Users\me\f.md``
+# becomes ``C:Usersmef.md``). For these we take the literal remainder after the
+# command token, stripped of an optional single pair of surrounding quotes.
+_RAW_REMAINDER_COMMANDS: frozenset[str] = frozenset({"/open"})
+
+
+def _strip_one_quote_pair(s: str) -> str:
+    """Strip a single matching pair of surrounding quotes, if present."""
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
+
 def _build_lookup() -> dict[str, Command]:
     out: dict[str, Command] = {}
     for cmd in COMMANDS:
@@ -341,6 +356,13 @@ def dispatch(text: str) -> CommandResult:
         return CommandResult(output="Empty command", ok=False)
     cmd_name = parts[0]
     args = parts[1:]
+
+    # Path/free-form commands keep their argument verbatim so a Windows-style
+    # path (backslashes) or any other literal remainder survives intact rather
+    # than being mangled by shlex tokenization.
+    if cmd_name in _RAW_REMAINDER_COMMANDS:
+        remainder = text[len(cmd_name):].strip()
+        args = [_strip_one_quote_pair(remainder)] if remainder else []
 
     lookup = _build_lookup()
     cmd = lookup.get(cmd_name)

@@ -7877,6 +7877,165 @@ def test_leader_verify_prompt_carries_the_md_satisfies_render_rule():
     assert "satisfies" in body
 
 
+# ── #73: family-aware render-path normalization ──────────────────────────────
+
+def test_effective_assembly_family_priority():
+    """#73: the EFFECTIVE family MUST mirror _select_assembler_skill's authority:
+    (a) standards(artifact_kind).assembler_skill WINS (the sole routing
+    authority); (b) else the planner's required_skills assembler skill (backstop
+    when standards is silent — the planner-forgot-artifact_kind seam); (c) else
+    document default."""
+    from modulatio.orchestration import _effective_assembly_family as fam
+    # (a) standards for artifact_kind wins (seed image/video → media-assembly)
+    assert fam("image", [], None) == "media"
+    assert fam("video", [], None) == "media"
+    # (a) standards WINS over a CONFLICTING required_skills — _select_assembler_skill
+    # canonicalizes image→media-assembly, so evidence must follow (Nemo code review).
+    assert fam("image", ["document-assembly"], None) == "media"
+    assert fam("text", ["media-assembly"], None) == "media"  # text: standards silent → backstop
+    # (b) backstop: artifact_kind 'text' declares no assembler_skill, so the
+    # planner's explicit assembler skill routes (the forgot-artifact_kind seam)
+    assert fam("text", ["document-assembly"], None) == "document"
+    assert fam("text", ["code-assembly"], None) == "code"
+    assert fam("text", ["data-assembly"], None) == "data"
+    # (c) default
+    assert fam("text", [], None) == "document"
+    assert fam("zzz-nope", [], None) == "document"
+
+
+def test_build_requirement_family_aware():
+    """#73: render-path rewrite (.pptx → .md) fires ONLY for the document family;
+    media/code/data and the empty/unknown (decompose) family keep the real path."""
+    from modulatio.orchestration import _build_requirement
+    raw = {"kind": "artifact", "description": "d", "target": "out/deck.pptx",
+           "source": "src/deck.pptx"}
+    # document → rewrite to .md source
+    doc = _build_requirement(raw, family="document")
+    assert doc.target == "out/deck.md" and doc.source == "src/deck.md"
+    # media → keep the binary extension (the deliverable IS the .pptx)
+    media = _build_requirement(raw, family="media")
+    assert media.target == "out/deck.pptx" and media.source == "src/deck.pptx"
+    # code/data → never rewrite a natural output to .md
+    assert _build_requirement({"target": "a.csv"}, family="data").target == "a.csv"
+    # empty family (decompose, before artifact_kind exists) → no rewrite
+    assert _build_requirement(raw, family="").target == "out/deck.pptx"
+    # default (back-compat) is document
+    assert _build_requirement(raw).target == "out/deck.md"
+
+
+def _evidence_of(orch, planner_item: dict):
+    """Run _plan_tasks with a single-task planner emitting ``planner_item`` and
+    return the first built task's first EvidenceRequirement."""
+    from uuid import uuid4
+
+    from modulatio.types import Goal, GoalStatus
+    orch.runners["planner"] = lambda prompt: f"```json\n{json.dumps([planner_item])}\n```"
+    goal = Goal(id=f"{PROJECT_CODE}-G-001", project_id=uuid4(),
+                description="make the deliverable", success_criteria="it exists",
+                status=GoalStatus.PENDING)
+    tasks = orch._plan_tasks(goal)
+    assert tasks and tasks[0].evidence_required
+    return tasks[0].evidence_required[0]
+
+
+def test_plan_tasks_media_evidence_keeps_container_extension(project: Project):
+    """#73 behavioral: a MEDIA task — even one whose planner FORGOT artifact_kind
+    (defaulted to text) but declared required_skills=['media-assembly'] — keeps
+    its real binary extension in evidence, NOT document-normalized to .md."""
+    orch = Orchestrator(project, {"leader": _leader_stub, "planner": _planner_stub,
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    ev = _evidence_of(orch, {
+        "description": "composite the slideshow",
+        "artifact_kind": "text",                 # planner forgot the media kind
+        "required_skills": ["media-assembly"],   # but declared the assembler
+        "output_path": "deck.pptx",
+        "deliverable": True,
+        "evidence_required": [
+            {"kind": "artifact", "description": "the slideshow", "target": "decks/deck.pptx"},
+        ],
+    })
+    assert ev.target == "decks/deck.pptx", "media evidence must keep the binary extension"
+
+
+def test_plan_tasks_document_evidence_normalizes_to_md(project: Project):
+    """#73 behavioral: a DOCUMENT task's evidence still rewrites the render-format
+    path to the authored .md source (verify checks the source; delivery renders
+    the container off output_path, which is untouched)."""
+    orch = Orchestrator(project, {"leader": _leader_stub, "planner": _planner_stub,
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    ev = _evidence_of(orch, {
+        "description": "write the report",
+        "artifact_kind": "report",
+        "output_path": "report.pdf",            # render target — untouched
+        "deliverable": True,
+        "evidence_required": [
+            {"kind": "artifact", "description": "the report", "target": "out/report.pdf"},
+        ],
+    })
+    assert ev.target == "out/report.md", "document evidence names the authored .md source"
+
+
+def test_plan_tasks_conflicting_skill_vs_kind_evidence_follows_route(project: Project):
+    """#73 / Nemo code review: when the planner's required_skills CONFLICT with
+    artifact_kind's standards family, evidence normalization must follow the SAME
+    route `_select_assembler_skill` canonicalizes to — no split-brain. Here
+    artifact_kind=image (standards → media-assembly) overrides a planner
+    required_skills=['document-assembly'], so the task routes to MEDIA and its
+    evidence must keep the binary extension, NOT be document-normalized to .md."""
+    from uuid import uuid4
+
+    from modulatio.types import Goal, GoalStatus
+    orch = Orchestrator(project, {"leader": _leader_stub, "planner": _planner_stub,
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    item = {
+        "description": "composite the deck",
+        "artifact_kind": "image",                  # standards → media-assembly
+        "required_skills": ["document-assembly"],  # conflicting planner choice
+        "output_path": "report.pdf",
+        "deliverable": True,
+        "evidence_required": [
+            {"kind": "artifact", "description": "the deck", "target": "out/report.pdf"},
+        ],
+    }
+    orch.runners["planner"] = lambda prompt: f"```json\n{json.dumps([item])}\n```"
+    goal = Goal(id=f"{PROJECT_CODE}-G-001", project_id=uuid4(),
+                description="make a deck", success_criteria="it exists",
+                status=GoalStatus.PENDING)
+    tasks = orch._plan_tasks(goal)
+    assert tasks
+    t = tasks[0]
+    # the engine canonicalizes the route to the standards family...
+    assert "media-assembly" in t.required_skills, "route canonicalized to media-assembly"
+    # ...and evidence FOLLOWED that route (kept binary, not document-normalized)
+    assert t.evidence_required[0].target == "out/report.pdf", (
+        "evidence must follow the canonicalized media route, not be rewritten to .md"
+    )
+
+
+def test_decompose_keeps_goal_prose_unnormalized(project: Project):
+    """#73: decompose no longer rewrites goal prose — the goal names the
+    user-requested deliverable (truthful intent); the family-aware rewrite is
+    deferred to the per-task evidence."""
+    def _media_leader(prompt: str) -> str:
+        goals = [{
+            "description": "produce slides.pptx from the images",
+            "success_criteria": "a slides.pptx deck exists",
+            "evidence_required": [
+                {"kind": "artifact", "description": "the deck", "target": "slides.pptx"},
+            ],
+        }]
+        return f"```json\n{json.dumps(goals)}\n```"
+
+    orch = Orchestrator(project, {"leader": _media_leader, "planner": _planner_stub,
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    goals = orch._leader_decompose("make a slideshow")
+    assert goals
+    assert "slides.pptx" in goals[0].description, "goal prose keeps the user-requested name"
+    assert "slides.pptx" in goals[0].success_criteria
+    # decompose-level evidence is also left un-normalized (family unknown there)
+    assert goals[0].evidence_required[0].target == "slides.pptx"
+
+
 # ── §2: deliverable render in the ENGINE (every run path delivers) ───────────
 
 def test_engine_renders_grounded_deliverables_partial(tmp_path, monkeypatch):
@@ -10117,3 +10276,103 @@ def test_regression_blocked_only_in_generate_mode(project, tmp_path):
     assert orch._regression_blocked(Task(producer_mode="generate", **base), p, "stub") is True
     assert orch._regression_blocked(Task(producer_mode="revise", **base), p, "stub") is False
     assert orch._regression_blocked(Task(producer_mode="edit", **base), p, "stub") is False
+
+
+# ── Cluster D: wave worker-state loss (Opus R2 H2/H3 + Nemo write_artifact) ────
+
+def test_concurrent_wave_workers_inherit_budget_tracker(project: Project, monkeypatch):
+    """Opus R2 H3: wave workers must inherit the main-thread BudgetTracker
+    ContextVar (via per-future copy_context). A producer running in a wave worker
+    must see the SAME bound tracker — else its spend is unmetered and
+    max_tokens/max_cost_usd caps under-count (cost bypass)."""
+    import threading
+
+    from modulatio import budget
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "1")
+
+    tracker = budget.BudgetTracker()
+    seen: list = []
+    lock = threading.Lock()
+
+    def _capturing_drafter(prompt: str) -> str:
+        with lock:
+            seen.append(budget.current_tracker())
+        return _drafter_stub(prompt)
+
+    def _coord_two(prompt: str) -> str:
+        tasks = [
+            {"description": f"produce artifact {i}", "assignee_specialist": "drafter",
+             "artifact_kind": "essay",
+             "evidence_required": [{"kind": "artifact", "description": "file"}]}
+            for i in (1, 2)
+        ]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "planner": _coord_two,
+        "drafter": _capturing_drafter, "qc": _qc_stub,
+    })
+    with budget.with_tracker(tracker):
+        orch.kickoff("two independent things")
+
+    assert seen, "producers must have run in the wave"
+    assert all(t is tracker for t in seen), (
+        "every wave worker must inherit the bound BudgetTracker "
+        "(None / a different object => unmetered producer spend)"
+    )
+
+
+def test_staging_write_artifact_is_recorded_for_merge(project: Project):
+    """Nemo R2 HIGH: a producer's write_artifact in a wave worker writes into the
+    per-task staging tree; that write must be RECORDED so _merge_wave_artifacts
+    copies it to the shared tree (else it's deleted with staging and lost)."""
+    orch = Orchestrator(project, {"drafter": _drafter_stub, "qc": _qc_stub})
+    staging = orch._scope_root() / ".staging" / "WA-T-001"
+    staging.mkdir(parents=True)
+
+    buf: list = []
+    orch._tls.artifact_writes = buf
+    orch._tls.staging_root = staging  # makes _artifacts_root() resolve to staging
+    try:
+        reg = orch._staging_tool_registry(staging)
+        reg["write_artifact"].call(path="side.py", content="print(1)\n")
+    finally:
+        orch._tls.artifact_writes = None
+        orch._tls.staging_root = None
+
+    assert "side.py" in buf, "a staged write_artifact must be recorded for the merge"
+    assert (staging / "side.py").read_text() == "print(1)\n"
+
+
+def test_concurrent_merge_copies_recorded_twin_drops_unrecorded(project: Project):
+    """Opus R2 H2: the binary deliverable's readable text-twin must survive the
+    concurrent-wave merge. The merge only copies RECORDED artifact_writes — so the
+    twin must be recorded (the fix). This pins the contract: a recorded staged
+    twin lands in shared; an UNrecorded one is dropped + torn down with staging
+    (exactly how the verifier went blind)."""
+    from modulatio.orchestration import Orchestrator, RunSummary, TaskExecutionResult
+    from modulatio.types import Task, TaskStatus
+    orch = Orchestrator(project, {"drafter": _drafter_stub, "qc": _qc_stub})
+    shared = orch._scope_root() / "artifacts"
+
+    st1 = orch._scope_root() / ".staging" / "TWN-T-001"
+    (st1 / ".twins").mkdir(parents=True)
+    (st1 / ".twins" / "TWN-T-001.md").write_text("readable twin body\n")
+    t1 = Task(id="TWN-T-001", project_id=project.id, goal_id="TWN-G",
+              description="d", status=TaskStatus.COMPLETED)
+    r1 = TaskExecutionResult(task=t1, drafts=[], staging_root=st1,
+                             artifact_writes=[".twins/TWN-T-001.md"])
+
+    st2 = orch._scope_root() / ".staging" / "TWN-T-002"
+    (st2 / ".twins").mkdir(parents=True)
+    (st2 / ".twins" / "TWN-T-002.md").write_text("readable twin body\n")
+    t2 = Task(id="TWN-T-002", project_id=project.id, goal_id="TWN-G",
+              description="d", status=TaskStatus.COMPLETED)
+    r2 = TaskExecutionResult(task=t2, drafts=[], staging_root=st2, artifact_writes=[])
+
+    orch._merge_wave_artifacts({t1.id: r1, t2.id: r2}, RunSummary(project=project))
+
+    assert (shared / ".twins" / "TWN-T-001.md").exists(), "recorded twin must survive the merge"
+    assert not (shared / ".twins" / "TWN-T-002.md").exists(), (
+        "an unrecorded staged file is dropped — the fix records the twin so it doesn't"
+    )

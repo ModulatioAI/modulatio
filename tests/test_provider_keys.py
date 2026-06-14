@@ -158,3 +158,60 @@ def test_remove_pinned_key_also_clears_its_pin(keys):
     keys.remove_key(BASE)
     assert keys.list_keys(BASE) == []
     assert keys.pinned_env_var_for("m", BASE) is None
+
+
+def test_concurrent_rotation_is_serialized(keys, monkeypatch):
+    """Regression: next_pool_env_var's cursor read-modify-write is hit by
+    concurrent wave workers. Without the lock two workers can read the same
+    cursor value and one increment is lost, skewing the round-robin toward a
+    subset of keys (the very rate-limit clumping the pool exists to avoid).
+
+    The plain GIL makes the two-bytecode race fire only rarely, so we force
+    the window open: a dict subclass whose ``get`` yields the GIL (sleeps)
+    right after the read. Under the lock the critical section is serialized
+    and the read→write stays atomic regardless of that yield, so the rotation
+    is exact and an exact multiple of the pool size lands perfectly evenly.
+    Without the lock the forced yield makes the lost update near-certain and
+    the distribution skews."""
+    import collections
+    import threading
+    import time
+
+    class _YieldingCursor(dict):
+        def get(self, key, default=None):  # type: ignore[override]
+            value = super().get(key, default)
+            time.sleep(0)  # release the GIL to widen the race window
+            return value
+
+    monkeypatch.setattr(keys, "_pool_cursor", _YieldingCursor())
+
+    keys.add_key(BASE, "k1", "a")
+    keys.add_key(BASE, "k2", "b")
+    keys.add_key(BASE, "k3", "c")
+
+    pool_size = len(keys.pool_env_vars(BASE))
+    assert pool_size == 3
+    calls_per_thread = 60
+    n_threads = 9  # total = 540, an exact multiple of pool_size (3)
+    total = n_threads * calls_per_thread
+    barrier = threading.Barrier(n_threads)
+    results: list[str] = []
+    results_lock = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait()  # maximise contention on the shared cursor
+        local = [keys.next_pool_env_var(BASE) for _ in range(calls_per_thread)]
+        with results_lock:
+            results.extend(local)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == total
+    # Atomic rotation over an exact multiple of the pool size ⇒ perfectly even
+    # distribution. A lost-update race leaves at least one key over/under-used.
+    counts = collections.Counter(results)
+    assert set(counts.values()) == {total // pool_size}, counts

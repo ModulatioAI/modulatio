@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -89,7 +90,14 @@ def _now_iso() -> str:
 
 
 def _new_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")[:18]
+    # Full UTC timestamp (incl. all 6 microsecond digits) keeps ids
+    # sortable by creation time; a short random suffix makes them
+    # collision-resistant under the daemon's fast-dispatch loop, where
+    # two ids can otherwise land in the same microsecond window.
+    # (Previously this truncated to 18 chars, dropping 2 of 6 microsecond
+    # digits → ~100µs resolution → colliding task/cron ids.)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    return f"{stamp}{secrets.token_hex(3)}"
 
 
 # === Queue CRUD ===
@@ -107,6 +115,7 @@ def add_task(
     jt_id: Optional[str] = None,
     jt_params: Optional[dict] = None,
     on_refused: Optional[str] = None,
+    next_run: Optional[str] = None,
 ) -> dict:
     """Queue an objective for the given project.
 
@@ -125,6 +134,14 @@ def add_task(
     its bind: ``"skip"`` (the cron default — skip the slot, no greenfield
     substitute) or ``"greenfield"`` (Clif's per-cron override — run the objective
     greenfield). ``None`` ⇒ the dispatch callback's default ("skip" for cron).
+
+    ``next_run`` — pre-set the eligibility timestamp ATOMICALLY at create time so
+    the task is never persisted in an eligible-now state. ``None`` (default) ⇒
+    eligible immediately. ``requeue_recurring`` passes the computed interval
+    next_run here so a recurring child is never briefly on disk with
+    ``next_run=None`` (which ``_select_next_pending`` would treat as
+    eligible-now → a concurrent claim could dispatch it before its interval is
+    set, bypassing the recurrence).
     """
     from modulatio import vault
 
@@ -151,7 +168,7 @@ def add_task(
             "retries": 0,
             "max_retries": max_retries,
             "every": every,
-            "next_run": None,
+            "next_run": next_run,
             "depends_on": list(depends_on or []),
             "jt_id": jt_id or None,
             "jt_params": dict(jt_params) if jt_params else None,
@@ -246,13 +263,13 @@ def recover_stale_tasks(*, max_age_minutes: int = DEFAULT_STALE_MINUTES) -> int:
 
 # === Selection ===
 
-def next_pending() -> Optional[dict]:
-    """Return the highest-priority pending task whose dependencies are met
-    AND whose next_run (if any) is reached. Lower priority number wins.
+def _select_next_pending(all_tasks: list) -> Optional[dict]:
+    """Pure selection over an already-loaded task list (no I/O).
 
-    Recurring tasks not yet at their ``next_run`` are skipped.
+    Returns the highest-priority eligible pending task (lower priority number
+    wins, created-time as tiebreak), or None. Shared by ``next_pending`` (a
+    read-only peek) and ``claim_next_pending`` (the atomic select-and-mark).
     """
-    all_tasks = _load_queue()
     done_ids = {t["id"] for t in all_tasks if t.get("status") == "done"}
     pending: list[dict] = []
     now = datetime.now(timezone.utc)
@@ -286,17 +303,69 @@ def next_pending() -> Optional[dict]:
     return pending[0]
 
 
+def next_pending() -> Optional[dict]:
+    """Return the highest-priority pending task whose dependencies are met
+    AND whose next_run (if any) is reached. Lower priority number wins.
+
+    Recurring tasks not yet at their ``next_run`` are skipped.
+
+    Read-only peek: this does NOT claim the task. Two callers (a daemon tick
+    and a CLI ``run-once``) can both see the same task here. Use
+    ``claim_next_pending`` to atomically select-and-mark for dispatch.
+    """
+    return _select_next_pending(_load_queue())
+
+
+def claim_next_pending() -> Optional[dict]:
+    """Atomically select the next eligible pending task AND flip it to
+    ``running`` under a single ``_queue_lock`` acquisition, then return the
+    claimed task (with its ``started`` stamp set). Returns None if nothing
+    is eligible.
+
+    This closes the select-then-claim race: ``next_pending`` releases the
+    lock before a separate ``update_task(status="running")`` reacquires it,
+    so a daemon heartbeat tick and a concurrent CLI ``heartbeat run-once``
+    against the same on-disk queue could both observe the same task as
+    next-pending and both dispatch it (duplicate kickoff, duplicate cost).
+    Holding the lock across the read-decide-write makes the claim exclusive:
+    the loser re-reads the queue, sees the task already ``running``, and
+    selects a different one (or None).
+    """
+    with _queue_lock:
+        tasks = _load_queue()
+        task = _select_next_pending(tasks)
+        if task is None:
+            return None
+        task["status"] = "running"
+        task["started"] = _now_iso()
+        _save_queue(tasks)
+        # Return a copy so a caller mutating the dict can't corrupt the
+        # just-saved on-disk state out-of-band.
+        return dict(task)
+
+
 # === Recurrence ===
 
 _INTERVAL_RE = re.compile(r"^(\d+)\s*(m|min|h|hr|hour|d|day)s?$")
 
 
 def parse_interval(interval_str: str) -> Optional[timedelta]:
-    """Parse interval strings like '30m', '6h', '1d' → timedelta. None on failure."""
+    """Parse interval strings like '30m', '6h', '1d' → timedelta. None on failure.
+
+    A zero (or, defensively, negative) value is rejected as *unparseable* (None):
+    a ``"0m"``/``"0h"``/``"0d"`` schedule yields ``timedelta(0)``, whose next_run
+    is perpetually ``now`` — on the cron path that means an unbounded
+    immediate-dispatch loop (every daemon tick re-fires + re-pins to now →
+    runaway cost + queue growth). Rejecting it here closes that hole at the
+    source: cron.parse_schedule then declines the schedule, and
+    ``requeue_recurring`` treats ``"0m"`` as non-recurring.
+    """
     m = _INTERVAL_RE.match(interval_str.strip().lower())
     if not m:
         return None
     val = int(m.group(1))
+    if val <= 0:
+        return None
     unit = m.group(2)
     if unit in ("m", "min"):
         return timedelta(minutes=val)
@@ -322,7 +391,12 @@ def requeue_recurring(task: dict) -> Optional[dict]:
     if not delta:
         return None
     next_run = (datetime.now(timezone.utc) + delta).isoformat(timespec="seconds")
-    new_task = add_task(
+    # Pre-set next_run at create time so the child is persisted ATOMICALLY with
+    # its interval already set — it is never on disk in the eligible-now state
+    # (next_run=None) that _select_next_pending treats as runnable. Otherwise a
+    # concurrent claim_next_pending could dispatch the fresh recurring instance
+    # before its interval next_run is set, silently bypassing the recurrence.
+    return add_task(
         description=task["description"],
         project_code=task["project_code"],
         objective=task["objective"],
@@ -339,8 +413,8 @@ def requeue_recurring(task: dict) -> Optional[dict]:
         jt_id=task.get("jt_id"),
         jt_params=task.get("jt_params"),
         on_refused=task.get("on_refused"),  # #97 R2: carry the refusal policy too
+        next_run=next_run,
     )
-    return update_task(new_task["id"], next_run=next_run)
 
 
 # === Output capture ===
@@ -418,13 +492,19 @@ class Heartbeat:
         return self._thread is not None and self._thread.is_alive()
 
     def tick_once(self) -> Optional[dict]:
-        """Single-iteration drain: recover stale, find next_pending, run it.
+        """Single-iteration drain: recover stale, claim next_pending, run it.
 
         Returns the task that ran (or None if queue was empty). Useful for
         tests + the CLI's manual ``heartbeat run`` invocation.
+
+        Claims the task atomically (``claim_next_pending`` flips it to
+        ``running`` under the queue lock) so a daemon tick and a concurrent
+        CLI ``run-once`` against the same queue never dispatch the same task
+        twice — exactly one wins the claim; the loser gets a different task
+        or None.
         """
         recover_stale_tasks(max_age_minutes=self.stale_minutes)
-        task = next_pending()
+        task = claim_next_pending()
         if task is None:
             return None
         return self._run_task(task)
@@ -439,7 +519,13 @@ class Heartbeat:
             self._stop.wait(self.interval_seconds)
 
     def _run_task(self, task: dict) -> dict:
-        """Mark running, dispatch, capture result, mark done/failed."""
+        """Mark running, dispatch, capture result, mark done/failed.
+
+        Idempotent re: the running mark — ``tick_once`` already claims the
+        task via ``claim_next_pending`` (flipping it to ``running``). This
+        ``update_task`` re-asserts it, which keeps direct callers that hand a
+        not-yet-claimed task to ``_run_task`` working unchanged.
+        """
         update_task(task["id"], status="running", started=_now_iso())
         try:
             # B3: a JT-bound task (cron) passes its template through to the
@@ -504,6 +590,7 @@ __all__ = [
     "cancel_task",
     "clear_done",
     "next_pending",
+    "claim_next_pending",
     "recover_stale_tasks",
     "parse_interval",
     "requeue_recurring",

@@ -476,6 +476,88 @@ async def test_artifacts_tab_hides_pycache_and_dotfiles(
         assert not any(".env" in s for s in items)
 
 
+# ─── Preview crash-resistance: markup + non-UTF-8 content ───────────────────
+#
+# The preview pane reads a highlighted artifact and pushes it into a
+# Static. Two crash paths must NOT propagate out of the highlight/select
+# handler: (1) file content containing console-markup-like sequences
+# such as ``[/]`` (ubiquitous in code/regex/JSON-path text) must not be
+# re-parsed as Rich markup → MarkupError; (2) a surfaced text-extension
+# file that is not valid UTF-8 must not raise UnicodeDecodeError (a
+# ValueError, NOT an OSError).
+
+
+@pytest.fixture
+def tui_vault_with_tricky_preview_artifacts(tmp_path: Path, monkeypatch):
+    """Seed two artifacts that previously crashed the preview: one whose
+    body contains a bare ``[/]`` closing-tag-like sequence, and one
+    written as latin-1 (not valid UTF-8)."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(PROJECT_CODE, "Tricky preview", "obj")
+    run_id = "20260428T140000Z-tttt"
+    vault.init_run(PROJECT_CODE, run_id, "tricky")
+    run_root = vault.run_dir(PROJECT_CODE, run_id)
+    art = run_root / "artifacts"
+    # Markup-like content (closing tag with nothing to close).
+    (art / "bracket.py").write_text(
+        "import re\nPATTERN = re.compile(r'[/]')  # bracket [/] tag\n"
+    )
+    # Non-UTF-8 content: 'café' encoded as latin-1 in a .csv.
+    (art / "latin.csv").write_bytes("name\ncafé\n".encode("latin-1"))
+    return tmp_path
+
+
+async def test_preview_survives_markup_like_content(
+    tui_vault_with_tricky_preview_artifacts,
+):
+    """Highlighting an artifact whose body contains a ``[/]`` sequence
+    must not raise MarkupError — the content is shown verbatim."""
+    from textual.widgets import ListView, Static, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        listview = app.query_one("#artifacts-list", ListView)
+        items = [str(item.children[0].render()) for item in listview.children]
+        bracket_idx = next(
+            i for i, s in enumerate(items) if "bracket.py" in s
+        )
+        listview.index = bracket_idx
+        await pilot.pause()
+        preview = app.query_one("#artifact-preview", Static)
+        rendered = str(preview.render())
+        # Content rendered verbatim (bracket sequence preserved), no crash.
+        assert "[/]" in rendered
+
+
+async def test_preview_survives_non_utf8_content(
+    tui_vault_with_tricky_preview_artifacts,
+):
+    """Highlighting a non-UTF-8 file must not raise UnicodeDecodeError —
+    the preview shows a best-effort decode rather than crashing."""
+    from textual.widgets import ListView, Static, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        listview = app.query_one("#artifacts-list", ListView)
+        items = [str(item.children[0].render()) for item in listview.children]
+        latin_idx = next(i for i, s in enumerate(items) if "latin.csv" in s)
+        listview.index = latin_idx
+        await pilot.pause()
+        preview = app.query_one("#artifact-preview", Static)
+        rendered = str(preview.render())
+        # Best-effort decode rendered (replacement char or the ascii head),
+        # and crucially the handler did not crash.
+        assert "name" in rendered
+
+
 async def test_artifacts_tab_drafts_md_still_visible(
     tui_vault_with_diverse_artifacts,
 ):

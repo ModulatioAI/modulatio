@@ -10,6 +10,7 @@ an agent via the Agents tab first).
 """
 from __future__ import annotations
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Label, Static
@@ -106,10 +107,11 @@ class ModelsScreen(Vertical):
                 agent_id=agent_id,
             )
         except FileNotFoundError as exc:
-            status.update(f"[bold red]Clear failed:[/] {exc}")
+            status.update(f"[bold red]Clear failed:[/] {escape(str(exc))}")
             return
         status.update(
-            f"[bold green]✓ Cleared[/] [dim]model assignment for[/] {agent_id}"
+            f"[bold green]✓ Cleared[/] [dim]model assignment for[/]"
+            f" {escape(agent_id)}"
         )
         self._refresh()
 

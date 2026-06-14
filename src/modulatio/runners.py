@@ -508,18 +508,29 @@ def litellm_runner(
 
         try:
             resp = completion(model=litellm_model, messages=msgs, **call_kwargs)
-        except RateLimitError:
+        except RateLimitError as initial_err:
             # Key-pool failover: rotate to the next key and retry, bounded by
             # the pool size. No pool / single key → nothing to fail over to.
             if _pool_count(pool_base) <= 1:
                 raise
             resp = None
-            last_err = None
+            # Seed with the original 429 so a TOCTOU pool-shrink (the pool
+            # emptied between the guard check and ``range()`` → zero retries)
+            # re-raises a real error, never ``raise None``.
+            last_err: RateLimitError = initial_err
             for _ in range(_pool_count(pool_base)):
-                retry_kwargs = dict(kwargs)
                 rk = _rotated_pool_key(pool_base)  # next key
-                if rk is not None:
-                    retry_kwargs["api_key"] = rk
+                if rk is None:
+                    # TOCTOU pool-shrink: the pool emptied mid-failover (the
+                    # last unpinned key was pinned/unset between iterations).
+                    # Do NOT retry without an explicit api_key — that would let
+                    # LiteLLM resolve the (maybe PINNED) base env var and borrow
+                    # a key the metering keel forbids. Skip this slot; if every
+                    # slot is empty the loop exhausts and re-raises the seeded
+                    # 429 below, never a borrowed-key success.
+                    continue
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["api_key"] = rk
                 try:
                     resp = completion(model=litellm_model, messages=msgs, **retry_kwargs)
                     break
@@ -1142,18 +1153,28 @@ def litellm_chat_runner(
 
         try:
             resp = _call()
-        except RateLimitError:
+        except RateLimitError as initial_err:
             # Key-pool failover on the tool-loop path: rotate + retry, bounded.
             if _pool_count(pool_base) <= 1:
                 raise
             resp = None
-            last_err = None
+            # Seed with the original 429 so a TOCTOU pool-shrink (zero retries)
+            # re-raises a real error, never ``raise None``.
+            last_err: RateLimitError = initial_err
             for _ in range(_pool_count(pool_base)):
                 try:
                     resp = _call()
                     break
                 except RateLimitError as e:
                     last_err = e
+                except RuntimeError:
+                    # TOCTOU pool-shrink: ``_pooled_call_key`` raises when the
+                    # pool emptied mid-failover (every unpinned key got pinned/
+                    # unset between iterations). Swallow it and keep iterating —
+                    # if every slot is empty the loop exhausts and re-raises the
+                    # SEEDED 429 below (the real cause), never a bare pool-empty
+                    # RuntimeError that masks the rate limit.
+                    continue
             if resp is None:
                 raise last_err
         # Same usage-tracking seam as litellm_runner. Tool-using skills

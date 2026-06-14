@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from modulatio import config
 from modulatio.vault import project_dir
@@ -86,6 +86,19 @@ class Agent(BaseModel):
     #: default for the budget_role mapped from ``tier``. ``None`` →
     #: inherit. Opt-in only.
     context_budget: int | None = None
+
+    @field_validator("capacity_cap")
+    @classmethod
+    def _floor_capacity_cap(cls, v: int) -> int:
+        """A capacity cap below 1 is never a legitimate dispatchable
+        producer — the wave scheduler reads ``max(0, capacity_cap)`` and
+        a 0/negative cap would leave skill-routed tasks perpetually
+        DEFERRED_CAPACITY (silent goal stall) while the single-pick
+        dispatch path, which ignores capacity, happily routes the same
+        agent. Bind the invariant deterministically: floor at 1 so a
+        non-dispatchable cap can never enter the roster, regardless of
+        construction path (parse, wizard, default seed, direct)."""
+        return v if v >= 1 else 1
 
     def has_skill(self, skill: str) -> bool:
         return skill in self.skills

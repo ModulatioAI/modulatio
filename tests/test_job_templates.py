@@ -101,6 +101,49 @@ def test_cardinality_variants(shared):
     assert jt.load_with_metadata("c-fixed-12").output_spec.cardinality == "fixed:12"
 
 
+def test_parse_output_spec_rejects_out_of_grammar_cardinality():
+    """Finding #30: the load path must enforce the same cardinality grammar as
+    create_job_template — a hand-edited/migrated template can't smuggle a literal
+    the engine branches on into the run. Off-grammar → 'one' (safe default)."""
+    # bare digit normalizes to fixed:N (mirrors the create tool)
+    assert jt._parse_output_spec('{"cardinality": "8"}').cardinality == "fixed:8"
+    # case/space tolerant
+    assert jt._parse_output_spec('{"cardinality": "Fixed: 5"}').cardinality == "fixed:5"
+    # fixed:N with N<1 is not enforceable → one
+    assert jt._parse_output_spec('{"cardinality": "fixed:0"}').cardinality == "one"
+    assert jt._parse_output_spec('{"cardinality": "fixed:-3"}').cardinality == "one"
+    # arbitrary junk → one (was: passed through verbatim)
+    assert jt._parse_output_spec('{"cardinality": "lots"}').cardinality == "one"
+    assert jt._parse_output_spec('{"cardinality": ""}').cardinality == "one"
+    # per-item with no `per` has no fan-out contract → one
+    assert jt._parse_output_spec('{"cardinality": "per-item"}').cardinality == "one"
+    # per-item WITH a per param survives
+    spec = jt._parse_output_spec('{"cardinality": "per-item", "per": "items"}')
+    assert spec.cardinality == "per-item" and spec.per == "items"
+    # the valid literals round-trip unchanged
+    assert jt._parse_output_spec('{"cardinality": "one"}').cardinality == "one"
+    assert jt._parse_output_spec('{"cardinality": "fixed:12"}').cardinality == "fixed:12"
+
+
+def test_parse_deliverable_spec_rejects_bool_and_nonintegral_floor():
+    """Finding #29: JSON bool/non-integral float must NOT coerce into a silent
+    wrong part_floor/part_ceiling. `int(True)`==1, `int(False)`==0, `int(2.9)`==2
+    are author mistakes, not constraints — they drop to None (no floor)."""
+    # bool floor/ceiling → None, not 1/0
+    d = jt._parse_deliverable_spec('{"part_floor": true, "part_ceiling": false}')
+    assert d.part_floor is None and d.part_ceiling is None
+    # non-integral float → None, not truncated
+    assert jt._parse_deliverable_spec('{"part_floor": 2.9}').part_floor is None
+    # integral float still accepted (3.0 → 3)
+    assert jt._parse_deliverable_spec('{"part_floor": 3.0}').part_floor == 3
+    # a real int is unaffected
+    assert jt._parse_deliverable_spec('{"part_floor": 500}').part_floor == 500
+    # a digit string still coerces (existing behavior preserved)
+    assert jt._parse_deliverable_spec('{"part_floor": "750"}').part_floor == 750
+    # garbage → None
+    assert jt._parse_deliverable_spec('{"part_floor": "many"}').part_floor is None
+
+
 # ── 3-location precedence: project > shared > seed ────────────────────────
 
 

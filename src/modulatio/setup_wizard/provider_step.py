@@ -571,7 +571,9 @@ def run(state: dict) -> Any:
                 badge = _status_badge(key, staged_keys)
                 line = (
                     f"  {theme.color(f'{i:>2}', 'highlight')}) "
-                    f"{theme.color(key, 'accent', bold=True):24s}  "
+                    # Pad the visible key to 24 cols BEFORE coloring so the
+                    # column width isn't thrown off by invisible ANSI escapes.
+                    f"{theme.color(f'{key:24s}', 'accent', bold=True)}  "
                     f"{p.get('label', '')[:30]:30s}  "
                     f"→ {p.get('api_format', '?')}/{p.get('model', '?')[:24]:24s}  "
                     f"{badge}"

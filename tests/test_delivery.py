@@ -154,6 +154,87 @@ def test_deliver_finished_products_skips_missing(monkeypatch, tmp_path, _mock_ex
     assert out[0].name == "Real Deliverable"
 
 
+# ── binary / data deliverables ship verbatim (not pandoc'd, byte-preserving) ─
+
+def test_deliver_media_binary_ships_verbatim(monkeypatch, tmp_path):
+    """A media composite (.mp4/.zip/.png) is a finished BINARY — it must be
+    copied byte-for-byte, never read as text and re-rendered through pandoc
+    (which corrupts it and breaks the QC binary-aware checksum guarantee).
+    export_artifact must NOT be called."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+
+    def _poison(*a, **k):  # pragma: no cover - must not run for a binary
+        raise AssertionError("export_artifact called for a binary deliverable")
+    monkeypatch.setattr(delivery, "export_artifact", _poison)
+
+    src = tmp_path / "clip.mp4"
+    payload = b"\x00\x00\x00\x18ftypmp42\x00\x01\xff\xfe binary bytes \x80\x90"
+    src.write_bytes(payload)
+    dp = delivery.deliver_product(src, project_code="MOD", task_id="MOD-T-007")
+    assert dp.error is None
+    assert dp.dest == tmp_path / "MOD" / "clip.mp4"  # name + extension preserved
+    assert dp.dest.read_bytes() == payload  # byte-for-byte, checksum intact
+
+
+def test_deliver_data_csv_ships_verbatim(monkeypatch, tmp_path):
+    """A data deliverable (.csv) is product-agnostic content, NOT Markdown
+    prose. It must arrive as results.csv with identical bytes — not rendered
+    to a stray ``name,score.docx`` (its first row mistaken for an H1 title)."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+
+    def _poison(*a, **k):  # pragma: no cover - must not run for data
+        raise AssertionError("export_artifact called for a data deliverable")
+    monkeypatch.setattr(delivery, "export_artifact", _poison)
+
+    src = tmp_path / "results.csv"
+    body = "name,score\nalice,9\nbob,7\n"
+    src.write_text(body)
+    dp = delivery.deliver_product(src, project_code="MOD", task_id="MOD-T-008")
+    assert dp.error is None
+    assert dp.dest == tmp_path / "MOD" / "results.csv"  # name + .csv kept
+    assert dp.dest.read_text() == body  # byte-for-byte
+
+
+def test_deliver_rendered_pdf_binary_ships_verbatim(monkeypatch, tmp_path):
+    """An ALREADY-rendered .pdf (real binary bytes) ships verbatim — it is not
+    Markdown text, so it must not be re-staged + re-rendered through pandoc."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+
+    def _poison(*a, **k):  # pragma: no cover - must not run for a binary pdf
+        raise AssertionError("export_artifact called for a rendered binary pdf")
+    monkeypatch.setattr(delivery, "export_artifact", _poison)
+
+    src = tmp_path / "report.pdf"
+    payload = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< >>\nendobj\n"
+    src.write_bytes(payload)
+    dp = delivery.deliver_product(src, project_code="MOD", task_id="MOD-T-010")
+    assert dp.error is None
+    assert dp.dest == tmp_path / "MOD" / "report.pdf"
+    assert dp.dest.read_bytes() == payload
+
+
+def test_leader_named_pdf_still_markdown_text_renders(monkeypatch, tmp_path):
+    """Back-compat: a deliverable the Leader NAMED ``report.pdf`` but whose
+    bytes are still hand-written Markdown TEXT must still flow through the
+    render path (the historical reason render ignored on-disk extension)."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+
+    called = {}
+
+    def _fake(md, dest, fmt):
+        called["yes"] = (Path(md).read_text(), fmt)
+        Path(dest).write_text("rendered")
+        return ExportResult(source=Path(md), dest=Path(dest), format=fmt, error=None)
+    monkeypatch.setattr(delivery, "export_artifact", _fake)
+
+    src = tmp_path / "report.pdf"
+    src.write_text("# Quarterly Brief\n\nstill markdown text")
+    dp = delivery.deliver_product(src, project_code="MOD", task_id="MOD-T-011")
+    assert dp.error is None
+    assert called.get("yes"), "render path must run for Markdown-text content"
+    assert dp.name == "Quarterly Brief"  # named from its H1
+
+
 # ── deliverables_from_tasks (the wiring adapter) ─────────────────────────
 
 class _FakeTask:
@@ -173,7 +254,22 @@ def test_deliverables_from_tasks_filters_and_resolves(tmp_path):
     out = delivery.deliverables_from_tasks(tasks, tmp_path)
     assert len(out) == 2  # only the deliverables
     assert out[0] == ("T-2", tmp_path / "paper.md", "the paper")
-    assert out[1] == ("T-3", tmp_path / "drafts/T-3.md", "report")  # default drafts/<id>.md
+    # default drafts/<id>.md — lowercased to match the producer's writer
+    assert out[1] == ("T-3", tmp_path / "drafts/t-3.md", "report")
+
+
+def test_deliverables_from_tasks_lowercases_default_path(tmp_path):
+    """The producer writes the default draft to ``drafts/{id.lower()}.md``
+    (orchestration.py:3731). deliverables_from_tasks must resolve to the SAME
+    lowercase path or an uppercase-id deliverable is silently never delivered.
+    An explicit output_path is honored verbatim (not lowercased)."""
+    tasks = [
+        _FakeTask("ABC-T-001", deliverable=True, output_path=None, description="upper id"),
+        _FakeTask("XYZ-T-002", deliverable=True, output_path="Sub/Keep-Case.md", description="explicit"),
+    ]
+    out = delivery.deliverables_from_tasks(tasks, tmp_path)
+    assert out[0] == ("ABC-T-001", tmp_path / "drafts/abc-t-001.md", "upper id")
+    assert out[1] == ("XYZ-T-002", tmp_path / "Sub/Keep-Case.md", "explicit")
 
 
 # ── real render (integration; skipped without pandoc) ────────────────────

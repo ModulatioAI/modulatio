@@ -295,3 +295,52 @@ def test_no_module_level_constants(project):
         "qc_history._EMBED_MODEL must NOT exist; embedding model is "
         "config-derived via the _embed_model() helper."
     )
+
+
+# ── Concurrency — LanceDB rebuild/read race (Opus R2 H4) ──────────────────────
+
+def test_similar_verdicts_concurrent_is_thread_safe(project):
+    """Opus R2 H4: QC runs per-task on concurrent wave workers; each calls
+    similar_verdicts -> _ensure_verdict_vectors which does a destructive
+    drop_table+create_table rebuild then reads. Without the per-(project,domain)
+    lock, two workers of the same domain race the rebuild (create_table raises
+    'Table already exists') or one drops the table mid-search. Fire many
+    barrier-synchronized calls and require every one to succeed with the same
+    hit count. (Mirrors team_memory's test_recall_concurrent_semantic_path.)"""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    embedder = StubEmbedder(dim=16)
+    for i in range(6):
+        qc_history.append_verdict(
+            "essay", project,
+            _record(entry_id=f"v-{i}", task_id=f"TST-T-{i:03d}",
+                    artifact_body=f"draft number {i} about the seam"),
+        )
+
+    n = 12
+    barrier = threading.Barrier(n)
+    errors: list[Exception] = []
+    counts: list[int] = []
+    lock = threading.Lock()
+
+    def _do():
+        barrier.wait()  # release together to maximize the rebuild collision
+        try:
+            hits = qc_history.similar_verdicts(
+                "essay", project, artifact_body="the seam draft",
+                embedder=embedder, k=5,
+            )
+            with lock:
+                counts.append(len(hits))
+        except Exception as exc:  # noqa: BLE001 — the race surfaces as a raise
+            with lock:
+                errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        for f in [ex.submit(_do) for _ in range(n)]:
+            f.result(timeout=60)
+
+    assert not errors, f"concurrent similar_verdicts raised: {errors[:3]}"
+    assert len(counts) == n
+    assert len(set(counts)) == 1, f"inconsistent results across threads: {set(counts)}"

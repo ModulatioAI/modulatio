@@ -89,6 +89,48 @@ def test_save_round_trip(tmp_path, monkeypatch):
     assert "en.wikipedia.org" in entry.sources[0]
 
 
+def test_save_round_trip_source_with_comma(tmp_path, monkeypatch):
+    """A source string that itself contains a comma must survive the
+    save/load round-trip as a SINGLE source — not be split on the comma.
+
+    Regression: sources were inline-joined with ', ' on save and naively
+    comma-split on load, so a citation like 'Smith, J. (2026)' or a URL
+    with a comma fractured into multiple bogus sources.
+    """
+    monkeypatch.setattr(research, "_RESEARCH_ROOT", tmp_path / "shared")
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
+    comma_source = "Smith, J. (2026), Journal of Tops, vol. 3"
+    url_with_comma = "https://example.com/a,b?x=1,2"
+    research.save(
+        topic="comma sources",
+        body="Body.\n",
+        project_code="TST",
+        sources=(comma_source, url_with_comma, "https://plain.example/ok"),
+    )
+    entry = research.load_with_metadata("comma sources", project_code="TST")
+    assert entry.sources == (
+        comma_source,
+        url_with_comma,
+        "https://plain.example/ok",
+    )
+
+
+def test_load_legacy_inline_comma_sources_still_parsed(tmp_path, monkeypatch):
+    """Back-compat: entries written in the old inline 'sources: a, b' shape
+    (comma-free sources) still load as a list of sources."""
+    monkeypatch.setattr(research, "_RESEARCH_ROOT", tmp_path / "shared")
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
+    _write(
+        tmp_path / "projects" / "tst" / "research" / "legacy.md",
+        "---\n"
+        "sources: https://a.example, https://b.example\n"
+        "---\n"
+        "\nBody.\n",
+    )
+    entry = research.load_with_metadata("legacy", project_code="TST")
+    assert entry.sources == ("https://a.example", "https://b.example")
+
+
 def test_topic_slugs_are_filesystem_safe(tmp_path, monkeypatch):
     """Arbitrary topic strings — with spaces, punctuation, mixed case —
     must map deterministically to safe filenames. Two calls with equivalent

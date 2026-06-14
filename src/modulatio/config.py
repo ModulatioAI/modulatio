@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Optional
@@ -168,15 +169,21 @@ def write_secret_file(path: Path, content: str) -> None:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / (path.name + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Unique temp name (not a fixed ``<name>.tmp``): two concurrent writers for
+    # the SAME secret path (an auth-alert write racing a key-pin write) would
+    # otherwise share one temp file, clobber each other's bytes, and interleave
+    # the replace/unlink — corrupting the secret. mkstemp creates the file with
+    # mode 0o600, so there is never a world-readable window either.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(content)
-        os.replace(str(tmp), str(path))
+        os.replace(tmp_name, str(path))
     except Exception:
         try:
-            tmp.unlink()
+            os.unlink(tmp_name)
         except OSError:
             pass
         raise
@@ -391,7 +398,7 @@ def get_default_budget_caps() -> dict:
     out: dict = {k: None for k in _BUDGET_CAP_KEYS}
     if not isinstance(raw, dict):
         return out
-    if isinstance(raw.get("max_wall_clock_min"), (int, float)):
+    if isinstance(raw.get("max_wall_clock_min"), (int, float)) and not isinstance(raw.get("max_wall_clock_min"), bool):
         out["max_wall_clock_min"] = float(raw["max_wall_clock_min"])
     if isinstance(raw.get("max_tokens"), int) and not isinstance(raw.get("max_tokens"), bool):
         out["max_tokens"] = int(raw["max_tokens"])

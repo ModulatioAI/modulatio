@@ -1506,3 +1506,40 @@ def test_schedule_wave_respects_skill_capability_floor():
     # Without the floor: cheaper agent wins (shows the floor changed it).
     sched_nofloor = dispatch.schedule_wave([task], agents)
     assert sched_nofloor.assignments == {"W-T-001": "cheap"}
+
+
+def test_schedule_wave_continuity_hint_pointing_at_nonproducer_is_ignored():
+    """Regression (finding H9): the wave scheduler's continuity-hint path
+    must mirror ``select_agent`` and only honor a hint that names a member
+    of the producer-only candidate pool. A stale/hand-edited hint naming a
+    leader- or qc-tier agent must NOT route producer work to that
+    non-producer — the task falls through to normal best-ranked selection."""
+    task = _wtask("W-T-001", ["drafter"])
+    task.preferred_continuity_agent = "lead"  # a leader, not a producer
+    agents = [
+        roster.Agent(
+            id="lead", name="lead", identity="x", skills=[],
+            cost_class="premium-cloud", tier="leader", capacity_cap=1,
+        ),
+        _wagent("p1", ["drafter"], cap=1),
+    ]
+    sched = dispatch.schedule_wave([task], agents)
+    # The producer gets the work; the leader is never assigned.
+    assert sched.assignments == {"W-T-001": "p1"}
+    assert "lead" not in sched.assignments.values()
+    assert sched.gaps == ()
+    assert sched.deferred == ()
+
+
+def test_schedule_wave_continuity_hint_at_producer_still_honored():
+    """The fix must not regress the legitimate case: a hint naming a
+    producer in the candidate pool is still honored (continuity wins over
+    the default cheapest-first ranking)."""
+    task = _wtask("W-T-001", ["drafter"])
+    task.preferred_continuity_agent = "p-pricey"
+    agents = [
+        _wagent("p-cheap", ["drafter"], cap=1, cost_class="free-local"),
+        _wagent("p-pricey", ["drafter"], cap=1, cost_class="premium-cloud"),
+    ]
+    sched = dispatch.schedule_wave([task], agents)
+    assert sched.assignments == {"W-T-001": "p-pricey"}  # hint honored

@@ -52,6 +52,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,6 +73,13 @@ _MAX_UNIT_BYTES = 4 * 1024 * 1024
 _MAX_TOTAL_BYTES = 32 * 1024 * 1024
 
 _DEFAULT_SEPARATOR = "\n\n---\n\n"
+
+#: ``csv.field_size_limit`` is process-GLOBAL parser state. With concurrent wave
+#: workers (default-on), two parallel CSV merges racing the save/restore idiom can
+#: leak our raised ceiling onto unrelated CSV parsing (A saves orig, B saves A's
+#: raised value, A restores orig, B's finally restores A's raised value). Serialize
+#: the set→parse→restore window so it is atomic w.r.t. the process global.
+_CSV_FIELD_LIMIT_LOCK = threading.Lock()
 
 #: Fenced ``assembly`` block. Tolerant of leading spaces and an optional
 #: trailing newline before the closing fence. DOTALL so the JSON body may
@@ -377,11 +385,27 @@ def build_deliverable_digest(
 # only what is absent).
 
 
-def _unit_headings(units: "list", artifacts_root: Path) -> "list[str]":
-    """The display heading of each readable unit, in order (document family helper —
-    reuses :func:`_first_heading`). Unreadable/missing units are skipped, never
-    fabricated."""
+def _unit_headings(
+    units: "list", artifacts_root: Path, *, separator: str = _DEFAULT_SEPARATOR,
+    base_total: int = 0,
+) -> "list[str]":
+    """The display heading of each unit that will actually land in the assembled
+    body, in order (document family helper — reuses :func:`_first_heading`).
+
+    This MIRRORS :func:`_assemble_document`'s unit-selection exactly: a unit is
+    listed only if it is readable AND survives the per-unit size cap AND fits
+    before the total-byte cap (at which point the body stops dropping the rest).
+    Without that, a TOC built here would list units the body never includes
+    (missing/overflow/cap-truncated) — the TOC and body headings would diverge.
+    ``base_total`` seeds the running byte total with the framing
+    (title_page/trailer) bytes the body already counts before the units, so the
+    TOC's cap stops at the SAME unit the body does (otherwise the TOC could list a
+    final unit the body drops at the byte cap). Unreadable/missing/over-cap units
+    are skipped, never fabricated."""
     out: list[str] = []
+    sep_bytes = len(separator.encode())
+    total = base_total
+    emitted = False
     for name in units or []:
         if not isinstance(name, str):
             continue
@@ -389,9 +413,23 @@ def _unit_headings(units: "list", artifacts_root: Path) -> "list[str]":
         if path is None or not path.is_file():
             continue
         try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if size > _MAX_UNIT_BYTES:
+            continue
+        # Account for the separator that precedes every block after the first,
+        # exactly as the body's running total does — so the cap stops the TOC at
+        # the same unit the body stops at.
+        added = size + (sep_bytes if emitted else 0)
+        if total + added > _MAX_TOTAL_BYTES:
+            break
+        try:
             heading = _first_heading(path.read_text())
         except (OSError, UnicodeDecodeError):
             continue
+        total += added
+        emitted = True
         if heading:
             out.append(heading)
     return out
@@ -418,7 +456,25 @@ def _document_head(
         lines.append(f"# {str(title).strip()}")
     out = dict(manifest)
     if want_toc:
-        headings = _unit_headings(manifest.get("units", []), artifacts_root)
+        # Mirror the body's separator so _unit_headings applies the same total-byte
+        # cap math the assembler does — the TOC must list ONLY the units that survive
+        # into the body (not the missing/overflow/cap-truncated ones).
+        sep = manifest.get("separator")
+        sep = sep if isinstance(sep, str) else _DEFAULT_SEPARATOR
+        # Seed the cap math with the framing bytes the body counts before any unit
+        # (the title_page we're building here + the producer trailer), mirroring
+        # _assemble_document's framing_bytes — including its >cap zeroing — so the
+        # TOC drops the SAME trailing unit the body does at the byte cap.
+        title_page_text = "\n".join(lines)
+        trailer = manifest.get("trailer")
+        trailer = trailer if isinstance(trailer, str) else ""
+        framing_bytes = len(title_page_text.encode()) + len(trailer.encode())
+        if framing_bytes > _MAX_TOTAL_BYTES:
+            framing_bytes = 0
+        headings = _unit_headings(
+            manifest.get("units", []), artifacts_root, separator=sep,
+            base_total=framing_bytes,
+        )
         # #101 Part D: the TOC lists the NORMALIZED sequence, so it agrees with the body
         # the assembler renumbers (both pass through the same document normalizer).
         headings, _ = continuity_headings(headings, "document")
@@ -938,45 +994,56 @@ def _merge_csv(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[st
     real ``csv.Error`` (not silently normalized — Nemo hull #3). Header mismatch
     AND row-arity mismatch are recorded errors → the assembly is incomplete
     (fail-closed), never silently merging mismatched/garbage schemas."""
-    csv.field_size_limit(_MAX_UNIT_BYTES)
-    header: list[str] | None = None
-    rows: list[list[str]] = []
-    errors: list[str] = []
-    for name, text in items:
+    # ``field_size_limit`` is process-wide global parser state; raise it only for
+    # the span of this merge and ALWAYS restore the prior value (even on error /
+    # early return) so we don't leak our ceiling onto unrelated CSV parsing. The
+    # module lock makes set→parse→restore atomic across concurrent wave workers, so
+    # one merge's raised ceiling can never be captured as another's "prior" value.
+    with _CSV_FIELD_LIMIT_LOCK:
+        _prev_field_limit = csv.field_size_limit(_MAX_UNIT_BYTES)
         try:
-            parsed = [r for r in csv.reader(io.StringIO(text), strict=True) if r]
-        except (csv.Error, ValueError) as exc:
-            errors.append(f"{name}: invalid CSV ({exc})")
-            continue
-        if not parsed:
-            continue
-        if header is None:
-            header = parsed[0]
-        elif parsed[0] != header:
-            errors.append(f"{name}: CSV header mismatch (expected {header})")
-            continue
-        width = len(header)
-        for row in parsed[1:]:
-            if len(row) != width:
-                errors.append(f"{name}: CSV row arity {len(row)} != header {width}")
-                continue
-            rows.append(row)
-    if dedupe:
-        seen: set[str] = set()
-        out: list[list[str]] = []
-        for r in rows:
-            key = _dedupe_key("\x00".join(r))
-            if key not in seen:
-                seen.add(key)
-                out.append(r)
-        rows = out
-    if header is None:
-        return "", errors
-    buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(header)
-    writer.writerows(rows)
-    return _capped(buf.getvalue(), errors, "CSV")
+            header: list[str] | None = None
+            rows: list[list[str]] = []
+            errors: list[str] = []
+            for name, text in items:
+                try:
+                    parsed = [r for r in csv.reader(io.StringIO(text), strict=True) if r]
+                except (csv.Error, ValueError) as exc:
+                    errors.append(f"{name}: invalid CSV ({exc})")
+                    continue
+                if not parsed:
+                    continue
+                if header is None:
+                    header = parsed[0]
+                elif parsed[0] != header:
+                    errors.append(f"{name}: CSV header mismatch (expected {header})")
+                    continue
+                width = len(header)
+                for row in parsed[1:]:
+                    if len(row) != width:
+                        errors.append(
+                            f"{name}: CSV row arity {len(row)} != header {width}"
+                        )
+                        continue
+                    rows.append(row)
+            if dedupe:
+                seen: set[str] = set()
+                out: list[list[str]] = []
+                for r in rows:
+                    key = _dedupe_key("\x00".join(r))
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(r)
+                rows = out
+            if header is None:
+                return "", errors
+            buf = io.StringIO()
+            writer = csv.writer(buf, lineterminator="\n")
+            writer.writerow(header)
+            writer.writerows(rows)
+            return _capped(buf.getvalue(), errors, "CSV")
+        finally:
+            csv.field_size_limit(_prev_field_limit)
 
 
 #: External-compositor wall-clock ceiling. A media join that can't finish in this

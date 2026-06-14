@@ -74,24 +74,45 @@ def _parse_file(path: Path) -> ResearchEntry:
     raw = path.read_text()
     m = _OWN_FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}
+    # YAML-list-style sources, captured as one entry per ``- value`` line so a
+    # source that itself contains a comma round-trips intact (a plain inline
+    # ``sources: a, b`` value still lands in meta and is comma-split below).
+    list_sources: list[str] = []
     body = raw
     if m:
+        cur_list_key: str | None = None
         for line in m.group(1).splitlines():
+            stripped = line.strip()
+            # Continuation of a list block: ``- value`` under a bare key.
+            if cur_list_key == "sources" and stripped.startswith("- "):
+                item = stripped[2:].strip()
+                if item:
+                    list_sources.append(item)
+                continue
             if ":" in line:
                 k, _, v = line.partition(":")
-                meta[k.strip()] = v.strip()
+                key = k.strip()
+                val = v.strip()
+                # A bare ``sources:`` (no inline value) opens a list block.
+                cur_list_key = key if (key == "sources" and not val) else None
+                meta[key] = val
+            else:
+                cur_list_key = None
         body = raw[m.end():].lstrip()
     else:
         body = raw.lstrip()
 
-    sources_raw = meta.get("sources", "")
-    if sources_raw:
-        # Simple comma-split; good enough for a short CSV-style list in
-        # frontmatter. Researcher-written files can use this shape, and
-        # arbitrary lists-of-strings are not our problem yet.
-        sources = tuple(s.strip() for s in sources_raw.split(",") if s.strip())
+    if list_sources:
+        sources = tuple(list_sources)
     else:
-        sources = ()
+        sources_raw = meta.get("sources", "")
+        if sources_raw:
+            # Legacy inline form: comma-split. Kept for back-compat with
+            # entries written before the list-block serialization; sources
+            # with embedded commas should use the list block instead.
+            sources = tuple(s.strip() for s in sources_raw.split(",") if s.strip())
+        else:
+            sources = ()
 
     return ResearchEntry(
         body=body,
@@ -151,7 +172,11 @@ def save(
     if last_verified_at:
         fm_lines.append(f"last_verified_at: {last_verified_at}")
     if sources:
-        fm_lines.append(f"sources: {', '.join(sources)}")
+        # Serialize as a YAML-list block (one ``- value`` per line) so a
+        # source containing a comma round-trips intact instead of being
+        # split on the comma at load time.
+        fm_lines.append("sources:")
+        fm_lines.extend(f"- {s}" for s in sources)
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + body.rstrip() + "\n"
     path.write_text(content)

@@ -709,7 +709,7 @@ def test_reexecute_goal_runs_each_pending_task(project: Project, monkeypatch):
     called: list[str] = []
     monkeypatch.setattr(
         orch, "_run_task_with_redo",
-        lambda t, summary: called.append(t.id),
+        lambda t, summary, initial_corrective_notes="": called.append(t.id),
     )
     monkeypatch.setattr(
         orch, "_leader_verify_goal",
@@ -741,7 +741,9 @@ def test_reexecute_goal_marks_redispatched_in_transition_log(project: Project, m
     store.save_task(project.code, task)
 
     orch = Orchestrator(project, runners={})
-    monkeypatch.setattr(orch, "_run_task_with_redo", lambda t, s: None)
+    monkeypatch.setattr(
+        orch, "_run_task_with_redo", lambda t, s, initial_corrective_notes="": None
+    )
     monkeypatch.setattr(orch, "_leader_verify_goal", lambda *a, **kw: None)
 
     orch._reexecute_goal(goal, RunSummary(project=project))

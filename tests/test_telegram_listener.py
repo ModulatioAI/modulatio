@@ -6,6 +6,8 @@ command dispatcher table + each handler's behavior against fixture state.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from modulatio import config, cron, heartbeat, telegram_listener, vault
@@ -292,3 +294,179 @@ def test_listener_rejects_message_with_no_sender():
         },
     }])
     assert listener.handled == []
+
+
+# === getUpdates offset persistence (restart must not replay commands) ===
+
+
+def test_offset_persists_across_listener_instances():
+    """A new listener with the same bot token must resume from the last
+    persisted update_id, NOT replay from offset 0."""
+    tl = telegram_listener.TelegramListener(bot_token="bot-abc", chat_id="1")
+    assert tl._last_update_id == 0
+    # Simulate having consumed a batch up to update_id 500.
+    telegram_listener._save_offset(tl._offset_path, 500)
+    # A fresh listener (daemon restart) must load the persisted offset.
+    tl2 = telegram_listener.TelegramListener(bot_token="bot-abc", chat_id="1")
+    assert tl2._last_update_id == 500
+
+
+def test_offset_state_path_is_per_bot_token():
+    """Two distinct bot tokens must not share an offset file."""
+    p1 = telegram_listener._offset_state_path("token-one")
+    p2 = telegram_listener._offset_state_path("token-two")
+    assert p1 != p2
+    # And the raw token never appears in the filename.
+    assert "token-one" not in p1.name
+
+
+def test_offset_roundtrip_load_save():
+    tl = telegram_listener.TelegramListener(bot_token="bot-xyz", chat_id="1")
+    telegram_listener._save_offset(tl._offset_path, 12345)
+    assert telegram_listener._load_offset(tl._offset_path) == 12345
+
+
+def test_load_offset_returns_zero_when_missing_or_corrupt(tmp_path):
+    missing = tmp_path / "nope.json"
+    assert telegram_listener._load_offset(missing) == 0
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("not json {{{")
+    assert telegram_listener._load_offset(corrupt) == 0
+
+
+def test_poll_once_persists_offset_before_dispatch(monkeypatch):
+    """_poll_once must advance + persist the batch offset so a restart
+    after handling does not replay the same update."""
+    tl = telegram_listener.TelegramListener(bot_token="bot-poll", chat_id="42")
+    handled: list[str] = []
+    monkeypatch.setattr(tl, "_handle_message", lambda text: handled.append(text))
+
+    updates = {
+        "result": [
+            {
+                "update_id": 77,
+                "message": {
+                    "chat": {"id": 42, "type": "private"},
+                    "from": {"id": 1},
+                    "text": "/help",
+                },
+            }
+        ]
+    }
+
+    class _Resp:
+        status = 200
+
+        def read(self, *_a):
+            return json.dumps(updates).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        telegram_listener.urllib.request, "urlopen", lambda *a, **k: _Resp()
+    )
+    tl._poll_once()
+    assert handled == ["/help"]
+    assert tl._last_update_id == 77
+    # Persisted: a brand-new listener resumes past the handled update.
+    tl2 = telegram_listener.TelegramListener(bot_token="bot-poll", chat_id="42")
+    assert tl2._last_update_id == 77
+
+
+# === Markdown reply fallback (malformed entities must not lose the reply) ===
+
+
+def test_reply_falls_back_to_plaintext_when_markdown_rejected(monkeypatch):
+    """If the Markdown send fails (Telegram 400 on a malformed entity),
+    _reply must retry as plain text so the user still gets the reply."""
+    from modulatio import telegram_notify
+
+    calls: list[dict] = []
+
+    def fake_send(text, *, parse_mode, bot_token, chat_id):
+        calls.append({"text": text, "parse_mode": parse_mode})
+        # First (Markdown) send fails; plain-text send succeeds.
+        return parse_mode is None
+
+    monkeypatch.setattr(telegram_notify, "send_message", fake_send)
+
+    tl = telegram_listener.TelegramListener(bot_token="t", chat_id="1")
+    tl._reply("Error executing `/agents`: bad _entity* here")
+
+    assert len(calls) == 2
+    assert calls[0]["parse_mode"] == "Markdown"
+    assert calls[1]["parse_mode"] is None
+    assert calls[1]["text"] == "Error executing `/agents`: bad _entity* here"
+
+
+def test_reply_does_not_resend_when_markdown_succeeds(monkeypatch):
+    from modulatio import telegram_notify
+
+    calls: list[dict] = []
+
+    def fake_send(text, *, parse_mode, bot_token, chat_id):
+        calls.append({"parse_mode": parse_mode})
+        return True
+
+    monkeypatch.setattr(telegram_notify, "send_message", fake_send)
+
+    tl = telegram_listener.TelegramListener(bot_token="t", chat_id="1")
+    tl._reply("ok")
+    assert len(calls) == 1
+    assert calls[0]["parse_mode"] == "Markdown"
+
+
+def test_reply_multichunk_only_retries_failed_chunk_no_duplicate(monkeypatch):
+    """Regression: when a reply spans multiple 4000-char chunks and only one
+    chunk's Markdown send fails, _reply must re-send ONLY that chunk in
+    plaintext. A blanket whole-text fallback would re-deliver the chunks
+    that already succeeded, duplicating them for the user."""
+    from modulatio import telegram_notify
+
+    calls: list[dict] = []
+
+    # Build a 3-chunk reply: each line is just under the split size so the
+    # splitter yields one chunk per line.
+    line_len = telegram_notify._MAX_MESSAGE_LENGTH - 10
+    chunk_a = "A" * line_len + "\n"
+    chunk_b = "B" * line_len + "\n"
+    chunk_c = "C" * line_len + "\n"
+    text = chunk_a + chunk_b + chunk_c
+    expected_chunks = telegram_notify._split_chunks(text)
+    assert len(expected_chunks) == 3  # guard: the splitter behaves as assumed
+
+    def fake_send(sent_text, *, parse_mode, bot_token, chat_id):
+        calls.append({"text": sent_text, "parse_mode": parse_mode})
+        # The middle (B) chunk fails on the Markdown pass; everything else
+        # (including its plaintext retry) succeeds.
+        if parse_mode == "Markdown" and sent_text.startswith("B"):
+            return False
+        return True
+
+    monkeypatch.setattr(telegram_notify, "send_message", fake_send)
+
+    tl = telegram_listener.TelegramListener(bot_token="t", chat_id="1")
+    tl._reply(text)
+
+    # 3 Markdown sends + exactly 1 plaintext retry (the B chunk) = 4 total.
+    assert len(calls) == 4, calls
+    markdown_calls = [c for c in calls if c["parse_mode"] == "Markdown"]
+    plain_calls = [c for c in calls if c["parse_mode"] is None]
+    assert len(markdown_calls) == 3
+    assert len(plain_calls) == 1
+    # The single plaintext retry is the failed B chunk — not the whole text.
+    assert plain_calls[0]["text"].startswith("B")
+    # No chunk is delivered twice: each succeeded chunk goes out exactly once.
+    # Count successful deliveries per chunk leader char.
+    delivered = [
+        c["text"]
+        for c in calls
+        if not (c["parse_mode"] == "Markdown" and c["text"].startswith("B"))
+    ]
+    assert sum(t.startswith("A") for t in delivered) == 1
+    assert sum(t.startswith("B") for t in delivered) == 1  # plaintext only
+    assert sum(t.startswith("C") for t in delivered) == 1

@@ -1383,6 +1383,83 @@ def test_run_shell_not_installed_is_recoverable_not_raised(tmp_path):
         assert "exit_code:" in out
 
 
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "mypy ../../../etc/passwd.py",
+        "mypy /etc/shadow.py",
+        "pyflakes ../../secret.py",
+        "ruff check /etc",
+        "ruff check ../../sibling",
+    ],
+)
+def test_run_shell_passive_lint_refuses_paths_outside_artifacts(tmp_path, cmd):
+    """Re-filed #3: ruff/mypy/pyflakes echo offending source lines in their
+    output, so an unconfined path arg is an arbitrary-file read. The passive
+    allowlist must confine lint path args to the artifacts root just like
+    cat/head/tail — a traversal or absolute path is refused before spawn."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    with pytest.raises(ValueError, match="not allowed"):
+        rs(cmd=cmd, profile="passive")
+
+
+def test_run_shell_passive_lint_allows_confined_path(tmp_path):
+    """A lint path INSIDE the artifacts root still passes the allowlist (the
+    tool may or may not be installed in the test env — either way the command
+    is accepted, not refused as unsafe)."""
+    art = _make_artifacts(tmp_path)
+    (art / "ok.py").write_text("x = 1\n")
+    rs = tools.make_run_shell(art)
+    for cmd in ("mypy ok.py", "pyflakes ok.py", "ruff check ok.py"):
+        out = rs(cmd=cmd, profile="passive", timeout=5)
+        # Accepted by the allowlist → real exit code or friendly [INFO], never
+        # the "not allowed" refusal.
+        assert "exit_code:" in out
+        assert "not allowed" not in out
+
+
+def test_run_shell_timeout_drain_is_bounded_against_reparented_child(tmp_path, monkeypatch):
+    """Re-filed #4: after the wall-clock timeout kills the process group, a
+    double-forking grandchild that called setsid() escapes the group and keeps
+    the inherited stdout pipe open — an unbounded proc.communicate() drain would
+    then block run_shell forever. The drain is now bounded; run_shell must
+    return promptly with a TIMEOUT result even though the grandchild lives on."""
+    import os
+    import time as _time
+
+    if not hasattr(os, "fork") or not hasattr(os, "setsid"):
+        pytest.skip("POSIX fork/setsid required")
+
+    # Shrink the drain cap so the test is fast; default is 5s.
+    monkeypatch.setattr(tools, "_RUN_SHELL_DRAIN_TIMEOUT", 1.0)
+
+    art = _make_artifacts(tmp_path)
+    # P (the Popen target) forks G; G escapes the process group via setsid and
+    # holds stdout open while sleeping well past the timeout. P sleeps so the
+    # initial timeout fires with P alive. killpg reaps P but not G; the bounded
+    # drain must not wait out G's full sleep.
+    (art / "reparent.py").write_text(
+        "import os, sys, time\n"
+        "pid = os.fork()\n"
+        "if pid > 0:\n"
+        "    time.sleep(60)\n"
+        "    sys.exit(0)\n"
+        "os.setsid()        # G escapes P's process group\n"
+        "time.sleep(20)     # hold the inherited stdout pipe open\n"
+    )
+    rs = tools.make_run_shell(art)
+
+    start = _time.monotonic()
+    out = rs(cmd="python3 reparent.py", profile="full", timeout=1)
+    elapsed = _time.monotonic() - start
+
+    assert "TIMEOUT" in out
+    # 1s timeout + two ~1s bounded drains ≈ 3s. Unbounded would block ~20s on
+    # G's open pipe. Generous ceiling that still proves the drain is capped.
+    assert elapsed < 12, f"drain was not bounded: {elapsed:.1f}s"
+
+
 # ── write_artifact tool ────────────────────────────────────────────────────
 #
 # Engineer agents reach for ``cat > file << EOF`` to write files
@@ -1726,3 +1803,52 @@ def test_resolve_under_roots_overlong_path_returns_none(tmp_path):
     root.mkdir()
     overlong = "a/" * 5000 + "x.md"
     assert tools.resolve_under_roots(overlong, [root]) is None
+
+
+# ── write_artifact merge callback (Nemo R2 HIGH) ──────────────────────────────
+
+def test_make_write_artifact_invokes_on_write_callback(tmp_path):
+    """Nemo R2 HIGH: make_write_artifact must invoke the on_write callback with
+    the absolute target path after a successful write, so the concurrent-wave
+    orchestrator can record a tool-written file for the merge."""
+    art = _make_artifacts(tmp_path)
+    recorded: list = []
+    wa = tools.make_write_artifact(art, on_write=recorded.append)
+    wa(path="sub/side.py", content="print(1)\n")
+    assert len(recorded) == 1
+    assert recorded[0].name == "side.py"
+    assert recorded[0].read_text() == "print(1)\n"
+
+
+def test_make_write_artifact_on_write_none_is_safe(tmp_path):
+    """Default (sequential path / CLI): no callback → plain write, no error."""
+    art = _make_artifacts(tmp_path)
+    wa = tools.make_write_artifact(art)  # on_write defaults to None
+    out = wa(path="side.py", content="x\n")
+    assert "[OK]" in out and (art / "side.py").read_text() == "x\n"
+
+
+def test_build_registry_threads_on_artifact_write(tmp_path):
+    """build_registry must thread on_artifact_write into the write_artifact tool."""
+    art = _make_artifacts(tmp_path)
+    recorded: list = []
+    reg = tools.build_registry(artifacts_root=art, on_artifact_write=recorded.append)
+    reg["write_artifact"].call(path="side.py", content="y\n")
+    assert len(recorded) == 1 and recorded[0].name == "side.py"
+
+
+@pytest.mark.parametrize("cmd", [
+    "ruff check --fix",
+    "ruff check --fix .",
+    "ruff check --fix-only ok.py",
+    "ruff check --add-noqa ok.py",
+])
+def test_run_shell_passive_ruff_rejects_mutating_flags(tmp_path, cmd):
+    """Security (0.9.0 MED): the passive (read-only) tier must NOT admit ruff's
+    file-mutating flags — --fix / --fix-only / --add-noqa REWRITE files. They
+    slipped through because _is_safe_file_arg treated '--fix' as a filename."""
+    art = _make_artifacts(tmp_path)
+    (art / "ok.py").write_text("x=1\n")
+    rs = tools.make_run_shell(art)
+    with pytest.raises(ValueError, match="not allowed"):
+        rs(cmd=cmd, profile="passive")

@@ -49,7 +49,11 @@ def _read_frontmatter(path: Path) -> dict[str, str]:
     """
     meta: dict[str, str] = {}
     try:
-        with path.open("r", encoding="utf-8") as fh:
+        # errors="replace": a non-UTF-8 byte in a skill/standards file must not
+        # raise UnicodeDecodeError out of the index build and crash the wave
+        # scheduler — degrade to a best-effort parse (mirrors the resilience the
+        # entity / qc-history / standards read paths already have).
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
             if fh.readline().strip() != "---":
                 return meta
             for line in fh:
@@ -85,17 +89,29 @@ def _skill_paths(project_code: str | None = None) -> dict[str, Path]:
 
 
 def build_index(project_code: str | None = None) -> list[SkillIndexEntry]:
-    """Build the resident index — one cheap frontmatter read per skill,
-    bodies excluded. Cheap enough to rebuild on demand (it is just the
-    frontmatter of a few dozen small files)."""
+    """Build the resident index — metadata only, bodies excluded. Cheap
+    enough to rebuild on demand (it is just a few dozen small files).
+
+    Each name is resolved through :func:`skills.load_with_metadata` — the
+    SAME resolution :func:`checkout` uses — so the metadata the index
+    advertises (description, capability_tags) is exactly what a producer
+    gets when it checks the skill out. Resolving through ``load_with_metadata``
+    rather than reading the highest-precedence frontmatter directly keeps the
+    index from advertising a STALE machine-codification's metadata that
+    checkout would then supersede away (the freshness gate, task #84): if a
+    shared codification has gone stale against a newer bundled seed, both the
+    index and checkout report the seed. The body is parsed but immediately
+    discarded — the entry keeps only name/description/tags (cheap-index
+    guardrail).
+    """
     entries: list[SkillIndexEntry] = []
-    for name, path in sorted(_skill_paths(project_code).items()):
-        meta = _read_frontmatter(path)
+    for name in sorted(_skill_paths(project_code)):
+        skill = skills.load_with_metadata(name, project_code)
         entries.append(
             SkillIndexEntry(
-                name=meta.get("name") or name,
-                description=meta.get("description", ""),
-                capability_tags=skills._parse_csv(meta.get("capability_tags", "")),
+                name=skill.name or name,
+                description=skill.description,
+                capability_tags=skill.capability_tags,
             )
         )
     return entries
@@ -124,7 +140,9 @@ def search_skills(
         if score:
             scored.append((score, entry))
     scored.sort(key=lambda pair: (-pair[0], pair[1].name))
-    return [entry for _, entry in scored[: max(1, limit)]]
+    if limit <= 0:
+        return []
+    return [entry for _, entry in scored[:limit]]
 
 
 def checkout(name: str, project_code: str | None = None) -> skills.Skill:

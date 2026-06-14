@@ -127,6 +127,12 @@ class ACPServer:
         self._stdout_lock = threading.Lock()
         self._pending = rpc.PendingRequests()
         self._idgen = rpc.IdGen()
+        # Per-session ownership of in-flight server-initiated request ids, so
+        # session/cancel only unblocks ITS OWN permission/input requests — not
+        # every session's (H1: cancel_all() across the shared _pending would
+        # fail-closed-deny unrelated, in-flight prompts in other sessions).
+        self._session_pending_lock = threading.Lock()
+        self._session_pending: dict[str, set] = {}
         self._sessions: dict[str, ACPSession] = {}
         self._session_counter = itertools.count(1)
         # Injectable for tests; defaults to the real construction.
@@ -148,13 +154,31 @@ class ACPServer:
     def request_and_wait(self, method: str, params: dict,
                          timeout: float = _REQUEST_TIMEOUT_SECONDS):
         """Issue a server-initiated request and BLOCK for the client's response
-        (correlated by id). Returns the result, or None on timeout/cancel."""
+        (correlated by id). Returns the result, or None on timeout/cancel.
+
+        The request id is registered to the owning session (``sessionId`` in
+        ``params``) so that ``session/cancel`` only unblocks that session's own
+        in-flight requests (H1)."""
         rid = self._idgen.next()
         self._pending.register(rid)
-        rpc.write_message(
-            self._stdout, rpc.make_request(rid, method, params), self._stdout_lock)
-        ok, value = self._pending.wait(rid, timeout)
-        return value if ok else None
+        sid = params.get("sessionId")
+        if sid is not None:
+            with self._session_pending_lock:
+                self._session_pending.setdefault(sid, set()).add(rid)
+        try:
+            rpc.write_message(
+                self._stdout, rpc.make_request(rid, method, params),
+                self._stdout_lock)
+            ok, value = self._pending.wait(rid, timeout)
+            return value if ok else None
+        finally:
+            if sid is not None:
+                with self._session_pending_lock:
+                    ids = self._session_pending.get(sid)
+                    if ids is not None:
+                        ids.discard(rid)
+                        if not ids:
+                            self._session_pending.pop(sid, None)
 
     # ── the read loop ────────────────────────────────────────────────────
     def run(self) -> None:
@@ -185,7 +209,13 @@ class ACPServer:
             elif method == "session/prompt":
                 self._prompt(req_id, params)  # responds from the worker thread
             elif method == "session/cancel":
-                self._cancel(params)  # notification — no response
+                # Spec'd as a notification (no id). If a non-compliant client
+                # sends it as a request (with an id), still ACK it — otherwise
+                # that client blocks forever awaiting a response that, by the
+                # notification contract, would never come.
+                self._cancel(params)
+                if req_id is not None:
+                    self._respond(req_id, None)
             elif req_id is not None:
                 self._error(req_id, rpc.METHOD_NOT_FOUND, f"unknown method {method!r}")
         except Exception as exc:  # never let a handler kill the loop
@@ -221,13 +251,20 @@ class ACPServer:
             self._error(req_id, rpc.INVALID_REQUEST,
                         "session already has an active prompt")
             return
-        session.cancelled = False
-        message, attachments = _parse_prompt(params)
-        threading.Thread(
-            target=self._run_prompt,
-            args=(req_id, session, message, attachments),
-            daemon=True,
-        ).start()
+        # Once the lock is held, ONLY the worker's finally releases it. If
+        # _parse_prompt or Thread.start() raises before the worker exists, the
+        # lock would leak and wedge the session forever — release it here (H2).
+        try:
+            session.cancelled = False
+            message, attachments = _parse_prompt(params)
+            threading.Thread(
+                target=self._run_prompt,
+                args=(req_id, session, message, attachments),
+                daemon=True,
+            ).start()
+        except BaseException:
+            session.end_prompt()
+            raise
 
     def _run_prompt(self, req_id, session: ACPSession, message, attachments) -> None:
         try:
@@ -243,11 +280,16 @@ class ACPServer:
             session.end_prompt()
 
     def _cancel(self, params: dict) -> None:
-        session = self._sessions.get(params.get("sessionId"))
+        sid = params.get("sessionId")
+        session = self._sessions.get(sid)
         if session is not None:
             session.cancelled = True
-        # unblock any in-flight permission/input request → fails closed
-        self._pending.cancel_all()
+        # Unblock only THIS session's in-flight permission/input requests →
+        # they fail closed. Other sessions' pending requests are untouched (H1).
+        with self._session_pending_lock:
+            ids = list(self._session_pending.get(sid, ()))
+        for rid in ids:
+            self._pending.resolve(rid, None)
 
     # ── real Orchestrator construction (mirrors the TUI converse path) ───
     def _build_orchestrator(self, session: ACPSession):

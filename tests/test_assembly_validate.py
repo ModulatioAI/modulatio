@@ -479,3 +479,61 @@ def test_norm_normalizer_is_single_canonical_helper():
 
     assert assembly._norm is review_ledger._norm_unit
     assert av._norm_unit is review_ledger._norm_unit
+
+
+# ── r2 audit: deliverable-move regression (assembly_validate.py:446) ───────────
+
+
+def _moved_bundle_record(members: "dict[str, bytes]", *, root, deliverable_rel):
+    """Build a bundle the way PRODUCTION leaves it: the composite lives at the
+    DELIVERABLE path (assembly_task.output_path under root), and ``record.output_file``
+    points at a since-MOVED-AWAY temp file that no longer exists — exactly the state
+    after the engine does ``shutil.move(record.output_file, deliverable)`` and never
+    rewrites ``output_file`` (orchestration.py ~3699/4029)."""
+    for name, b in members.items():
+        (root / name).write_bytes(b)
+    deliverable = root / deliverable_rel
+    deliverable.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(deliverable, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, b in members.items():
+            zf.writestr(name, b)
+    stale_temp = root / ".assembly_media_stale.zip"  # the temp that was moved away
+    manifest = {"units": list(members), "media_kind": "bundle"}
+    rec = AssemblyRecord(manifest=manifest, final_checksum="sha256:x",
+                         complete=True, strategy="media", output_file=stale_temp)
+    return rec, deliverable
+
+
+def test_bundle_validates_deliverable_after_engine_move(tmp_path):
+    """REGRESSION (r2:446): post-move, record.output_file dangles; the bundle oracle
+    must validate the DELIVERABLE at assembly_task.output_path instead, not bail with
+    'composited output missing on disk'. Before the fix this always falls back."""
+    rec, _deliverable = _moved_bundle_record(
+        {"a.png": b"AAA", "b.csv": b"BBB"}, root=tmp_path,
+        deliverable_rel="out/bundle.zip",
+    )
+    assert not rec.output_file.exists()  # the move left output_file dangling
+    task = _task(output_path="out/bundle.zip")
+    ok, reason, oracle = av.validate_media_assembly(rec, task, tmp_path)
+    assert ok, reason
+    assert oracle == "stdlib-zipfile-bytes"
+
+
+def test_bundle_deliverable_path_escaping_root_is_unsafe(tmp_path):
+    """A producer-named output_path that escapes artifacts_root must NOT be read; the
+    oracle resolves nothing and honestly falls back (never validate an out-of-root file)."""
+    rec, _ = _moved_bundle_record(
+        {"a.png": b"AAA"}, root=tmp_path, deliverable_rel="out/bundle.zip",
+    )
+    task = _task(output_path="../escape.zip")
+    ok, reason, oracle = av.validate_media_assembly(rec, task, tmp_path)
+    assert not ok and "composited output missing on disk" in reason and oracle == ""
+
+
+def test_bundle_falls_back_to_output_file_when_no_output_path(tmp_path):
+    """Back-compat: a directly-built record with no output_path still uses
+    record.output_file (the un-moved unit-test shape)."""
+    rec = _bundle_record({"a.png": b"AAA", "b.csv": b"BBB"}, root=tmp_path)
+    ok, reason, oracle = av.validate_media_assembly(rec, _task(), tmp_path)
+    assert ok, reason
+    assert oracle == "stdlib-zipfile-bytes"

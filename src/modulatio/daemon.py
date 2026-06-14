@@ -83,9 +83,19 @@ def start(*, stub: bool = True) -> int:
     defaults.json to have default_models configured.
     """
     if is_running():
-        pid = int(_pid_file().read_text().strip())
-        logger.info("Daemon already running (pid=%s).", pid)
-        return pid
+        # TOCTOU guard: between is_running() and this re-read a concurrent
+        # stop()/daemon-exit can unlink or truncate the PID file, so reading
+        # it again can raise FileNotFoundError (OSError) or int() can raise
+        # ValueError. Guard the same way the rest of the module does; if the
+        # file no longer yields a valid pid, the daemon isn't reliably
+        # running — fall through and start a fresh one instead of crashing.
+        try:
+            pid = int(_pid_file().read_text().strip())
+        except (ValueError, OSError):
+            pid = None
+        if pid is not None:
+            logger.info("Daemon already running (pid=%s).", pid)
+            return pid
 
     # Fork once; parent returns immediately, child becomes the daemon.
     pid = os.fork()
@@ -97,9 +107,43 @@ def start(*, stub: bool = True) -> int:
     # === Child process ===
     # Detach from terminal: new session, new file descriptors.
     os.setsid()
-    sys.stdin = open(os.devnull, "r")
-    sys.stdout = open(_log_file(), "a", buffering=1)
-    sys.stderr = sys.stdout
+    # Capture the inherited terminal streams so we can close them after
+    # redirecting — otherwise their underlying file objects (and the
+    # controlling-terminal fds they hold) leak for the daemon's lifetime.
+    _old_stdin, _old_stdout, _old_stderr = sys.stdin, sys.stdout, sys.stderr
+    _new_stdin = open(os.devnull, "r")
+    _new_stdout = open(_log_file(), "a", buffering=1)
+    sys.stdin = _new_stdin
+    sys.stdout = _new_stdout
+    sys.stderr = _new_stdout
+    # Snapshot the new fds BEFORE closing the old streams: the old terminal
+    # streams hold fds 0/1/2, and closing a Python file object closes its
+    # stored fd number, so we must capture our targets first.
+    _stdin_fd = _new_stdin.fileno()
+    _stdout_fd = _new_stdout.fileno()
+    for _old in (_old_stdin, _old_stdout, _old_stderr):
+        # stderr is commonly aliased to stdout; close each underlying object
+        # at most once and never let a benign close error abort detachment.
+        try:
+            if _old is not None and not _old.closed:
+                _old.close()
+        except (OSError, ValueError):
+            pass
+    # Now redirect the raw fds 0/1/2 onto the new streams (the standard
+    # double-fork daemonize pattern). Closing the inherited terminal streams
+    # above freed fds 0/1/2; without this dup2 they stay closed/invalid, so
+    # any C-level / subprocess write to fd 1 or 2 would land on whatever fd
+    # the kernel next hands out (e.g. a future LanceDB/socket fd), corrupting
+    # it. dup2 restores 0→devnull, 1/2→log file as intended.
+    try:
+        os.dup2(_stdin_fd, 0)
+        os.dup2(_stdout_fd, 1)
+        os.dup2(_stdout_fd, 2)
+    except OSError:
+        # dup2 should not fail with valid source fds; if it does, fall
+        # through rather than abort detachment (streams remain redirected
+        # at the Python level via sys.std* above).
+        pass
 
     config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     _pid_file().write_text(str(os.getpid()))

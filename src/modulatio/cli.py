@@ -209,8 +209,12 @@ def _root(
         raise typer.Exit(code=1)
 
     typer.echo(f"Launching Modulatio TUI on '{code}' (real-mode)...\n")
-    from modulatio.tui.app import ModulatioApp
-    ModulatioApp(project_code=code, stub=False).run()
+    from modulatio.tui.app import ModulatioApp, _relaunch_if_restart
+    app_inst = ModulatioApp(project_code=code, stub=False)
+    app_inst.run()
+    # Honor /restart (app.exit(return_code=42)) at the process boundary — this
+    # CLI launch path previously swallowed it, so the TUI never came back up.
+    _relaunch_if_restart(app_inst)
     raise typer.Exit(code=0)
 
 
@@ -425,6 +429,26 @@ def kickoff(
         qc_model=qc_model,
     )
 
+    # Validate + build attachments BEFORE any disk side-effect (project
+    # init, roster seed, run-folder creation). build_attachment is
+    # independent of project/run state, so doing it here means a
+    # missing/unreadable --attach fails fast without leaving an orphan
+    # net-new project + seeded roster and runs/<run_id>/ folder on disk.
+    _atts = []
+    for _p in (attach or []):
+        _path = Path(_p).expanduser()
+        try:
+            _atts.append(build_attachment(_path, kind="document"))
+        except FileNotFoundError:
+            typer.echo(f"  ! --attach: file not found: {_path}", err=True)
+            raise typer.Exit(1)
+        except (ValueError, UnicodeDecodeError, OSError) as _e:
+            # OSError covers a directory passed as --attach (IsADirectoryError)
+            # and an unreadable file (PermissionError) — both surface as a clean
+            # message instead of an uncaught stack trace.
+            typer.echo(f"  ! --attach: cannot attach {_path}: {_e}", err=True)
+            raise typer.Exit(1)
+
     wiki = project_dir(code)
     net_new = not wiki.exists()
     vault.init_project(code, pname, objective, exist_ok=True)
@@ -538,17 +562,6 @@ def kickoff(
         ),
         user_budget_overrides=user_budget_overrides or None,
     )
-    _atts = []
-    for _p in (attach or []):
-        _path = Path(_p).expanduser()
-        try:
-            _atts.append(build_attachment(_path, kind="document"))
-        except FileNotFoundError:
-            typer.echo(f"  ! --attach: file not found: {_path}", err=True)
-            raise typer.Exit(1)
-        except (ValueError, UnicodeDecodeError) as _e:
-            typer.echo(f"  ! --attach: cannot attach {_path}: {_e}", err=True)
-            raise typer.Exit(1)
     if _atts:
         names = ", ".join(a.name for a in _atts)
         typer.echo(f"  In-place edit — improving: {names}")
@@ -659,7 +672,19 @@ def models_add(
         if not env_var:
             typer.echo("--env-var is required when --auth-type=api_key", err=True)
             raise typer.Exit(code=1)
-        auth_config = {"env_var": env_var.upper()}
+        # Env var names are case-sensitive on POSIX — uppercasing would
+        # silently mis-point a lowercase var (e.g. ``my_key`` → ``MY_KEY``).
+        # Store exactly what the operator passed.
+        auth_config = {"env_var": env_var}
+    elif env_var:
+        # env_var only applies to api_key auth; for any other auth_type it
+        # would be silently dropped. Fail loud so the operator notices the
+        # mismatched --auth-type rather than a silently keyless entry.
+        typer.echo(
+            f"--env-var only applies to --auth-type=api_key (got auth_type={auth_type!r}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     try:
         entry = model_presets.add_preset(
             key,
@@ -698,7 +723,10 @@ def models_edit(
         raise typer.Exit(code=1)
     try:
         result = model_presets.update_preset(key, **fields)
-    except KeyError as e:
+    except (KeyError, ValueError) as e:
+        # KeyError: unknown entry key. ValueError: an invalid field value
+        # (e.g. a bad api_format/auth_type) — both are operator errors that
+        # should surface as a clean message, not a stack trace.
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1)
     typer.echo(f"Updated '{key}': {fields}")
@@ -935,6 +963,13 @@ def heartbeat_add(
 ) -> None:
     """Queue an objective for the heartbeat to dispatch."""
     deps = [d.strip() for d in depends_on.split(",") if d.strip()] if depends_on else []
+    if every is not None and heartbeat.parse_interval(every) is None:
+        typer.echo(
+            f"Invalid --every interval {every!r}. "
+            "Expected a value like 30m, 6h, or 1d.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     task = heartbeat.add_task(
         description=description,
         project_code=code,
@@ -1061,6 +1096,12 @@ def cron_add(
     answers. Without ``--jt`` the cron runs the raw objective as before."""
     _jt_params = None
     if jt_params:
+        if not jt:
+            # --jt-params without --jt has nothing to bind to; the params
+            # would be silently dropped. Fail loud so the operator notices
+            # the missing --jt rather than scheduling a JT-less raw job.
+            typer.echo("--jt-params requires --jt (there is no template to bind them to).", err=True)
+            raise typer.Exit(code=1)
         import json as _json
         try:
             _jt_params = _json.loads(jt_params)
@@ -1370,7 +1411,9 @@ def project_runs(
         objective_path = run_path / "objective.md"
         objective = ""
         if objective_path.exists():
-            for line in objective_path.read_text().splitlines():
+            for line in objective_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
                 stripped = line.strip()
                 if stripped and not stripped.startswith(("---", "#", "run_id:", "created:")):
                     objective = stripped[:80]
@@ -1419,6 +1462,13 @@ def project_clean(
     only ``runs/<run_id>/`` subfolders are removed.
     """
     import shutil
+
+    if keep_last < 0:
+        # A negative keep_last falls through to the "delete all" branch below
+        # (it's neither > 0 nor >= len(runs)), silently wiping every run when
+        # the operator almost certainly meant to preserve some. Refuse it.
+        typer.echo("--keep-last cannot be negative.", err=True)
+        raise typer.Exit(code=2)
 
     runs = vault.list_runs(code)
     if not runs:

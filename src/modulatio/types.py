@@ -9,6 +9,7 @@ cross-cutting.md in the design vault for context.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -353,7 +354,27 @@ class Ticket(BaseModel):
 #: Tuples of unknown context_budget role keys we've already warned about
 #: this process. Validator drops repeats to DEBUG to keep TUI/status
 #: polling from spamming the log.
+#:
+#: Bounded to avoid an unbounded-growth leak across the process lifetime:
+#: keys come from operator-supplied ``Project.context_budgets`` and a
+#: buggy/adversarial caller could feed an endless stream of *distinct*
+#: unknown role tuples, each one a new entry that never expires. We cap
+#: the cache at ``_SEEN_UNKNOWN_BUDGET_ROLES_MAX`` and flush it wholesale
+#: on overflow (kept as a plain set so ``.add`` / ``.discard`` / ``.clear``
+#: / membership all stay valid for callers and tests). The only
+#: observable effect of a flush is that a previously-seen tuple may emit
+#: one fresh WARN if it recurs afterwards — acceptable for what is purely
+#: a log-noise dampener, and the cap is far above the handful of distinct
+#: role tuples a sane config ever produces.
+_SEEN_UNKNOWN_BUDGET_ROLES_MAX = 1024
 _SEEN_UNKNOWN_BUDGET_ROLES: set[tuple[str, ...]] = set()
+#: Guards the check-then-act on ``_SEEN_UNKNOWN_BUDGET_ROLES``. Project
+#: validation runs on concurrent wave-executor threads (waves are ON by
+#: default), so an unsynchronized "in?-then-add" can let two threads both
+#: miss and both emit the first-sighting WARN. The lock makes the
+#: first-sighting/repeat decision deterministic — exactly one WARN per
+#: unknown tuple — without changing what gets logged.
+_SEEN_UNKNOWN_BUDGET_ROLES_LOCK = threading.Lock()
 
 
 class Project(BaseModel):
@@ -528,14 +549,28 @@ class Project(BaseModel):
             logger = logging.getLogger("modulatio.context_budget")
             # First sighting of this exact unknown-tuple gets WARN; later
             # round-trips (TUI render, daemon poll, status command) drop
-            # to DEBUG so the noise floor stays usable.
-            if unknown in _SEEN_UNKNOWN_BUDGET_ROLES:
+            # to DEBUG so the noise floor stays usable. The check-then-act
+            # is locked: concurrent wave threads must not both treat the
+            # same tuple as a first sighting (double-WARN).
+            with _SEEN_UNKNOWN_BUDGET_ROLES_LOCK:
+                first_sighting = unknown not in _SEEN_UNKNOWN_BUDGET_ROLES
+                if first_sighting:
+                    # Flush wholesale past the cap so an endless stream of
+                    # distinct unknown tuples can't grow the cache without
+                    # bound. Flushing before the add keeps the just-seen
+                    # tuple recorded as the sole survivor.
+                    if (
+                        len(_SEEN_UNKNOWN_BUDGET_ROLES)
+                        >= _SEEN_UNKNOWN_BUDGET_ROLES_MAX
+                    ):
+                        _SEEN_UNKNOWN_BUDGET_ROLES.clear()
+                    _SEEN_UNKNOWN_BUDGET_ROLES.add(unknown)
+            if not first_sighting:
                 logger.debug(
                     "Project.context_budgets unknown budget_role(s) %s "
                     "(repeat).", list(unknown),
                 )
             else:
-                _SEEN_UNKNOWN_BUDGET_ROLES.add(unknown)
                 logger.warning(
                     "Project.context_budgets contains unknown budget_role(s) "
                     "%s — preserved across round-trip but will not be applied "

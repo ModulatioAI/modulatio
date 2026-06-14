@@ -217,6 +217,68 @@ def _is_code_source(source: Path) -> bool:
     return source.name.lower() in {"dockerfile", "makefile"}
 
 
+#: Extensions whose content IS prose the producer hand-wrote as Markdown — the
+#: ONLY inputs the pandoc render path can sensibly consume. A bare ``.pdf`` /
+#: ``.docx`` the Leader *named* but whose bytes are still Markdown text also
+#: belongs here (the historical reason the render path ignored extension).
+#: Everything NOT prose and NOT code (a media composite ``.mp4``/``.zip``/
+#: ``.png``, a data file ``.csv``/``.xlsx``, an ALREADY-rendered ``.pdf``/
+#: ``.docx`` binary) must ship verbatim — reading those with ``read_text`` and
+#: re-rendering them through pandoc corrupts them (and, for media composites,
+#: breaks the QC binary-aware checksum guarantee). See :func:`_is_prose_source`.
+_PROSE_SUFFIXES = frozenset({
+    ".md", ".markdown", ".mdown", ".mkd", ".txt", ".text", ".rst", "",
+    # Doc extensions the Leader may name while the bytes are still Markdown
+    # text; the render path stages a ``.md`` temp regardless of the name.
+    ".pdf", ".docx", ".doc", ".odt", ".rtf",
+})
+
+
+def _looks_binary(source: Path) -> bool:
+    """True iff ``source`` is a real binary file (a NUL byte in the head, or
+    its bytes don't decode as UTF-8). Used to distinguish a Leader-named
+    ``report.pdf`` whose content is still Markdown text (render it) from an
+    ALREADY-rendered ``.pdf``/``.docx`` binary or a media composite (ship it
+    verbatim). Returns ``False`` if the file can't be read — the caller's
+    normal text path then surfaces the real error."""
+    try:
+        with source.open("rb") as fh:
+            head = fh.read(8192)
+    except OSError:
+        return False
+    if b"\x00" in head:
+        return True
+    # Decode tolerantly: a fixed-size read can split a multibyte UTF-8 code
+    # point at the 8192-byte boundary, which would otherwise raise and
+    # mis-classify valid text as binary. ``errors="ignore"`` drops only an
+    # incomplete trailing sequence (and any genuinely invalid bytes), so a
+    # real binary still surfaces via the NUL check above or the replacement
+    # of its non-UTF-8 bytes — but a truncated tail no longer triggers a
+    # false positive. Re-encode and compare to detect genuine decode loss
+    # within the head (true binary), tolerating only a short truncated tail.
+    try:
+        head.decode("utf-8")
+        return False
+    except UnicodeDecodeError as exc:
+        # If the only undecodable bytes are a short, incomplete multibyte
+        # sequence at the very end of the read (a boundary truncation, never
+        # more than 3 trailing bytes for UTF-8), treat it as text.
+        if exc.start >= len(head) - 3 and exc.end == len(head):
+            return False
+        return True
+
+
+def _is_prose_source(source: Path) -> bool:
+    """True iff ``source`` should flow through the Markdown render path. Prose
+    means: a text/markdown extension, OR a doc extension (``.pdf``/``.docx``)
+    whose bytes are still hand-written Markdown text (not an already-rendered
+    binary). A media composite, data file, or rendered binary returns ``False``
+    so delivery copies its bytes verbatim instead of corrupting them."""
+    if source.suffix.lower() not in _PROSE_SUFFIXES:
+        return False
+    return not _looks_binary(source)
+
+
 def deliver_product(
     source_md: Path,
     *,
@@ -257,8 +319,12 @@ def deliver_product(
         )
     # VERBATIM: ship the file as-is, original name + extension preserved — code
     # always, plus markdown companions in a code bundle (keep README.md beside
-    # game.py rather than rendering it to a stray .docx).
-    if _is_code_source(source_md) or verbatim:
+    # game.py rather than rendering it to a stray .docx), AND any non-prose
+    # artifact: a media composite (.mp4/.zip/.png), a data file (.csv/.xlsx),
+    # or an already-rendered .pdf/.docx binary. Those would be corrupted by the
+    # text-read + pandoc render path (and a media composite would lose the QC
+    # binary-aware checksum guarantee). Byte-preserving copy keeps them intact.
+    if _is_code_source(source_md) or verbatim or not _is_prose_source(source_md):
         name = source_md.stem
         dest = dest_dir / source_md.name
         # Iteration: an improved PINNED file replaces its prior same-named copy
@@ -437,7 +503,11 @@ def deliverables_from_tasks(
     for t in tasks:
         if not getattr(t, "deliverable", False):
             continue
-        rel = getattr(t, "output_path", None) or f"drafts/{getattr(t, 'id')}.md"
+        # Default draft path mirrors the producer's writer, which lowercases the
+        # task id (orchestration ``drafts/{task.id.lower()}.md``). Using the raw
+        # id here silently misses the file for an uppercase id (e.g. ABC-T-001),
+        # so the deliverable never ships. Honor an explicit ``output_path`` as-is.
+        rel = getattr(t, "output_path", None) or f"drafts/{str(getattr(t, 'id')).lower()}.md"
         path = artifacts_root / rel
         # Last writer wins — later tasks edited the same file after earlier ones.
         by_path[path] = (getattr(t, "id"), path, getattr(t, "description", None))

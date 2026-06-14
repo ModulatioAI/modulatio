@@ -24,6 +24,7 @@ are closed at the engine chokepoints, not in prompt prose.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -171,10 +172,15 @@ def _artifacts(tmp_path):
 def test_run_shell_applies_resource_limits(tmp_path):
     """H3a: the child (and any sandboxed grandchild) runs under a bounded
     address space + zero core-dump size, so a memory bomb is contained even
-    though bwrap doesn't cgroup-limit memory."""
+    though bwrap doesn't cgroup-limit memory.
+
+    The caps are now applied from the PARENT via ``prlimit`` right after spawn
+    (not a fork-hazardous ``preexec_fn``), so the child sleeps briefly before
+    reading its own limits to let the microsecond-scale apply land first."""
     art = _artifacts(tmp_path)
     (art / "limits.py").write_text(
-        "import resource\n"
+        "import resource, time\n"
+        "time.sleep(0.3)  # let the parent's prlimit land\n"
         "soft_as, _ = resource.getrlimit(resource.RLIMIT_AS)\n"
         "soft_core, _ = resource.getrlimit(resource.RLIMIT_CORE)\n"
         "print(f'AS={soft_as} CORE={soft_core}')\n"
@@ -190,6 +196,27 @@ def test_run_shell_applies_resource_limits(tmp_path):
     assert as_val != -1
     assert as_val <= 4 * 1024**3
     assert core_val == 0
+
+
+def test_run_shell_is_fork_safe_from_worker_threads(tmp_path):
+    """0.9.0 hang regression: run_shell must be safe to call from worker
+    threads. The old ``preexec_fn`` ran Python between fork() and exec() in a
+    multithreaded process — a lock another thread held at fork time could
+    deadlock the child and wedge the parent's own thread creation, hanging the
+    whole suite. The cap is now applied from the parent via ``prlimit``, which
+    has no fork hazard. Drive several concurrent run_shell calls off worker
+    threads and require they all complete promptly."""
+    art = _artifacts(tmp_path)
+    (art / "echo.py").write_text("print('ok')\n")
+    rs = tools.make_run_shell(art)
+
+    def _call(_i):
+        return rs(cmd="python3 echo.py", profile="full", timeout=10)
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(_call, i) for i in range(8)]
+        outs = [f.result(timeout=30) for f in futures]
+    assert all("ok" in o for o in outs)
 
 
 def test_run_shell_reaps_orphaned_background_child_on_timeout(tmp_path):

@@ -29,6 +29,7 @@ Slice scope:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -39,6 +40,8 @@ import yaml
 
 from modulatio.attachments import Attachment
 from modulatio.vault import project_dir, validate_project_code
+
+_logger = logging.getLogger(__name__)
 
 #: Sentinel marker an agent emits at the very start of a plan-shaped
 #: response. HTML comment so it's invisible in markdown render but
@@ -247,7 +250,6 @@ def persist(
         return None
 
     code = validate_project_code(project_code.lower())
-    plan_id = next_plan_id(code)
     body = _strip_marker(response)
 
     # Inherit project-level default budget caps (from defaults.json's
@@ -257,45 +259,71 @@ def persist(
     from modulatio import config as _config
     default_caps = _config.get_default_budget_caps()
 
-    record = PlanRecord(
-        id=plan_id,
-        project_code=code,
-        created_at=datetime.now(timezone.utc).isoformat(),
-        agent_id=agent_id,
-        source_message=source_message,
-        attachments=tuple(_serialize_attachments(attachments)),
-        status="draft",
-        body=body,
-        max_wall_clock_min=default_caps.get("max_wall_clock_min"),
-        max_tokens=default_caps.get("max_tokens"),
-        max_cost_usd=default_caps.get("max_cost_usd"),
-    )
+    created_at = datetime.now(timezone.utc).isoformat()
+    attachments_tuple = tuple(_serialize_attachments(attachments))
+    max_wall_clock_min = default_caps.get("max_wall_clock_min")
+    max_tokens = default_caps.get("max_tokens")
+    max_cost_usd = default_caps.get("max_cost_usd")
 
     plans_root = _plans_dir(code)
     plans_root.mkdir(parents=True, exist_ok=True)
-    target = record.path
-    frontmatter: dict[str, Any] = {
-        "id": record.id,
-        "project_code": record.project_code,
-        "created_at": record.created_at,
-        "agent_id": record.agent_id,
-        "source_message": record.source_message,
-        "attachments": list(record.attachments),
-        "status": record.status,
-    }
-    # Cap fields only emitted when actually set, so plans without
-    # any inherited caps render the same frontmatter shape they did
-    # before this slice landed (audit-friendly).
-    if record.max_wall_clock_min is not None:
-        frontmatter["max_wall_clock_min"] = record.max_wall_clock_min
-    if record.max_tokens is not None:
-        frontmatter["max_tokens"] = record.max_tokens
-    if record.max_cost_usd is not None:
-        frontmatter["max_cost_usd"] = record.max_cost_usd
-    text = "---\n" + yaml.safe_dump(
-        frontmatter, sort_keys=False, allow_unicode=True,
-    ) + "---\n\n" + body.rstrip() + "\n"
-    target.write_text(text)
+
+    # Allocate id + write atomically. next_plan_id is filesystem-derived,
+    # so two concurrent persists can compute the SAME next id; an O_EXCL
+    # create (open mode "x") makes the loser fail with FileExistsError
+    # instead of clobbering the winner's plan. Retry re-derives the next
+    # free id.
+    record: PlanRecord
+    for _attempt in range(64):
+        plan_id = next_plan_id(code)
+        record = PlanRecord(
+            id=plan_id,
+            project_code=code,
+            created_at=created_at,
+            agent_id=agent_id,
+            source_message=source_message,
+            attachments=attachments_tuple,
+            status="draft",
+            body=body,
+            max_wall_clock_min=max_wall_clock_min,
+            max_tokens=max_tokens,
+            max_cost_usd=max_cost_usd,
+        )
+        target = record.path
+        frontmatter: dict[str, Any] = {
+            "id": record.id,
+            "project_code": record.project_code,
+            "created_at": record.created_at,
+            "agent_id": record.agent_id,
+            "source_message": record.source_message,
+            "attachments": list(record.attachments),
+            "status": record.status,
+        }
+        # Cap fields only emitted when actually set, so plans without
+        # any inherited caps render the same frontmatter shape they did
+        # before this slice landed (audit-friendly).
+        if record.max_wall_clock_min is not None:
+            frontmatter["max_wall_clock_min"] = record.max_wall_clock_min
+        if record.max_tokens is not None:
+            frontmatter["max_tokens"] = record.max_tokens
+        if record.max_cost_usd is not None:
+            frontmatter["max_cost_usd"] = record.max_cost_usd
+        text = "---\n" + yaml.safe_dump(
+            frontmatter, sort_keys=False, allow_unicode=True,
+        ) + "---\n\n" + body.rstrip() + "\n"
+        try:
+            with open(target, "x", encoding="utf-8") as fh:
+                fh.write(text)
+            break
+        except FileExistsError:
+            # Lost the id race to a concurrent persist (or a pre-existing
+            # file at this id). Re-derive the next free id and retry.
+            continue
+    else:  # pragma: no cover — 64 collisions in a row is pathological
+        raise RuntimeError(
+            f"could not allocate a unique plan id for project {code!r} "
+            "after 64 attempts"
+        )
 
     # Phase 3.1b-iv-γ-3: notify on new plan needing review. Soft-fail.
     try:
@@ -317,6 +345,27 @@ def persist(
 
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+def _coerce_cap(value: Any, kind: type) -> int | float | None:
+    """Coerce a frontmatter budget-cap value to ``int``/``float`` or
+    ``None``. Honors ``load()``'s 'None on malformed' contract:
+
+    - ``None`` (unset) → ``None``.
+    - YAML booleans → ``None``. YAML parses ``true``/``yes``/``on`` to
+      ``bool``, and ``int(True)`` silently coerces to a cap of ``1`` (a
+      bogus, near-zero budget) — reject it rather than honor a
+      hand-edit typo as a tiny cap.
+    - A non-numeric string (``max_tokens: abc``) raises ``ValueError``
+      in ``int``/``float``; degrade to ``None`` instead of bricking the
+      whole load (which ``list_plans`` would silently skip).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return kind(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def load(plan_id: str, project_code: str) -> Optional[PlanRecord]:
@@ -346,26 +395,14 @@ def load(plan_id: str, project_code: str) -> Optional[PlanRecord]:
         current_index=int(meta.get("current_index", 0) or 0),
         reflection_log=tuple(meta.get("reflection_log") or ()),
         spawned_kickoffs=tuple(meta.get("spawned_kickoffs") or ()),
-        max_wall_clock_min=(
-            float(meta["max_wall_clock_min"])
-            if meta.get("max_wall_clock_min") is not None
-            else None
-        ),
+        max_wall_clock_min=_coerce_cap(meta.get("max_wall_clock_min"), float),
         execution_started_at=(
             str(meta["execution_started_at"])
             if meta.get("execution_started_at")
             else None
         ),
-        max_tokens=(
-            int(meta["max_tokens"])
-            if meta.get("max_tokens") is not None
-            else None
-        ),
-        max_cost_usd=(
-            float(meta["max_cost_usd"])
-            if meta.get("max_cost_usd") is not None
-            else None
-        ),
+        max_tokens=_coerce_cap(meta.get("max_tokens"), int),
+        max_cost_usd=_coerce_cap(meta.get("max_cost_usd"), float),
         tokens_used=int(meta.get("tokens_used", 0) or 0),
         cost_usd_used=float(meta.get("cost_usd_used", 0.0) or 0.0),
         body=body,
@@ -407,8 +444,24 @@ _NEXT_SECTION_RE = re.compile(r"^#{2,3}\s+\S", re.MULTILINE)
 _SUB_OBJECTIVE_ITEM_RE = re.compile(
     # Numbered list items in the leader-plan skill's required format:
     # "**N. <action-verb noun phrase>** — 1-line description."
-    r"^\s{0,3}\*\*\s*(\d+)\.\s*([^*]+?)\*\*[\s—–\-:]*(.+?)$",
+    # The description is OPTIONAL: a title-only item ("**N. Foo**")
+    # must still match (the loop defaults description to the title).
+    # The separator class deliberately excludes newline whitespace
+    # (uses [ \t] not \s) so a title-only line never borrows the
+    # next item's line as its description and swallows it.
+    # Title capture is line-anchored ($ + MULTILINE keeps it on one line)
+    # and lazy, so it tolerates inner markdown emphasis (``*draft*`` /
+    # nested ``**bold**``) inside the bold title without dropping the
+    # item — a negated-asterisk class would silently omit any such
+    # sub-objective from the parsed list.
+    r"^[ \t]{0,3}\*\*\s*(\d+)\.\s*(.+?)\*\*[ \t—–\-:]*(.*)$",
     re.MULTILINE,
+)
+#: Line-starts that look like a numbered bold sub-objective item. Used
+#: as a cheap cross-check against the parsed-item count so a future
+#: regex drift that silently omits an item is detected, not swallowed.
+_SUB_OBJECTIVE_ITEM_LINE_RE = re.compile(
+    r"^[ \t]{0,3}\*\*\s*\d+\.", re.MULTILINE,
 )
 
 
@@ -438,6 +491,18 @@ def extract_sub_objectives(plan_body: str) -> list[dict]:
 
     out: list[dict] = []
     items = list(_SUB_OBJECTIVE_ITEM_RE.finditer(section))
+    # Cross-check: every line that LOOKS like a numbered bold item must
+    # actually parse. A mismatch means the item regex silently dropped a
+    # sub-objective (e.g. inner-emphasis title) — surface it rather than
+    # report a short list as the whole plan.
+    line_starts = len(_SUB_OBJECTIVE_ITEM_LINE_RE.findall(section))
+    if line_starts != len(items):
+        _logger.warning(
+            "extract_sub_objectives parsed %d items but found %d "
+            "numbered-item line-starts; a sub-objective may have been "
+            "dropped by the item regex",
+            len(items), line_starts,
+        )
     for i, m in enumerate(items):
         title = m.group(2).strip()
         first_line = m.group(3).strip()

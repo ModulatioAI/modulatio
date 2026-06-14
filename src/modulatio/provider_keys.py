@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Optional, TypedDict
 
 from modulatio import config
@@ -129,6 +130,7 @@ def add_key(
 
 
 _pool_cursor: dict[str, int] = {}
+_pool_cursor_lock = threading.Lock()  # guards the cursor read-modify-write
 
 
 def pool_env_vars(base_env_var: str) -> list[str]:
@@ -148,8 +150,12 @@ def next_pool_env_var(base_env_var: str) -> str:
     pool = pool_env_vars(base_env_var)
     if not pool:
         return base_env_var
-    i = _pool_cursor.get(base_env_var, 0) % len(pool)
-    _pool_cursor[base_env_var] = i + 1
+    # Concurrent wave workers call this; the cursor read-modify-write must be
+    # atomic or two workers can read the same index (uneven balancing) and
+    # corrupt the count.
+    with _pool_cursor_lock:
+        i = _pool_cursor.get(base_env_var, 0) % len(pool)
+        _pool_cursor[base_env_var] = i + 1
     return pool[i]
 
 

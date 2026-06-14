@@ -698,6 +698,80 @@ def test_parse_inbox_proposals_malformed_json_yields_empty() -> None:
     assert "## inbox_proposals" not in stripped
 
 
+def test_parse_inbox_proposals_blank_line_gap_after_heading() -> None:
+    # The contract example puts a blank line between the heading and
+    # the fence — the anchored matcher must still find it.
+    body = (
+        "artifact\n"
+        "\n"
+        "## inbox_proposals\n"
+        "\n"
+        "```json\n"
+        '[{"target_scope":"all","priority":"P2",'
+        '"reason":"scope_clarification","content":"x"}]\n'
+        "```\n"
+    )
+    stripped, props = inboxes.parse_inbox_proposals(body)
+    assert len(props) == 1
+    assert props[0]["target_scope"] == "all"
+    assert "## inbox_proposals" not in stripped
+
+
+def test_parse_inbox_proposals_ignores_unanchored_fence() -> None:
+    # Regression: a fenced block that does NOT immediately follow the
+    # heading (here: trailing prose carrying an example fence) must NOT
+    # be extracted as the proposals block. Splicing it out would corrupt
+    # the artifact by deleting the wrong region. With no anchored fence,
+    # the heading is stripped alone and no proposals are emitted; the
+    # downstream prose + its fence are preserved verbatim.
+    body = (
+        "artifact body\n"
+        "\n"
+        "## inbox_proposals\n"
+        "\n"
+        "Some explanatory prose, not a fence yet.\n"
+        "\n"
+        "```json\n"
+        '[{"target_scope":"agent","target_agent_id":"leader",'
+        '"priority":"P1","reason":"constraint_discovered",'
+        '"content":"should NOT be extracted"}]\n'
+        "```\n"
+    )
+    stripped, props = inboxes.parse_inbox_proposals(body)
+    assert props == []
+    assert "## inbox_proposals" not in stripped
+    # The downstream example fence + prose are preserved, not spliced.
+    assert "explanatory prose" in stripped
+    assert "should NOT be extracted" in stripped
+
+
+def test_parse_inbox_proposals_first_fence_anchored_not_downstream() -> None:
+    # Regression: heading is immediately followed by the real proposals
+    # fence, then trailing prose containing ANOTHER fence. The anchored
+    # matcher extracts the FIRST (correct) fence and leaves the trailing
+    # prose-fence in place rather than over-splicing.
+    body = (
+        "artifact\n"
+        "\n"
+        "## inbox_proposals\n"
+        "```json\n"
+        '[{"target_scope":"all","priority":"P3","reason":"hint",'
+        '"content":"real"}]\n'
+        "```\n"
+        "\n"
+        "Trailing note with a code sample:\n"
+        "```json\n"
+        '{"unrelated": true}\n'
+        "```\n"
+    )
+    stripped, props = inboxes.parse_inbox_proposals(body)
+    assert len(props) == 1
+    assert props[0]["content"] == "real"
+    assert "## inbox_proposals" not in stripped
+    assert "Trailing note" in stripped
+    assert '{"unrelated": true}' in stripped
+
+
 # ── MODULATIO_INBOXES off ─────────────────────────────────────────────────
 
 

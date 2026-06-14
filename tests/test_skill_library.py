@@ -9,8 +9,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 
-from modulatio import skill_library, tools
+from modulatio import skill_library, skills, tools
+
+
+def _write_skill(d: Path, name: str, body: str, **fm: str) -> None:
+    lines = [f"name: {name}"] + [f"{k}: {v}" for k, v in fm.items()]
+    d.joinpath(f"{name}.md").write_text(
+        "---\n" + "\n".join(lines) + "\n---\n\n" + body + "\n"
+    )
+
+
+@pytest.fixture
+def isolated_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point the seed + shared roots at empty temp dirs so the index sees
+    only the skills a test writes (and so checkout resolves against them)."""
+    seed = tmp_path / "seed"
+    shared = tmp_path / "shared"
+    seed.mkdir()
+    shared.mkdir()
+    monkeypatch.setattr(skills, "_SEED_SKILLS_ROOT", seed)
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", shared)
+    skills._WARNED_SUPERSEDED.clear()
+    return seed, shared
 
 
 # ── the resident index ────────────────────────────────────────────────────
@@ -96,6 +118,58 @@ def test_checkout_unknown_is_empty_not_error() -> None:
     assert skill.name == ""  # the empty-skill sentinel; callers treat as missing
 
 
+# ── index ↔ checkout agreement (task #84 freshness gate) ──────────────────
+
+
+def test_index_reflects_supersession_not_stale_codification(isolated_roots) -> None:
+    """A STALE machine codification (base_seed_hash no longer matches the
+    bundled seed) is superseded by the seed on checkout. The resident index
+    must advertise the SAME thing checkout returns — the seed's metadata —
+    not the stale codification's description/tags that checkout discards.
+    Regression for the index-vs-checkout drift (#38)."""
+    seed, shared = isolated_roots
+    _write_skill(
+        seed, "s", "NEW SEED BODY",
+        description="fresh seed description",
+        capability_tags="fresh-tag",
+    )
+    # A codification stamped against an OLD seed → stale → superseded.
+    _write_skill(
+        shared, "s", "OLD CODIFIED BODY",
+        version="3", base_seed_hash="deadbeefdeadbeef",
+        description="stale codified description",
+        capability_tags="stale-tag",
+    )
+
+    checked_out = skill_library.checkout("s")
+    assert checked_out.prompt_template.strip() == "NEW SEED BODY"
+
+    entry = next(e for e in skill_library.build_index() if e.name == "s")
+    # The index must match checkout, not the stale shared file on disk.
+    assert entry.description == checked_out.description == "fresh seed description"
+    assert entry.capability_tags == checked_out.capability_tags == ("fresh-tag",)
+    assert "stale" not in entry.description
+    assert "stale-tag" not in entry.capability_tags
+
+
+def test_index_honors_current_codification(isolated_roots) -> None:
+    """When the shared codification is CURRENT (base_seed_hash matches), it
+    wins on checkout — and the index advertises ITS metadata, not the seed's."""
+    seed, shared = isolated_roots
+    _write_skill(seed, "s", "SEED BODY", description="seed desc")
+    h = skills.seed_content_hash("s")
+    _write_skill(
+        shared, "s", "CODIFIED BODY",
+        version="3", base_seed_hash=h,
+        description="codified desc", capability_tags="codified-tag",
+    )
+
+    checked_out = skill_library.checkout("s")
+    entry = next(e for e in skill_library.build_index() if e.name == "s")
+    assert entry.description == checked_out.description == "codified desc"
+    assert entry.capability_tags == ("codified-tag",)
+
+
 # ── the builtins ──────────────────────────────────────────────────────────
 
 
@@ -141,3 +215,14 @@ def test_build_registry_accepts_project_code() -> None:
     reg = tools.build_registry(project_code="someproj")
     assert "http_get" in reg and "web_search" in reg
     assert "search_skills" in reg
+
+
+def test_read_frontmatter_survives_non_utf8(tmp_path):
+    """Cross-file (R2): a non-UTF-8 skill file must not raise UnicodeDecodeError
+    out of the index build (which would crash the wave scheduler) — degrade to a
+    best-effort parse."""
+    from modulatio import skill_library
+    p = tmp_path / "weird.md"
+    p.write_bytes(b"---\nname: weird\ndescription: has \xff\xfe bad bytes\n---\nbody\n")
+    meta = skill_library._read_frontmatter(p)  # must not raise
+    assert meta.get("name") == "weird"

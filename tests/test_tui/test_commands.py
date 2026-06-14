@@ -156,3 +156,36 @@ def test_dispatch_handles_quoted_arguments():
     result = cmd_mod.dispatch('/open "notes with spaces.md"')
     assert result.ok is True
     assert result.side_effect == "open_file:notes with spaces.md"
+
+
+def test_open_preserves_windows_style_backslash_path():
+    """Regression (r2 LOW): posix shlex.split silently ate backslashes,
+    corrupting a Windows-style path. /open must keep them verbatim."""
+    result = cmd_mod.dispatch(r"/open C:\Users\me\report.pdf")
+    assert result.ok is True
+    assert result.side_effect == r"open_file:C:\Users\me\report.pdf"
+
+
+def test_open_preserves_relative_backslash_path():
+    result = cmd_mod.dispatch(r"/open notes\sub\file.md")
+    assert result.ok is True
+    assert result.side_effect == r"open_file:notes\sub\file.md"
+
+
+def test_open_single_quoted_path_strips_quotes():
+    result = cmd_mod.dispatch("/open 'notes with spaces.md'")
+    assert result.ok is True
+    assert result.side_effect == "open_file:notes with spaces.md"
+
+
+def test_open_blank_remainder_still_requires_argument():
+    """Whitespace-only after /open must not become an empty-path open."""
+    result = cmd_mod.dispatch("/open    ")
+    assert result.ok is False
+    assert "Usage" in result.output
+
+
+def test_open_trims_surrounding_whitespace_on_path():
+    result = cmd_mod.dispatch("/open   notes/leader.md  ")
+    assert result.ok is True
+    assert result.side_effect == "open_file:notes/leader.md"

@@ -450,13 +450,45 @@ def append_activity(
     anchor = "### Recent Activity"
     if anchor not in body:
         return path  # leave the file alone; caller can decide
-    # Insert immediately after the anchor's first line.
+    # Append at the END of the Recent Activity block so the on-disk
+    # order matches render_state's oldest-first/newest-last ordering
+    # (push_activity appends to the tail; render iterates in order).
+    # Inserting newest-first here would desync the two writers, so the
+    # displayed order would flip depending on which last touched the file.
     head, _, tail = body.partition(anchor)
     if "\n" in tail:
         first_line, rest = tail.split("\n", 1)
     else:
         first_line, rest = tail, ""
-    new_block = head + anchor + first_line + "\n" + entry.render() + "\n" + rest
+    # Split the section body (entries) from the remainder (next "###"
+    # heading and beyond). Entries run until the first blank line or the
+    # next section heading, whichever comes first.
+    section_lines: list[str] = []
+    remainder_lines: list[str] = []
+    in_section = True
+    for line in rest.split("\n"):
+        if in_section and (line.startswith("### ") or line == ""):
+            in_section = False
+        if in_section:
+            section_lines.append(line)
+        else:
+            remainder_lines.append(line)
+    # Drop a "- (none)" placeholder; the new entry supersedes it.
+    section_lines = [ln for ln in section_lines if ln.strip() != "- (none)"]
+    section_lines.append(entry.render())
+    # FIFO-trim to RECENT_ACTIVITY_MAX so this markdown-splice writer
+    # honors the same cap as TeamState.push_activity (the structured
+    # writer). Without this, repeated append_activity calls grow the
+    # on-disk Recent Activity list unbounded, breaking the documented
+    # "max 8" invariant and inflating the file past the soft cap.
+    # Count only entry lines (those starting with "- "); preserve any
+    # incidental non-entry lines and evict the oldest entries first.
+    entry_idxs = [i for i, ln in enumerate(section_lines) if ln.startswith("- ")]
+    if len(entry_idxs) > RECENT_ACTIVITY_MAX:
+        drop = set(entry_idxs[: len(entry_idxs) - RECENT_ACTIVITY_MAX])
+        section_lines = [ln for i, ln in enumerate(section_lines) if i not in drop]
+    new_rest = "\n".join(section_lines + remainder_lines)
+    new_block = head + anchor + first_line + "\n" + new_rest
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(new_block)
     tmp.replace(path)

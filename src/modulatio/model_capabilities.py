@@ -23,6 +23,9 @@ free-form and mirror the ones the seed skills advertise.
 
 from __future__ import annotations
 
+import ipaddress
+from urllib.parse import urlsplit
+
 # Canonical tiers, weakest → strongest (matches dispatch._TIER_RANK).
 MODEL_TIERS: tuple[str, ...] = (
     "budget", "generalist", "tactical", "tool-using", "reasoning-heavy", "strategic",
@@ -49,7 +52,15 @@ _DEFAULT_CAPS: tuple[str, ...] = ()
 # Ordered (substrings, tier, cost_class, capability_tags). First family whose
 # any-substring matches the lowercased model id (or label) wins. Order from
 # most-specific to most-general within a vendor.
-_FAMILY_TABLE: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...] = (
+#
+# cost_class is the model family's *default*. For OPEN-WEIGHTS families (gemma /
+# llama) it is left ``None`` rather than baked to ``free-local``: the same
+# open-weights model is free run locally but PAID via a hosted API
+# (OpenRouter / NVIDIA / Ollama Cloud / Google). Cost must flow from WHERE the
+# model runs, so ``_is_local_endpoint`` is the only thing that promotes a model
+# to free-local; a hosted open-weights model stays unknown-cost (dispatch ranks
+# unknown cost LAST, never misranking a billed model as cheapest).
+_FAMILY_TABLE: tuple[tuple[tuple[str, ...], str, str | None, tuple[str, ...]], ...] = (
     # Anthropic
     (("opus",), "strategic", "premium-cloud",
      ("reasoning-heavy", "long-context", "vision", "structured-output")),
@@ -88,9 +99,9 @@ _FAMILY_TABLE: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...] = (
     # Google Gemini / Gemma
     (("gemini",), "reasoning-heavy", "paid-cloud",
      ("long-context", "vision", "structured-output")),
-    (("gemma",), "budget", "free-local", ("fast",)),
+    (("gemma",), "budget", None, ("fast",)),
     # Meta Llama
-    (("llama",), "generalist", "free-local", ()),
+    (("llama",), "generalist", None, ()),
     # MiniMax
     (("minimax",), "generalist", "paid-cloud",
      ("code-production", "long-context")),
@@ -102,8 +113,30 @@ _FAMILY_TABLE: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...] = (
 
 
 def _is_local_endpoint(base_url: str) -> bool:
-    u = (base_url or "").lower()
-    return any(h in u for h in ("localhost", "127.0.0.1", "0.0.0.0", "::1"))
+    """True only when ``base_url``'s HOSTNAME is the local machine.
+
+    Tests the parsed hostname exactly — ``localhost`` (or a ``*.localhost``
+    name) or a loopback / unspecified IP — never a bare substring. Substring
+    matching wrongly flipped a remote host that merely *contains* one of these
+    tokens (e.g. ``https://localhost.evil-remote.example`` or
+    ``https://api.0.0.0.0-host.net``) to free-local.
+    """
+    raw = (base_url or "").strip()
+    if not raw:
+        return False
+    # Default a scheme so a bare "host:port" still yields a hostname (urlsplit
+    # otherwise reads "localhost:8080" as scheme="localhost", host="").
+    parsed = urlsplit(raw if "//" in raw else f"//{raw}")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_unspecified
 
 
 def infer(

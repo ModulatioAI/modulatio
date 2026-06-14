@@ -106,27 +106,44 @@ def build_repo_map(artifacts_root: Path) -> str:
     total_chars = len(out[0])
     truncated = False
 
-    for path in files:
+    for i, path in enumerate(files):
         rel = path.relative_to(artifacts_root)
+        # Hard stop once the cap is reached — even via name-only "listed only"
+        # lines, which previously BYPASSED the cap (they were appended without
+        # counting), so a repo with thousands of files grew the map unbounded.
+        # Count every appended line below, and break with a "+N more" summary.
+        if total_chars > MAX_MAP_CHARS:
+            truncated = True
+            remaining = len(files) - i
+            out.append(
+                f"- … and {remaining:,} more file(s) omitted (repo-map cap reached)"
+            )
+            break
         try:
             file_size = path.stat().st_size
         except OSError:
-            out.append(f"- `{rel}` — unreadable (stat failed)")
+            line = f"- `{rel}` — unreadable (stat failed)"
+            out.append(line)
+            total_chars += len(line)
             continue
         if file_size > MAX_FILE_BYTES:
-            out.append(
+            line = (
                 f"- `{rel}` ({file_size:,} bytes) — exceeds map size cap, "
                 f"listed only"
             )
+            out.append(line)
+            total_chars += len(line)
             continue
 
         block = _render_file(path, rel, file_size)
         if total_chars + len(block) > MAX_MAP_CHARS:
             truncated = True
-            out.append(
+            line = (
                 f"- `{rel}` ({file_size:,} bytes) — listed only "
                 f"(repo-map cap reached)"
             )
+            out.append(line)
+            total_chars += len(line)
             continue
         out.append(block)
         total_chars += len(block)

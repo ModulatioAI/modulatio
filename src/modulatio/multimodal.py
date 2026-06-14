@@ -130,14 +130,36 @@ def _render_user_text(
     if docs:
         parts.append("# Attached documents")
         for doc in docs:
+            content = doc.content or ""
             parts.append(f"## `{doc.name}`")
             parts.append("")
-            parts.append("```")
-            parts.append(doc.content or "")
-            parts.append("```")
+            # Fence with a backtick run longer than any run in the content
+            # so a document's own fences can't break out of the wrapper and
+            # bleed into instruction context (CommonMark info-string rule).
+            fence = "`" * (_longest_backtick_run(content) + 1)
+            if len(fence) < 3:
+                fence = "```"
+            parts.append(fence)
+            parts.append(content)
+            parts.append(fence)
         parts.append("")
     parts.append(message)
     return "\n".join(parts)
+
+
+def _longest_backtick_run(text: str) -> int:
+    """Return the length of the longest consecutive run of backticks in
+    ``text`` (0 when there are none)."""
+    longest = 0
+    current = 0
+    for ch in text:
+        if ch == "`":
+            current += 1
+            if current > longest:
+                longest = current
+        else:
+            current = 0
+    return longest
 
 
 def chat_with_agent_multimodal(

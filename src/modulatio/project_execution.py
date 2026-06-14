@@ -172,6 +172,33 @@ def build_emit_state_tool_schema() -> dict:
         "outcome": {"type": "string", "enum": sorted(VALID_REFLECT_OUTCOMES)},
         "rationale": {"type": "string"},
         "divergence_notes": {"type": "array", "items": {"type": "string"}},
+        # Optional outcome payloads. Without these in the schema a
+        # schema-constrained model (the now-default structured path) has
+        # nowhere to put the revise-major / pause / abort detail the
+        # outcome handlers read (decision.get("revise_major") etc.), so
+        # those tickets/summaries would always fall back to generic
+        # "(no summary)" / default-title text. The legacy fenced-text
+        # path preserved arbitrary keys; this restores parity.
+        "revise_major": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "ticket_body": {"type": "string"},
+            },
+        },
+        "pause": {
+            "type": "object",
+            "properties": {
+                "ticket_title": {"type": "string"},
+                "ticket_body": {"type": "string"},
+            },
+        },
+        "abort": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+            },
+        },
     }
     return {
         "type": "function",
@@ -467,11 +494,17 @@ def _build_reflection_prompt(
     lines.append(body_excerpt)
     lines.append("")
     lines.append("## Sub-objective progress")
-    for so in sub_objectives:
-        idx = so["index"] - 1  # 0-based for completion comparison
-        if idx < completed_index:
+    # Render markers from the POSITIONAL enumeration the execution loop
+    # uses (it advances ``completed`` via ``sub_objectives[completed]``),
+    # NOT from ``so['index']`` — that index is taken verbatim from the
+    # number the LLM wrote, so a mis-numbered plan (duplicates, gaps,
+    # 0-based) would desync the markers from what actually ran and corrupt
+    # the very progress view Leader reflects on. The displayed number stays
+    # the LLM's ``so['index']`` so the prose matches the plan body.
+    for pos, so in enumerate(sub_objectives):
+        if pos < completed_index:
             marker = "✓"
-        elif idx == completed_index:
+        elif pos == completed_index:
             marker = "▶"
         else:
             marker = "☐"
@@ -887,9 +920,44 @@ def start_execution(
             error="no parseable sub-objectives",
         )
     if len(sub_objectives) > max_sub_objectives:
-        raise ValueError(
-            f"plan {plan_id} has {len(sub_objectives)} sub-objectives "
-            f"(cap={max_sub_objectives}); refusing as malformed"
+        # Over-cap = likely malformed plan. CRITICAL: flip status to
+        # 'paused' BEFORE returning, mirroring the no-sub-objectives
+        # branch above. If we instead raised here (pre-set_status), the
+        # plan would stay 'approved' and the daemon's tick() — which
+        # selects the lowest-id approved plan first — would re-discover
+        # and re-raise on it every tick, deterministically STARVING every
+        # other approved plan in the vault. Pause + ticket instead.
+        plans.set_status(
+            plan_id, project.code, "paused",
+            decided_by="dispatcher",
+            note=(
+                f"{len(sub_objectives)} sub-objectives exceeds cap "
+                f"{max_sub_objectives}; paused as likely malformed"
+            ),
+        )
+        ticket_id = _open_pause_ticket(
+            project=project, plan=plan,
+            title=f"Plan {plan_id}: too many sub-objectives parsed",
+            body=(
+                f"Execution couldn't begin because the plan body parsed "
+                f"{len(sub_objectives)} sub-objectives, over the safety "
+                f"cap of {max_sub_objectives} — likely a malformed plan. "
+                f"Revise the plan to fewer sub-objectives and re-approve, "
+                f"or close this ticket to abandon."
+            ),
+            affected_plan_id=plan_id,
+        )
+        return ExecutionResult(
+            plan_id=plan_id,
+            project_code=plan.project_code,
+            final_status="paused",
+            sub_objectives_completed=0,
+            sub_objectives_total=len(sub_objectives),
+            paused_ticket_id=ticket_id,
+            error=(
+                f"{len(sub_objectives)} sub-objectives exceeds cap "
+                f"{max_sub_objectives}"
+            ),
         )
 
     # Atomic claim (third-party review fix 2026-05-02): hold a POSIX
@@ -1488,7 +1556,18 @@ def _run_execution_loop(
                                 project.code, project.run_id
                             ) or ""
                         )
-                        _pressure = len(_prior_state.split()) / reflect_effective_cap
+                        # Token-native pressure: numerator and denominator
+                        # MUST share units. The denominator
+                        # (reflect_effective_cap) is a model TOKEN budget, so
+                        # the numerator must be the model-aware token count of
+                        # the accumulated state — not a whitespace word count,
+                        # which diverges arbitrarily by artifact (code/JSON/CJK)
+                        # and silently under-fires the gate. The TOKEN is the
+                        # unit; producers/artifacts are agnostic.
+                        _prior_tokens = tool_summarization.count_tokens(
+                            project.leader_model, text=_prior_state
+                        )
+                        _pressure = _prior_tokens / reflect_effective_cap
                         if _pressure < project.compression_pressure_threshold:
                             _pressure_skip = True
                     if _pressure_skip:
@@ -1864,6 +1943,16 @@ def tick(
         fresh = plans.load(record.id, code)
         if fresh is None or fresh.status != "approved":
             continue
+        # Plan size for the error-path ExecutionResults below. Derive it
+        # from the freshest plan body so a dispatch that fails before
+        # start_execution still reports the real total (not 0, which —
+        # paired with completed=current_index — misrepresents plan size
+        # to the daemon). Defensive: a malformed body yields [] → 0, the
+        # same honest answer the success path gives for an empty plan.
+        try:
+            _plan_total = len(plans.extract_sub_objectives(fresh.body))
+        except Exception:  # pragma: no cover — defensive
+            _plan_total = 0
         try:
             project = project_loader(code)
         except Exception as exc:
@@ -1872,7 +1961,7 @@ def tick(
                 plan_id=record.id, project_code=code,
                 final_status="executing",
                 sub_objectives_completed=record.current_index,
-                sub_objectives_total=0,
+                sub_objectives_total=_plan_total,
                 error=f"project_loader failed: {exc}",
             ))
             continue
@@ -1883,7 +1972,7 @@ def tick(
                 plan_id=record.id, project_code=code,
                 final_status="executing",
                 sub_objectives_completed=record.current_index,
-                sub_objectives_total=0,
+                sub_objectives_total=_plan_total,
                 error=f"runners_for failed: {exc}",
             ))
             continue
@@ -1909,7 +1998,7 @@ def tick(
                 plan_id=record.id, project_code=code,
                 final_status=actual_status,
                 sub_objectives_completed=record.current_index,
-                sub_objectives_total=0,
+                sub_objectives_total=_plan_total,
                 error=f"start_execution raised: {exc}",
             ))
             continue

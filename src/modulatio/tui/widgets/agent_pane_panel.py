@@ -22,6 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -191,13 +192,14 @@ class AgentPanePanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static(
-            f"[bold]{self.agent_name}[/]  [dim]({self.agent_tier})[/]\n"
-            f"[cyan]{self.agent_model}[/]  [dim]— idle[/]",
+            f"[bold]{escape(self.agent_name)}[/]  "
+            f"[dim]({escape(self.agent_tier)})[/]\n"
+            f"[cyan]{escape(self.agent_model)}[/]  [dim]— idle[/]",
             id=f"pane-status-{self.agent_id}",
             classes="agent-pane-status",
         )
         yield Static(
-            self.agent_identity,
+            escape(self.agent_identity),
             id=f"pane-identity-{self.agent_id}",
             classes="agent-pane-identity",
         )
@@ -224,7 +226,7 @@ class AgentPanePanel(Vertical):
                 classes="agent-pane-btn",
             )
         yield Static(
-            f"[dim]chat with {self.agent_name} — buttons or: "
+            f"[dim]chat with {escape(self.agent_name)} — buttons or: "
             f"Ctrl+S send · Alt+T train · Alt+I image · Alt+D doc"
             f"  ·  paste: Ctrl+Shift+V[/]",
             classes="agent-pane-input-hint",
@@ -255,7 +257,7 @@ class AgentPanePanel(Vertical):
         if not text:
             return
         log = self.query_one(f"#pane-log-{self.agent_id}", RichLog)
-        log.write(f"[bold]You:[/] {text}")
+        log.write(f"[bold]You:[/] {escape(text)}")
         # Snapshot + clear attachments before dispatch so the worker
         # sees them but the next message starts clean. Per-message
         # semantics: attachments stick to the send that fires them.
@@ -315,9 +317,11 @@ class AgentPanePanel(Vertical):
             return
         log = self.query_one(f"#pane-log-{self.agent_id}", RichLog)
         if event.error:
-            log.write(f"[bold red]Error:[/] {event.error}")
+            log.write(f"[bold red]Error:[/] {escape(event.error)}")
             return
-        log.write(f"[bold]{self.agent_name}:[/] {event.response}")
+        log.write(
+            f"[bold]{escape(self.agent_name)}:[/] {escape(event.response)}"
+        )
         # Append the full turn (both sides) to history atomically here
         # so a fast follow-up submission sees them as prior context.
         self._history.append(("user", event.user_message))
@@ -344,7 +348,9 @@ class AgentPanePanel(Vertical):
                         log, project_code, event,
                     )
         except Exception as exc:
-            log.write(f"[dim]([plan-flow post-process skipped: {exc}])[/]")
+            log.write(
+                f"[dim]([plan-flow post-process skipped: {escape(str(exc))}])[/]"
+            )
         try:
             from modulatio.memory import agent_memory
             content = (
@@ -361,7 +367,7 @@ class AgentPanePanel(Vertical):
                 tags=["chat"],
             )
         except Exception as exc:
-            log.write(f"[dim]([memory write skipped: {exc}])[/]")
+            log.write(f"[dim]([memory write skipped: {escape(str(exc))}])[/]")
 
     # ── Plan-flow helpers (Phase 3.1b-i / -ii / -iii) ────────────────────
 
@@ -389,7 +395,8 @@ class AgentPanePanel(Vertical):
         if record is None:
             return
         log.write(
-            f"[dim]([plan saved as {record.id} → {record.path}])[/]"
+            f"[dim]([plan saved as {escape(str(record.id))} → "
+            f"{escape(str(record.path))}])[/]"
         )
         project = getattr(self.app, "_project", None)
         if project is None:
@@ -456,7 +463,7 @@ class AgentPanePanel(Vertical):
         )
         if ticket is None:
             log.write(
-                f"[dim]([no pending approval ticket for {plan_id} — "
+                f"[dim]([no pending approval ticket for {escape(str(plan_id))} — "
                 f"either already resolved or never opened])[/]"
             )
             return
@@ -469,7 +476,7 @@ class AgentPanePanel(Vertical):
         )
         verb = "approved" if decision == "approved" else "declined"
         log.write(
-            f"[dim]([plan {plan_id} {verb} via conversation; "
+            f"[dim]([plan {escape(str(plan_id))} {verb} via conversation; "
             f"ticket {ticket.id} resolved])[/]"
         )
 
@@ -484,19 +491,19 @@ class AgentPanePanel(Vertical):
         try:
             att = build_attachment(path, kind=kind)
         except FileNotFoundError as exc:
-            log.write(f"[bold red]Attach failed:[/] {exc}")
+            log.write(f"[bold red]Attach failed:[/] {escape(str(exc))}")
             return
         except UnicodeDecodeError as exc:
             log.write(
-                f"[bold red]Attach failed:[/] {path.name} is not a "
+                f"[bold red]Attach failed:[/] {escape(path.name)} is not a "
                 f"text-readable document. PDF/DOCX support is a future "
-                f"slice. ({exc})"
+                f"slice. ({escape(str(exc))})"
             )
             return
         self._attachments.append(att)
         self._refresh_status()
         log.write(
-            f"[dim]📎 attached {kind}: {att.name} "
+            f"[dim]📎 attached {escape(str(kind))}: {escape(att.name)} "
             f"({len(self._attachments)} pending)[/]"
         )
 
@@ -531,9 +538,10 @@ class AgentPanePanel(Vertical):
         if self.identity_visible:
             focus_marker = " [bold yellow]★ FOCUSED[/]"
         status_widget.update(
-            f"[bold]{self.agent_name}[/]  [dim]({self.agent_tier})[/]"
+            f"[bold]{escape(self.agent_name)}[/]  "
+            f"[dim]({escape(self.agent_tier)})[/]"
             f"{focus_marker}{badge}\n"
-            f"[cyan]{self.agent_model}[/]  [dim]— idle[/]"
+            f"[cyan]{escape(self.agent_model)}[/]  [dim]— idle[/]"
         )
 
     # ── Train-the-agent (Ctrl+M) ────────────────────────────────────────
@@ -563,11 +571,12 @@ class AgentPanePanel(Vertical):
                 tags=["user_training"],
             )
         except Exception as exc:
-            log.write(f"[bold red]Train failed:[/] {exc}")
+            log.write(f"[bold red]Train failed:[/] {escape(str(exc))}")
             return
         log.write(
             f"[bold green]✓ Trained[/]  "
-            f"[dim]saved to {self.agent_name}'s standing memory:[/]  {text}"
+            f"[dim]saved to {escape(self.agent_name)}'s standing memory:[/]"
+            f"  {escape(text)}"
         )
         ta.text = ""
 

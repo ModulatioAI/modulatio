@@ -62,6 +62,58 @@ def test_redact_argv(argv: list[str], expected: list[str]) -> None:
     assert _crash._redact_argv(argv) == expected
 
 
+@pytest.mark.parametrize(
+    "argv,expected,leaked",
+    [
+        # secret embedded as a URL query param on a non-secret-named flag
+        (
+            ["modulatio", "--endpoint=https://h/v1?api_key=sk-deadbeef"],
+            ["modulatio", "--endpoint=https://h/v1?api_key=<redacted>"],
+            "sk-deadbeef",
+        ),
+        # inline token=... in an otherwise innocuous value
+        (
+            ["modulatio", "--config=token=ghp_abc123"],
+            ["modulatio", "--config=token=<redacted>"],
+            "ghp_abc123",
+        ),
+        # positional value (no flag) carrying an embedded secret
+        (
+            ["modulatio", "dsn=postgres://u/db?password=hunter2"],
+            ["modulatio", "dsn=postgres://u/db?password=<redacted>"],
+            "hunter2",
+        ),
+        # access_token query param mid-URL — value stops at the next `&`
+        (
+            ["modulatio", "--url=https://h?access_token=AAA&page=2"],
+            ["modulatio", "--url=https://h?access_token=<redacted>&page=2"],
+            "AAA",
+        ),
+        # case-insensitive embedded key
+        (
+            ["modulatio", "--x=Secret=topsecret"],
+            ["modulatio", "--x=Secret=<redacted>"],
+            "topsecret",
+        ),
+    ],
+)
+def test_redact_argv_scrubs_embedded_secret_values(
+    argv: list[str], expected: list[str], leaked: str
+) -> None:
+    out = _crash._redact_argv(argv)
+    assert out == expected
+    assert leaked not in " ".join(out)
+
+
+def test_redact_argv_embedded_secret_does_not_overscrub_plain_kv() -> None:
+    # A non-secret key=value pair (e.g. code=FOO) must survive untouched.
+    assert _crash._redact_argv(["modulatio", "--code=FOO", "page=2"]) == [
+        "modulatio",
+        "--code=FOO",
+        "page=2",
+    ]
+
+
 def test_write_crash_log_creates_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -20,6 +20,7 @@ always shown (read available to all roster members).
 
 from __future__ import annotations
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Label, Select, Static
@@ -29,6 +30,20 @@ from modulatio.memory import agent_memory, team_memory
 
 
 _TEAM_ONLY = "__team_only__"
+
+
+def _cell(value: object) -> Text:
+    """Wrap a cell value in a Rich ``Text`` so DataTable renders it VERBATIM.
+
+    Textual's ``default_cell_formatter`` feeds every raw ``str`` cell through
+    ``Text.from_markup``, which raises ``MarkupError`` on bracket sequences
+    like ``[/]`` or ``x[/2]``. Memory bodies/content are arbitrary
+    agent/LLM-authored text (responses, code/regex/artifact excerpts) that
+    routinely contain such brackets, so an un-wrapped cell crashes the whole
+    TUI at paint time. A ``Text`` instance is a renderable and bypasses
+    markup parsing — same hardening artifacts.py/stream_view.py already use.
+    """
+    return Text("" if value is None else str(value))
 
 
 class MemoryScreen(Vertical):
@@ -197,10 +212,10 @@ class MemoryScreen(Vertical):
                 episodic_entries = []
             for e in episodic_entries:
                 episodic.add_row(
-                    e.when[:19],
-                    e.type,
-                    e.source,
-                    (e.content or "")[:80],
+                    _cell(e.when[:19]),
+                    _cell(e.type),
+                    _cell(e.source),
+                    _cell((e.content or "")[:80]),
                 )
             try:
                 semantic_entries = agent_memory.get_semantic(
@@ -210,10 +225,10 @@ class MemoryScreen(Vertical):
                 semantic_entries = []
             for e in semantic_entries:
                 semantic.add_row(
-                    e.when[:19],
-                    e.type,
-                    e.confidence,
-                    (e.content or "")[:80],
+                    _cell(e.when[:19]),
+                    _cell(e.type),
+                    _cell(e.confidence),
+                    _cell((e.content or "")[:80]),
                 )
         else:
             stats_widget.update("(select an agent above to inspect per-agent memory)")
@@ -228,10 +243,10 @@ class MemoryScreen(Vertical):
             if entry.proposed_by and entry.proposed_by != entry.writer_id:
                 writer = f"{entry.proposed_by} → {entry.writer_id}"
             team.add_row(
-                entry.timestamp[:19],
-                writer,
-                entry.artifact_kind or "?",
-                (entry.body or "")[:80],
+                _cell(entry.timestamp[:19]),
+                _cell(writer),
+                _cell(entry.artifact_kind or "?"),
+                _cell((entry.body or "")[:80]),
             )
 
 
