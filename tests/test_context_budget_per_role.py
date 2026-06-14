@@ -27,13 +27,9 @@ PROJECT_CODE = "BDG"
 def _fresh_warn_once_state(monkeypatch):
     """Reset context_budget's module-level warn-once registries per test.
 
-    Three tests in this file feed the same "lieder-reflect" role into
-    ``_WARNED_UNKNOWN_RUNNER_ROLE``; whichever runs first consumes the
-    once-per-role WARN and the others see silence (order-dependent flake —
-    proven under seeded full-suite shuffle). Fresh sets make every test
-    see first-occurrence behavior regardless of suite order.
+    Resets the remaining module-level warn-once registries per test so
+    order-dependent first-occurrence behavior is deterministic.
     """
-    monkeypatch.setattr(cb, "_WARNED_UNKNOWN_RUNNER_ROLE", set())
     monkeypatch.setattr(cb, "_WARNED_MISSING_RUN_ID", set())
     monkeypatch.setattr(cb, "_WARNED_UNBOUND_GATE_FIRE", [])
     # The schema-load unknown-role warn dedups through types.py, not
@@ -987,54 +983,20 @@ def test_40_missing_run_id_audit_warn_once(caplog, tmp_path):
 # ─── Lovecraft round-3: M1/M2/M3 close-outs ──────────────────────────────
 
 
-def test_41_unknown_runner_role_warns_once(caplog):
-    """_budget_role_for_role fallthrough into 'producer' for a
-    project-specific unknown role emits WARN once per role string.
-    Lovecraft M1, narrowed by Nemo's follow-up so first-party
-    producer aliases stay silent."""
-    import logging as _logging
-    cb._WARNED_UNKNOWN_RUNNER_ROLE.clear()
-    caplog.set_level(_logging.WARNING, logger="modulatio.context_budget")
-    for _ in range(3):
-        assert cb._budget_role_for_role("verify") == "producer"
-    # Different unknown project-specific role triggers a fresh WARN.
-    cb._budget_role_for_role("audit-bot")
-    warns = [
-        r for r in caplog.records
-        if r.levelno == _logging.WARNING and "unknown runner role" in r.message
-    ]
-    assert len(warns) == 2, f"expected 2 WARNs, got {len(warns)}"
-    # Known mapper roles + first-party producer aliases never warn.
-    for role in ("leader", "planner", "qc", "researcher",
-                 "drafter", "engineer", "analyst", "writer"):
-        cb._budget_role_for_role(role)
-    warns_after = [
-        r for r in caplog.records
-        if r.levelno == _logging.WARNING and "unknown runner role" in r.message
-    ]
-    assert len(warns_after) == 2, (
-        f"first-party + mapper-known roles must not warn; got "
-        f"{[r.message for r in warns_after]}"
-    )
-
-
-def test_41b_first_party_producer_aliases_silent(caplog):
-    """drafter / engineer / analyst / writer are documented producer
-    roles and must never emit the mapper WARN. Nemo round-3 follow-up:
-    catches the false-positive that fired on the default 'drafter'
-    runner during the alpha3 smoke."""
-    import logging as _logging
-    cb._WARNED_UNKNOWN_RUNNER_ROLE.clear()
-    caplog.set_level(_logging.WARNING, logger="modulatio.context_budget")
-    for role in ("drafter", "engineer", "analyst", "writer"):
+def test_41_any_producer_role_buckets_to_producer_silently():
+    """Producer-agnostic (cadre agnostic audit): there is NO canonical
+    producer-role allowlist. ANY non-core role — a first-party alias OR a
+    project-specific custom name — buckets to the 'producer' budget pool with NO
+    warning. (The old "unknown runner role" warn + the hardcoded
+    {drafter,engineer,analyst,writer} allowlist were a fixed-role assumption,
+    removed.) Core ENGINE functions still map to their own budget roles."""
+    for role in ("drafter", "engineer", "analyst", "writer",
+                 "verify", "audit-bot", "task-planner-x", "whatever-role"):
         assert cb._budget_role_for_role(role) == "producer"
-    warns = [
-        r for r in caplog.records
-        if r.levelno == _logging.WARNING and "unknown runner role" in r.message
-    ]
-    assert len(warns) == 0, (
-        f"first-party producer aliases must not warn; got {warns}"
-    )
+    assert cb._budget_role_for_role("leader") == "leader-decompose"
+    assert cb._budget_role_for_role("qc") == "qc"
+    assert cb._budget_role_for_role("planner") == "planner"
+    assert cb._budget_role_for_role("research") == "research"
 
 
 def test_42_unbound_gate_fire_warns_once(caplog):

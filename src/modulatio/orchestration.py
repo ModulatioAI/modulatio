@@ -535,6 +535,29 @@ def _effective_assembly_family(
     return "document"
 
 
+#: Fallback draft extension by assembly family — used only when a task declares
+#: NO output_path. document stays .md (no change for the common case); a
+#: non-document family gets a non-prose extension so extension-switching
+#: consumers don't mis-classify the deliverable (cadre agnostic audit F2-2).
+_FALLBACK_EXT_BY_FAMILY = {
+    "document": "md", "code": "txt", "data": "json", "media": "bin",
+}
+
+
+def _draft_fallback_name(task: "Task") -> str:
+    """The fallback draft FILENAME (``<id>.<ext>``) for a task with no declared
+    output_path. Family-aware so a code/data/media deliverable does NOT land at a
+    document-shaped ``.md`` path that downstream consumers (export / delivery /
+    the Artifacts tab) mis-read by extension. Deterministic from the task alone,
+    so the write path and EVERY lookup path always agree on the extension."""
+    try:
+        family = _effective_assembly_family(
+            task.artifact_kind, task.required_skills, None)
+    except Exception:  # noqa: BLE001 — best-effort; default to document
+        family = "document"
+    ext = _FALLBACK_EXT_BY_FAMILY.get(family, "md")
+    return f"{task.id.lower()}.{ext}"
+
 def _wire_assembler_dependencies(tasks: list["Task"]) -> None:
     """Engine bind (Part A / A2, #85): give each assembler task in a goal an
     AUTHORITATIVE dependency on the sibling unit tasks it combines, when it
@@ -784,7 +807,11 @@ def _format_kickoff_attachments(attachments: list) -> str:
             body = att.content
             if body is None and getattr(att, "path", None):
                 try:
-                    body = Path(att.path).read_text(encoding="utf-8", errors="replace")
+                    # Strict decode (matches attachments.build_attachment's
+                    # "binary fails fast" contract): a binary file raises
+                    # UnicodeDecodeError (a ValueError) → caught below → no body,
+                    # NOT a garbled errors="replace" inline (cadre audit F2-3).
+                    body = Path(att.path).read_text(encoding="utf-8")
                 except (OSError, ValueError):
                     body = None
             # re-sweep R4 #2: fence the document body with a backtick run longer
@@ -3928,7 +3955,7 @@ class Orchestrator:
         if task.output_path:
             path = artifacts_root / task.output_path
         else:
-            path = artifacts_root / "drafts" / f"{task.id.lower()}.md"
+            path = artifacts_root / "drafts" / _draft_fallback_name(task)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # P1 (engine binds the assembly): an assembler task is a MECHANICAL
@@ -4260,7 +4287,8 @@ class Orchestrator:
         # Whitespace-token count; kept as an audit metric, not a quality rule
         # (length constraints are user inputs that live in the standards
         # file for the domain, not baked into the orchestrator).
-        token_count = len(response.split())
+        token_count = _tool_sum_module.count_tokens(
+            self.project.leader_model, text=response)
         return path, checksum, token_count
 
     def _maybe_trip_breaker(
@@ -4608,7 +4636,8 @@ class Orchestrator:
         # Token count over the entire producer response (mirrors the
         # other producer paths' shape — audit metric, not a quality
         # rule).
-        token_count = len(cleaned.split())
+        token_count = _tool_sum_module.count_tokens(
+            self.project.leader_model, text=cleaned)
         return primary_path, checksum, token_count
 
     # ── Tool executor (slice #9e) ────────────────────────────────────────
@@ -4646,7 +4675,8 @@ class Orchestrator:
         path.write_text(response, encoding="utf-8")
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
         checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
-        token_count = len(response.split())
+        token_count = _tool_sum_module.count_tokens(
+            self.project.leader_model, text=response)
         return path, checksum, token_count
 
     # ── LLM-with-tools executor (Phase 2A) ───────────────────────────────
@@ -5786,7 +5816,8 @@ class Orchestrator:
         # body (incl. any thinking); ``cleaned`` is what committed.
         self._maybe_trip_breaker(producer_role, response, cleaned, task=task)
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
-        token_count = len(cleaned.split())
+        token_count = _tool_sum_module.count_tokens(
+            self.project.leader_model, text=cleaned)
         return path, checksum, token_count
 
     def _regression_blocked(self, task: Task, path: Path, new_content: str) -> bool:
@@ -6745,7 +6776,7 @@ class Orchestrator:
                 name="token_count",
                 value=float(token_count),
                 target="see domain standards",
-                source=f"whitespace-split token count of {draft_path.name}",
+                source=f"token count of {draft_path.name}",
             )
             t.evidence_provided.extend([artifact.id, metric.id])
 
@@ -7032,7 +7063,7 @@ class Orchestrator:
         logic: explicit Task.output_path, else drafts/<task.id>.md."""
         if task.output_path:
             return task.output_path
-        return f"drafts/{task.id.lower()}.md"
+        return f"drafts/{_draft_fallback_name(task)}"
 
     # ── #151/e2e Blocker 2: per-task artifact staging + deterministic merge ──
     def _artifacts_root(self) -> Path:
@@ -7827,7 +7858,7 @@ class Orchestrator:
                     name="token_count",
                     value=float(token_count),
                     target="see domain standards",
-                    source=f"whitespace-split token count of {draft_path.name}",
+                    source=f"token count of {draft_path.name}",
                 )
                 t.evidence_provided.extend([artifact.id, metric.id])
 
@@ -8058,7 +8089,7 @@ class Orchestrator:
         # it to the shared post-merge location. Sequential → shared directly.
         try:
             drafts_dir = self._artifacts_root() / "drafts"
-            final_path = drafts_dir / f"{t.id.lower()}.md"
+            final_path = drafts_dir / _draft_fallback_name(t)
             if final_path.exists() and final_path not in summary.drafts:
                 summary.drafts.append(final_path)
         except Exception:
@@ -8110,7 +8141,7 @@ class Orchestrator:
         artifacts_root = self._artifacts_root()
         if t.output_path:
             return artifacts_root / t.output_path
-        return artifacts_root / "drafts" / f"{t.id.lower()}.md"
+        return artifacts_root / "drafts" / _draft_fallback_name(t)
 
     # ── QC-as-fixer (Slice 3): last-resort QC-authored rescue ─────────
     #
@@ -8848,7 +8879,7 @@ class Orchestrator:
                     if primary.exists():
                         candidate = primary
                 if candidate is None:
-                    fallback = artifacts_root / "drafts" / f"{t.id.lower()}.md"
+                    fallback = artifacts_root / "drafts" / _draft_fallback_name(t)
                     if fallback.exists():
                         candidate = fallback
                 if candidate is not None:
@@ -9701,7 +9732,7 @@ class Orchestrator:
             primary = artifacts_root / task.output_path
             if primary.exists():
                 return primary
-        fallback = artifacts_root / "drafts" / f"{task.id.lower()}.md"
+        fallback = artifacts_root / "drafts" / _draft_fallback_name(task)
         if fallback.exists():
             return fallback
         return None

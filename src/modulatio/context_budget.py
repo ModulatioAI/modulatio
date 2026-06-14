@@ -81,14 +81,6 @@ _WARNED_MISSING_RUN_ID: set[tuple[str | None, ...]] = set()
 #: the "producer" budget — they're documented design, not surprises.
 #: Project-specific custom roles outside this set still trigger the
 #: once-per-role WARN in _budget_role_for_role.
-_KNOWN_PRODUCER_CLASS_ROLES: frozenset[str] = frozenset({
-    "drafter", "engineer", "analyst", "writer",
-})
-
-#: Project-specific roles that have already been warned about for the
-#: _budget_role_for_role fallthrough into "producer". Warn once so
-#: genuinely unexpected roles surface without log spam.
-_WARNED_UNKNOWN_RUNNER_ROLE: set[str] = set()
 
 #: Once-per-process flag for the "gate fired without dispatch_context
 #: binding" WARNING. List-as-flag so it can be cleared by tests.
@@ -781,19 +773,12 @@ def _budget_role_for_role(role: str) -> str:
     }
     if role in known:
         return known[role]
-    # First-party producer aliases are part of the documented design;
-    # they silently bucket to producer. Only project-specific custom
-    # roles get the visibility warning.
-    if role not in _KNOWN_PRODUCER_CLASS_ROLES:
-        if role not in _WARNED_UNKNOWN_RUNNER_ROLE:
-            _WARNED_UNKNOWN_RUNNER_ROLE.add(role)
-            _LOGGER.warning(
-                "_budget_role_for_role: unknown runner role %r → bucketing "
-                "under 'producer'. Custom producer-class roles are fine; "
-                "if this was a typo or a new role that needs its own budget "
-                "bucket, add it to EXPERIMENTAL_DEFAULTS and the role map.",
-                role,
-            )
+    # Producer-agnostic: there is NO canonical producer-role set. Any role that
+    # is not a core ENGINE function (leader/planner/qc/research) is a producer —
+    # a model endpoint that composes skills — and correctly buckets to the
+    # "producer" budget pool. (Cadre agnostic audit: removed the hardcoded
+    # "known producer roles" allowlist + its "unknown role" warning, which baked
+    # in a fixed-role assumption for no behavioral gain.)
     return "producer"
 
 

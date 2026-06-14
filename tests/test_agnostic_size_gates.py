@@ -70,3 +70,37 @@ def test_export_copy_is_a_raw_passthrough(tmp_path: Path):
     res = export_artifact(src, dest, format="copy")
     assert res.error is None
     assert dest.read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
+
+
+# ── output-agnostic: the draft fallback path is family-aware (cadre F2-2) ─────
+
+def test_draft_fallback_name_is_family_aware():
+    """A task with NO output_path must not always land at a document `.md` path:
+    code/data/media families get a non-document extension so downstream
+    extension-switching consumers don't mis-classify the deliverable."""
+    from uuid import uuid4
+    from modulatio.orchestration import _draft_fallback_name
+    from modulatio.types import Task
+
+    def t(kind, skills=None):
+        return Task(id="T-1", project_id=uuid4(), goal_id="G", description="x",
+                    artifact_kind=kind, required_skills=skills or [])
+    assert _draft_fallback_name(t("document")) == "t-1.md"   # unchanged
+    assert _draft_fallback_name(t("text")) == "t-1.md"       # default stays .md
+    assert _draft_fallback_name(t("code")) == "t-1.txt"
+    assert _draft_fallback_name(t("data")) == "t-1.json"
+    assert _draft_fallback_name(t("image")) == "t-1.bin"
+    # an explicit assembler skill overrides the artifact_kind
+    assert _draft_fallback_name(t("text", ["code-assembly"])) == "t-1.txt"
+
+
+def test_task_output_key_agrees_with_draft_fallback():
+    """The wave-conflict key (_task_output_key) and the write fallback must use
+    the SAME family-aware extension, or write+lookup diverge."""
+    from uuid import uuid4
+    from modulatio.orchestration import Orchestrator, _draft_fallback_name
+    from modulatio.types import Task
+    code_task = Task(id="T-2", project_id=uuid4(), goal_id="G", description="x",
+                     artifact_kind="code")
+    assert Orchestrator._task_output_key(code_task) == f"drafts/{_draft_fallback_name(code_task)}"
+    assert Orchestrator._task_output_key(code_task) == "drafts/t-2.txt"  # not .md
