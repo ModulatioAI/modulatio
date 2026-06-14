@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from modulatio import config, heartbeat
+from tests._thread_check import run_threads_checked
 
 
 @pytest.fixture(autouse=True)
@@ -188,11 +189,7 @@ def test_claim_next_pending_concurrent_threads_claim_distinct_tasks():
                 with lock:
                     claimed_ids.append(t["id"])
 
-    threads = [_threading.Thread(target=_worker) for _ in range(4)]
-    for th in threads:
-        th.start()
-    for th in threads:
-        th.join()
+    run_threads_checked([_worker] * 4)
 
     # Every claim must be of a distinct task — no id claimed twice.
     assert len(claimed_ids) == len(set(claimed_ids)), "a task was claimed twice"

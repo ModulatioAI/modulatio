@@ -7564,6 +7564,18 @@ class Orchestrator:
                         # in `done`. Record a synthetic failed-task result so the
                         # merge proceeds and this task surfaces as BLOCKED rather
                         # than vanishing.
+                        #
+                        # REVIEWER NOTE (0.9.0 cadre, 2026-06-14): a worker thread
+                        # canNOT silently die here — every future is drained via
+                        # `fut.result()` and a raise becomes a BLOCKED task above.
+                        # The non-deterministic `PytestUnhandledThreadException
+                        # Warning` seen once in the 0.9.0 suite is NOT this path:
+                        # all four reviewers (Lovecraft, Nemo/MiniMax-M3, Wild
+                        # Bill/Codex, + the GPT-5.5 pass) traced it to a raw-thread
+                        # TEST without exception capture, ruled it BENIGN test
+                        # hygiene — not a worker-isolation hazard. Full record:
+                        # docs/design/0.9.0-flaky-thread-warning.md. Don't
+                        # re-litigate this as an engine bug.
                         crashed = task_map.get(tid)
                         if crashed is not None:
                             crashed.status = TaskStatus.BLOCKED
