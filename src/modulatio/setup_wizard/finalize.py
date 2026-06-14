@@ -230,7 +230,7 @@ def commit(state: dict, *, version: str) -> None:
         env_path = vault_root / ".env"
         existing: dict[str, str] = {}
         if env_path.exists():
-            for line in env_path.read_text().splitlines():
+            for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)

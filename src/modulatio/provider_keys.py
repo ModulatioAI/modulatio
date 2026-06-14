@@ -45,7 +45,7 @@ class KeySlot(TypedDict):
 def _load_labels() -> dict[str, str]:
     if LABELS_FILE.exists():
         try:
-            data = json.loads(LABELS_FILE.read_text())
+            data = json.loads(LABELS_FILE.read_text(encoding="utf-8", errors="replace"))
             return data if isinstance(data, dict) else {}
         except (OSError, json.JSONDecodeError):
             return {}
@@ -59,7 +59,7 @@ def _save_labels(labels: dict[str, str]) -> None:
 def _load_pins() -> dict[str, list[str]]:
     if PINS_FILE.exists():
         try:
-            data = json.loads(PINS_FILE.read_text())
+            data = json.loads(PINS_FILE.read_text(encoding="utf-8", errors="replace"))
             if isinstance(data, dict):
                 # keep only well-formed {env_var: [str, …]} entries
                 return {k: [m for m in v if isinstance(m, str)]

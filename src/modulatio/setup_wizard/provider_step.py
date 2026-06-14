@@ -54,7 +54,7 @@ def _load_oauth_picklists() -> dict[str, tuple[str, ...]]:
     needs no extra build config.
     """
     seed = Path(__file__).resolve().parent.parent / "_seed_data" / "oauth_model_picklists.json"
-    raw = json.loads(seed.read_text())
+    raw = json.loads(seed.read_text(encoding="utf-8", errors="replace"))
     return {
         vendor: tuple(sorted(models))
         for vendor, models in raw.items()

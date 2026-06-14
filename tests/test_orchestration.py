@@ -10443,3 +10443,47 @@ def test_main_path_topo_filters_cross_goal_deps_no_reject():
             for t in tasks]
     ordered = _topological_sort(view)  # must NOT raise _DependencyError
     assert [t.id for t in ordered] == ["G2-T-001"]
+
+
+def test_dep_failed_blocks_on_failed_cross_goal_dep():
+    """#1437: a cross-goal dep (absent from this goal's task_map) that
+    terminal-FAILED must be reported by _dep_failed when the caller supplies
+    cross_goal_status — else a later goal runs against an input that never
+    shipped. Product-agnostic: the failed prior unit could be any artifact."""
+    from modulatio.orchestration import _dep_failed
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    pid = uuid4()
+    t = Task(id="G2-T1", project_id=pid, goal_id="G2", description="x",
+             depends_on=["G1-T1"], status=TaskStatus.PENDING)
+    task_map = {t.id: t}
+    # without cross_goal_status: absent dep ignored (back-compat)
+    assert _dep_failed(t, task_map) == []
+    # with it FAILED: blocked
+    assert _dep_failed(t, task_map, {"G1-T1": TaskStatus.QC_REJECTED}) == ["G1-T1"]
+    # with it COMPLETED: not blocked
+    assert _dep_failed(t, task_map, {"G1-T1": TaskStatus.COMPLETED}) == []
+
+
+def test_ready_wave_holds_on_failed_or_pending_cross_goal_dep():
+    """#1437: _ready_wave must NOT admit a task whose cross-goal dep failed or
+    hasn't completed; it admits only when the store says COMPLETED."""
+    from modulatio.orchestration import _ready_wave
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    pid = uuid4()
+
+    def consumer():
+        return Task(id="G2-T1", project_id=pid, goal_id="G2", description="x",
+                    depends_on=["G1-T1"], status=TaskStatus.PENDING)
+
+    c = consumer()
+    # FAILED cross-goal dep → dead (cascade-blocked, not in wave)
+    assert _ready_wave([c], {"G1-T1": TaskStatus.BLOCKED}) == []
+    # still in flight → waits
+    assert _ready_wave([consumer()], {"G1-T1": TaskStatus.IN_PROGRESS}) == []
+    # COMPLETED → admitted
+    w = _ready_wave([consumer()], {"G1-T1": TaskStatus.COMPLETED})
+    assert [t.id for t in w] == ["G2-T1"]
+    # back-compat: no status map → absent dep treated as satisfied
+    assert [t.id for t in _ready_wave([consumer()])] == ["G2-T1"]

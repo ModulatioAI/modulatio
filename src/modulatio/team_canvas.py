@@ -128,7 +128,7 @@ def build_digest(artifacts_root: Path) -> str:
             )
             continue
         try:
-            content = path.read_text()
+            content = path.read_text(encoding="utf-8", errors="replace")
         except (UnicodeDecodeError, OSError):
             # Binary or unreadable — list by name only.
             _emit(f"- `{rel}` — binary/unreadable, listed only")

@@ -321,7 +321,7 @@ def _document_digest(
             parts.append({"label": "", "size": 0})
             continue
         try:
-            body = path.read_text()
+            body = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             parts.append({"label": "", "size": 0})
             continue
@@ -425,7 +425,7 @@ def _unit_headings(
         if total + added > _MAX_TOTAL_BYTES:
             break
         try:
-            heading = _first_heading(path.read_text())
+            heading = _first_heading(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
             continue
         total += added
@@ -790,7 +790,7 @@ def _assemble_document(
             over_cap = True
             break
         try:
-            body = path.read_text()
+            body = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             errors.append(f"read failed for {name!r}: {exc}")
             missing.append(name)
@@ -921,7 +921,7 @@ def _assemble_data(manifest: dict, artifacts_root: Path) -> AssemblyResult:
             errors.append(f"total merged size would exceed {_MAX_TOTAL_BYTES} bytes")
             break
         try:
-            resolved.append((name, path.read_text()))
+            resolved.append((name, path.read_text(encoding="utf-8")))
             total += size
         except (OSError, UnicodeDecodeError) as exc:
             errors.append(f"read failed for {name!r}: {exc}")
@@ -1242,6 +1242,11 @@ def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path
             # to pollute artifact scans (mirrors the pandoc-direct branch hygiene).
             pdf_out = docx_tmp.with_suffix(".pdf")
             try:
+                # md → docx (pandoc) → pdf (libreoffice). The intermediate docx
+                # MUST be rendered from the markdown source FIRST; handing an
+                # empty docx to soffice yields a contentless PDF (regression
+                # caught in the 0.9.0 pre-ship re-sweep). Both steps fail-closed.
+                _run_doc_tool(["pandoc", str(src), "-o", str(docx_tmp)], tool="pandoc")
                 _run_doc_tool(
                     ["soffice", "--headless", "--convert-to", "pdf",
                      "--outdir", str(artifacts_root), str(docx_tmp)],

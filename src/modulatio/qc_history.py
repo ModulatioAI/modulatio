@@ -278,8 +278,8 @@ def _load_meta(project_code: str, domain: str) -> dict:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text())
-    except json.JSONDecodeError:
+        return json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
         return {}
 
 

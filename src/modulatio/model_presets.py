@@ -70,7 +70,7 @@ def load_presets() -> dict[str, dict[str, Any]]:
     if not PRESETS_FILE.exists():
         return {}
     try:
-        data = json.loads(PRESETS_FILE.read_text())
+        data = json.loads(PRESETS_FILE.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(data, dict):

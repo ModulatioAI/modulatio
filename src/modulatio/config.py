@@ -134,7 +134,7 @@ def _load_defaults() -> dict:
             _cached_defaults = {}
             return _cached_defaults
         try:
-            _cached_defaults = json.loads(DEFAULTS_FILE.read_text())
+            _cached_defaults = json.loads(DEFAULTS_FILE.read_text(encoding="utf-8", errors="replace"))
         except (json.JSONDecodeError, OSError):
             _cached_defaults = {}
         return _cached_defaults
@@ -213,7 +213,7 @@ def set_env_secret(name: str, value: str) -> Path:
     out_lines: list[str] = []
     replaced = False
     if env_path.exists():
-        for line in env_path.read_text().splitlines():
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
             stripped = line.strip()
             if (stripped and not stripped.startswith("#") and "=" in stripped
                     and stripped.split("=", 1)[0].strip() == name):
@@ -238,7 +238,7 @@ def remove_env_secret(name: str) -> bool:
     env_path = get_vault_root() / ".env"
     if env_path.exists():
         kept: list[str] = []
-        for line in env_path.read_text().splitlines():
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
             stripped = line.strip()
             if (stripped and not stripped.startswith("#") and "=" in stripped
                     and stripped.split("=", 1)[0].strip() == name):
@@ -469,7 +469,7 @@ def load_team_template() -> Optional[list[dict]]:
     if not TEAM_TEMPLATE_FILE.exists():
         return None
     try:
-        data = json.loads(TEAM_TEMPLATE_FILE.read_text())
+        data = json.loads(TEAM_TEMPLATE_FILE.read_text(encoding="utf-8", errors="replace"))
     except (json.JSONDecodeError, OSError):
         return None
     if not isinstance(data, list):

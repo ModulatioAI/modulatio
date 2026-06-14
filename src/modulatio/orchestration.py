@@ -1434,23 +1434,40 @@ def _runnable(task: "Task") -> bool:
     return task.status in (TaskStatus.PENDING, TaskStatus.DISPATCHED)
 
 
-def _dep_failed(task: "Task", task_map: "dict[str, Task]") -> list[str]:
+def _dep_failed(
+    task: "Task",
+    task_map: "dict[str, Task]",
+    cross_goal_status: "dict[str, TaskStatus] | None" = None,
+) -> list[str]:
     """Return the ids of ``task``'s dependencies that have reached a
     terminal-FAIL state (BLOCKED / QC_REJECTED / ABANDONED). Non-empty →
-    the task can never run; the caller cascades it to BLOCKED. Unknown
-    dep ids are ignored here (``_topological_sort`` already validated
-    references before execution)."""
+    the task can never run; the caller cascades it to BLOCKED.
+
+    A dep absent from this goal's ``task_map`` is a CROSS-GOAL dependency
+    (a prior goal's task). When ``cross_goal_status`` is supplied (the
+    caller resolved those ids in the store), a cross-goal dep that
+    terminal-FAILED also blocks the dependent — otherwise a later goal's
+    task would run against an input that never shipped. Unknown ids the
+    caller couldn't resolve are ignored (``_topological_sort`` already
+    validated references before execution)."""
     terminal_fail = {
         TaskStatus.BLOCKED, TaskStatus.QC_REJECTED, TaskStatus.ABANDONED,
     }
-    return [
-        dep_id for dep_id in task.depends_on
-        if task_map.get(dep_id) is not None
-        and task_map[dep_id].status in terminal_fail
-    ]
+    failed: list[str] = []
+    for dep_id in task.depends_on:
+        dep = task_map.get(dep_id)
+        if dep is not None:
+            if dep.status in terminal_fail:
+                failed.append(dep_id)
+        elif cross_goal_status and cross_goal_status.get(dep_id) in terminal_fail:
+            failed.append(dep_id)
+    return failed
 
 
-def _ready_wave(tasks: "list[Task]") -> "list[Task]":
+def _ready_wave(
+    tasks: "list[Task]",
+    cross_goal_status: "dict[str, TaskStatus] | None" = None,
+) -> "list[Task]":
     """Return the next concurrent WAVE: every runnable task whose
     dependencies are ALL completed. Status-aware — call it again after
     merging a wave's results and statuses advance, the next wave appears.
@@ -1466,22 +1483,28 @@ def _ready_wave(tasks: "list[Task]") -> "list[Task]":
     (deterministic), but the wave runs concurrently so order is cosmetic.
     """
     task_map = {t.id: t for t in tasks}
+
+    def _dep_ok(dep_id: str) -> bool:
+        dep = task_map.get(dep_id)
+        if dep is not None:
+            return dep.status is TaskStatus.COMPLETED
+        # Cross-goal dep (a prior goal's task). Satisfied ONLY if the store
+        # says it COMPLETED; a resolved-but-not-completed cross-goal dep keeps
+        # the task waiting (and a FAILED one is cascade-blocked by _dep_failed
+        # before we get here). An id the caller couldn't resolve (no
+        # cross_goal_status, or absent from it) falls back to satisfied —
+        # _topological_sort already validated references.
+        if cross_goal_status is not None and dep_id in cross_goal_status:
+            return cross_goal_status[dep_id] is TaskStatus.COMPLETED
+        return True
+
     wave: list[Task] = []
     for t in tasks:
         if not _runnable(t):
             continue
-        if _dep_failed(t, task_map):
+        if _dep_failed(t, task_map, cross_goal_status):
             continue  # dead — cascade-blocked by the caller, not run
-        deps_done = all(
-            # A dep absent from THIS goal's task_map is a CROSS-GOAL dependency
-            # (a prior goal's task, completed before this goal) — treat it as
-            # satisfied, matching the sequential resume gate. Else the in-goal
-            # dep must be COMPLETED.
-            task_map.get(dep_id) is None
-            or task_map[dep_id].status is TaskStatus.COMPLETED
-            for dep_id in t.depends_on
-        )
-        if deps_done:
+        if all(_dep_ok(dep_id) for dep_id in t.depends_on):
             wave.append(t)
     return sorted(wave, key=lambda t: t.id)
 
@@ -1720,7 +1743,7 @@ def _draft_is_multifile(task: "Task", draft_path: "Path") -> bool:
     if (task.artifact_kind or "").strip().lower() == "code":
         return True
     try:
-        text = draft_path.read_text()
+        text = draft_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         # A binary/media draft is not a multi-file text bundle; UnicodeDecodeError
         # is a ValueError, not OSError. Treat it as single-artifact.
@@ -4493,12 +4516,12 @@ class Orchestrator:
                 encoding="utf-8",
             )
             self._record_artifact_write(primary_path)  # staging merge
-            primary_content = primary_path.read_text()
+            primary_content = primary_path.read_text(encoding="utf-8")
 
         # Recompute primary content from disk in case it was written
         # via write_artifact (the in-memory `primary_content` may be
         # empty if no block matched the primary path).
-        actual_primary = primary_path.read_text() if primary_path.exists() else primary_content
+        actual_primary = primary_path.read_text(encoding="utf-8") if primary_path.exists() else primary_content
         checksum = (
             f"sha256:{hashlib.sha256(actual_primary.encode()).hexdigest()}"
         )
@@ -5729,6 +5752,31 @@ class Orchestrator:
         checksum = f"sha256:{hashlib.sha256(kept_bytes).hexdigest()}"
         return path, checksum, len(kept.split())
 
+    def _cross_goal_dep_status(
+        self, tasks: "list[Task]"
+    ) -> "dict[str, TaskStatus]":
+        """Resolve the live status of every CROSS-GOAL dependency referenced by
+        ``tasks`` — a dep id NOT among ``tasks`` (a prior goal's task). The wave
+        gates (``_dep_failed`` / ``_ready_wave``) only see in-goal statuses; this
+        lets them block a dependent whose prior-goal input terminal-FAILED and
+        admit one whose input COMPLETED, instead of blindly treating an absent
+        dep as satisfied. Ids that don't resolve in the store are omitted (the
+        gates fall back to satisfied — references were validated at topo time)."""
+        in_goal = {t.id for t in tasks}
+        absent = {
+            dep_id
+            for t in tasks
+            for dep_id in t.depends_on
+            if dep_id not in in_goal
+        }
+        out: dict[str, TaskStatus] = {}
+        for dep_id in absent:
+            rt = store.get_task(
+                self.project.code, dep_id, run_id=self.project.run_id)
+            if rt is not None:
+                out[dep_id] = rt.status
+        return out
+
     def _wire_cross_goal_assembler_deps(self, tasks: "list[Task]") -> None:
         """P1 (engine binds the assembly — suspenders): wire a CROSS-GOAL assembler
         task to the unit tasks it combines when the same-goal wiring found none.
@@ -6165,7 +6213,7 @@ class Orchestrator:
             )
             # fall through to a normal full review (fail-closed): {reason}
         try:
-            body = draft_path.read_text()
+            body = draft_path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError) as exc:
             # Defensive backstop: ANY binary/undecodable artifact reaching QC (a
             # media output with no record, an opaque blob) gets an environmental
@@ -7197,6 +7245,11 @@ class Orchestrator:
         def _save(task: Task) -> None:
             store.save_task(self.project.code, task, run_id=self.project.run_id)
 
+        # Cross-goal dep statuses (prior goals' tasks this goal depends on) are
+        # terminal by the time this goal runs (goals execute serially), so
+        # resolve them ONCE — a FAILED cross-goal input must block its dependent,
+        # a COMPLETED one admits it (#1437).
+        cross_goal_status = self._cross_goal_dep_status(tasks)
         while True:
             # Fix C: operator kill-switch — stop launching new waves. The current
             # wave's in-flight tasks already finished (we only reach the top of
@@ -7209,7 +7262,7 @@ class Orchestrator:
             for t in tasks:
                 if not _runnable(t):
                     continue
-                fd = _dep_failed(t, task_map)
+                fd = _dep_failed(t, task_map, cross_goal_status)
                 if fd:
                     t.transitions.append(StateTransition(
                         from_state=t.status.value,
@@ -7224,7 +7277,7 @@ class Orchestrator:
                     _save(t)
 
             # 2. Next ready wave (runnable, deps all COMPLETED).
-            wave = _ready_wave(tasks)
+            wave = _ready_wave(tasks, cross_goal_status)
             if not wave:
                 break
 
@@ -7887,7 +7940,7 @@ class Orchestrator:
         if draft_path is None or not draft_path.exists():
             return False
         try:
-            body = draft_path.read_text()
+            body = draft_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             # A binary/media artifact (zip/mp4/rendered pdf/docx) isn't
             # text-patchable; UnicodeDecodeError is a ValueError, not OSError.
@@ -10873,6 +10926,10 @@ class Orchestrator:
         # tasks, but the gate keeps us honest against a dep that failed earlier
         # in the same pass).
         task_map = {t.id: t for t in tasks}
+        # Live status of cross-goal deps (prior goals' tasks), so a FAILED
+        # prior-goal input blocks its dependent and a not-yet-COMPLETED one keeps
+        # it waiting — instead of treating any absent dep as satisfied (#1437).
+        cross_goal_status = self._cross_goal_dep_status(tasks)
         # Order ONLY on the intra-goal dependency edges. A reopened goal's task
         # can legitimately depend on a task in ANOTHER goal (a cross-goal id not
         # present in `tasks`); feeding that id to _topological_sort makes it raise
@@ -10900,7 +10957,7 @@ class Orchestrator:
                 return
             if not _runnable(t):
                 continue
-            fd = _dep_failed(t, task_map)
+            fd = _dep_failed(t, task_map, cross_goal_status)
             if fd:
                 t.transitions.append(StateTransition(
                     from_state=t.status.value,
@@ -10915,12 +10972,16 @@ class Orchestrator:
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
                 continue
             # A dep that hasn't COMPLETED yet (e.g. itself reopened but ordered
-            # after) keeps this task waiting — skip it this pass rather than
-            # draft against missing input.
+            # after, or a cross-goal prior-goal task still in flight) keeps this
+            # task waiting — skip it this pass rather than draft against missing
+            # input.
             unready = [
                 d for d in t.depends_on
-                if task_map.get(d) is not None
-                and task_map[d].status != TaskStatus.COMPLETED
+                if (task_map.get(d) is not None
+                    and task_map[d].status != TaskStatus.COMPLETED)
+                or (task_map.get(d) is None
+                    and d in cross_goal_status
+                    and cross_goal_status[d] != TaskStatus.COMPLETED)
             ]
             if unready:
                 continue
@@ -11340,7 +11401,7 @@ class Orchestrator:
                     # A document attachment is text by contract; a binary file
                     # (e.g. a .docx) fails to decode (UnicodeDecodeError <:
                     # ValueError) — skip it rather than crash the pin step.
-                    content = Path(a.path).read_text()
+                    content = Path(a.path).read_text(encoding="utf-8")
                 except (OSError, ValueError):
                     continue
             try:  # same confinement rule as a producer output_path

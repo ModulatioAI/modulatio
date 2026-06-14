@@ -57,7 +57,7 @@ def _load_json(path: Path) -> list:
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text()) or []
+        return json.loads(path.read_text(encoding="utf-8", errors="replace")) or []
     except (OSError, json.JSONDecodeError):
         return []
 

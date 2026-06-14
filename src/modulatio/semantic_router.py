@@ -254,8 +254,8 @@ def _load_meta(project_code: str) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
-    except json.JSONDecodeError:
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
         return {}
 
 

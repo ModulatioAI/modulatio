@@ -179,7 +179,7 @@ def _render_file(path: Path, rel: Path, file_size: int) -> str:
 def _render_python(path: Path, rel: Path) -> str:
     """Render a Python file's symbol map via ``ast``."""
     try:
-        source = path.read_text()
+        source = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return f"- `{rel}` — unreadable, listed only"
     try:
@@ -342,7 +342,7 @@ def _format_arguments(args: ast.arguments) -> str:
 def _render_head_excerpt(path: Path, rel: Path) -> str:
     """Non-Python text file fallback — head excerpt mirroring team_canvas."""
     try:
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return f"- `{rel}` — binary/unreadable, listed only"
     line_count = content.count("\n") + (

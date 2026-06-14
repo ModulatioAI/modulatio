@@ -70,6 +70,38 @@ def test_pdf_render_oversize_leaves_no_orphan_pdf(tmp_path, monkeypatch):
     assert _pdf_artifacts(tmp_path) == [], "over-cap PDF was orphaned"
 
 
+def test_pdf_render_invokes_pandoc_to_fill_the_docx_before_soffice(tmp_path, monkeypatch):
+    """Regression (0.9.0 re-sweep HIGH): the pdf branch MUST render the markdown
+    source into the intermediate .docx via pandoc BEFORE handing that .docx to
+    libreoffice — else soffice gets an empty docx and the PDF is contentless.
+    Records the real call sequence (the leak tests mock pandoc but never assert
+    it runs, so the dropped-pandoc regression slipped past them)."""
+    seq = []
+
+    def fake_run_doc_tool(argv, tool):
+        seq.append((tool, list(argv)))
+        if tool == "pandoc":
+            out = assembly.Path(argv[argv.index("-o") + 1])
+            # pandoc must be given the markdown SOURCE as input and the docx as -o
+            assert argv[1].endswith(".md"), f"pandoc input not the md source: {argv}"
+            assert out.suffix == ".docx", f"pandoc -o not a docx: {out}"
+            out.write_bytes(b"PK\x03\x04 real docx from pandoc")
+            return
+        # libreoffice: the docx it converts must be NON-EMPTY (pandoc filled it)
+        docx = assembly.Path(argv[-1])
+        assert docx.stat().st_size > 0, "soffice handed an EMPTY docx — pandoc step missing"
+        outdir = assembly.Path(argv[argv.index("--outdir") + 1])
+        (outdir / docx.with_suffix(".pdf").name).write_bytes(b"%PDF real content here")
+
+    monkeypatch.setattr(assembly, "_run_doc_tool", fake_run_doc_tool)
+    out, msg = assembly.render_document("# title\n\nbody\n", "pdf", tmp_path)
+
+    assert [t for t, _ in seq] == ["pandoc", "libreoffice"], (
+        f"pandoc must run before libreoffice; got {[t for t, _ in seq]}"
+    )
+    assert out.suffix == ".pdf" and out.is_file()
+
+
 def test_csv_dedupe_does_not_collide_on_nul_shifted_values():
     """Two genuinely-distinct rows whose values differ only by where a NUL byte
     falls must NOT collapse to one row under dedupe (the old "\\x00".join key

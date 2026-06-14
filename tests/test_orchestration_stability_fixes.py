@@ -512,3 +512,4 @@ def test_auto_resume_zero_completed_settles_goal(project: Project):
 
     reloaded = store.get_goal(PROJECT_CODE, goal.id, run_id=project.run_id)
     assert reloaded.status == GoalStatus.COMPLETED, "zero-completed auto-resume must settle the goal"
+

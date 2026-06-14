@@ -105,7 +105,7 @@ def load_config() -> dict:
     if not CONFIG_FILE.exists():
         return _default_config()
     try:
-        data = json.loads(CONFIG_FILE.read_text())
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return _default_config()
     # Merge with defaults so partial files don't crash callers

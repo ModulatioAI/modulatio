@@ -73,7 +73,7 @@ def is_running() -> bool:
     if not pf.exists():
         return False
     try:
-        pid = int(pf.read_text().strip())
+        pid = int(pf.read_text(encoding="utf-8").strip())
     except (ValueError, OSError):
         return False
     try:
@@ -104,7 +104,7 @@ def start(*, stub: bool = True) -> int:
         # file no longer yields a valid pid, the daemon isn't reliably
         # running — fall through and start a fresh one instead of crashing.
         try:
-            pid = int(_pid_file().read_text().strip())
+            pid = int(_pid_file().read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             pid = None
         if pid is not None:
@@ -189,7 +189,7 @@ def stop(*, timeout: float = 10.0) -> bool:
         return False
     pf = _pid_file()
     try:
-        pid = int(pf.read_text().strip())
+        pid = int(pf.read_text(encoding="utf-8").strip())
     except (ValueError, OSError):
         return False
     try:
@@ -216,7 +216,7 @@ def status() -> dict:
     """Returns a status dict for the CLI / TUI to render."""
     if is_running():
         try:
-            pid = int(_pid_file().read_text().strip())
+            pid = int(_pid_file().read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             pid = None
         return {"running": True, "pid": pid, "log_file": str(_log_file())}

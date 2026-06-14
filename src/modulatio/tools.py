@@ -1863,7 +1863,7 @@ def make_read_tool_result(tool_calls_dir: Path) -> Callable[..., str]:
                 "(no raw was saved) or the run-workspace was cleaned up."
             )
         try:
-            return path.read_text()
+            return path.read_text(encoding="utf-8")
         except Exception as exc:
             return f"ERROR: could not read call_id={call_id!r}: {exc}"
 

@@ -43,7 +43,7 @@ def load() -> dict[str, Any]:
     if not SETUP_STATE_FILE.exists():
         return {}
     try:
-        return json.loads(SETUP_STATE_FILE.read_text()) or {}
+        return json.loads(SETUP_STATE_FILE.read_text(encoding="utf-8", errors="replace")) or {}
     except (OSError, json.JSONDecodeError):
         return {}
 

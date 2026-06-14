@@ -24,7 +24,7 @@ def load_prefs() -> dict:
     if not PREFS_FILE.exists():
         return {}
     try:
-        return json.loads(PREFS_FILE.read_text()) or {}
+        return json.loads(PREFS_FILE.read_text(encoding="utf-8", errors="replace")) or {}
     except (OSError, json.JSONDecodeError):
         return {}
 

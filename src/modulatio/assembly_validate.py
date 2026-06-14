@@ -368,7 +368,7 @@ def _validate_code(
         if path is None or not path.is_file():
             return False, f"code assembly: unit {norm!r} missing on disk — full review"
         try:
-            sources[norm] = path.read_text()
+            sources[norm] = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             return False, f"code assembly: unit {norm!r} unreadable: {exc}"
 

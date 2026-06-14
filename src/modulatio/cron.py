@@ -71,7 +71,7 @@ def _load() -> list[dict]:
         if not cf.exists():
             return []
         try:
-            data = json.loads(cf.read_text())
+            data = json.loads(cf.read_text(encoding="utf-8", errors="replace"))
         except (OSError, json.JSONDecodeError):
             return []
         return list(data.get("jobs", []))

@@ -153,7 +153,7 @@ def _parse_csv_field(raw: str) -> tuple[str, ...]:
 
 def _parse(path: Path) -> MemoryEntry | None:
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         # A binary / non-UTF-8 / truncated-mid-multibyte .md (crash-during-write,
         # FS corruption, a stray file) must degrade to "skip this one entry"
@@ -319,7 +319,7 @@ def list_proposals(project_code: str) -> list[Proposal]:
     out: list[Proposal] = []
     for p in sorted(dir_.glob("*.json")):
         try:
-            data = json.loads(p.read_text())
+            data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
         except (OSError, json.JSONDecodeError):
             continue
         out.append(Proposal(
@@ -356,7 +356,7 @@ def approve_proposal(
     if not matching:
         raise KeyError(f"Proposal {proposal_id} not found in {dir_}.")
     path = matching[0]
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     entry = write(
         writer_id=approver_id,
         writer_tier=approver_tier,
@@ -422,8 +422,8 @@ def _load_meta(project_code: str) -> dict:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text())
-    except json.JSONDecodeError:
+        return json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
         return {}
 
 

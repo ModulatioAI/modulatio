@@ -369,7 +369,7 @@ def _dump_deliverable_spec(spec: DeliverableSpec) -> str:
 
 
 def _parse_file(path: Path) -> JobTemplate:
-    raw = path.read_text()
+    raw = path.read_text(encoding="utf-8", errors="replace")
     m = _OWN_FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}
     body = raw

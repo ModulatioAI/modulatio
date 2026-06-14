@@ -70,7 +70,7 @@ def _offset_state_path(bot_token: str) -> Path:
 
 def _load_offset(path: Path) -> int:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         offset = int(data.get("last_update_id", 0))
         return offset if offset > 0 else 0
     except (OSError, ValueError, json.JSONDecodeError, TypeError):

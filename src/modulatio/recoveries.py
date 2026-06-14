@@ -352,7 +352,7 @@ def load_recoveries(project_code: str) -> "list[RecoveryRecord]":
     out: list[RecoveryRecord] = []
     known = {f.name for f in fields(RecoveryRecord)}
     try:
-        for line in p.read_text().splitlines():
+        for line in p.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -382,7 +382,7 @@ def consumed_ids(project_code: str) -> "set[str]":
     if not p.exists():
         return set()
     try:
-        return {ln.strip() for ln in p.read_text().splitlines() if ln.strip()}
+        return {ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()}
     except (OSError, UnicodeDecodeError):
         # Fail OPEN on a non-UTF-8 consumed ledger (UnicodeDecodeError is a
         # ValueError subclass, not an OSError) — an unreadable ledger must not

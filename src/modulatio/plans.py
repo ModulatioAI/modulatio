@@ -380,7 +380,7 @@ def load(plan_id: str, project_code: str) -> Optional[PlanRecord]:
     # defaults to the process locale and a daemon/cron run under a non-UTF-8
     # locale (e.g. C/POSIX) raises UnicodeDecodeError on a legitimate
     # non-ASCII title/body, bricking the load + the whole project listing.
-    raw = target.read_text(encoding="utf-8")
+    raw = target.read_text(encoding="utf-8", errors="replace")
     m = _FRONTMATTER_RE.match(raw)
     if m is None:
         return None
@@ -613,7 +613,7 @@ def set_status(
         raise FileNotFoundError(f"plan file not found: {target}")
     # UTF-8 to mirror the write path; a non-UTF-8 process locale must not
     # turn a legitimate non-ASCII plan into a UnicodeDecodeError brick.
-    raw = target.read_text(encoding="utf-8")
+    raw = target.read_text(encoding="utf-8", errors="replace")
     m = _FRONTMATTER_RE.match(raw)
     if m is None:
         raise ValueError(f"plan file {target} has no frontmatter")
@@ -812,7 +812,7 @@ def update_execution_state(
         raise FileNotFoundError(f"plan file not found: {target}")
     # UTF-8 to mirror the write path; a non-UTF-8 process locale must not
     # turn a legitimate non-ASCII plan into a UnicodeDecodeError brick.
-    raw = target.read_text(encoding="utf-8")
+    raw = target.read_text(encoding="utf-8", errors="replace")
     m = _FRONTMATTER_RE.match(raw)
     if m is None:
         raise ValueError(f"plan file {target} has no frontmatter")

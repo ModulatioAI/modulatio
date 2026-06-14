@@ -46,7 +46,7 @@ def load_alerts() -> dict[str, dict[str, Any]]:
     if not config.AUTH_ALERTS_FILE.exists():
         return {}
     try:
-        data = json.loads(config.AUTH_ALERTS_FILE.read_text())
+        data = json.loads(config.AUTH_ALERTS_FILE.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}

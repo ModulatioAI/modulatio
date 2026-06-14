@@ -71,7 +71,7 @@ def _slug(topic: str) -> str:
 
 
 def _parse_file(path: Path) -> ResearchEntry:
-    raw = path.read_text()
+    raw = path.read_text(encoding="utf-8", errors="replace")
     m = _OWN_FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}
     # YAML-list-style sources, captured as one entry per ``- value`` line so a

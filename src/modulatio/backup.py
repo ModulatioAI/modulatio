@@ -71,7 +71,7 @@ def _read_json_or_empty(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text()) or {}
+        return json.loads(path.read_text(encoding="utf-8", errors="replace")) or {}
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -159,7 +159,7 @@ def _walk_vault(vault_root: Path, code: str) -> tuple[dict[str, str], list[str]]
             skipped.append(rel)
             continue
         try:
-            files[rel] = f.read_text()
+            files[rel] = f.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             # Binary or unreadable — text-only backup can't carry it.
             skipped.append(rel)
@@ -236,7 +236,7 @@ def export_backup(
     env_path = vault_root / ".env" if vault_root else None
     if not strip_secrets and env_path and env_path.exists():
         try:
-            vault_env = env_path.read_text()
+            vault_env = env_path.read_text(encoding="utf-8")
         except OSError:
             vault_env = ""
 
@@ -301,7 +301,7 @@ def import_backup(
             f"split or regenerate the backup."
         )
     try:
-        backup = json.loads(path.read_text())
+        backup = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError) as e:
         raise ValueError(f"Could not parse backup: {e}")
 

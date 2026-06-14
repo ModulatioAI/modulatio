@@ -54,7 +54,7 @@ def read_anthropic_credentials() -> dict[str, Any] | None:
     if not has_anthropic_credentials():
         return None
     try:
-        data = json.loads(ANTHROPIC_CREDENTIALS_FILE.read_text())
+        data = json.loads(ANTHROPIC_CREDENTIALS_FILE.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return None
     inner = data.get("claudeAiOauth") if isinstance(data, dict) else None
@@ -115,7 +115,7 @@ def read_openai_credentials() -> dict[str, Any] | None:
     if not has_openai_credentials():
         return None
     try:
-        data = json.loads(OPENAI_CODEX_CREDENTIALS_FILE.read_text())
+        data = json.loads(OPENAI_CODEX_CREDENTIALS_FILE.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
@@ -166,7 +166,7 @@ def read_xai_credentials() -> dict[str, Any] | None:
     if not has_xai_credentials():
         return None
     try:
-        data = json.loads(XAI_GROK_CREDENTIALS_FILE.read_text())
+        data = json.loads(XAI_GROK_CREDENTIALS_FILE.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict):

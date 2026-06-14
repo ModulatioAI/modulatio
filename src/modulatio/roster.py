@@ -142,7 +142,7 @@ def _parse_int(raw: str, default: int) -> int:
 
 
 def _parse_file(path: Path) -> Agent:
-    raw = path.read_text()
+    raw = path.read_text(encoding="utf-8", errors="replace")
     m = _OWN_FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}
     body = raw
