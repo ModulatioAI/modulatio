@@ -60,20 +60,31 @@ _FORBIDDEN_KEY_TOKENS = ("url", "uri", "endpoint", "host", "webhook", "proxy")
 #: the value itself looking like a URL.
 _URL_LIKE_RE = re.compile(r"^\s*[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
 
+#: Max nesting depth the scan will descend through LLM-supplied tool-call args.
+#: The args object is model-controlled, so a pathologically deep nest would blow the
+#: Python recursion limit. We bound the descent and treat over-depth as FORBIDDEN
+#: (deny) — consistent with the narrow-param/fail-closed contract: legitimate metered
+#: args are pinned ids + bounded options, never a deeply nested blob.
+_MAX_SCAN_DEPTH = 32
 
-def _scan_for_network_params(obj: object, path: str = "") -> "list[str]":
+
+def _scan_for_network_params(obj: object, path: str = "", _depth: int = 0) -> "list[str]":
     """Recursively find forbidden network keys or URL-like string values. Returns
-    a list of offending dotted paths (empty = clean)."""
+    a list of offending dotted paths (empty = clean). Descent is depth-bounded
+    (``_MAX_SCAN_DEPTH``): args nested past the bound are denied rather than risking a
+    RecursionError on model-controlled input."""
+    if _depth > _MAX_SCAN_DEPTH:
+        return [f"{path}<nested past max depth {_MAX_SCAN_DEPTH}>"]
     bad: list[str] = []
     if isinstance(obj, dict):
         for key, val in obj.items():
             kl = str(key).lower()
             if kl in FORBIDDEN_ARG_KEYS or any(tok in kl for tok in _FORBIDDEN_KEY_TOKENS):
                 bad.append(f"{path}{key}")
-            bad.extend(_scan_for_network_params(val, f"{path}{key}."))
+            bad.extend(_scan_for_network_params(val, f"{path}{key}.", _depth + 1))
     elif isinstance(obj, (list, tuple)):
         for i, val in enumerate(obj):
-            bad.extend(_scan_for_network_params(val, f"{path}[{i}]."))
+            bad.extend(_scan_for_network_params(val, f"{path}[{i}].", _depth + 1))
     elif isinstance(obj, str) and _URL_LIKE_RE.match(obj):
         bad.append(f"{path}<url-like value>")
     return bad

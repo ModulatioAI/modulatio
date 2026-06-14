@@ -34,7 +34,6 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -55,41 +54,18 @@ def _claim_plan_lock(plan_id: str, project_code: str, *, timeout: float = 5.0):
     blocks, then re-reads inside the critical section, sees status is
     no longer 'approved', and bails out cleanly.
 
+    re-sweep (F2): delegates to ``plans._plan_lock`` so the CAS lock and
+    the plan-file mutators (``set_status`` / ``update_execution_state``,
+    which this CAS calls WHILE holding the lock) share ONE re-entrant lock
+    registry. Without that the nested mutators would open a second file
+    description on the same ``.lock`` and self-deadlock against this hold.
+
     POSIX-only: ``fcntl.flock`` is unavailable on Windows. There the lock
     becomes a no-op — single-daemon Windows is the only documented
     deployment shape (see daemon ops guide).
     """
-    try:
-        import fcntl  # POSIX only
-    except ImportError:
+    with plans._plan_lock(plan_id, project_code, timeout=timeout):
         yield
-        return
-
-    lock_path = plans._plans_dir(project_code) / f"{plan_id}.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.touch()
-    fh = open(lock_path, "w")
-    try:
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() > deadline:
-                    raise BlockingIOError(
-                        f"could not acquire plan lock for {plan_id} after "
-                        f"{timeout}s — another claimer is holding the "
-                        f"lock for an unusually long time"
-                    )
-                time.sleep(0.05)
-        yield
-    finally:
-        try:
-            fcntl.flock(fh, fcntl.LOCK_UN)
-        except Exception:  # pragma: no cover — best-effort release
-            pass
-        fh.close()
 
 
 # Tolerant JSON-block parser for Leader's reflection response.

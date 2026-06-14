@@ -21,6 +21,8 @@ picker.
 """
 from __future__ import annotations
 
+import asyncio
+
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
@@ -70,6 +72,12 @@ class AuthStep(Vertical):
         super().__init__(**kwargs)
         self.provider = provider
         self._selected = provider.auth_options[0]
+        # re-sweep (Finding 1): serialize body rebuilds. remove_children() +
+        # mount() can't be made atomic on their own (each awaits, yielding the
+        # loop), so two fast RadioSet.Changed events could interleave and mount
+        # duplicate ids (auth-key, ...) -> DuplicateIds. The lock makes each
+        # rebuild run to completion before the next starts.
+        self._render_lock = asyncio.Lock()
 
     def compose(self) -> ComposeResult:
         yield Static(f"Authenticate · {self.provider.name}", classes="auth-title")
@@ -93,20 +101,24 @@ class AuthStep(Vertical):
         await self._render_body()
 
     async def _render_body(self) -> None:
-        body = self.query_one("#auth-body", Vertical)
-        await body.remove_children()
+        # re-sweep (Finding 1): serialize so a rebuild runs to completion before
+        # the next begins. remove_children() + mount() each yield the loop, so
+        # without the lock two fast RadioSet.Changed events interleave and mount
+        # duplicate ids -> DuplicateIds. Collect the children first, then under
+        # the lock do remove + a single awaited batch mount.
         a = self._selected
         is_custom = self.provider.models_source.kind == "custom"
+        widgets: list = []
         if is_custom:
-            body.mount(Input(
+            widgets.append(Input(
                 placeholder="base_url, e.g. https://host/v1", id="auth-baseurl",
             ))
         if a.auth_type == "api_key":
             if a.env_var is None:  # custom — name the env var + enter the key
-                body.mount(Input(
+                widgets.append(Input(
                     placeholder="env var name, e.g. MYPROVIDER_API_KEY",
                     id="auth-envvar"))
-                body.mount(Input(
+                widgets.append(Input(
                     password=True, placeholder="paste your API key",
                     id="auth-key"))
             else:
@@ -115,19 +127,19 @@ class AuthStep(Vertical):
                 pool = [s for s in provider_keys.list_keys(a.env_var)
                         if s["is_set"] and not s["pinned_to"]]
                 if pool:
-                    body.mount(Static(
+                    widgets.append(Static(
                         f"✓ {len(pool)} key(s) in this provider's shared pool — "
                         "this model uses them (rotate + failover). Just "
                         "Continue, or add another key below."))
                 else:
                     any_keys = bool(provider_keys.list_keys(a.env_var))
-                    body.mount(Static(
+                    widgets.append(Static(
                         "This provider's keys are all pinned to other models — "
                         "add a key for the shared pool:" if any_keys else
                         f"Add an API key for this provider  →  saved as "
                         f"{a.env_var}:"))
                 # add a key — optional when the pool has one, required when not.
-                body.mount(Input(
+                widgets.append(Input(
                     placeholder="label this key (optional), e.g. backup",
                     id="auth-keylabel"))
                 hint = (
@@ -135,15 +147,20 @@ class AuthStep(Vertical):
                     if pool
                     else f"paste your API key  →  saved as {a.env_var}"
                 )
-                body.mount(Input(password=True, placeholder=hint, id="auth-key"))
+                widgets.append(Input(password=True, placeholder=hint, id="auth-key"))
             if self.provider.signup_url:
-                body.mount(Static(f"Need one? {self.provider.signup_url}"))
+                widgets.append(Static(f"Need one? {self.provider.signup_url}"))
         elif a.auth_type.startswith("oauth"):
             ready, hint = pc.auth_status(a)
-            body.mount(Static("✓ signed in — ready." if ready
-                              else f"Not signed in. {hint}"))
+            widgets.append(Static("✓ signed in — ready." if ready
+                                  else f"Not signed in. {hint}"))
         elif a.auth_type == "none" and not is_custom:
-            body.mount(Static("No auth needed — local server."))
+            widgets.append(Static("No auth needed — local server."))
+        async with self._render_lock:
+            body = self.query_one("#auth-body", Vertical)
+            await body.remove_children()
+            if widgets:
+                await body.mount(*widgets)
 
     def _status(self, text: str) -> None:
         self.query_one("#auth-status", Static).update(text)

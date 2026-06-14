@@ -58,6 +58,23 @@ _PROVIDER_LOCKS: dict[str, threading.Lock] = {
     "xai": threading.Lock(),
 }
 
+# xAI single-flight cache.
+#
+# Anthropic/OpenAI collapse a concurrent refresh burst via an under-lock re-read
+# of the credential file: a follower that arrives after the leader rotated +
+# wrote the tokens returns the just-written access token instead of re-POSTing a
+# now-consumed grant. xAI deliberately does NOT write back (the Grok file format
+# is unvalidated), so there is no persisted token for a follower to re-read —
+# the lock alone only *serializes* the exchanges, it does not collapse them:
+# followers would each POST the same now-consumed refresh token and be rejected.
+# To actually collapse the burst we cache the leader's just-minted access token
+# in memory, keyed by the refresh token it was minted from, for a short TTL. A
+# follower holding that same pre-lock refresh token returns the cached token
+# rather than spending the consumed grant. (resweep: in-comment claim that the
+# lock collapses the burst was overstated — this cache makes it true.)
+_XAI_FRESH_TOKEN_TTL_SEC = 30.0
+_xai_fresh_token: dict[str, Any] = {"refresh_token": None, "access_token": None, "minted_at": 0.0}
+
 
 @contextlib.contextmanager
 def _single_flight(provider: str, lock_path):
@@ -390,12 +407,43 @@ def refresh_xai_token(*, timeout: float = 30.0) -> str:
     # With several daemon callers (heartbeat + cron + Telegram listener) hitting
     # a 401 at once, each would POST the SAME refresh token; the first consumes
     # it and the rest are rejected. The in-process lock + cross-process file lock
-    # collapse the concurrent burst to a single exchange. (We don't write back
-    # the rotated token — the Grok file format is unvalidated — so there's no
-    # under-lock re-check; the lock alone prevents the concurrent double-spend.)
+    # serialize the exchanges. Because xAI doesn't write back the rotated token
+    # (the Grok file format is unvalidated), serialization alone would still let
+    # followers re-POST the consumed grant; the short-TTL in-memory cache below
+    # is what actually collapses the burst to a single exchange. (resweep)
     lock_path = str(oauth_helpers.XAI_GROK_CREDENTIALS_FILE) + ".lock"
     with _single_flight("xai", lock_path):
-        return _do_refresh_xai(refresh_token, timeout=timeout)
+        # Re-check under the lock: if the leader of this burst just minted an
+        # access token from the SAME refresh token we hold, return it rather
+        # than POSTing the now-consumed grant (which the provider would reject).
+        cached = _xai_cached_access(refresh_token)
+        if cached is not None:
+            return cached
+        access = _do_refresh_xai(refresh_token, timeout=timeout)
+        _xai_cache_access(refresh_token, access)
+        return access
+
+
+def _xai_cached_access(refresh_token: str) -> str | None:
+    """Return the cached fresh access token if it was minted from *refresh_token*
+    within the TTL window, else None. Caller holds the single-flight lock."""
+    entry = _xai_fresh_token
+    if (
+        entry["refresh_token"] == refresh_token
+        and isinstance(entry["access_token"], str)
+        and entry["access_token"]
+        and (time.monotonic() - entry["minted_at"]) < _XAI_FRESH_TOKEN_TTL_SEC
+    ):
+        return entry["access_token"]
+    return None
+
+
+def _xai_cache_access(refresh_token: str, access_token: str) -> None:
+    """Cache *access_token* against the *refresh_token* it was minted from, with a
+    monotonic timestamp for TTL expiry. Caller holds the single-flight lock."""
+    _xai_fresh_token["refresh_token"] = refresh_token
+    _xai_fresh_token["access_token"] = access_token
+    _xai_fresh_token["minted_at"] = time.monotonic()
 
 
 def _do_refresh_xai(refresh_token: str, *, timeout: float) -> str:

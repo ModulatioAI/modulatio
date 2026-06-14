@@ -933,6 +933,18 @@ def _validate_content_and_reason(content: str, reason: str) -> None:
         )
 
 
+def _validate_priority(priority: str) -> None:
+    # re-sweep finding 1: gate priority at API entry, mirroring the
+    # closed-reason check above. Without this an invalid/hallucinated
+    # priority (e.g. "URGENT", "P5") was persisted as a durable candidate
+    # and only blew up later as a raw KeyError in PRIORITY_DECAY_DEFAULTS/
+    # PRIORITY_RANK at enqueue/read time. Fail fast as a typed InboxError.
+    if priority not in PRIORITY_RANK:
+        raise InboxError(
+            f"priority={priority!r}: must be one of {tuple(PRIORITY_RANK)}"
+        )
+
+
 def _resolve_caps_and_decay(
     *,
     target_runner_role: str | None,
@@ -1042,6 +1054,7 @@ def enqueue(
         raise InboxAuthorityError(
             "broadcast (target_scope='all') is Leader-only."
         )
+    _validate_priority(priority)  # re-sweep finding 1
     _validate_content_and_reason(content, reason)
 
     _soft, hard_cap, decay_after = _resolve_caps_and_decay(
@@ -1239,6 +1252,7 @@ def propose(
         target_agent_id=target_agent_id,
         target_runner_role=target_runner_role,
     )
+    _validate_priority(priority)  # re-sweep finding 1
     _validate_content_and_reason(content, reason)
     candidate = InboxCandidate(
         candidate_id=_make_candidate_id(),
@@ -1534,11 +1548,18 @@ def accept_candidate(
     # terminal write fails, the candidate stays pending on the next
     # scan — Leader can see + re-act, which is the right behavior:
     # the durable note IS in the inbox, but the candidate-state
-    # bookkeeping is the source of truth for "already acted on?". A
-    # rare double-accept produces a superseded-pattern note which the
-    # tombstone path already handles cleanly, vs. the inverse where a
-    # silent failure would lock out re-action on a candidate that
-    # might still be live.
+    # bookkeeping is the source of truth for "already acted on?".
+    #
+    # re-sweep finding 2: a rare double-accept appends a genuine
+    # DUPLICATE note (a fresh note_id, no supersedes link) — accept
+    # passes the candidate's content through verbatim with no
+    # supersedes_note_id, so the second note does NOT tombstone the
+    # first; both coexist live. This is accepted as the lesser evil vs.
+    # the inverse (terminal-write-first), where a post-write enqueue
+    # failure would silently lock out re-action on a candidate that is
+    # still live and never produced a note. A duplicate Leader note is
+    # benign (Leader/QC dedupe on read); a lost note is not. The earlier
+    # wording here wrongly claimed a supersede occurs — it does not.
     _record_candidate_terminal(
         run_dir=run_dir, candidate_id=candidate.candidate_id,
         terminal="accepted", current_turn=current_turn,
@@ -1645,10 +1666,25 @@ def parse_inbox_proposals(text: str) -> "tuple[str, list[dict]]":
     )
     fm = fence_re.match(tail)
     if fm is None:
-        # Heading present but no fenced block — strip the heading
-        # alone so it doesn't end up in the artifact, but no
-        # proposals are emitted.
-        stripped = text[:m.start()] + tail
+        # No fenced block IMMEDIATELY follows the heading. Two sub-cases:
+        #
+        #   (a) re-sweep finding 3: there is NO fenced JSON block anywhere
+        #       downstream either — the heading is just legitimate prose
+        #       in the producer's deliverable (e.g. documentation OF the
+        #       feature). Stripping the bare heading silently deletes real
+        #       content, so leave the artifact fully intact.
+        #
+        #   (b) unanchored-fence case: a fence DOES appear downstream but
+        #       not directly under the heading. We must NOT splice that
+        #       (wrong-region) fence out — but the heading is still a
+        #       (malformed) proposals trailer, so strip the heading line
+        #       alone and preserve the downstream prose + fence verbatim.
+        downstream_fence = re.compile(
+            r"```(?:json)?[ \t]*\n", re.MULTILINE,
+        ).search(tail)
+        if downstream_fence is None:
+            return text, []  # (a)
+        stripped = text[:m.start()] + tail  # (b)
         return stripped.rstrip() + "\n", []
     try:
         parsed = json.loads(fm.group(1))

@@ -184,7 +184,13 @@ class ArtifactsScreen(Vertical):
             # handler and crashing the app.
             text = path.read_text(encoding="utf-8", errors="replace")
         except (OSError, ValueError) as exc:
-            preview.update(f"(could not read {path.name}: {exc})")
+            # re-sweep (Finding 1): wrap in Text so the error message is
+            # rendered VERBATIM, matching the success path. ``exc`` (an
+            # OSError/ValueError str) could contain console-markup brackets
+            # (e.g. ``[errno]``-style or path fragments) that Static.update
+            # would otherwise re-parse and raise MarkupError from — the very
+            # handler meant to gracefully report a read failure.
+            preview.update(Text(f"(could not read {path.name}: {exc})"))
             return
         # Truncate long files for preview — full content is still on disk.
         if len(text) > 2000:

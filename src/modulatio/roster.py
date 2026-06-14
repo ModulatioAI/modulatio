@@ -97,8 +97,24 @@ class Agent(BaseModel):
         dispatch path, which ignores capacity, happily routes the same
         agent. Bind the invariant deterministically: floor at 1 so a
         non-dispatchable cap can never enter the roster, regardless of
-        construction path (parse, wizard, default seed, direct)."""
+        construction path (parse, wizard, default seed, direct, copy).
+
+        NOTE: Pydantic v2 ``field_validator``\\ s do NOT fire on
+        ``model_copy(update=...)`` (copy is non-revalidating by design), so
+        this validator alone covers ctor/parse but leaves a ``model_copy``
+        hole. ``model_copy`` is overridden below to re-floor so the
+        "regardless of construction path" claim actually holds."""
         return v if v >= 1 else 1
+
+    # re-sweep finding 1: floor the cap on the copy path too. field_validator
+    # does not run on Pydantic's model_copy, so ``add_model``/``clear_model``
+    # (and any future update) could otherwise slip a sub-1, non-dispatchable
+    # cap into the roster.
+    def model_copy(self, *, update: dict | None = None, deep: bool = False) -> "Agent":
+        copied = super().model_copy(update=update, deep=deep)
+        if copied.capacity_cap < 1:
+            object.__setattr__(copied, "capacity_cap", 1)
+        return copied
 
     def has_skill(self, skill: str) -> bool:
         return skill in self.skills

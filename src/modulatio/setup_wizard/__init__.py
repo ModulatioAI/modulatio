@@ -20,9 +20,11 @@ Wizard step order (8 steps; step 5 added 2026-04-30 for budget caps):
        for wall-clock / token / cost caps. Each axis independently None
        (unbounded) or set. New plans inherit at draft time.
     6. first project capture (code + objective for the auto-launch handoff)
-    7. confirm + finalize (writes defaults.json + model_presets.json +
-       team_template.json + .env)
-    8. embedded LLM prefetch (silent if cached, default-yes if missing)
+    7. embedded LLM prefetch (silent if cached, default-yes if missing) —
+       runs before confirm so the prefetch (a pure cache warm) can't sit
+       between a confirmed save and the commit write (finding #348)
+    8. confirm + finalize (writes defaults.json + model_presets.json +
+       team_template.json + .env); commit fires immediately after confirm
 
 After successful completion, the wizard initializes the captured first
 project's vault + seeds the roster from the team template, then launches
@@ -78,8 +80,10 @@ _STEP_TITLES = {
     "agents": "4. Provision agents (triad + workers)",
     "budget": "5. Budget defaults (optional)",
     "first_project": "6. Your first project",
-    "confirm": "7. Review and finalize",
-    "embedded_llm": "8. Prefetch embedded LLM",
+    # re-sweep (finding #348): embedded_llm now runs before confirm so the
+    # confirmed save commits immediately — labels follow the new order.
+    "embedded_llm": "7. Prefetch embedded LLM",
+    "confirm": "8. Review and finalize",
 }
 
 
@@ -119,7 +123,14 @@ def _pop_state(step_name: str, state: dict) -> None:
         "pandoc": ["pandoc_installed", "pandoc_skipped"],
         "clipboard": ["clipboard_backend_installed", "clipboard_skipped"],
         "vault_path": ["vault_root", "shared_resources_path"],
-        "models": ["staged_api_keys", "configured_models"],
+        # re-sweep (Finding 1): do NOT pop 'staged_api_keys' on BACK. The
+        # model_presets that reference these keys are written through to disk
+        # immediately by provider_step.run, so they survive BACK/re-enter; the
+        # pasted key VALUES live only here in memory. Dropping them leaves a
+        # half-configured model (preset on disk, key never written to .env).
+        # 'configured_models' is a list of preset keys, losslessly rebuilt
+        # from disk on re-entry, so it may still be cleared.
+        "models": ["configured_models"],
         "agents": ["triad_agents", "worker_agents"],
         "budget": ["budget_caps"],
         "first_project": ["first_project_code", "first_project_objective"],
@@ -272,6 +283,14 @@ def _run_setup_body() -> bool:
     presets_at_start = _presets_snapshot()
     tools_at_start = _system_tools_snapshot()
 
+    # re-sweep (finding #348): embedded_llm runs BEFORE confirm. The confirm
+    # step prompts "Save and complete setup?" and ``commit`` fires the instant
+    # the machine finishes — so nothing slow may sit between confirm and the
+    # write. The embedded-LLM prefetch is a pure, reusable cache warm with no
+    # dependency on commit (it populates fastembed's own cache root), so it is
+    # safe to run ahead of confirm. This closes the long unsaved window where a
+    # user could answer Y and then have a multi-minute model download
+    # interrupted before anything was persisted.
     step_order = [
         "pandoc",
         "clipboard",
@@ -280,8 +299,8 @@ def _run_setup_body() -> bool:
         "agents",
         "budget",
         "first_project",
-        "confirm",
         "embedded_llm",
+        "confirm",
     ]
 
     try:

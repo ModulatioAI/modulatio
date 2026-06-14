@@ -119,6 +119,38 @@ def start(*, stub: bool = True) -> int:
         return pid
 
     # === Child process ===
+    # The child must NEVER return control to start()'s caller: an uncaught
+    # exception before the os._exit() below (e.g. log open / PID write failing
+    # on a full or read-only disk) would unwind back through the parent-side
+    # CLI stack IN THE FORKED CHILD, running normal Python/atexit/CLI teardown
+    # the parent already owns. _child_main() wraps the whole child body so a
+    # failure always lands on os._exit() instead of unwinding.
+    _child_main(stub=stub)
+
+
+def _child_main(*, stub: bool) -> None:
+    """Post-fork child body. Always terminates via os._exit(); never returns.
+
+    re-sweep (#1): any failure setting up the detached child (log open, PID
+    write, dup2, etc.) calls os._exit(1) rather than raising back out of the
+    fork, which would otherwise run parent-side CLI/atexit teardown inside the
+    forked child.
+    """
+    try:
+        _child_detach_and_run(stub=stub)
+    except BaseException:  # noqa: BLE001 — last line of defense before _exit
+        # Logging may itself be unusable (stdout could be the failed log fd),
+        # so guard the log attempt and exit non-zero regardless.
+        try:
+            logger.exception("Daemon child failed during startup.")
+        except Exception:
+            pass
+        os._exit(1)
+    # _child_detach_and_run always ends in os._exit(0); this is unreachable.
+    os._exit(0)
+
+
+def _child_detach_and_run(*, stub: bool) -> None:
     # Detach from terminal: new session, new file descriptors.
     os.setsid()
     # Capture the inherited terminal streams so we can close them after

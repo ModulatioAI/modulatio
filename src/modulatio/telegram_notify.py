@@ -216,6 +216,23 @@ def _sanitize_multipart_filename(name: str) -> str:
     return cleaned or "document"
 
 
+def _sanitize_multipart_caption(caption: str) -> str:
+    """Make a caption safe to interpolate into a multipart body part.
+
+    re-sweep: the caption lands in a non-quoted ``name="caption"`` part, so
+    quotes/backslashes are harmless body text and are preserved. The only
+    injection vector is CR/LF: a caption carrying ``\\r\\n`` plus the fixed
+    boundary token could otherwise inject an additional multipart part.
+    Caption text is far more likely than a filename to carry attacker- or
+    LLM-influenced content, so strip CR/LF (and other C0 controls). Tab is
+    kept since it's harmless and meaningful in body text.
+    """
+    return "".join(
+        ch for ch in str(caption)
+        if ch == "\t" or (ord(ch) >= 0x20 and ch != "\x7f")
+    )
+
+
 def send_document(
     file_path: str | Path,
     *,
@@ -260,12 +277,15 @@ def send_document(
     # (RFC 2388 / HTML5 form-encoding). Strip control chars and percent-encode
     # the quote + backslash, matching how browsers escape these in the header.
     safe_filename = _sanitize_multipart_filename(path.name)
+    # re-sweep: the caption is interpolated into a multipart part too; strip
+    # CR/LF so an attacker/LLM-influenced caption can't inject extra parts.
+    safe_caption = _sanitize_multipart_caption(caption)
 
     boundary = "----ModulatioFormBoundary7MA4YWxkTrZu0gW"
     body = bytearray()
     body += f'--{boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n{target}\r\n'.encode()
-    if caption:
-        body += f'--{boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n{caption}\r\n'.encode()
+    if safe_caption:
+        body += f'--{boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n{safe_caption}\r\n'.encode()
     body += f'--{boundary}\r\nContent-Disposition: form-data; name="document"; filename="{safe_filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode()
     body += path.read_bytes()
     body += f'\r\n--{boundary}--\r\n'.encode()

@@ -236,7 +236,17 @@ def _provision_triad(state: dict, default_models: dict[str, str]) -> Any:
             return steps.QUIT
         if model is steps.BACK:
             if i == 0:
-                return steps.BACK
+                # re-sweep (:237): BACK at the FIRST role's (Leader) model
+                # picker re-shows the Leader's TEMPLATE picker rather than
+                # bubbling out of the whole agents step — bubbling would discard
+                # the just-picked Leader template (by_tier[tier] is set only
+                # AFTER the model is chosen, below) AND pop the just-provisioned
+                # worker pool. Re-seed the template default from the just-picked
+                # template_id so the re-show lands on the user's current choice;
+                # the {**...} spread preserves any prior context_budget. (For
+                # i>0, BACK steps to the previous role, the tested behavior.)
+                by_tier[tier] = {**by_tier.get(tier, {}), "template_origin": template_id}
+                continue
             i -= 1
             continue
 

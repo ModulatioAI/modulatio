@@ -152,19 +152,45 @@ class ACPServer:
             self._stdout, rpc.make_error(req_id, code, message), self._stdout_lock)
 
     def request_and_wait(self, method: str, params: dict,
-                         timeout: float = _REQUEST_TIMEOUT_SECONDS):
+                         timeout: float = _REQUEST_TIMEOUT_SECONDS,
+                         cancel_check=None):
         """Issue a server-initiated request and BLOCK for the client's response
         (correlated by id). Returns the result, or None on timeout/cancel.
 
         The request id is registered to the owning session (``sessionId`` in
         ``params``) so that ``session/cancel`` only unblocks that session's own
-        in-flight requests (H1)."""
+        in-flight requests (H1).
+
+        ``cancel_check`` closes a TOCTOU window (MEDIUM/race): a caller checks
+        ``session.cancelled`` then calls here, but a ``session/cancel`` can fire
+        between that check and the rid landing in ``_session_pending`` — leaving
+        the rid invisible to cancel's snapshot, so it blocks the full timeout.
+        We evaluate ``cancel_check`` under the SAME ``_session_pending_lock`` the
+        cancel snapshots, right after registering the rid: if it's truthy the
+        cancel already happened (or is happening), so we unregister and bail with
+        None before writing any frame — failing closed promptly."""
         rid = self._idgen.next()
         self._pending.register(rid)
         sid = params.get("sessionId")
         if sid is not None:
             with self._session_pending_lock:
                 self._session_pending.setdefault(sid, set()).add(rid)
+                # re-sweep: observe a cancel that raced our caller's pre-check,
+                # atomically vs the cancel snapshot.
+                cancelled = bool(cancel_check()) if cancel_check is not None \
+                    else False
+            if cancelled:
+                self._pending.wait(rid, 0)  # pop the slot we just registered
+                with self._session_pending_lock:
+                    ids = self._session_pending.get(sid)
+                    if ids is not None:
+                        ids.discard(rid)
+                        if not ids:
+                            self._session_pending.pop(sid, None)
+                return None
+        elif cancel_check is not None and bool(cancel_check()):
+            self._pending.wait(rid, 0)  # no session bucket to clean; just pop
+            return None
         try:
             rpc.write_message(
                 self._stdout, rpc.make_request(rid, method, params),

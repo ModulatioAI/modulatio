@@ -160,8 +160,16 @@ _DENY_ENV_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"PASSWD", re.IGNORECASE),
     re.compile(r"PASSPHRASE", re.IGNORECASE),
     re.compile(r"CREDENTIAL", re.IGNORECASE),
-    re.compile(r"_API_KEY$", re.IGNORECASE),
-    re.compile(r"_KEY$", re.IGNORECASE),
+    # re-sweep #163: the old rules were exact-suffix (`_API_KEY$` / `_KEY$`)
+    # and let secret-shaped names slip through when the `KEY` lacked that exact
+    # `_KEY` shape — ``MISTRAL_APIKEY`` (no separator), ``DEPLOY_KEYS`` (plural),
+    # ``API-KEY`` (hyphen), ``SOMEKEY`` (bare suffix). Broadened to a
+    # word-ending ``KEYS?$`` match plus the hyphen/no-separator ``API[_-]?KEY``
+    # shape. Over-denying a non-secret var is the documented safe direction;
+    # a prefix ``KEY`` (KEYBOARD_LAYOUT) or mid-word KEY (MONKEYPATCH) is left
+    # alone because it isn't a key-suffix shape.
+    re.compile(r"API[_-]?KEY", re.IGNORECASE),
+    re.compile(r"KEYS?$", re.IGNORECASE),
     re.compile(r"PRIVATE_KEY", re.IGNORECASE),
     re.compile(r"_PAT$", re.IGNORECASE),
     re.compile(r"_DSN$", re.IGNORECASE),
@@ -415,8 +423,13 @@ def build_sandboxed_argv(
     values overrides the contextvars (useful for tests).
 
     ``extra_binds`` lets the caller request additional read-only mounts
-    inside the sandbox — used to give pytest access to the project's
-    test tree and venv site-packages.
+    inside the sandbox. It is currently an UNUSED hook: the sole production
+    caller (``tools.run_shell``) never passes it. pytest already sees the
+    venv/site-packages via ``_interpreter_binds(sys.prefix)`` and the project
+    test tree via the read-only ``--ro-bind / /``, so no extra mount is
+    needed today. The parameter is kept (default ``()``) for a future caller
+    that genuinely needs an extra writable/visible path; passing values still
+    adds ``--ro-bind-try`` mounts (re-sweep #418).
 
     ``profile`` selects the operator posture (see ``current_profile``);
     ``None`` reads the ``MODULATIO_SANDBOX_PROFILE`` env. ``trusted``

@@ -57,7 +57,15 @@ _DEFAULT_CAPS: tuple[str, ...] = ()
 # wrongly tag them OpenAI reasoning/premium. Anchor to a token boundary instead:
 # the token must start the id or follow a separator (``/`` ``-`` whitespace) and
 # end the id or be followed by a separator — never embedded inside a longer word.
-_OPENAI_O_SERIES = re.compile(r"(?:^|[/\s_-])o[134](?:$|[-\s/_])")
+#
+# re-sweep (0.9.0): the LEFT boundary must NOT include a bare ``-``/``_``. An
+# o-token welded between two name segments (``command-o4-beta``,
+# ``llama-o3-instruct``, ``foo_o3_bar``) has a ``-``/``_`` on both sides, so the
+# old class ``[/\s_-]`` matched it and mis-tagged it OpenAI o-series. Genuine
+# o-series ids only ever start the id, follow a provider ``/`` (``openai/o3``),
+# or sit between whitespace (a label) — never after a bare ``-``/``_``. The
+# right boundary stays permissive so ``o3-mini`` / ``o1-preview`` still match.
+_OPENAI_O_SERIES = re.compile(r"(?:^|[/\s])o[134](?:$|[-\s/_])")
 
 # Ordered (substrings, tier, cost_class, capability_tags). First family whose
 # any-substring matches the lowercased model id (or label) wins. Order from

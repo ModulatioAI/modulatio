@@ -578,11 +578,22 @@ def recall(
         by_id = {r.entry_id: r for r in filtered}
 
         query_vec = embedder.embed_text(task_description)
-        # Pull more than top_k from LanceDB so the post-filter has slack.
+        # re-sweep (finding 1): the search ranks GLOBAL body-similarity over the
+        # full pool, but the metadata filter is applied in Python AFTER. A fixed
+        # top_k*4 slice can be saturated by non-matching bodies that rank higher,
+        # dropping every valid metadata-matched precedent even though it clears
+        # min_similarity. Size the candidate set so the filtered hits stay
+        # reachable: worst case every non-matching body outranks the matches, so
+        # we need (pool - filtered) + top_k candidates. Capped at the pool size,
+        # floored at the original top_k*4 to leave small-pool behavior unchanged.
+        pool = table.count_rows()
+        slack = (pool - len(filtered)) + top_k
+        limit = max(top_k * 4, slack)
+        limit = min(limit, pool)
         raw_results = (
             table.search(query_vec)
             .metric("cosine")
-            .limit(top_k * 4)
+            .limit(limit)
             .to_list()
         )
 

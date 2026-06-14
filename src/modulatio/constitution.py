@@ -48,7 +48,13 @@ def load_constitution(project_code: str | None = None) -> str:
     missing (it ships with the package, so that's effectively never)."""
     candidates: list[Path] = []
     if project_code:
-        candidates.append(project_dir(project_code) / "constitution.md")
+        try:
+            candidates.append(project_dir(project_code) / "constitution.md")
+        except ValueError:
+            # re-sweep: an invalid project_code (validate_project_code) shouldn't
+            # crash the loader — fall through to the shared/seed constitution.
+            # Mirrors qc_persona.load_qc_persona.
+            pass
     candidates.append(_shared_constitution_file())
     candidates.append(_SEED_CONSTITUTION_FILE)
     for path in candidates:

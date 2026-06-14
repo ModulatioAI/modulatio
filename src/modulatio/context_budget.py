@@ -608,13 +608,15 @@ def check_and_compress(
     padded_after = int(raw_after * (1 + cfg.pad_pct))
 
     if padded_after < cap:
-        # pre_compression_tokens carries the pre-prune estimate so a
-        # downstream join can compute the compression ratio against
-        # padded_after.
+        # re-sweep (#611): pre_compression_tokens carries the pre-prune
+        # estimate; post_compression_tokens carries the padded post-prune
+        # estimate so a downstream join can compute the compression ratio
+        # (post/pre) directly off the row instead of guessing padded_after.
         _emit_context_budget_event(
             model=model,
             call_id=call_id,
             pre_compression_tokens=padded_estimate,
+            post_compression_tokens=padded_after,
             soft_warn_fired=False,
             compression_fired=True,
             refusal_fired=False,
@@ -639,10 +641,13 @@ def check_and_compress(
             # signal — surface the budget breach regardless.
             cp_path = None
     # Emit BEFORE the raise so the row lands even on the failure path.
+    # re-sweep (#611): the refusal path also pruned, so carry the
+    # post-prune estimate that still overflowed.
     _emit_context_budget_event(
         model=model,
         call_id=call_id,
         pre_compression_tokens=padded_estimate,
+        post_compression_tokens=padded_after,
         soft_warn_fired=False,
         compression_fired=True,
         refusal_fired=True,
@@ -1132,9 +1137,15 @@ def _emit_context_budget_event(
     compression_fired: bool,
     refusal_fired: bool,
     checkpoint_path: Path | None = None,
+    post_compression_tokens: int | None = None,
 ) -> None:
     """Append one ``actor="context_budget"`` row to the bound telemetry
     audit log.
+
+    ``post_compression_tokens`` (re-sweep #611) is the padded post-prune
+    token estimate; it's set on the compression branches (success +
+    refusal) so the row carries both ends of the prune and a derived
+    ``compression_ratio``. ``None`` on the no-prune branches.
 
     Best-effort: if the bound telemetry context has no ``audit_path``
     (or the write fails), debug-logs and returns without raising — must
@@ -1193,6 +1204,16 @@ def _emit_context_budget_event(
         if tel.effective_cap and tel.effective_cap > 0
         else 0.0
     )
+    # re-sweep (#611): carry the post-prune token count (and the ratio
+    # off it) on the compression branches so the documented
+    # compression-ratio join is computable from the row alone. None on
+    # the no-compression branches (under-threshold / soft-warn / disabled
+    # / unsupported) where no prune ran.
+    compression_ratio = (
+        post_compression_tokens / pre_compression_tokens
+        if post_compression_tokens is not None and pre_compression_tokens > 0
+        else None
+    )
 
     event = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1213,6 +1234,8 @@ def _emit_context_budget_event(
         "effective_cap": tel.effective_cap,
         "status": tel.status,
         "pre_compression_tokens": pre_compression_tokens,
+        "post_compression_tokens": post_compression_tokens,
+        "compression_ratio": compression_ratio,
         "pct_of_budget_used": pct_budget,
         "pct_of_effective_cap_used": pct_effective,
         "soft_warn_fired": soft_warn_fired,

@@ -280,6 +280,33 @@ def finalize_task(task_id: str, **updates) -> Optional[dict]:
         return None
 
 
+def requeue_task(task_id: str, **updates) -> Optional[dict]:
+    """Re-arm a claimed task back to ``pending`` UNLESS it was cancelled
+    out-of-band mid-dispatch.
+
+    The retry path (``_run_task``: dispatch failed, retries remain) flips a
+    ``running`` task back to ``pending`` so the next tick re-dispatches it. But
+    if an operator cancelled that task while it was in flight (``cancel_task``
+    set ``cancelled`` under the lock), a plain ``update_task(status="pending")``
+    would clobber the cancel and ``_select_next_pending`` would re-select it,
+    defeating the cancel. This reads the current status under the queue lock and
+    skips the re-arm when the task has already moved to ``cancelled``, so the
+    operator's intent wins the race (mirrors ``finalize_task``). Returns the task
+    (re-armed, or left cancelled), or None if it no longer exists.
+    """
+    with _queue_lock:
+        tasks = _load_queue()
+        for t in tasks:
+            if t.get("id") == task_id:
+                if t.get("status") == "cancelled":
+                    return t
+                t.update(updates)
+                t["status"] = "pending"
+                _save_queue(tasks)
+                return t
+        return None
+
+
 def cancel_task(task_id: str) -> bool:
     """Mark a task as cancelled. Returns True if found + updated."""
     return update_task(task_id, status="cancelled", completed=_now_iso()) is not None
@@ -337,6 +364,28 @@ def recover_stale_tasks(*, max_age_minutes: int = DEFAULT_STALE_MINUTES) -> int:
 
 # === Selection ===
 
+# Length of the random ``secrets.token_hex(3)`` suffix every id ends with
+# (3 bytes → 6 hex chars). A dep "suffix" must span at least this whole
+# random segment to be a safe, non-coincidental match.
+_ID_TOKEN_LEN = 6
+
+
+def _dep_matches(dep: str, done_id: str) -> bool:
+    """True iff ``dep`` identifies ``done_id`` as a completed predecessor.
+
+    depends_on entries are documented as task-id suffixes (full suffixes are
+    safe). A bare ``done_id.endswith(dep)`` over the WHOLE id can false-satisfy:
+    a short or coincidental ``dep`` can tail an unrelated done id (the trailing
+    chars of the random ``token_hex(3)`` segment), marking the dependency met
+    before the intended predecessor finished. Anchor instead on the random-token
+    boundary: accept an exact full-id match, or a suffix that spans at least the
+    complete 6-hex random segment.
+    """
+    if dep == done_id:
+        return True
+    return len(dep) >= _ID_TOKEN_LEN and done_id.endswith(dep)
+
+
 def _select_next_pending(all_tasks: list) -> Optional[dict]:
     """Pure selection over an already-loaded task list (no I/O).
 
@@ -372,7 +421,7 @@ def _select_next_pending(all_tasks: list) -> Optional[dict]:
         if deps:
             blocked = False
             for dep in deps:
-                if not any(tid.endswith(dep) for tid in done_ids):
+                if not any(_dep_matches(dep, tid) for tid in done_ids):
                     blocked = True
                     break
             if blocked:
@@ -639,8 +688,10 @@ class Heartbeat:
             retries = int(task.get("retries") or 0) + 1
             max_retries = int(task.get("max_retries") or 1)
             if retries < max_retries:
-                # Bump retries; remain pending so next tick picks it up.
-                update_task(task["id"], retries=retries, status="pending", started=None)
+                # Bump retries; remain pending so next tick picks it up — but
+                # re-sweep: honor a mid-dispatch cancel (requeue_task skips the
+                # re-arm when the task was already flipped to 'cancelled').
+                requeue_task(task["id"], retries=retries, started=None)
             else:
                 finalize_task(
                     task["id"],
@@ -683,6 +734,7 @@ __all__ = [
     "list_tasks",
     "update_task",
     "finalize_task",
+    "requeue_task",
     "cancel_task",
     "clear_done",
     "next_pending",

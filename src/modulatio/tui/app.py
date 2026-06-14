@@ -589,7 +589,21 @@ class ModulatioApp(App):
         no_deliver = error is None and (
             delivered == 0 or blocked > 0 or incomplete > 0
         )
-        team_status = self._lane_status("stream-team-status")
+        # Guard symmetric with ``_on_converse_done``: a *separate* converse-driven
+        # run_job may still be in flight on ``_conv_orch`` (the engine supports a
+        # direct kickoff AND a converse run_job live at once — that's why
+        # ``_active_job_orchestrators`` returns a list). Settling THIS kickoff's
+        # outcome onto the shared TEAM spinner would overwrite the other run's live
+        # state with a stale verdict. ``_kickoff_pending`` is already cleared above
+        # and this kickoff's own orch has flipped ``_kickoff_active`` False in
+        # kickoff()'s finally before the worker returned, so ``_any_job_in_flight``
+        # is True here only when an *other* job is still running. Skip the settle in
+        # that case; that job's own done-handler self-corrects the spinner.
+        team_status = (
+            self._lane_status("stream-team-status")
+            if not self._any_job_in_flight()
+            else None
+        )
         if error is not None:
             if team_status is not None:
                 team_status.set_error(str(error)[:80])

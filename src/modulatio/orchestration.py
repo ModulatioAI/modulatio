@@ -5725,8 +5725,15 @@ class Orchestrator:
             prior = prior_bytes.decode()
         except UnicodeDecodeError:
             return False
-        prior_tokens = len(prior.split())
-        new_tokens = len(new_content.split())
+        # re-sweep F1: measure the size in TOKENS, not whitespace word-count.
+        # Modulatio is artifact-agnostic — a compact/minified data or code
+        # deliverable (e.g. a single-line JSON object) has near-zero whitespace,
+        # so ``.split()`` collapses hundreds of tokens to ~1 "word" and the guard
+        # never engages. ``count_tokens`` is litellm-backed with a deterministic
+        # char/4 fallback, so the floor fires consistently across families.
+        model = self.project.leader_model
+        prior_tokens = _tool_sum_module.count_tokens(model, text=prior)
+        new_tokens = _tool_sum_module.count_tokens(model, text=new_content)
         return (
             prior_tokens >= _REGRESSION_MIN_PRIOR_TOKENS
             and new_tokens < prior_tokens * _REGRESSION_SHRINK_RATIO
@@ -5910,8 +5917,14 @@ class Orchestrator:
         # fallback; verify_assembly then fails closed on its empty dep set.
         filtered_units: list[str] = []
         if task.depends_on:
+            # re-sweep F9: normalize with the CANONICAL _norm_unit (prefix strip),
+            # not `.lstrip("./")` (a char-set strip that mangles a leading-dot run,
+            # e.g. `.config.json` -> `config.json`). The char-set strip would let an
+            # undeclared in-root dotfile collide with a declared `config.json` and
+            # sneak past the allowlist — exactly the pre-QC exposure hull #8 closes.
+            # Share ONE definition of unit identity with verify_assembly.
             allowed = {
-                d.output_path.strip().lstrip("./")
+                _review_ledger._norm_unit(d.output_path)
                 for d in (
                     store.list_tasks(self.project.code, run_id=self.project.run_id)
                 )
@@ -5919,7 +5932,7 @@ class Orchestrator:
             }
             kept_units = []
             for u in manifest.get("units", []):
-                if str(u).strip().lstrip("./") in allowed:
+                if _review_ledger._norm_unit(str(u)) in allowed:
                     kept_units.append(u)
                 else:
                     filtered_units.append(u)
@@ -6714,9 +6727,16 @@ class Orchestrator:
         - the worker mutates only its own ``Task`` ``t``.
 
         Re-uses ``_run_task_with_redo`` internals untouched — same
-        producer→QC→redo — just pointed at isolated sinks. The single
-        documented exception is the locked ``qc_history.append_verdict``
-        (a best-effort precedent log held under ``self._store_lock``).
+        producer→QC→redo — just pointed at isolated sinks. Two documented
+        exceptions write shared instance state from inside the worker:
+        - the locked ``qc_history.append_verdict`` (a best-effort precedent log
+          held under ``self._store_lock``);
+        - ``self._assembly_records[task.id] = ...`` in ``_apply_assembly_manifest``
+          (re-sweep F7). This is safe WITHOUT a lock: the key is the worker's own
+          unique task id (no two workers touch the same slot) and a dict
+          ``__setitem__`` is atomic under the GIL, so concurrent inserts can't
+          corrupt the dict. The main thread only reads these records AFTER the wave
+          merge (verify paths), by which point every worker has joined.
         """
         # Fix C hardening (Nemo BLOCK): the whole wave is submitted to the pool
         # at once, so a task QUEUED behind the pool ceiling can start AFTER the
@@ -7411,6 +7431,16 @@ class Orchestrator:
                                 task=crashed,
                                 errors=[f"wave worker crashed: {type(exc).__name__}: {exc}"],
                             )
+                        # re-sweep F5: a worker that escapes BEFORE building its
+                        # result (e.g. _seed_staging / _staging_tool_registry throws
+                        # before the worker's own try) carries NO staging_root, so the
+                        # synthetic result above can't tell _merge_wave_artifacts to
+                        # tear down its .staging/<tid> dir — it would leak every crash.
+                        # Sweep it here directly (idempotent; no-op if never created).
+                        import shutil
+                        shutil.rmtree(
+                            self._scope_root() / ".staging" / tid, ignore_errors=True
+                        )
                         _logger.exception(
                             "wave worker for task %s crashed; recorded as BLOCKED", tid
                         )
@@ -9297,6 +9327,11 @@ class Orchestrator:
             )
         )
         goal.status = GoalStatus.COMPLETED
+        # re-sweep F6: this is the shared terminalizer for ALL redo lanes (leader
+        # auto-redo / decline reexecute / budget auto-resume). The normal terminal-
+        # COMPLETED path pops the redo loop-breaker fingerprint; a zero-settled
+        # redone goal must too, or it strands a stale entry in the per-run dict.
+        self._goal_redo_fingerprints.pop(goal.id, None)
         store.save_goal(self.project.code, goal, run_id=self.project.run_id)
         self._emit_activity(
             role="leader", phase="leader_verify_ended", agent_id="leader",
@@ -10120,7 +10155,7 @@ class Orchestrator:
         surfaces a LOUDER spot-check recommendation (Hero R1b). Best-effort."""
         try:
             recs = recoveries.unconsumed_recoveries(self.project.code)
-            clusters = recoveries.cluster_recoveries(recs, floor=_WIN_CODIFY_FLOOR)
+            clusters = recoveries.cluster_recoveries(recs, floor=_win_codify_floor())
         except Exception:  # noqa: BLE001
             self._codification_skipped("recovery_feed_failed")
             return
@@ -13238,7 +13273,29 @@ Return {{"codifications": []}} when nothing recurred enough to codify.
 
 
 #: #81 codify-the-win: the engine recurrence floor for a win cluster (env-overridable).
-_WIN_CODIFY_FLOOR = int(os.environ.get("MODULATIO_WIN_CODIFY_FLOOR", "3") or "3")
+_WIN_CODIFY_FLOOR_DEFAULT = 3
+
+
+def _win_codify_floor() -> int:
+    """The win-codify recurrence floor, read from ``MODULATIO_WIN_CODIFY_FLOOR``.
+
+    re-sweep F3: this MUST NOT crash on a malformed value. ``orchestration`` is
+    imported unconditionally by ``cli.py``, so an unguarded ``int(...)`` at module
+    scope on e.g. ``MODULATIO_WIN_CODIFY_FLOOR=foo`` raised ``ValueError`` at IMPORT
+    and bricked the whole CLI/TUI. Mirror ``_wave_global_cap``: try/except with a
+    sane default, clamped to >=1 (a floor of 0 would surface every singleton)."""
+    raw = (os.environ.get("MODULATIO_WIN_CODIFY_FLOOR") or "").strip()
+    if not raw:
+        return _WIN_CODIFY_FLOOR_DEFAULT
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _WIN_CODIFY_FLOOR_DEFAULT
+
+
+#: Module-level convenience: resolved once at import via the guarded parser, so a
+#: malformed env value can never raise at import time (the brick F3 closes).
+_WIN_CODIFY_FLOOR = _win_codify_floor()
 
 #: Fallback for the `win-codify` seed (the Leader's recovery-technique-drafting
 #: template). The ENGINE has already proven RECURRENCE (it surfaced a cluster of

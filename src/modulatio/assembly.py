@@ -289,7 +289,27 @@ def _generic_digest(
 ) -> DeliverableDigest:
     """Family-NEUTRAL digest: any deliverable is N parts of some BYTE size. The
     default until a family grows a richer extractor — it reads NO domain meaning from
-    the bytes, so it is correct for code / data / media / anything at all."""
+    the bytes, so it is correct for code / data / media / anything at all.
+
+    # re-sweep (#101/0.9.0): for a SINGLE-FILE-OUTPUT family (a media composite —
+    # ffmpeg/ImageMagick/zip write ONE binary), the deliverable IS that produced
+    # ``output_file``, not the N input units in ``units_used``. Pointing the digest at
+    # the inputs aims the verifier's "eyes" at the wrong files. When a real composite
+    # exists on disk, describe THAT one artifact (1 part + whole_size = its byte size).
+    # Product-agnostic: keyed on "a composite was produced", never on "media".
+    # Fail-open — an absent/unstattable output_file falls back to the per-unit digest."""
+    if output_file is not None and output_file.is_file():
+        try:
+            out_size = output_file.stat().st_size
+        except OSError:
+            out_size = None
+        if out_size is not None:
+            return DeliverableDigest(
+                kind=kind, part_count=1,
+                parts=[{"label": output_file.name, "size": out_size}],
+                part_size_unit="bytes", whole_size=out_size, whole_size_unit="bytes",
+                text_twin_path=text_twin_path,
+            )
     parts: list[dict] = []
     for name in units_used:
         path = _safe_unit_path(name, artifacts_root)

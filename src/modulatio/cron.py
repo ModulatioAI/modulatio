@@ -32,13 +32,21 @@ single daemon instance can serve multiple projects' cron jobs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import re
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Iterator, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX (Windows): flock is a no-op.
+    fcntl = None  # type: ignore[assignment]
 
 from modulatio import config, heartbeat
 
@@ -63,6 +71,47 @@ def _config_file():
 
 
 _cron_lock = threading.RLock()
+
+
+# `_cron_lock` (an in-process RLock) only serializes threads WITHIN one process.
+# `dispatch_due`'s select-advance-dispatch window ALSO has to be exclusive ACROSS
+# processes — the daemon's per-tick `cron.dispatch_due()` and a separate
+# `modulatio cron dispatch-due` CLI invocation are distinct OS processes sharing
+# the same on-disk cron-config, and an RLock cannot see across that boundary.
+# Without it both could observe the same job as due and both fire add_task
+# (duplicate kickoff, duplicate cost). For the dispatch we additionally hold a
+# POSIX `flock` on a sidecar lock file, which attaches to the open file
+# description and therefore serializes across both threads and processes.
+# Mirrors heartbeat._cross_process_claim_lock.
+
+def _dispatch_lock_file() -> Path:
+    return _config_file().with_suffix(".json.lock")
+
+
+@contextlib.contextmanager
+def _cross_process_dispatch_lock() -> Iterator[None]:
+    """Hold an exclusive POSIX ``flock`` across the dispatch window.
+
+    A fresh fd is opened per acquisition so the exclusive lock serializes across
+    both threads and processes (``flock`` attaches to the open file description,
+    not the process). POSIX-only: when ``fcntl`` is unavailable (Windows) the
+    lock is a no-op — the in-process ``_cron_lock`` still serializes the
+    single-process case (mirrors heartbeat's posture).
+    """
+    if fcntl is None:  # pragma: no cover — non-POSIX no-op
+        yield
+        return
+    lock_path = _dispatch_lock_file()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:  # pragma: no cover — best-effort release
+            pass
 
 
 def _load() -> list[dict]:
@@ -424,48 +473,63 @@ def dispatch_due(*, now: Optional[datetime] = None) -> list[dict]:
     """
     now = now or _now()
     fired: list[dict] = []
-    for job in check_due(now=now):
-        dispatch_ok = True
-        status = "ok"
-        try:
-            heartbeat.add_task(
-                description=f"cron:{job.get('name', job.get('id'))}",
-                project_code=job["project_code"],
-                objective=job["objective"],
-                priority=job.get("priority", 5),
-                tags=["cron", job.get("name", "")],
-                jt_id=job.get("jt_id"),
-                jt_params=job.get("jt_params"),
-                on_refused=job.get("on_refused"),
-            )
-        except Exception as e:
-            logger.exception("Cron job %s: heartbeat add_task failed", job.get("id"))
-            dispatch_ok = False
-            status = f"error:{e}"
-
-        # Advance next_run REGARDLESS of dispatch outcome — a failed dispatch must
-        # not pin the job at the same minute, where check_due re-selects it every
-        # ~30s daemon tick forever (a retry storm + traceback flood on a degraded
-        # config). The schedule is re-parsed here for the advance; if it became
-        # unparseable (e.g. a hand-edited config) we can't compute a next slot, so
-        # we DISABLE the job fail-closed rather than leave it perpetually due —
-        # this also stops a successful dispatch from re-firing every tick.
-        parsed = parse_schedule(job["schedule"])
-        fields = {"last_run": now.isoformat(timespec="seconds"), "last_status": status}
-        if parsed is not None:
-            new_next = _advance_next_run(parsed, job.get("next_run"), now)
-            fields["next_run"] = new_next.isoformat(timespec="seconds")
-        else:
-            logger.warning(
-                "Cron job %s: schedule %r no longer parses; disabling to stop "
-                "perpetual re-dispatch", job.get("id"), job.get("schedule"))
-            fields["enabled"] = False
-            fields["last_status"] = "error:unparseable-schedule"
-        update(job["id"], **fields)
-
-        if dispatch_ok:
-            fired.append(job)
+    # re-sweep: hold the cross-process flock across the ENTIRE select →
+    # add_task → advance window. check_due re-reads the on-disk config INSIDE the
+    # lock, so a concurrent process that already won the lock (and advanced
+    # next_run past `now`) leaves the loser seeing nothing due — exactly one fire
+    # per due slot across daemon-tick + CLI dispatch-due processes.
+    with _cross_process_dispatch_lock():
+        for job in check_due(now=now):
+            if _dispatch_one(job, now):
+                fired.append(job)
     return fired
+
+
+def _dispatch_one(job: dict, now: datetime) -> bool:
+    """Add a heartbeat task for one due job and advance its next_run.
+
+    Returns True if the heartbeat dispatch succeeded. Always called with the
+    cross-process dispatch lock held (see ``dispatch_due``).
+    """
+    dispatch_ok = True
+    status = "ok"
+    try:
+        heartbeat.add_task(
+            description=f"cron:{job.get('name', job.get('id'))}",
+            project_code=job["project_code"],
+            objective=job["objective"],
+            priority=job.get("priority", 5),
+            tags=["cron", job.get("name", "")],
+            jt_id=job.get("jt_id"),
+            jt_params=job.get("jt_params"),
+            on_refused=job.get("on_refused"),
+        )
+    except Exception as e:
+        logger.exception("Cron job %s: heartbeat add_task failed", job.get("id"))
+        dispatch_ok = False
+        status = f"error:{e}"
+
+    # Advance next_run REGARDLESS of dispatch outcome — a failed dispatch must
+    # not pin the job at the same minute, where check_due re-selects it every
+    # ~30s daemon tick forever (a retry storm + traceback flood on a degraded
+    # config). The schedule is re-parsed here for the advance; if it became
+    # unparseable (e.g. a hand-edited config) we can't compute a next slot, so
+    # we DISABLE the job fail-closed rather than leave it perpetually due —
+    # this also stops a successful dispatch from re-firing every tick.
+    parsed = parse_schedule(job["schedule"])
+    fields = {"last_run": now.isoformat(timespec="seconds"), "last_status": status}
+    if parsed is not None:
+        new_next = _advance_next_run(parsed, job.get("next_run"), now)
+        fields["next_run"] = new_next.isoformat(timespec="seconds")
+    else:
+        logger.warning(
+            "Cron job %s: schedule %r no longer parses; disabling to stop "
+            "perpetual re-dispatch", job.get("id"), job.get("schedule"))
+        fields["enabled"] = False
+        fields["last_status"] = "error:unparseable-schedule"
+    update(job["id"], **fields)
+
+    return dispatch_ok
 
 
 def run_now(job_id: str) -> Optional[dict]:

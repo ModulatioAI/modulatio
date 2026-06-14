@@ -1188,6 +1188,18 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
                                     _pipe.close()
                                 except OSError:
                                     pass
+                        # re-sweep: killpg already SIGKILL'd the group, so the
+                        # child is dead — but nothing here reaped it, leaving a
+                        # zombie until Popen.__del__ runs under the chat loop's
+                        # GC. Reap it now with a non-blocking poll() (the group
+                        # is gone, so this returns immediately) rather than
+                        # leaking a defunct PID per give-up under wave load.
+                        # Best-effort: a reap failure must never crash the chat
+                        # loop on this already-pathological path.
+                        try:
+                            proc.poll()
+                        except Exception:  # noqa: BLE001 - best-effort reap
+                            pass
                         stdout, stderr = "", ""
                 stderr = (stderr or "") + f"\n[TIMEOUT after {timeout}s]"
                 return _format_run_shell_result(-1, stdout or "", stderr)

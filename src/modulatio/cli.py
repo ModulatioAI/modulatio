@@ -1059,24 +1059,35 @@ def heartbeat_run_once(
 ) -> None:
     """Run a single heartbeat tick — recover stale tasks + dispatch the
     next pending task. Useful for cron-style external scheduling."""
+    # re-sweep (finding 1): reject --no-stub at the CLI layer BEFORE any
+    # queue mutation. Otherwise the NotImplementedError below is swallowed by
+    # Heartbeat._run_task's catch-all (logged to the daemon log, not here),
+    # the task is marked failed / its retries burned, and the CLI prints a
+    # bare "status=failed" with no reason. Fail loud + early instead.
+    if not stub:
+        typer.echo(
+            "heartbeat run-once --no-stub requires the daemon (slice 8); "
+            "use `modulatio kickoff` for real-model runs.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     def _dispatch(
         project_code: str, objective: str, *,
         jt_id: str | None = None, jt_params: dict | None = None,
         on_refused: str = "skip",
     ) -> str:
         # Build the same Orchestrator stack kickoff() uses.
-        if stub:
-            runners = default_generic_stub_runners()
-            matcher = None
-        else:
-            # Defer real-model wiring — would mirror cli.kickoff(); out of
-            # scope for slice 6 since heartbeat run-once is primarily a
-            # diagnostic / cron-driver verb. The daemon (slice 8) wires
-            # the real-model path.
+        # --no-stub is rejected at the CLI layer above, so stub is always True
+        # here; the real-model path is the daemon's (slice 8). Defensive
+        # guard kept in case _dispatch is ever invoked outside this command.
+        if not stub:  # pragma: no cover - unreachable via heartbeat_run_once
             raise NotImplementedError(
                 "heartbeat run-once --no-stub requires the daemon (slice 8). "
                 "Use `modulatio kickoff` for direct real-model runs."
             )
+        runners = default_generic_stub_runners()
+        matcher = None
         wiki = project_dir(project_code)
         net_new = not wiki.exists()
         vault.init_project(project_code, project_code, objective, exist_ok=True)
