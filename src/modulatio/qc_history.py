@@ -36,12 +36,37 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from modulatio import config
 from modulatio.semantic_router import Embedder
 from modulatio.vault import project_dir
+
+# Per-(project, domain) reentrant lock guarding the LanceDB "verdicts" index.
+# QC runs per task on concurrent wave workers (default-on); each calls
+# similar_verdicts() -> _ensure_verdict_vectors(), which does a destructive
+# drop_table+create_table rebuild, then reads the table. Without serialization
+# two QC workers of the SAME artifact_kind (== same qc-history domain) can both
+# rebuild at once (create_table races) or one can drop/recreate the table while
+# another is mid-search — raise or garbled precedent. This is the exact hazard
+# 5bce6a2 fixed in team_memory; the structurally-identical sibling was missed.
+# Keyed per-(project, domain) so unrelated artifact kinds don't contend (domain
+# == LanceDB table granularity). Reentrant so similar_verdicts() can hold it
+# across both _ensure_verdict_vectors() and its own read.
+_VECTOR_LOCKS: dict[tuple[str, str], threading.RLock] = {}
+_VECTOR_LOCKS_GUARD = threading.Lock()
+
+
+def _vector_lock(project_code: str, domain: str) -> threading.RLock:
+    key = (project_code, domain)
+    with _VECTOR_LOCKS_GUARD:
+        lock = _VECTOR_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _VECTOR_LOCKS[key] = lock
+        return lock
 
 
 def _cache_root() -> Path:
@@ -237,56 +262,59 @@ def _ensure_verdict_vectors(
     changed). Volumes are expected low in slice #8 scope; incremental
     append is a later optimization if the history grows large.
     """
-    records = load_verdicts(domain, project_code)
-    new_hash = _config_hash(records)
-    meta = _load_meta(project_code, domain)
+    # Serialized per (project, domain): the drop_table+create_table rebuild is
+    # destructive and must not interleave with another worker's rebuild or read.
+    with _vector_lock(project_code, domain):
+        records = load_verdicts(domain, project_code)
+        new_hash = _config_hash(records)
+        meta = _load_meta(project_code, domain)
 
-    active_model = _embed_model()
-    if (
-        meta.get("records_hash") == new_hash
-        and meta.get("embedding_model") == active_model
-        and meta.get("embed_dim") == embedder.dim
-    ):
-        return records
+        active_model = _embed_model()
+        if (
+            meta.get("records_hash") == new_hash
+            and meta.get("embedding_model") == active_model
+            and meta.get("embed_dim") == embedder.dim
+        ):
+            return records
 
-    import lancedb
-    import pyarrow as pa
+        import lancedb
+        import pyarrow as pa
 
-    _cache_dir(project_code, domain).mkdir(parents=True, exist_ok=True)
-    db = lancedb.connect(_db_path(project_code, domain))
+        _cache_dir(project_code, domain).mkdir(parents=True, exist_ok=True)
+        db = lancedb.connect(_db_path(project_code, domain))
 
-    if "verdicts" in db.list_tables().tables:
-        db.drop_table("verdicts")
+        if "verdicts" in db.list_tables().tables:
+            db.drop_table("verdicts")
 
-    if not records:
+        if not records:
+            _save_meta(project_code, domain, {
+                "records_hash": new_hash,
+                "embedding_model": active_model,
+                "embed_dim": embedder.dim,
+                "record_count": 0,
+            })
+            return records
+
+        texts = [r.artifact_body for r in records]
+        vectors = embedder.embed_texts(texts)
+
+        rows = [
+            {"vector": v, "entry_id": r.entry_id}
+            for r, v in zip(records, vectors)
+        ]
+        schema = pa.schema([
+            pa.field("vector", pa.list_(pa.float32(), embedder.dim)),
+            pa.field("entry_id", pa.string()),
+        ])
+        db.create_table("verdicts", data=rows, schema=schema)
+
         _save_meta(project_code, domain, {
             "records_hash": new_hash,
             "embedding_model": active_model,
             "embed_dim": embedder.dim,
-            "record_count": 0,
+            "record_count": len(records),
         })
         return records
-
-    texts = [r.artifact_body for r in records]
-    vectors = embedder.embed_texts(texts)
-
-    rows = [
-        {"vector": v, "entry_id": r.entry_id}
-        for r, v in zip(records, vectors)
-    ]
-    schema = pa.schema([
-        pa.field("vector", pa.list_(pa.float32(), embedder.dim)),
-        pa.field("entry_id", pa.string()),
-    ])
-    db.create_table("verdicts", data=rows, schema=schema)
-
-    _save_meta(project_code, domain, {
-        "records_hash": new_hash,
-        "embedding_model": active_model,
-        "embed_dim": embedder.dim,
-        "record_count": len(records),
-    })
-    return records
 
 
 def similar_verdicts(
@@ -302,44 +330,48 @@ def similar_verdicts(
     Sorted by cosine similarity descending. Empty history → empty list.
     Domain-scoped: a "code" call never returns "marketing" verdicts.
     """
-    records = _ensure_verdict_vectors(domain, project_code, embedder)
-    if not records:
-        return []
+    # Hold the per-(project, domain) lock across the rebuild AND the read so no
+    # concurrent QC worker can drop/recreate the shared table mid-search (the
+    # lock is reentrant, so the nested _ensure_verdict_vectors acquire is free).
+    with _vector_lock(project_code, domain):
+        records = _ensure_verdict_vectors(domain, project_code, embedder)
+        if not records:
+            return []
 
-    import lancedb
+        import lancedb
 
-    path = _db_path(project_code, domain)
-    if not path.exists():
-        return []
+        path = _db_path(project_code, domain)
+        if not path.exists():
+            return []
 
-    db = lancedb.connect(path)
-    if "verdicts" not in db.list_tables().tables:
-        return []
+        db = lancedb.connect(path)
+        if "verdicts" not in db.list_tables().tables:
+            return []
 
-    table = db.open_table("verdicts")
-    if table.count_rows() == 0:
-        return []
+        table = db.open_table("verdicts")
+        if table.count_rows() == 0:
+            return []
 
-    query_vec = embedder.embed_text(artifact_body)
-    results = (
-        table.search(query_vec)
-        .metric("cosine")
-        .limit(k)
-        .to_list()
-    )
+        query_vec = embedder.embed_text(artifact_body)
+        results = (
+            table.search(query_vec)
+            .metric("cosine")
+            .limit(k)
+            .to_list()
+        )
 
-    by_id = {r.entry_id: r for r in records}
-    hits: list[tuple[VerdictRecord, float]] = []
-    for row in results:
-        eid = row.get("entry_id")
-        rec = by_id.get(eid)
-        if rec is None:
-            # Stale vector for a record since pruned — skip.
-            continue
-        distance = float(row.get("_distance", 1.0))
-        similarity = 1.0 - distance
-        hits.append((rec, similarity))
-    return hits
+        by_id = {r.entry_id: r for r in records}
+        hits: list[tuple[VerdictRecord, float]] = []
+        for row in results:
+            eid = row.get("entry_id")
+            rec = by_id.get(eid)
+            if rec is None:
+                # Stale vector for a record since pruned — skip.
+                continue
+            distance = float(row.get("_distance", 1.0))
+            similarity = 1.0 - distance
+            hits.append((rec, similarity))
+        return hits
 
 
 __all__ = [
