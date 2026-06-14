@@ -215,3 +215,14 @@ def test_build_registry_accepts_project_code() -> None:
     reg = tools.build_registry(project_code="someproj")
     assert "http_get" in reg and "web_search" in reg
     assert "search_skills" in reg
+
+
+def test_read_frontmatter_survives_non_utf8(tmp_path):
+    """Cross-file (R2): a non-UTF-8 skill file must not raise UnicodeDecodeError
+    out of the index build (which would crash the wave scheduler) — degrade to a
+    best-effort parse."""
+    from modulatio import skill_library
+    p = tmp_path / "weird.md"
+    p.write_bytes(b"---\nname: weird\ndescription: has \xff\xfe bad bytes\n---\nbody\n")
+    meta = skill_library._read_frontmatter(p)  # must not raise
+    assert meta.get("name") == "weird"

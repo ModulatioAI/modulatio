@@ -49,7 +49,11 @@ def _read_frontmatter(path: Path) -> dict[str, str]:
     """
     meta: dict[str, str] = {}
     try:
-        with path.open("r", encoding="utf-8") as fh:
+        # errors="replace": a non-UTF-8 byte in a skill/standards file must not
+        # raise UnicodeDecodeError out of the index build and crash the wave
+        # scheduler — degrade to a best-effort parse (mirrors the resilience the
+        # entity / qc-history / standards read paths already have).
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
             if fh.readline().strip() != "---":
                 return meta
             for line in fh:

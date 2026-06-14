@@ -88,6 +88,28 @@ def save_presets(presets: dict[str, dict[str, Any]]) -> None:
     config.write_secret_file(PRESETS_FILE, json.dumps(presets, indent=2))
 
 
+def _reject_secret_auth_config(auth_config: Any) -> None:
+    """Security keel (Nemo, hull 2026-06-02): a preset stores an env-var
+    *reference* (``env_var``), never a secret value. Reject any auth_config
+    field that looks like a raw key/token/secret so a stray value can't get
+    persisted into model_presets.json (chmod 600, but still never values).
+    Applied by BOTH add_preset and update_preset — the latter is reachable from
+    configuration.register()'s fallback, which previously bypassed this gate."""
+    if not isinstance(auth_config, dict):
+        raise ValueError(
+            f"auth_config must be a dict, got {type(auth_config).__name__}"
+        )
+    _SECRET_FIELDS = {"key", "api_key", "apikey", "token", "secret",
+                      "password", "access_token", "refresh_token"}
+    leaked = sorted(f for f in auth_config if f.lower() in _SECRET_FIELDS)
+    if leaked:
+        raise ValueError(
+            f"auth_config may not carry raw secret value(s) {leaked} — "
+            f"store the secret in the vault and reference it via "
+            f"'env_var'. Presets keep references, never values."
+        )
+
+
 def add_preset(
     key: str,
     *,
@@ -129,23 +151,7 @@ def add_preset(
             f"{type(default_params).__name__}"
         )
     if auth_config is not None:
-        if not isinstance(auth_config, dict):
-            raise ValueError(
-                f"auth_config must be a dict, got {type(auth_config).__name__}"
-            )
-        # Security keel (Nemo, hull 2026-06-02): a preset stores an env-var
-        # *reference* (`env_var`), never a secret value. Reject any field that
-        # looks like a raw key/token/secret so a stray value can't get
-        # persisted into model_presets.json (chmod 600, but still never values).
-        _SECRET_FIELDS = {"key", "api_key", "apikey", "token", "secret",
-                          "password", "access_token", "refresh_token"}
-        leaked = sorted(f for f in auth_config if f.lower() in _SECRET_FIELDS)
-        if leaked:
-            raise ValueError(
-                f"auth_config may not carry raw secret value(s) {leaked} — "
-                f"store the secret in the vault and reference it via "
-                f"'env_var'. Presets keep references, never values."
-            )
+        _reject_secret_auth_config(auth_config)
 
     presets = load_presets()
     if key in presets:
@@ -190,6 +196,11 @@ def update_preset(key: str, **fields: Any) -> dict[str, Any]:
     if key not in presets:
         raise KeyError(f"Model entry '{key}' not found.")
     merged = {**presets[key], **fields}
+    # Same secret-leak keel as add_preset — an update that sets auth_config (e.g.
+    # via configuration.register()'s add→update fallback) must not slip a raw
+    # secret value into the persisted preset.
+    if "auth_config" in fields and fields["auth_config"] is not None:
+        _reject_secret_auth_config(fields["auth_config"])
     if merged.get("api_format") not in VALID_API_FORMATS:
         raise ValueError(f"api_format must be one of {VALID_API_FORMATS}")
     valid = valid_auth_types()

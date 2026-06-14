@@ -282,3 +282,17 @@ def test_is_available_oauth_anthropic_checks_credential_file(tmp_path, monkeypat
     assert model_presets.is_available("anth") is False
     creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "x"}}))
     assert model_presets.is_available("anth") is True
+
+
+def test_update_preset_rejects_raw_secret_in_auth_config(tmp_path, monkeypatch):
+    """Cross-file (R2): update_preset must run the SAME secret-leak keel as
+    add_preset — a raw key/token in auth_config must be refused, not persisted
+    (configuration.register()'s add→update fallback reaches this path)."""
+    import pytest
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "presets.json")
+    model_presets.add_preset(
+        key="m1", label="M1", api_format="openai",
+        base_url="https://x/v1", model="m", auth_type="none",
+    )
+    with pytest.raises(ValueError, match="raw secret"):
+        model_presets.update_preset("m1", auth_config={"api_key": "sk-leaked"})
