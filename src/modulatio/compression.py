@@ -71,7 +71,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 try:  # POSIX-only; absent on Windows (single-process deployment there).
     import fcntl
@@ -879,7 +879,9 @@ def _unified_diff(prev_state: dict | None, curr_state: dict) -> str:
 # ─── Audit emission ──────────────────────────────────────────────────────
 
 
-def _append_audit_row_0600(audit_path: Path, row: dict) -> None:
+def _append_audit_row_0600(
+    audit_path: Path, row: dict, write_lock: Any = None,
+) -> None:
     """Append one JSONL line to ``audit.jsonl``. Best-effort: write
     failures log WARN and return (mirrors inbox audit
     semantics — the LLM call that triggered the event must not be
@@ -890,22 +892,30 @@ def _append_audit_row_0600(audit_path: Path, row: dict) -> None:
 
     ``ensure_ascii=True`` so future fields whose ``str()`` returns
     multiline content can't smuggle bytes that break the JSONL
-    contract."""
+    contract.
+
+    Concurrency: when ``write_lock`` is bound (the orchestrator passes
+    its shared-run-file lock under concurrent wave workers), the append
+    serializes with the orchestrator's OTHER shared-run-file writes —
+    mirrors ``context_budget``'s ``write_lock`` idiom. ``None`` (the
+    sequential / unbound path) → no locking, the prior behavior."""
+    _guard = write_lock if write_lock is not None else contextlib.nullcontext()
     try:
-        _ensure_parent_0700(audit_path)
-        # Touch with 0o600 if absent — keeps the post-rename chmod
-        # window closed across all writers to this file.
-        if not audit_path.exists():
+        with _guard:
+            _ensure_parent_0700(audit_path)
+            # Touch with 0o600 if absent — keeps the post-rename chmod
+            # window closed across all writers to this file.
+            if not audit_path.exists():
+                try:
+                    audit_path.touch(mode=0o600, exist_ok=True)
+                except OSError:
+                    pass
             try:
-                audit_path.touch(mode=0o600, exist_ok=True)
+                audit_path.chmod(0o600)
             except OSError:
                 pass
-        try:
-            audit_path.chmod(0o600)
-        except OSError:
-            pass
-        with audit_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, default=str, ensure_ascii=True) + "\n")
+            with audit_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, default=str, ensure_ascii=True) + "\n")
     except Exception as exc:  # noqa: BLE001 — best-effort audit
         _logger.warning(
             "compression audit append failed at %s: %s", audit_path, exc,
@@ -980,6 +990,7 @@ def emit_compaction_emit(
     record: CompactionRecord,
     reduction_pct: int,
     diff_format: str = "structured_json_with_unified_diff",
+    write_lock: Any = None,
 ) -> None:
     """Append a ``compaction_emit`` row. Caller computes
     reduction_pct (truncated to int) because pre/post chars come
@@ -1012,7 +1023,7 @@ def emit_compaction_emit(
         "deferred_items_count": record.deferred_items_count,
         "non_goals_count": record.non_goals_count,
     })
-    _append_audit_row_0600(audit_path, row)
+    _append_audit_row_0600(audit_path, row, write_lock)
 
 
 def emit_compaction_skipped(
@@ -1028,6 +1039,7 @@ def emit_compaction_skipped(
     pre_compaction_id: str | None = None,
     pre_state_sha256: str | None = None,
     missing_fields: list[str] | None = None,
+    write_lock: Any = None,
 ) -> None:
     """Append a ``compaction_skipped`` row. ``compaction_id`` is
     allocated for join consistency even though no files are written
@@ -1053,7 +1065,7 @@ def emit_compaction_skipped(
         "pre_state_sha256": pre_state_sha256,
         "missing_fields": missing_fields,
     })
-    _append_audit_row_0600(audit_path, row)
+    _append_audit_row_0600(audit_path, row, write_lock)
 
 
 def emit_echo_corrected(
@@ -1066,6 +1078,7 @@ def emit_echo_corrected(
     call_scope_id: str | None,
     call_id: str | None,
     correction: EchoCorrection,
+    write_lock: Any = None,
 ) -> None:
     """Append a ``compression_echo_corrected`` row. Carries hashes
     + short excerpts (Nemo M5), never the raw divergent text."""
@@ -1082,7 +1095,7 @@ def emit_echo_corrected(
         "leader_value_excerpt": correction.leader_value_excerpt,
         "source_value_excerpt": correction.source_value_excerpt,
     })
-    _append_audit_row_0600(audit_path, row)
+    _append_audit_row_0600(audit_path, row, write_lock)
 
 
 # ─── State validation ───────────────────────────────────────────────────
@@ -1293,6 +1306,7 @@ def emit_compaction(
     original_user_goal_source: str,
     triggered_by: str = "leader_reflect",
     parse_failure_reason: str | None = None,
+    write_lock: Any = None,
 ) -> CompactionOutcome:
     """Run one compaction attempt end-to-end.
 
@@ -1356,6 +1370,7 @@ def emit_compaction(
             pre_state_sha256=(
                 prev_manifest.latest_state_sha256 if prev_manifest else None
             ),
+            write_lock=write_lock,
         )
         return CompactionOutcome(
             record=None, skip_reason=skip_reason,
@@ -1379,6 +1394,7 @@ def emit_compaction(
                 prev_manifest.latest_state_sha256 if prev_manifest else None
             ),
             missing_fields=missing,
+            write_lock=write_lock,
         )
         return CompactionOutcome(
             record=None, skip_reason="malformed_state_doc",
@@ -1469,6 +1485,7 @@ def emit_compaction(
                     after_sub_objective=after_sub_objective,
                     call_scope_id=call_scope_id, call_id=call_id,
                     correction=correction,
+                    write_lock=write_lock,
                 )
             emit_compaction_skipped(
                 audit_path=audit_path,
@@ -1478,6 +1495,7 @@ def emit_compaction(
                 skip_reason="no_material_change",
                 pre_compaction_id=prev_manifest.latest_compaction_id,
                 pre_state_sha256=prev_manifest.latest_state_sha256,
+                write_lock=write_lock,
             )
             return CompactionOutcome(
                 record=None, skip_reason="no_material_change",
@@ -1521,6 +1539,7 @@ def emit_compaction(
             after_sub_objective=after_sub_objective,
             call_scope_id=call_scope_id, call_id=call_id,
             correction=correction,
+            write_lock=write_lock,
         )
 
     pre_chars = len(prev_state_body) if prev_state_body is not None else 0
@@ -1562,6 +1581,7 @@ def emit_compaction(
         after_sub_objective=after_sub_objective,
         call_scope_id=call_scope_id, call_id=call_id,
         record=record, reduction_pct=reduction_pct,
+        write_lock=write_lock,
     )
     return CompactionOutcome(
         record=record, skip_reason=None,

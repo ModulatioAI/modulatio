@@ -119,12 +119,17 @@ def save(proposal: Proposal, project_code: str) -> Path:
         f"---\n\n"
         f"{proposal.rule_body.rstrip()}\n"
     )
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     return path
 
 
 def _parse_file(path: Path) -> Proposal:
-    raw = path.read_text()
+    # Strict UTF-8. A standards proposal is DURABLE, human/team-authored POLICY
+    # text that approve() appends verbatim into the project standards — NOT a
+    # rebuildable cache. Decoding with replacement would let a corrupt proposal
+    # stay listable + approvable and graft mojibake (U+FFFD) into standards. So
+    # decode strictly and let list_proposals SKIP a malformed file (Nemo).
+    raw = path.read_text(encoding="utf-8")
     m = _FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}
     body = raw
@@ -151,7 +156,15 @@ def list_proposals(project_code: str) -> list[Proposal]:
     root = _proposals_dir(project_code)
     if not root.exists():
         return []
-    return [_parse_file(p) for p in sorted(root.glob("*.md"))]
+    out: list[Proposal] = []
+    for p in sorted(root.glob("*.md")):
+        try:
+            out.append(_parse_file(p))
+        except UnicodeDecodeError:
+            # Skip a corrupt / non-UTF-8 proposal — never crash the whole review
+            # surface on one bad file, never surface it as approvable mojibake.
+            continue
+    return out
 
 
 def list_ids(project_code: str) -> list[str]:
@@ -182,15 +195,15 @@ def _append_to_team_section(domain_file: Path, title: str, body: str) -> None:
     entry = f"\n### {title}\n\n{body.rstrip()}\n"
     if not domain_file.exists():
         domain_file.parent.mkdir(parents=True, exist_ok=True)
-        domain_file.write_text(f"{_TEAM_HEADER}\n{entry}")
+        domain_file.write_text(f"{_TEAM_HEADER}\n{entry}", encoding="utf-8")
         return
-    existing = domain_file.read_text()
+    existing = domain_file.read_text(encoding="utf-8")
     if _TEAM_HEADER in existing:
         # Append entry at the end — header already present.
-        with domain_file.open("a") as f:
+        with domain_file.open("a", encoding="utf-8") as f:
             f.write(entry)
     else:
-        with domain_file.open("a") as f:
+        with domain_file.open("a", encoding="utf-8") as f:
             f.write(f"\n{_TEAM_HEADER}\n{entry}")
 
 

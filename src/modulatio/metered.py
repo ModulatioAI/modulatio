@@ -34,6 +34,40 @@ from typing import TYPE_CHECKING, Callable
 
 from modulatio import comptroller, review_ledger
 
+
+class AuthorizerResult(tuple):
+    """The metered authorizer's return value.
+
+    re-sweep MEDIUM/integration (Finding 1): the comptroller flags an
+    idempotent replay structurally (``Authorization.idempotent_reuse``) so the
+    tool runner can short-circuit the provider re-invoke (reuse the prior
+    result) instead of paying again. ``build_metered_authorizer`` previously
+    collapsed that signal to ``(allowed, reason)`` and dropped it, leaving the
+    contract unfulfilled — the runner would re-pay on an identical metered call.
+
+    This is a length-2 ``(allowed, reason)`` tuple so EVERY existing 2-tuple
+    unpacker (the runner's ``allowed, why = metered_authorizer(...)`` and the
+    test suite) stays back-compatible, while carrying ``idempotent_reuse`` as a
+    structured side-channel the runner reads to skip the re-invoke.
+    """
+
+    def __new__(cls, allowed: bool, reason: str, idempotent_reuse: bool = False):
+        self = super().__new__(cls, (allowed, reason))
+        self._idempotent_reuse = idempotent_reuse  # type: ignore[attr-defined]
+        return self
+
+    @property
+    def allowed(self) -> bool:
+        return self[0]
+
+    @property
+    def reason(self) -> str:
+        return self[1]
+
+    @property
+    def idempotent_reuse(self) -> bool:
+        return self._idempotent_reuse  # type: ignore[attr-defined,no-any-return]
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pathlib import Path
 
@@ -60,20 +94,31 @@ _FORBIDDEN_KEY_TOKENS = ("url", "uri", "endpoint", "host", "webhook", "proxy")
 #: the value itself looking like a URL.
 _URL_LIKE_RE = re.compile(r"^\s*[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
 
+#: Max nesting depth the scan will descend through LLM-supplied tool-call args.
+#: The args object is model-controlled, so a pathologically deep nest would blow the
+#: Python recursion limit. We bound the descent and treat over-depth as FORBIDDEN
+#: (deny) — consistent with the narrow-param/fail-closed contract: legitimate metered
+#: args are pinned ids + bounded options, never a deeply nested blob.
+_MAX_SCAN_DEPTH = 32
 
-def _scan_for_network_params(obj: object, path: str = "") -> "list[str]":
+
+def _scan_for_network_params(obj: object, path: str = "", _depth: int = 0) -> "list[str]":
     """Recursively find forbidden network keys or URL-like string values. Returns
-    a list of offending dotted paths (empty = clean)."""
+    a list of offending dotted paths (empty = clean). Descent is depth-bounded
+    (``_MAX_SCAN_DEPTH``): args nested past the bound are denied rather than risking a
+    RecursionError on model-controlled input."""
+    if _depth > _MAX_SCAN_DEPTH:
+        return [f"{path}<nested past max depth {_MAX_SCAN_DEPTH}>"]
     bad: list[str] = []
     if isinstance(obj, dict):
         for key, val in obj.items():
             kl = str(key).lower()
             if kl in FORBIDDEN_ARG_KEYS or any(tok in kl for tok in _FORBIDDEN_KEY_TOKENS):
                 bad.append(f"{path}{key}")
-            bad.extend(_scan_for_network_params(val, f"{path}{key}."))
+            bad.extend(_scan_for_network_params(val, f"{path}{key}.", _depth + 1))
     elif isinstance(obj, (list, tuple)):
         for i, val in enumerate(obj):
-            bad.extend(_scan_for_network_params(val, f"{path}[{i}]."))
+            bad.extend(_scan_for_network_params(val, f"{path}[{i}].", _depth + 1))
     elif isinstance(obj, str) and _URL_LIKE_RE.match(obj):
         bad.append(f"{path}<url-like value>")
     return bad
@@ -151,9 +196,16 @@ def build_metered_authorizer(
             project_code, cost_class, tool_name, task_id, key, agent_id,
             per_task_cap=per_task_cap,
         )
-        return auth.allowed, auth.reason
+        # re-sweep (Finding 1): thread the structured idempotent-replay signal
+        # through to the runner (length-2 (allowed, reason) for back-compat).
+        return AuthorizerResult(auth.allowed, auth.reason, auth.idempotent_reuse)
 
     return authorize
 
 
-__all__ = ["FORBIDDEN_ARG_KEYS", "build_metered_authorizer", "metered_idempotency_key"]
+__all__ = [
+    "AuthorizerResult",
+    "FORBIDDEN_ARG_KEYS",
+    "build_metered_authorizer",
+    "metered_idempotency_key",
+]

@@ -100,7 +100,7 @@ def _load_from_path(path: Path) -> Template | None:
     if not path.exists() or not path.is_file():
         return None
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return None
     fields, body = _parse_frontmatter(text)

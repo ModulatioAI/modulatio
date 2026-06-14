@@ -289,7 +289,27 @@ def _generic_digest(
 ) -> DeliverableDigest:
     """Family-NEUTRAL digest: any deliverable is N parts of some BYTE size. The
     default until a family grows a richer extractor — it reads NO domain meaning from
-    the bytes, so it is correct for code / data / media / anything at all."""
+    the bytes, so it is correct for code / data / media / anything at all.
+
+    # re-sweep (#101/0.9.0): for a SINGLE-FILE-OUTPUT family (a media composite —
+    # ffmpeg/ImageMagick/zip write ONE binary), the deliverable IS that produced
+    # ``output_file``, not the N input units in ``units_used``. Pointing the digest at
+    # the inputs aims the verifier's "eyes" at the wrong files. When a real composite
+    # exists on disk, describe THAT one artifact (1 part + whole_size = its byte size).
+    # Product-agnostic: keyed on "a composite was produced", never on "media".
+    # Fail-open — an absent/unstattable output_file falls back to the per-unit digest."""
+    if output_file is not None and output_file.is_file():
+        try:
+            out_size = output_file.stat().st_size
+        except OSError:
+            out_size = None
+        if out_size is not None:
+            return DeliverableDigest(
+                kind=kind, part_count=1,
+                parts=[{"label": output_file.name, "size": out_size}],
+                part_size_unit="bytes", whole_size=out_size, whole_size_unit="bytes",
+                text_twin_path=text_twin_path,
+            )
     parts: list[dict] = []
     for name in units_used:
         path = _safe_unit_path(name, artifacts_root)
@@ -321,7 +341,7 @@ def _document_digest(
             parts.append({"label": "", "size": 0})
             continue
         try:
-            body = path.read_text()
+            body = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             parts.append({"label": "", "size": 0})
             continue
@@ -387,7 +407,7 @@ def build_deliverable_digest(
 
 def _unit_headings(
     units: "list", artifacts_root: Path, *, separator: str = _DEFAULT_SEPARATOR,
-    base_total: int = 0,
+    base_total: int = 0, leading_block: bool = False,
 ) -> "list[str]":
     """The display heading of each unit that will actually land in the assembled
     body, in order (document family helper — reuses :func:`_first_heading`).
@@ -400,12 +420,16 @@ def _unit_headings(
     ``base_total`` seeds the running byte total with the framing
     (title_page/trailer) bytes the body already counts before the units, so the
     TOC's cap stops at the SAME unit the body does (otherwise the TOC could list a
-    final unit the body drops at the byte cap). Unreadable/missing/over-cap units
-    are skipped, never fabricated."""
+    final unit the body drops at the byte cap). ``leading_block`` says a non-empty
+    framing block (the title_page) precedes the units in the body — when True the
+    body separates the FIRST unit too, so the cap-math must charge a separator
+    before unit #1 (otherwise the TOC under-counts by one separator and lists a
+    final unit the body drops). Unreadable/missing/over-cap units are skipped,
+    never fabricated."""
     out: list[str] = []
     sep_bytes = len(separator.encode())
     total = base_total
-    emitted = False
+    emitted = leading_block
     for name in units or []:
         if not isinstance(name, str):
             continue
@@ -425,7 +449,7 @@ def _unit_headings(
         if total + added > _MAX_TOTAL_BYTES:
             break
         try:
-            heading = _first_heading(path.read_text())
+            heading = _first_heading(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
             continue
         total += added
@@ -461,23 +485,61 @@ def _document_head(
         # into the body (not the missing/overflow/cap-truncated ones).
         sep = manifest.get("separator")
         sep = sep if isinstance(sep, str) else _DEFAULT_SEPARATOR
-        # Seed the cap math with the framing bytes the body counts before any unit
-        # (the title_page we're building here + the producer trailer), mirroring
-        # _assemble_document's framing_bytes — including its >cap zeroing — so the
-        # TOC drops the SAME trailing unit the body does at the byte cap.
-        title_page_text = "\n".join(lines)
+        # Seed the cap math with the framing bytes the BODY actually counts before any
+        # unit. The body's framing is the FINAL title_page (this title line + the whole
+        # rendered "## Contents" block) + the producer trailer + a leading separator —
+        # but the TOC block's own bytes depend on which units survive, which depends on
+        # the seed. The fixpoint iteration below resolves that circularity.
         trailer = manifest.get("trailer")
         trailer = trailer if isinstance(trailer, str) else ""
-        framing_bytes = len(title_page_text.encode()) + len(trailer.encode())
-        if framing_bytes > _MAX_TOTAL_BYTES:
-            framing_bytes = 0
-        headings = _unit_headings(
-            manifest.get("units", []), artifacts_root, separator=sep,
-            base_total=framing_bytes,
-        )
-        # #101 Part D: the TOC lists the NORMALIZED sequence, so it agrees with the body
-        # the assembler renumbers (both pass through the same document normalizer).
-        headings, _ = continuity_headings(headings, "document")
+
+        def _toc_head_bytes(hs: "list[str]") -> int:
+            # Byte size of the FULL title_page the body would count, given TOC headings.
+            head_lines = list(lines)
+            if hs:
+                if head_lines:
+                    head_lines.append("")
+                head_lines.append("## Contents")
+                head_lines.extend(f"{i}. {h}" for i, h in enumerate(hs, 1))
+            return len("\n".join(head_lines).encode())
+
+        def _framing(head_bytes: int) -> int:
+            fb = head_bytes + len(trailer.encode())
+            return 0 if fb > _MAX_TOTAL_BYTES else fb
+
+        units = manifest.get("units", [])
+        # The body always prepends this (non-empty) head as blocks[0], so it separates
+        # the first unit too — _unit_headings must charge that leading separator.
+        lead = bool(lines)
+
+        def _headings_for(seed_bytes: int) -> "list[str]":
+            hs = _unit_headings(
+                units, artifacts_root, separator=sep, leading_block=lead,
+                base_total=_framing(seed_bytes),
+            )
+            # #101 Part D: the TOC lists the NORMALIZED sequence, so it agrees with the
+            # body the assembler renumbers (both pass through the same normalizer).
+            return continuity_headings(hs, "document")[0]
+
+        # The body sizes its framing budget on the FINAL title_page (this head + its
+        # rendered TOC block), so the TOC's surviving-unit set and the head's byte size
+        # are mutually dependent: list fewer units → smaller head → more body budget →
+        # the body keeps a unit the TOC dropped (and vice-versa). Iterate toward a
+        # FIXPOINT (head we render == framing the body counts). In a NARROW band right at
+        # the byte cap the system is genuinely bistable (no exact fixpoint — the body's
+        # discrete cap boundary sits between the two head sizes); there we must pick the
+        # SAFE side, so we always seed with the LARGEST head seen — fewer TOC entries —
+        # which makes the TOC a SUBSET of the body's units (never a phantom entry the
+        # reader can't find). re-sweep: a single seed pass let TOC/body diverge by one
+        # unit at the cap. The seed is non-decreasing, so this converges in ≤ N steps.
+        seed = len("\n".join(lines).encode())  # title-only to start
+        headings = _headings_for(seed)
+        for _ in range(len(units) + 1):
+            next_seed = max(seed, _toc_head_bytes(headings))
+            if next_seed == seed:
+                break
+            seed = next_seed
+            headings = _headings_for(seed)
         if headings:
             if lines:
                 lines.append("")
@@ -614,7 +676,7 @@ def write_text_twin(content: str, artifacts_root: Path, name: str) -> str:
     twins = artifacts_root / ".twins"
     twins.mkdir(parents=True, exist_ok=True)
     out = twins / f"{safe}.md"
-    out.write_text(content)
+    out.write_text(content, encoding="utf-8")
     return str(out.relative_to(artifacts_root))
 
 
@@ -790,7 +852,7 @@ def _assemble_document(
             over_cap = True
             break
         try:
-            body = path.read_text()
+            body = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             errors.append(f"read failed for {name!r}: {exc}")
             missing.append(name)
@@ -921,7 +983,7 @@ def _assemble_data(manifest: dict, artifacts_root: Path) -> AssemblyResult:
             errors.append(f"total merged size would exceed {_MAX_TOTAL_BYTES} bytes")
             break
         try:
-            resolved.append((name, path.read_text()))
+            resolved.append((name, path.read_text(encoding="utf-8")))
             total += size
         except (OSError, UnicodeDecodeError) as exc:
             errors.append(f"read failed for {name!r}: {exc}")
@@ -1030,7 +1092,11 @@ def _merge_csv(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[st
                 seen: set[str] = set()
                 out: list[list[str]] = []
                 for r in rows:
-                    key = _dedupe_key("\x00".join(r))
+                    # Serialize the row as a list so field boundaries are
+                    # unambiguous: a NUL-join collides differently-shaped values
+                    # (``["a\x00b","c"]`` and ``["a","b\x00c"]`` both yield
+                    # ``a\x00b\x00c``). json.dumps escapes/encodes each cell.
+                    key = _dedupe_key(json.dumps(r))
                     if key not in seen:
                         seen.add(key)
                         out.append(r)
@@ -1217,7 +1283,7 @@ def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path
     unrendered — it NEVER fabricates a binary (the HRWT text-named-.pdf failure)."""
     fmt = (fmt or "").lower().lstrip(".")
     src = _media_out(artifacts_root, ".md")
-    src.write_text(content)
+    src.write_text(content, encoding="utf-8")
     try:
         if fmt in _PANDOC_DIRECT_FORMATS:
             out = _media_out(artifacts_root, f".{fmt}")
@@ -1232,20 +1298,31 @@ def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path
             return out, f"rendered .{fmt} via pandoc"
         if fmt == "pdf":
             docx_tmp = _media_out(artifacts_root, ".docx")
-            _run_doc_tool(["pandoc", str(src), "-o", str(docx_tmp)], tool="pandoc")
+            # libreoffice writes ``<docx_stem>.pdf`` into artifacts_root. Name it up
+            # front so a partial/garbage PDF left behind by a soffice failure (or an
+            # over-cap output) is always unlinked on the failure path, not orphaned
+            # to pollute artifact scans (mirrors the pandoc-direct branch hygiene).
+            pdf_out = docx_tmp.with_suffix(".pdf")
             try:
+                # md → docx (pandoc) → pdf (libreoffice). The intermediate docx
+                # MUST be rendered from the markdown source FIRST; handing an
+                # empty docx to soffice yields a contentless PDF (regression
+                # caught in the 0.9.0 pre-ship re-sweep). Both steps fail-closed.
+                _run_doc_tool(["pandoc", str(src), "-o", str(docx_tmp)], tool="pandoc")
                 _run_doc_tool(
                     ["soffice", "--headless", "--convert-to", "pdf",
                      "--outdir", str(artifacts_root), str(docx_tmp)],
                     tool="libreoffice",
                 )
-                pdf_out = docx_tmp.with_suffix(".pdf")
                 if not pdf_out.is_file():
                     raise _DocToolError("libreoffice produced no PDF")
                 _check_output_size(pdf_out)
-                return pdf_out, "rendered .pdf via pandoc+libreoffice"
+            except (_DocToolError, _MediaToolError):
+                pdf_out.unlink(missing_ok=True)
+                raise
             finally:
                 docx_tmp.unlink(missing_ok=True)
+            return pdf_out, "rendered .pdf via pandoc+libreoffice"
         raise _DocToolError(f"unsupported document render format {fmt!r}")
     finally:
         src.unlink(missing_ok=True)
@@ -1296,7 +1373,7 @@ def _join_av(resolved: "list[tuple[str, Path]]", artifacts_root: Path, kind: str
         # path are escaped per ffmpeg's rule ('\'').
         lines = [f"file '{str(p).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'"
                  for _n, p in resolved]
-        listfile.write_text("\n".join(lines) + "\n")
+        listfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
         try:
             _run_media_join(
                 ["ffmpeg", "-y", "-f", "concat", "-safe", "0",

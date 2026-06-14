@@ -470,3 +470,56 @@ def test_reply_multichunk_only_retries_failed_chunk_no_duplicate(monkeypatch):
     assert sum(t.startswith("A") for t in delivered) == 1
     assert sum(t.startswith("B") for t in delivered) == 1  # plaintext only
     assert sum(t.startswith("C") for t in delivered) == 1
+
+
+# === Pre-ship: args_text derivation vs quoted command token ===
+
+def _capture_listener():
+    """A listener whose dispatcher records (cmd, args_text) and replies are
+    swallowed, so _handle_message can be driven without any network."""
+    captured: list[tuple[str, str]] = []
+
+    def handler(cmd: str, args_text: str) -> str:
+        captured.append((cmd, args_text))
+        return ""  # empty reply => _reply not invoked
+
+    tl = telegram_listener.TelegramListener(
+        bot_token="t", chat_id="1", on_command=handler
+    )
+    return tl, captured
+
+
+def test_args_text_plain_command():
+    tl, captured = _capture_listener()
+    tl._handle_message("/kickoff proj write the intro")
+    assert captured == [("/kickoff", "proj write the intro")]
+
+
+def test_args_text_command_with_no_args():
+    tl, captured = _capture_listener()
+    tl._handle_message("/status")
+    assert captured == [("/status", "")]
+
+
+def test_args_text_quoted_command_token_does_not_corrupt_args():
+    """Regression: shlex unquotes parts[0], so a command token carrying
+    quotes/escapes (e.g. `/kick"off"`) yields an unquoted `cmd` SHORTER than
+    its raw token. The old `text[len(cmd):]` slice then bled leftover command
+    bytes into args_text. Deriving args by stripping the raw first token keeps
+    args verbatim regardless of quoting in the command token."""
+    tl, captured = _capture_listener()
+    tl._handle_message('/kick"off" do the thing')
+    assert len(captured) == 1
+    cmd, args_text = captured[0]
+    # shlex collapses the quoted token to the bare command.
+    assert cmd == "/kickoff"
+    # The args must be exactly the post-token text — no leaked `off"` bytes.
+    assert args_text == "do the thing"
+
+
+def test_args_text_preserves_inner_quoting_verbatim():
+    """Args text is handed to the dispatcher verbatim (the dispatcher does its
+    own re-parsing); quoting inside the args must survive untouched."""
+    tl, captured = _capture_listener()
+    tl._handle_message('/kickoff "quoted arg" tail')
+    assert captured == [("/kickoff", '"quoted arg" tail')]

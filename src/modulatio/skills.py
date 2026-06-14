@@ -38,7 +38,24 @@ from modulatio.vault import project_dir, validate_registry_name
 
 logger = logging.getLogger("modulatio.skills")
 
-_SKILLS_ROOT = config.get_shared_resources_path() / "skills"
+#: Override hook for the shared skills directory. ``None`` (the default)
+#: means resolve from ``config.get_shared_resources_path()`` at CALL time, so a
+#: relocated shared-resources path (e.g. after a config reload) is honored —
+#: matching standards.py / constitution.py / qc_persona.py, which never freeze
+#: the path at import. Set to a concrete ``Path`` only to pin the directory
+#: (tests do this via ``monkeypatch.setattr(skills, "_SKILLS_ROOT", ...)``).
+#: re-sweep (0.9.0 MEDIUM): was frozen at import — diverged from the sibling
+#: resolvers and went stale after a config reload.
+_SKILLS_ROOT: Path | None = None
+
+
+def _skills_root() -> Path:
+    """The user's shared skills directory, resolved at call time so a
+    relocated shared-resources path / test pin is honored (no import-time
+    freeze) — mirrors ``standards._standards_root()``."""
+    if _SKILLS_ROOT is not None:
+        return _SKILLS_ROOT
+    return config.get_shared_resources_path() / "skills"
 
 #: Built-in canonical skills bundled with the package. Read-only seed
 #: copies of skills that the team_template + roster reference by name —
@@ -305,7 +322,7 @@ def load_with_metadata(name: str, project_code: str | None = None) -> Skill:
         local = project_dir(project_code) / "skills" / f"{name}.md"
         if local.exists():
             return _maybe_supersede(name, _parse_file(local), seed_path)
-    shared = _SKILLS_ROOT / f"{name}.md"
+    shared = _skills_root() / f"{name}.md"
     if shared.exists():
         return _maybe_supersede(name, _parse_file(shared), seed_path)
     if seed_path.exists():
@@ -366,8 +383,9 @@ def list_skills(project_code: str | None = None) -> list[str]:
     names: set[str] = set()
     if _SEED_SKILLS_ROOT.exists():
         names.update(p.stem for p in _SEED_SKILLS_ROOT.glob("*.md"))
-    if _SKILLS_ROOT.exists():
-        names.update(p.stem for p in _SKILLS_ROOT.glob("*.md"))
+    shared_root = _skills_root()
+    if shared_root.exists():
+        names.update(p.stem for p in shared_root.glob("*.md"))
     if project_code is not None:
         local_dir = project_dir(project_code) / "skills"
         if local_dir.exists():
@@ -385,7 +403,7 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
     if project_code is not None:
         root = project_dir(project_code) / "skills"
     else:
-        root = _SKILLS_ROOT
+        root = _skills_root()
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{skill.name}.md"
 
@@ -429,7 +447,7 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
         fm_lines.append(f"pass_env: {_fm(', '.join(skill.pass_env))}")
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + skill.prompt_template.rstrip() + "\n"
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     return path
 
 
@@ -465,7 +483,7 @@ def create_skill(
     if project_code is not None:
         root = project_dir(project_code) / "skills"
     else:
-        root = _SKILLS_ROOT
+        root = _skills_root()
     target = root / f"{name}.md"
     if target.exists():
         raise FileExistsError(

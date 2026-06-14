@@ -60,6 +60,26 @@ app = typer.Typer(
 )
 
 
+#: Extensions routed to ``kind='image'`` so vision-capable producers can
+#: improve a picture, not just text. Product-agnostic: the attachment kind
+#: follows the artifact's class, never a hardcoded "document" assumption.
+_IMAGE_ATTACH_EXTS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
+)
+
+
+def _infer_attachment_kind(path: Path) -> str:
+    """Infer the attachment kind from the path extension.
+
+    Images route to ``kind='image'`` (path-only, resolved at multimodal
+    dispatch); everything else stays ``kind='document'`` (utf-8 text read).
+    A non-image binary still fails the utf-8 read in build_attachment — the
+    caller surfaces an artifact-class-aware message instead of an opaque
+    codec error.
+    """
+    return "image" if path.suffix.lower() in _IMAGE_ATTACH_EXTS else "document"
+
+
 def _version_callback(value: bool) -> None:
     if not value:
         return
@@ -437,12 +457,38 @@ def kickoff(
     _atts = []
     for _p in (attach or []):
         _path = Path(_p).expanduser()
+        _kind = _infer_attachment_kind(_path)
+        # re-sweep (edge-case): a directory (or FIFO/device) whose name ends
+        # in an image extension routes to kind='image', which never read_text()s
+        # — so it slips past build_attachment's fail-fast and crashes later at
+        # multimodal dispatch. The document branch is protected (read_text on a
+        # dir raises IsADirectoryError, caught below) but the image branch is
+        # not. Require a regular file up front so both kinds fail fast here,
+        # before any disk side-effect leaves an orphan project/roster/run folder.
+        if _path.exists() and not _path.is_file():
+            typer.echo(
+                f"  ! --attach: cannot attach {_path}: not a regular file "
+                "(directory/FIFO/device).",
+                err=True,
+            )
+            raise typer.Exit(1)
         try:
-            _atts.append(build_attachment(_path, kind="document"))
+            _atts.append(build_attachment(_path, kind=_kind))
         except FileNotFoundError:
             typer.echo(f"  ! --attach: file not found: {_path}", err=True)
             raise typer.Exit(1)
-        except (ValueError, UnicodeDecodeError, OSError) as _e:
+        except UnicodeDecodeError:
+            # A non-image binary (PDF, zip, compiled, media) read as a utf-8
+            # document. Surface an artifact-class-aware message rather than the
+            # opaque "'utf-8' codec can't decode byte ..." stack of digits.
+            typer.echo(
+                f"  ! --attach: cannot attach {_path}: not a text/image "
+                "artifact (binary documents like PDF/zip/media aren't "
+                "supported via --attach yet — convert to text first).",
+                err=True,
+            )
+            raise typer.Exit(1)
+        except (ValueError, OSError) as _e:
             # OSError covers a directory passed as --attach (IsADirectoryError)
             # and an unreadable file (PermissionError) — both surface as a clean
             # message instead of an uncaught stack trace.
@@ -1027,24 +1073,35 @@ def heartbeat_run_once(
 ) -> None:
     """Run a single heartbeat tick — recover stale tasks + dispatch the
     next pending task. Useful for cron-style external scheduling."""
+    # re-sweep (finding 1): reject --no-stub at the CLI layer BEFORE any
+    # queue mutation. Otherwise the NotImplementedError below is swallowed by
+    # Heartbeat._run_task's catch-all (logged to the daemon log, not here),
+    # the task is marked failed / its retries burned, and the CLI prints a
+    # bare "status=failed" with no reason. Fail loud + early instead.
+    if not stub:
+        typer.echo(
+            "heartbeat run-once --no-stub requires the daemon (slice 8); "
+            "use `modulatio kickoff` for real-model runs.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     def _dispatch(
         project_code: str, objective: str, *,
         jt_id: str | None = None, jt_params: dict | None = None,
         on_refused: str = "skip",
     ) -> str:
         # Build the same Orchestrator stack kickoff() uses.
-        if stub:
-            runners = default_generic_stub_runners()
-            matcher = None
-        else:
-            # Defer real-model wiring — would mirror cli.kickoff(); out of
-            # scope for slice 6 since heartbeat run-once is primarily a
-            # diagnostic / cron-driver verb. The daemon (slice 8) wires
-            # the real-model path.
+        # --no-stub is rejected at the CLI layer above, so stub is always True
+        # here; the real-model path is the daemon's (slice 8). Defensive
+        # guard kept in case _dispatch is ever invoked outside this command.
+        if not stub:  # pragma: no cover - unreachable via heartbeat_run_once
             raise NotImplementedError(
                 "heartbeat run-once --no-stub requires the daemon (slice 8). "
                 "Use `modulatio kickoff` for direct real-model runs."
             )
+        runners = default_generic_stub_runners()
+        matcher = None
         wiki = project_dir(project_code)
         net_new = not wiki.exists()
         vault.init_project(project_code, project_code, objective, exist_ok=True)
@@ -1139,7 +1196,7 @@ def cron_list(
     if not jobs:
         typer.echo("(no cron jobs)")
         return
-    jobs.sort(key=lambda j: (not j.get("enabled"), j.get("next_run", "")))
+    jobs.sort(key=lambda j: (not j.get("enabled"), j.get("next_run") or ""))
     for j in jobs:
         flag = "✓" if j.get("enabled") else "✗"
         typer.echo(

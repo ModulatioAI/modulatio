@@ -187,7 +187,7 @@ def persist_raw_result(call_id: str, text: str, tool_calls_dir: Path) -> Path:
         candidate, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600,
     )
     try:
-        with _os.fdopen(fd, "w") as fh:
+        with _os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
     except Exception:
         try:
@@ -328,6 +328,7 @@ def prune_messages_sliding_window(
     max_input_tokens: int,
     prune_at_pct: float = 0.80,
     keep_recent: int = 3,
+    tool_calls_dir: Path | None = None,
 ) -> tuple[list[dict], int]:
     """Rewrite oldest ``role: tool`` messages to summarized placeholders
     when the conversation token count exceeds ``prune_at_pct *
@@ -344,6 +345,22 @@ def prune_messages_sliding_window(
     estimate hits the 80-100% band. Layer 1 (this module) calls it from
     inside the tool loop after each tool-result append. Same function,
     two trigger sites.
+
+    Recoverability (0.9.0 re-sweep, finding 1): the tool loop only persists
+    a raw result to ``<tool_calls_dir>/<call_id>.txt`` when it crosses
+    ``threshold_tokens``. A SUB-threshold result lands verbatim with no disk
+    copy. Pruning such a message to a ``read_tool_result`` promise dangled a
+    dead pointer and lost the original text irrecoverably. So:
+      - if the message already carries a persist marker (``[summarized:`` /
+        ``[truncated:``) OR a ``<call_id>.txt`` already exists, the raw is
+        on disk → emit the recovery promise as before;
+      - else if a ``tool_calls_dir`` is known (explicit arg, else the bound
+        config's), PERSIST-ON-PRUNE the verbatim content first, then emit
+        the recovery promise (now resolvable);
+      - else (no dir reachable) emit a placeholder that plainly says the raw
+        cannot be recovered — never a pointer we can't honor.
+    ``tool_calls_dir`` defaults to ``None``; the budget-primitive call site
+    doesn't thread it, so we also fall back to ``current_config()``.
     """
     if max_input_tokens <= 0:
         return list(messages), 0
@@ -351,6 +368,13 @@ def prune_messages_sliding_window(
     current = count_tokens(model, messages=messages)
     if current <= threshold:
         return list(messages), 0
+
+    # Resolve where raw results live: explicit arg wins, else the bound
+    # config's dir (the #90 budget call site doesn't pass one).
+    if tool_calls_dir is None:
+        _cfg = current_config()
+        if _cfg is not None:
+            tool_calls_dir = _cfg.tool_calls_dir
 
     # Find tool-role indices in order; protect the last keep_recent.
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
@@ -366,14 +390,46 @@ def prune_messages_sliding_window(
         if content.startswith("[summarized:"):
             continue
         call_id = str(msg.get("tool_call_id") or f"prune-{i}")
-        out[i] = {
-            **msg,
-            "content": (
+
+        # Is the raw already on disk? Either the tool loop persisted it (the
+        # inline content carries a persist marker) or a file already exists.
+        # re-sweep finding 1: `[summarized:` content already `continue`d above,
+        # so `[truncated:` is the only persist marker reachable here.
+        already_persisted = content.startswith("[truncated:")
+        if not already_persisted and tool_calls_dir is not None:
+            try:
+                candidate = (Path(tool_calls_dir) / f"{call_id}.txt").resolve()
+                root = Path(tool_calls_dir).resolve()
+                candidate.relative_to(root)
+                already_persisted = candidate.exists()
+            except (ValueError, OSError):
+                already_persisted = False
+
+        recoverable = already_persisted
+        # Never-persisted sub-threshold result + a known dir → persist now so
+        # the pointer we're about to write actually resolves.
+        if not recoverable and tool_calls_dir is not None and call_id:
+            try:
+                persist_raw_result(call_id, content, Path(tool_calls_dir))
+                recoverable = True
+            except (ValueError, OSError):
+                # Hostile call_id shape or unwritable dir — fall through to
+                # the no-promise placeholder rather than dangle a pointer.
+                recoverable = False
+
+        if recoverable:
+            new_content = (
                 f"[summarized: call_id={call_id} (pruned)]\n"
                 f"Original tool result removed by sliding-window prune. "
                 f"Use read_tool_result(call_id={call_id!r}) to retrieve."
-            ),
-        }
+            )
+        else:
+            new_content = (
+                f"[summarized: call_id={call_id} (pruned)]\n"
+                f"Original tool result removed by sliding-window prune and "
+                f"cannot be recovered (raw was not persisted to disk)."
+            )
+        out[i] = {**msg, "content": new_content}
         pruned += 1
         if count_tokens(model, messages=out) <= threshold:
             break

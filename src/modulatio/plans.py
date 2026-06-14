@@ -29,8 +29,12 @@ Slice scope:
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -139,6 +143,121 @@ class PlanRecord:
 
 def _plans_dir(project_code: str) -> Path:
     return project_dir(project_code) / "plans"
+
+
+#: Default seconds a plan-file mutator waits for the per-plan lock before
+#: giving up. Overridable via ``MODULATIO_PLAN_LOCK_TIMEOUT`` (tests bump
+#: it so a deliberately-held lock makes the writer WAIT rather than error).
+_PLAN_LOCK_TIMEOUT_DEFAULT: float = 5.0
+
+
+def _plan_lock_timeout() -> float:
+    raw = os.environ.get("MODULATIO_PLAN_LOCK_TIMEOUT")
+    if not raw:
+        return _PLAN_LOCK_TIMEOUT_DEFAULT
+    try:
+        return float(raw)
+    except ValueError:
+        return _PLAN_LOCK_TIMEOUT_DEFAULT
+
+
+#: Thread-local re-entrancy depths, keyed by absolute lock-file path. The
+#: file lock (``fcntl.flock``) is NOT recursive across two open file
+#: descriptions in the same process, so a nested ``_plan_lock`` (e.g.
+#: ``project_execution._claim_plan_lock`` holding the lock while calling
+#: ``set_status`` / ``update_execution_state``, which re-enter the lock)
+#: would self-deadlock. We track depth per thread + path and only touch
+#: ``fcntl`` on the OUTERMOST acquisition; inner re-entries pass through.
+_plan_lock_state = threading.local()
+
+
+@contextlib.contextmanager
+def _plan_lock(plan_id: str, project_code: str, *, timeout: float | None = None):
+    """Hold a POSIX exclusive file lock serializing ALL read-modify-write
+    mutations of a plan's YAML frontmatter.
+
+    re-sweep (F2): ``set_status`` / ``update_execution_state`` (and
+    ``cancel`` through ``set_status``) each do a read-YAML / modify /
+    write-YAML cycle. Unguarded, a user ``cancel`` flipping status to
+    ``declined`` can be clobbered by the dispatcher loop's
+    ``update_execution_state`` writing back its pre-cancel meta (lost
+    update). This lock makes those cycles mutually exclusive and forces
+    the read to happen INSIDE the critical section so each mutator sees
+    the latest on-disk state.
+
+    The lock file is the SAME ``<plan-id>.lock`` that
+    ``project_execution._claim_plan_lock`` claims for the approved→executing
+    CAS (which delegates here), so plan-file mutators and the CAS claimer
+    serialize against one another rather than racing on two separate locks.
+
+    Re-entrant within a thread: a nested call on the same lock path passes
+    through without re-grabbing ``fcntl`` (which is non-recursive across
+    file descriptions and would deadlock). Only the outermost acquisition
+    holds/releases the OS lock.
+
+    POSIX-only: ``fcntl.flock`` is unavailable on Windows, where this
+    degrades to a no-op (single-process Windows is the only documented
+    shape — see daemon ops guide).
+    """
+    if timeout is None:
+        timeout = _plan_lock_timeout()
+    code = validate_project_code(project_code.lower())
+    lock_path = _plans_dir(code) / f"{plan_id}.lock"
+    # re-sweep (F1): the re-entrancy key MUST be identical between the
+    # outer acquisition (lock file not yet created — it's touch()ed below)
+    # and a nested re-entrant acquisition (file now exists). Gating
+    # resolve() on .exists() made the outer key the UNRESOLVED path and the
+    # inner key the symlink-RESOLVED path; under a symlinked plans-root the
+    # two keys diverged, so the nested call missed the depth>0 fast-path and
+    # tried to re-grab fcntl on the same fd → self-deadlock. resolve()
+    # resolves a symlinked parent even when the leaf is absent, so computing
+    # it unconditionally yields a stable key for both acquisitions.
+    key = str(lock_path.resolve())
+
+    depths = getattr(_plan_lock_state, "depths", None)
+    if depths is None:
+        depths = {}
+        _plan_lock_state.depths = depths
+    if depths.get(key, 0) > 0:
+        # Re-entrant: this thread already holds the OS lock for this path.
+        depths[key] += 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+        return
+
+    try:
+        import fcntl  # POSIX only
+    except ImportError:  # pragma: no cover — non-POSIX fallback
+        yield
+        return
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch()
+    fh = open(lock_path, "w", encoding="utf-8")
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise BlockingIOError(
+                        f"could not acquire plan lock for {plan_id} after "
+                        f"{timeout}s — another mutator is holding it"
+                    )
+                time.sleep(0.05)
+        depths[key] = 1
+        yield
+    finally:
+        depths[key] = 0
+        try:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        except Exception:  # pragma: no cover — best-effort release
+            pass
+        fh.close()
 
 
 def looks_like_plan(response: str) -> bool:
@@ -359,13 +478,22 @@ def _coerce_cap(value: Any, kind: type) -> int | float | None:
     - A non-numeric string (``max_tokens: abc``) raises ``ValueError``
       in ``int``/``float``; degrade to ``None`` instead of bricking the
       whole load (which ``list_plans`` would silently skip).
+    - A negative cap (``max_tokens: -1``) → ``None``. ``over_cap()`` halts
+      whenever ``used > cap``; a negative cap is ``< 0`` so it trips on the
+      first usage record (``0 > -1``), bricking the plan with a confusing
+      "cap exceeded" before any work runs. Mirror ``comptroller._parse_int``'s
+      negative-cap rejection: degrade a typo'd negative cap to unbounded
+      rather than instant-halt. (re-sweep F2.)
     """
     if value is None or isinstance(value, bool):
         return None
     try:
-        return kind(value)
+        coerced = kind(value)
     except (TypeError, ValueError):
         return None
+    if coerced < 0:
+        return None
+    return coerced
 
 
 def load(plan_id: str, project_code: str) -> Optional[PlanRecord]:
@@ -375,7 +503,18 @@ def load(plan_id: str, project_code: str) -> Optional[PlanRecord]:
     target = _plans_dir(code) / f"{plan_id}.md"
     if not target.exists():
         return None
-    raw = target.read_text()
+    # Mirror the UTF-8 write path (persist() opens with encoding="utf-8"
+    # and yaml allow_unicode=True). Without an explicit encoding, read_text
+    # defaults to the process locale and a daemon/cron run under a non-UTF-8
+    # locale (e.g. C/POSIX) raises UnicodeDecodeError on a legitimate
+    # non-ASCII title/body, bricking the load + the whole project listing.
+    try:
+        raw = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        # A corrupt / non-UTF-8 plan is UNLOADABLE — skip it (the malformed-file
+        # contract list_plans relies on). Never decode-with-replacement: that
+        # would surface mojibake as a real operator-approved plan (Nemo).
+        return None
     m = _FRONTMATTER_RE.match(raw)
     if m is None:
         return None
@@ -449,12 +588,24 @@ _SUB_OBJECTIVE_ITEM_RE = re.compile(
     # The separator class deliberately excludes newline whitespace
     # (uses [ \t] not \s) so a title-only line never borrows the
     # next item's line as its description and swallows it.
-    # Title capture is line-anchored ($ + MULTILINE keeps it on one line)
-    # and lazy, so it tolerates inner markdown emphasis (``*draft*`` /
-    # nested ``**bold**``) inside the bold title without dropping the
-    # item — a negated-asterisk class would silently omit any such
-    # sub-objective from the parsed list.
-    r"^[ \t]{0,3}\*\*\s*(\d+)\.\s*(.+?)\*\*[ \t—–\-:]*(.*)$",
+    # re-sweep (F1): the title closes at the ``**`` that PRECEDES the
+    # separator boundary, not the last ``**`` on the line. The old greedy
+    # ``(.+)\*\*`` bound the closing ``**`` to the LAST ``**``, so bold in
+    # the DESCRIPTION (after the em-dash) corrupted the title — e.g.
+    # ``**1. Build it** — do it with **care**`` parsed title=``Build it**
+    # — do it with **care``. We now match the title LAZILY (``.+?``) and
+    # require the closing ``**`` be followed (after optional spaces/tabs)
+    # by an explicit separator char (— – - :) or end-of-line. A space
+    # alone is NOT a separator (it appears mid-title), which is why the
+    # boundary is the dash/colon-or-EOL class, not the old space-inclusive
+    # one. Lazy + that boundary still tolerates nested ``**bold**`` inside
+    # the TITLE (``**1. Do the **important** thing** — x``): the lazy
+    # engine backtracks past the inner ``**`` (no separator follows it)
+    # until it reaches the ``**`` that does precede the separator. The
+    # description (group 4) is captured separately and keeps its own bold.
+    # ``$`` + MULTILINE keeps the match on one line so a title-only item
+    # never borrows the next line.
+    r"^[ \t]{0,3}\*\*\s*(\d+)\.\s*(.+?)\*\*[ \t]*(?:([—–\-:])[ \t]*(.*))?$",
     re.MULTILINE,
 )
 #: Line-starts that look like a numbered bold sub-objective item. Used
@@ -499,13 +650,23 @@ def extract_sub_objectives(plan_body: str) -> list[dict]:
     if line_starts != len(items):
         _logger.warning(
             "extract_sub_objectives parsed %d items but found %d "
-            "numbered-item line-starts; a sub-objective may have been "
-            "dropped by the item regex",
+            "numbered-item line-starts; a sub-objective was dropped by "
+            "the item regex — returning EMPTY to fail closed (the "
+            "dispatcher pauses for human revision rather than running a "
+            "short list and reporting an approved objective done)",
             len(items), line_starts,
         )
+        # Fail closed: a detected drop means we cannot trust this list to
+        # be complete. Returning the short list would silently skip a
+        # user-approved sub-objective and report the plan done. An empty
+        # return routes start_execution to its no-sub-objectives branch,
+        # which flips the plan to 'paused' and opens a revision ticket.
+        return []
     for i, m in enumerate(items):
         title = m.group(2).strip()
-        first_line = m.group(3).strip()
+        # re-sweep (F1): group(3) is the separator char (— – - :), group(4)
+        # the same-line description (both None for a title-only item).
+        first_line = (m.group(4) or "").strip()
         chunk_start = m.start()
         chunk_end = items[i + 1].start() if i + 1 < len(items) else len(section)
         raw = section[chunk_start:chunk_end].strip()
@@ -594,28 +755,41 @@ def set_status(
     target = _plans_dir(code) / f"{plan_id}.md"
     if not target.exists():
         raise FileNotFoundError(f"plan file not found: {target}")
-    raw = target.read_text()
-    m = _FRONTMATTER_RE.match(raw)
-    if m is None:
-        raise ValueError(f"plan file {target} has no frontmatter")
-    meta = yaml.safe_load(m.group(1)) or {}
-    body = raw[m.end():].rstrip()
+    # re-sweep (F2): read-modify-write under the per-plan lock so a
+    # concurrent update_execution_state can't clobber this status flip
+    # (lost update). Read happens INSIDE the lock to see the latest state.
+    with _plan_lock(plan_id, code):
+        # UTF-8 to mirror the write path; a non-UTF-8 process locale must
+        # not turn a legitimate non-ASCII plan into a UnicodeDecodeError.
+        try:
+            raw = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # Fail CLEAN — never read-with-replacement and write U+FFFD back into
+            # an operator-approved plan during a read-modify-write (Nemo).
+            raise ValueError(
+                f"plan file {target} is not valid UTF-8; refusing to rewrite"
+            ) from exc
+        m = _FRONTMATTER_RE.match(raw)
+        if m is None:
+            raise ValueError(f"plan file {target} has no frontmatter")
+        meta = yaml.safe_load(m.group(1)) or {}
+        body = raw[m.end():].rstrip()
 
-    prev_status = str(meta.get("status", "draft"))
-    meta["status"] = new_status
-    transitions = list(meta.get("status_transitions") or [])
-    transitions.append({
-        "to": new_status,
-        "decided_by": decided_by,
-        "decided_at": datetime.now(timezone.utc).isoformat(),
-        "note": note,
-    })
-    meta["status_transitions"] = transitions
+        prev_status = str(meta.get("status", "draft"))
+        meta["status"] = new_status
+        transitions = list(meta.get("status_transitions") or [])
+        transitions.append({
+            "to": new_status,
+            "decided_by": decided_by,
+            "decided_at": datetime.now(timezone.utc).isoformat(),
+            "note": note,
+        })
+        meta["status_transitions"] = transitions
 
-    text = "---\n" + yaml.safe_dump(
-        meta, sort_keys=False, allow_unicode=True,
-    ) + "---\n\n" + body + "\n"
-    target.write_text(text)
+        text = "---\n" + yaml.safe_dump(
+            meta, sort_keys=False, allow_unicode=True,
+        ) + "---\n\n" + body + "\n"
+        target.write_text(text, encoding="utf-8")
 
     # Return the up-to-date record
     record = load(plan_id, code)
@@ -791,34 +965,47 @@ def update_execution_state(
     target = _plans_dir(code) / f"{plan_id}.md"
     if not target.exists():
         raise FileNotFoundError(f"plan file not found: {target}")
-    raw = target.read_text()
-    m = _FRONTMATTER_RE.match(raw)
-    if m is None:
-        raise ValueError(f"plan file {target} has no frontmatter")
-    meta = yaml.safe_load(m.group(1)) or {}
-    body = raw[m.end():].rstrip()
+    # re-sweep (F2): read-modify-write under the per-plan lock and read
+    # INSIDE it, so a concurrent cancel()/set_status flip to 'declined'
+    # is never clobbered by this update writing back its pre-cancel meta.
+    with _plan_lock(plan_id, code):
+        # UTF-8 to mirror the write path; a non-UTF-8 process locale must
+        # not turn a legitimate non-ASCII plan into a UnicodeDecodeError.
+        try:
+            raw = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # Fail CLEAN — never read-with-replacement and write U+FFFD back into
+            # an operator-approved plan during a read-modify-write (Nemo).
+            raise ValueError(
+                f"plan file {target} is not valid UTF-8; refusing to rewrite"
+            ) from exc
+        m = _FRONTMATTER_RE.match(raw)
+        if m is None:
+            raise ValueError(f"plan file {target} has no frontmatter")
+        meta = yaml.safe_load(m.group(1)) or {}
+        body = raw[m.end():].rstrip()
 
-    if current_index is not None:
-        meta["current_index"] = int(current_index)
-    if reflection_entry is not None:
-        log = list(meta.get("reflection_log") or [])
-        log.append(reflection_entry)
-        meta["reflection_log"] = log
-    if spawned_kickoff is not None:
-        spawned = list(meta.get("spawned_kickoffs") or [])
-        spawned.append(spawned_kickoff)
-        meta["spawned_kickoffs"] = spawned
-    if execution_started_at is not None and not meta.get("execution_started_at"):
-        meta["execution_started_at"] = execution_started_at
-    if tokens_used is not None:
-        meta["tokens_used"] = int(tokens_used)
-    if cost_usd_used is not None:
-        meta["cost_usd_used"] = float(cost_usd_used)
+        if current_index is not None:
+            meta["current_index"] = int(current_index)
+        if reflection_entry is not None:
+            log = list(meta.get("reflection_log") or [])
+            log.append(reflection_entry)
+            meta["reflection_log"] = log
+        if spawned_kickoff is not None:
+            spawned = list(meta.get("spawned_kickoffs") or [])
+            spawned.append(spawned_kickoff)
+            meta["spawned_kickoffs"] = spawned
+        if execution_started_at is not None and not meta.get("execution_started_at"):
+            meta["execution_started_at"] = execution_started_at
+        if tokens_used is not None:
+            meta["tokens_used"] = int(tokens_used)
+        if cost_usd_used is not None:
+            meta["cost_usd_used"] = float(cost_usd_used)
 
-    text = "---\n" + yaml.safe_dump(
-        meta, sort_keys=False, allow_unicode=True,
-    ) + "---\n\n" + body + "\n"
-    target.write_text(text)
+        text = "---\n" + yaml.safe_dump(
+            meta, sort_keys=False, allow_unicode=True,
+        ) + "---\n\n" + body + "\n"
+        target.write_text(text, encoding="utf-8")
 
     record = load(plan_id, code)
     if record is None:  # pragma: no cover

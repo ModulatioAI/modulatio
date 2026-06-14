@@ -134,7 +134,7 @@ def _load_defaults() -> dict:
             _cached_defaults = {}
             return _cached_defaults
         try:
-            _cached_defaults = json.loads(DEFAULTS_FILE.read_text())
+            _cached_defaults = json.loads(DEFAULTS_FILE.read_text(encoding="utf-8", errors="replace"))
         except (json.JSONDecodeError, OSError):
             _cached_defaults = {}
         return _cached_defaults
@@ -155,7 +155,7 @@ def defaults_exist() -> bool:
 def write_secret_file(path: Path, content: str) -> None:
     """Atomically write *content* to *path* with mode 0o600 throughout.
 
-    The naive ``path.write_text(...); path.chmod(0o600)`` pattern leaves
+    The naive ``path.write_text(..., encoding="utf-8"); path.chmod(0o600)`` pattern leaves
     the file briefly world-readable between create-with-default-umask
     and the explicit chmod. On a multi-user host, that window is enough
     to leak credentials; the pre-V2 security audit (2026-05-02) flagged
@@ -178,7 +178,7 @@ def write_secret_file(path: Path, content: str) -> None:
         dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)
         os.replace(tmp_name, str(path))
     except Exception:
@@ -195,20 +195,38 @@ def set_env_secret(name: str, value: str) -> Path:
 
     Used by the Configuration tab when the operator enters an API key — the
     key persists across sessions (loaded by ``load_modulatio_env``) and is live
-    this session. Existing lines are preserved; the named key is updated or
-    appended. Returns the env file path."""
+    this session. The named key is updated in place when already present, or
+    appended; ALL other lines — including comments and blanks — are preserved
+    verbatim (mirroring ``remove_env_secret``'s preserve-and-rewrite). Returns
+    the env file path.
+
+    A newline (``\\n``/``\\r``) anywhere in *name* or *value* would let a
+    crafted key value inject a second ``KEY=...`` assignment into the file, so
+    such inputs are rejected fail-closed rather than written. An ``=`` is fine
+    in the value (readers split on the first ``=``) but not in the key name.
+    """
+    if "\n" in name or "\r" in name or "\n" in value or "\r" in value:
+        raise ValueError("env secret name/value must not contain newlines")
+    if "=" in name or not name.strip():
+        raise ValueError("env secret name must be non-empty and contain no '='")
     env_path = get_vault_root() / ".env"
-    existing: dict[str, str] = {}
+    out_lines: list[str] = []
+    replaced = False
     if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                existing[k.strip()] = v.strip()
-    existing[name] = value
-    write_secret_file(
-        env_path, "\n".join(f"{k}={v}" for k, v in existing.items()) + "\n"
-    )
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if (stripped and not stripped.startswith("#") and "=" in stripped
+                    and stripped.split("=", 1)[0].strip() == name):
+                # Update the existing assignment in place; preserve position.
+                if not replaced:
+                    out_lines.append(f"{name}={value}")
+                    replaced = True
+                # Drop any later duplicate assignments of the same key.
+                continue
+            out_lines.append(line)  # comment, blank, or unrelated kv — verbatim
+    if not replaced:
+        out_lines.append(f"{name}={value}")
+    write_secret_file(env_path, "\n".join(out_lines) + "\n")
     os.environ[name] = value
     return env_path
 
@@ -220,7 +238,7 @@ def remove_env_secret(name: str) -> bool:
     env_path = get_vault_root() / ".env"
     if env_path.exists():
         kept: list[str] = []
-        for line in env_path.read_text().splitlines():
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
             stripped = line.strip()
             if (stripped and not stripped.startswith("#") and "=" in stripped
                     and stripped.split("=", 1)[0].strip() == name):
@@ -451,7 +469,7 @@ def load_team_template() -> Optional[list[dict]]:
     if not TEAM_TEMPLATE_FILE.exists():
         return None
     try:
-        data = json.loads(TEAM_TEMPLATE_FILE.read_text())
+        data = json.loads(TEAM_TEMPLATE_FILE.read_text(encoding="utf-8", errors="replace"))
     except (json.JSONDecodeError, OSError):
         return None
     if not isinstance(data, list):

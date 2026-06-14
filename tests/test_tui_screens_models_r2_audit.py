@@ -70,3 +70,71 @@ def test_models_screen_source_escapes_dynamic_status_values():
     src = inspect.getsource(models.ModelsScreen._clear_selected_model)
     assert "escape(str(exc))" in src
     assert "escape(agent_id)" in src
+
+
+# ---------------------------------------------------------------------------
+# Pre-ship: the DataTable ROWS were not hardened (only the status Static was).
+# A bracketed agent name / custom model id rendered through
+# DataTable -> default_cell_formatter -> Text.from_markup raises MarkupError
+# at paint time. The fix wraps each dynamic cell in a Rich ``Text``.
+# ---------------------------------------------------------------------------
+
+
+def _formats_without_markup_error(value: object) -> str:
+    """Mimic DataTable's ``default_cell_formatter``: a raw ``str`` is fed
+    through ``Text.from_markup`` (markup-parsed), while a ``Text`` renderable
+    is passed through verbatim. Returns the rendered plain text, raising
+    MarkupError if the value would crash at paint time."""
+    from rich.text import Text
+
+    if isinstance(value, str):
+        return str(Text.from_markup(value))  # the hazardous path
+    if isinstance(value, Text):
+        return str(value)  # bypasses markup parsing
+    return str(value)
+
+
+def test_raw_bracketed_cell_would_crash_datatable():
+    """Sanity: a raw bracket-closer string IS the paint-time hazard the fix
+    prevents — proves the bug is real for the rows, not just the status."""
+    bad = "grok-1[/v2]"
+    try:
+        _formats_without_markup_error(bad)
+    except _MARKUP_ERRORS:
+        return
+    raise AssertionError("expected MarkupError on raw bracketed cell string")
+
+
+def test_cell_helper_wraps_bracketed_value_verbatim():
+    """The fix: ``_cell`` returns a Rich ``Text`` that renders bracket
+    sequences VERBATIM instead of parsing them as markup."""
+    from rich.text import Text
+
+    from modulatio.tui.screens.models import _cell
+
+    cell = _cell("agent[/lead]")
+    assert isinstance(cell, Text)
+    # renders verbatim, no MarkupError
+    assert _formats_without_markup_error(cell) == "agent[/lead]"
+
+
+def test_cell_helper_handles_none():
+    """``model``/``cost_class`` can be falsy; ``_cell`` maps None to ''."""
+    from modulatio.tui.screens.models import _cell
+
+    assert str(_cell(None)) == ""
+
+
+def test_models_refresh_uses_cell_helper_for_all_dynamic_rows():
+    """Belt-and-suspenders: ``_refresh`` wraps every dynamic cell (id, name,
+    model, tier, cost_class) in ``_cell`` before ``add_row``."""
+    import inspect
+
+    from modulatio.tui.screens import models
+
+    src = inspect.getsource(models.ModelsScreen._refresh)
+    assert "_cell(agent.id)" in src
+    assert "_cell(agent.name)" in src
+    assert "_cell(agent.model or \"\")" in src
+    assert "_cell(agent.model_tier or \"\")" in src
+    assert "_cell(agent.cost_class or \"\")" in src

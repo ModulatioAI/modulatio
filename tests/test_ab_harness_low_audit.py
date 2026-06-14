@@ -16,7 +16,12 @@ import os
 import stat
 
 from modulatio import ab_harness
-from modulatio.ab_harness import _usage_cost_total, _write_artifact_0600
+from modulatio.ab_harness import (
+    _read_audit_rows,
+    _read_usage_rows,
+    _usage_cost_total,
+    _write_artifact_0600,
+)
 
 
 # ── #43: _write_artifact_0600 ────────────────────────────────────────
@@ -160,3 +165,35 @@ def test_usage_cost_total_matches_snapshot_cost(tmp_path):
         wall_clock_seconds=1.0,
     )
     assert _usage_cost_total(log) == snap.cost_usd == 0.07
+
+
+def test_read_audit_rows_survives_non_utf8_byte(tmp_path):
+    """A crash that truncates a multibyte char mid-write to audit.jsonl
+    leaves an invalid UTF-8 byte. The reader must skip that line and
+    still return the valid rows — not raise UnicodeDecodeError and lose
+    the whole replicate's audit."""
+    audit = tmp_path / "audit.jsonl"
+    good = json.dumps({"event": "ok", "n": 1}).encode("utf-8")
+    # A lone 0xff is never valid UTF-8 — simulates a truncated multibyte
+    # write at crash time.
+    truncated = b'{"event": "boom", "x": "\xff'
+    good2 = json.dumps({"event": "ok", "n": 2}).encode("utf-8")
+    audit.write_bytes(good + b"\n" + truncated + b"\n" + good2 + b"\n")
+
+    rows = _read_audit_rows(audit)
+    assert [r.get("n") for r in rows] == [1, 2]
+
+
+def test_read_usage_rows_survives_non_utf8_byte(tmp_path):
+    """Same robustness posture as the audit reader — a corrupt byte in
+    the usage log degrades to one skipped line, never a lost replicate."""
+    log = tmp_path / "plan.usage.jsonl"
+    good = json.dumps({"cost_total": 0.05}).encode("utf-8")
+    truncated = b'{"cost_total": \xff'
+    good2 = json.dumps({"cost_total": 0.12}).encode("utf-8")
+    log.write_bytes(good + b"\n" + truncated + b"\n" + good2 + b"\n")
+
+    rows = _read_usage_rows(log)
+    assert [r.get("cost_total") for r in rows] == [0.05, 0.12]
+    # And the crash-path cost extractor still surfaces the last good total.
+    assert _usage_cost_total(log) == 0.12

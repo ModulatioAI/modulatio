@@ -39,9 +39,21 @@ from modulatio import config
 
 CONFIG_FILE = config.CONFIG_DIR / "telegram-config.json"
 
-# Multi-message split threshold — Telegram's API hard-caps at 4096 chars,
-# leave headroom for our framing.
+# Multi-message split threshold — Telegram's API hard-caps at 4096 *UTF-16
+# code units* (NOT Python code points), leave headroom for our framing.
+# re-sweep: each non-BMP char (most emoji, CJK-ext) costs 2 UTF-16 units,
+# so an emoji-heavy chunk measured in code points could be ~2x the real
+# wire size and 400 against the 4096 cap. _split_chunks budgets in UTF-16.
 _MAX_MESSAGE_LENGTH = 4000
+
+
+def _utf16_len(s: str) -> int:
+    """Length of ``s`` in UTF-16 code units — the unit Telegram counts
+    against its 4096-char message cap. Non-BMP chars (most emoji) count
+    as 2; everything in the BMP counts as 1."""
+    # Each surrogate pair in utf-16-le is 4 bytes -> 2 code units; BMP is
+    # 2 bytes -> 1 unit. Dividing the byte length by 2 yields the unit count.
+    return len(s.encode("utf-16-le")) // 2
 
 # cap document uploads
 # before reading bytes off disk. Telegram's Bot API rejects
@@ -105,7 +117,7 @@ def load_config() -> dict:
     if not CONFIG_FILE.exists():
         return _default_config()
     try:
-        data = json.loads(CONFIG_FILE.read_text())
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return _default_config()
     # Merge with defaults so partial files don't crash callers
@@ -146,22 +158,56 @@ def _post(url: str, data: dict, *, timeout: float = 10.0) -> tuple[bool, str]:
         return False, str(e)
 
 
+def _hard_split_utf16(line: str, max_len: int) -> tuple[list[str], str]:
+    """Hard-split ``line`` so no piece exceeds ``max_len`` UTF-16 code units.
+
+    re-sweep: a code-point slice (``line[:max_len]``) can still exceed the
+    UTF-16 cap when the slice is emoji-heavy. Walk by character, accumulating
+    UTF-16 cost, and cut before a character would push the piece over the cap
+    — which also guarantees we never split a surrogate pair (each Python char
+    is whole, costing 1 or 2 units). Returns (completed_pieces, remainder).
+    """
+    pieces: list[str] = []
+    buf = ""
+    buf_len = 0
+    for ch in line:
+        ch_len = 2 if ord(ch) > 0xFFFF else 1
+        if buf_len + ch_len > max_len:
+            pieces.append(buf)
+            buf = ch
+            buf_len = ch_len
+        else:
+            buf += ch
+            buf_len += ch_len
+    return pieces, buf
+
+
 def _split_chunks(text: str, max_len: int = _MAX_MESSAGE_LENGTH) -> list[str]:
-    """Split a long message at line boundaries when possible."""
-    if len(text) <= max_len:
+    """Split a long message at line boundaries when possible.
+
+    Budgets by UTF-16 code units (``_utf16_len``) — the unit Telegram counts
+    against its message cap — so an emoji-heavy message can't produce a chunk
+    that measures under ``max_len`` code points yet exceeds the wire cap.
+    """
+    if _utf16_len(text) <= max_len:
         return [text]
     chunks: list[str] = []
     current = ""
+    current_len = 0
     for line in text.splitlines(keepends=True):
-        if len(current) + len(line) > max_len:
+        line_len = _utf16_len(line)
+        if current_len + line_len > max_len:
             if current:
                 chunks.append(current)
                 current = ""
-            # If a single line is itself too long, hard-split.
-            while len(line) > max_len:
-                chunks.append(line[:max_len])
-                line = line[max_len:]
+                current_len = 0
+            # If a single line is itself too long, hard-split on UTF-16 units.
+            if line_len > max_len:
+                pieces, line = _hard_split_utf16(line, max_len)
+                chunks.extend(pieces)
+                line_len = _utf16_len(line)
         current += line
+        current_len += line_len
     if current:
         chunks.append(current)
     return chunks
@@ -216,6 +262,23 @@ def _sanitize_multipart_filename(name: str) -> str:
     return cleaned or "document"
 
 
+def _sanitize_multipart_caption(caption: str) -> str:
+    """Make a caption safe to interpolate into a multipart body part.
+
+    re-sweep: the caption lands in a non-quoted ``name="caption"`` part, so
+    quotes/backslashes are harmless body text and are preserved. The only
+    injection vector is CR/LF: a caption carrying ``\\r\\n`` plus the fixed
+    boundary token could otherwise inject an additional multipart part.
+    Caption text is far more likely than a filename to carry attacker- or
+    LLM-influenced content, so strip CR/LF (and other C0 controls). Tab is
+    kept since it's harmless and meaningful in body text.
+    """
+    return "".join(
+        ch for ch in str(caption)
+        if ch == "\t" or (ord(ch) >= 0x20 and ch != "\x7f")
+    )
+
+
 def send_document(
     file_path: str | Path,
     *,
@@ -260,12 +323,15 @@ def send_document(
     # (RFC 2388 / HTML5 form-encoding). Strip control chars and percent-encode
     # the quote + backslash, matching how browsers escape these in the header.
     safe_filename = _sanitize_multipart_filename(path.name)
+    # re-sweep: the caption is interpolated into a multipart part too; strip
+    # CR/LF so an attacker/LLM-influenced caption can't inject extra parts.
+    safe_caption = _sanitize_multipart_caption(caption)
 
     boundary = "----ModulatioFormBoundary7MA4YWxkTrZu0gW"
     body = bytearray()
     body += f'--{boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n{target}\r\n'.encode()
-    if caption:
-        body += f'--{boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n{caption}\r\n'.encode()
+    if safe_caption:
+        body += f'--{boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n{safe_caption}\r\n'.encode()
     body += f'--{boundary}\r\nContent-Disposition: form-data; name="document"; filename="{safe_filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode()
     body += path.read_bytes()
     body += f'\r\n--{boundary}--\r\n'.encode()

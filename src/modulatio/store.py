@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -88,7 +89,24 @@ def _is_quarantined(path: Path) -> bool:
     return ".broken" in path.suffixes or path.name.endswith(".broken.md")
 
 
-def _quarantine_corrupt(path: Path, exc: Exception) -> None:
+def _parse_entity(text: str, model: type[BaseModel]) -> BaseModel:
+    """Turn an entity file's text into a validated model (or raise).
+
+    Factored out of :func:`_read_entity` so :func:`_quarantine_corrupt` can
+    cheaply re-parse the on-disk bytes immediately before renaming, to confirm
+    the file is *still* corrupt and hasn't been replaced by a concurrent valid
+    write in the meantime. Raises members of ``_PARSE_ERRORS`` on bad bytes.
+    """
+    text = _normalize_entity_text(text)
+    meta, body = _split_frontmatter(text)
+    body, transitions = _extract_transitions(body)
+    data = {**meta, "transitions": [t.model_dump() for t in transitions]}
+    return model.model_validate(data)
+
+
+def _quarantine_corrupt(
+    path: Path, exc: Exception, model: type[BaseModel] | None = None
+) -> None:
     """Move a corrupt entity file aside so it stops bricking the read path.
 
     The file is renamed to ``<name>.broken.md`` (preserving the operator's
@@ -96,7 +114,35 @@ def _quarantine_corrupt(path: Path, exc: Exception) -> None:
     prior ``.broken.md`` already exists or the rename fails (read-only FS,
     file vanished), we swallow the secondary error — the primary goal is
     that the *read* degrades to "missing", which it does regardless.
+
+    Re-sweep (lock-free read vs. locked writer race): the reader that decided
+    to quarantine read the bytes, parse-failed, then reaches here — but the
+    decision and the ``rename`` are NOT atomic and run WITHOUT ``_store_lock``,
+    while a concurrent ``_write_entity`` finishes with an atomic
+    ``os.replace(tmp, path)``. If a writer replaced the corrupt file with a
+    VALID one in that window, renaming it aside would quarantine a freshly-fixed
+    record and make it read as missing. So, with the model in hand, re-read and
+    re-parse the file here; if it now parses cleanly the corruption is gone —
+    skip the rename and leave the good bytes in place. IDs are engine-generated
+    and corruption is a during-write transient, so a clean re-parse means the
+    writer won and there is nothing to quarantine.
     """
+    if model is not None:
+        try:
+            _parse_entity(path.read_text(encoding="utf-8"), model)
+        except _PARSE_ERRORS:
+            pass  # still corrupt — fall through and quarantine
+        except OSError:
+            pass  # unreadable now (vanished/perm) — let the rename below decide
+        else:
+            # re-sweep: a writer replaced the corrupt bytes with a valid record
+            # between our parse-fail and now; don't rename the good file aside.
+            _log.info(
+                "entity file %s parses cleanly on re-sweep; a concurrent write "
+                "resolved the corruption, not quarantining",
+                path,
+            )
+            return
     _log.warning(
         "corrupt entity file %s (%s: %s); quarantining as .broken.md and "
         "treating as missing",
@@ -106,8 +152,20 @@ def _quarantine_corrupt(path: Path, exc: Exception) -> None:
         broken = path.with_suffix(".broken.md")
         if broken.exists():
             # Keep an existing quarantine record; stamp this one uniquely so
-            # repeated reads of the same still-corrupt name don't collide.
-            broken = path.with_suffix(f".broken.{int(_utcnow().timestamp())}.md")
+            # repeated reads of the same still-corrupt name don't collide. A
+            # second-resolution timestamp is NOT collision-proof — two distinct
+            # corrupt files quarantined in the same wall-clock second would pick
+            # the same name and one would silently overwrite (clobber) the
+            # other's preserved bytes. Use a short random token and probe for a
+            # free name so every quarantine keeps its own record.
+            for _ in range(64):
+                token = secrets.token_hex(4)
+                candidate = path.with_suffix(f".broken.{token}.md")
+                if not candidate.exists():
+                    broken = candidate
+                    break
+            else:  # pragma: no cover - astronomically unlikely 64x collision
+                broken = path.with_suffix(f".broken.{secrets.token_hex(8)}.md")
         path.rename(broken)
     except OSError as move_exc:  # pragma: no cover - best-effort cleanup
         _log.warning("could not quarantine %s: %s", path, move_exc)
@@ -180,17 +238,20 @@ def _read_entity(path: Path, model: type[BaseModel]) -> BaseModel | None:
     try:
         # read_text is INSIDE the try: a binary / non-UTF-8 file raises
         # UnicodeDecodeError (a ValueError ∈ _PARSE_ERRORS), which must flow to
-        # quarantine — not escape and brick the whole listing.
-        text = _normalize_entity_text(path.read_text())
-        meta, body = _split_frontmatter(text)
-        body, transitions = _extract_transitions(body)
-        data = {**meta, "transitions": [t.model_dump() for t in transitions]}
-        entity = model.model_validate(data)
+        # quarantine — not escape and brick the whole listing. Read with the
+        # SAME explicit utf-8 the writer uses (_write_entity opens the temp file
+        # encoding='utf-8'); without it read_text defaults to the process locale
+        # (ASCII under a bare C/POSIX cron/systemd env), so a well-formed utf-8
+        # entity carrying any non-ASCII byte (em-dash, accented agent name,
+        # curly quote) would falsely UnicodeDecodeError and be quarantined.
+        entity = _parse_entity(path.read_text(encoding="utf-8"), model)
     except _PARSE_ERRORS as exc:
         # One corrupt file must not take down the whole listing / read.
         # Quarantine it and degrade to "missing" — callers already treat
         # a None return (and list_* already skip None) as "not there".
-        _quarantine_corrupt(path, exc)
+        # Pass ``model`` so the quarantine can re-sweep and skip the rename if
+        # a concurrent valid write has since replaced the corrupt bytes.
+        _quarantine_corrupt(path, exc, model)
         return None
     except OSError as exc:
         # Transient / permission read failure — NOT corruption. Degrade to
@@ -248,9 +309,20 @@ def _next_ticket_number(code: str, run_id: str | None = None) -> int:
         return 1
     highest = 0
     prefix = f"{code.upper()}-"
-    for p in d.glob(f"{prefix}*.md"):
-        stem = p.stem
-        tail = stem[len(prefix):]
+    # Glob the broader '{prefix}*' (not just '*.md') so QUARANTINED siblings
+    # count too: a corrupt 'TST-5.md' is renamed to 'TST-5.broken.md' (or
+    # 'TST-5.broken.<ts>.md'), whose stem 'TST-5.broken' fails .isdigit() and
+    # would otherwise drop the highest number — letting the next create reuse
+    # ID TST-5 and clobber the operator's preserved-but-broken record. Strip a
+    # trailing '.broken[.<ts>]' before the digit check so the number is honored.
+    for p in d.glob(f"{prefix}*"):
+        tail = p.name[len(prefix):]
+        # Peel the canonical '.md' suffix and any quarantine '.broken[.<ts>].md'
+        # decoration down to the bare numeric tail.
+        if tail.endswith(".md"):
+            tail = tail[: -len(".md")]
+        if ".broken" in tail:
+            tail = tail.split(".broken", 1)[0]
         if tail.isdigit():
             highest = max(highest, int(tail))
     return highest + 1
@@ -388,6 +460,40 @@ def update_ticket_approval(
                 # the ticket update. Keeps the ticket layer working
                 # even if a plan was deleted out of band.
                 pass
+            except Exception as plan_exc:
+                # The ticket is ALREADY committed RESOLVED on disk (line ~355).
+                # If the plan flip blows up with anything else — a corrupt /
+                # un-parseable plan file (pydantic ValidationError = ValueError),
+                # set_status raising ValueError on a disallowed transition, a
+                # RuntimeError if the plan vanished mid-write — letting it
+                # propagate leaves the ticket RESOLVED but the plan unflipped
+                # AND raises out of update_ticket_approval, so the caller can't
+                # tell the decision half-landed. Tolerate it the same way
+                # FileNotFoundError is tolerated, but record an audit transition
+                # noting the un-reconciled plan so the divergence is legible and
+                # recoverable rather than silent.
+                _log.warning(
+                    "ticket %s decided %s but linked plan %s flip failed "
+                    "(%s: %s); ticket stays RESOLVED, plan unreconciled",
+                    ticket_id, decision, ticket.affected_plan_id,
+                    type(plan_exc).__name__, plan_exc,
+                )
+                ticket.transitions.append(
+                    StateTransition(
+                        from_state=TicketStatus.RESOLVED.value,
+                        to_state=TicketStatus.RESOLVED.value,
+                        actor="system",
+                        rationale=(
+                            f"linked plan {ticket.affected_plan_id} flip failed "
+                            f"({type(plan_exc).__name__}); plan left unreconciled"
+                        ),
+                    )
+                )
+                ticket.updated_at = _utcnow()
+                _write_entity(
+                    _ticket_path(project_code, ticket_id, run_id=run_id),
+                    ticket, ticket.body,
+                )
 
         return ticket
 

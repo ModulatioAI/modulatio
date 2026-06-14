@@ -46,7 +46,7 @@ def consumed_ids(project_code: str) -> set[str]:
     if not p.exists():
         return set()
     try:
-        return {ln.strip() for ln in p.read_text().splitlines() if ln.strip()}
+        return {ln.strip() for ln in p.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()}
     except OSError:
         return set()
 
@@ -60,7 +60,7 @@ def mark_consumed(project_code: str, entry_ids) -> None:
     have = consumed_ids(project_code)
     new = [e for e in ids if e not in have]
     if new:
-        with p.open("a") as f:
+        with p.open("a", encoding="utf-8") as f:
             for e in new:
                 f.write(e + "\n")
 

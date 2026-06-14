@@ -103,7 +103,10 @@ def export_artifact(
     dest = dest.resolve()
 
     if format == "markdown":
-        shutil.copy(source, dest)
+        # source/dest already resolved above; if they're the same file the
+        # copy is a no-op and shutil.copy would raise SameFileError.
+        if source != dest:
+            shutil.copy(source, dest)
         return ExportResult(source=source, dest=dest, format=format, error=None)
 
     if _has_pypandoc():

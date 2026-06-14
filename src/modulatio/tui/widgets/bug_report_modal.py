@@ -14,6 +14,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Static, TextArea
 
@@ -73,7 +74,14 @@ class BugReportModal(ModalScreen[None]):
             self._submit()
 
     def _set_status(self, text: str) -> None:
-        self.query_one("#bug-status", Static).update(text)
+        # re-sweep: the in-flight submit worker can't be interrupted, so it may
+        # call back through here after the modal was dismissed/unmounted. The
+        # status Static is gone by then, so swallow NoMatches instead of
+        # crashing the worker callback on the main thread.
+        try:
+            self.query_one("#bug-status", Static).update(text)
+        except NoMatches:
+            return
 
     def _submit(self) -> None:
         title = self.query_one("#bug-title", Input).value.strip()

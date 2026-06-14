@@ -78,7 +78,7 @@ def _skill_paths(project_code: str | None = None) -> dict[str, Path]:
     from modulatio.vault import project_dir
 
     paths: dict[str, Path] = {}
-    roots: list[Path] = [skills._SEED_SKILLS_ROOT, skills._SKILLS_ROOT]
+    roots: list[Path] = [skills._SEED_SKILLS_ROOT, skills._skills_root()]
     if project_code is not None:
         roots.append(project_dir(project_code) / "skills")
     for root in roots:

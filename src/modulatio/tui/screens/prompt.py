@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Static, TabbedContent, TabPane, TextArea
@@ -229,9 +230,12 @@ class PromptScreen(Vertical):
         it without modal interaction."""
         try:
             att = build_attachment(path, kind=kind)
-        except (FileNotFoundError, UnicodeDecodeError) as exc:
+        # re-sweep: build_attachment also raises ValueError (size cap) and
+        # OSError (IsADirectoryError/permission) — catch them so an oversized
+        # or unreadable attachment surfaces as a status, not a TUI crash.
+        except (FileNotFoundError, UnicodeDecodeError, ValueError, OSError) as exc:
             self.query_one("#prompt-response", Static).update(
-                f"[bold red]Attach failed:[/] {exc}"
+                f"[bold red]Attach failed:[/] {escape(str(exc))}"
             )
             return
         self._kickoff_attachments.append(att)
@@ -250,9 +254,11 @@ class PromptScreen(Vertical):
         so the 📎/🖼 buttons (via modal callback) and tests can drive it."""
         try:
             att = build_attachment(path, kind=kind)
-        except (FileNotFoundError, UnicodeDecodeError) as exc:
+        # re-sweep: also catch ValueError (size cap) / OSError so an oversized
+        # or unreadable chat attachment surfaces as a status, not a crash.
+        except (FileNotFoundError, UnicodeDecodeError, ValueError, OSError) as exc:
             self.query_one("#prompt-response", Static).update(
-                f"[bold red]Attach failed:[/] {exc}"
+                f"[bold red]Attach failed:[/] {escape(str(exc))}"
             )
             return
         self._chatbox_attachments.append(att)
@@ -271,7 +277,9 @@ class PromptScreen(Vertical):
             widget.update("")
             return
         names = [
-            f"📎 {att.name}" if att.kind == "document" else f"🖼  {att.name}"
+            # re-sweep: att.name is operator-chosen Path.name; escape so a
+            # filename like `notes[/].md` can't crash the TUI via MarkupError.
+            f"📎 {escape(att.name)}" if att.kind == "document" else f"🖼  {escape(att.name)}"
             for att in self._chatbox_attachments
         ]
         widget.update(f"[dim]attached:[/] {'  '.join(names)}")
@@ -423,7 +431,8 @@ class PromptScreen(Vertical):
             widget.update("")
             return
         names = [
-            f"📎 {att.name}" if att.kind == "document" else f"🖼  {att.name}"
+            # re-sweep: escape operator-chosen filename — see _refresh_chatbox.
+            f"📎 {escape(att.name)}" if att.kind == "document" else f"🖼  {escape(att.name)}"
             for att in self._kickoff_attachments
         ]
         widget.update(f"[dim]attached for kickoff:[/] {'  '.join(names)}")

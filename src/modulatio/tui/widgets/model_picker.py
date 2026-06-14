@@ -122,7 +122,15 @@ class ModelPicker(Vertical):
         )
         opt_list = self.query_one("#mp-list", OptionList)
         opt_list.clear_options()
+        # re-sweep: the listing aggregates multiple sources (models_source +
+        # extra_sources), which can carry the same id twice. OptionList raises
+        # DuplicateID on a repeat id — dedup by first occurrence (preserving
+        # order) so a noisy feed can't crash the picker.
+        seen: set[str] = set()
         for m in listing:
+            if m.id in seen:
+                continue
+            seen.add(m.id)
             opt_list.add_option(Option(self._label(m), id=m.id))
 
     def _label(self, m: pc.CatalogModel) -> Text:

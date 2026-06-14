@@ -43,7 +43,7 @@ def load() -> dict[str, Any]:
     if not SETUP_STATE_FILE.exists():
         return {}
     try:
-        return json.loads(SETUP_STATE_FILE.read_text()) or {}
+        return json.loads(SETUP_STATE_FILE.read_text(encoding="utf-8", errors="replace")) or {}
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -51,7 +51,7 @@ def load() -> dict[str, Any]:
 def save(state: dict[str, Any]) -> None:
     """Persist setup state."""
     config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    SETUP_STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
+    SETUP_STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def mark_completed(*, version: str, skipped_steps: list[str] | None = None) -> dict[str, Any]:

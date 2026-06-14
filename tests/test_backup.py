@@ -297,3 +297,43 @@ def test_import_rejects_symlink_escape(tmp_path):
     (proj / "sub").symlink_to(escape_target)
     with pytest.raises(ValueError, match="resolves outside project"):
         backup.import_backup(out)
+
+
+def test_export_excludes_dotfile_dirs_and_round_trips(tmp_path):
+    """Regression (pre-ship MEDIUM): a project containing dotfile content
+    (e.g. .obsidian/* — the vault IS an Obsidian vault) must not break the
+    round-trip. export must NOT capture dotfile components (import would
+    reject them via _is_safe_relative_file_arg and abort the WHOLE restore);
+    the excluded files are counted in ``skipped`` so the loss is visible.
+    """
+    _seed_state(tmp_path)
+    proj = tmp_path / "vault" / "STA"
+    (proj / ".obsidian").mkdir()
+    (proj / ".obsidian" / "app.json").write_text('{"theme":"obsidian"}')
+    (proj / ".obsidian" / "workspace.json").write_text("{}")
+
+    out = tmp_path / "backup.modulatio"
+    backup.export_backup(out)
+    data = json.loads(out.read_text())
+
+    # The benign content file is still captured...
+    assert "index.md" in data["vaults"]["STA"]["files"]
+    # ...but no .obsidian (or any dotfile) entry leaked into the archive.
+    captured = data["vaults"]["STA"]["files"]
+    assert not any(
+        any(part.startswith(".") for part in rel.replace("\\", "/").split("/"))
+        for rel in captured
+    )
+    # The skip is surfaced, not silent.
+    skipped = data["vaults"]["STA"].get("skipped", [])
+    assert any(".obsidian" in s for s in skipped)
+    assert data["skipped_files"] >= 2
+
+    # And the backup actually round-trips (would have raised before the fix).
+    new_vault = tmp_path / "new-vault"
+    data["defaults"]["vault_root"] = str(new_vault)
+    out.write_text(json.dumps(data))
+    summary = backup.import_backup(out)
+    assert summary["vault_files_written"] >= 2
+    assert (new_vault / "STA" / "index.md").exists()
+    assert not (new_vault / "STA" / ".obsidian").exists()

@@ -9,6 +9,8 @@ interactive form complexity stays out of the TUI for now.
 
 from __future__ import annotations
 
+from rich.markup import escape
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -182,13 +184,13 @@ class CronScreen(Vertical):
         jobs.sort(key=lambda j: (not j.get("enabled"), j.get("next_run", "")))
         for j in jobs:
             table.add_row(
-                j.get("id", "?"),
-                j.get("name", "?"),
-                j.get("project_code", "?"),
-                j.get("schedule", "?"),
+                escape(j.get("id", "?")),
+                escape(j.get("name", "?")),
+                escape(j.get("project_code", "?")),
+                escape(j.get("schedule", "?")),
                 "yes" if j.get("enabled") else "no",
-                (j.get("next_run", "") or "")[:19],
-                j.get("last_status") or "",
+                escape((j.get("next_run", "") or "")[:19]),
+                escape(j.get("last_status") or ""),
                 key=j.get("id"),
             )
 

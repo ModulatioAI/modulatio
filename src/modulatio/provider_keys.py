@@ -45,7 +45,7 @@ class KeySlot(TypedDict):
 def _load_labels() -> dict[str, str]:
     if LABELS_FILE.exists():
         try:
-            data = json.loads(LABELS_FILE.read_text())
+            data = json.loads(LABELS_FILE.read_text(encoding="utf-8", errors="replace"))
             return data if isinstance(data, dict) else {}
         except (OSError, json.JSONDecodeError):
             return {}
@@ -59,7 +59,7 @@ def _save_labels(labels: dict[str, str]) -> None:
 def _load_pins() -> dict[str, list[str]]:
     if PINS_FILE.exists():
         try:
-            data = json.loads(PINS_FILE.read_text())
+            data = json.loads(PINS_FILE.read_text(encoding="utf-8", errors="replace"))
             if isinstance(data, dict):
                 # keep only well-formed {env_var: [str, …]} entries
                 return {k: [m for m in v if isinstance(m, str)]
@@ -87,13 +87,16 @@ def list_keys(base_env_var: str) -> list[KeySlot]:
     with index / env_var / label / is_set; never the value."""
     labels = _load_labels()
     pins = _load_pins()
+    # Snapshot env names once: a concurrent config edit can mutate os.environ
+    # mid-scan ("dict changed size during iteration").
+    env_names = list(os.environ.keys())
     indices: set[int] = set()
     # #1 — the base var, if set or labelled
     if os.environ.get(base_env_var) or base_env_var in labels:
         indices.add(1)
     # #2.. — scan env + labels for "<base>_<digits>"
     prefix = base_env_var + "_"
-    for source in (os.environ.keys(), labels.keys()):
+    for source in (env_names, labels.keys()):
         for name in source:
             if name.startswith(prefix):
                 suffix = name[len(prefix):]

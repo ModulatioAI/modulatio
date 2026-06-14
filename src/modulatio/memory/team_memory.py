@@ -153,7 +153,7 @@ def _parse_csv_field(raw: str) -> tuple[str, ...]:
 
 def _parse(path: Path) -> MemoryEntry | None:
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         # A binary / non-UTF-8 / truncated-mid-multibyte .md (crash-during-write,
         # FS corruption, a stray file) must degrade to "skip this one entry"
@@ -245,7 +245,7 @@ def write(
     )
     dir_ = _team_dir(project_code)
     dir_.mkdir(parents=True, exist_ok=True)
-    (dir_ / _entry_filename(record)).write_text(_render(record))
+    (dir_ / _entry_filename(record)).write_text(_render(record), encoding="utf-8")
     return record
 
 
@@ -307,7 +307,7 @@ def propose(
         "artifact_kind": artifact_kind,
         "capability_tags": list(proposal.capability_tags),
         "rationale": rationale,
-    }, indent=2))
+    }, indent=2), encoding="utf-8")
     return proposal
 
 
@@ -319,7 +319,7 @@ def list_proposals(project_code: str) -> list[Proposal]:
     out: list[Proposal] = []
     for p in sorted(dir_.glob("*.json")):
         try:
-            data = json.loads(p.read_text())
+            data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
         except (OSError, json.JSONDecodeError):
             continue
         out.append(Proposal(
@@ -333,6 +333,27 @@ def list_proposals(project_code: str) -> list[Proposal]:
             rationale=data.get("rationale", ""),
         ))
     return out
+
+
+def _find_proposal_path(dir_: Path, proposal_id: str) -> Path | None:
+    """Locate the proposal file whose embedded id == ``proposal_id`` exactly.
+
+    re-sweep: ``proposal_id`` is a caller/operator-supplied argument. A prior
+    substring ``glob(f"*{proposal_id}*.json")`` treated it as a glob pattern, so
+    a metacharacter (``*``/``?``/``[``) or a bare substring matched unintended
+    proposals and acted on a non-deterministic ``matching[0]``. Iterate plain
+    ``*.json`` and select on the canonical id stored inside the file.
+    """
+    if not dir_.exists():
+        return None
+    for p in sorted(dir_.glob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("proposal_id", "") == proposal_id:
+            return p
+    return None
 
 
 def approve_proposal(
@@ -352,11 +373,10 @@ def approve_proposal(
             f"Approve denied for tier '{approver_tier}'. Only {sorted(_WRITE_AUTHORIZED_TIERS)} can approve."
         )
     dir_ = _team_dir(project_code) / "_proposals"
-    matching = [p for p in dir_.glob(f"*{proposal_id}*.json")] if dir_.exists() else []
-    if not matching:
+    path = _find_proposal_path(dir_, proposal_id)
+    if path is None:
         raise KeyError(f"Proposal {proposal_id} not found in {dir_}.")
-    path = matching[0]
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     entry = write(
         writer_id=approver_id,
         writer_tier=approver_tier,
@@ -374,12 +394,10 @@ def approve_proposal(
 def reject_proposal(proposal_id: str, *, project_code: str) -> bool:
     """QC or Leader rejects a proposal — file is removed without write."""
     dir_ = _team_dir(project_code) / "_proposals"
-    if not dir_.exists():
+    path = _find_proposal_path(dir_, proposal_id)
+    if path is None:
         return False
-    matching = list(dir_.glob(f"*{proposal_id}*.json"))
-    if not matching:
-        return False
-    matching[0].unlink()
+    path.unlink()
     return True
 
 
@@ -422,14 +440,14 @@ def _load_meta(project_code: str) -> dict:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text())
-    except json.JSONDecodeError:
+        return json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _save_meta(project_code: str, meta: dict) -> None:
     _cache_dir(project_code).mkdir(parents=True, exist_ok=True)
-    _meta_path(project_code).write_text(json.dumps(meta, indent=2))
+    _meta_path(project_code).write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
 def _ensure_vectors(project_code: str, embedder: Embedder) -> list[MemoryEntry]:
@@ -578,11 +596,22 @@ def recall(
         by_id = {r.entry_id: r for r in filtered}
 
         query_vec = embedder.embed_text(task_description)
-        # Pull more than top_k from LanceDB so the post-filter has slack.
+        # re-sweep (finding 1): the search ranks GLOBAL body-similarity over the
+        # full pool, but the metadata filter is applied in Python AFTER. A fixed
+        # top_k*4 slice can be saturated by non-matching bodies that rank higher,
+        # dropping every valid metadata-matched precedent even though it clears
+        # min_similarity. Size the candidate set so the filtered hits stay
+        # reachable: worst case every non-matching body outranks the matches, so
+        # we need (pool - filtered) + top_k candidates. Capped at the pool size,
+        # floored at the original top_k*4 to leave small-pool behavior unchanged.
+        pool = table.count_rows()
+        slack = (pool - len(filtered)) + top_k
+        limit = max(top_k * 4, slack)
+        limit = min(limit, pool)
         raw_results = (
             table.search(query_vec)
             .metric("cosine")
-            .limit(top_k * 4)
+            .limit(limit)
             .to_list()
         )
 

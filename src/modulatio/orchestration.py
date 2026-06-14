@@ -13,6 +13,7 @@ the flow against stub LLMs before spending real tokens.
 
 from __future__ import annotations
 
+import collections
 import contextvars
 import hashlib
 import json
@@ -384,14 +385,14 @@ def _opt_str(v) -> str | None:
 
 
 # A DOCUMENT deliverable is authored as Markdown; the export pipeline renders
-# .docx/.pdf/.pptx/etc. from the .md at DELIVERY — producers never emit binary
+# .docx/.pdf/etc. from the .md at DELIVERY — producers never emit binary
 # Office formats. So a DOCUMENT goal/evidence path naming a render format points
 # at a file that does NOT exist during the run; live (run 6b3234) that made the
 # Leader reject QC-passed .md work and loop the goal to its retry cap. Rewriting
 # render-format PATHS to their .md source makes the run-time contract match what
 # the team actually produces.
 #
-# But .docx/pdf/pptx/odt/rtf/epub are AMBIGUOUS: they are ALSO genuine
+# But .docx/pdf/odt/rtf/epub are AMBIGUOUS: they are ALSO genuine
 # MEDIA-assembled binaries (a slideshow built from images, an epub, a zip/video)
 # that media-assembly produces DIRECTLY and that DO exist mid-run (#73). So this
 # rewrite is applied **family-aware, per task** (via `_build_requirement(...,
@@ -401,8 +402,16 @@ def _opt_str(v) -> str | None:
 # anymore: at that stage no artifact_kind exists yet, and rewriting there both
 # mis-handled media and erased the container cue the planner needs to route a
 # media goal. Goal prose keeps the user-requested name (truthful intent).
+#
+# The set is kept IN LOCK-STEP with what the document family can ACTUALLY render
+# (``_DOC_RENDER_EXTS`` / pandoc's direct formats + the pdf bridge). ``pptx`` is
+# deliberately EXCLUDED: the document family cannot render a .pptx (pandoc has no
+# direct pptx writer and there's no bridge), so rewriting ``deck.pptx`` → .md for
+# a document contract whose deliverable stays ``deck.pptx`` strands it in a P5
+# reject loop (#404). A .pptx deliverable keeps its real extension and routes as
+# a media composite. Never rewrite an extension the doc family can't produce.
 _RENDER_DELIVERABLE_RE = re.compile(
-    r"(\S+?)\.(?:docx|pdf|pptx|odt|rtf|epub)\b", re.IGNORECASE
+    r"(\S+?)\.(?:docx|pdf|odt|rtf|epub)\b", re.IGNORECASE
 )
 
 
@@ -768,11 +777,32 @@ def _format_kickoff_attachments(attachments: list) -> str:
                 f"— vision content blocks for kickoff are a future slice"
             )
         else:  # document
+            # re-sweep #3: a path-only document (content=None) must not inline as an
+            # empty block — the Leader would see the filename but plan blind. Mirror
+            # _pin_attachments' resilience: best-effort read att.path before falling
+            # back to ''. A binary file fails to decode (UnicodeDecodeError <: ValueError).
+            body = att.content
+            if body is None and getattr(att, "path", None):
+                try:
+                    body = Path(att.path).read_text(encoding="utf-8", errors="replace")
+                except (OSError, ValueError):
+                    body = None
+            # re-sweep R4 #2: fence the document body with a backtick run longer
+            # than any run inside it (min 3), so a document whose own content
+            # carries a ``` line can't break out of the wrapper and bleed into the
+            # Leader's instruction context (prompt-injection / context-bleed). This
+            # matches the multimodal user-text path (multimodal._render_user_text);
+            # the shared helper lives there so both surfaces stay consistent.
+            from modulatio import multimodal as _multimodal
+            doc_body = body or ""
+            fence = "`" * (_multimodal._longest_backtick_run(doc_body) + 1)
+            if len(fence) < 3:
+                fence = "```"
             parts.append(f"## Attached document: `{att.name}`")
             parts.append("")
-            parts.append("```")
-            parts.append(att.content or "")
-            parts.append("```")
+            parts.append(fence)
+            parts.append(doc_body)
+            parts.append(fence)
     return "\n".join(parts)
 
 
@@ -1425,23 +1455,79 @@ def _runnable(task: "Task") -> bool:
     return task.status in (TaskStatus.PENDING, TaskStatus.DISPATCHED)
 
 
-def _dep_failed(task: "Task", task_map: "dict[str, Task]") -> list[str]:
+def _dep_failed(
+    task: "Task",
+    task_map: "dict[str, Task]",
+    cross_goal_status: "dict[str, TaskStatus] | None" = None,
+) -> list[str]:
     """Return the ids of ``task``'s dependencies that have reached a
     terminal-FAIL state (BLOCKED / QC_REJECTED / ABANDONED). Non-empty →
-    the task can never run; the caller cascades it to BLOCKED. Unknown
-    dep ids are ignored here (``_topological_sort`` already validated
-    references before execution)."""
+    the task can never run; the caller cascades it to BLOCKED.
+
+    A dep absent from this goal's ``task_map`` is a CROSS-GOAL dependency
+    (a prior goal's task). When ``cross_goal_status`` is supplied (the
+    caller resolved those ids in the store), a cross-goal dep that
+    terminal-FAILED also blocks the dependent — otherwise a later goal's
+    task would run against an input that never shipped. Unknown ids the
+    caller couldn't resolve are ignored (``_topological_sort`` already
+    validated references before execution)."""
     terminal_fail = {
         TaskStatus.BLOCKED, TaskStatus.QC_REJECTED, TaskStatus.ABANDONED,
     }
-    return [
-        dep_id for dep_id in task.depends_on
-        if task_map.get(dep_id) is not None
-        and task_map[dep_id].status in terminal_fail
-    ]
+    failed: list[str] = []
+    for dep_id in task.depends_on:
+        dep = task_map.get(dep_id)
+        if dep is not None:
+            if dep.status in terminal_fail:
+                failed.append(dep_id)
+        elif cross_goal_status and cross_goal_status.get(dep_id) in terminal_fail:
+            failed.append(dep_id)
+    return failed
 
 
-def _ready_wave(tasks: "list[Task]") -> "list[Task]":
+def _unknown_deps(
+    task: "Task",
+    task_map: "dict[str, Task]",
+    cross_goal_status: "dict[str, TaskStatus] | None" = None,
+) -> list[str]:
+    """Return dep ids that are absent from BOTH this goal's ``task_map`` AND the
+    store-resolved ``cross_goal_status`` — an UNVALIDATED / malformed (typo)
+    dependency edge. Non-empty → the caller must fail closed (block), never run a
+    task against an unresolved dependency. The initial-pass topo-sort already
+    rejects these via store-validation; the iterate-style resume path skips that
+    validation (to avoid #10755), so it enforces the invariant here instead
+    (Nemo HIGH)."""
+    cg = cross_goal_status or {}
+    return [d for d in task.depends_on if d not in task_map and d not in cg]
+
+
+def _unready_deps(
+    task: "Task",
+    task_map: "dict[str, Task]",
+    cross_goal_status: "dict[str, TaskStatus] | None" = None,
+) -> list[str]:
+    """Return dep ids that are PRESENT (in ``task_map`` or resolved in
+    ``cross_goal_status``) but not yet COMPLETED — the task must WAIT, not draft
+    against an input that has not shipped. The shared "COMPLETED-or-wait" gate
+    used by the sequential fallback AND the resume path, so all execution paths
+    enforce the same readiness contract (terminal-FAIL deps are handled first by
+    ``_dep_failed``; unknown deps by ``_unknown_deps``)."""
+    cg = cross_goal_status or {}
+    out: list[str] = []
+    for dep_id in task.depends_on:
+        dep = task_map.get(dep_id)
+        if dep is not None:
+            if dep.status is not TaskStatus.COMPLETED:
+                out.append(dep_id)
+        elif dep_id in cg and cg[dep_id] is not TaskStatus.COMPLETED:
+            out.append(dep_id)
+    return out
+
+
+def _ready_wave(
+    tasks: "list[Task]",
+    cross_goal_status: "dict[str, TaskStatus] | None" = None,
+) -> "list[Task]":
     """Return the next concurrent WAVE: every runnable task whose
     dependencies are ALL completed. Status-aware — call it again after
     merging a wave's results and statuses advance, the next wave appears.
@@ -1457,18 +1543,28 @@ def _ready_wave(tasks: "list[Task]") -> "list[Task]":
     (deterministic), but the wave runs concurrently so order is cosmetic.
     """
     task_map = {t.id: t for t in tasks}
+
+    def _dep_ok(dep_id: str) -> bool:
+        dep = task_map.get(dep_id)
+        if dep is not None:
+            return dep.status is TaskStatus.COMPLETED
+        # Cross-goal dep (a prior goal's task). Satisfied ONLY if the store
+        # says it COMPLETED; a resolved-but-not-completed cross-goal dep keeps
+        # the task waiting (and a FAILED one is cascade-blocked by _dep_failed
+        # before we get here). An id the caller couldn't resolve (no
+        # cross_goal_status, or absent from it) falls back to satisfied —
+        # _topological_sort already validated references.
+        if cross_goal_status is not None and dep_id in cross_goal_status:
+            return cross_goal_status[dep_id] is TaskStatus.COMPLETED
+        return True
+
     wave: list[Task] = []
     for t in tasks:
         if not _runnable(t):
             continue
-        if _dep_failed(t, task_map):
+        if _dep_failed(t, task_map, cross_goal_status):
             continue  # dead — cascade-blocked by the caller, not run
-        deps_done = all(
-            task_map.get(dep_id) is not None
-            and task_map[dep_id].status is TaskStatus.COMPLETED
-            for dep_id in t.depends_on
-        )
-        if deps_done:
+        if all(_dep_ok(dep_id) for dep_id in t.depends_on):
             wave.append(t)
     return sorted(wave, key=lambda t: t.id)
 
@@ -1707,7 +1803,7 @@ def _draft_is_multifile(task: "Task", draft_path: "Path") -> bool:
     if (task.artifact_kind or "").strip().lower() == "code":
         return True
     try:
-        text = draft_path.read_text()
+        text = draft_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         # A binary/media draft is not a multi-file text bundle; UnicodeDecodeError
         # is a ValueError, not OSError. Treat it as single-artifact.
@@ -3375,6 +3471,20 @@ class Orchestrator:
             # the parent's artifact_kind / required_skills / deps /
             # evidence, differing only in id, description, and
             # output_path.
+            artifact_kind = str(item.get("artifact_kind") or "text")
+            # #73: the effective assembly family (and the rewritten evidence it
+            # gates) is identical for every sub-task of this spec — it keys only
+            # off artifact_kind + required_skills, which are spec-level. Compute
+            # it (and the evidence list) ONCE per spec instead of re-reading +
+            # reparsing the standards file per sub-task × per evidence item.
+            spec_family = _effective_assembly_family(
+                artifact_kind, required_skills, self.project.code
+            )
+            spec_evidence_required = [
+                _build_requirement(req, family=spec_family)
+                for req in item.get("evidence_required", [])
+            ]
+            spec_deliverable = bool(item.get("deliverable", False))
             for sub_idx, (output_path, sub_desc) in enumerate(plan):
                 tid = index_to_ids[i][sub_idx]
                 t = Task(
@@ -3382,7 +3492,7 @@ class Orchestrator:
                     project_id=self.project.id,
                     goal_id=goal.id,
                     description=sub_desc,
-                    artifact_kind=str(item.get("artifact_kind") or "text"),
+                    artifact_kind=artifact_kind,
                     research_topics=research_topics,
                     required_skills=required_skills,
                     required_capabilities=required_capabilities,
@@ -3392,21 +3502,13 @@ class Orchestrator:
                     # Finished-product tag from the Leader's plan. Whole
                     # spec-group inherits it (an ``artifacts: [...]`` group
                     # that's a deliverable delivers each rendered piece).
-                    deliverable=bool(item.get("deliverable", False)),
-                    # #73: rewrite render-format evidence paths to .md ONLY for
+                    deliverable=spec_deliverable,
+                    # #73: render-format evidence paths rewritten to .md ONLY for
                     # the document family — keyed off the EFFECTIVE assembly family
-                    # (required_skills first, then artifact_kind's standards), so a
-                    # media deliverable's evidence keeps its real binary extension.
+                    # (computed once above), so a media deliverable's evidence keeps
+                    # its real binary extension.
                     evidence_required=[
-                        _build_requirement(
-                            req,
-                            family=_effective_assembly_family(
-                                str(item.get("artifact_kind") or "text"),
-                                required_skills,
-                                self.project.code,
-                            ),
-                        )
-                        for req in item.get("evidence_required", [])
+                        req.model_copy() for req in spec_evidence_required
                     ],
                     status=TaskStatus.PENDING,
                 )
@@ -3786,7 +3888,7 @@ class Orchestrator:
             return path, _rl.file_checksum(path), 0
         # Text deliverable: the mechanically-joined body.
         response = assembled if assembled is not None else ""
-        path.write_text(response)
+        path.write_text(response, encoding="utf-8")
         self._record_artifact_write(path)
         checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
         return path, checksum, len(response.split())
@@ -4143,7 +4245,7 @@ class Orchestrator:
                 response = _trim_leading_prose_from_code(response)
         if self._regression_blocked(task, path, response):
             return self._note_regression_kept(task, path, response)
-        path.write_text(response)
+        path.write_text(response, encoding="utf-8")
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
 
         # QC-as-fixer Slice 2: per-dispatch circuit breaker (post-hoc).
@@ -4152,7 +4254,7 @@ class Orchestrator:
         # default; worker-local + pure so it's merge-safe under concurrent
         # waves. A trip raises DispatchAbort, caught separately by the redo
         # loop and routed to self-heal (NOT the runtime-BLOCKED path).
-        self._maybe_trip_breaker(producer_role, raw_response, response)
+        self._maybe_trip_breaker(producer_role, raw_response, response, task=task)
 
         checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
         # Whitespace-token count; kept as an audit metric, not a quality rule
@@ -4162,13 +4264,17 @@ class Orchestrator:
         return path, checksum, token_count
 
     def _maybe_trip_breaker(
-        self, role: str, raw_response: str, committed_text: str
+        self, role: str, raw_response: str, committed_text: str,
+        task: "Task | None" = None,
     ) -> None:
         """Run the post-hoc circuit breaker when enabled; raise on a trip.
 
         No-op unless ``MODULATIO_DISPATCH_BREAKER=1``. Pure + worker-local
         (delegates to ``dispatch_breaker.analyze_output``) so it adds no
-        shared state under the concurrent wave path.
+        shared state under the concurrent wave path. ``task`` (when known)
+        carries the artifact FAMILY so the prose-tuned repetition heuristic
+        doesn't false-trip on a legitimately-repetitive code/data/media
+        deliverable (R2).
         """
         from modulatio import dispatch_breaker
 
@@ -4183,8 +4289,16 @@ class Orchestrator:
             "output-budget for role=%s: soft=%d hard=%d (overrides=%s)",
             role, budget.soft_cap, budget.hard_cap, overrides or {},
         )
+        family = "document"
+        if task is not None:
+            try:
+                family = _effective_assembly_family(
+                    task.artifact_kind, task.required_skills, self.project.code)
+            except Exception:  # noqa: BLE001 — family is advisory; default safe
+                family = "document"
         abort = dispatch_breaker.analyze_output(
             raw_response, committed_text, role=role, budget=budget,
+            artifact_family=family,
         )
         if abort is not None:
             raise abort
@@ -4221,7 +4335,17 @@ class Orchestrator:
 
         Returns ``(path, checksum, token_count)`` like the other producers."""
         producer_role = self.default_producer_role
-        current = path.read_text()
+        try:
+            current = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # The iteration target isn't readable text (a binary file mis-routed
+            # to patch mode, or a non-UTF-8 locale write). A bare read_text() here
+            # raised UnicodeDecodeError that surfaced as a confusing BLOCKED with
+            # no actionable message. Degrade to a clean generate instead: with no
+            # existing text to anchor SEARCH blocks against, any blocks fail to
+            # match (file left unchanged for QC) and a full-file producer response
+            # writes fresh content — the safe regenerate path.
+            current = ""
         prompt = self._prompt("drafter-patch", _DRAFTER_PATCH_PROMPT).format(
             task_id=task.id,
             artifact_kind=task.artifact_kind,
@@ -4264,7 +4388,7 @@ class Orchestrator:
         if blocks:
             new_content, applied, failures = _apply_search_replace(current, blocks)
             if applied > 0:
-                path.write_text(new_content)
+                path.write_text(new_content, encoding="utf-8")
                 self._record_artifact_write(path)
                 if failures:
                     task.transitions.append(StateTransition(
@@ -4297,9 +4421,9 @@ class Orchestrator:
 
         # No SEARCH/REPLACE blocks → producer returned a full file. Fall back to
         # edit-mode behavior: write the cleaned body as the new artifact.
-        path.write_text(cleaned)
+        path.write_text(cleaned, encoding="utf-8")
         self._record_artifact_write(path)
-        self._maybe_trip_breaker(producer_role, raw_response, cleaned)
+        self._maybe_trip_breaker(producer_role, raw_response, cleaned, task=task)
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
         return path, checksum, len(cleaned.split())
 
@@ -4398,13 +4522,13 @@ class Orchestrator:
             # actual output (mechanical defect: producer should have
             # emitted FILE blocks). Don't silently swallow.
             primary_path.parent.mkdir(parents=True, exist_ok=True)
-            primary_path.write_text(cleaned)
+            primary_path.write_text(cleaned, encoding="utf-8")
             self._record_artifact_write(primary_path)  # staging merge
             # QC-as-fixer Slice 2 (Nemo impl-sweep B1): diff-mode is a
             # producer dispatch and Slice 1 routes code/multi-file fixes
             # here — bind it with the breaker too. Contract-miss (no FILE
             # blocks): committed = the body we wrote.
-            self._maybe_trip_breaker(producer_role, raw_response, cleaned)
+            self._maybe_trip_breaker(producer_role, raw_response, cleaned, task=task)
             checksum = (
                 f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
             )
@@ -4460,15 +4584,16 @@ class Orchestrator:
             primary_path.parent.mkdir(parents=True, exist_ok=True)
             primary_path.write_text(
                 "(diff-mode producer wrote sibling files but not this "
-                "primary path — see artifacts tree)\n"
+                "primary path — see artifacts tree)\n",
+                encoding="utf-8",
             )
             self._record_artifact_write(primary_path)  # staging merge
-            primary_content = primary_path.read_text()
+            primary_content = primary_path.read_text(encoding="utf-8")
 
         # Recompute primary content from disk in case it was written
         # via write_artifact (the in-memory `primary_content` may be
         # empty if no block matched the primary path).
-        actual_primary = primary_path.read_text() if primary_path.exists() else primary_content
+        actual_primary = primary_path.read_text(encoding="utf-8") if primary_path.exists() else primary_content
         checksum = (
             f"sha256:{hashlib.sha256(actual_primary.encode()).hexdigest()}"
         )
@@ -4478,7 +4603,7 @@ class Orchestrator:
         # valid sidecar-only diff is NOT falsely flagged no-commit just
         # because the primary marker is small (Nemo's explicit caution).
         self._maybe_trip_breaker(
-            producer_role, raw_response, "".join(written_parts)
+            producer_role, raw_response, "".join(written_parts), task=task
         )
         # Token count over the entire producer response (mirrors the
         # other producer paths' shape — audit metric, not a quality
@@ -4518,7 +4643,7 @@ class Orchestrator:
                 f"(required by skill {skill.name!r})"
             )
         response = str(tool.call(**task.tool_args))
-        path.write_text(response)
+        path.write_text(response, encoding="utf-8")
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
         checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
         token_count = len(response.split())
@@ -4614,7 +4739,7 @@ class Orchestrator:
                 agent_id=agent_id,
             )
             try:
-                with transcript_path.open("a") as f:
+                with transcript_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({
                         "task_id": task_id,
                         "role": role,
@@ -4701,7 +4826,6 @@ class Orchestrator:
         path = self._conversation_path()
         if not path.exists():
             return []
-        turns: list[dict] = []
         # Read defensively: the conversation log is a durable, user-facing,
         # hand-editable artifact. A single non-UTF-8 byte (crash mid-write of a
         # future non-ASCII write, an operator paste/edit, external tooling) must
@@ -4711,12 +4835,20 @@ class Orchestrator:
             raw = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return []
+        # Only the most recent turns are ever consumed (the prompt windows to
+        # ``_CONVERSE_PROMPT_WINDOW``); a long-lived project's log would otherwise
+        # materialize the ENTIRE transcript into memory on every turn (#4700).
+        # Keep a bounded window with a deque so memory stays O(window), not
+        # O(history). The durable file still holds the full history for the user.
+        # A small headroom multiplier tolerates interleaved malformed lines.
+        window = max(self._CONVERSE_PROMPT_WINDOW * 2, self._CONVERSE_PROMPT_WINDOW)
+        turns: "collections.deque[dict]" = collections.deque(maxlen=window)
         for line in raw.splitlines():
             try:
                 turns.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-        return turns
+        return list(turns)
 
     def _append_conversation(self, role: str, content: str) -> None:
         # SEC-03 (security audit, Nemo): the Leader↔operator log is durable and
@@ -4729,7 +4861,7 @@ class Orchestrator:
         path.parent.mkdir(parents=True, exist_ok=True)
         existed = path.exists()
         fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a") as f:
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps({
                 "role": role,
                 "content": _redact_secrets(content),
@@ -5322,8 +5454,22 @@ class Orchestrator:
             # before re-raising so the durable log never ends on an unanswered
             # operator turn (which would put two consecutive Operator turns in the
             # next prompt).
+            # The offline guard must reflect the model the chosen branch will
+            # ACTUALLY dispatch through (#5326): the text path resolves a chat
+            # runner, but the vision path bypasses chat_runner entirely and
+            # resolves `agent_models['leader'] or leader_model` directly. Checking
+            # only the chat runner falsely reports "offline" for an image turn
+            # whose multimodal model IS wired (and only the text runner is unset).
+            if has_image:
+                multimodal_model = (
+                    self.project.agent_models.get("leader")
+                    or self.project.leader_model
+                )
+                branch_offline = not multimodal_model
+            else:
+                branch_offline = self._resolve_chat_runner("leader") is None
             try:
-                if self._resolve_chat_runner("leader") is None:
+                if branch_offline:
                     reply = (
                         "(offline — no leader model is wired here, so I can't think "
                         f"this through yet. You said: {message})"
@@ -5376,7 +5522,21 @@ class Orchestrator:
             # Defensive: never persist None (a misbehaving runner path) — keep the
             # log a clean string thread.
             reply = reply if reply is not None else ""
-            self._append_conversation("leader", reply)
+            # The success append must not be able to leave the durable log ending
+            # on an unanswered operator turn (#5379): if writing the reply fails
+            # (disk error, encoding), record a placeholder leader turn so the next
+            # prompt never sees two consecutive operator turns. Best-effort — a
+            # second failure is swallowed (the reply is still returned to the
+            # caller in memory).
+            try:
+                self._append_conversation("leader", reply)
+            except Exception:  # noqa: BLE001 — never let log-write failure lose the turn
+                try:
+                    self._append_conversation(
+                        "leader", "(reply produced but the durable log write failed)"
+                    )
+                except Exception:  # noqa: BLE001 — give up; in-memory reply still returned
+                    pass
             self._emit_activity(role="leader", phase="leader_answered", agent_id="leader")
             return reply
 
@@ -5578,6 +5738,28 @@ class Orchestrator:
         # files from disk, no output-token re-emission). Parse from body_text
         # BEFORE fence-stripping, since the manifest is itself a fenced block.
         assembled = self._apply_assembly_manifest(task, body_text)
+        _asm_rec = self._assembly_records.get(task.id)
+        if _asm_rec is not None and getattr(_asm_rec, "output_file", None) is not None:
+            # re-sweep R4 #1: binary (media) deliverable — the engine composited a
+            # file in the vault (ffmpeg/ImageMagick/zip). Mirror the other two
+            # assembly callers (_engine_assemble_deliverable, _producer_execute):
+            # move that file onto the deliverable path (NOT a text write of the
+            # human-readable receipt), skip the prose-strip + breaker + regression
+            # guard (all text-only), and leak nothing. Without this the tool-loop
+            # path wrote the receipt string ("media assembly (image): composite …")
+            # as the deliverable and stranded the binary temp file.
+            import shutil
+            src = _asm_rec.output_file
+            try:
+                shutil.move(str(src), str(path))
+            except OSError:
+                shutil.copyfile(str(src), str(path))
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
+            self._record_artifact_write(path)
+            return path, _asm_rec.final_checksum, 0
         if assembled is not None:
             cleaned = assembled
         else:
@@ -5592,13 +5774,13 @@ class Orchestrator:
                 cleaned = _trim_leading_prose_from_code(cleaned)
         if self._regression_blocked(task, path, cleaned):
             return self._note_regression_kept(task, path, cleaned)
-        path.write_text(cleaned)
+        path.write_text(cleaned, encoding="utf-8")
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
         # QC-as-fixer Slice 2 (Nemo impl-sweep B2): the tool-loop producer
         # is part of the producer surface — bind it with the same post-hoc
         # circuit breaker as the plain path. ``response`` is the full final
         # body (incl. any thinking); ``cleaned`` is what committed.
-        self._maybe_trip_breaker(producer_role, response, cleaned)
+        self._maybe_trip_breaker(producer_role, response, cleaned, task=task)
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
         token_count = len(cleaned.split())
         return path, checksum, token_count
@@ -5637,8 +5819,15 @@ class Orchestrator:
             prior = prior_bytes.decode()
         except UnicodeDecodeError:
             return False
-        prior_tokens = len(prior.split())
-        new_tokens = len(new_content.split())
+        # re-sweep F1: measure the size in TOKENS, not whitespace word-count.
+        # Modulatio is artifact-agnostic — a compact/minified data or code
+        # deliverable (e.g. a single-line JSON object) has near-zero whitespace,
+        # so ``.split()`` collapses hundreds of tokens to ~1 "word" and the guard
+        # never engages. ``count_tokens`` is litellm-backed with a deterministic
+        # char/4 fallback, so the floor fires consistently across families.
+        model = self.project.leader_model
+        prior_tokens = _tool_sum_module.count_tokens(model, text=prior)
+        new_tokens = _tool_sum_module.count_tokens(model, text=new_content)
         return (
             prior_tokens >= _REGRESSION_MIN_PRIOR_TOKENS
             and new_tokens < prior_tokens * _REGRESSION_SHRINK_RATIO
@@ -5650,19 +5839,53 @@ class Orchestrator:
         token_count) as the PASSED version so QC re-affirms it. #86."""
         kept_bytes = path.read_bytes()
         kept = kept_bytes.decode(errors="replace")
+        # re-sweep #6: the audit rationale must report the TOKEN measure the gate
+        # (_regression_blocked) actually decides on, not whitespace word-count. A
+        # compact/minified data/code deliverable has near-zero whitespace, so .split()
+        # logged "1 → 1 tokens" while hundreds of real tokens shrank — making the audit
+        # read like nothing happened. (The returned size stays the word-count for
+        # back-compat with _producer_execute's existing consumers/tests.)
+        model = self.project.leader_model
+        kept_tokens = _tool_sum_module.count_tokens(model, text=kept)
+        new_tokens = _tool_sum_module.count_tokens(model, text=new_content)
         task.transitions.append(StateTransition(
             from_state=task.status.value,
             to_state=task.status.value,
             actor="orchestrator",
             rationale=(
                 f"no-regress (#86): refused a generate write shrinking the "
-                f"QC-passed deliverable {len(kept.split())} → "
-                f"{len(new_content.split())} tokens; kept the passed version"
+                f"QC-passed deliverable {kept_tokens} → "
+                f"{new_tokens} tokens; kept the passed version"
             ),
         ))
         self._record_artifact_write(path)
         checksum = f"sha256:{hashlib.sha256(kept_bytes).hexdigest()}"
         return path, checksum, len(kept.split())
+
+    def _cross_goal_dep_status(
+        self, tasks: "list[Task]"
+    ) -> "dict[str, TaskStatus]":
+        """Resolve the live status of every CROSS-GOAL dependency referenced by
+        ``tasks`` — a dep id NOT among ``tasks`` (a prior goal's task). The wave
+        gates (``_dep_failed`` / ``_ready_wave``) only see in-goal statuses; this
+        lets them block a dependent whose prior-goal input terminal-FAILED and
+        admit one whose input COMPLETED, instead of blindly treating an absent
+        dep as satisfied. Ids that don't resolve in the store are omitted (the
+        gates fall back to satisfied — references were validated at topo time)."""
+        in_goal = {t.id for t in tasks}
+        absent = {
+            dep_id
+            for t in tasks
+            for dep_id in t.depends_on
+            if dep_id not in in_goal
+        }
+        out: dict[str, TaskStatus] = {}
+        for dep_id in absent:
+            rt = store.get_task(
+                self.project.code, dep_id, run_id=self.project.run_id)
+            if rt is not None:
+                out[dep_id] = rt.status
+        return out
 
     def _wire_cross_goal_assembler_deps(self, tasks: "list[Task]") -> None:
         """P1 (engine binds the assembly — suspenders): wire a CROSS-GOAL assembler
@@ -5797,8 +6020,14 @@ class Orchestrator:
         # fallback; verify_assembly then fails closed on its empty dep set.
         filtered_units: list[str] = []
         if task.depends_on:
+            # re-sweep F9: normalize with the CANONICAL _norm_unit (prefix strip),
+            # not `.lstrip("./")` (a char-set strip that mangles a leading-dot run,
+            # e.g. `.config.json` -> `config.json`). The char-set strip would let an
+            # undeclared in-root dotfile collide with a declared `config.json` and
+            # sneak past the allowlist — exactly the pre-QC exposure hull #8 closes.
+            # Share ONE definition of unit identity with verify_assembly.
             allowed = {
-                d.output_path.strip().lstrip("./")
+                _review_ledger._norm_unit(d.output_path)
                 for d in (
                     store.list_tasks(self.project.code, run_id=self.project.run_id)
                 )
@@ -5806,7 +6035,7 @@ class Orchestrator:
             }
             kept_units = []
             for u in manifest.get("units", []):
-                if str(u).strip().lstrip("./") in allowed:
+                if _review_ledger._norm_unit(str(u)) in allowed:
                     kept_units.append(u)
                 else:
                     filtered_units.append(u)
@@ -6100,7 +6329,7 @@ class Orchestrator:
             )
             # fall through to a normal full review (fail-closed): {reason}
         try:
-            body = draft_path.read_text()
+            body = draft_path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError) as exc:
             # Defensive backstop: ANY binary/undecodable artifact reaching QC (a
             # media output with no record, an opaque blob) gets an environmental
@@ -6170,13 +6399,20 @@ class Orchestrator:
         domain_standards = standards.load(task.artifact_kind, project_code=self.project.code)
         history_hits: list[tuple[qc_history.VerdictRecord, float]] = []
         if self.qc_history_embedder is not None:
-            history_hits = qc_history.similar_verdicts(
-                task.artifact_kind,
-                self.project.code,
-                artifact_body=body,
-                embedder=self.qc_history_embedder,
-                k=self.qc_history_top_k,
-            )
+            # re-sweep #2: advisory precedent must NEVER fail or retry a task.
+            # similar_verdicts can raise (embed_text on a pathological body, or a
+            # lancedb error during the destructive _ensure_verdict_vectors rebuild);
+            # mirror _recall_team_memory's defensive contract and fall back to none.
+            try:
+                history_hits = qc_history.similar_verdicts(
+                    task.artifact_kind,
+                    self.project.code,
+                    artifact_body=body,
+                    embedder=self.qc_history_embedder,
+                    k=self.qc_history_top_k,
+                )
+            except Exception:  # noqa: BLE001 — advisory-only; never block the review
+                history_hits = []
         standing_notes_raw = qc_notes.load_standing_notes(
             task.artifact_kind, self.project.code,
         )
@@ -6395,8 +6631,10 @@ class Orchestrator:
         the current agent (last-ditch — flaky QC sometimes resolves).
         Caller decides: escalation helper returns the sentinels
         :data:`_ESCALATION_COMPLETED` / :data:`_ESCALATION_EXCEPTION`
-        for terminal outcomes, or a fresh ``(qc_verdict, qc_notes)``
-        tuple when QC still rejects (caller settles QC_REJECTED).
+        for terminal outcomes, or a fresh
+        ``(qc_verdict, qc_notes, defect_type)`` tuple when QC still rejects
+        (caller settles QC_REJECTED and threads ``defect_type`` to the
+        QC-authored fixer / recovery witness).
 
         The producer+QC cycle reuses the same dispatch path as the
         normal redo loop — skill-floor callable, per-agent runner
@@ -6500,7 +6738,7 @@ class Orchestrator:
             )
             t.evidence_provided.extend([artifact.id, metric.id])
 
-            qc_verdict_new, qc_notes_new, _defect = self._qc_review(
+            qc_verdict_new, qc_notes_new, defect_new = self._qc_review(
                 t, draft_path, checksum, token_count
             )
             t.evidence_provided.append(qc_verdict_new.id)
@@ -6526,10 +6764,12 @@ class Orchestrator:
                     summary.drafts.append(draft_path)
                 return _ESCALATION_COMPLETED
 
-            # Escalation attempt QC-failed. Return the fresh verdict so
-            # the caller settles QC_REJECTED using the most recent
-            # context, not the pre-escalation one.
-            return (qc_verdict_new, qc_notes_new)
+            # Escalation attempt QC-failed. Return the fresh verdict AND its
+            # defect class (re-sweep R4 #3) so the caller settles QC_REJECTED —
+            # and runs the QC-authored fixer / recovery witness — using THIS
+            # attempt's context, not the pre-escalation ``rescue_defect_type``
+            # (last set inside the retry loop from a different QC verdict).
+            return (qc_verdict_new, qc_notes_new, defect_new)
 
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
@@ -6601,9 +6841,16 @@ class Orchestrator:
         - the worker mutates only its own ``Task`` ``t``.
 
         Re-uses ``_run_task_with_redo`` internals untouched — same
-        producer→QC→redo — just pointed at isolated sinks. The single
-        documented exception is the locked ``qc_history.append_verdict``
-        (a best-effort precedent log held under ``self._store_lock``).
+        producer→QC→redo — just pointed at isolated sinks. Two documented
+        exceptions write shared instance state from inside the worker:
+        - the locked ``qc_history.append_verdict`` (a best-effort precedent log
+          held under ``self._store_lock``);
+        - ``self._assembly_records[task.id] = ...`` in ``_apply_assembly_manifest``
+          (re-sweep F7). This is safe WITHOUT a lock: the key is the worker's own
+          unique task id (no two workers touch the same slot) and a dict
+          ``__setitem__`` is atomic under the GIL, so concurrent inserts can't
+          corrupt the dict. The main thread only reads these records AFTER the wave
+          merge (verify paths), by which point every worker has joined.
         """
         # Fix C hardening (Nemo BLOCK): the whole wave is submitted to the pool
         # at once, so a task QUEUED behind the pool ceiling can start AFTER the
@@ -6640,16 +6887,46 @@ class Orchestrator:
                     role=self.default_producer_role, phase="task_settled",
                     task_id=t.id, agent_id=t.assigned_agent_id,
                 )
-        except BaseException:
+        except BaseException as exc:
             # An UNEXPECTED escape (engine bug — producer/QC failures are caught
-            # inside the redo loop) propagates out and never returns a result, so
-            # the main-thread merge records a synthetic BLOCKED result with NO
-            # staging_root and `_merge_wave_artifacts` never tears this dir down.
-            # Remove the orphaned per-task staging tree here before re-raising so
-            # a crashed worker doesn't leak it under ``.staging/``.
-            import shutil
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
+            # inside the redo loop). The buffers this worker already accumulated —
+            # deferred store-writes (block-path tickets / task saves) and decompose
+            # CHILD tasks — are in scope here; if we re-raise, the main-thread
+            # crash handler rebuilds a synthetic BLOCKED result with EMPTY buffers
+            # and those committed-but-undelivered side effects are silently lost
+            # (#6643). Carry them back instead: mark the task BLOCKED and return a
+            # result that preserves the deferred writes, child tasks, drafts/errors
+            # AND the staging tree, so the deterministic main-thread merge commits
+            # them and `_merge_wave_artifacts` tears the staging dir down normally.
+            # A KeyboardInterrupt/SystemExit must still propagate (operator/runtime
+            # teardown is not a recoverable worker crash).
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                import shutil
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+            t.status = TaskStatus.BLOCKED
+            local_summary.errors.append(
+                f"wave worker crashed: {type(exc).__name__}: {exc}"
+            )
+            _logger.exception(
+                "wave worker for task %s crashed; recovering deferred writes "
+                "(%d) and child tasks (%d), recorded as BLOCKED",
+                t.id, len(deferred), len(child_tasks),
+            )
+            self._emit_activity(
+                role=self.default_producer_role, phase="task_settled",
+                task_id=t.id, agent_id=t.assigned_agent_id,
+            )
+            return TaskExecutionResult(
+                task=t,
+                drafts=list(local_summary.drafts),
+                errors=list(local_summary.errors),
+                deferred_writes=deferred,
+                qc_authored_fixes=list(local_summary.qc_authored_fixes),
+                staging_root=staging,
+                artifact_writes=artifact_writes,
+                child_tasks=child_tasks,
+            )
         finally:
             self._tls.deferred_writes = None
             self._tls.artifact_writes = None
@@ -6882,6 +7159,15 @@ class Orchestrator:
                 claimed[pk] = tid
                 _copy(r.staging_root, pk)
 
+        # re-sweep R4 #4: reserve EVERY task's declared primary path up front —
+        # even one that pass 1 never claimed because the task didn't actually
+        # write it (empty/failed producer). The pass-2 guard below only skips a
+        # task's OWN primary (``k == pk``), so without this a SIBLING task's
+        # sidecar write at the same path would find ``claimed.get(k) is None``
+        # and land on the absent task's primary slot. Reserving the path keeps a
+        # sidecar from ever claiming another task's primary, written or not.
+        reserved_primaries = set(primary_keys.values())
+
         # Pass 2: sidecars — deterministic (task-id, path) order.
         for tid, r in staged:
             pk = primary_keys[tid]
@@ -6889,6 +7175,23 @@ class Orchestrator:
                 k = _key(rel)
                 if k == pk:
                     continue  # already merged in pass 1
+                if k in reserved_primaries and claimed.get(k) != tid:
+                    # Another task's declared primary path — never let a sidecar
+                    # land here. Surface it as a dropped-sidecar merge transition
+                    # (same shape as the claimed-owner conflict below).
+                    r.task.transitions.append(
+                        StateTransition(
+                            from_state=r.task.status.value,
+                            to_state=r.task.status.value,
+                            actor="merge",
+                            rationale=(
+                                f"artifact path {rel!r} is another task's declared "
+                                f"primary output — this task's sidecar dropped, not "
+                                f"merged"
+                            ),
+                        )
+                    )
+                    continue
                 owner = claimed.get(k)
                 if owner is not None and owner != tid:
                     r.task.transitions.append(
@@ -7102,6 +7405,11 @@ class Orchestrator:
         def _save(task: Task) -> None:
             store.save_task(self.project.code, task, run_id=self.project.run_id)
 
+        # Cross-goal dep statuses (prior goals' tasks this goal depends on) are
+        # terminal by the time this goal runs (goals execute serially), so
+        # resolve them ONCE — a FAILED cross-goal input must block its dependent,
+        # a COMPLETED one admits it (#1437).
+        cross_goal_status = self._cross_goal_dep_status(tasks)
         while True:
             # Fix C: operator kill-switch — stop launching new waves. The current
             # wave's in-flight tasks already finished (we only reach the top of
@@ -7114,7 +7422,7 @@ class Orchestrator:
             for t in tasks:
                 if not _runnable(t):
                     continue
-                fd = _dep_failed(t, task_map)
+                fd = _dep_failed(t, task_map, cross_goal_status)
                 if fd:
                     t.transitions.append(StateTransition(
                         from_state=t.status.value,
@@ -7129,7 +7437,7 @@ class Orchestrator:
                     _save(t)
 
             # 2. Next ready wave (runnable, deps all COMPLETED).
-            wave = _ready_wave(tasks)
+            wave = _ready_wave(tasks, cross_goal_status)
             if not wave:
                 break
 
@@ -7256,6 +7564,18 @@ class Orchestrator:
                         # in `done`. Record a synthetic failed-task result so the
                         # merge proceeds and this task surfaces as BLOCKED rather
                         # than vanishing.
+                        #
+                        # REVIEWER NOTE (0.9.0 cadre, 2026-06-14): a worker thread
+                        # canNOT silently die here — every future is drained via
+                        # `fut.result()` and a raise becomes a BLOCKED task above.
+                        # The non-deterministic `PytestUnhandledThreadException
+                        # Warning` seen once in the 0.9.0 suite is NOT this path:
+                        # all four reviewers (Lovecraft, Nemo/MiniMax-M3, Wild
+                        # Bill/Codex, + the GPT-5.5 pass) traced it to a raw-thread
+                        # TEST without exception capture, ruled it BENIGN test
+                        # hygiene — not a worker-isolation hazard. Full record:
+                        # docs/design/0.9.0-flaky-thread-warning.md. Don't
+                        # re-litigate this as an engine bug.
                         crashed = task_map.get(tid)
                         if crashed is not None:
                             crashed.status = TaskStatus.BLOCKED
@@ -7263,6 +7583,16 @@ class Orchestrator:
                                 task=crashed,
                                 errors=[f"wave worker crashed: {type(exc).__name__}: {exc}"],
                             )
+                        # re-sweep F5: a worker that escapes BEFORE building its
+                        # result (e.g. _seed_staging / _staging_tool_registry throws
+                        # before the worker's own try) carries NO staging_root, so the
+                        # synthetic result above can't tell _merge_wave_artifacts to
+                        # tear down its .staging/<tid> dir — it would leak every crash.
+                        # Sweep it here directly (idempotent; no-op if never created).
+                        import shutil
+                        shutil.rmtree(
+                            self._scope_root() / ".staging" / tid, ignore_errors=True
+                        )
                         _logger.exception(
                             "wave worker for task %s crashed; recorded as BLOCKED", tid
                         )
@@ -7374,8 +7704,23 @@ class Orchestrator:
                     and isinstance(new_skills, list)
                     and all(isinstance(s, str) for s in new_skills)
                 ):
-                    t.required_skills = new_skills
-                    changed.append("required_skills")
+                    # re-sweep #8: _select_assembler_skill canonicalization and the
+                    # #73 evidence-family normalization run ONCE in _plan_tasks. A
+                    # reflect 'revise' that introduces/swaps an ASSEMBLER skill would
+                    # leave the executed assembly route diverged from the already-built
+                    # (.md-normalized) evidence — and that normalization is one-way, so
+                    # we can't re-derive the binary-extension evidence here. Forbid an
+                    # assembler-skill CHANGE (mirrors the operator-present authority lock
+                    # above); non-assembler skill revisions still apply, then re-run
+                    # _select_assembler_skill so canonicalization stays consistent.
+                    cur_assemblers = set(t.required_skills) & _ASSEMBLER_SKILLS
+                    new_assemblers = set(new_skills) & _ASSEMBLER_SKILLS
+                    if new_assemblers != cur_assemblers:
+                        pass  # assembler-skill change rejected — keep planned skills
+                    else:
+                        t.required_skills = new_skills
+                        _select_assembler_skill([t], self.project.code)
+                        changed.append("required_skills")
                 if changed:
                     t.transitions.append(StateTransition(
                         from_state=t.status.value,
@@ -7661,10 +8006,11 @@ class Orchestrator:
             # Exception on the escalation cycle → BLOCKED. The helper
             # has already written the transition + summary line.
             return
-        # Fall through to QC_REJECTED settlement using the last_qc
-        # from the escalation attempt (helper updates last_qc in
-        # place via return).
-        qc_verdict, qc_notes = escalation_outcome  # type: ignore[misc]
+        # Fall through to QC_REJECTED settlement using the verdict from the
+        # escalation attempt (re-sweep R4 #3: the helper now also returns the
+        # escalation attempt's OWN defect class, so the QC-fixer / witness see
+        # this attempt's defect, not the stale loop-scoped rescue_defect_type).
+        qc_verdict, qc_notes, escalation_defect_type = escalation_outcome  # type: ignore[misc]
 
         # QC-as-fixer Slice 3: producer exhausted retries AND escalation.
         # Before settling a dead QC_REJECTED, try a QC-authored rescue of
@@ -7672,7 +8018,7 @@ class Orchestrator:
         # nothing salvageable).
         if self._attempt_qc_fix_forward(
             t, self._resolve_draft_path(t), (qc_verdict, qc_notes), summary,
-            defect_type=rescue_defect_type,
+            defect_type=escalation_defect_type,
         ):
             return
 
@@ -7792,7 +8138,7 @@ class Orchestrator:
         if draft_path is None or not draft_path.exists():
             return False
         try:
-            body = draft_path.read_text()
+            body = draft_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             # A binary/media artifact (zip/mp4/rendered pdf/docx) isn't
             # text-patchable; UnicodeDecodeError is a ValueError, not OSError.
@@ -7915,7 +8261,7 @@ class Orchestrator:
                 patched = _trim_leading_prose_from_code(patched)
         if not patched.strip():
             raise ValueError("QC patch produced an empty artifact")
-        draft_path.write_text(patched)
+        draft_path.write_text(patched, encoding="utf-8")
         # P5 declared-format integrity (HRWT fabrication gate). The QC patch
         # ALWAYS writes TEXT; on the breaker-abort lane QC-review never ran, so
         # verify_declared_format never fired on the patched bytes. Writing text
@@ -8386,22 +8732,6 @@ class Orchestrator:
         tomorrow = (now + timedelta(days=1)).date()
         return datetime.combine(tomorrow, time.min, tzinfo=timezone.utc)
 
-    @staticmethod
-    def _budget_fresh_today(goal: Goal) -> bool:
-        """True when the goal's retry_count pertains to today's window.
-        If the date rolled over, the orchestrator treats the budget as
-        fresh (callers should reset ``retry_count`` to 0 before using)."""
-        return goal.retry_count_date == date.today()
-
-    def _refresh_daily_budget_if_new_day(self, goal: Goal) -> None:
-        """If the goal's retry_count_date is stale (None or before
-        today), reset the counter and stamp today. Called before any
-        auto-redo attempt — it's the "daily refresh" semantics the
-        business-harness budget pattern exposes."""
-        if not self._budget_fresh_today(goal):
-            goal.retry_count = 0
-            goal.retry_count_date = date.today()
-
     # ── Leader goal verification (slice #7d + auto-redo #7e) ────────────
     def _leader_verify_goal(
         self,
@@ -8419,15 +8749,21 @@ class Orchestrator:
             * budget available this window → auto-redo (reset tasks,
               re-execute, recursively re-verify). No ticket fires on
               this path; Leader's rationale feeds corrective notes.
-            * budget exhausted → BLOCKER ticket with refresh_at set to
-              tomorrow-midnight-UTC. Goal stays IN_PROGRESS so the
-              auto-resume path picks it up when the budget refreshes.
+            * budget exhausted → ship-with-reservations and COMPLETE the
+              goal (the final ``else`` below). The run is never blocked on
+              the Leader's reservations; the human reads them in the
+              Product Quality Report and decides what to double-check. No
+              retry-budget BLOCKER fires anymore (re-sweep #4: the old
+              budget-exhausted ticket + cross-day auto-resume-from-retry-
+              budget path is retired — ``_open_budget_exhausted_ticket`` is
+              now dead in production, retained only for its plain-English
+              ticket-body contract test).
 
         Ticket semantics (user-defined): MINOR = work continues watch;
         CRITICAL = might need intervention, continuing for now; BLOCKER
-        = stop, human required. BLOCKER is reserved for exhausted
-        budgets (both retry-budget here and cost-budget later when
-        Comptroller lands).
+        = stop, human required. The remaining live BLOCKER path is the
+        Comptroller escalation-budget deny (``_open_budget_ticket``),
+        which DOES carry refresh_at + auto-resume.
         """
         self._emit_activity(
             role="leader",
@@ -8591,10 +8927,27 @@ class Orchestrator:
             data = _extract_json(response)
         except (ValueError, KeyError) as exc:
             # Parse failure is rare but not impossible. Don't crash the
-            # run — surface the error, leave goal status alone, and move
-            # on. Human can read summary.errors.
+            # run — surface the error and move on. Previously this returned
+            # leaving goal status untouched, which STRANDED the goal IN_PROGRESS
+            # on a normal finish (#8592): the driving ticket is already resolved,
+            # the wind-down loop won't re-pick it, and only an F8 teardown ever
+            # finalized it. Drive it to a terminal state with a PQR reservation so
+            # it surfaces for human review instead of hanging the run (mirrors the
+            # zero-completed settle used by the redo lanes).
             summary.errors.append(
                 f"{goal.id}: leader verify failed to parse verdict: {exc}"
+            )
+            self._settle_zero_completed(
+                goal, summary,
+                concern=(
+                    "The Leader's verify response could not be parsed into a "
+                    "verdict, so the goal was settled as-is without an automated "
+                    f"quality judgment. Parse error: {exc}"
+                ),
+                rationale=(
+                    "leader verify settled: verdict response unparseable "
+                    f"({type(exc).__name__})"
+                ),
             )
             self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
             return
@@ -8619,7 +8972,7 @@ class Orchestrator:
             "---\n\n"
             f"{report_body.rstrip()}\n"
         )
-        report_path.write_text(report_content)
+        report_path.write_text(report_content, encoding="utf-8")
         summary.goal_reports.append(report_path)
 
         # Normalize unknown verdicts to "disappointed" — better to
@@ -9082,6 +9435,17 @@ class Orchestrator:
         human-facing recommendations (the Product Quality Report). Tolerant
         of dict items ({concern, suggestion}) or bare strings. Advisory only
         — never affects goal status or run flow."""
+        # The §3b redo path re-enters _leader_verify_goal recursively, so for a
+        # goal that redoes N-1 times the verifier (which calls this UNCONDITIONALLY
+        # before the verdict branch) runs N times and would append that round's
+        # reservations to the shared PQR each pass — the same (goal, concern,
+        # suggestion) reservation rendered N times in the human-facing report
+        # (#8651). Dedup against what's already recorded for this goal so a redo
+        # loop doesn't multiply identical reservations.
+        existing = {
+            (rec.get("goal_id"), rec.get("concern"), rec.get("suggestion"))
+            for rec in summary.recommendations
+        }
         for r in raw or []:
             if isinstance(r, dict):
                 concern = str(r.get("concern", "") or "").strip()
@@ -9089,6 +9453,10 @@ class Orchestrator:
             else:
                 concern, suggestion = str(r or "").strip(), ""
             if concern or suggestion:
+                key = (goal.id, concern, suggestion)
+                if key in existing:
+                    continue
+                existing.add(key)
                 summary.recommendations.append({
                     "goal_id": goal.id,
                     "concern": concern,
@@ -9133,6 +9501,11 @@ class Orchestrator:
             )
         )
         goal.status = GoalStatus.COMPLETED
+        # re-sweep F6: this is the shared terminalizer for ALL redo lanes (leader
+        # auto-redo / decline reexecute / budget auto-resume). The normal terminal-
+        # COMPLETED path pops the redo loop-breaker fingerprint; a zero-settled
+        # redone goal must too, or it strands a stale entry in the per-run dict.
+        self._goal_redo_fingerprints.pop(goal.id, None)
         store.save_goal(self.project.code, goal, run_id=self.project.run_id)
         self._emit_activity(
             role="leader", phase="leader_verify_ended", agent_id="leader",
@@ -9389,10 +9762,21 @@ class Orchestrator:
             (t for t in tasks if getattr(t, "deliverable", False)),
             key=lambda t: t.id,
         ):
-            body = self._read_task_artifact(t) or ""
             h.update(t.id.encode())
             h.update(b"\0")
-            h.update(body.encode("utf-8", "replace"))
+            # Fingerprint the actual on-disk BYTES, not the text-decoded body
+            # (#9392): _read_task_artifact returns None for any non-utf-8 file, so
+            # a binary/media deliverable (a .pptx/.pdf/.png) used to collapse to ""
+            # every round — the loop-breaker then saw an UNCHANGED fingerprint and
+            # forced a false "stalled" after a single redo, regardless of whether
+            # the redo actually changed the artifact. Hashing the raw bytes makes
+            # the loop-breaker see real content changes for every artifact class.
+            path = self._task_artifact_path(t)
+            if path is not None:
+                try:
+                    h.update(path.read_bytes())
+                except OSError:
+                    pass
             h.update(b"\0")
         return h.hexdigest()
 
@@ -9538,6 +9922,11 @@ class Orchestrator:
                     f"higher-tier agent to the roster.\n"
                 ),
                 affected_task_id=task.id,
+                # re-sweep #1: also bind the goal so _auto_resume_refreshable_goals
+                # (which skips affected_goal_id-only tickets) can actually fulfil the
+                # ticket's "next kickoff past refresh auto-resumes" promise — without
+                # it the BLOCKER's refresh_at was dead and recovery never fired.
+                affected_goal_id=task.goal_id,
                 actor="comptroller",
             )
             ticket.refresh_at = refresh_at
@@ -9945,7 +10334,7 @@ class Orchestrator:
         surfaces a LOUDER spot-check recommendation (Hero R1b). Best-effort."""
         try:
             recs = recoveries.unconsumed_recoveries(self.project.code)
-            clusters = recoveries.cluster_recoveries(recs, floor=_WIN_CODIFY_FLOOR)
+            clusters = recoveries.cluster_recoveries(recs, floor=_win_codify_floor())
         except Exception:  # noqa: BLE001
             self._codification_skipped("recovery_feed_failed")
             return
@@ -10134,7 +10523,7 @@ class Orchestrator:
         # The repo is the SHARED library (fail) or the PROJECT-LOCAL skills dir (win).
         skill_root = (
             (project_dir(project_code) / "skills")
-            if project_code else skills._SKILLS_ROOT
+            if project_code else skills._skills_root()
         )
         skill_path = skill_root / f"{new_skill.name}.md"
         skill_git.ensure_repo(skill_root)
@@ -10751,11 +11140,30 @@ class Orchestrator:
         # tasks, but the gate keeps us honest against a dep that failed earlier
         # in the same pass).
         task_map = {t.id: t for t in tasks}
+        # Live status of cross-goal deps (prior goals' tasks), so a FAILED
+        # prior-goal input blocks its dependent and a not-yet-COMPLETED one keeps
+        # it waiting — instead of treating any absent dep as satisfied (#1437).
+        cross_goal_status = self._cross_goal_dep_status(tasks)
+        # Order ONLY on the intra-goal dependency edges. A reopened goal's task
+        # can legitimately depend on a task in ANOTHER goal (a cross-goal id not
+        # present in `tasks`); feeding that id to _topological_sort makes it raise
+        # _DependencyError("unknown dependency ids") → the whole sort collapses to
+        # store order and the goal's REAL intra-goal ordering is silently lost
+        # (#10755). Sort over copies whose deps are filtered to ids in this set;
+        # the cross-goal deps stay enforced below by the live _dep_failed / unready
+        # gate (which already tolerates a dep not in task_map).
+        order_view = [
+            t.model_copy(
+                update={"depends_on": [d for d in t.depends_on if d in task_map]}
+            )
+            for t in tasks
+        ]
         try:
-            ordered = _topological_sort(tasks)
+            ordered_view = _topological_sort(order_view)
+            ordered = [task_map[v.id] for v in ordered_view]
         except _DependencyError:
-            # A cycle/unknown-ref here mirrors the initial-pass validator; fall
-            # back to store order rather than aborting the resume entirely.
+            # A genuine cycle among the intra-goal edges mirrors the initial-pass
+            # validator; fall back to store order rather than aborting the resume.
             ordered = list(tasks)
         for t in ordered:
             if self.abort_event.is_set():
@@ -10763,7 +11171,7 @@ class Orchestrator:
                 return
             if not _runnable(t):
                 continue
-            fd = _dep_failed(t, task_map)
+            fd = _dep_failed(t, task_map, cross_goal_status)
             if fd:
                 t.transitions.append(StateTransition(
                     from_state=t.status.value,
@@ -10777,14 +11185,33 @@ class Orchestrator:
                 )
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
                 continue
+            # An UNVALIDATED dep (absent from this goal AND not resolved in the
+            # store — a typo / malformed cross-goal edge) must FAIL CLOSED. The
+            # initial-pass topo store-validates and rejects these; the resume
+            # topo skips that validation (to avoid #10755), so enforce the
+            # invariant here — never run a reopened task against an unresolved
+            # dependency (Nemo HIGH).
+            unknown = _unknown_deps(t, task_map, cross_goal_status)
+            if unknown:
+                t.transitions.append(StateTransition(
+                    from_state=t.status.value,
+                    to_state=TaskStatus.BLOCKED.value,
+                    actor="planner",
+                    rationale=(
+                        f"unresolved dependency ids {unknown}; producer skipped"
+                    ),
+                ))
+                t.status = TaskStatus.BLOCKED
+                summary.errors.append(
+                    f"{t.id}: blocked by unresolved dependency {unknown}"
+                )
+                store.save_task(self.project.code, t, run_id=self.project.run_id)
+                continue
             # A dep that hasn't COMPLETED yet (e.g. itself reopened but ordered
-            # after) keeps this task waiting — skip it this pass rather than
-            # draft against missing input.
-            unready = [
-                d for d in t.depends_on
-                if task_map.get(d) is not None
-                and task_map[d].status != TaskStatus.COMPLETED
-            ]
+            # after, or a cross-goal prior-goal task still in flight) keeps this
+            # task waiting — skip it this pass rather than draft against missing
+            # input.
+            unready = _unready_deps(t, task_map, cross_goal_status)
             if unready:
                 continue
             self._run_task_with_redo(
@@ -10882,6 +11309,21 @@ class Orchestrator:
 
             goal = store.get_goal(self.project.code, ticket.affected_goal_id, run_id=self.project.run_id)
             if goal is None or goal.status in (GoalStatus.COMPLETED, GoalStatus.ABANDONED):
+                # re-sweep #5: the goal already terminalized (e.g. a sibling/duplicate
+                # ticket for the same goal recovered it first, or it completed in the
+                # producing run). Retire this stale ticket instead of leaving it OPEN
+                # forever with a past refresh_at — no lane else reprocesses it.
+                if goal is not None:
+                    store.update_ticket_status(
+                        self.project.code,
+                        ticket.id,
+                        TicketStatus.RESOLVED,
+                        actor="leader",
+                        rationale=(
+                            f"goal already {goal.status.value} — stale refresh ticket retired"
+                        ),
+                        run_id=self.project.run_id,
+                    )
                 continue
 
             # Load the goal's tasks — reset to PENDING for a fresh run.
@@ -11203,7 +11645,7 @@ class Orchestrator:
                     # A document attachment is text by contract; a binary file
                     # (e.g. a .docx) fails to decode (UnicodeDecodeError <:
                     # ValueError) — skip it rather than crash the pin step.
-                    content = Path(a.path).read_text()
+                    content = Path(a.path).read_text(encoding="utf-8")
                 except (OSError, ValueError):
                     continue
             try:  # same confinement rule as a producer output_path
@@ -11214,10 +11656,13 @@ class Orchestrator:
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 # write_text raises TypeError on non-str content (a binary
-                # attachment that arrived as bytes) — guard it too so one bad
-                # attachment doesn't abort pinning the rest.
-                dest.write_text(content)
-            except (OSError, TypeError):
+                # attachment that arrived as bytes), and UnicodeEncodeError (a
+                # ValueError) under a non-UTF-8 process locale for legitimate
+                # non-ASCII content — guard both so one bad attachment doesn't
+                # abort pinning the rest. Write UTF-8 explicitly to match the
+                # read side and avoid locale-dependent encode failures.
+                dest.write_text(content, encoding="utf-8")
+            except (OSError, TypeError, ValueError):
                 continue
             self._pinned_files.append(rel)
         if self._pinned_files:
@@ -11489,8 +11934,34 @@ class Orchestrator:
             # the whole plan — open a CRITICAL ticket, mark every task
             # BLOCKED, skip producer/QC/Leader-verify. That's a bad
             # plan output case, same shape as #6d capability tickets.
+            # Order on intra-goal edges. An assembler task can legitimately
+            # depend on a PRIOR goal's unit tasks (cross-goal ids absent from
+            # this goal's `tasks`); feeding those to _topological_sort makes it
+            # raise and reject the whole plan (#11628 — the same hazard the
+            # resume path guards at ~10880). But a genuinely unknown ref (a
+            # planner typo, e.g. an out-of-range index) must STILL reject (the
+            # #7a safety gate). So filter out ONLY deps that resolve to a real
+            # task elsewhere in this run — a VALIDATED cross-goal edge; an id
+            # that resolves to nothing stays in and trips _topological_sort. The
+            # cross-goal deps remain on the real tasks for execution-time
+            # enforcement (_dep_failed / _ready_wave treat an absent dep as a
+            # satisfied prior-goal completion). A real intra-goal cycle rejects.
+            _tmap_topo = {t.id: t for t in tasks}
+            _cross_goal_ids = {
+                rt.id
+                for rt in store.list_tasks(
+                    self.project.code, run_id=self.project.run_id)
+            } - set(_tmap_topo)
             try:
-                tasks = _topological_sort(tasks)
+                _ordered = _topological_sort([
+                    t.model_copy(update={
+                        "depends_on": [
+                            d for d in t.depends_on if d not in _cross_goal_ids
+                        ]
+                    })
+                    for t in tasks
+                ])
+                tasks = [_tmap_topo[v.id] for v in _ordered]
             except _DependencyError as exc:
                 self._reject_task_plan(g, tasks, exc.reason, summary)
                 continue
@@ -11661,6 +12132,11 @@ class Orchestrator:
                 TaskStatus.QC_REJECTED,
                 TaskStatus.ABANDONED,
             }
+            # Live status of this goal's CROSS-GOAL deps (prior goals' tasks), so
+            # the sequential fallback cascade-blocks on a terminal-FAILED
+            # prior-goal input — the third execution path joining the wave
+            # executor and the resume gate (#1437 / #11951).
+            cross_goal_status = self._cross_goal_dep_status(tasks)
             # Core rebuild B4: when the concurrent wave executor is enabled
             # (default ON since §5 — kill-switch MODULATIO_CONCURRENT_WAVES=0
             # forces sequential), it runs ALL of this goal's tasks in parallel
@@ -11686,12 +12162,10 @@ class Orchestrator:
                     store.save_task(self.project.code, t, run_id=self.project.run_id)
                     continue
 
-                # Slice #7a: cascade dep failure to successor.
-                failed_deps = [
-                    dep_id for dep_id in t.depends_on
-                    if task_map.get(dep_id) is not None
-                    and task_map[dep_id].status in _TERMINAL_FAIL
-                ]
+                # Slice #7a: cascade dep failure to successor — including a
+                # CROSS-GOAL dep (a prior goal's task) that terminal-FAILED,
+                # via the shared _dep_failed gate (#11951).
+                failed_deps = _dep_failed(t, task_map, cross_goal_status)
                 if failed_deps:
                     t.transitions.append(
                         StateTransition(
@@ -11709,6 +12183,32 @@ class Orchestrator:
                         f"{t.id}: blocked by failed dependency {failed_deps}"
                     )
                     store.save_task(self.project.code, t, run_id=self.project.run_id)
+                    continue
+
+                # Three-path parity (Nemo): an UNVALIDATED dep fails closed
+                # (defense-in-depth — the initial-pass topo already store-validated
+                # this plan, but the gate matches the resume path exactly)…
+                unknown = _unknown_deps(t, task_map, cross_goal_status)
+                if unknown:
+                    t.transitions.append(StateTransition(
+                        from_state=t.status.value,
+                        to_state=TaskStatus.BLOCKED.value,
+                        actor="planner",
+                        rationale=(
+                            f"unresolved dependency ids {unknown}; producer skipped"
+                        ),
+                    ))
+                    t.status = TaskStatus.BLOCKED
+                    summary.errors.append(
+                        f"{t.id}: blocked by unresolved dependency {unknown}"
+                    )
+                    store.save_task(self.project.code, t, run_id=self.project.run_id)
+                    continue
+                # …and a resolved dep that has not COMPLETED yet keeps the task
+                # WAITING rather than drafting against an input that hasn't
+                # shipped (the COMPLETED-or-wait contract the concurrent
+                # `_ready_wave` and the resume gate already enforce).
+                if _unready_deps(t, task_map, cross_goal_status):
                     continue
 
                 self._run_task_with_redo(t, summary)
@@ -13011,7 +13511,29 @@ Return {{"codifications": []}} when nothing recurred enough to codify.
 
 
 #: #81 codify-the-win: the engine recurrence floor for a win cluster (env-overridable).
-_WIN_CODIFY_FLOOR = int(os.environ.get("MODULATIO_WIN_CODIFY_FLOOR", "3") or "3")
+_WIN_CODIFY_FLOOR_DEFAULT = 3
+
+
+def _win_codify_floor() -> int:
+    """The win-codify recurrence floor, read from ``MODULATIO_WIN_CODIFY_FLOOR``.
+
+    re-sweep F3: this MUST NOT crash on a malformed value. ``orchestration`` is
+    imported unconditionally by ``cli.py``, so an unguarded ``int(...)`` at module
+    scope on e.g. ``MODULATIO_WIN_CODIFY_FLOOR=foo`` raised ``ValueError`` at IMPORT
+    and bricked the whole CLI/TUI. Mirror ``_wave_global_cap``: try/except with a
+    sane default, clamped to >=1 (a floor of 0 would surface every singleton)."""
+    raw = (os.environ.get("MODULATIO_WIN_CODIFY_FLOOR") or "").strip()
+    if not raw:
+        return _WIN_CODIFY_FLOOR_DEFAULT
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _WIN_CODIFY_FLOOR_DEFAULT
+
+
+#: Module-level convenience: resolved once at import via the guarded parser, so a
+#: malformed env value can never raise at import time (the brick F3 closes).
+_WIN_CODIFY_FLOOR = _win_codify_floor()
 
 #: Fallback for the `win-codify` seed (the Leader's recovery-technique-drafting
 #: template). The ENGINE has already proven RECURRENCE (it surfaced a cluster of

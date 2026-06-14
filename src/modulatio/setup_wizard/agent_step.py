@@ -23,6 +23,15 @@ from modulatio.setup_wizard import steps
 MIN_AGENTS = 3  # structural roles (Leader + QC) + 1 producer/skill-holder
 MAX_AGENTS = 10
 
+# Position of this (agents) step in the wizard's step machine, for the
+# step header. The driver (steps.run_step_machine) renders the header from
+# the live (step_idx+1, total); these sub-screens clear+re-render their own
+# header, so they must match. Kept here (not threaded through run()) to avoid
+# a circular import on setup_wizard.__init__, which imports this module — see
+# step_order in setup_wizard.__init__._run_setup_body (agents is the 5th of 9).
+_STEP_NUMBER = 5
+_STEP_TOTAL = 9
+
 
 def _pick_template_for_tier(tier: str, current: str | None = None) -> Any:
     """Pick a template for a structural-role tier (leader / qc).
@@ -209,7 +218,7 @@ def _provision_triad(state: dict, default_models: dict[str, str]) -> Any:
         tier = tiers[i]
         theme.clear_screen()
         label = "Leader (plans + decides)" if tier == "leader" else "Quality Control (verifier)"
-        theme.step_header(4, 7, f"Structural role — {label} (mandatory)")
+        theme.step_header(_STEP_NUMBER, _STEP_TOTAL, f"Structural role — {label} (mandatory)")
 
         current_template = by_tier.get(tier, {}).get("template_origin")
         template_id = _pick_template_for_tier(tier, current=current_template)
@@ -227,11 +236,29 @@ def _provision_triad(state: dict, default_models: dict[str, str]) -> Any:
             return steps.QUIT
         if model is steps.BACK:
             if i == 0:
-                return steps.BACK
+                # re-sweep (:237): BACK at the FIRST role's (Leader) model
+                # picker re-shows the Leader's TEMPLATE picker rather than
+                # bubbling out of the whole agents step — bubbling would discard
+                # the just-picked Leader template (by_tier[tier] is set only
+                # AFTER the model is chosen, below) AND pop the just-provisioned
+                # worker pool. Re-seed the template default from the just-picked
+                # template_id so the re-show lands on the user's current choice;
+                # the {**...} spread preserves any prior context_budget. (For
+                # i>0, BACK steps to the previous role, the tested behavior.)
+                by_tier[tier] = {**by_tier.get(tier, {}), "template_origin": template_id}
+                continue
             i -= 1
             continue
 
-        by_tier[tier] = _build_agent_from_template(template_id, model)
+        built = _build_agent_from_template(template_id, model)
+        # Re-invocation edit/keep: carry forward a per-role context_budget the
+        # user customized in a prior run (pre-seeded into ``by_tier`` from the
+        # saved team template). The rebuild above does not re-derive it, so
+        # without this it would be silently dropped on a reconfigure.
+        prior_cb = by_tier.get(tier, {}).get("context_budget")
+        if prior_cb is not None:
+            built["context_budget"] = prior_cb
+        by_tier[tier] = built
         i += 1
 
     state["triad_agents"] = [by_tier["leader"], by_tier["qc"]]
@@ -256,12 +283,13 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
     # Re-invocation edit/keep: seed the producer picker defaults from the saved
     # worker pool so a reconfigure starts on the current picks instead of an
     # empty re-provision (mirrors how _provision_triad seeds from ``by_tier``).
-    prior_models = [
-        a.get("model") for a in state.get("worker_agents", []) if a.get("model")
+    prior_workers = [
+        a for a in state.get("worker_agents", []) if a.get("model")
     ][:max_producers]
+    prior_models = [a.get("model") for a in prior_workers]
 
     theme.clear_screen()
-    theme.step_header(4, 7, "Build your team — add producers")
+    theme.step_header(_STEP_NUMBER, _STEP_TOTAL, "Build your team — add producers")
     print(theme.color(
         "  A producer is a model endpoint. Assign an LLM and confirm what it's "
         "good at — skills are drawn from the shared library per task, so any "
@@ -273,7 +301,7 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
     while len(producers) < max_producers:
         n = len(producers) + 1
         theme.clear_screen()
-        theme.step_header(4, 7, f"Producer {n} of up to {max_producers}")
+        theme.step_header(_STEP_NUMBER, _STEP_TOTAL, f"Producer {n} of up to {max_producers}")
         prior = prior_models[n - 1] if n - 1 < len(prior_models) else None
         model = _pick_model(
             f"producer {n}", default_models, staged_keys=staged_keys, current=prior
@@ -286,7 +314,17 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
             if model is steps.QUIT:
                 return model
             break
-        producers.append(_build_producer(model, index=n))
+        built = _build_producer(model, index=n)
+        # Carry forward a per-producer context_budget customized in a prior run
+        # (same index in the saved pool); the rebuild does not re-derive it, so
+        # without this a reconfigure would silently drop it.
+        prior_cb = (
+            prior_workers[n - 1].get("context_budget")
+            if n - 1 < len(prior_workers) else None
+        )
+        if prior_cb is not None:
+            built["context_budget"] = prior_cb
+        producers.append(built)
         if len(producers) >= max_producers:
             theme.muted(f"  Reached the {MAX_AGENTS}-member team cap.")
             break
@@ -370,7 +408,7 @@ def _maybe_customize_context_budgets(state: dict) -> None:
     default path keeps them (sets nothing → the engine's per-role defaults
     govern); customization is gated behind a warn and defaults to No."""
     theme.clear_screen()
-    theme.step_header(4, 7, "Context budgets (tuned — change is discouraged)")
+    theme.step_header(_STEP_NUMBER, _STEP_TOTAL, "Context budgets (tuned — change is discouraged)")
     print(theme.color(
         "  Modulatio allocates context BY ROLE, not by model. These per-role "
         "budgets are tuned from extensive Project-Sid testing — large context "
@@ -427,11 +465,22 @@ def run(state: dict) -> Any:
     if result in (steps.BACK, steps.QUIT):
         return result
 
-    total = len(state["triad_agents"]) + len(state["worker_agents"])
-    if total < MIN_AGENTS:
+    # Structural-pair + producer-floor invariant. `_provision_triad` always
+    # emits exactly the Leader+QC pair and `_provision_workers` enforces >=1
+    # producer, so a bare `total < MIN_AGENTS` sum-check was unreachable. Assert
+    # the actual structural shape instead: the deliberative pair must be present
+    # (one leader + one qc) and at least one producer — so a future change to
+    # either provisioner that breaks the cardinality is caught here rather than
+    # shipping a malformed roster.
+    triad = state["triad_agents"]
+    workers = state["worker_agents"]
+    tiers = {a.get("tier") for a in triad}
+    if tiers != {"leader", "qc"} or len(triad) != 2 or not workers:
+        total = len(triad) + len(workers)
         theme.error(
-            f"A team needs at least {MIN_AGENTS} members (Leader + QC + one "
-            f"skill-holder). Got {total}. Restarting team formation."
+            f"A team needs Leader + QC + at least one skill-holder "
+            f"({MIN_AGENTS} minimum). Got {total} ({sorted(tiers)} + "
+            f"{len(workers)} producer(s)). Restarting team formation."
         )
         return steps.BACK
 

@@ -71,7 +71,7 @@ def _read_json_or_empty(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text()) or {}
+        return json.loads(path.read_text(encoding="utf-8", errors="replace")) or {}
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -133,11 +133,28 @@ def _walk_vault(vault_root: Path, code: str) -> tuple[dict[str, str], list[str]]
     for f in project.rglob("*"):
         if not f.is_file():
             continue
-        # Skip cache-like dirs — not part of the project content, so not
-        # counted as a lossy skip.
-        if any(part in (".cache", "_proposals", "lance.db") for part in f.parts):
-            continue
         rel = str(f.relative_to(project))
+        # re-sweep (F1): scope the cache-dir skip to the PROJECT tree, not
+        # the absolute path. f.parts includes every ancestor up to "/", so
+        # a vault root mounted under a dir named .cache/_proposals/lance.db
+        # (e.g. ~/.cache/...) would match on the ancestor and silently drop
+        # every file. Compare project-relative parts, like the dotfile check
+        # below already does.
+        rel_parts = f.relative_to(project).parts
+        if any(p in (".cache", "_proposals", "lance.db") for p in rel_parts):
+            continue
+        # Skip files with a dot-prefixed path component (e.g. .obsidian/*).
+        # import_backup validates every captured rel_path with
+        # tools._is_safe_relative_file_arg, which REJECTS any dotfile
+        # component and raises — aborting the WHOLE restore. Capturing such
+        # files here would make the backup un-restorable, so we exclude them
+        # at export time and count them in ``skipped`` so the lossiness is
+        # visible (mirrors the import-side contract; the two halves must
+        # agree). Compared against the project-relative parts so dotted
+        # files anywhere in the tree are caught.
+        if any(part.startswith(".") for part in f.relative_to(project).parts):
+            skipped.append(rel)
+            continue
         try:
             too_big = f.stat().st_size > _MAX_VAULT_FILE_BYTES
         except OSError:
@@ -147,7 +164,7 @@ def _walk_vault(vault_root: Path, code: str) -> tuple[dict[str, str], list[str]]
             skipped.append(rel)
             continue
         try:
-            files[rel] = f.read_text()
+            files[rel] = f.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             # Binary or unreadable — text-only backup can't carry it.
             skipped.append(rel)
@@ -224,7 +241,7 @@ def export_backup(
     env_path = vault_root / ".env" if vault_root else None
     if not strip_secrets and env_path and env_path.exists():
         try:
-            vault_env = env_path.read_text()
+            vault_env = env_path.read_text(encoding="utf-8")
         except OSError:
             vault_env = ""
 
@@ -249,7 +266,7 @@ def export_backup(
         # No tokens in the file — write at default umask, easy to email
         # or commit to a sharing repo.
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(payload)
+        out.write_text(payload, encoding="utf-8")
     else:
         # Backup contains vault_env + telegram bot token + provider
         # OAuth state. write_secret_file gives 0600 throughout, no
@@ -289,7 +306,7 @@ def import_backup(
             f"split or regenerate the backup."
         )
     try:
-        backup = json.loads(path.read_text())
+        backup = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError) as e:
         raise ValueError(f"Could not parse backup: {e}")
 
@@ -360,7 +377,7 @@ def import_backup(
             # window between write and chmod.
             config.write_secret_file(target, payload)
         else:
-            target.write_text(payload)
+            target.write_text(payload, encoding="utf-8")
         summary["config_files"].append(fname)
 
     config.reload()  # paths in defaults may have changed
@@ -417,7 +434,17 @@ def import_backup(
             if target.exists() and not overwrite:
                 summary["vault_files_skipped"] += 1
                 continue
-            target.write_text(content)
+            # re-sweep (F2): a corrupt/hand-crafted backup may carry a
+            # non-string value for a file entry (dict, number, null).
+            # write_text would raise TypeError mid-restore; fail closed with
+            # a clean ValueError matching the other malformed-input guards.
+            if not isinstance(content, str):
+                raise ValueError(
+                    f"backup file {rel_path!r} for project {code!r} has "
+                    f"non-text content ({type(content).__name__}); "
+                    f"refusing to import."
+                )
+            target.write_text(content, encoding="utf-8")
             summary["vault_files_written"] += 1
 
     return summary

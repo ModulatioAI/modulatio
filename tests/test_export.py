@@ -66,6 +66,26 @@ def test_markdown_format_copies_file_without_pandoc(tmp_path: Path):
     assert dest.read_text() == "# hello\n\nbody.\n"
 
 
+def test_markdown_same_source_dest_is_success_noop(tmp_path: Path):
+    """When source resolves to the same path as dest, the markdown
+    no-op copy must not raise shutil.SameFileError — it short-circuits
+    and returns a successful ExportResult, leaving the file intact."""
+    from modulatio import export
+
+    source = tmp_path / "src.md"
+    source.write_text("# same\n\nbody.\n")
+    # Distinct Path objects that resolve to the same file (relative + dot).
+    dest = tmp_path / "." / "src.md"
+
+    with patch("modulatio.export._has_pypandoc", return_value=False), \
+         patch("modulatio.export._has_system_pandoc", return_value=False):
+        result = export.export_artifact(source, dest, format="markdown")
+
+    assert result.error is None
+    assert result.source == result.dest
+    assert source.read_text() == "# same\n\nbody.\n"
+
+
 # ─── DOCX / PDF via pypandoc path ───────────────────────────────────────────
 
 def test_docx_format_uses_pypandoc_when_available(tmp_path: Path):

@@ -80,13 +80,20 @@ class ACPSession:
                     {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
                 ],
             },
+            # re-sweep: a cancel can fire between the guard above and the rid
+            # registering; the server re-checks this atomically vs cancel's
+            # snapshot so we fail closed promptly instead of blocking the timeout.
+            cancel_check=lambda: self.cancelled,
         )
         return _permission_allows(result)
 
     # ── ask_operator → input request (kickoff/JT path only in v1) ───────
     def ask_operator(self, prompt: str):
+        if self.cancelled:
+            return None  # re-sweep: entry guard parity with permission_cb
         result = self._server.request_and_wait(
-            "session/request_input", {"sessionId": self.id, "prompt": prompt})
+            "session/request_input", {"sessionId": self.id, "prompt": prompt},
+            cancel_check=lambda: self.cancelled)
         if isinstance(result, dict):
             return result.get("answer") or result.get("text")
         return None

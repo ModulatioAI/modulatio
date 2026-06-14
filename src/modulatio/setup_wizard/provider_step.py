@@ -54,17 +54,37 @@ def _load_oauth_picklists() -> dict[str, tuple[str, ...]]:
     needs no extra build config.
     """
     seed = Path(__file__).resolve().parent.parent / "_seed_data" / "oauth_model_picklists.json"
-    raw = json.loads(seed.read_text())
+    # re-sweep (finding 1): a malformed/edited seed must not brick the whole
+    # wizard at import. Degrade to empty picklists so the curated OAuth picker
+    # falls back to manual entry instead of raising an opaque traceback.
+    try:
+        raw = json.loads(seed.read_text(encoding="utf-8", errors="replace"))
+        if not isinstance(raw, dict):
+            raise ValueError("oauth_model_picklists.json must be a JSON object")
+    except (OSError, ValueError) as exc:  # ValueError covers json.JSONDecodeError
+        theme.warn(
+            f"curated OAuth model list unavailable ({exc}); "
+            "use manual model entry."
+        )
+        return {}
+    # re-sweep (finding 1, r4): the comprehension sits OUTSIDE the try above,
+    # so a hand-edited seed whose list mixes uncomparable elements (e.g. a str
+    # and a null → sorted() raises TypeError) would still brick the wizard at
+    # import despite the stated "malformed seed never bricks" intent. Filter to
+    # str elements before sorting so heterogeneous/None entries are dropped, not
+    # fatal — the curated list only ever holds model-id strings anyway.
     return {
-        vendor: tuple(sorted(models))
+        vendor: tuple(sorted(m for m in models if isinstance(m, str)))
         for vendor, models in raw.items()
         if isinstance(models, list)
     }
 
 
 _OAUTH_PICKLISTS = _load_oauth_picklists()
-ANTHROPIC_OAUTH_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS["anthropic"]
-OPENAI_OAUTH_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS["openai"]
+# re-sweep (finding 1): .get(vendor, ()) — a seed missing either key disables
+# only that vendor's curated list, not the whole wizard.
+ANTHROPIC_OAUTH_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS.get("anthropic", ())
+OPENAI_OAUTH_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS.get("openai", ())
 
 
 # === Env-var smart default (slice #23) ===
@@ -532,14 +552,44 @@ def _status_badge(key: str, staged_keys: dict[str, str] | None = None) -> str:
     return theme.color("[?]", "muted")
 
 
-def _remove_flow() -> None:
+def _drop_orphaned_staged_key(
+    removed_key: str,
+    removed_preset: dict[str, Any],
+    surviving: dict[str, Any],
+    staged_keys: dict[str, str],
+) -> None:
+    """re-sweep (F2): when an api_key model is removed, drop its staged env
+    var from ``staged_keys`` UNLESS a surviving preset still references that
+    same env var (shared key). Keeps finalize from writing an orphaned key to
+    ``<vault>/.env`` and listing a phantom provider on the confirm screen."""
+    if not staged_keys or not isinstance(removed_preset, dict):
+        return
+    if removed_preset.get("auth_type") != "api_key":
+        return
+    auth_config = removed_preset.get("auth_config")
+    if not isinstance(auth_config, dict):
+        return
+    env_var = auth_config.get("env_var")
+    if not env_var or env_var not in staged_keys:
+        return
+    for p in surviving.values():
+        if not isinstance(p, dict):
+            continue
+        ac = p.get("auth_config")
+        if isinstance(ac, dict) and ac.get("env_var") == env_var:
+            return  # still referenced by a surviving preset — keep it
+    staged_keys.pop(env_var, None)
+
+
+def _remove_flow(staged_keys: dict[str, str] | None = None) -> None:
     presets = model_presets.load_presets()
     if not presets:
         theme.muted("No models to remove.")
         return
     options = [
-        (f"{key:24s}  {p.get('label', '')[:40]}", key)
+        (f"{key:24s}  {str(p.get('label') or '')[:40]}", key)
         for key, p in sorted(presets.items())
+        if isinstance(p, dict)
     ]
     pick = steps.pick_option("Pick a model to remove", options)
     if pick in (steps.BACK, steps.QUIT) or not isinstance(pick, str):
@@ -548,7 +598,12 @@ def _remove_flow() -> None:
         f"Remove '{pick}'? Agents currently bound to it will break until reassigned.",
         default=False,
     ):
+        # Capture the preset BEFORE removal so we can unstage an orphaned key.
+        removed_preset = presets.get(pick) or {}
         model_presets.remove_preset(pick)
+        if staged_keys is not None:
+            surviving = {k: v for k, v in presets.items() if k != pick}
+            _drop_orphaned_staged_key(pick, removed_preset, surviving, staged_keys)
         theme.success(f"Removed '{pick}'.")
 
 
@@ -568,14 +623,26 @@ def run(state: dict) -> Any:
         configured = model_presets.load_presets()
         if configured:
             for i, (key, p) in enumerate(sorted(configured.items()), 1):
+                # re-sweep (F1): load_presets() returns raw on-disk JSON with
+                # no per-preset shape check. Skip a non-dict preset and coerce
+                # sliced fields to str so a corrupt/hand-edited file (non-dict
+                # value, or model=null) can't crash the render.
+                if not isinstance(p, dict):
+                    continue
                 badge = _status_badge(key, staged_keys)
+                label = str(p.get("label") or "")[:30]
+                api_format = str(p.get("api_format") or "?")
+                model = str(p.get("model") or "?")[:24]
                 line = (
                     f"  {theme.color(f'{i:>2}', 'highlight')}) "
                     # Pad the visible key to 24 cols BEFORE coloring so the
                     # column width isn't thrown off by invisible ANSI escapes.
                     f"{theme.color(f'{key:24s}', 'accent', bold=True)}  "
-                    f"{p.get('label', '')[:30]:30s}  "
-                    f"→ {p.get('api_format', '?')}/{p.get('model', '?')[:24]:24s}  "
+                    f"{label:30s}  "
+                    # re-sweep (finding 2, r4): pad api_format to a fixed width
+                    # so the model + trailing badge columns stay aligned across
+                    # rows whose api_format differs in width ('openai' vs '?').
+                    f"→ {api_format:>9s}/{model:24s}  "
                     f"{badge}"
                 )
                 print(line)
@@ -641,7 +708,7 @@ def run(state: dict) -> Any:
                 return steps.QUIT
             continue
         if raw == "r" and configured:
-            _remove_flow()
+            _remove_flow(staged_keys)
             try:
                 input(theme.prompt_color("  Press Enter to continue...", "muted"))
             except (EOFError, KeyboardInterrupt):

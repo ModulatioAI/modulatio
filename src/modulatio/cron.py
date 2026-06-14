@@ -32,13 +32,21 @@ single daemon instance can serve multiple projects' cron jobs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import re
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Iterator, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX (Windows): flock is a no-op.
+    fcntl = None  # type: ignore[assignment]
 
 from modulatio import config, heartbeat
 
@@ -65,13 +73,82 @@ def _config_file():
 _cron_lock = threading.RLock()
 
 
+# `_cron_lock` (an in-process RLock) only serializes threads WITHIN one process.
+# `dispatch_due`'s select-advance-dispatch window ALSO has to be exclusive ACROSS
+# processes — the daemon's per-tick `cron.dispatch_due()` and a separate
+# `modulatio cron dispatch-due` CLI invocation are distinct OS processes sharing
+# the same on-disk cron-config, and an RLock cannot see across that boundary.
+# Without it both could observe the same job as due and both fire add_task
+# (duplicate kickoff, duplicate cost). For the dispatch we additionally hold a
+# POSIX `flock` on a sidecar lock file, which attaches to the open file
+# description and therefore serializes across both threads and processes.
+# Mirrors heartbeat._cross_process_claim_lock.
+
+def _dispatch_lock_file() -> Path:
+    return _config_file().with_suffix(".json.lock")
+
+
+# re-sweep: the cross-process flock must be RE-ENTRANT within a thread. The
+# dispatch path holds the flock across its window and then calls _dispatch_one ->
+# update(), which now ALSO takes the flock; the mutators are likewise the lock for
+# their own RMW. A POSIX flock is keyed to the open file description, so two
+# fresh-fd acquisitions from the SAME process/thread DEADLOCK against each other.
+# A thread-local depth counter makes the inner acquisitions no-ops that ride the
+# outer fd — exactly the RLock semantics callers expect, extended across the
+# process boundary on the OUTERMOST hold only.
+_dispatch_lock_depth = threading.local()
+
+
+@contextlib.contextmanager
+def _cross_process_dispatch_lock() -> Iterator[None]:
+    """Hold an exclusive POSIX ``flock`` across a select-advance / mutate window.
+
+    Re-entrant per thread: only the outermost acquisition opens an fd and takes
+    the OS-level ``flock``; nested acquisitions on the same thread ride that hold.
+    A fresh fd is opened per OUTERMOST acquisition so the exclusive lock serializes
+    across both threads and processes (``flock`` attaches to the open file
+    description, not the process). POSIX-only: when ``fcntl`` is unavailable
+    (Windows) the lock is a no-op — the in-process ``_cron_lock`` still serializes
+    the single-process case (mirrors heartbeat's posture).
+    """
+    if fcntl is None:  # pragma: no cover — non-POSIX no-op
+        yield
+        return
+    depth = getattr(_dispatch_lock_depth, "value", 0)
+    if depth > 0:
+        # Already held by this thread — ride the outer flock, don't re-acquire
+        # (a second fresh-fd LOCK_EX from the same process would deadlock).
+        _dispatch_lock_depth.value = depth + 1
+        try:
+            yield
+        finally:
+            _dispatch_lock_depth.value -= 1
+        return
+    lock_path = _dispatch_lock_file()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _dispatch_lock_depth.value = 1
+        yield
+    finally:
+        _dispatch_lock_depth.value = 0
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:  # pragma: no cover — best-effort release
+            pass
+        os.close(fd)  # re-sweep: close the fd (mirrors heartbeat) — the mutators
+        # now take this lock on every add/update/remove, so a leaked fd per call
+        # would exhaust the descriptor table.
+
+
 def _load() -> list[dict]:
     cf = _config_file()
     with _cron_lock:
         if not cf.exists():
             return []
         try:
-            data = json.loads(cf.read_text())
+            data = json.loads(cf.read_text(encoding="utf-8", errors="replace"))
         except (OSError, json.JSONDecodeError):
             return []
         return list(data.get("jobs", []))
@@ -80,9 +157,14 @@ def _load() -> list[dict]:
 def _save(jobs: list[dict]) -> None:
     cf = _config_file()
     cf.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cf.with_suffix(".json.tmp")
+    # re-sweep: a pid-unique tmp name keeps two processes writing the config from
+    # clobbering each other's tmp before the atomic rename (the cross-process
+    # mutator lock serializes the RMW, but the tmp name must still be unique so a
+    # crash mid-write can't leave a half-written tmp that another pid then
+    # replaces over the live config).
+    tmp = cf.with_suffix(f".json.tmp.{os.getpid()}")
     with _cron_lock:
-        tmp.write_text(json.dumps({"jobs": jobs}, indent=2, default=str))
+        tmp.write_text(json.dumps({"jobs": jobs}, indent=2, default=str), encoding="utf-8")
         tmp.replace(cf)
 
 
@@ -277,18 +359,32 @@ def add(
     parsed = parse_schedule(schedule)
     if parsed is None:
         raise ValueError(f"Could not parse schedule: {schedule!r}")
+    # re-sweep (finding 2): validate the project code WHILE THE OPERATOR IS HERE,
+    # exactly as heartbeat.add_task does — a malformed/path-hostile/typo'd code
+    # was previously only .upper()'d and stored, then rejected on every headless
+    # dispatch (heartbeat.add_task raises), invisible until the daemon logs. Be
+    # permissive on case (validate the lowered form) but strict on shape; store
+    # the upper form as before. Raises ValueError, which the CLI surfaces cleanly.
+    from modulatio import vault
+    project_code = vault.validate_project_code(project_code.lower()).upper()
     if jt_id:
         # Validate now, never at dispatch — the operator is here to fix it.
         from modulatio import job_template_library
-        jt = job_template_library.checkout(jt_id, project_code.upper())
+        jt = job_template_library.checkout(jt_id, project_code)
         if not jt.name:
             raise ValueError(f"Job template {jt_id!r} not found for project {project_code!r}")
-        # Use the STRICT predicate (the same one the run-time #97 fit-gate
-        # applies, `_jt_fit` → `unfilled_required`): catch a required param that
-        # is present-but-empty (`{"topic": ""}` / `{"competitors": []}`), not
-        # just absent/None. Otherwise a cron could be added here that the
-        # headless dispatch's fit-gate would then refuse every cycle.
-        bind_params = jt_params or {}
+        # Mirror the run-time bind EXACTLY so the add-time gate neither
+        # over- nor under-rejects relative to the headless dispatch's #97
+        # fit-gate. `_run_jt_interview` starts from the JT's standing
+        # `defaults()` and overlays only the non-None supplied params; the
+        # fit-gate (`_jt_fit`) then runs against that MERGED dict. Gating the
+        # raw `jt_params` alone (ignoring the JT's own defaults) made the
+        # add-time gate STRICTER than dispatch — a cron whose required blanks
+        # are filled by the template's defaults would be rejected here yet would
+        # run fine every cycle. Fold defaults in (dropping None overlays, as the
+        # interview does) so this gate is a true mirror of post-interview `_jt_fit`.
+        bind_params = dict(jt.defaults())
+        bind_params.update({k: v for k, v in (jt_params or {}).items() if v is not None})
         missing = jt.unfilled_required(bind_params)
         if missing:
             raise ValueError(
@@ -323,7 +419,7 @@ def add(
         "name": name,
         "description": description,
         "schedule": schedule,
-        "project_code": project_code.upper(),
+        "project_code": project_code,
         "objective": objective,
         "priority": priority,
         "enabled": enabled,
@@ -335,7 +431,10 @@ def add(
         "last_run": None,
         "last_status": None,
     }
-    with _cron_lock:
+    # re-sweep: cross-process lock OUTER, _cron_lock INNER — same ordering the
+    # dispatch path uses, so the CLI-facing RMW can't interleave with a
+    # concurrent daemon dispatch's load/update/save and lose a write.
+    with _cross_process_dispatch_lock(), _cron_lock:
         jobs = _load()
         jobs.append(job)
         _save(jobs)
@@ -359,7 +458,9 @@ def list_jobs(*, enabled_only: bool = False, project_code: Optional[str] = None)
 
 
 def update(job_id: str, **fields) -> Optional[dict]:
-    with _cron_lock:
+    # re-sweep: cross-process lock OUTER (re-entrant when _dispatch_one already
+    # holds it), _cron_lock INNER.
+    with _cross_process_dispatch_lock(), _cron_lock:
         jobs = _load()
         for j in jobs:
             if j.get("id") == job_id:
@@ -376,7 +477,8 @@ def update(job_id: str, **fields) -> Optional[dict]:
 
 
 def remove(job_id: str) -> bool:
-    with _cron_lock:
+    # re-sweep: cross-process lock OUTER, _cron_lock INNER.
+    with _cross_process_dispatch_lock(), _cron_lock:
         jobs = _load()
         before = len(jobs)
         jobs = [j for j in jobs if j.get("id") != job_id]
@@ -424,48 +526,63 @@ def dispatch_due(*, now: Optional[datetime] = None) -> list[dict]:
     """
     now = now or _now()
     fired: list[dict] = []
-    for job in check_due(now=now):
-        dispatch_ok = True
-        status = "ok"
-        try:
-            heartbeat.add_task(
-                description=f"cron:{job.get('name', job.get('id'))}",
-                project_code=job["project_code"],
-                objective=job["objective"],
-                priority=job.get("priority", 5),
-                tags=["cron", job.get("name", "")],
-                jt_id=job.get("jt_id"),
-                jt_params=job.get("jt_params"),
-                on_refused=job.get("on_refused"),
-            )
-        except Exception as e:
-            logger.exception("Cron job %s: heartbeat add_task failed", job.get("id"))
-            dispatch_ok = False
-            status = f"error:{e}"
-
-        # Advance next_run REGARDLESS of dispatch outcome — a failed dispatch must
-        # not pin the job at the same minute, where check_due re-selects it every
-        # ~30s daemon tick forever (a retry storm + traceback flood on a degraded
-        # config). The schedule is re-parsed here for the advance; if it became
-        # unparseable (e.g. a hand-edited config) we can't compute a next slot, so
-        # we DISABLE the job fail-closed rather than leave it perpetually due —
-        # this also stops a successful dispatch from re-firing every tick.
-        parsed = parse_schedule(job["schedule"])
-        fields = {"last_run": now.isoformat(timespec="seconds"), "last_status": status}
-        if parsed is not None:
-            new_next = _advance_next_run(parsed, job.get("next_run"), now)
-            fields["next_run"] = new_next.isoformat(timespec="seconds")
-        else:
-            logger.warning(
-                "Cron job %s: schedule %r no longer parses; disabling to stop "
-                "perpetual re-dispatch", job.get("id"), job.get("schedule"))
-            fields["enabled"] = False
-            fields["last_status"] = "error:unparseable-schedule"
-        update(job["id"], **fields)
-
-        if dispatch_ok:
-            fired.append(job)
+    # re-sweep: hold the cross-process flock across the ENTIRE select →
+    # add_task → advance window. check_due re-reads the on-disk config INSIDE the
+    # lock, so a concurrent process that already won the lock (and advanced
+    # next_run past `now`) leaves the loser seeing nothing due — exactly one fire
+    # per due slot across daemon-tick + CLI dispatch-due processes.
+    with _cross_process_dispatch_lock():
+        for job in check_due(now=now):
+            if _dispatch_one(job, now):
+                fired.append(job)
     return fired
+
+
+def _dispatch_one(job: dict, now: datetime) -> bool:
+    """Add a heartbeat task for one due job and advance its next_run.
+
+    Returns True if the heartbeat dispatch succeeded. Always called with the
+    cross-process dispatch lock held (see ``dispatch_due``).
+    """
+    dispatch_ok = True
+    status = "ok"
+    try:
+        heartbeat.add_task(
+            description=f"cron:{job.get('name', job.get('id'))}",
+            project_code=job["project_code"],
+            objective=job["objective"],
+            priority=job.get("priority", 5),
+            tags=["cron", job.get("name", "")],
+            jt_id=job.get("jt_id"),
+            jt_params=job.get("jt_params"),
+            on_refused=job.get("on_refused"),
+        )
+    except Exception as e:
+        logger.exception("Cron job %s: heartbeat add_task failed", job.get("id"))
+        dispatch_ok = False
+        status = f"error:{e}"
+
+    # Advance next_run REGARDLESS of dispatch outcome — a failed dispatch must
+    # not pin the job at the same minute, where check_due re-selects it every
+    # ~30s daemon tick forever (a retry storm + traceback flood on a degraded
+    # config). The schedule is re-parsed here for the advance; if it became
+    # unparseable (e.g. a hand-edited config) we can't compute a next slot, so
+    # we DISABLE the job fail-closed rather than leave it perpetually due —
+    # this also stops a successful dispatch from re-firing every tick.
+    parsed = parse_schedule(job["schedule"])
+    fields = {"last_run": now.isoformat(timespec="seconds"), "last_status": status}
+    if parsed is not None:
+        new_next = _advance_next_run(parsed, job.get("next_run"), now)
+        fields["next_run"] = new_next.isoformat(timespec="seconds")
+    else:
+        logger.warning(
+            "Cron job %s: schedule %r no longer parses; disabling to stop "
+            "perpetual re-dispatch", job.get("id"), job.get("schedule"))
+        fields["enabled"] = False
+        fields["last_status"] = "error:unparseable-schedule"
+    update(job["id"], **fields)
+
+    return dispatch_ok
 
 
 def run_now(job_id: str) -> Optional[dict]:

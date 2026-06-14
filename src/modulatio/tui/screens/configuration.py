@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Input, OptionList, Static
@@ -115,8 +116,13 @@ class ConfigScreen(Vertical):
         """(Re)populate the preset rows — row key = the preset key."""
         for key, preset in sorted(model_presets.load_presets().items()):
             ready = model_presets.is_available(key)
+            # Escape painted cells — preset key / model / auth_type are
+            # operator-authored (custom-provider flow) and may contain
+            # markup-closer sequences that crash DataTable paint (MarkupError).
+            # The row `key=` is an identifier, not painted, so it stays raw.
             table.add_row(
-                key, preset.get("model", ""), preset.get("auth_type", ""),
+                escape(key), escape(preset.get("model", "")),
+                escape(preset.get("auth_type", "")),
                 "ready ✓" if ready else "needs setup", key=key,
             )
 

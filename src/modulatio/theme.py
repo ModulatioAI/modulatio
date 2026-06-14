@@ -165,8 +165,12 @@ def clear_screen():
         return
     if _dark_screen_active:
         print(_ANSI["clear"], end="", flush=True)
+        # re-sweep: keep the per-cell dark-bg paint as the fill; the prior
+        # second ESC[2J here erased that whole paint, making it dead work.
+        # Re-assert the dark-bg/light-fg SGR so content printed afterward
+        # renders on the fill (the paint already leaves it active; cheap belt).
         _paint_dark_background()
-        print(f"{_ANSI['clear']}{_ANSI['default_dark_bg']}{_ANSI['default_light_fg']}", end="", flush=True)
+        print(f"{_ANSI['default_dark_bg']}{_ANSI['default_light_fg']}", end="", flush=True)
     else:
         print(_ANSI["clear"], end="", flush=True)
 

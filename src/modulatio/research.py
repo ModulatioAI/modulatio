@@ -25,7 +25,9 @@ whether a refresh is warranted.
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,7 +73,7 @@ def _slug(topic: str) -> str:
 
 
 def _parse_file(path: Path) -> ResearchEntry:
-    raw = path.read_text()
+    raw = path.read_text(encoding="utf-8", errors="replace")
     m = _OWN_FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}
     # YAML-list-style sources, captured as one entry per ``- value`` line so a
@@ -179,7 +181,30 @@ def save(
         fm_lines.extend(f"- {s}" for s in sources)
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + body.rstrip() + "\n"
-    path.write_text(content)
+    # re-sweep (#151 follow-up): write atomically. The cache READ path
+    # (load_with_metadata → _parse_file → read_text) is intentionally
+    # unlocked while the WRITE is serialized under the orchestrator's
+    # store lock, so a plain truncate-then-write here lets a concurrent
+    # same-slug reader observe a half-written (truncated) note. Write to a
+    # unique temp file in the same dir and os.replace into place: a reader
+    # then always sees either the complete old file or the complete new
+    # one, never a truncation. Unique temp name (not a fixed ".tmp") so a
+    # future concurrent writer can't clobber an in-flight temp. Not a
+    # secret, so no 0o600 — config.write_secret_file's perms would be
+    # wrong here; only its atomic-rename pattern is borrowed.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp_name, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     return path
 
 

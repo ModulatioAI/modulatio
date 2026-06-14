@@ -84,7 +84,7 @@ def record(
         )
         path = vault.run_dir(project_code, run_id) / _HISTORY_FILENAME
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(rec), ensure_ascii=False, indent=2))
+        path.write_text(json.dumps(asdict(rec), ensure_ascii=False, indent=2), encoding="utf-8")
         return path
     except Exception:  # noqa: BLE001 — observability must never break a run
         return None
@@ -111,7 +111,7 @@ def recent(
             path = vault.run_dir(project_code, rid) / _HISTORY_FILENAME
             if not path.exists():
                 continue
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
             out.append(KickoffRecord(
                 run_id=str(data.get("run_id", rid)),
                 objective=str(data.get("objective", "")),
@@ -152,7 +152,7 @@ def consumed_slugs(project_code: str) -> set[str]:
     try:
         if not p.exists():
             return set()
-        return {ln.strip() for ln in p.read_text().splitlines() if ln.strip()}
+        return {ln.strip() for ln in p.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()}
     except OSError:
         return set()
 

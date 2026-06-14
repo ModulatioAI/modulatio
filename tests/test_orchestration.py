@@ -7841,10 +7841,16 @@ def test_qc_review_no_band_runs_qc_without_size_block(project, tmp_path):
 
 def test_normalize_render_paths_rewrites_only_render_formats():
     from modulatio.orchestration import _normalize_render_paths
-    # document render formats → .md
+    # document render formats the engine can ACTUALLY render → .md
     assert _normalize_render_paths("out/intro.docx") == "out/intro.md"
     assert _normalize_render_paths("reports/Q3.pdf") == "reports/Q3.md"
-    assert _normalize_render_paths("deck.pptx") == "deck.md"
+    assert _normalize_render_paths("book.epub") == "book.md"
+    assert _normalize_render_paths("note.rtf") == "note.md"
+    assert _normalize_render_paths("doc.odt") == "doc.md"
+    # pptx is NOT a document-renderable format (#404): the doc family has no
+    # pptx writer, so rewriting deck.pptx → deck.md (while the deliverable stays
+    # deck.pptx) strands the goal in a P5 reject loop. Keep the real extension.
+    assert _normalize_render_paths("deck.pptx") == "deck.pptx"
     # code/data authored directly → untouched
     assert _normalize_render_paths("src/app.py") == "src/app.py"
     assert _normalize_render_paths("data/out.csv") == "data/out.csv"
@@ -7904,23 +7910,28 @@ def test_effective_assembly_family_priority():
 
 
 def test_build_requirement_family_aware():
-    """#73: render-path rewrite (.pptx → .md) fires ONLY for the document family;
+    """#73: render-path rewrite (.docx → .md) fires ONLY for the document family;
     media/code/data and the empty/unknown (decompose) family keep the real path."""
     from modulatio.orchestration import _build_requirement
-    raw = {"kind": "artifact", "description": "d", "target": "out/deck.pptx",
-           "source": "src/deck.pptx"}
+    raw = {"kind": "artifact", "description": "d", "target": "out/book.docx",
+           "source": "src/book.docx"}
     # document → rewrite to .md source
     doc = _build_requirement(raw, family="document")
-    assert doc.target == "out/deck.md" and doc.source == "src/deck.md"
-    # media → keep the binary extension (the deliverable IS the .pptx)
+    assert doc.target == "out/book.md" and doc.source == "src/book.md"
+    # media → keep the binary extension (the deliverable IS the .docx)
     media = _build_requirement(raw, family="media")
-    assert media.target == "out/deck.pptx" and media.source == "src/deck.pptx"
+    assert media.target == "out/book.docx" and media.source == "src/book.docx"
     # code/data → never rewrite a natural output to .md
     assert _build_requirement({"target": "a.csv"}, family="data").target == "a.csv"
     # empty family (decompose, before artifact_kind exists) → no rewrite
-    assert _build_requirement(raw, family="").target == "out/deck.pptx"
+    assert _build_requirement(raw, family="").target == "out/book.docx"
     # default (back-compat) is document
-    assert _build_requirement(raw).target == "out/deck.md"
+    assert _build_requirement(raw).target == "out/book.md"
+    # #404/#73: pptx is NOT doc-renderable — even the document family keeps it,
+    # so a .pptx deliverable's evidence is never wrongly pointed at a .md.
+    pptx = {"target": "out/deck.pptx", "source": "src/deck.pptx"}
+    assert _build_requirement(pptx, family="document").target == "out/deck.pptx"
+    assert _build_requirement(pptx, family="document").source == "src/deck.pptx"
 
 
 def _evidence_of(orch, planner_item: dict):
@@ -10376,3 +10387,103 @@ def test_concurrent_merge_copies_recorded_twin_drops_unrecorded(project: Project
     assert not (shared / ".twins" / "TWN-T-002.md").exists(), (
         "an unrecorded staged file is dropped — the fix records the twin so it doesn't"
     )
+
+
+# ── #11628: cross-goal assembler dependency (product-agnostic) ────────────────
+
+def test_ready_wave_treats_cross_goal_dep_as_satisfied():
+    """#11628: a task whose dependency lives in ANOTHER goal (a prior goal's
+    unit, already completed) — absent from THIS goal's task_map — must be
+    treated as satisfied, not silently stalled. Product-agnostic: the 'unit'
+    could be a code module, a data partition, a media segment, or a doc
+    section; the assembler is family-neutral here."""
+    from modulatio.orchestration import _ready_wave
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    pid = uuid4()
+    # The assembler task depends on a unit id from a PRIOR goal (not in `tasks`).
+    assembler = Task(id="G2-T-001", project_id=pid, goal_id="G-002",
+                     description="assemble", required_skills=["data-assembly"],
+                     depends_on=["G1-T-007"], status=TaskStatus.PENDING)
+    wave = _ready_wave([assembler])
+    assert assembler in wave, "a cross-goal (prior-goal) dependency must count as satisfied"
+
+
+def test_ready_wave_still_holds_on_incomplete_intra_goal_dep():
+    """Guard: a dep that IS in this goal and is NOT completed still holds the
+    task back (we only loosened cross-goal/absent deps)."""
+    from modulatio.orchestration import _ready_wave
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    pid = uuid4()
+    dep = Task(id="G-T-001", project_id=pid, goal_id="G", description="unit",
+               status=TaskStatus.PENDING)
+    consumer = Task(id="G-T-002", project_id=pid, goal_id="G", description="assemble",
+                    depends_on=["G-T-001"], status=TaskStatus.PENDING)
+    wave = _ready_wave([dep, consumer])
+    assert dep in wave and consumer not in wave, "intra-goal incomplete dep still holds"
+
+
+def test_main_path_topo_filters_cross_goal_deps_no_reject():
+    """#11628: _topological_sort over intra-goal-filtered deps must NOT raise on
+    a cross-goal id (the main planning path used to reject the whole plan). The
+    real tasks keep their full depends_on for execution-time enforcement."""
+    from modulatio.orchestration import _topological_sort
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    pid = uuid4()
+    tasks = [
+        Task(id="G2-T-001", project_id=pid, goal_id="G-002", description="assemble",
+             required_skills=["code-assembly"], depends_on=["G1-T-001", "G1-T-002"],
+             status=TaskStatus.PENDING),
+    ]
+    tmap = {t.id: t for t in tasks}
+    # the filtered view (what the main path now sorts) — no cross-goal ids
+    view = [t.model_copy(update={"depends_on": [d for d in t.depends_on if d in tmap]})
+            for t in tasks]
+    ordered = _topological_sort(view)  # must NOT raise _DependencyError
+    assert [t.id for t in ordered] == ["G2-T-001"]
+
+
+def test_dep_failed_blocks_on_failed_cross_goal_dep():
+    """#1437: a cross-goal dep (absent from this goal's task_map) that
+    terminal-FAILED must be reported by _dep_failed when the caller supplies
+    cross_goal_status — else a later goal runs against an input that never
+    shipped. Product-agnostic: the failed prior unit could be any artifact."""
+    from modulatio.orchestration import _dep_failed
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    pid = uuid4()
+    t = Task(id="G2-T1", project_id=pid, goal_id="G2", description="x",
+             depends_on=["G1-T1"], status=TaskStatus.PENDING)
+    task_map = {t.id: t}
+    # without cross_goal_status: absent dep ignored (back-compat)
+    assert _dep_failed(t, task_map) == []
+    # with it FAILED: blocked
+    assert _dep_failed(t, task_map, {"G1-T1": TaskStatus.QC_REJECTED}) == ["G1-T1"]
+    # with it COMPLETED: not blocked
+    assert _dep_failed(t, task_map, {"G1-T1": TaskStatus.COMPLETED}) == []
+
+
+def test_ready_wave_holds_on_failed_or_pending_cross_goal_dep():
+    """#1437: _ready_wave must NOT admit a task whose cross-goal dep failed or
+    hasn't completed; it admits only when the store says COMPLETED."""
+    from modulatio.orchestration import _ready_wave
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    pid = uuid4()
+
+    def consumer():
+        return Task(id="G2-T1", project_id=pid, goal_id="G2", description="x",
+                    depends_on=["G1-T1"], status=TaskStatus.PENDING)
+
+    c = consumer()
+    # FAILED cross-goal dep → dead (cascade-blocked, not in wave)
+    assert _ready_wave([c], {"G1-T1": TaskStatus.BLOCKED}) == []
+    # still in flight → waits
+    assert _ready_wave([consumer()], {"G1-T1": TaskStatus.IN_PROGRESS}) == []
+    # COMPLETED → admitted
+    w = _ready_wave([consumer()], {"G1-T1": TaskStatus.COMPLETED})
+    assert [t.id for t in w] == ["G2-T1"]
+    # back-compat: no status map → absent dep treated as satisfied
+    assert [t.id for t in _ready_wave([consumer()])] == ["G2-T1"]

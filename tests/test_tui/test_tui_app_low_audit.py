@@ -126,7 +126,7 @@ async def test_converse_done_does_not_settle_running_kickoff_spinner():
         assert team is not None and team._done is False
 
         # Pretend a kickoff worker is in flight.
-        app._running_job_orchestrator = lambda: object()  # type: ignore[method-assign]
+        app._any_job_in_flight = lambda: True  # type: ignore[method-assign]
 
         app._on_converse_done("hi there")
         await pilot.pause()
@@ -149,9 +149,108 @@ async def test_converse_done_settles_spinner_when_idle():
         assert team is not None and team._done is False
 
         # No job in flight.
-        app._running_job_orchestrator = lambda: None  # type: ignore[method-assign]
+        app._any_job_in_flight = lambda: False  # type: ignore[method-assign]
 
         app._on_converse_done("hi there")
         await pilot.pause()
 
         assert team._done is True
+
+
+# ─── pre-ship #F8a: STOP must signal EVERY active orchestrator ───────────────
+
+
+class _FakeOrch:
+    """A stand-in orchestrator: ``_kickoff_active`` says it's running, and an
+    ``abort_event`` whose ``.set()`` we can observe."""
+
+    def __init__(self, active: bool = True):
+        self._kickoff_active = active
+
+        class _Ev:
+            def __init__(self):
+                self.was_set = False
+
+            def set(self):
+                self.was_set = True
+
+        self.abort_event = _Ev()
+
+
+@pytest.mark.asyncio
+async def test_stop_signals_both_concurrent_orchestrators():
+    """F8 with BOTH a converse-driven run_job and a direct kickoff in flight
+    must signal ``abort_event`` on BOTH — not just the first one found."""
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+
+        conv = _FakeOrch(active=True)
+        kick = _FakeOrch(active=True)
+        app._conv_orch = conv  # type: ignore[attr-defined]
+        app._kickoff_orch = kick  # type: ignore[attr-defined]
+
+        app.action_stop_job()
+
+        assert conv.abort_event.was_set is True
+        assert kick.abort_event.was_set is True
+
+
+@pytest.mark.asyncio
+async def test_stop_skips_inactive_orchestrator():
+    """An orchestrator that exists but is NOT running (``_kickoff_active`` is
+    False) must not be signaled; only the live one is."""
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+
+        idle = _FakeOrch(active=False)
+        live = _FakeOrch(active=True)
+        app._conv_orch = idle  # type: ignore[attr-defined]
+        app._kickoff_orch = live  # type: ignore[attr-defined]
+
+        app.action_stop_job()
+
+        assert idle.abort_event.was_set is False
+        assert live.abort_event.was_set is True
+
+
+@pytest.mark.asyncio
+async def test_stop_noop_when_nothing_running():
+    """F8 with no live orchestrators must be a clean no-op (never raises)."""
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        # No _conv_orch / _kickoff_orch attributes at all.
+        app.action_stop_job()  # must not raise
+
+
+# ─── pre-ship #F8b: kickoff startup window must hold the TEAM spinner ─────────
+
+
+@pytest.mark.asyncio
+async def test_kickoff_pending_keeps_converse_done_from_settling():
+    """During a kickoff's startup window the worker is scheduled but
+    ``_kickoff_orch`` hasn't come up yet, so ``_active_job_orchestrators`` is
+    empty. The ``_kickoff_pending`` flag must still make ``_any_job_in_flight``
+    True so a concurrent converse-done does NOT falsely settle the spinner."""
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+
+        app._set_lane_status("stream-team-status", "modulating")
+        await pilot.pause()
+        team = app._lane_status("stream-team-status")
+        assert team is not None and team._done is False
+
+        # Startup window: pending set, but no orchestrator exposed yet.
+        app._kickoff_pending = True  # type: ignore[attr-defined]
+        assert getattr(app, "_kickoff_orch", None) is None
+        assert app._active_job_orchestrators() == []
+        assert app._any_job_in_flight() is True
+
+        app._on_converse_done("hi there")
+        await pilot.pause()
+
+        # Must NOT have force-settled — the kickoff is still spinning up.
+        assert team._done is False

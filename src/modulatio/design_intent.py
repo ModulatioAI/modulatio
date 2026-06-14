@@ -64,8 +64,11 @@ def load_body(project_code: str) -> str:
     if not path.exists():
         return ""
     try:
-        raw = path.read_text()
-    except OSError:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        # OSError = unreadable file; ValueError covers UnicodeDecodeError
+        # (a non-UTF-8 design-intent file). A broken file must NOT block
+        # producer dispatch — degrade to no intent context.
         return ""
     m = _FRONTMATTER_RE.match(raw)
     if m is None:

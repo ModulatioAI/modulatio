@@ -41,6 +41,51 @@ def test_infer_unknown_is_neutral_not_error():
     assert caps == ()
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        "o1",
+        "o3",
+        "o3-mini",
+        "o4-mini",
+        "o1-preview",
+        "o1-2024-12-17",
+        "openai/o3-mini",
+    ],
+)
+def test_infer_openai_o_series_matched(model):
+    """The OpenAI o-series is tagged reasoning-heavy / premium-cloud."""
+    tier, cost, caps = mc.infer(model)
+    assert tier == "reasoning-heavy"
+    assert cost == "premium-cloud"
+    assert "reasoning-heavy" in caps
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Bare o1/o3/o4 substrings used to mis-infer these as OpenAI o-series:
+        "mistralo1",
+        "qwen2.5-o4b",
+        "phi-o3x",
+        # gpt-4o family carries a trailing 'o' but is NOT the o-series.
+        "gpt-4o",
+        "gpt-4o-mini",
+        "chatgpt-4o-latest",
+    ],
+)
+def test_infer_non_o_series_not_mis_tagged_openai(model):
+    """Unrelated ids whose substrings contain o1/o3/o4 must NOT be promoted to
+    the OpenAI o-series premium reasoning tier by a bare-substring match."""
+    tier, cost, caps = mc.infer(model)
+    # Whatever they resolve to, it is NOT the o-series premium signature.
+    assert not (
+        tier == "reasoning-heavy"
+        and cost == "premium-cloud"
+        and set(caps) == {"reasoning-heavy", "structured-output"}
+    ), f"{model} was wrongly tagged as the OpenAI o-series"
+
+
 def test_local_endpoint_forces_free_local():
     # Same open-weights model is free run locally, paid via a hosted API.
     _, cost, _ = mc.infer("qwen3.5:122b", base_url="http://localhost:11434")

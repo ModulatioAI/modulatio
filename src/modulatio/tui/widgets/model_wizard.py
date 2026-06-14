@@ -12,6 +12,7 @@ consistent across all three.
 """
 from __future__ import annotations
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Label, Select, Static
@@ -94,14 +95,20 @@ class ModelWizard(Vertical):
                 model=model,
             )
         except FileNotFoundError as exc:
-            status.update(f"[red]Agent not found: {exc}[/red]")
+            # re-sweep #1: escape — exc embeds the operator-typed agent id
+            status.update(f"[red]Agent not found: {escape(str(exc))}[/red]")
             return None
         except Exception as exc:
-            status.update(f"[red]Failed to update model: {exc}[/red]")
+            status.update(f"[red]Failed to update model: {escape(str(exc))}[/red]")
             return None
 
         self.last_updated = updated
-        status.update(f"[green]Updated {updated.id} → {updated.model}[/green]")
+        # re-sweep #1: updated.model is the free-form operator-typed id; a
+        # `[/]`-class value would raise MarkupError in Static.update otherwise.
+        status.update(
+            f"[green]Updated {escape(str(updated.id))} → "
+            f"{escape(str(updated.model))}[/green]"
+        )
         return updated
 
 

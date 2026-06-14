@@ -51,6 +51,20 @@ def _log_file() -> Path:
     return config.CONFIG_DIR / "daemon.log"
 
 
+def _open_log_for_append():
+    """Open the daemon log for append, ensuring CONFIG_DIR exists first.
+
+    On a fresh install ``~/.config/modulatio/`` may not yet exist — nothing in
+    the daemon-start path or config.py mkdirs it. Opening ``_log_file()`` for
+    append before the directory exists raises FileNotFoundError; that happens
+    inside the forked child AFTER the parent already returned the (now-doomed)
+    pid, so ``daemon on`` would report success while the daemon silently dies.
+    Create the directory first so the log open always succeeds on a clean box.
+    """
+    config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    return open(_log_file(), "a", buffering=1, encoding="utf-8")
+
+
 # === Lifecycle (CLI-facing) ===
 
 def is_running() -> bool:
@@ -59,7 +73,7 @@ def is_running() -> bool:
     if not pf.exists():
         return False
     try:
-        pid = int(pf.read_text().strip())
+        pid = int(pf.read_text(encoding="utf-8").strip())
     except (ValueError, OSError):
         return False
     try:
@@ -90,7 +104,7 @@ def start(*, stub: bool = True) -> int:
         # file no longer yields a valid pid, the daemon isn't reliably
         # running — fall through and start a fresh one instead of crashing.
         try:
-            pid = int(_pid_file().read_text().strip())
+            pid = int(_pid_file().read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             pid = None
         if pid is not None:
@@ -105,6 +119,38 @@ def start(*, stub: bool = True) -> int:
         return pid
 
     # === Child process ===
+    # The child must NEVER return control to start()'s caller: an uncaught
+    # exception before the os._exit() below (e.g. log open / PID write failing
+    # on a full or read-only disk) would unwind back through the parent-side
+    # CLI stack IN THE FORKED CHILD, running normal Python/atexit/CLI teardown
+    # the parent already owns. _child_main() wraps the whole child body so a
+    # failure always lands on os._exit() instead of unwinding.
+    _child_main(stub=stub)
+
+
+def _child_main(*, stub: bool) -> None:
+    """Post-fork child body. Always terminates via os._exit(); never returns.
+
+    re-sweep (#1): any failure setting up the detached child (log open, PID
+    write, dup2, etc.) calls os._exit(1) rather than raising back out of the
+    fork, which would otherwise run parent-side CLI/atexit teardown inside the
+    forked child.
+    """
+    try:
+        _child_detach_and_run(stub=stub)
+    except BaseException:  # noqa: BLE001 — last line of defense before _exit
+        # Logging may itself be unusable (stdout could be the failed log fd),
+        # so guard the log attempt and exit non-zero regardless.
+        try:
+            logger.exception("Daemon child failed during startup.")
+        except Exception:
+            pass
+        os._exit(1)
+    # _child_detach_and_run always ends in os._exit(0); this is unreachable.
+    os._exit(0)
+
+
+def _child_detach_and_run(*, stub: bool) -> None:
     # Detach from terminal: new session, new file descriptors.
     os.setsid()
     # Capture the inherited terminal streams so we can close them after
@@ -112,7 +158,7 @@ def start(*, stub: bool = True) -> int:
     # controlling-terminal fds they hold) leak for the daemon's lifetime.
     _old_stdin, _old_stdout, _old_stderr = sys.stdin, sys.stdout, sys.stderr
     _new_stdin = open(os.devnull, "r")
-    _new_stdout = open(_log_file(), "a", buffering=1)
+    _new_stdout = _open_log_for_append()
     sys.stdin = _new_stdin
     sys.stdout = _new_stdout
     sys.stderr = _new_stdout
@@ -146,7 +192,7 @@ def start(*, stub: bool = True) -> int:
         pass
 
     config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    _pid_file().write_text(str(os.getpid()))
+    _pid_file().write_text(str(os.getpid()), encoding="utf-8")
 
     # Configure logging now that stdout is the log file
     logging.basicConfig(
@@ -175,7 +221,7 @@ def stop(*, timeout: float = 10.0) -> bool:
         return False
     pf = _pid_file()
     try:
-        pid = int(pf.read_text().strip())
+        pid = int(pf.read_text(encoding="utf-8").strip())
     except (ValueError, OSError):
         return False
     try:
@@ -202,7 +248,7 @@ def status() -> dict:
     """Returns a status dict for the CLI / TUI to render."""
     if is_running():
         try:
-            pid = int(_pid_file().read_text().strip())
+            pid = int(_pid_file().read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             pid = None
         return {"running": True, "pid": pid, "log_file": str(_log_file())}
@@ -220,6 +266,11 @@ def _signal_handler(signum, _frame):
 
 
 def _run_daemon(*, stub: bool) -> None:
+    # Clear any leftover shutdown state from a prior run in this process.
+    # _shutdown is a module-global Event; a fork-free re-invocation (tests,
+    # or an in-process restart) would otherwise inherit a set() flag and exit
+    # the loop immediately. Idempotent in the normal forked-child path.
+    _shutdown.clear()
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 

@@ -92,3 +92,53 @@ def test_load_verdicts_skips_file_that_vanishes_mid_read(project, monkeypatch):
     # One file was dropped; the other still loaded — no crash.
     assert len(loaded) == 1
     assert loaded[0].entry_id in {"keep-1", "keep-2"}
+
+
+def _record_with(entry_id: str, timestamp: str) -> "qc_history.VerdictRecord":
+    rec = _record(entry_id)
+    return qc_history.VerdictRecord(
+        entry_id=rec.entry_id,
+        timestamp=timestamp,
+        task_id=rec.task_id,
+        producer_agent=rec.producer_agent,
+        qc_agent=rec.qc_agent,
+        verdict=rec.verdict,
+        defect_type=rec.defect_type,
+        rationale=rec.rationale,
+        artifact_body=rec.artifact_body,
+    )
+
+
+def test_same_second_verdicts_load_in_append_order(project):
+    """LOW finding: timestamps are stamped at second resolution, so verdicts
+    appended within the same second share a filename prefix. The entry_id tail
+    is a random uuid, which sorts arbitrarily — not in append order. The
+    monotonic per-append sequence wedged into the filename must make
+    load_verdicts (sorted glob) reflect true append order within a second.
+
+    The entry_ids here are deliberately chosen so that a plain
+    ``{timestamp}__{entry_id}`` sort would invert append order: the first
+    appended record has the lexicographically-largest tail.
+    """
+    ts = "2026-04-21T12:00:00Z"  # identical second for all three
+    append_order = ["zzz-first", "mmm-second", "aaa-third"]
+    for eid in append_order:
+        qc_history.append_verdict("essay", project, _record_with(eid, ts))
+
+    loaded = qc_history.load_verdicts("essay", project)
+    assert [r.entry_id for r in loaded] == append_order
+
+
+def test_verdict_filename_has_sortable_seq_tiebreaker(project):
+    """The monotonic sequence segment must be present and strictly increasing
+    across appends so filenames sort by append order, independent of the
+    entry_id tail."""
+    ts = "2026-04-21T12:00:00Z"
+    qc_history.append_verdict("essay", project, _record_with("zzz", ts))
+    qc_history.append_verdict("essay", project, _record_with("aaa", ts))
+
+    names = sorted(p.name for p in qc_history._domain_dir("essay", project).glob("*.md"))
+    # Filenames sort with the zzz-tailed (first appended) file first because
+    # its seq segment is smaller, despite "zzz" > "aaa" lexically.
+    assert names[0].endswith("zzz.md")
+    assert names[1].endswith("aaa.md")

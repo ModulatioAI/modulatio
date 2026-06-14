@@ -13,6 +13,7 @@ and the F1 command modal land in later Phase 2 + Phase 3 slices.
 """
 from __future__ import annotations
 
+from rich.markup import escape
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -466,6 +467,15 @@ class ModulatioApp(App):
         except Exception:
             pass
 
+        # Mark a kickoff in flight on the MAIN thread, before the worker is
+        # scheduled. There's a startup window between here and the worker
+        # actually building the Orchestrator + the engine flipping
+        # ``_kickoff_active`` True; during that window ``_kickoff_orch`` is
+        # still None, so a concurrent converse-done would otherwise see
+        # "nothing running" and falsely settle the TEAM spinner. This flag
+        # closes that window (cleared in ``_on_kickoff_done``).
+        self._kickoff_pending = True
+
         # Schedule the kickoff in a background thread. Activity events still
         # fire via ``_record_activity`` (which uses call_from_thread to
         # safely update widgets from the worker). Completion is handled by
@@ -546,11 +556,30 @@ class ModulatioApp(App):
                 self._on_kickoff_done(event.worker.result, None)
             elif event.state == WorkerState.ERROR:
                 self._on_kickoff_done(None, event.worker.error)
+            elif event.state == WorkerState.CANCELLED:
+                # re-sweep (LOW resource-leak): a cancelled kickoff worker (app
+                # teardown / Textual cancel) never reaches SUCCESS or ERROR, so
+                # without this branch ``_on_kickoff_done`` never runs — the
+                # elapsed-time interval keeps ticking, ``_kickoff_pending`` stays
+                # armed, and the launch guard (``_kickoff_tick`` set) locks out
+                # every future kickoff with "a job is already running". Route the
+                # cancel through the same teardown so timer + guards always clear.
+                self._on_kickoff_done(None, None)
         elif event.worker.group == "converse":
             if event.state == WorkerState.SUCCESS:
                 self._on_converse_done(event.worker.result)
             elif event.state == WorkerState.ERROR:
                 self._on_converse_done(f"(error talking to the Leader: {event.worker.error})")
+            elif event.state == WorkerState.CANCELLED:
+                # re-sweep (LOW resource-leak): an exclusive converse worker is
+                # cancelled when a second chat message is sent while the Leader is
+                # still thinking. The replacement worker re-arms "leader_thinking"
+                # and settles it on its own done, but a cancel with NO replacement
+                # (app teardown / external cancel) would leave the leader lane
+                # stuck on the spinner and the TEAM spinner unsettled. Settle the
+                # lanes WITHOUT posting a chat message: a "(cancelled)" reply would
+                # be spurious noise in the common replace-on-second-message case.
+                self._on_converse_cancelled()
 
     def _on_kickoff_done(self, result: dict | None, error: BaseException | None) -> None:
         """Restore the UI after a kickoff worker finishes (success or fail)."""
@@ -562,6 +591,8 @@ class ModulatioApp(App):
         for attr in ("_kickoff_started_at", "_kickoff_mode"):
             if hasattr(self, attr):
                 delattr(self, attr)
+        # The kickoff worker is done — clear the in-flight startup guard.
+        self._kickoff_pending = False
         # Re-enable the Kick off button.
         try:
             btn = self.query_one("#prompt-kickoff", Button)
@@ -574,13 +605,35 @@ class ModulatioApp(App):
         delivered = (result or {}).get("drafts", 0)
         blocked = (result or {}).get("blocked_tasks", 0)
         incomplete = (result or {}).get("incomplete_goals", 0)
-        no_deliver = error is None and (
+        # re-sweep (LOW): a CANCELLED worker routes here with result AND error
+        # both None (there is no summary dict to render). Treat that as its own
+        # honest "cancelled" outcome — the no_deliver / completed branches below
+        # both subscript ``result`` and would crash on None.
+        cancelled = result is None and error is None
+        no_deliver = not cancelled and error is None and (
             delivered == 0 or blocked > 0 or incomplete > 0
         )
-        team_status = self._lane_status("stream-team-status")
+        # Guard symmetric with ``_on_converse_done``: a *separate* converse-driven
+        # run_job may still be in flight on ``_conv_orch`` (the engine supports a
+        # direct kickoff AND a converse run_job live at once — that's why
+        # ``_active_job_orchestrators`` returns a list). Settling THIS kickoff's
+        # outcome onto the shared TEAM spinner would overwrite the other run's live
+        # state with a stale verdict. ``_kickoff_pending`` is already cleared above
+        # and this kickoff's own orch has flipped ``_kickoff_active`` False in
+        # kickoff()'s finally before the worker returned, so ``_any_job_in_flight``
+        # is True here only when an *other* job is still running. Skip the settle in
+        # that case; that job's own done-handler self-corrects the spinner.
+        team_status = (
+            self._lane_status("stream-team-status")
+            if not self._any_job_in_flight()
+            else None
+        )
         if error is not None:
             if team_status is not None:
                 team_status.set_error(str(error)[:80])
+        elif cancelled:
+            if team_status is not None:
+                team_status.set_idle()
         elif no_deliver:
             if team_status is not None:
                 team_status.set_error("finished without deliverables")
@@ -590,6 +643,8 @@ class ModulatioApp(App):
         # Render the result on the floor's status line …
         if error is not None:
             self._set_kickoff_status(f"Kickoff failed: {error}")
+        elif cancelled:
+            self._set_kickoff_status("Kickoff cancelled.")
         elif no_deliver:
             self._set_kickoff_status(
                 f"Kickoff finished WITHOUT deliverables — "
@@ -606,11 +661,14 @@ class ModulatioApp(App):
                 f"errors: {result['errors']}"
             )
         # … and the Leader reports the verdict back on the LEADER tab — his
-        # voice, where you talk to him.
-        self._post_leader_verdict(result, error)
-        # The run is done — the Leader has a summary for you. Light the amber
-        # lamp ("talk to me") so it reads even from the factory floor.
-        self._signal_msg()
+        # voice, where you talk to him. A CANCELLED run has no summary to report,
+        # so skip the verdict + attention lamp (and avoid subscripting a None
+        # result inside ``_post_leader_verdict``).
+        if not cancelled:
+            self._post_leader_verdict(result, error)
+            # The run is done — the Leader has a summary for you. Light the amber
+            # lamp ("talk to me") so it reads even from the factory floor.
+            self._signal_msg()
 
     def _post_leader_verdict(
         self, result: dict | None, error: BaseException | None
@@ -787,8 +845,32 @@ class ModulatioApp(App):
         # normally settles it; this covers an error path that never emitted it.
         # Guard: a *separate* kickoff (button/F5) may still be in flight on its
         # own worker — settling its spinner to "done" here would lie about the
-        # live floor. Only force-settle when nothing is actually running.
-        if self._running_job_orchestrator() is None:
+        # live floor. Only force-settle when nothing is actually running. This
+        # also covers a kickoff still in its startup window (worker scheduled,
+        # orch not yet built) via the ``_kickoff_pending`` flag.
+        if not self._any_job_in_flight():
+            team_status = self._lane_status("stream-team-status")
+            if team_status is not None:
+                team_status.set_done()
+
+    def _on_converse_cancelled(self) -> None:
+        """re-sweep (LOW resource-leak): settle the converse lanes after a worker
+        is CANCELLED, without posting a chat reply. If a replacement converse
+        worker is already in flight (the usual case — a second message cancels
+        the first), that worker re-armed ``leader_thinking`` and will settle the
+        lanes on its own done; leave them alone so we don't flicker the spinner
+        off mid-thought. Only force-settle when nothing replaced it."""
+        replacement_live = any(
+            getattr(w, "group", None) == "converse"
+            and w.state in (WorkerState.PENDING, WorkerState.RUNNING)
+            for w in self.workers
+        )
+        if replacement_live:
+            return
+        status = self._lane_status("stream-leader-status")
+        if status is not None:
+            status.set_idle()
+        if not self._any_job_in_flight():
             team_status = self._lane_status("stream-team-status")
             if team_status is not None:
                 team_status.set_done()
@@ -968,13 +1050,13 @@ class ModulatioApp(App):
 
     def _set_response(self, text: str) -> None:
         self.last_summary_text = text
-        self.query_one("#prompt-response", Static).update(text)
+        self.query_one("#prompt-response", Static).update(escape(text))
 
     def _set_kickoff_status(self, text: str) -> None:
         """Update the KICK OFF box's status line on the TEAM floor."""
         self.last_summary_text = text
         try:
-            self.query_one("#kickoff-response", Static).update(text)
+            self.query_one("#kickoff-response", Static).update(escape(text))
         except NoMatches:
             pass
 
@@ -1048,26 +1130,47 @@ class ModulatioApp(App):
         never does this; only F5 or the KICK OFF button reaches here."""
         self._run_kickoff(self._kickoff_objective_text())
 
-    def _running_job_orchestrator(self):
-        """Fix C: the Orchestrator of the job running right now (via converse
-        run_job OR a direct kickoff), or None when nothing is in flight. The
-        engine's ``_kickoff_active`` flag is True for exactly the kickoff's
-        duration, so it's the reliable 'a job is running' signal."""
+    def _active_job_orchestrators(self) -> list:
+        """Every Orchestrator with a job running right now — a converse-driven
+        ``run_job`` AND a direct kickoff can be in flight at the same time
+        (different workers). The engine's ``_kickoff_active`` flag is True for
+        exactly a kickoff's duration, so it's the reliable 'this orch is
+        running' signal. Returns a list (possibly empty)."""
+        active = []
         for orch in (getattr(self, "_conv_orch", None),
                      getattr(self, "_kickoff_orch", None)):
             if orch is not None and getattr(orch, "_kickoff_active", False):
-                return orch
-        return None
+                active.append(orch)
+        return active
+
+    def _running_job_orchestrator(self):
+        """Fix C: the Orchestrator of the job running right now (via converse
+        run_job OR a direct kickoff), or None when nothing is in flight."""
+        active = self._active_job_orchestrators()
+        return active[0] if active else None
+
+    def _any_job_in_flight(self) -> bool:
+        """True if a job is running OR a kickoff is in its startup window (the
+        worker is scheduled but ``_kickoff_orch``/``_kickoff_active`` haven't
+        come up yet). Used to keep converse-done from falsely settling the TEAM
+        spinner during that window."""
+        if getattr(self, "_kickoff_pending", False):
+            return True
+        return bool(self._active_job_orchestrators())
 
     def action_stop_job(self) -> None:
         """F8 → the operator's kill-switch. Signal the running job to stop; it
         halts at the next safe point (finishing the current in-flight step, then
         launching no new work) and returns a clean partial result. No-op when
         nothing is running, so a stray F8 can't hurt."""
-        orch = self._running_job_orchestrator()
-        if orch is None:
+        active = self._active_job_orchestrators()
+        if not active:
             return
-        orch.abort_event.set()  # thread-safe; the worker's kickoff loop reads it
+        # Signal EVERY running orchestrator — a converse-driven run_job and a
+        # direct kickoff can both be in flight on their own workers; stopping
+        # only the first would leave the other running past an F8.
+        for orch in active:
+            orch.abort_event.set()  # thread-safe; the worker's loop reads it
         # F8 blows out the pipes (Clif 2026-06-05): clear the TEAM TV now for instant
         # kill feedback (and again when the run fully unwinds, so no late event re-
         # fills it). The engine teardown finalizes goals/tasks/tickets at run-end.

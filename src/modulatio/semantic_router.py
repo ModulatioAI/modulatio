@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from pathlib import Path
 from typing import Callable, Optional, Protocol
 
@@ -51,10 +52,52 @@ def _cache_root() -> Path:
 
 
 # Single source of truth lives in config.get_embedding_model() so
-# wizards / overrides land in one place. Computed at import is fine —
-# the value is stable for the process lifetime.
+# wizards / overrides land in one place. ``_EMBED_MODEL`` is the
+# import-time snapshot kept only for the class-level ``dim`` default and
+# back-compat; live code paths call ``_embed_model()`` so a mid-process
+# wizard model-swap is honored (mirrors ``qc_history._embed_model`` /
+# ``team_memory._embed_model``).
 _EMBED_MODEL = _config.get_embedding_model()
-_EMBED_DIM = 384
+
+
+def _embed_model() -> str:
+    """Resolve the active embedding-model identifier from current config.
+    Per-call resolution so a wizard model-swap is honored without a
+    process restart — matches ``qc_history._embed_model`` and
+    ``team_memory._embed_model`` so all vector subsystems agree on the
+    model fingerprint."""
+    return _config.get_embedding_model()
+
+# Fallback dimension for the default MiniLM model — used only when
+# fastembed isn't importable or the model isn't in its catalog (e.g. a
+# wizard-set custom model fastembed doesn't recognize). The real value
+# is derived from the model itself in ``_embed_dim_for_model`` so the
+# LanceDB schema width always matches the vectors the embedder emits.
+_DEFAULT_EMBED_DIM = 384
+
+
+def _embed_dim_for_model(model_name: str) -> int:
+    """Resolve the output vector length for ``model_name`` from
+    fastembed's catalog. The wizard can override the embedding model to
+    any supported model (e.g. a 768-dim bge model); the static 384 was a
+    silent mismatch that produced a LanceDB schema narrower/wider than
+    the actual vectors. Falls back to the MiniLM default if fastembed is
+    unavailable or the model is unknown."""
+    try:
+        from fastembed import TextEmbedding
+
+        for m in TextEmbedding.list_supported_models():
+            if m.get("model") == model_name:
+                dim = m.get("dim")
+                if isinstance(dim, int) and dim > 0:
+                    return dim
+                break
+    except Exception:
+        pass
+    return _DEFAULT_EMBED_DIM
+
+
+_EMBED_DIM = _embed_dim_for_model(_EMBED_MODEL)
 
 
 # ── Embedder protocol + impls ──────────────────────────────────────────────
@@ -87,23 +130,72 @@ class FastEmbedder:
     ``SPEC-routing-embedder.md``).
     """
 
+    # Class-level default (shipped config) so ``FastEmbedder.dim`` reads
+    # coherently before any instance loads a model. The authoritative
+    # value is the per-instance ``self.dim``, re-derived at load time from
+    # the model actually loaded (see ``_get``).
     dim = _EMBED_DIM
 
     def __init__(self) -> None:
         self._model = None
+        # re-sweep (Finding 1): resolve the embedding model LIVE at load
+        # time, not at module import. ``_EMBED_MODEL``/``_EMBED_DIM`` were
+        # pinned at import while qc_history/team_memory resolve
+        # ``config.get_embedding_model()`` per call to honor a mid-process
+        # wizard model-swap. Since one FastEmbedder is shared into all
+        # three subsystems, a pinned model meant the embedder loaded the
+        # OLD model + reported the OLD dim while the others fingerprinted
+        # the NEW model name → silent disagreement on rebuild. We now
+        # capture the model name the instance ACTUALLY loaded and derive
+        # ``dim`` from it, making the embedder the single source of truth
+        # the others can read (``model_name``) instead of config.
+        self._model_name: str | None = None
+        self.dim = _EMBED_DIM
+        # A single FastEmbedder is shared across all vector subsystems
+        # (routing matcher, qc_history, team_memory) and touched
+        # concurrently by wave workers in a ThreadPoolExecutor. Two
+        # locks: ``_load_lock`` makes the lazy model load happen exactly
+        # once (double-checked), and ``_infer_lock`` serializes ONNX
+        # inference so concurrent embed calls don't race the same
+        # underlying session.
+        self._load_lock = threading.Lock()
+        self._infer_lock = threading.Lock()
+
+    @property
+    def model_name(self) -> str:
+        """The embedding-model identifier this instance loaded (or will
+        load). Resolved live from config until the model is loaded, then
+        frozen to the loaded value so collaborators (qc_history,
+        team_memory) can fingerprint against the embedder's ACTUAL model
+        rather than re-reading config independently."""
+        if self._model_name is not None:
+            return self._model_name
+        return _config.get_embedding_model()
 
     def _get(self):
         if self._model is None:
-            from fastembed import TextEmbedding
-            from fastembed.common.types import Device
-            self._model = TextEmbedding(_EMBED_MODEL, cuda=Device.CPU)
+            with self._load_lock:
+                if self._model is None:
+                    from fastembed import TextEmbedding
+                    from fastembed.common.types import Device
+                    # Resolve the model live so a wizard swap before first
+                    # use is honored without a process restart.
+                    model_name = _config.get_embedding_model()
+                    model = TextEmbedding(model_name, cuda=Device.CPU)
+                    self._model_name = model_name
+                    self.dim = _embed_dim_for_model(model_name)
+                    self._model = model
         return self._model
 
     def embed_text(self, text: str) -> list[float]:
-        return next(self._get().embed([text])).tolist()
+        model = self._get()
+        with self._infer_lock:
+            return next(model.embed([text])).tolist()
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        return [v.tolist() for v in self._get().embed(texts)]
+        model = self._get()
+        with self._infer_lock:
+            return [v.tolist() for v in model.embed(texts)]
 
 
 class StubEmbedder:
@@ -199,7 +291,7 @@ def _config_hash(agents: list[Agent]) -> str:
             f"{','.join(sorted(a.capability_tags))}|"
             f"{a.identity.strip()}"
         )
-    payload = "||".join(parts) + f"|model={_EMBED_MODEL}"
+    payload = "||".join(parts) + f"|model={_embed_model()}"
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -208,14 +300,14 @@ def _load_meta(project_code: str) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
-    except json.JSONDecodeError:
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _save_meta(project_code: str, meta: dict) -> None:
     _cache_dir(project_code).mkdir(parents=True, exist_ok=True)
-    _meta_path(project_code).write_text(json.dumps(meta, indent=2))
+    _meta_path(project_code).write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
 def ensure_agent_vectors(project_code: str, embedder: Embedder) -> bool:
@@ -235,10 +327,13 @@ def ensure_agent_vectors(project_code: str, embedder: Embedder) -> bool:
     agents = roster.list_agents(project_code)
     new_hash = _config_hash(agents)
     meta = _load_meta(project_code)
+    # re-sweep (Finding 1): resolve the model live so a wizard swap
+    # invalidates the cache (matches _config_hash + qc_history/team_memory).
+    active_model = _embed_model()
 
     if (
         meta.get("agents_hash") == new_hash
-        and meta.get("embedding_model") == _EMBED_MODEL
+        and meta.get("embedding_model") == active_model
         and meta.get("embed_dim") == embedder.dim
     ):
         return False
@@ -252,7 +347,7 @@ def ensure_agent_vectors(project_code: str, embedder: Embedder) -> bool:
     if not agents:
         _save_meta(project_code, {
             "agents_hash": new_hash,
-            "embedding_model": _EMBED_MODEL,
+            "embedding_model": active_model,
             "embed_dim": embedder.dim,
             "agent_count": 0,
         })
@@ -275,7 +370,7 @@ def ensure_agent_vectors(project_code: str, embedder: Embedder) -> bool:
 
     _save_meta(project_code, {
         "agents_hash": new_hash,
-        "embedding_model": _EMBED_MODEL,
+        "embedding_model": active_model,
         "embed_dim": embedder.dim,
         "agent_count": len(agents),
     })

@@ -215,3 +215,60 @@ def test_concurrent_rotation_is_serialized(keys, monkeypatch):
     # distribution. A lost-update race leaves at least one key over/under-used.
     counts = collections.Counter(results)
     assert set(counts.values()) == {total // pool_size}, counts
+
+
+def test_list_keys_survives_concurrent_env_mutation(keys, monkeypatch):
+    """list_keys must not raise 'dictionary changed size during iteration' when
+    a concurrent config edit mutates os.environ during its scan.
+
+    Root cause (pre-fix): list_keys iterated the LIVE ``os.environ.keys()`` view
+    lazily across its per-name loop body. The GIL can switch threads at the
+    bytecode boundaries inside that loop, so another thread's
+    ``os.environ[...] = ...`` (e.g. config.set_env_secret) lands mid-iteration
+    and the next ``__next__`` raises RuntimeError. The fix snapshots names up
+    front — ``env_names = list(os.environ.keys())`` — which is a single atomic
+    C-level pass the GIL never interrupts.
+
+    This is an inherently concurrent race: we run a churn thread mutating a real
+    dict (real ``.keys()`` view semantics) while the scanner loops. On the
+    pre-fix code this reliably trips; the fix runs clean.
+    """
+    import sys
+    import threading
+
+    keys.add_key(BASE, "secret-one", "text")  # ensures index #1 is discoverable
+    # A real dict gives genuine os.environ.keys()-view semantics; mutate it from
+    # another thread exactly like a concurrent config edit would.
+    store = dict(os.environ)
+    monkeypatch.setattr(os, "environ", store)
+
+    stop = threading.Event()
+    error: list[BaseException] = []
+
+    def churn() -> None:
+        i = 0
+        while not stop.is_set():
+            store[f"{BASE}_CHURN_{i % 12}"] = "x"
+            store.pop(f"{BASE}_CHURN_{(i + 6) % 12}", None)
+            i += 1
+
+    # Tighten the thread-switch interval so the GIL hands off inside list_keys'
+    # scan loop, making the (otherwise rare) race fire deterministically fast.
+    prev_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    churner = threading.Thread(target=churn, daemon=True)
+    churner.start()
+    try:
+        for _ in range(3000):
+            try:
+                slots = keys.list_keys(BASE)  # must never raise RuntimeError
+            except RuntimeError as exc:  # pragma: no cover - the bug's signature
+                error.append(exc)
+                break
+            assert any(s["index"] == 1 for s in slots)
+    finally:
+        stop.set()
+        churner.join(timeout=2.0)
+        sys.setswitchinterval(prev_interval)
+
+    assert not error, f"list_keys raced on os.environ mutation: {error[0]!r}"

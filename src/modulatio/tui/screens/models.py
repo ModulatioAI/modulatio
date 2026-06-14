@@ -11,12 +11,27 @@ an agent via the Agents tab first).
 from __future__ import annotations
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Label, Static
 
 from modulatio import roster
 from modulatio.tui.widgets.model_wizard import ModelWizard
+
+
+def _cell(value: object) -> Text:
+    """Wrap a cell value in a Rich ``Text`` so DataTable renders it VERBATIM.
+
+    Textual's ``default_cell_formatter`` feeds every raw ``str`` cell through
+    ``Text.from_markup``, which raises ``MarkupError`` on bracket sequences
+    like ``[/]`` or ``x[/2]``. Agent names and custom model ids are
+    free-form / operator-authored and can contain such brackets, so an
+    un-wrapped cell crashes the whole TUI at paint time. A ``Text`` instance
+    is a renderable and bypasses markup parsing — same hardening memory.py
+    already uses.
+    """
+    return Text("" if value is None else str(value))
 
 
 class ModelsScreen(Vertical):
@@ -61,11 +76,11 @@ class ModelsScreen(Vertical):
         code = self.app.project_code  # type: ignore[attr-defined]
         for agent in roster.list_agents(code):
             table.add_row(
-                agent.id,
-                agent.name,
-                agent.model or "",
-                agent.model_tier or "",
-                agent.cost_class or "",
+                _cell(agent.id),
+                _cell(agent.name),
+                _cell(agent.model or ""),
+                _cell(agent.model_tier or ""),
+                _cell(agent.cost_class or ""),
                 key=agent.id,
             )
 

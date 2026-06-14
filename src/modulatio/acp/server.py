@@ -15,6 +15,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import stat
 import threading
 from pathlib import Path
 from typing import Callable
@@ -67,6 +68,22 @@ def _validate_attachment_path(raw_path: str) -> Path:
         if any(part.startswith(".") for part in rel.parts):
             raise ValueError(
                 f"attachment path rejected (dotfile/secret component): {raw_path!r}"
+            )
+        # re-sweep (LOW/resource-leak): confinement + dotfile checks pass a FIFO
+        # / character device sitting inside an allowed root. build_attachment
+        # then stat()s it (size 0) and read_text()s it — an open/read on a named
+        # pipe or device BLOCKS the worker thread indefinitely. Require a regular
+        # file so only ordinary files are ever opened. stat() (follows symlinks,
+        # but resolved is already symlink-free) so a broken link surfaces here.
+        try:
+            mode = resolved.stat().st_mode
+        except OSError as exc:
+            raise ValueError(
+                f"attachment path unreadable: {raw_path!r}") from exc
+        if not stat.S_ISREG(mode):
+            raise ValueError(
+                f"attachment path is not a regular file (FIFO/device/dir "
+                f"rejected): {raw_path!r}"
             )
         return resolved
     raise ValueError(
@@ -152,19 +169,45 @@ class ACPServer:
             self._stdout, rpc.make_error(req_id, code, message), self._stdout_lock)
 
     def request_and_wait(self, method: str, params: dict,
-                         timeout: float = _REQUEST_TIMEOUT_SECONDS):
+                         timeout: float = _REQUEST_TIMEOUT_SECONDS,
+                         cancel_check=None):
         """Issue a server-initiated request and BLOCK for the client's response
         (correlated by id). Returns the result, or None on timeout/cancel.
 
         The request id is registered to the owning session (``sessionId`` in
         ``params``) so that ``session/cancel`` only unblocks that session's own
-        in-flight requests (H1)."""
+        in-flight requests (H1).
+
+        ``cancel_check`` closes a TOCTOU window (MEDIUM/race): a caller checks
+        ``session.cancelled`` then calls here, but a ``session/cancel`` can fire
+        between that check and the rid landing in ``_session_pending`` — leaving
+        the rid invisible to cancel's snapshot, so it blocks the full timeout.
+        We evaluate ``cancel_check`` under the SAME ``_session_pending_lock`` the
+        cancel snapshots, right after registering the rid: if it's truthy the
+        cancel already happened (or is happening), so we unregister and bail with
+        None before writing any frame — failing closed promptly."""
         rid = self._idgen.next()
         self._pending.register(rid)
         sid = params.get("sessionId")
         if sid is not None:
             with self._session_pending_lock:
                 self._session_pending.setdefault(sid, set()).add(rid)
+                # re-sweep: observe a cancel that raced our caller's pre-check,
+                # atomically vs the cancel snapshot.
+                cancelled = bool(cancel_check()) if cancel_check is not None \
+                    else False
+            if cancelled:
+                self._pending.wait(rid, 0)  # pop the slot we just registered
+                with self._session_pending_lock:
+                    ids = self._session_pending.get(sid)
+                    if ids is not None:
+                        ids.discard(rid)
+                        if not ids:
+                            self._session_pending.pop(sid, None)
+                return None
+        elif cancel_check is not None and bool(cancel_check()):
+            self._pending.wait(rid, 0)  # no session bucket to clean; just pop
+            return None
         try:
             rpc.write_message(
                 self._stdout, rpc.make_request(rid, method, params),
@@ -172,6 +215,10 @@ class ACPServer:
             ok, value = self._pending.wait(rid, timeout)
             return value if ok else None
         finally:
+            # If write_message raised before wait() popped the slot, wait()
+            # never ran and the _pending slot would leak. wait(rid, 0) pops it
+            # immediately and is a harmless no-op when already popped (M, leak).
+            self._pending.wait(rid, 0)
             if sid is not None:
                 with self._session_pending_lock:
                     ids = self._session_pending.get(sid)
@@ -214,6 +261,13 @@ class ACPServer:
                 # that client blocks forever awaiting a response that, by the
                 # notification contract, would never come.
                 self._cancel(params)
+                if req_id is not None:
+                    self._respond(req_id, None)
+            elif method == "session/close":
+                # Explicit teardown signal: drop the session so _sessions /
+                # _session_pending don't grow unbounded across a long-lived
+                # server (cancel keeps a session reusable; close ends it).
+                self._close(params)
                 if req_id is not None:
                     self._respond(req_id, None)
             elif req_id is not None:
@@ -290,6 +344,22 @@ class ACPServer:
             ids = list(self._session_pending.get(sid, ()))
         for rid in ids:
             self._pending.resolve(rid, None)
+
+    def _close(self, params: dict) -> None:
+        """Tear down a session on an explicit ``session/close``: unblock any of
+        its in-flight permission/input requests (fail-closed), then drop it from
+        ``_sessions`` and ``_session_pending`` so neither grows unbounded over a
+        long-lived server. A still-running prompt worker's finally is a no-op on
+        an already-dropped session."""
+        sid = params.get("sessionId")
+        session = self._sessions.get(sid)
+        if session is not None:
+            session.cancelled = True
+        with self._session_pending_lock:
+            ids = list(self._session_pending.pop(sid, ()))
+        for rid in ids:
+            self._pending.resolve(rid, None)
+        self._sessions.pop(sid, None)
 
     # ── real Orchestrator construction (mirrors the TUI converse path) ───
     def _build_orchestrator(self, session: ACPSession):

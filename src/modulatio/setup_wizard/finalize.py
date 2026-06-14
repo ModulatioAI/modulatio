@@ -91,6 +91,12 @@ def _derive_providers(state: dict) -> list[str]:
     providers: set[str] = set()
     for env_var in state.get("staged_api_keys", {}):
         name = str(env_var).strip()
+        # re-sweep: the neutral 'API_KEY' sentinel (default_env_var_for's
+        # fallback for a malformed base_url) carries no provider — it's 7 chars
+        # so it doesn't end with '_API_KEY' (8) and would otherwise render a
+        # bogus 'api_key' provider on the confirm line. Skip it.
+        if name.upper() == "API_KEY":
+            continue
         if name.upper().endswith("_API_KEY"):
             name = name[: -len("_API_KEY")]
         name = name.strip("_").lower()
@@ -230,7 +236,7 @@ def commit(state: dict, *, version: str) -> None:
         env_path = vault_root / ".env"
         existing: dict[str, str] = {}
         if env_path.exists():
-            for line in env_path.read_text().splitlines():
+            for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)

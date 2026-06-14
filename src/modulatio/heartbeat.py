@@ -25,14 +25,21 @@ Preserved from v1.3:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import re
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX (Windows): flock is a no-op.
+    fcntl = None  # type: ignore[assignment]
 
 from modulatio import config
 
@@ -60,7 +67,80 @@ def _output_dir() -> Path:
 # the heartbeat background thread, the daemon, and CLI commands may all
 # mutate the queue. Without this lock, a concurrent write can produce a
 # partial/empty JSON file and silently lose every queued task.
+#
+# `_queue_lock` (an in-process RLock) only serializes threads WITHIN one
+# process. EVERY read-modify-write of the queue ALSO has to be exclusive
+# ACROSS processes — a daemon tick and a separate `modulatio heartbeat
+# run-once` CLI invocation are distinct OS processes sharing the same
+# on-disk queue, and an RLock cannot see across that boundary. So every
+# load→mutate→save mutator (add/update/finalize/requeue/cancel/clear/
+# recover_stale AND the select-and-claim) holds a POSIX `flock` on a sidecar
+# lock file, which attaches to the open file description and therefore
+# serializes across both threads and processes. Holding it only around the
+# claim (as an earlier revision did) left every OTHER mutator able to clobber
+# a concurrent process's update (lost update) and to publish a torn file via
+# a shared tmp (see `_save_queue`). This mirrors the comptroller-ledger /
+# compaction flock idiom already used elsewhere in the engine.
 _queue_lock = threading.RLock()
+
+# Per-PROCESS reentrancy depth for the cross-process flock. A second
+# `flock(LOCK_EX)` on a *different* fd within the SAME process blocks (it does
+# not see the process already holds the lock), so nested mutators (e.g.
+# `cancel_task`→`update_task`) would self-deadlock if each opened its own fd.
+# We instead open+lock the fd ONCE at the outermost acquisition and reuse it
+# for inner ones, guarded by `_queue_lock` (an RLock, so reentrant per thread).
+# R1 (cadre): the depth/fd bookkeeping is held in a ``threading.local`` (the
+# same idiom cron uses) so it is genuinely PER-THREAD — robust even if the
+# ``_queue_lock`` serialization that already makes it safe were ever weakened.
+_claim_lock_local = threading.local()
+
+
+def _claim_lock_file() -> Path:
+    return _queue_file().with_suffix(".json.lock")
+
+
+@contextlib.contextmanager
+def _cross_process_claim_lock() -> Iterator[None]:
+    """Hold an exclusive POSIX ``flock`` across a queue read-modify-write.
+
+    The exclusive lock serializes across both threads and processes (``flock``
+    attaches to the open file description, not the process). It is REENTRANT
+    within a process: nested acquisitions (a locked mutator calling another)
+    reuse the single locked fd via a depth counter rather than opening a new fd
+    — a new-fd `flock(LOCK_EX)` would block against the process's own held lock
+    and self-deadlock. POSIX-only: when ``fcntl`` is unavailable (Windows) the
+    lock is a no-op — the in-process ``_queue_lock`` still serializes the
+    single-process case (mirrors the compaction-lock posture).
+    """
+    if fcntl is None:  # pragma: no cover — non-POSIX no-op
+        yield
+        return
+    # `_queue_lock` (RLock) guards the depth/fd bookkeeping so it is consistent
+    # across threads; it is reentrant, so holding it here AND inside the wrapped
+    # mutator is fine. Depth/fd live in a thread-local (R1) so the reentrancy
+    # counter is per-thread by construction.
+    with _queue_lock:
+        depth = getattr(_claim_lock_local, "depth", 0)
+        if depth == 0:
+            lock_path = _claim_lock_file()
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            _claim_lock_local.fd = fd
+        _claim_lock_local.depth = depth + 1
+        try:
+            yield
+        finally:
+            _claim_lock_local.depth -= 1
+            if _claim_lock_local.depth == 0 and getattr(
+                    _claim_lock_local, "fd", None) is not None:
+                fd = _claim_lock_local.fd
+                _claim_lock_local.fd = None
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:  # pragma: no cover — best-effort release
+                    pass
+                os.close(fd)
 
 
 def _load_queue() -> list:
@@ -69,7 +149,7 @@ def _load_queue() -> list:
         if not qf.exists():
             return []
         try:
-            return json.loads(qf.read_text()) or []
+            return json.loads(qf.read_text(encoding="utf-8", errors="replace")) or []
         except (OSError, json.JSONDecodeError):
             return []
 
@@ -77,10 +157,23 @@ def _load_queue() -> list:
 def _save_queue(tasks: list) -> None:
     qf = _queue_file()
     qf.parent.mkdir(parents=True, exist_ok=True)
-    tmp = qf.with_suffix(".json.tmp")
+    # Per-PROCESS-unique tmp name. A single shared `.json.tmp` lets two
+    # processes write the SAME tmp path concurrently; one's `tmp.replace(qf)`
+    # then publishes the OTHER's half-written bytes (a torn/partial queue) even
+    # though rename itself is atomic. Tagging the tmp with pid + a random token
+    # gives each writer its own tmp file, so the atomic rename only ever
+    # publishes bytes this process fully wrote. (The cross-process flock now
+    # serializes the RMW too, but a unique tmp is the belt to that suspenders.)
+    tmp = qf.with_suffix(f".json.tmp.{os.getpid()}.{secrets.token_hex(4)}")
     with _queue_lock:
-        tmp.write_text(json.dumps(tasks, indent=2, default=str))
-        tmp.replace(qf)
+        try:
+            tmp.write_text(json.dumps(tasks, indent=2, default=str), encoding="utf-8")
+            tmp.replace(qf)
+        finally:
+            # If replace() failed, don't leak the tmp.
+            with contextlib.suppress(OSError):
+                if tmp.exists():
+                    tmp.unlink()
 
 
 # === Time helpers ===
@@ -150,7 +243,7 @@ def add_task(
     # lowered form must still match the project-code regex. Anything
     # not str / containing path-traversal / shell-hostile chars raises.
     validated_code = vault.validate_project_code(project_code.lower())
-    with _queue_lock:
+    with _cross_process_claim_lock(), _queue_lock:
         tasks = _load_queue()
         task = {
             "id": _new_id(),
@@ -196,11 +289,64 @@ def list_tasks(*, status: Optional[str] = None, project_code: Optional[str] = No
 
 
 def update_task(task_id: str, **updates) -> Optional[dict]:
-    with _queue_lock:
+    with _cross_process_claim_lock(), _queue_lock:
         tasks = _load_queue()
         for t in tasks:
             if t.get("id") == task_id:
                 t.update(updates)
+                _save_queue(tasks)
+                return t
+        return None
+
+
+def finalize_task(task_id: str, **updates) -> Optional[dict]:
+    """Write a terminal result (done/failed) UNLESS the task was cancelled
+    out-of-band mid-dispatch.
+
+    ``_run_task`` dispatches a claimed task (status ``running``) and then writes
+    its outcome. If an operator cancels that task while it is in flight (a
+    ``cancel_task`` flips it to ``cancelled`` under the lock), a plain
+    ``update_task(status="done"/"failed")`` would clobber that cancel and
+    resurrect the task into a terminal-but-not-cancelled state. This reads the
+    current status under the queue lock and skips the write when the task has
+    already been moved to ``cancelled``, so the operator's intent wins the race.
+    Returns the task (updated, or left as-is if already cancelled), or None if
+    the task no longer exists.
+    """
+    with _cross_process_claim_lock(), _queue_lock:
+        tasks = _load_queue()
+        for t in tasks:
+            if t.get("id") == task_id:
+                if t.get("status") == "cancelled":
+                    return t
+                t.update(updates)
+                _save_queue(tasks)
+                return t
+        return None
+
+
+def requeue_task(task_id: str, **updates) -> Optional[dict]:
+    """Re-arm a claimed task back to ``pending`` UNLESS it was cancelled
+    out-of-band mid-dispatch.
+
+    The retry path (``_run_task``: dispatch failed, retries remain) flips a
+    ``running`` task back to ``pending`` so the next tick re-dispatches it. But
+    if an operator cancelled that task while it was in flight (``cancel_task``
+    set ``cancelled`` under the lock), a plain ``update_task(status="pending")``
+    would clobber the cancel and ``_select_next_pending`` would re-select it,
+    defeating the cancel. This reads the current status under the queue lock and
+    skips the re-arm when the task has already moved to ``cancelled``, so the
+    operator's intent wins the race (mirrors ``finalize_task``). Returns the task
+    (re-armed, or left cancelled), or None if it no longer exists.
+    """
+    with _cross_process_claim_lock(), _queue_lock:
+        tasks = _load_queue()
+        for t in tasks:
+            if t.get("id") == task_id:
+                if t.get("status") == "cancelled":
+                    return t
+                t.update(updates)
+                t["status"] = "pending"
                 _save_queue(tasks)
                 return t
         return None
@@ -213,7 +359,7 @@ def cancel_task(task_id: str) -> bool:
 
 def clear_done() -> int:
     """Remove completed/failed/cancelled tasks. Returns count removed."""
-    with _queue_lock:
+    with _cross_process_claim_lock(), _queue_lock:
         tasks = _load_queue()
         before = len(tasks)
         tasks = [t for t in tasks if t.get("status") in ("pending", "running")]
@@ -229,7 +375,7 @@ def recover_stale_tasks(*, max_age_minutes: int = DEFAULT_STALE_MINUTES) -> int:
     Called automatically by the Heartbeat loop on tick + on startup. Safe
     to invoke manually from CLI for diagnostics.
     """
-    with _queue_lock:
+    with _cross_process_claim_lock(), _queue_lock:
         tasks = _load_queue()
         changed = 0
         now = datetime.now(timezone.utc)
@@ -263,6 +409,28 @@ def recover_stale_tasks(*, max_age_minutes: int = DEFAULT_STALE_MINUTES) -> int:
 
 # === Selection ===
 
+# Length of the random ``secrets.token_hex(3)`` suffix every id ends with
+# (3 bytes → 6 hex chars). A dep "suffix" must span at least this whole
+# random segment to be a safe, non-coincidental match.
+_ID_TOKEN_LEN = 6
+
+
+def _dep_matches(dep: str, done_id: str) -> bool:
+    """True iff ``dep`` identifies ``done_id`` as a completed predecessor.
+
+    depends_on entries are documented as task-id suffixes (full suffixes are
+    safe). A bare ``done_id.endswith(dep)`` over the WHOLE id can false-satisfy:
+    a short or coincidental ``dep`` can tail an unrelated done id (the trailing
+    chars of the random ``token_hex(3)`` segment), marking the dependency met
+    before the intended predecessor finished. Anchor instead on the random-token
+    boundary: accept an exact full-id match, or a suffix that spans at least the
+    complete 6-hex random segment.
+    """
+    if dep == done_id:
+        return True
+    return len(dep) >= _ID_TOKEN_LEN and done_id.endswith(dep)
+
+
 def _select_next_pending(all_tasks: list) -> Optional[dict]:
     """Pure selection over an already-loaded task list (no I/O).
 
@@ -282,16 +450,23 @@ def _select_next_pending(all_tasks: list) -> Optional[dict]:
                 if now < datetime.fromisoformat(nr):
                     continue
             except (ValueError, TypeError):
+                # An unparseable next_run must NOT be treated as eligible-now:
+                # a recurring task whose schedule stamp got corrupted would
+                # then dispatch immediately on every tick, silently bypassing
+                # (and busy-looping) its recurrence. Fail closed — skip it so a
+                # human/recovery path can inspect the bad stamp rather than the
+                # daemon firing it perpetually.
                 logger.warning(
-                    "Task %s: unparseable next_run=%r; running now",
+                    "Task %s: unparseable next_run=%r; skipping (not eligible)",
                     t.get("id"),
                     nr,
                 )
+                continue
         deps = t.get("depends_on") or []
         if deps:
             blocked = False
             for dep in deps:
-                if not any(tid.endswith(dep) for tid in done_ids):
+                if not any(_dep_matches(dep, tid) for tid in done_ids):
                     blocked = True
                     break
             if blocked:
@@ -330,18 +505,27 @@ def claim_next_pending() -> Optional[dict]:
     Holding the lock across the read-decide-write makes the claim exclusive:
     the loser re-reads the queue, sees the task already ``running``, and
     selects a different one (or None).
+
+    Because the daemon and the CLI are separate OS processes, the in-process
+    ``_queue_lock`` alone cannot make the claim exclusive across them — so the
+    read-decide-write is ALSO wrapped in a cross-process POSIX ``flock``
+    (``_cross_process_claim_lock``). The flock is acquired OUTSIDE the RLock to
+    keep a single, consistent lock-acquisition order everywhere (no path nests
+    these two in the opposite order), so it cannot deadlock against another
+    queue operation.
     """
-    with _queue_lock:
-        tasks = _load_queue()
-        task = _select_next_pending(tasks)
-        if task is None:
-            return None
-        task["status"] = "running"
-        task["started"] = _now_iso()
-        _save_queue(tasks)
-        # Return a copy so a caller mutating the dict can't corrupt the
-        # just-saved on-disk state out-of-band.
-        return dict(task)
+    with _cross_process_claim_lock():
+        with _queue_lock:
+            tasks = _load_queue()
+            task = _select_next_pending(tasks)
+            if task is None:
+                return None
+            task["status"] = "running"
+            task["started"] = _now_iso()
+            _save_queue(tasks)
+            # Return a copy so a caller mutating the dict can't corrupt the
+            # just-saved on-disk state out-of-band.
+            return dict(task)
 
 
 # === Recurrence ===
@@ -437,7 +621,7 @@ def save_task_output(task: dict, result: str) -> Path:
     if task.get("every"):
         body += f"**Recurring:** every {task['every']}\n"
     body += f"\n---\n\n{result}\n"
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
     return path
 
 
@@ -549,10 +733,12 @@ class Heartbeat:
             retries = int(task.get("retries") or 0) + 1
             max_retries = int(task.get("max_retries") or 1)
             if retries < max_retries:
-                # Bump retries; remain pending so next tick picks it up.
-                update_task(task["id"], retries=retries, status="pending", started=None)
+                # Bump retries; remain pending so next tick picks it up — but
+                # re-sweep: honor a mid-dispatch cancel (requeue_task skips the
+                # re-arm when the task was already flipped to 'cancelled').
+                requeue_task(task["id"], retries=retries, started=None)
             else:
-                update_task(
+                finalize_task(
                     task["id"],
                     status="failed",
                     completed=_now_iso(),
@@ -567,12 +753,17 @@ class Heartbeat:
         except Exception as e:
             logger.warning("Heartbeat task %s: output save failed: %s", task["id"], e)
             output_path = None
-        update_task(
+        finalized = finalize_task(
             task["id"],
             status="done",
             completed=_now_iso(),
             result=str(output_path) if output_path else result[:200],
         )
+        # If the task was cancelled out-of-band mid-dispatch, finalize_task
+        # left it cancelled — honor that intent and do NOT spin up the next
+        # recurring instance (a cancel of the running slot ends the chain).
+        if finalized is not None and finalized.get("status") == "cancelled":
+            return finalized
         # Recurrence: queue the next instance
         try:
             requeue_recurring(task)
@@ -587,6 +778,8 @@ __all__ = [
     "get_task",
     "list_tasks",
     "update_task",
+    "finalize_task",
+    "requeue_task",
     "cancel_task",
     "clear_done",
     "next_pending",

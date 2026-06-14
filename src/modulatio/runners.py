@@ -25,12 +25,21 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Callable, Mapping
 from uuid import uuid4
 
 
 _log = logging.getLogger("modulatio.runners")
+
+# Round-robin cursor for ``_rotated_pool_key``. Kept HERE (not in provider_keys'
+# ``next_pool_env_var``) so the pool snapshot used for the empty-check and the
+# index advance are the SAME list — closing the TOCTOU where the pool could go
+# non-empty→empty between ``provider_keys.next_pool_env_var``'s own re-derivation
+# and fall back to the (maybe PINNED) base var.
+_pool_rr_cursor: dict[str, int] = {}
+_pool_rr_lock = threading.Lock()
 
 _LITELLM_QUIETED = False
 
@@ -261,7 +270,18 @@ def _resolve_model_call_args(
     # tuning params like extra_body / reasoning_effort).
     default_params = preset.get("default_params")
     if isinstance(default_params, dict):
-        kwargs.update(default_params)
+        # ``default_params`` carries provider TUNING kwargs only (extra_body,
+        # reasoning_effort, …). The auth/endpoint fields are owned by the
+        # dedicated ``base_url`` (→ api_base) + strategy token (→ api_key)
+        # resolution below, which is authoritative. Strip any stray api_key /
+        # api_base here so a none-auth preset (strategy token is None, so
+        # nothing overrides downstream) can't silently inherit a bogus key from
+        # default_params — the defense-in-depth the comment above promises only
+        # held for presets whose strategy DID emit a token.
+        kwargs.update(
+            {k: v for k, v in default_params.items()
+             if k not in ("api_key", "api_base")}
+        )
 
     base_url = preset.get("base_url")
     if base_url:
@@ -319,9 +339,20 @@ def _rotated_pool_key(pool_base: str | None) -> str | None:
     import os
 
     from modulatio import provider_keys
-    if not provider_keys.pool_env_vars(pool_base):
+    # Snapshot the pool ONCE and index THAT snapshot — never re-derive. The old
+    # code checked ``pool_env_vars`` non-empty then called ``next_pool_env_var``
+    # which re-computed the pool independently; if the pool emptied between those
+    # two calls (a concurrent pin/unset), ``next_pool_env_var`` fell back to the
+    # bare base var — which may be PINNED, the exact key the metering keel forbids
+    # a pooled model from borrowing. With a single snapshot there is no second
+    # derivation and thus no fall-back window.
+    pool = provider_keys.pool_env_vars(pool_base)
+    if not pool:
         return None  # no unpinned key — do NOT fall back to the (maybe pinned) base
-    return os.environ.get(provider_keys.next_pool_env_var(pool_base))
+    with _pool_rr_lock:
+        i = _pool_rr_cursor.get(pool_base, 0) % len(pool)
+        _pool_rr_cursor[pool_base] = i + 1
+    return os.environ.get(pool[i])
 
 
 def _pooled_call_key(pool_base: str, model: str) -> str:
@@ -477,13 +508,57 @@ def litellm_runner(
         if pool_base is not None:
             call_kwargs["api_key"] = _pooled_call_key(pool_base, model)
 
+        def _refreshed_retry_kwargs() -> dict | None:
+            """Auth-refresh-once kwargs for a retry, or None if no refresh is
+            available. Shared by the completion AND responses paths so the
+            responses endpoint (xAI multi-agent / o1) is no longer the only path
+            that can't recover from an expired OAuth token. Honors the pooled
+            metering keel: a pooled api_key preset re-draws from the unpinned
+            pool rather than its (maybe pinned) refreshed base var."""
+            new_token = _try_refresh_for(model)
+            if new_token is None:
+                return None
+            retry = dict(call_kwargs)
+            retry["api_key"] = new_token
+            if pool_base is not None:
+                retry["api_key"] = _pooled_call_key(pool_base, model)
+            return retry
+
         # ── Responses API path ───────────────────────────────────────
         if endpoint == "responses":
             try:
                 resp = responses(model=litellm_model, input=body, **call_kwargs)
+            except RateLimitError:
+                # 429 pool failover (mirror the completion path): rotate to the
+                # next unpinned pool key and retry, bounded by the pool size. No
+                # pool / single key → nothing to fail over to; re-raise.
+                if _pool_count(pool_base) <= 1:
+                    raise
+                resp = None
+                for _ in range(_pool_count(pool_base)):
+                    rk = _rotated_pool_key(pool_base)
+                    if rk is None:
+                        continue  # pool emptied mid-failover — never borrow base
+                    fk = dict(call_kwargs)
+                    fk["api_key"] = rk
+                    try:
+                        resp = responses(model=litellm_model, input=body, **fk)
+                        break
+                    except RateLimitError:
+                        resp = None
+                if resp is None:
+                    raise
             except AuthenticationError as e:
-                _fire_auth_alert(model, str(e), provider_id_for_alerts)
-                raise
+                # OAuth refresh-once retry (mirror the completion path).
+                retry = _refreshed_retry_kwargs()
+                if retry is None:
+                    _fire_auth_alert(model, str(e), provider_id_for_alerts)
+                    raise
+                try:
+                    resp = responses(model=litellm_model, input=body, **retry)
+                except AuthenticationError as e2:
+                    _fire_auth_alert(model, str(e2), provider_id_for_alerts)
+                    raise
             _clear_auth_alert(provider_id_for_alerts)
             _record_call_usage(resp, litellm_model)
             # Responses API returns a structured ``output`` list with
@@ -539,14 +614,13 @@ def litellm_runner(
             if resp is None:
                 raise last_err
         except AuthenticationError as e:
-            new_token = _try_refresh_for(model)
-            if new_token is not None:
-                # Use the REFRESHED token directly. xAI's refresh is in-memory
-                # (it does NOT rewrite the Grok CLI creds file), so a disk
-                # re-resolve would read the STALE token (Nemo, 2026-06-02). The
-                # fresh token is authoritative for every provider.
-                retry_call_kwargs = dict(call_kwargs)
-                retry_call_kwargs["api_key"] = new_token
+            # Use the REFRESHED token directly. xAI's refresh is in-memory (it
+            # does NOT rewrite the Grok CLI creds file), so a disk re-resolve
+            # would read the STALE token (Nemo, 2026-06-02). For a pooled
+            # api_key preset, ``_refreshed_retry_kwargs`` re-draws from the
+            # unpinned pool (the refreshed base var may be PINNED).
+            retry_call_kwargs = _refreshed_retry_kwargs()
+            if retry_call_kwargs is not None:
                 try:
                     resp = completion(model=litellm_model, messages=msgs, **retry_call_kwargs)
                 except AuthenticationError as e2:
@@ -912,6 +986,11 @@ def run_llm_with_tools(
     # WARNINGs. Track whether we've already warned in this invocation
     # so the gate fires once per loop instead of once per iteration.
     soft_warn_seen = False
+    # re-sweep (metered Finding 1): cache each metered tool's successful result
+    # keyed by (name, canonical args) so an idempotent replay — flagged
+    # structurally by the authorizer (``idempotent_reuse``) — reuses the prior
+    # result instead of re-invoking (and re-paying) the provider.
+    metered_result_cache: dict[tuple[str, str], str] = {}
 
     for iteration in range(max_iters):
         # Slice 90: pre-flight context-budget check. Compresses
@@ -1004,17 +1083,37 @@ def run_llm_with_tools(
                         f"authorizer is wired — fail closed."
                     )
                 else:
+                    idempotent_reuse = False
                     try:
-                        allowed, why = metered_authorizer(call.name, dict(call.args))
+                        auth = metered_authorizer(call.name, dict(call.args))
+                        allowed, why = auth[0], auth[1]
+                        # re-sweep (metered Finding 1): read the structured
+                        # idempotent-replay signal (back-compat: defaults False
+                        # for a plain 2-tuple authorizer).
+                        idempotent_reuse = bool(getattr(auth, "idempotent_reuse", False))
                     except Exception as exc:
                         allowed, why = False, f"authorizer error: {type(exc).__name__}: {exc}"
                     if not allowed:
                         result = f"DENIED (metered): {why}"
                     else:
-                        try:
-                            result = str(tool.call(**call.args))
-                        except Exception as exc:
-                            result = f"ERROR: {type(exc).__name__}: {exc}"
+                        cache_key = (
+                            call.name,
+                            json.dumps(call.args, sort_keys=True, default=str),
+                        )
+                        # Idempotent replay: the comptroller authorized this
+                        # identical call WITHOUT re-charging, so reuse the prior
+                        # result rather than re-invoking (and re-paying) the
+                        # provider. Falls through to a live call if no prior
+                        # result was cached (e.g. reuse flagged across a fresh
+                        # loop) — still correct, just no saving that time.
+                        if idempotent_reuse and cache_key in metered_result_cache:
+                            result = metered_result_cache[cache_key]
+                        else:
+                            try:
+                                result = str(tool.call(**call.args))
+                                metered_result_cache[cache_key] = result
+                            except Exception as exc:
+                                result = f"ERROR: {type(exc).__name__}: {exc}"
             else:
                 try:
                     result = str(tool.call(**call.args))
@@ -1064,20 +1163,35 @@ def run_llm_with_tools(
                             # Summarizer failed — TRUNCATE, don't keep verbatim:
                             # verbatim accumulation is exactly what storms the
                             # loop. Raw is on disk for read_tool_result.
+                            # re-sweep (Finding 2): budget the kept head with the
+                            # MAIN model's tokenizer (``model``), not the
+                            # summarizer's (``count_model``). The truncated text
+                            # lands in the main model's context, so the head must
+                            # be sized against the tokenizer that will carry it —
+                            # a denser main-model tokenizer would otherwise let
+                            # the head overshoot its real context budget.
                             conv_content = _tool_sum.truncate_tool_result(
                                 result, call_id=call.id,
                                 max_tokens=ts_config.threshold_tokens,
-                                model=count_model,
+                                model=model,
                             )
                     else:
                         # No summarizer configured → model-free truncation so a
                         # multi-fetch producer can't accumulate raw results past
                         # its role budget. The producer extracts + cites what it
                         # needs; the bulky raw never piles up (2026-05-30).
+                        # re-sweep (Finding 1, sibling of Finding 2 above): budget
+                        # the kept head with the MAIN model's tokenizer (``model``),
+                        # not ``count_model`` (= summarizer_model or model). The
+                        # truncated head lands in the MAIN model's context
+                        # regardless of why summarization was skipped — including
+                        # when summarizer_model is set but the factory is unwired
+                        # (have_summarizer False). count_model drives only the
+                        # threshold MEASUREMENT above, not the head sizing.
                         conv_content = _tool_sum.truncate_tool_result(
                             result, call_id=call.id,
                             max_tokens=ts_config.threshold_tokens,
-                            model=count_model,
+                            model=model,
                         )
 
             messages.append({
@@ -1123,6 +1237,10 @@ def litellm_chat_runner(
 
     from modulatio import model_presets
     presets = model_presets.load_presets()
+    # Alert/refresh accounting mirrors litellm_runner: the preset key when known
+    # (None when a raw id was used → alerts key by the raw id, fine since that
+    # path is interactive-only).
+    provider_id_for_alerts = model if model in presets else None
     endpoint = (presets.get(model, {}) or {}).get("endpoint", "chat")
     if endpoint == "responses":
         raise NotImplementedError(
@@ -1136,12 +1254,18 @@ def litellm_chat_runner(
         tool_choice: "dict | str | None" = None,
     ) -> ChatResponse:
         from litellm import completion
-        from litellm.exceptions import RateLimitError
+        from litellm.exceptions import AuthenticationError, RateLimitError
 
-        def _call():
+        def _call(api_key_override: str | None = None):
             ck = dict(kwargs)
             if pool_base is not None:  # draw ONLY from the unpinned pool; raise
                 ck["api_key"] = _pooled_call_key(pool_base, model)  # if empty
+            elif api_key_override is not None:
+                # Auth-refresh retry: use the REFRESHED token directly (xAI's
+                # refresh is in-memory, a disk re-resolve would read the STALE
+                # one). A pooled preset re-draws above instead (the refreshed
+                # base var may be PINNED), matching litellm_runner.
+                ck["api_key"] = api_key_override
             if tools:
                 ck["tools"] = tools
             # Forced tool_choice (e.g. emit_state for Leader-reflect) makes a
@@ -1153,6 +1277,21 @@ def litellm_chat_runner(
 
         try:
             resp = _call()
+        except AuthenticationError as e:
+            # re-sweep (Finding 1): the tool-loop is the PRIMARY producer path,
+            # yet it had NO 401 recovery — an expired OAuth access token (they
+            # die ~24h) killed every tool-using producer overnight while the
+            # single-shot litellm_runner self-healed. Mirror its refresh-once /
+            # fire-alert / clear-alert dance here.
+            new_token = _try_refresh_for(model)
+            if new_token is None:
+                _fire_auth_alert(model, str(e), provider_id_for_alerts)
+                raise
+            try:
+                resp = _call(api_key_override=new_token)
+            except AuthenticationError as e2:
+                _fire_auth_alert(model, str(e2), provider_id_for_alerts)
+                raise
         except RateLimitError as initial_err:
             # Key-pool failover on the tool-loop path: rotate + retry, bounded.
             if _pool_count(pool_base) <= 1:
@@ -1177,6 +1316,10 @@ def litellm_chat_runner(
                     continue
             if resp is None:
                 raise last_err
+        # re-sweep (Finding 1): clear any prior auth alert on a successful
+        # dispatch so the banner self-heals once creds are good again — same
+        # contract as litellm_runner.
+        _clear_auth_alert(provider_id_for_alerts)
         # Same usage-tracking seam as litellm_runner. Tool-using skills
         # (QC's code-review with run_shell, future agentic loops) loop
         # multiple completions per task — each iteration's tokens +

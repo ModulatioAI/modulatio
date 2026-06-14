@@ -127,11 +127,32 @@ def _filename_slug(s: str) -> str:
     return _FILENAME_UNSAFE_RE.sub("-", s).strip("-") or "entry"
 
 
+# Monotonic per-process sequence breaking same-second filename ties. The
+# caller stamps ``record.timestamp`` with ``timespec="seconds"``, so two
+# verdicts appended in the same second share a timestamp prefix; the
+# ``entry_id`` tail is a random uuid, which sorts arbitrarily — not in
+# append order. A zero-padded counter wedged between the (coarse, restart-
+# stable) timestamp and the entry_id makes ``sorted(glob("*.md"))`` reflect
+# true append order within a second. Mirrors team_memory._new_id's counter.
+_SEQ_LOCK = threading.Lock()
+_SEQ_COUNTER = 0
+
+
+def _next_seq() -> int:
+    global _SEQ_COUNTER
+    with _SEQ_LOCK:
+        _SEQ_COUNTER = (_SEQ_COUNTER + 1) % 1000000
+        return _SEQ_COUNTER
+
+
 def _verdict_filename(record: VerdictRecord) -> str:
     # Sortable compact timestamp prefix → append-order sort by filename.
+    # Timestamp stays the primary (restart-stable) key; the monotonic seq is
+    # only a within-second tiebreaker, so it never reorders across restarts.
     ts = _filename_slug(record.timestamp)
+    seq = _next_seq()
     eid = _filename_slug(record.entry_id)
-    return f"{ts}__{eid}.md"
+    return f"{ts}__{seq:06d}__{eid}.md"
 
 
 def _render_verdict(record: VerdictRecord) -> str:
@@ -202,7 +223,7 @@ def append_verdict(domain: str, project_code: str, record: VerdictRecord) -> Pat
     dir_ = _domain_dir(domain, project_code)
     dir_.mkdir(parents=True, exist_ok=True)
     path = dir_ / _verdict_filename(record)
-    path.write_text(_render_verdict(record))
+    path.write_text(_render_verdict(record), encoding="utf-8")
     return path
 
 
@@ -257,14 +278,14 @@ def _load_meta(project_code: str, domain: str) -> dict:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text())
-    except json.JSONDecodeError:
+        return json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _save_meta(project_code: str, domain: str, meta: dict) -> None:
     _cache_dir(project_code, domain).mkdir(parents=True, exist_ok=True)
-    _meta_path(project_code, domain).write_text(json.dumps(meta, indent=2))
+    _meta_path(project_code, domain).write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
 def _ensure_verdict_vectors(

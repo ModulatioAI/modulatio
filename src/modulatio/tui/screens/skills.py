@@ -17,6 +17,7 @@ The Agents tab keeps showing skills as a read-only column.
 """
 from __future__ import annotations
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Label, Select
@@ -95,9 +96,9 @@ class SkillsScreen(Vertical):
             s = skills.load_with_metadata(name, project_code=code)
             is_local = (project_skills_dir / f"{name}.md").exists()
             table.add_row(
-                s.name,
-                s.description[:60] if s.description else "",
-                ", ".join(s.capability_tags),
+                escape(s.name),
+                escape(s.description[:60] if s.description else ""),
+                escape(", ".join(s.capability_tags)),
                 "yes" if is_local else "no",
                 key=s.name,
             )
@@ -189,7 +190,11 @@ class SkillsScreen(Vertical):
         try:
             roster.save(agent, code)
         except Exception as exc:  # noqa: BLE001 — surface any persistence error
-            status.update(f"Error saving: {type(exc).__name__}: {exc}")
+            # re-sweep: escape exc text — an un-escaped [/] in the message
+            # would raise MarkupError inside the error handler itself.
+            status.update(
+                f"Error saving: {type(exc).__name__}: {escape(str(exc))}"
+            )
             return
         self._hide_bind_panel()
         self._refresh()

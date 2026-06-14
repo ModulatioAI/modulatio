@@ -17,7 +17,9 @@ orchestrator). Two consumers rely on it:
     the LLM (blowing the QC budget → partial view → false-reject), it can verify
     cheaply: each expected unit is QC-passed AND its on-disk bytes still match the
     mark. (Deriving the *authoritative expected set* additionally needs the
-    assembly task's ``depends_on`` to name the unit tasks — see A2.)
+    assembly task's ``depends_on`` to name the unit tasks — see A2; the engine
+    wires this for same-goal AND cross-goal assemblers via
+    ``orchestration._wire_cross_goal_assembler_deps``.)
   * The no-regress guard (#86) — checkpoint the version that earned the mark so a
     drifted retry can't clobber a complete deliverable with a stub.
 
@@ -247,8 +249,11 @@ def verify_assembly(
       1. the assembly was COMPLETE (no missing/errored units);
       2. the on-disk output still hashes to the engine-recorded checksum (no
          tampering since assembly);
-      3. there is an authoritative dependency set (``depends_on``) — cross-goal
-         assemblies have none and fall back;
+      3. there is an authoritative dependency set (``depends_on``) — the engine
+         wires this for same-goal AND cross-goal assemblers
+         (``_wire_cross_goal_assembler_deps``, orchestration.py), so the fall-back
+         now triggers only for an assembler that genuinely has no resolvable deps
+         (e.g. the ambiguous 0-or->1 fan-out case that wiring fails closed on);
       4. every dependency unit is QC-passed AND its on-disk bytes still match its
          mark (``verify_unit``);
       5. the manifest's unit SET equals the dependency set exactly — no missing,
@@ -311,9 +316,12 @@ def verify_assembly(
     except (OSError, UnicodeDecodeError) as exc:
         return False, f"assembled output unreadable: {exc}", ""
 
+    # depends_on is engine-wired for same-goal AND cross-goal assemblers
+    # (_wire_cross_goal_assembler_deps); empty only when no deps are resolvable
+    # (e.g. the ambiguous fan-out case wiring fails closed on) → fall back.
     dep_ids = list(assembly_task.depends_on)
     if not dep_ids:
-        return False, "no authoritative dependency set (cross-goal assembly)", ""
+        return False, "no authoritative dependency set (unresolvable assembler deps)", ""
     expected: list[str] = []
     for dep_id in dep_ids:
         dep = tasks_by_id.get(dep_id)

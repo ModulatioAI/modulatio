@@ -24,6 +24,7 @@ anything itself.
 from __future__ import annotations
 
 from rich.text import Text
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -102,7 +103,9 @@ class TicketsScreen(Vertical):
         run_id = self._scope_run_id(code)
         for t in store.list_tickets(code, run_id=run_id):
             row = ticket_row(t)
-            cells = list(row)
+            # escape raw (operator-authored) string cells; the badge (cell 4) is
+            # an intentional-markup Text object built below.
+            cells = [escape(c) if isinstance(c, str) else c for c in row]
             cells[4] = Text.from_markup(row[4]) if row[4] else ""
             table.add_row(*cells, key=t.id)
         if table.row_count > 0:

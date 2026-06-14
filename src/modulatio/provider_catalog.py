@@ -401,7 +401,11 @@ _EXTRA_PRICE_FIELDS = ("request", "image", "web_search", "internal_reasoning")
 
 def _is_free(model: dict, free_detect: str) -> bool:
     if free_detect == "pricing_zero":
-        p = model.get("pricing") or {}
+        p = model.get("pricing")
+        # A provider feed can return a truthy non-dict pricing (e.g. the string
+        # "free"); guard the type so one malformed entry doesn't abort the whole
+        # catalog parse on a downstream .get().
+        p = p if isinstance(p, dict) else {}
         if not (_price_is_zero(p.get("prompt")) and _price_is_zero(p.get("completion"))):
             return False
         # A zero token rate isn't truly free if another billed dimension is set.
@@ -447,15 +451,19 @@ def parse_models(
         if not isinstance(m, dict):
             continue
         mid = m.get("id")
-        if not mid:
+        # A truthy non-string id (e.g. an int) would crash .startswith() with a
+        # strip set, or fail CatalogModel(id=...) pydantic validation otherwise.
+        # Skip it so one malformed entry doesn't abort the whole batch.
+        if not isinstance(mid, str) or not mid:
             continue
         if strip and mid.startswith(strip):
             mid = mid[len(strip):]
         mod = classify_modality(mid) if provider.infer_modality_by_id else modality
+        name = m.get("name")
         out.append(
             CatalogModel(
                 id=mid,
-                name=m.get("name") or mid,
+                name=name if isinstance(name, str) and name else mid,
                 provider_id=provider.id,
                 modality=mod,
                 context_length=_coerce_int(m.get("context_length")),
@@ -495,8 +503,20 @@ def _load_picklist(picklist_key: str) -> list[str]:
     from pathlib import Path
 
     path = Path(__file__).parent / "_seed_data" / "oauth_model_picklists.json"
-    data = json.loads(path.read_text())
-    return list(data.get(picklist_key) or [])
+    # A missing/corrupt seed file degrades to an empty picklist (the picker just
+    # shows nothing for that provider) rather than crashing the whole fetch —
+    # mirroring local_probe's graceful-empty pattern.
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    # re-sweep: a corrupt seed value that isn't a list (a str/dict for a provider
+    # key) must degrade to empty — never `list("claude-opus-4-8")` → one model id
+    # per character, nor a dict's keys. Keep only the well-formed str entries.
+    v = data.get(picklist_key)
+    return [s for s in v if isinstance(s, str)] if isinstance(v, list) else []
 
 
 def _fetch_source(
@@ -649,6 +669,15 @@ def preset_kwargs(
         auth_config = {"env_var": auth.env_var}
         if pool:  # rotate across the provider's numbered keys at call time
             auth_config["pool"] = True
+    elif pool:
+        # re-sweep: pooling derives numbered variants (FOO_API_KEY_2, …) from a
+        # named base env var. Without one (e.g. CUSTOM's keyed AuthOption has
+        # env_var=None, or a non-api_key auth) the request can't be honored —
+        # fail loud rather than silently drop it and surprise the operator.
+        raise ValueError(
+            "pool=True requires an api_key AuthOption with a named env_var; "
+            f"got auth_type={auth.auth_type!r} env_var={auth.env_var!r}"
+        )
     kwargs = dict(
         key=key or _slug(provider, model),
         label=model.name,

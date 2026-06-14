@@ -298,7 +298,8 @@ def init_run(
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         objective_path.write_text(
             f"---\nrun_id: {run_id}\ncreated: {created_at}\n---\n\n"
-            f"# Objective\n\n{objective}\n"
+            f"# Objective\n\n{objective}\n",
+            encoding="utf-8",
         )
     return target
 
@@ -361,7 +362,7 @@ def init_project(code: str, name: str, objective: str, *, exist_ok: bool = False
     for fname, content in seeds.items():
         fpath = root / fname
         if not fpath.exists():
-            fpath.write_text(content)
+            fpath.write_text(content, encoding="utf-8")
 
     return root
 

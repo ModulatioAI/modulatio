@@ -24,7 +24,7 @@ def load_prefs() -> dict:
     if not PREFS_FILE.exists():
         return {}
     try:
-        return json.loads(PREFS_FILE.read_text()) or {}
+        return json.loads(PREFS_FILE.read_text(encoding="utf-8", errors="replace")) or {}
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -32,7 +32,7 @@ def load_prefs() -> dict:
 def save_prefs(prefs: dict) -> None:
     """Persist preferences to disk."""
     config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    PREFS_FILE.write_text(json.dumps(prefs, indent=2))
+    PREFS_FILE.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
 
 
 def get_backup_dir() -> str:

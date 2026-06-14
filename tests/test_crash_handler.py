@@ -151,6 +151,82 @@ def test_write_crash_log_redacts_argv(
     assert "<redacted>" in body
 
 
+def test_write_crash_log_redacts_secret_in_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A secret echoed by str(exc) (URL query param / token=) must be
+    scrubbed from the traceback body, not just from argv."""
+    monkeypatch.setenv("MODULATIO_CRASH_DIR", str(tmp_path))
+    try:
+        raise RuntimeError(
+            "auth failed for https://api.host/v1?api_key=sk-deadbeef "
+            "(token=ghp_topsecret)"
+        )
+    except RuntimeError as exc:
+        path = _crash.write_crash_log(exc, ["modulatio", "kickoff"])
+    body = path.read_text()
+    assert "sk-deadbeef" not in body
+    assert "ghp_topsecret" not in body
+    # the shape is preserved so the log stays diagnosable
+    assert "api_key=<redacted>" in body
+    assert "token=<redacted>" in body
+
+
+def test_write_crash_log_redacts_bearer_token_in_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A space-separated `Authorization: Bearer <token>` echoed in the
+    exception must be scrubbed from the traceback body."""
+    monkeypatch.setenv("MODULATIO_CRASH_DIR", str(tmp_path))
+    try:
+        raise RuntimeError("401 with header Authorization: Bearer sk-bearerleak123")
+    except RuntimeError as exc:
+        path = _crash.write_crash_log(exc, ["modulatio", "kickoff"])
+    body = path.read_text()
+    assert "sk-bearerleak123" not in body
+    assert "Bearer <redacted>" in body
+
+
+def test_scrub_embedded_secrets_bearer_form() -> None:
+    out = _crash._scrub_embedded_secrets("Authorization: Bearer abc.def-123")
+    assert "abc.def-123" not in out
+    assert "Bearer <redacted>" in out
+
+
+def test_write_crash_log_prunes_old_logs_beyond_cap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The crash dir is capped — old logs are pruned after a write."""
+    monkeypatch.setenv("MODULATIO_CRASH_DIR", str(tmp_path))
+    monkeypatch.setenv("MODULATIO_CRASH_KEEP", "3")
+    # Seed five pre-existing (older) crash logs.
+    for i in range(5):
+        (tmp_path / f"crash-2000010{i}T000000_000000Z-{1000 + i}.log").write_text("old")
+    # An unrelated file must survive the prune.
+    (tmp_path / "README.txt").write_text("keep me")
+
+    try:
+        raise ValueError("boom")
+    except ValueError as exc:
+        newest = _crash.write_crash_log(exc, ["modulatio"])
+
+    logs = sorted(tmp_path.glob("crash-*.log"))
+    assert len(logs) == 3
+    # The just-written log is the newest and must be retained.
+    assert newest in logs
+    assert (tmp_path / "README.txt").exists()
+
+
+def test_write_crash_log_keep_defaults_when_env_invalid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MODULATIO_CRASH_KEEP", "not-an-int")
+    assert _crash._crash_keep() == _crash._DEFAULT_KEEP
+    monkeypatch.setenv("MODULATIO_CRASH_KEEP", "0")
+    # clamped to at least 1 so we never prune everything
+    assert _crash._crash_keep() == 1
+
+
 def test_run_with_crash_handler_returns_zero_on_success() -> None:
     assert _crash.run_with_crash_handler(lambda: None) == 0
 

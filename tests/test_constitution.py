@@ -47,6 +47,23 @@ def test_project_overrides_shared(iso):
     assert constitution.load_constitution("OTHER") == "SHARED"
 
 
+def test_non_utf8_shared_file_degrades_to_seed(iso):
+    """A non-UTF-8 byte in a user-editable constitution must NOT crash the
+    Leader prompt-build (UnicodeDecodeError is a ValueError, not OSError) —
+    it degrades to the next candidate."""
+    (iso / "shared" / "constitution.md").write_bytes(b"\xff\xfe bad bytes")
+    # Before the fix this raised UnicodeDecodeError; now it falls back.
+    assert constitution.load_constitution() == "SEED VALUES"
+
+
+def test_non_utf8_project_file_degrades_to_shared(iso):
+    (iso / "shared" / "constitution.md").write_text("SHARED", encoding="utf-8")
+    proj = iso / "proj" / "TST"
+    proj.mkdir(parents=True)
+    (proj / "constitution.md").write_bytes(b"\xff\xfe\x80broken")
+    assert constitution.load_constitution("TST") == "SHARED"
+
+
 def test_seed_default_has_real_values():
     """The shipped seed actually carries the four value sections."""
     body = constitution.load_constitution()

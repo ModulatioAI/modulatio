@@ -70,7 +70,7 @@ def _offset_state_path(bot_token: str) -> Path:
 
 def _load_offset(path: Path) -> int:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         offset = int(data.get("last_update_id", 0))
         return offset if offset > 0 else 0
     except (OSError, ValueError, json.JSONDecodeError, TypeError):
@@ -81,7 +81,7 @@ def _save_offset(path: Path, last_update_id: int) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps({"last_update_id": int(last_update_id)}))
+        tmp.write_text(json.dumps({"last_update_id": int(last_update_id)}), encoding="utf-8")
         tmp.replace(path)
     except OSError as e:
         # A failed persist must not crash the poll loop — worst case we
@@ -260,7 +260,15 @@ class TelegramListener:
         if not parts:
             return
         cmd = parts[0]
-        args_text = text[len(cmd):].strip()
+        # Derive args from the ORIGINAL text by stripping its first
+        # whitespace-delimited token, not by slicing `len(cmd)` chars.
+        # shlex unquotes parts[0], so when the command token itself carried
+        # quotes/escapes (e.g. `/fo"o" arg`), the unquoted `cmd` is shorter
+        # than the raw token and `text[len(cmd):]` would bleed leftover
+        # command bytes into args_text. Splitting the raw text on its first
+        # run of whitespace recovers the args verbatim regardless of quoting.
+        raw_split = text.split(maxsplit=1)
+        args_text = raw_split[1].strip() if len(raw_split) > 1 else ""
         try:
             response = self._on_command(cmd, args_text)
         except Exception as e:

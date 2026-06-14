@@ -34,7 +34,6 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -55,41 +54,18 @@ def _claim_plan_lock(plan_id: str, project_code: str, *, timeout: float = 5.0):
     blocks, then re-reads inside the critical section, sees status is
     no longer 'approved', and bails out cleanly.
 
+    re-sweep (F2): delegates to ``plans._plan_lock`` so the CAS lock and
+    the plan-file mutators (``set_status`` / ``update_execution_state``,
+    which this CAS calls WHILE holding the lock) share ONE re-entrant lock
+    registry. Without that the nested mutators would open a second file
+    description on the same ``.lock`` and self-deadlock against this hold.
+
     POSIX-only: ``fcntl.flock`` is unavailable on Windows. There the lock
     becomes a no-op — single-daemon Windows is the only documented
     deployment shape (see daemon ops guide).
     """
-    try:
-        import fcntl  # POSIX only
-    except ImportError:
+    with plans._plan_lock(plan_id, project_code, timeout=timeout):
         yield
-        return
-
-    lock_path = plans._plans_dir(project_code) / f"{plan_id}.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.touch()
-    fh = open(lock_path, "w")
-    try:
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() > deadline:
-                    raise BlockingIOError(
-                        f"could not acquire plan lock for {plan_id} after "
-                        f"{timeout}s — another claimer is holding the "
-                        f"lock for an unusually long time"
-                    )
-                time.sleep(0.05)
-        yield
-    finally:
-        try:
-            fcntl.flock(fh, fcntl.LOCK_UN)
-        except Exception:  # pragma: no cover — best-effort release
-            pass
-        fh.close()
 
 
 # Tolerant JSON-block parser for Leader's reflection response.
@@ -775,7 +751,7 @@ def _append_audit_entries(
         path = _run_dir(project_code, run_id) / "audit.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now(timezone.utc).isoformat()
-        with path.open("a") as fh:
+        with path.open("a", encoding="utf-8") as fh:
             for entry in entries:
                 payload = dict(entry)
                 payload.setdefault("timestamp", now)
@@ -985,6 +961,18 @@ def start_execution(
                 ),
             )
 
+        # Resume state authority: from here on use ``fresh`` (the
+        # under-lock reload), NOT the pre-lock ``plan`` snapshot loaded
+        # at the top of the function. Under a daemon race the pre-lock
+        # snapshot can be stale — a concurrent claimer may have advanced
+        # current_index / appended kickoffs / accumulated token+cost
+        # totals before we won the lock. Resuming from the stale plan
+        # would re-run already-completed sub-objectives and reset the
+        # budget tracker to an earlier total (double-counting). The CAS
+        # above guarantees nobody else holds the lock now; fresh is the
+        # authoritative state for the rest of this run.
+        plan = fresh
+
         # Stamp execution_started_at FIRST, then flip status to
         # 'executing'. Order matters: if we crash between the two writes
         # plan stays in 'approved' with started_at populated — re-scan
@@ -1160,6 +1148,13 @@ def _run_execution_loop(
                 started_dt = datetime.fromisoformat(plan_started_at)
             except (TypeError, ValueError):
                 started_dt = None
+            # re-sweep: ``execution_started_at`` may be hand-edited in the
+            # frontmatter to a timezone-NAIVE value (no offset), which
+            # parses fine but then explodes the aware-minus-naive
+            # subtraction below with a TypeError. Coerce naive → UTC so the
+            # cap math stays inside one guarded shape (mirrors heartbeat.py).
+            if started_dt is not None and started_dt.tzinfo is None:
+                started_dt = started_dt.replace(tzinfo=timezone.utc)
             if started_dt is not None:
                 elapsed_min = (
                     datetime.now(timezone.utc) - started_dt
@@ -1931,7 +1926,16 @@ def tick(
         return []
 
     results: list[ExecutionResult] = []
-    for code, record in discovered[:max_per_tick]:
+    # Cap AFTER the staleness skip, not before: if we sliced
+    # ``discovered[:max_per_tick]`` first, a stale lowest-id plan
+    # (already claimed by another daemon since the scan) would consume
+    # the slot and the tick would do no real work — starving every
+    # other approved plan that iteration. Instead walk the full ordered
+    # list, skip stale entries, and stop once ``max_per_tick`` plans
+    # have actually been dispatched.
+    for code, record in discovered:
+        if len(results) >= max_per_tick:
+            break
         # TOCTOU guard: another daemon (or a manual `modulatio kickoff`)
         # may have claimed the plan since `find_approved_plans` scanned.
         # Reload status from disk and skip if it's no longer 'approved'.
@@ -1957,9 +1961,12 @@ def tick(
             project = project_loader(code)
         except Exception as exc:
             # Couldn't construct project — log via the result and skip.
+            # The plan never started: report its real on-disk status
+            # (still 'approved' — we hold the freshest read above) rather
+            # than a misleading 'executing' the dispatch never reached.
             results.append(ExecutionResult(
                 plan_id=record.id, project_code=code,
-                final_status="executing",
+                final_status=fresh.status,
                 sub_objectives_completed=record.current_index,
                 sub_objectives_total=_plan_total,
                 error=f"project_loader failed: {exc}",
@@ -1968,9 +1975,11 @@ def tick(
         try:
             runners = runners_for(project)
         except Exception as exc:
+            # Same as the loader-failure path: the plan never started, so
+            # report its real on-disk status, not a hardcoded 'executing'.
             results.append(ExecutionResult(
                 plan_id=record.id, project_code=code,
-                final_status="executing",
+                final_status=fresh.status,
                 sub_objectives_completed=record.current_index,
                 sub_objectives_total=_plan_total,
                 error=f"runners_for failed: {exc}",

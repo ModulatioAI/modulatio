@@ -52,6 +52,24 @@ async def test_lists_the_roster(project):
         assert app.query_one("#agt-table", DataTable).row_count == 3
 
 
+async def test_roster_table_survives_bracketed_agent_name(project):
+    # Regression (0.9.0 pre-ship): a name with invalid Rich-markup (a bare
+    # closing tag) must not crash the roster DataTable with MarkupError. Without
+    # escaping, mounting the table raises during DataTable._update_dimensions.
+    roster.add_agent(project_code=project, agent_id="bracketed", name="[/]boss[red]",
+                     identity="prod", skills=[], model=None, tier="producer")
+    app = _Host(project)
+    async with app.run_test() as pilot:
+        # Mounting drives DataTable._on_idle → _update_dimensions, which
+        # formats every cell as markup. An unescaped "[/]" raises MarkupError.
+        await pilot.pause()
+        table = app.query_one("#agt-table", DataTable)
+        assert table.row_count == 4
+        # Compute the bad row's renderables directly — the exact crash site.
+        for idx in range(table.row_count):
+            table._get_row_renderables(idx)
+
+
 async def test_change_model_assigns_a_preset(project):
     app = _Host(project)
     async with app.run_test() as pilot:

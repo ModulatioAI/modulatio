@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import (
@@ -93,7 +94,7 @@ class AgentBuilderScreen(Vertical):
             model = a.model or "(inherits)"
             ready = model_presets.is_available(a.model) if a.model else True
             table.add_row(
-                a.tier, a.name or a.id, model,
+                escape(a.tier), escape(a.name or a.id), escape(model),
                 "ready ✓" if ready else "needs setup", key=a.id,
             )
         buttons = Horizontal(

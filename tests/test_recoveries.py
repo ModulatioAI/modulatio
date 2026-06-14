@@ -207,3 +207,25 @@ def test_signature_rationale_key_uses_truncated_rationale(tmp_path, monkeypatch)
     )
     assert "sentinelpastcap" not in rec.signature.lower()
     assert "sentinelpastcap" not in rec.qc_rationale.lower()
+
+
+def test_load_recoveries_fails_open_on_non_utf8_log(tmp_path, monkeypatch):
+    """Pre-ship LOW: a non-UTF-8 recovery log (truncated multibyte write / foreign
+    locale) must fail OPEN to [] — UnicodeDecodeError is a ValueError subclass, not
+    an OSError, so the read must catch it explicitly and not propagate."""
+    monkeypatch.setattr(recoveries, "project_dir", lambda pc: tmp_path)
+    p = recoveries._log_path("P")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # A lone 0xFF byte is invalid UTF-8 and raises UnicodeDecodeError on read_text().
+    p.write_bytes(b'{"entry_id": "e1"}\n\xff\xfe garbage\n')
+    assert recoveries.load_recoveries("P") == []
+
+
+def test_consumed_ids_fails_open_on_non_utf8_ledger(tmp_path, monkeypatch):
+    """Pre-ship LOW: a non-UTF-8 consumed ledger must fail OPEN to set(), not block
+    the win loop with an uncaught UnicodeDecodeError."""
+    monkeypatch.setattr(recoveries, "project_dir", lambda pc: tmp_path)
+    p = recoveries._consumed_path("P")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"e1\n\xff\xfe\ne2\n")
+    assert recoveries.consumed_ids("P") == set()

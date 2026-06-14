@@ -24,6 +24,7 @@ free-form and mirror the ones the seed skills advertise.
 from __future__ import annotations
 
 import ipaddress
+import re
 from urllib.parse import urlsplit
 
 # Canonical tiers, weakest → strongest (matches dispatch._TIER_RANK).
@@ -49,6 +50,23 @@ CAPABILITY_TAGS: tuple[str, ...] = (
 _DEFAULT_TIER = "generalist"
 _DEFAULT_CAPS: tuple[str, ...] = ()
 
+# OpenAI o-series ids (``o1`` / ``o3`` / ``o4`` and their ``-mini`` / ``-preview``
+# variants, optionally provider-prefixed like ``openai/o3-mini``). These tokens
+# are far too short to match as bare substrings — ``o1`` etc. appear mid-word in
+# unrelated ids (``mistralo1``, ``qwen2.5-o4b``, ``command-o4-beta``), which would
+# wrongly tag them OpenAI reasoning/premium. Anchor to a token boundary instead:
+# the token must start the id or follow a separator (``/`` ``-`` whitespace) and
+# end the id or be followed by a separator — never embedded inside a longer word.
+#
+# re-sweep (0.9.0): the LEFT boundary must NOT include a bare ``-``/``_``. An
+# o-token welded between two name segments (``command-o4-beta``,
+# ``llama-o3-instruct``, ``foo_o3_bar``) has a ``-``/``_`` on both sides, so the
+# old class ``[/\s_-]`` matched it and mis-tagged it OpenAI o-series. Genuine
+# o-series ids only ever start the id, follow a provider ``/`` (``openai/o3``),
+# or sit between whitespace (a label) — never after a bare ``-``/``_``. The
+# right boundary stays permissive so ``o3-mini`` / ``o1-preview`` still match.
+_OPENAI_O_SERIES = re.compile(r"(?:^|[/\s])o[134](?:$|[-\s/_])")
+
 # Ordered (substrings, tier, cost_class, capability_tags). First family whose
 # any-substring matches the lowercased model id (or label) wins. Order from
 # most-specific to most-general within a vendor.
@@ -67,9 +85,10 @@ _FAMILY_TABLE: tuple[tuple[tuple[str, ...], str, str | None, tuple[str, ...]], .
     (("sonnet",), "reasoning-heavy", "paid-cloud",
      ("reasoning-heavy", "long-context", "vision", "structured-output")),
     (("haiku",), "generalist", "paid-cloud", ("fast", "structured-output")),
-    # OpenAI
-    (("o1", "o3", "o4"), "reasoning-heavy", "premium-cloud",
-     ("reasoning-heavy", "structured-output")),
+    # OpenAI — note the o-series (o1/o3/o4) is matched separately in ``infer``
+    # via ``_OPENAI_O_SERIES`` (boundary-anchored) since the bare two-char tokens
+    # collide with unrelated ids as substrings. It is checked BEFORE this table so
+    # it keeps its most-specific-within-vendor ordering.
     (("gpt-5", "gpt5"), "reasoning-heavy", "premium-cloud",
      ("reasoning-heavy", "long-context", "structured-output", "vision")),
     (("gpt-4", "gpt4"), "generalist", "paid-cloud",
@@ -154,10 +173,18 @@ def infer(
     tier: str | None = _DEFAULT_TIER
     cost: str | None = None
     caps: tuple[str, ...] = _DEFAULT_CAPS
-    for substrs, fam_tier, fam_cost, fam_caps in _FAMILY_TABLE:
-        if any(s in hay for s in substrs):
-            tier, cost, caps = fam_tier, fam_cost, fam_caps
-            break
+    if _OPENAI_O_SERIES.search(hay):
+        # OpenAI o-series — most specific within the OpenAI vendor block.
+        tier, cost, caps = (
+            "reasoning-heavy",
+            "premium-cloud",
+            ("reasoning-heavy", "structured-output"),
+        )
+    else:
+        for substrs, fam_tier, fam_cost, fam_caps in _FAMILY_TABLE:
+            if any(s in hay for s in substrs):
+                tier, cost, caps = fam_tier, fam_cost, fam_caps
+                break
     if _is_local_endpoint(base_url):
         cost = "free-local"
     return tier, cost, caps

@@ -20,9 +20,11 @@ Wizard step order (8 steps; step 5 added 2026-04-30 for budget caps):
        for wall-clock / token / cost caps. Each axis independently None
        (unbounded) or set. New plans inherit at draft time.
     6. first project capture (code + objective for the auto-launch handoff)
-    7. confirm + finalize (writes defaults.json + model_presets.json +
-       team_template.json + .env)
-    8. embedded LLM prefetch (silent if cached, default-yes if missing)
+    7. embedded LLM prefetch (silent if cached, default-yes if missing) —
+       runs before confirm so the prefetch (a pure cache warm) can't sit
+       between a confirmed save and the commit write (finding #348)
+    8. confirm + finalize (writes defaults.json + model_presets.json +
+       team_template.json + .env); commit fires immediately after confirm
 
 After successful completion, the wizard initializes the captured first
 project's vault + seeds the roster from the team template, then launches
@@ -78,8 +80,10 @@ _STEP_TITLES = {
     "agents": "4. Provision agents (triad + workers)",
     "budget": "5. Budget defaults (optional)",
     "first_project": "6. Your first project",
-    "confirm": "7. Review and finalize",
-    "embedded_llm": "8. Prefetch embedded LLM",
+    # re-sweep (finding #348): embedded_llm now runs before confirm so the
+    # confirmed save commits immediately — labels follow the new order.
+    "embedded_llm": "7. Prefetch embedded LLM",
+    "confirm": "8. Review and finalize",
 }
 
 
@@ -119,8 +123,25 @@ def _pop_state(step_name: str, state: dict) -> None:
         "pandoc": ["pandoc_installed", "pandoc_skipped"],
         "clipboard": ["clipboard_backend_installed", "clipboard_skipped"],
         "vault_path": ["vault_root", "shared_resources_path"],
-        "models": ["staged_api_keys", "configured_models"],
-        "agents": ["triad_agents", "worker_agents"],
+        # re-sweep (Finding 1): do NOT pop 'staged_api_keys' on BACK. The
+        # model_presets that reference these keys are written through to disk
+        # immediately by provider_step.run, so they survive BACK/re-enter; the
+        # pasted key VALUES live only here in memory. Dropping them leaves a
+        # half-configured model (preset on disk, key never written to .env).
+        # 'configured_models' is a list of preset keys, losslessly rebuilt
+        # from disk on re-entry, so it may still be cleared.
+        "models": ["configured_models"],
+        # re-sweep (Finding 1): do NOT pop 'triad_agents'/'worker_agents' on
+        # BACK. _load_existing_state pre-populates these from the saved
+        # team_template.json so the agents step starts on the user's current
+        # team with edit/keep semantics. Popping them on a BACK-out (e.g. the
+        # user enters agents then returns to the models step) discards the
+        # disk-loaded pre-fill the user never touched — and any in-progress
+        # picks — so re-entry restarts on an empty re-provision instead of the
+        # current team. The agents step re-walks every role and overwrites
+        # both keys on re-entry (by_tier/producers rebuild), so keeping the
+        # prior values is lossless: the next entry replaces them.
+        "agents": [],
         "budget": ["budget_caps"],
         "first_project": ["first_project_code", "first_project_objective"],
         "confirm": [],
@@ -255,6 +276,32 @@ def _system_tools_snapshot() -> dict[str, bool]:
     return snapshot
 
 
+def _embedded_model_snapshot() -> tuple[str, bool]:
+    """The active embedding model id + whether it's already in the fastembed
+    cache.
+
+    re-sweep (Finding 1): the embedded_llm prefetch step (now step 7, before
+    confirm — finding #348) calls ``prefetch()``, which downloads the routing
+    embedder (potentially hundreds of MB) into fastembed's cache — a durable,
+    reusable on-disk side effect. The abort message must not paper that over
+    with "No changes written" on a run where the on-disk presets / system tools
+    are otherwise unchanged. Snapshotting cached-ness at wizard start and again
+    at abort (mirrors ``_system_tools_snapshot``) lets the message tell the
+    truth about a cache warm that happened during this run. Never raises — a
+    probe failure is treated as "not cached" so the abort path can't crash.
+    """
+    from modulatio.setup_wizard import embedded_llm_step
+
+    try:
+        model_id = config.get_embedding_model()
+    except Exception:
+        return ("", False)
+    try:
+        return (model_id, bool(embedded_llm_step.is_cached(model_id)))
+    except Exception:
+        return (model_id, False)
+
+
 def _join_tool_names(names: list[str]) -> str:
     """Render a human-readable list of installed system tool names.
 
@@ -271,7 +318,16 @@ def _run_setup_body() -> bool:
     state = _load_existing_state()
     presets_at_start = _presets_snapshot()
     tools_at_start = _system_tools_snapshot()
+    embed_model, embed_cached_at_start = _embedded_model_snapshot()
 
+    # re-sweep (finding #348): embedded_llm runs BEFORE confirm. The confirm
+    # step prompts "Save and complete setup?" and ``commit`` fires the instant
+    # the machine finishes — so nothing slow may sit between confirm and the
+    # write. The embedded-LLM prefetch is a pure, reusable cache warm with no
+    # dependency on commit (it populates fastembed's own cache root), so it is
+    # safe to run ahead of confirm. This closes the long unsaved window where a
+    # user could answer Y and then have a multi-minute model download
+    # interrupted before anything was persisted.
     step_order = [
         "pandoc",
         "clipboard",
@@ -280,8 +336,8 @@ def _run_setup_body() -> bool:
         "agents",
         "budget",
         "first_project",
-        "confirm",
         "embedded_llm",
+        "confirm",
     ]
 
     try:
@@ -310,26 +366,72 @@ def _run_setup_body() -> bool:
             for name, present in tools_at_end.items()
             if present and not tools_at_start.get(name, False)
         ]
-        presets_changed = _presets_snapshot() != presets_at_start
+        presets_at_end = _presets_snapshot()
+        presets_changed = presets_at_end != presets_at_start
+        # remove_preset() writes through immediately too, so an abort after a
+        # removal also flips presets_changed. Distinguish a purely-additive
+        # delta (only safe to call "saved and remain available") from one that
+        # dropped a preexisting preset — comparing key sets tells them apart.
+        presets_removed = bool(set(presets_at_start) - set(presets_at_end))
 
-        if presets_changed and newly_installed:
-            theme.muted(
-                "Setup aborted. Configured models were saved and remain available, "
-                f"and {_join_tool_names(newly_installed)} was installed on your system; "
-                "no other settings were written."
+        # re-sweep (Finding 1): the embedded-LLM prefetch can download the
+        # routing embedder into fastembed's cache before confirm. If it flipped
+        # from not-cached to cached during this run, the abort message must own
+        # that durable (but reusable) on-disk side effect rather than claim "No
+        # changes written."
+        _, embed_cached_at_end = _embedded_model_snapshot()
+        embed_newly_cached = embed_cached_at_end and not embed_cached_at_start
+
+        def _preset_clause() -> str:
+            # Lowercase-start so it composes mid-sentence; the lead clause is
+            # re-capitalized below. Prior wording preserved verbatim.
+            if presets_removed:
+                return "model changes (including removals) were written to disk"
+            return "configured models were saved and remain available"
+
+        # Compose the message from whichever side effects actually occurred so a
+        # new dimension doesn't multiply the branch count combinatorially.
+        clauses: list[str] = []
+        if presets_changed:
+            clauses.append(_preset_clause())
+        if newly_installed:
+            clauses.append(
+                f"{_join_tool_names(newly_installed)} was installed on your system"
             )
-        elif presets_changed:
-            theme.muted(
-                "Setup aborted. Configured models were saved and remain available; "
-                "no other settings were written."
+        if embed_newly_cached:
+            model_label = f" ({embed_model})" if embed_model else ""
+            clauses.append(
+                f"the embedded routing model{model_label} was downloaded to a "
+                "reusable cache"
             )
-        elif newly_installed:
-            theme.muted(
-                f"Setup aborted. {_join_tool_names(newly_installed)} was installed on "
-                "your system; no configuration was written."
-            )
-        else:
+
+        if not clauses:
             theme.muted("Setup aborted. No changes written.")
+        else:
+            if len(clauses) > 1:
+                body = ", and ".join((", ".join(clauses[:-1]), clauses[-1]))
+            else:
+                body = clauses[0]
+            # Capitalize the lead unless the LEADING clause is a verbatim
+            # tool-name match (a tool-install clause leads only when no presets
+            # changed) — those stay lowercase so callers/tests can match the
+            # name verbatim ("pandoc was installed ..."). The preset clause and
+            # an embed-led clause (cache warm with no preset/install ahead of
+            # it) are prose, so they get capitalized.
+            # re-sweep (Finding 2): an embed-cache-only abort used to read
+            # "Setup aborted. the embedded routing model ..." because the lead
+            # was only capitalized on presets_changed.
+            tool_install_leads = bool(newly_installed) and not presets_changed
+            if not tool_install_leads:
+                body = f"{body[0].upper()}{body[1:]}"
+            # A config/cache side effect ("other settings") vs a system-only
+            # install ("no configuration") — mirrors the prior tail wording.
+            tail = (
+                "no other settings were written"
+                if (presets_changed or embed_newly_cached)
+                else "no configuration was written"
+            )
+            theme.muted(f"Setup aborted. {body}; {tail}.")
         return False
 
     finalize.commit(state, version=WIZARD_VERSION)

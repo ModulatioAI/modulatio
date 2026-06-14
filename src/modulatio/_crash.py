@@ -27,6 +27,12 @@ ISSUE_URL = (
 
 _DEFAULT_DIR = Path.home() / ".config" / "modulatio" / "crashes"
 
+# Keep at most this many crash logs; older ones are pruned after each
+# write so a long-lived install's crash dir doesn't grow without bound.
+# Overridable via MODULATIO_CRASH_KEEP (an int >= 1) for operators who
+# want a deeper history.
+_DEFAULT_KEEP = 50
+
 # Match flags whose name suggests a secret value, with optional inline
 # `=value`. Values consumed positionally (no `=`) are redacted by the
 # next-arg-skip path in `_redact_argv`.
@@ -46,6 +52,17 @@ _EMBEDDED_SECRET = re.compile(
     re.IGNORECASE,
 )
 
+# Match a space-separated `Bearer <token>` (optionally prefixed by an
+# `Authorization:` header label). LLM-client exceptions (litellm/httpx auth
+# errors) routinely echo a request header like
+# `Authorization: Bearer sk-...` in the traceback body; the `key=value`
+# form above won't catch the space-delimited credential, so this is a
+# second pass applied alongside `_scrub_embedded_secrets`.
+_BEARER_TOKEN = re.compile(
+    r"(?P<scheme>\bBearer)\s+(?P<val>[A-Za-z0-9._\-+/=~]+)",
+    re.IGNORECASE,
+)
+
 
 def crash_dir() -> Path:
     override = os.environ.get("MODULATIO_CRASH_DIR")
@@ -60,8 +77,11 @@ def _scrub_embedded_secrets(value: str) -> str:
     param, an inline `token=...`). Preserves the key and separator so the
     log still shows the shape; only the secret value is replaced.
     """
-    return _EMBEDDED_SECRET.sub(
+    scrubbed = _EMBEDDED_SECRET.sub(
         lambda m: f"{m.group('key')}{m.group('sep')}<redacted>", value
+    )
+    return _BEARER_TOKEN.sub(
+        lambda m: f"{m.group('scheme')} <redacted>", scrubbed
     )
 
 
@@ -100,6 +120,11 @@ def write_crash_log(exc: BaseException, argv: Sequence[str]) -> Path:
     # (or two processes crashing at once) don't overwrite each other's log.
     path = d / f"crash-{now.strftime('%Y%m%dT%H%M%S_%fZ')}-{os.getpid()}.log"
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    # The traceback can embed secrets the same way argv can — an LLM/HTTP
+    # client exception often echoes the request URL (`?api_key=...`) or an
+    # `Authorization: Bearer ...` header in str(exc). Scrub it with the same
+    # belt-and-suspenders pass used for argv before it lands on disk.
+    tb = _scrub_embedded_secrets(tb)
     body = (
         "Modulatio crash report\n"
         "=====================\n"
@@ -116,9 +141,41 @@ def write_crash_log(exc: BaseException, argv: Sequence[str]) -> Path:
     # Mode 0o600 from creation — the report carries a traceback and
     # (redacted) argv; on a shared host it must not be world-readable.
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(body)
+    _prune_old_logs(d)
     return path
+
+
+def _crash_keep() -> int:
+    """How many crash logs to retain (>= 1)."""
+    raw = os.environ.get("MODULATIO_CRASH_KEEP")
+    if raw is None:
+        return _DEFAULT_KEEP
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_KEEP
+
+
+def _prune_old_logs(d: Path) -> None:
+    """Drop the oldest crash logs beyond the retention cap.
+
+    Filenames are timestamp+PID prefixed, so a lexical sort is also a
+    chronological one; we keep the newest `_crash_keep()` and unlink the
+    rest. Best-effort — pruning must never mask the crash that triggered
+    the write, so any error is swallowed.
+    """
+    try:
+        logs = sorted(d.glob("crash-*.log"))
+        keep = _crash_keep()
+        for stale in logs[:-keep]:
+            try:
+                stale.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
 
 
 def run_with_crash_handler(main_fn: Callable[[], object]) -> int:

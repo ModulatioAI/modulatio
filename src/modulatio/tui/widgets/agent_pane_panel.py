@@ -315,7 +315,20 @@ class AgentPanePanel(Vertical):
     def on_chat_response(self, event: ChatResponse) -> None:
         if event.agent_id != self.agent_id:
             return
-        log = self.query_one(f"#pane-log-{self.agent_id}", RichLog)
+        # re-sweep (0.9.0-preship): the chat worker runs detached on a
+        # thread; if the Prompt screen rebuilds its panes or this pane is
+        # removed (project switch / roster re-render) while a chat is in
+        # flight, the posted ChatResponse is still delivered to this now-
+        # detached widget. Bail quietly rather than letting query_one raise
+        # NoMatches uncaught. ``is_mounted`` can lag a remove() so we guard
+        # on the actual query (the RichLog child is gone once detached).
+        from textual.css.query import NoMatches
+        if not self.is_mounted:
+            return
+        try:
+            log = self.query_one(f"#pane-log-{self.agent_id}", RichLog)
+        except NoMatches:
+            return
         if event.error:
             log.write(f"[bold red]Error:[/] {escape(event.error)}")
             return

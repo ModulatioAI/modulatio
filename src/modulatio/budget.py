@@ -43,8 +43,9 @@ from __future__ import annotations
 
 import contextvars
 import json
+import threading
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,6 +71,18 @@ class BudgetTracker:
     tokens_used: int = 0
     cost_usd_used: float = 0.0
     log_path: Path | None = None
+    # re-sweep (Opus R2 MED/race): one tracker is intentionally shared
+    # across the default-on concurrent wave workers (orchestration.py copies
+    # the ContextVar binding, not the object, into each future). The ``+=``
+    # accumulation in record() is a non-atomic read-modify-write, so without
+    # synchronization concurrent calls lose increments and under-count spend,
+    # weakening the token/cost caps. This lock serializes the whole record()
+    # body (both updates + the log append's total snapshot). Excluded from
+    # the dataclass __eq__/__init__ so it stays invisible to the value
+    # contract and auto-creates per instance.
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, compare=False, repr=False,
+    )
 
     def record(
         self, *, input_tokens: int, output_tokens: int, cost_usd: float,
@@ -82,15 +95,19 @@ class BudgetTracker:
         callers that don't have it (tests, future stub paths) leave
         it None and the log line records ``"model": null``.
         """
-        self.tokens_used += int(input_tokens) + int(output_tokens)
-        self.cost_usd_used += float(cost_usd)
-        if self.log_path is not None:
-            self._append_log_line(
-                input_tokens=int(input_tokens),
-                output_tokens=int(output_tokens),
-                cost_usd=float(cost_usd),
-                model=model,
-            )
+        # re-sweep: hold the lock across BOTH accumulations and the log
+        # append so the running totals captured per JSONL line come from a
+        # consistent snapshot and concurrent writers can't interleave.
+        with self._lock:
+            self.tokens_used += int(input_tokens) + int(output_tokens)
+            self.cost_usd_used += float(cost_usd)
+            if self.log_path is not None:
+                self._append_log_line(
+                    input_tokens=int(input_tokens),
+                    output_tokens=int(output_tokens),
+                    cost_usd=float(cost_usd),
+                    model=model,
+                )
 
     def _append_log_line(
         self, *, input_tokens: int, output_tokens: int, cost_usd: float,
@@ -110,7 +127,7 @@ class BudgetTracker:
                 "cost_total": round(self.cost_usd_used, 6),
             }
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.log_path.open("a") as f:
+            with self.log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
         except OSError:
             # Filesystem unavailable / permission denied / disk full —

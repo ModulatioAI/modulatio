@@ -340,7 +340,7 @@ def record_recovery(
     )
     p = _log_path(project_code)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a") as f:
+    with p.open("a", encoding="utf-8") as f:
         f.write(json.dumps(asdict(rec)) + "\n")
     return rec
 
@@ -352,7 +352,7 @@ def load_recoveries(project_code: str) -> "list[RecoveryRecord]":
     out: list[RecoveryRecord] = []
     known = {f.name for f in fields(RecoveryRecord)}
     try:
-        for line in p.read_text().splitlines():
+        for line in p.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -366,7 +366,10 @@ def load_recoveries(project_code: str) -> "list[RecoveryRecord]":
                 out.append(RecoveryRecord(**{k: v for k, v in obj.items() if k in known}))
             except (ValueError, TypeError):
                 continue  # a malformed line never blocks the feed
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # A non-UTF-8 log (truncated multibyte write, foreign locale) must fail
+        # OPEN, not propagate — UnicodeDecodeError is a ValueError subclass, not
+        # an OSError, so it is named explicitly to honor the module contract.
         return []
     return out
 
@@ -379,8 +382,11 @@ def consumed_ids(project_code: str) -> "set[str]":
     if not p.exists():
         return set()
     try:
-        return {ln.strip() for ln in p.read_text().splitlines() if ln.strip()}
-    except OSError:
+        return {ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()}
+    except (OSError, UnicodeDecodeError):
+        # Fail OPEN on a non-UTF-8 consumed ledger (UnicodeDecodeError is a
+        # ValueError subclass, not an OSError) — an unreadable ledger must not
+        # block the win loop; the worst case is a recovery re-witnessed once.
         return set()
 
 
@@ -393,7 +399,7 @@ def mark_consumed(project_code: str, entry_ids) -> None:
     have = consumed_ids(project_code)
     new = [e for e in ids if e not in have]
     if new:
-        with p.open("a") as f:
+        with p.open("a", encoding="utf-8") as f:
             for e in new:
                 f.write(e + "\n")
 

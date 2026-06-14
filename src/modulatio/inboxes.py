@@ -78,9 +78,19 @@ _INBOXES_ENV = "MODULATIO_INBOXES"
 #: warning fired for a recipient in one run does NOT suppress the same
 #: recipient's warning in a later, distinct run sharing this process
 #: (the daemon / JT / cron paths reuse the interpreter across runs).
-#: The run_id also scopes growth: entries belong to a bounded run
-#: rather than accumulating for the process lifetime.
+#: Because run_id is part of the key, each new run contributes fresh
+#: entries that are never explicitly torn down — so in a long-lived
+#: daemon the set would otherwise grow without bound. It is hard-capped
+#: at :data:`_WARNED_SOFT_CAP_MAX`; on overflow the oldest-style dedup
+#: state is dropped wholesale (the only consequence is a recipient may
+#: get one more soft-cap WARN — purely a log-dedup, never correctness).
 _WARNED_SOFT_CAP: set[tuple[str, str, str | None, str | None]] = set()
+
+#: Upper bound on :data:`_WARNED_SOFT_CAP`. Generous (a single run
+#: contributes at most one entry per distinct recipient), so reaching
+#: it implies many thousands of runs in one process — at which point
+#: clearing the dedup state is the right trade vs. unbounded growth.
+_WARNED_SOFT_CAP_MAX = 4096
 
 
 #: Recipient key regex. Rejects path-traversal primitives (``/``,
@@ -402,7 +412,12 @@ def _load_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
     rows: list[dict] = []
-    with path.open("r", encoding="utf-8") as fh:
+    # re-sweep (0.9.0): errors="replace" so a non-UTF-8 byte from a Latin-1
+    # hand-edit or a torn write degrades to U+FFFD on that line (caught below
+    # as a JSONDecodeError) instead of raising UnicodeDecodeError during
+    # iteration and making the whole inbox unreadable. Matches the sibling
+    # JSONL/text readers across this package (qc_history, comptroller, …).
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -464,8 +479,20 @@ def _load_notes(path: Path) -> list[InboxNote]:
 
 def _load_tombstoned_ids(path: Path) -> set[str]:
     """Return the set of note_ids that already have a tombstone row.
-    Used to suppress duplicate tombstones on repeated reads."""
-    return {row["note_id"] for row in _load_jsonl(path)}
+    Used to suppress duplicate tombstones on repeated reads.
+
+    re-sweep: per-row best-effort, mirroring :func:`_load_notes` and the
+    candidate readers. ``_load_jsonl`` only skips JSON-decode errors — a
+    WELL-FORMED row missing ``note_id`` (schema drift, a hand-edit, a
+    future tombstone format, a field rename across versions) would
+    otherwise KeyError here and silently disable EVERY inbox read /
+    enqueue for the recipient. Skip the bad row, keep the rest of the
+    tombstone set live."""
+    return {
+        row["note_id"]
+        for row in _load_jsonl(path)
+        if isinstance(row, dict) and row.get("note_id")
+    }
 
 
 def _live_notes(notes: Iterable[InboxNote], tombstoned: set[str]) -> list[InboxNote]:
@@ -666,6 +693,12 @@ def _soft_cap_warn_once(
     key = (run_id, target_scope, target_agent_id, target_runner_role)
     if key in _WARNED_SOFT_CAP:
         return
+    # Bound the dedup set so a long-lived daemon serving many runs can't
+    # accumulate run-scoped entries for the process lifetime. On
+    # overflow drop the accumulated state wholesale; the worst case is a
+    # repeat WARN for an in-flight recipient (cosmetic).
+    if len(_WARNED_SOFT_CAP) >= _WARNED_SOFT_CAP_MAX:
+        _WARNED_SOFT_CAP.clear()
     _WARNED_SOFT_CAP.add(key)
     _LOGGER.warning(
         "inbox soft-cap pressure: recipient=%r live=%d (soft=%d, hard=%d). "
@@ -788,8 +821,15 @@ def _emit_inbox_event(
             audit_path.chmod(0o600)
         except OSError:
             pass
-        with audit_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(base, default=str, ensure_ascii=True) + "\n")
+        # Serialize under the same reentrant lock that guards
+        # _append_jsonl_row so concurrent wave-worker audit emissions
+        # cannot interleave and tear a JSONL line. The lock is reentrant,
+        # so callers already holding it (e.g. the decay/tombstone path)
+        # are unaffected.
+        line = json.dumps(base, default=str, ensure_ascii=True) + "\n"
+        with _APPEND_LOCK:
+            with audit_path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
     except Exception as exc:
         _LOGGER.warning(
             "inbox audit-write failed (path=%s, event=%s): %s",
@@ -910,6 +950,18 @@ def _validate_content_and_reason(content: str, reason: str) -> None:
         )
 
 
+def _validate_priority(priority: str) -> None:
+    # re-sweep finding 1: gate priority at API entry, mirroring the
+    # closed-reason check above. Without this an invalid/hallucinated
+    # priority (e.g. "URGENT", "P5") was persisted as a durable candidate
+    # and only blew up later as a raw KeyError in PRIORITY_DECAY_DEFAULTS/
+    # PRIORITY_RANK at enqueue/read time. Fail fast as a typed InboxError.
+    if priority not in PRIORITY_RANK:
+        raise InboxError(
+            f"priority={priority!r}: must be one of {tuple(PRIORITY_RANK)}"
+        )
+
+
 def _resolve_caps_and_decay(
     *,
     target_runner_role: str | None,
@@ -1019,6 +1071,7 @@ def enqueue(
         raise InboxAuthorityError(
             "broadcast (target_scope='all') is Leader-only."
         )
+    _validate_priority(priority)  # re-sweep finding 1
     _validate_content_and_reason(content, reason)
 
     _soft, hard_cap, decay_after = _resolve_caps_and_decay(
@@ -1216,6 +1269,7 @@ def propose(
         target_agent_id=target_agent_id,
         target_runner_role=target_runner_role,
     )
+    _validate_priority(priority)  # re-sweep finding 1
     _validate_content_and_reason(content, reason)
     candidate = InboxCandidate(
         candidate_id=_make_candidate_id(),
@@ -1317,6 +1371,42 @@ def _candidate_terminal_ids(
     return terminal
 
 
+def _abandon_candidate_once(
+    *,
+    run_dir: Path,
+    candidate: InboxCandidate,
+    current_turn: int,
+    audit_path: Path | None,
+) -> bool:
+    """Atomically mark ``candidate`` abandoned: record the durable
+    terminal row and emit the audit event exactly once, even when
+    ``list_pending_candidates`` and ``sweep_abandoned_candidates`` race
+    for the same candidate/turn (or run back-to-back in one turn).
+
+    The terminal-id set is re-read under :data:`_APPEND_LOCK`
+    immediately before recording, so a candidate that another caller
+    already drove terminal between the caller's stale snapshot and this
+    point is skipped instead of double-emitting the terminal + audit
+    rows. Returns ``True`` when this call performed the transition,
+    ``False`` when it was already terminal (no rows written here).
+    The lock is reentrant, so it composes with the appends underneath."""
+    with _APPEND_LOCK:
+        if candidate.candidate_id in _candidate_terminal_ids(
+            run_dir=run_dir, audit_path=audit_path
+        ):
+            return False
+        # M1: durable terminal-state write first; audit row second.
+        _record_candidate_terminal(
+            run_dir=run_dir, candidate_id=candidate.candidate_id,
+            terminal="abandoned", current_turn=current_turn,
+        )
+        _emit_inbox_event(
+            audit_path=audit_path, event="propose_abandoned",
+            candidate=candidate, current_turn=current_turn,
+        )
+        return True
+
+
 def list_pending_candidates(
     *,
     run_dir: Path,
@@ -1358,18 +1448,16 @@ def list_pending_candidates(
             current_turn - cand.created_at_turn
             >= INBOX_CANDIDATE_ABANDON_AFTER_TURNS
         ):
-            # M1 (Nemo round 2): record durable terminal state BEFORE
-            # the best-effort audit row. If the state write fails, the
-            # exception propagates and the candidate stays pending —
-            # safer than the inverse, where a successful audit row
-            # would falsely report the candidate as abandoned.
-            _record_candidate_terminal(
-                run_dir=run_dir, candidate_id=cand.candidate_id,
-                terminal="abandoned", current_turn=current_turn,
-            )
-            _emit_inbox_event(
-                audit_path=audit_path, event="propose_abandoned",
-                candidate=cand, current_turn=current_turn,
+            # Atomic check-and-record under _APPEND_LOCK (re-reads the
+            # terminal set inside the lock) so a concurrent
+            # sweep_abandoned_candidates for the same candidate/turn
+            # cannot double-emit the terminal + audit rows. The terminal
+            # write precedes the best-effort audit row (M1): if the
+            # state write fails the exception propagates and the
+            # candidate stays pending — safer than the inverse.
+            _abandon_candidate_once(
+                run_dir=run_dir, candidate=cand,
+                current_turn=current_turn, audit_path=audit_path,
             )
             continue
         pending.append(cand)
@@ -1410,16 +1498,16 @@ def sweep_abandoned_candidates(
         if (current_turn - cand.created_at_turn
                 < INBOX_CANDIDATE_ABANDON_AFTER_TURNS):
             continue
-        # M1: durable terminal-state write first; audit row second.
-        _record_candidate_terminal(
-            run_dir=run_dir, candidate_id=cand.candidate_id,
-            terminal="abandoned", current_turn=current_turn,
-        )
-        _emit_inbox_event(
-            audit_path=audit_path, event="propose_abandoned",
-            candidate=cand, current_turn=current_turn,
-        )
-        count += 1
+        # Atomic check-and-record under _APPEND_LOCK so a concurrent
+        # list_pending_candidates sweep for the same candidate/turn
+        # can't double-emit. Only count candidates THIS call transitioned
+        # — one already driven terminal by the racing caller returns
+        # False and must not be re-counted.
+        if _abandon_candidate_once(
+            run_dir=run_dir, candidate=cand,
+            current_turn=current_turn, audit_path=audit_path,
+        ):
+            count += 1
     return count
 
 
@@ -1477,11 +1565,18 @@ def accept_candidate(
     # terminal write fails, the candidate stays pending on the next
     # scan — Leader can see + re-act, which is the right behavior:
     # the durable note IS in the inbox, but the candidate-state
-    # bookkeeping is the source of truth for "already acted on?". A
-    # rare double-accept produces a superseded-pattern note which the
-    # tombstone path already handles cleanly, vs. the inverse where a
-    # silent failure would lock out re-action on a candidate that
-    # might still be live.
+    # bookkeeping is the source of truth for "already acted on?".
+    #
+    # re-sweep finding 2: a rare double-accept appends a genuine
+    # DUPLICATE note (a fresh note_id, no supersedes link) — accept
+    # passes the candidate's content through verbatim with no
+    # supersedes_note_id, so the second note does NOT tombstone the
+    # first; both coexist live. This is accepted as the lesser evil vs.
+    # the inverse (terminal-write-first), where a post-write enqueue
+    # failure would silently lock out re-action on a candidate that is
+    # still live and never produced a note. A duplicate Leader note is
+    # benign (Leader/QC dedupe on read); a lost note is not. The earlier
+    # wording here wrongly claimed a supersede occurs — it does not.
     _record_candidate_terminal(
         run_dir=run_dir, candidate_id=candidate.candidate_id,
         terminal="accepted", current_turn=current_turn,
@@ -1588,10 +1683,25 @@ def parse_inbox_proposals(text: str) -> "tuple[str, list[dict]]":
     )
     fm = fence_re.match(tail)
     if fm is None:
-        # Heading present but no fenced block — strip the heading
-        # alone so it doesn't end up in the artifact, but no
-        # proposals are emitted.
-        stripped = text[:m.start()] + tail
+        # No fenced block IMMEDIATELY follows the heading. Two sub-cases:
+        #
+        #   (a) re-sweep finding 3: there is NO fenced JSON block anywhere
+        #       downstream either — the heading is just legitimate prose
+        #       in the producer's deliverable (e.g. documentation OF the
+        #       feature). Stripping the bare heading silently deletes real
+        #       content, so leave the artifact fully intact.
+        #
+        #   (b) unanchored-fence case: a fence DOES appear downstream but
+        #       not directly under the heading. We must NOT splice that
+        #       (wrong-region) fence out — but the heading is still a
+        #       (malformed) proposals trailer, so strip the heading line
+        #       alone and preserve the downstream prose + fence verbatim.
+        downstream_fence = re.compile(
+            r"```(?:json)?[ \t]*\n", re.MULTILINE,
+        ).search(tail)
+        if downstream_fence is None:
+            return text, []  # (a)
+        stripped = text[:m.start()] + tail  # (b)
         return stripped.rstrip() + "\n", []
     try:
         parsed = json.loads(fm.group(1))

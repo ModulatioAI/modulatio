@@ -91,6 +91,50 @@ def test_extract_sub_objectives_warns_on_dropped_item(caplog):
     assert "may have been dropped" not in caplog.text
 
 
+# ── Pre-ship: nested **bold** inside a title must not corrupt parse ─────
+
+
+def test_extract_sub_objectives_nested_bold_title_not_truncated():
+    # A nested **bold** span inside the title used to truncate it: the
+    # lazy title match stopped at the first inner `**`, so the title
+    # became "Do the " and the real title/description bled into the
+    # description — WITHOUT tripping the count cross-check (still 1 item).
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. Do the **important** thing** — ship it.\n"
+        "**2. Plain second** — and this.\n"
+    )
+    items = plans.extract_sub_objectives(body)
+    assert [it["index"] for it in items] == [1, 2]
+    # Title now spans to the LAST `**` on the line, keeping the bold span.
+    assert items[0]["title"] == "Do the **important** thing"
+    assert items[0]["description"] == "ship it."
+    # The greedy match stays line-anchored: item 2 is untouched.
+    assert items[1]["title"] == "Plain second"
+    assert items[1]["description"] == "and this."
+
+
+# ── Pre-ship: detected item-drop fails CLOSED (returns empty) ───────────
+
+
+def test_extract_sub_objectives_returns_empty_on_detected_drop(caplog):
+    # A malformed item (missing closing bold) matches the line-start
+    # cross-check but not the item regex. Previously the function logged
+    # a warning and returned the SHORT list, silently skipping the
+    # approved sub-objective. It must now fail closed (empty) so the
+    # dispatcher pauses for human revision.
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. First well-formed task** — do it.\n"
+        "**2. Second task that forgot its closing bold\n"
+        "**3. Third well-formed task** — do it too.\n"
+    )
+    with caplog.at_level("WARNING", logger="modulatio.plans"):
+        items = plans.extract_sub_objectives(body)
+    assert items == []
+    assert "fail closed" in caplog.text or "dropped" in caplog.text
+
+
 # ── Finding 2: persist() id allocation is collision-safe ────────────────
 
 
@@ -195,6 +239,42 @@ def test_load_degrades_non_numeric_cap_to_none(isolated_vault):
     rec = plans.load(pid, "tst")
     assert rec is not None
     assert rec.max_tokens is None
+
+
+def test_load_non_ascii_plan_under_c_locale(isolated_vault, monkeypatch):
+    # The write path is UTF-8; a non-UTF-8 process locale must not turn a
+    # legitimate non-ASCII title/body into a UnicodeDecodeError that bricks
+    # load() + list_plans(). Force a non-UTF-8 default encoding to mirror a
+    # daemon/cron run under C/POSIX.
+    rec = plans.persist(
+        "<!-- modulatio:plan -->\n"
+        "### Diagnostic\nRédiger un résumé — 概要 ✦\n\n"
+        "### Sub-objectives\n**1. Écrire**\n",
+        project_code="tst", agent_id="leader", source_message="café",
+    )
+    assert rec is not None
+
+    # Simulate the locale-default decode path failing on UTF-8 bytes:
+    # patch read_text to behave as if the platform default were ASCII when
+    # no encoding is passed, and UTF-8 only when encoding is explicit.
+    real_read_text = Path.read_text
+
+    def locale_sensitive_read_text(self, *args, encoding=None, **kwargs):
+        if encoding is None:
+            # Emulate C/POSIX: ascii decode of UTF-8 bytes raises.
+            data = self.read_bytes()
+            return data.decode("ascii")  # raises UnicodeDecodeError
+        return real_read_text(self, *args, encoding=encoding, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", locale_sensitive_read_text)
+
+    loaded = plans.load(rec.id, "tst")
+    assert loaded is not None
+    assert "concept" not in loaded.body  # sanity: real body, not placeholder
+    assert "概要" in loaded.body
+    # list_plans must not silently swallow it either.
+    listed = plans.list_plans("tst")
+    assert any(p.id == rec.id for p in listed)
 
 
 def test_load_preserves_valid_numeric_caps(isolated_vault):
