@@ -58,6 +58,25 @@ TEXT_EXTENSIONS: frozenset[str] = frozenset({
 })
 
 
+def _within_tree(path: Path, root_resolved: Path) -> bool:
+    """True iff ``path``'s real location stays inside ``root_resolved``.
+
+    re-sweep (Finding 1, security): ``rglob('*')`` filtered by ``is_file()``
+    follows symlinks, and ``is_file()`` is True for a symlink whose target is
+    a regular file. A producer holding a shell tool could plant a symlink in
+    ``artifacts/`` pointing at ``/etc/passwd`` or another project's vault, and
+    its head-excerpt would be read (byte-capped) and injected into the next
+    producer's prompt. Resolve the candidate (which also collapses any
+    symlinked parent dir) and confirm it lands under the resolved root.
+    Anything escaping the tree — or whose resolve() fails — is skipped.
+    """
+    try:
+        path.resolve(strict=False).relative_to(root_resolved)
+    except (ValueError, OSError):
+        return False
+    return True
+
+
 def build_digest(artifacts_root: Path) -> str:
     """Render a markdown digest of ``artifacts_root``'s contents.
 
@@ -80,8 +99,18 @@ def build_digest(artifacts_root: Path) -> str:
     if not artifacts_root.exists() or not artifacts_root.is_dir():
         return _empty_marker()
 
+    root_resolved = artifacts_root.resolve(strict=False)
     files = sorted(
-        (p for p in artifacts_root.rglob("*") if p.is_file()),
+        (
+            p
+            for p in artifacts_root.rglob("*")
+            # re-sweep (Finding 1): skip symlinks and any path whose real
+            # location escapes the artifacts tree, so a planted symlink can't
+            # leak an out-of-tree file into the next producer's prompt.
+            if not p.is_symlink()
+            and p.is_file()
+            and _within_tree(p, root_resolved)
+        ),
         key=lambda p: str(p.relative_to(artifacts_root)),
     )
     if not files:

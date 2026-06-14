@@ -272,7 +272,9 @@ class PromptScreen(Vertical):
             widget.update("")
             return
         names = [
-            f"📎 {att.name}" if att.kind == "document" else f"🖼  {att.name}"
+            # re-sweep: att.name is operator-chosen Path.name; escape so a
+            # filename like `notes[/].md` can't crash the TUI via MarkupError.
+            f"📎 {escape(att.name)}" if att.kind == "document" else f"🖼  {escape(att.name)}"
             for att in self._chatbox_attachments
         ]
         widget.update(f"[dim]attached:[/] {'  '.join(names)}")
@@ -424,7 +426,8 @@ class PromptScreen(Vertical):
             widget.update("")
             return
         names = [
-            f"📎 {att.name}" if att.kind == "document" else f"🖼  {att.name}"
+            # re-sweep: escape operator-chosen filename — see _refresh_chatbox.
+            f"📎 {escape(att.name)}" if att.kind == "document" else f"🖼  {escape(att.name)}"
             for att in self._kickoff_attachments
         ]
         widget.update(f"[dim]attached for kickoff:[/] {'  '.join(names)}")

@@ -54,7 +54,19 @@ def _load_oauth_picklists() -> dict[str, tuple[str, ...]]:
     needs no extra build config.
     """
     seed = Path(__file__).resolve().parent.parent / "_seed_data" / "oauth_model_picklists.json"
-    raw = json.loads(seed.read_text(encoding="utf-8", errors="replace"))
+    # re-sweep (finding 1): a malformed/edited seed must not brick the whole
+    # wizard at import. Degrade to empty picklists so the curated OAuth picker
+    # falls back to manual entry instead of raising an opaque traceback.
+    try:
+        raw = json.loads(seed.read_text(encoding="utf-8", errors="replace"))
+        if not isinstance(raw, dict):
+            raise ValueError("oauth_model_picklists.json must be a JSON object")
+    except (OSError, ValueError) as exc:  # ValueError covers json.JSONDecodeError
+        theme.warn(
+            f"curated OAuth model list unavailable ({exc}); "
+            "use manual model entry."
+        )
+        return {}
     return {
         vendor: tuple(sorted(models))
         for vendor, models in raw.items()
@@ -63,8 +75,10 @@ def _load_oauth_picklists() -> dict[str, tuple[str, ...]]:
 
 
 _OAUTH_PICKLISTS = _load_oauth_picklists()
-ANTHROPIC_OAUTH_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS["anthropic"]
-OPENAI_OAUTH_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS["openai"]
+# re-sweep (finding 1): .get(vendor, ()) — a seed missing either key disables
+# only that vendor's curated list, not the whole wizard.
+ANTHROPIC_OAUTH_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS.get("anthropic", ())
+OPENAI_OAUTH_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS.get("openai", ())
 
 
 # === Env-var smart default (slice #23) ===

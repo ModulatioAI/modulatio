@@ -50,6 +50,45 @@ def _parse_optional_int(raw: str) -> tuple[int | None, str | None]:
     return v, None
 
 
+def _prompt_axis(
+    label: str,
+    *,
+    prior: float | int | None,
+    prior_display: str,
+    parse: Any,
+) -> Any:
+    """Prompt for one optional cap axis with clearable re-invocation
+    semantics.
+
+    Returns the parsed value (float/int/None) OR a nav sentinel
+    (``steps.BACK`` / ``steps.QUIT``).
+
+    Re-sweep fix: the prior value is shown as a *hint*, never passed as
+    ``prompt_nav``'s ``default``. ``prompt_nav`` returns its ``default``
+    on blank input (steps.py:133), which made blank Enter silently KEEP
+    the prior cap — contradicting the "blank = unbounded" copy and making
+    a single axis impossible to clear on re-invocation. Here blank truly
+    means unbounded (clears the axis); typing ``k`` keeps the prior value
+    without retyping it.
+    """
+    has_prior = prior is not None
+    if has_prior:
+        hint = f"blank = unbounded, k = keep {prior_display}"
+    else:
+        hint = "blank = unbounded"
+    while True:
+        result = steps.prompt_nav(label, hint=hint)
+        if result in (steps.BACK, steps.QUIT):
+            return result
+        if has_prior and result.strip().lower() == "k":
+            return prior
+        v, err = parse(result)
+        if err:
+            theme.error(err)
+            continue
+        return v
+
+
 def run(state: dict) -> Any:
     """Capture default budget caps. Mutates state with ``budget_caps``
     when the user opts in. ``budget_caps`` is a dict with keys
@@ -106,63 +145,52 @@ def run(state: dict) -> Any:
     }
 
     # Wall-clock (minutes).
-    while True:
-        existing_wc = existing.get("max_wall_clock_min")
-        default_wc = (
-            f"{existing_wc:.1f}".rstrip("0").rstrip(".")
-            if existing_wc is not None else ""
-        )
-        result = steps.prompt_nav(
-            "Wall-clock cap in minutes (blank = unbounded)",
-            default=default_wc,
-        )
-        if result in (steps.BACK, steps.QUIT):
-            return result
-        v, err = _parse_optional_float(result)
-        if err:
-            theme.error(err)
-            continue
-        caps["max_wall_clock_min"] = v
-        break
+    existing_wc = existing.get("max_wall_clock_min")
+    wc_display = (
+        f"{existing_wc:.1f}".rstrip("0").rstrip(".")
+        if existing_wc is not None else ""
+    )
+    result = _prompt_axis(
+        "Wall-clock cap in minutes",
+        prior=existing_wc,
+        prior_display=wc_display,
+        parse=_parse_optional_float,
+    )
+    if result in (steps.BACK, steps.QUIT):
+        return result
+    caps["max_wall_clock_min"] = result
 
     # Tokens.
-    while True:
-        existing_tk = existing.get("max_tokens")
-        default_tk = str(existing_tk) if existing_tk is not None else ""
-        result = steps.prompt_nav(
-            "Token cap (input + output, blank = unbounded)",
-            default=default_tk,
-        )
-        if result in (steps.BACK, steps.QUIT):
-            return result
-        v, err = _parse_optional_int(result)
-        if err:
-            theme.error(err)
-            continue
-        caps["max_tokens"] = v
-        break
+    existing_tk = existing.get("max_tokens")
+    result = _prompt_axis(
+        "Token cap (input + output)",
+        prior=existing_tk,
+        prior_display=str(existing_tk) if existing_tk is not None else "",
+        parse=_parse_optional_int,
+    )
+    if result in (steps.BACK, steps.QUIT):
+        return result
+    caps["max_tokens"] = result
 
     # Cost (USD).
-    while True:
-        existing_cost = existing.get("max_cost_usd")
-        default_cost = (
-            f"{existing_cost}" if existing_cost is not None else ""
-        )
-        result = steps.prompt_nav(
-            "Cost cap in USD (e.g. 5.00, blank = unbounded)",
-            default=default_cost,
-        )
-        if result in (steps.BACK, steps.QUIT):
-            return result
-        v, err = _parse_optional_float(result)
-        if err:
-            theme.error(err)
-            continue
-        caps["max_cost_usd"] = v
-        break
+    existing_cost = existing.get("max_cost_usd")
+    result = _prompt_axis(
+        "Cost cap in USD (e.g. 5.00)",
+        prior=existing_cost,
+        prior_display=f"{existing_cost}" if existing_cost is not None else "",
+        parse=_parse_optional_float,
+    )
+    if result in (steps.BACK, steps.QUIT):
+        return result
+    caps["max_cost_usd"] = result
 
     state["budget_caps"] = caps
     return "captured"
 
 
-__all__ = ["run", "_parse_optional_float", "_parse_optional_int"]
+__all__ = [
+    "run",
+    "_parse_optional_float",
+    "_parse_optional_int",
+    "_prompt_axis",
+]

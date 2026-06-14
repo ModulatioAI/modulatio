@@ -203,7 +203,16 @@ def _plan_lock(plan_id: str, project_code: str, *, timeout: float | None = None)
         timeout = _plan_lock_timeout()
     code = validate_project_code(project_code.lower())
     lock_path = _plans_dir(code) / f"{plan_id}.lock"
-    key = str(lock_path.resolve() if lock_path.exists() else lock_path)
+    # re-sweep (F1): the re-entrancy key MUST be identical between the
+    # outer acquisition (lock file not yet created — it's touch()ed below)
+    # and a nested re-entrant acquisition (file now exists). Gating
+    # resolve() on .exists() made the outer key the UNRESOLVED path and the
+    # inner key the symlink-RESOLVED path; under a symlinked plans-root the
+    # two keys diverged, so the nested call missed the depth>0 fast-path and
+    # tried to re-grab fcntl on the same fd → self-deadlock. resolve()
+    # resolves a symlinked parent even when the leaf is absent, so computing
+    # it unconditionally yields a stable key for both acquisitions.
+    key = str(lock_path.resolve())
 
     depths = getattr(_plan_lock_state, "depths", None)
     if depths is None:
@@ -469,13 +478,22 @@ def _coerce_cap(value: Any, kind: type) -> int | float | None:
     - A non-numeric string (``max_tokens: abc``) raises ``ValueError``
       in ``int``/``float``; degrade to ``None`` instead of bricking the
       whole load (which ``list_plans`` would silently skip).
+    - A negative cap (``max_tokens: -1``) → ``None``. ``over_cap()`` halts
+      whenever ``used > cap``; a negative cap is ``< 0`` so it trips on the
+      first usage record (``0 > -1``), bricking the plan with a confusing
+      "cap exceeded" before any work runs. Mirror ``comptroller._parse_int``'s
+      negative-cap rejection: degrade a typo'd negative cap to unbounded
+      rather than instant-halt. (re-sweep F2.)
     """
     if value is None or isinstance(value, bool):
         return None
     try:
-        return kind(value)
+        coerced = kind(value)
     except (TypeError, ValueError):
         return None
+    if coerced < 0:
+        return None
+    return coerced
 
 
 def load(plan_id: str, project_code: str) -> Optional[PlanRecord]:

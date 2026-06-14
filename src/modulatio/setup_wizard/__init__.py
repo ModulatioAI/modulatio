@@ -266,6 +266,32 @@ def _system_tools_snapshot() -> dict[str, bool]:
     return snapshot
 
 
+def _embedded_model_snapshot() -> tuple[str, bool]:
+    """The active embedding model id + whether it's already in the fastembed
+    cache.
+
+    re-sweep (Finding 1): the embedded_llm prefetch step (now step 7, before
+    confirm — finding #348) calls ``prefetch()``, which downloads the routing
+    embedder (potentially hundreds of MB) into fastembed's cache — a durable,
+    reusable on-disk side effect. The abort message must not paper that over
+    with "No changes written" on a run where the on-disk presets / system tools
+    are otherwise unchanged. Snapshotting cached-ness at wizard start and again
+    at abort (mirrors ``_system_tools_snapshot``) lets the message tell the
+    truth about a cache warm that happened during this run. Never raises — a
+    probe failure is treated as "not cached" so the abort path can't crash.
+    """
+    from modulatio.setup_wizard import embedded_llm_step
+
+    try:
+        model_id = config.get_embedding_model()
+    except Exception:
+        return ("", False)
+    try:
+        return (model_id, bool(embedded_llm_step.is_cached(model_id)))
+    except Exception:
+        return (model_id, False)
+
+
 def _join_tool_names(names: list[str]) -> str:
     """Render a human-readable list of installed system tool names.
 
@@ -282,6 +308,7 @@ def _run_setup_body() -> bool:
     state = _load_existing_state()
     presets_at_start = _presets_snapshot()
     tools_at_start = _system_tools_snapshot()
+    embed_model, embed_cached_at_start = _embedded_model_snapshot()
 
     # re-sweep (finding #348): embedded_llm runs BEFORE confirm. The confirm
     # step prompts "Save and complete setup?" and ``commit`` fires the instant
@@ -337,31 +364,57 @@ def _run_setup_body() -> bool:
         # dropped a preexisting preset — comparing key sets tells them apart.
         presets_removed = bool(set(presets_at_start) - set(presets_at_end))
 
+        # re-sweep (Finding 1): the embedded-LLM prefetch can download the
+        # routing embedder into fastembed's cache before confirm. If it flipped
+        # from not-cached to cached during this run, the abort message must own
+        # that durable (but reusable) on-disk side effect rather than claim "No
+        # changes written."
+        _, embed_cached_at_end = _embedded_model_snapshot()
+        embed_newly_cached = embed_cached_at_end and not embed_cached_at_start
+
         def _preset_clause() -> str:
+            # Lowercase-start so it composes mid-sentence; the lead clause is
+            # re-capitalized below. Prior wording preserved verbatim.
             if presets_removed:
                 return "model changes (including removals) were written to disk"
-            return "Configured models were saved and remain available"
+            return "configured models were saved and remain available"
 
-        if presets_changed and newly_installed:
-            clause = _preset_clause()
-            theme.muted(
-                f"Setup aborted. {clause[0].upper()}{clause[1:]}, "
-                f"and {_join_tool_names(newly_installed)} was installed on your system; "
-                "no other settings were written."
+        # Compose the message from whichever side effects actually occurred so a
+        # new dimension doesn't multiply the branch count combinatorially.
+        clauses: list[str] = []
+        if presets_changed:
+            clauses.append(_preset_clause())
+        if newly_installed:
+            clauses.append(
+                f"{_join_tool_names(newly_installed)} was installed on your system"
             )
-        elif presets_changed:
-            clause = _preset_clause()
-            theme.muted(
-                f"Setup aborted. {clause[0].upper()}{clause[1:]}; "
-                "no other settings were written."
+        if embed_newly_cached:
+            model_label = f" ({embed_model})" if embed_model else ""
+            clauses.append(
+                f"the embedded routing model{model_label} was downloaded to a "
+                "reusable cache"
             )
-        elif newly_installed:
-            theme.muted(
-                f"Setup aborted. {_join_tool_names(newly_installed)} was installed on "
-                "your system; no configuration was written."
-            )
-        else:
+
+        if not clauses:
             theme.muted("Setup aborted. No changes written.")
+        else:
+            if len(clauses) > 1:
+                body = ", and ".join((", ".join(clauses[:-1]), clauses[-1]))
+            else:
+                body = clauses[0]
+            # Capitalize the lead only when the preset clause leads — matches the
+            # prior wording (a leading tool name like "pandoc" stays lowercase so
+            # callers/tests can match it verbatim).
+            if presets_changed:
+                body = f"{body[0].upper()}{body[1:]}"
+            # A config/cache side effect ("other settings") vs a system-only
+            # install ("no configuration") — mirrors the prior tail wording.
+            tail = (
+                "no other settings were written"
+                if (presets_changed or embed_newly_cached)
+                else "no configuration was written"
+            )
+            theme.muted(f"Setup aborted. {body}; {tail}.")
         return False
 
     finalize.commit(state, version=WIZARD_VERSION)

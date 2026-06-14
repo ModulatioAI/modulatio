@@ -512,7 +512,11 @@ def _load_picklist(picklist_key: str) -> list[str]:
         return []
     if not isinstance(data, dict):
         return []
-    return list(data.get(picklist_key) or [])
+    # re-sweep: a corrupt seed value that isn't a list (a str/dict for a provider
+    # key) must degrade to empty — never `list("claude-opus-4-8")` → one model id
+    # per character, nor a dict's keys. Keep only the well-formed str entries.
+    v = data.get(picklist_key)
+    return [s for s in v if isinstance(s, str)] if isinstance(v, list) else []
 
 
 def _fetch_source(
@@ -665,6 +669,15 @@ def preset_kwargs(
         auth_config = {"env_var": auth.env_var}
         if pool:  # rotate across the provider's numbered keys at call time
             auth_config["pool"] = True
+    elif pool:
+        # re-sweep: pooling derives numbered variants (FOO_API_KEY_2, …) from a
+        # named base env var. Without one (e.g. CUSTOM's keyed AuthOption has
+        # env_var=None, or a non-api_key auth) the request can't be honored —
+        # fail loud rather than silently drop it and surprise the operator.
+        raise ValueError(
+            "pool=True requires an api_key AuthOption with a named env_var; "
+            f"got auth_type={auth.auth_type!r} env_var={auth.env_var!r}"
+        )
     kwargs = dict(
         key=key or _slug(provider, model),
         label=model.name,

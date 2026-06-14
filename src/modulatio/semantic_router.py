@@ -52,9 +52,21 @@ def _cache_root() -> Path:
 
 
 # Single source of truth lives in config.get_embedding_model() so
-# wizards / overrides land in one place. Computed at import is fine —
-# the value is stable for the process lifetime.
+# wizards / overrides land in one place. ``_EMBED_MODEL`` is the
+# import-time snapshot kept only for the class-level ``dim`` default and
+# back-compat; live code paths call ``_embed_model()`` so a mid-process
+# wizard model-swap is honored (mirrors ``qc_history._embed_model`` /
+# ``team_memory._embed_model``).
 _EMBED_MODEL = _config.get_embedding_model()
+
+
+def _embed_model() -> str:
+    """Resolve the active embedding-model identifier from current config.
+    Per-call resolution so a wizard model-swap is honored without a
+    process restart — matches ``qc_history._embed_model`` and
+    ``team_memory._embed_model`` so all vector subsystems agree on the
+    model fingerprint."""
+    return _config.get_embedding_model()
 
 # Fallback dimension for the default MiniLM model — used only when
 # fastembed isn't importable or the model isn't in its catalog (e.g. a
@@ -118,10 +130,27 @@ class FastEmbedder:
     ``SPEC-routing-embedder.md``).
     """
 
+    # Class-level default (shipped config) so ``FastEmbedder.dim`` reads
+    # coherently before any instance loads a model. The authoritative
+    # value is the per-instance ``self.dim``, re-derived at load time from
+    # the model actually loaded (see ``_get``).
     dim = _EMBED_DIM
 
     def __init__(self) -> None:
         self._model = None
+        # re-sweep (Finding 1): resolve the embedding model LIVE at load
+        # time, not at module import. ``_EMBED_MODEL``/``_EMBED_DIM`` were
+        # pinned at import while qc_history/team_memory resolve
+        # ``config.get_embedding_model()`` per call to honor a mid-process
+        # wizard model-swap. Since one FastEmbedder is shared into all
+        # three subsystems, a pinned model meant the embedder loaded the
+        # OLD model + reported the OLD dim while the others fingerprinted
+        # the NEW model name → silent disagreement on rebuild. We now
+        # capture the model name the instance ACTUALLY loaded and derive
+        # ``dim`` from it, making the embedder the single source of truth
+        # the others can read (``model_name``) instead of config.
+        self._model_name: str | None = None
+        self.dim = _EMBED_DIM
         # A single FastEmbedder is shared across all vector subsystems
         # (routing matcher, qc_history, team_memory) and touched
         # concurrently by wave workers in a ThreadPoolExecutor. Two
@@ -132,13 +161,30 @@ class FastEmbedder:
         self._load_lock = threading.Lock()
         self._infer_lock = threading.Lock()
 
+    @property
+    def model_name(self) -> str:
+        """The embedding-model identifier this instance loaded (or will
+        load). Resolved live from config until the model is loaded, then
+        frozen to the loaded value so collaborators (qc_history,
+        team_memory) can fingerprint against the embedder's ACTUAL model
+        rather than re-reading config independently."""
+        if self._model_name is not None:
+            return self._model_name
+        return _config.get_embedding_model()
+
     def _get(self):
         if self._model is None:
             with self._load_lock:
                 if self._model is None:
                     from fastembed import TextEmbedding
                     from fastembed.common.types import Device
-                    self._model = TextEmbedding(_EMBED_MODEL, cuda=Device.CPU)
+                    # Resolve the model live so a wizard swap before first
+                    # use is honored without a process restart.
+                    model_name = _config.get_embedding_model()
+                    model = TextEmbedding(model_name, cuda=Device.CPU)
+                    self._model_name = model_name
+                    self.dim = _embed_dim_for_model(model_name)
+                    self._model = model
         return self._model
 
     def embed_text(self, text: str) -> list[float]:
@@ -245,7 +291,7 @@ def _config_hash(agents: list[Agent]) -> str:
             f"{','.join(sorted(a.capability_tags))}|"
             f"{a.identity.strip()}"
         )
-    payload = "||".join(parts) + f"|model={_EMBED_MODEL}"
+    payload = "||".join(parts) + f"|model={_embed_model()}"
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -281,10 +327,13 @@ def ensure_agent_vectors(project_code: str, embedder: Embedder) -> bool:
     agents = roster.list_agents(project_code)
     new_hash = _config_hash(agents)
     meta = _load_meta(project_code)
+    # re-sweep (Finding 1): resolve the model live so a wizard swap
+    # invalidates the cache (matches _config_hash + qc_history/team_memory).
+    active_model = _embed_model()
 
     if (
         meta.get("agents_hash") == new_hash
-        and meta.get("embedding_model") == _EMBED_MODEL
+        and meta.get("embedding_model") == active_model
         and meta.get("embed_dim") == embedder.dim
     ):
         return False
@@ -298,7 +347,7 @@ def ensure_agent_vectors(project_code: str, embedder: Embedder) -> bool:
     if not agents:
         _save_meta(project_code, {
             "agents_hash": new_hash,
-            "embedding_model": _EMBED_MODEL,
+            "embedding_model": active_model,
             "embed_dim": embedder.dim,
             "agent_count": 0,
         })
@@ -321,7 +370,7 @@ def ensure_agent_vectors(project_code: str, embedder: Embedder) -> bool:
 
     _save_meta(project_code, {
         "agents_hash": new_hash,
-        "embedding_model": _EMBED_MODEL,
+        "embedding_model": active_model,
         "embed_dim": embedder.dim,
         "agent_count": len(agents),
     })

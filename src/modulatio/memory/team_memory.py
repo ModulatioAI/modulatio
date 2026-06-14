@@ -335,6 +335,27 @@ def list_proposals(project_code: str) -> list[Proposal]:
     return out
 
 
+def _find_proposal_path(dir_: Path, proposal_id: str) -> Path | None:
+    """Locate the proposal file whose embedded id == ``proposal_id`` exactly.
+
+    re-sweep: ``proposal_id`` is a caller/operator-supplied argument. A prior
+    substring ``glob(f"*{proposal_id}*.json")`` treated it as a glob pattern, so
+    a metacharacter (``*``/``?``/``[``) or a bare substring matched unintended
+    proposals and acted on a non-deterministic ``matching[0]``. Iterate plain
+    ``*.json`` and select on the canonical id stored inside the file.
+    """
+    if not dir_.exists():
+        return None
+    for p in sorted(dir_.glob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("proposal_id", "") == proposal_id:
+            return p
+    return None
+
+
 def approve_proposal(
     proposal_id: str,
     *,
@@ -352,10 +373,9 @@ def approve_proposal(
             f"Approve denied for tier '{approver_tier}'. Only {sorted(_WRITE_AUTHORIZED_TIERS)} can approve."
         )
     dir_ = _team_dir(project_code) / "_proposals"
-    matching = [p for p in dir_.glob(f"*{proposal_id}*.json")] if dir_.exists() else []
-    if not matching:
+    path = _find_proposal_path(dir_, proposal_id)
+    if path is None:
         raise KeyError(f"Proposal {proposal_id} not found in {dir_}.")
-    path = matching[0]
     data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     entry = write(
         writer_id=approver_id,
@@ -374,12 +394,10 @@ def approve_proposal(
 def reject_proposal(proposal_id: str, *, project_code: str) -> bool:
     """QC or Leader rejects a proposal — file is removed without write."""
     dir_ = _team_dir(project_code) / "_proposals"
-    if not dir_.exists():
+    path = _find_proposal_path(dir_, proposal_id)
+    if path is None:
         return False
-    matching = list(dir_.glob(f"*{proposal_id}*.json"))
-    if not matching:
-        return False
-    matching[0].unlink()
+    path.unlink()
     return True
 
 

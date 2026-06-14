@@ -88,30 +88,58 @@ def _dispatch_lock_file() -> Path:
     return _config_file().with_suffix(".json.lock")
 
 
+# re-sweep: the cross-process flock must be RE-ENTRANT within a thread. The
+# dispatch path holds the flock across its window and then calls _dispatch_one ->
+# update(), which now ALSO takes the flock; the mutators are likewise the lock for
+# their own RMW. A POSIX flock is keyed to the open file description, so two
+# fresh-fd acquisitions from the SAME process/thread DEADLOCK against each other.
+# A thread-local depth counter makes the inner acquisitions no-ops that ride the
+# outer fd — exactly the RLock semantics callers expect, extended across the
+# process boundary on the OUTERMOST hold only.
+_dispatch_lock_depth = threading.local()
+
+
 @contextlib.contextmanager
 def _cross_process_dispatch_lock() -> Iterator[None]:
-    """Hold an exclusive POSIX ``flock`` across the dispatch window.
+    """Hold an exclusive POSIX ``flock`` across a select-advance / mutate window.
 
-    A fresh fd is opened per acquisition so the exclusive lock serializes across
-    both threads and processes (``flock`` attaches to the open file description,
-    not the process). POSIX-only: when ``fcntl`` is unavailable (Windows) the
-    lock is a no-op — the in-process ``_cron_lock`` still serializes the
-    single-process case (mirrors heartbeat's posture).
+    Re-entrant per thread: only the outermost acquisition opens an fd and takes
+    the OS-level ``flock``; nested acquisitions on the same thread ride that hold.
+    A fresh fd is opened per OUTERMOST acquisition so the exclusive lock serializes
+    across both threads and processes (``flock`` attaches to the open file
+    description, not the process). POSIX-only: when ``fcntl`` is unavailable
+    (Windows) the lock is a no-op — the in-process ``_cron_lock`` still serializes
+    the single-process case (mirrors heartbeat's posture).
     """
     if fcntl is None:  # pragma: no cover — non-POSIX no-op
         yield
+        return
+    depth = getattr(_dispatch_lock_depth, "value", 0)
+    if depth > 0:
+        # Already held by this thread — ride the outer flock, don't re-acquire
+        # (a second fresh-fd LOCK_EX from the same process would deadlock).
+        _dispatch_lock_depth.value = depth + 1
+        try:
+            yield
+        finally:
+            _dispatch_lock_depth.value -= 1
         return
     lock_path = _dispatch_lock_file()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        _dispatch_lock_depth.value = 1
         yield
     finally:
+        _dispatch_lock_depth.value = 0
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:  # pragma: no cover — best-effort release
             pass
+        os.close(fd)  # re-sweep: close the fd (mirrors heartbeat) — the mutators
+        # now take this lock on every add/update/remove, so a leaked fd per call
+        # would exhaust the descriptor table.
 
 
 def _load() -> list[dict]:
@@ -129,7 +157,12 @@ def _load() -> list[dict]:
 def _save(jobs: list[dict]) -> None:
     cf = _config_file()
     cf.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cf.with_suffix(".json.tmp")
+    # re-sweep: a pid-unique tmp name keeps two processes writing the config from
+    # clobbering each other's tmp before the atomic rename (the cross-process
+    # mutator lock serializes the RMW, but the tmp name must still be unique so a
+    # crash mid-write can't leave a half-written tmp that another pid then
+    # replaces over the live config).
+    tmp = cf.with_suffix(f".json.tmp.{os.getpid()}")
     with _cron_lock:
         tmp.write_text(json.dumps({"jobs": jobs}, indent=2, default=str), encoding="utf-8")
         tmp.replace(cf)
@@ -326,10 +359,18 @@ def add(
     parsed = parse_schedule(schedule)
     if parsed is None:
         raise ValueError(f"Could not parse schedule: {schedule!r}")
+    # re-sweep (finding 2): validate the project code WHILE THE OPERATOR IS HERE,
+    # exactly as heartbeat.add_task does — a malformed/path-hostile/typo'd code
+    # was previously only .upper()'d and stored, then rejected on every headless
+    # dispatch (heartbeat.add_task raises), invisible until the daemon logs. Be
+    # permissive on case (validate the lowered form) but strict on shape; store
+    # the upper form as before. Raises ValueError, which the CLI surfaces cleanly.
+    from modulatio import vault
+    project_code = vault.validate_project_code(project_code.lower()).upper()
     if jt_id:
         # Validate now, never at dispatch — the operator is here to fix it.
         from modulatio import job_template_library
-        jt = job_template_library.checkout(jt_id, project_code.upper())
+        jt = job_template_library.checkout(jt_id, project_code)
         if not jt.name:
             raise ValueError(f"Job template {jt_id!r} not found for project {project_code!r}")
         # Use the STRICT predicate (the same one the run-time #97 fit-gate
@@ -372,7 +413,7 @@ def add(
         "name": name,
         "description": description,
         "schedule": schedule,
-        "project_code": project_code.upper(),
+        "project_code": project_code,
         "objective": objective,
         "priority": priority,
         "enabled": enabled,
@@ -384,7 +425,10 @@ def add(
         "last_run": None,
         "last_status": None,
     }
-    with _cron_lock:
+    # re-sweep: cross-process lock OUTER, _cron_lock INNER — same ordering the
+    # dispatch path uses, so the CLI-facing RMW can't interleave with a
+    # concurrent daemon dispatch's load/update/save and lose a write.
+    with _cross_process_dispatch_lock(), _cron_lock:
         jobs = _load()
         jobs.append(job)
         _save(jobs)
@@ -408,7 +452,9 @@ def list_jobs(*, enabled_only: bool = False, project_code: Optional[str] = None)
 
 
 def update(job_id: str, **fields) -> Optional[dict]:
-    with _cron_lock:
+    # re-sweep: cross-process lock OUTER (re-entrant when _dispatch_one already
+    # holds it), _cron_lock INNER.
+    with _cross_process_dispatch_lock(), _cron_lock:
         jobs = _load()
         for j in jobs:
             if j.get("id") == job_id:
@@ -425,7 +471,8 @@ def update(job_id: str, **fields) -> Optional[dict]:
 
 
 def remove(job_id: str) -> bool:
-    with _cron_lock:
+    # re-sweep: cross-process lock OUTER, _cron_lock INNER.
+    with _cross_process_dispatch_lock(), _cron_lock:
         jobs = _load()
         before = len(jobs)
         jobs = [j for j in jobs if j.get("id") != job_id]

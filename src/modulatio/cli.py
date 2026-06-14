@@ -458,6 +458,20 @@ def kickoff(
     for _p in (attach or []):
         _path = Path(_p).expanduser()
         _kind = _infer_attachment_kind(_path)
+        # re-sweep (edge-case): a directory (or FIFO/device) whose name ends
+        # in an image extension routes to kind='image', which never read_text()s
+        # — so it slips past build_attachment's fail-fast and crashes later at
+        # multimodal dispatch. The document branch is protected (read_text on a
+        # dir raises IsADirectoryError, caught below) but the image branch is
+        # not. Require a regular file up front so both kinds fail fast here,
+        # before any disk side-effect leaves an orphan project/roster/run folder.
+        if _path.exists() and not _path.is_file():
+            typer.echo(
+                f"  ! --attach: cannot attach {_path}: not a regular file "
+                "(directory/FIFO/device).",
+                err=True,
+            )
+            raise typer.Exit(1)
         try:
             _atts.append(build_attachment(_path, kind=_kind))
         except FileNotFoundError:

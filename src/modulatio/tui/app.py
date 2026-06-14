@@ -556,11 +556,30 @@ class ModulatioApp(App):
                 self._on_kickoff_done(event.worker.result, None)
             elif event.state == WorkerState.ERROR:
                 self._on_kickoff_done(None, event.worker.error)
+            elif event.state == WorkerState.CANCELLED:
+                # re-sweep (LOW resource-leak): a cancelled kickoff worker (app
+                # teardown / Textual cancel) never reaches SUCCESS or ERROR, so
+                # without this branch ``_on_kickoff_done`` never runs — the
+                # elapsed-time interval keeps ticking, ``_kickoff_pending`` stays
+                # armed, and the launch guard (``_kickoff_tick`` set) locks out
+                # every future kickoff with "a job is already running". Route the
+                # cancel through the same teardown so timer + guards always clear.
+                self._on_kickoff_done(None, None)
         elif event.worker.group == "converse":
             if event.state == WorkerState.SUCCESS:
                 self._on_converse_done(event.worker.result)
             elif event.state == WorkerState.ERROR:
                 self._on_converse_done(f"(error talking to the Leader: {event.worker.error})")
+            elif event.state == WorkerState.CANCELLED:
+                # re-sweep (LOW resource-leak): an exclusive converse worker is
+                # cancelled when a second chat message is sent while the Leader is
+                # still thinking. The replacement worker re-arms "leader_thinking"
+                # and settles it on its own done, but a cancel with NO replacement
+                # (app teardown / external cancel) would leave the leader lane
+                # stuck on the spinner and the TEAM spinner unsettled. Settle the
+                # lanes WITHOUT posting a chat message: a "(cancelled)" reply would
+                # be spurious noise in the common replace-on-second-message case.
+                self._on_converse_cancelled()
 
     def _on_kickoff_done(self, result: dict | None, error: BaseException | None) -> None:
         """Restore the UI after a kickoff worker finishes (success or fail)."""
@@ -586,7 +605,12 @@ class ModulatioApp(App):
         delivered = (result or {}).get("drafts", 0)
         blocked = (result or {}).get("blocked_tasks", 0)
         incomplete = (result or {}).get("incomplete_goals", 0)
-        no_deliver = error is None and (
+        # re-sweep (LOW): a CANCELLED worker routes here with result AND error
+        # both None (there is no summary dict to render). Treat that as its own
+        # honest "cancelled" outcome — the no_deliver / completed branches below
+        # both subscript ``result`` and would crash on None.
+        cancelled = result is None and error is None
+        no_deliver = not cancelled and error is None and (
             delivered == 0 or blocked > 0 or incomplete > 0
         )
         # Guard symmetric with ``_on_converse_done``: a *separate* converse-driven
@@ -607,6 +631,9 @@ class ModulatioApp(App):
         if error is not None:
             if team_status is not None:
                 team_status.set_error(str(error)[:80])
+        elif cancelled:
+            if team_status is not None:
+                team_status.set_idle()
         elif no_deliver:
             if team_status is not None:
                 team_status.set_error("finished without deliverables")
@@ -616,6 +643,8 @@ class ModulatioApp(App):
         # Render the result on the floor's status line …
         if error is not None:
             self._set_kickoff_status(f"Kickoff failed: {error}")
+        elif cancelled:
+            self._set_kickoff_status("Kickoff cancelled.")
         elif no_deliver:
             self._set_kickoff_status(
                 f"Kickoff finished WITHOUT deliverables — "
@@ -632,11 +661,14 @@ class ModulatioApp(App):
                 f"errors: {result['errors']}"
             )
         # … and the Leader reports the verdict back on the LEADER tab — his
-        # voice, where you talk to him.
-        self._post_leader_verdict(result, error)
-        # The run is done — the Leader has a summary for you. Light the amber
-        # lamp ("talk to me") so it reads even from the factory floor.
-        self._signal_msg()
+        # voice, where you talk to him. A CANCELLED run has no summary to report,
+        # so skip the verdict + attention lamp (and avoid subscripting a None
+        # result inside ``_post_leader_verdict``).
+        if not cancelled:
+            self._post_leader_verdict(result, error)
+            # The run is done — the Leader has a summary for you. Light the amber
+            # lamp ("talk to me") so it reads even from the factory floor.
+            self._signal_msg()
 
     def _post_leader_verdict(
         self, result: dict | None, error: BaseException | None
@@ -816,6 +848,28 @@ class ModulatioApp(App):
         # live floor. Only force-settle when nothing is actually running. This
         # also covers a kickoff still in its startup window (worker scheduled,
         # orch not yet built) via the ``_kickoff_pending`` flag.
+        if not self._any_job_in_flight():
+            team_status = self._lane_status("stream-team-status")
+            if team_status is not None:
+                team_status.set_done()
+
+    def _on_converse_cancelled(self) -> None:
+        """re-sweep (LOW resource-leak): settle the converse lanes after a worker
+        is CANCELLED, without posting a chat reply. If a replacement converse
+        worker is already in flight (the usual case — a second message cancels
+        the first), that worker re-armed ``leader_thinking`` and will settle the
+        lanes on its own done; leave them alone so we don't flicker the spinner
+        off mid-thought. Only force-settle when nothing replaced it."""
+        replacement_live = any(
+            getattr(w, "group", None) == "converse"
+            and w.state in (WorkerState.PENDING, WorkerState.RUNNING)
+            for w in self.workers
+        )
+        if replacement_live:
+            return
+        status = self._lane_status("stream-leader-status")
+        if status is not None:
+            status.set_idle()
         if not self._any_job_in_flight():
             team_status = self._lane_status("stream-team-status")
             if team_status is not None:

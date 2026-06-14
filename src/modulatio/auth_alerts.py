@@ -24,19 +24,73 @@ via ``modulatio auth clear <provider>`` or the TUI button.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
 from modulatio import config
 
+try:  # POSIX-only; absent on Windows. Cross-process file lock is best-effort.
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None  # type: ignore[assignment]
+
 # Telegram rate-limit: one ping per provider per hour during a sustained 401 storm.
 TELEGRAM_RATE_LIMIT_SEC = 3600
+
+
+# re-sweep (MEDIUM/race): raise_alert/clear_alert/clear_all each do
+# load_alerts() -> mutate -> save_alerts(), and save_alerts is an atomic
+# *replace* (config.write_secret_file), not an atomic read-modify-write. The
+# daemon runs heartbeat + cron + Telegram listener concurrently, and the wave
+# executor runs many producers in parallel — two concurrent writers (e.g.
+# raise(provA) racing clear(provB)) each load the same baseline, then one's
+# atomic replace clobbers the other's change entirely. Serialize the whole
+# read-modify-write the same way oauth_refresh does: an in-process
+# threading.Lock (thread-vs-thread) plus a cross-process fcntl.flock on a
+# sidecar .lock file (daemon-vs-cron-vs-listener-vs-wave). Mutators re-read the
+# file *inside* the lock so the merge is against the latest persisted state.
+_ALERTS_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _alerts_single_flight():
+    """Hold the in-process alerts lock and a cross-process file lock spanning a
+    load->mutate->save on the shared alerts file.
+
+    The file lock is best-effort: if flock is unavailable (non-POSIX) or the
+    lock file can't be opened (e.g. unwritable dir), in-process serialization
+    still applies rather than blocking alert persistence.
+    """
+    with _ALERTS_LOCK:
+        if fcntl is None:
+            yield
+            return
+        lock_path = str(config.AUTH_ALERTS_FILE) + ".lock"
+        fd = None
+        try:
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                fd = None
+        try:
+            yield
+        finally:
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    os.close(fd)
 
 
 # === Alert persistence ===
@@ -110,21 +164,24 @@ def raise_alert(
 
     Returns the persisted alert entry.
     """
-    alerts = load_alerts()
     now = int(time.time())
-    existing = alerts.get(provider_id, {})
-
     fix = suggested_fix(auth_type, auth_config)
-    entry = {
-        "raised_at": existing.get("raised_at", now),
-        "last_seen_at": now,
-        "error_message": error_message[:500],
-        "auth_type": auth_type,
-        "suggested_fix": fix,
-        "last_notified_at": existing.get("last_notified_at", 0),
-    }
-    alerts[provider_id] = entry
-    save_alerts(alerts)
+
+    # re-sweep: read-merge-write under the lock so a concurrent raise/clear on a
+    # DIFFERENT provider can't clobber this entry via the atomic file replace.
+    with _alerts_single_flight():
+        alerts = load_alerts()
+        existing = alerts.get(provider_id, {})
+        entry = {
+            "raised_at": existing.get("raised_at", now),
+            "last_seen_at": now,
+            "error_message": error_message[:500],
+            "auth_type": auth_type,
+            "suggested_fix": fix,
+            "last_notified_at": existing.get("last_notified_at", 0),
+        }
+        alerts[provider_id] = entry
+        save_alerts(alerts)
 
     # 1. stderr log — always
     print(
@@ -133,15 +190,24 @@ def raise_alert(
         file=sys.stderr,
     )
 
-    # 3. desktop notification — first ping per session (use last_notified_at gate)
+    # 3. desktop notification — first ping per session (use last_notified_at gate).
+    # Notifications run OUTSIDE the lock — each channel can block up to 5s on a
+    # subprocess/HTTP timeout, and we must not hold the cross-process lock (which
+    # gates the daemon/wave writers) for that long.
     should_telegram = (now - entry["last_notified_at"]) >= TELEGRAM_RATE_LIMIT_SEC
     if should_telegram:
         _try_desktop_notification(provider_id, error_message, fix)
         # 4. Telegram — same rate-limit gate
         _try_telegram_notification(provider_id, error_message, fix)
+        # Persist last_notified_at with a fresh read-merge-write so we don't undo
+        # a concurrent change (and only if the alert still exists / wasn't cleared).
+        with _alerts_single_flight():
+            alerts = load_alerts()
+            if provider_id in alerts:
+                alerts[provider_id]["last_notified_at"] = now
+                entry = alerts[provider_id]
+                save_alerts(alerts)
         entry["last_notified_at"] = now
-        alerts[provider_id] = entry
-        save_alerts(alerts)
 
     return entry
 
@@ -149,20 +215,26 @@ def raise_alert(
 def clear_alert(provider_id: str) -> bool:
     """Clear an alert (next successful call, or manual user action). Returns
     True if anything was cleared, False if there was no active alert."""
-    alerts = load_alerts()
-    if provider_id not in alerts:
-        return False
-    del alerts[provider_id]
-    save_alerts(alerts)
+    # re-sweep: read-modify-write under the lock so clearing provider B doesn't
+    # resurrect a concurrent raise(provider A) (or vice versa).
+    with _alerts_single_flight():
+        alerts = load_alerts()
+        if provider_id not in alerts:
+            return False
+        del alerts[provider_id]
+        save_alerts(alerts)
     return True
 
 
 def clear_all() -> int:
     """Clear all active alerts. Returns count cleared."""
-    alerts = load_alerts()
-    count = len(alerts)
-    if count:
-        save_alerts({})
+    # re-sweep: count + clear under the lock so the returned count matches what
+    # was actually wiped and a concurrent raise isn't silently dropped/double-counted.
+    with _alerts_single_flight():
+        alerts = load_alerts()
+        count = len(alerts)
+        if count:
+            save_alerts({})
     return count
 
 

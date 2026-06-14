@@ -451,6 +451,48 @@ def _apply_rlimits_to_pid(pid: int) -> None:
     _clamp(resource.RLIMIT_CORE, 0)
 
 
+def _prlimit_wrapper_prefix() -> list[str]:
+    """The ``prlimit`` argv prefix that applies the run_shell resource caps
+    to the *payload itself* at exec time, or ``[]`` when ``prlimit`` is
+    unavailable (non-Linux, util-linux absent).
+
+    H3a re-sweep: the parent-side ``_apply_rlimits_to_pid`` clamps the PID
+    that ``Popen`` returns. On the UNSANDBOXED path that is the payload and
+    the clamp lands. On the SANDBOXED (production) path that PID is the
+    ``bwrap`` MONITOR — bwrap then forks/execs the real payload into its own
+    PID namespace as a child, and RLIMIT_AS/FSIZE/CORE (per-process, inherited
+    only at fork time) set on the monitor AFTER that fork never reach the
+    payload. So a memory/disk bomb inside the sandbox — exactly the posture
+    H3a exists to bound — went uncapped.
+
+    Prefixing the payload argv with ``prlimit --as --fsize --core -- <argv>``
+    sets the limits in the child process via a single ``execve`` (no Python
+    ``preexec_fn`` — that is the fork-from-multithreaded deadlock that hung the
+    0.9.0 suite). When the prefix is wrapped BEFORE the bwrap argv it lands
+    INSIDE the sandbox (after bwrap's ``--``), so the limits are established on
+    the payload's own PID before it can allocate. ``prlimit`` unprivileged can
+    only LOWER limits, matching the never-raise contract. ``prlimit`` is bound
+    read-only into the sandbox by ``--ro-bind / /``.
+
+    Belt-and-suspenders: the parent-side clamp stays (it still bounds the
+    direct child on the unsandboxed path and the monitor on the sandboxed
+    one); this prefix is the suspenders that actually reach the payload.
+    """
+    import shutil
+
+    prlimit_bin = shutil.which("prlimit")
+    if prlimit_bin is None:  # non-Linux / util-linux not installed
+        return []
+    # Single value sets both soft and hard; prlimit lowers only, unprivileged.
+    return [
+        prlimit_bin,
+        f"--as={_RUN_SHELL_RLIMIT_AS_BYTES}",
+        f"--fsize={_RUN_SHELL_RLIMIT_FSIZE_BYTES}",
+        "--core=0",
+        "--",
+    ]
+
+
 def _is_safe_relative_file_arg(arg: str) -> bool:
     """True iff ``arg`` is a relative path with no dotfile components
     and no traversal segments. Used to guard the file arguments to
@@ -1097,13 +1139,22 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
         from modulatio import sandbox as _sandbox
 
         run_env: dict[str, str] | None = None
-        run_argv = exec_argv
+        # H3a re-sweep: wrap the PAYLOAD argv in a prlimit prefix so the
+        # mem/disk/core caps are established on the payload's own PID at exec
+        # time. On the sandboxed path this prefix is built BEFORE bwrap so it
+        # lands INSIDE the sandbox (after `--`) and clamps the real payload —
+        # the parent-side _apply_rlimits_to_pid below only ever sees the bwrap
+        # MONITOR pid there, which forks the payload AFTER and so never inherits
+        # the caps. Keep exec_argv un-wrapped for the FileNotFoundError message
+        # (it reports the real missing binary, not "prlimit").
+        _payload_argv = _prlimit_wrapper_prefix() + list(exec_argv)
+        run_argv = _payload_argv
         _profile = _sandbox.current_profile()
         if _sandbox.is_bypass_requested() or _profile == "off":
             pass  # explicit opt-out (UNSAFE env or profile=off), run as-is
         elif _sandbox.is_sandbox_available():
             run_argv, run_env = _sandbox.build_sandboxed_argv(
-                exec_argv, artifacts_root, profile=_profile,
+                _payload_argv, artifacts_root, profile=_profile,
             )
         elif _sandbox.is_sandbox_required():
             # H3c: operator demanded a working sandbox (MODULATIO_REQUIRE_SANDBOX=1)

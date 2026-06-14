@@ -407,7 +407,7 @@ def build_deliverable_digest(
 
 def _unit_headings(
     units: "list", artifacts_root: Path, *, separator: str = _DEFAULT_SEPARATOR,
-    base_total: int = 0,
+    base_total: int = 0, leading_block: bool = False,
 ) -> "list[str]":
     """The display heading of each unit that will actually land in the assembled
     body, in order (document family helper — reuses :func:`_first_heading`).
@@ -420,12 +420,16 @@ def _unit_headings(
     ``base_total`` seeds the running byte total with the framing
     (title_page/trailer) bytes the body already counts before the units, so the
     TOC's cap stops at the SAME unit the body does (otherwise the TOC could list a
-    final unit the body drops at the byte cap). Unreadable/missing/over-cap units
-    are skipped, never fabricated."""
+    final unit the body drops at the byte cap). ``leading_block`` says a non-empty
+    framing block (the title_page) precedes the units in the body — when True the
+    body separates the FIRST unit too, so the cap-math must charge a separator
+    before unit #1 (otherwise the TOC under-counts by one separator and lists a
+    final unit the body drops). Unreadable/missing/over-cap units are skipped,
+    never fabricated."""
     out: list[str] = []
     sep_bytes = len(separator.encode())
     total = base_total
-    emitted = False
+    emitted = leading_block
     for name in units or []:
         if not isinstance(name, str):
             continue
@@ -481,23 +485,61 @@ def _document_head(
         # into the body (not the missing/overflow/cap-truncated ones).
         sep = manifest.get("separator")
         sep = sep if isinstance(sep, str) else _DEFAULT_SEPARATOR
-        # Seed the cap math with the framing bytes the body counts before any unit
-        # (the title_page we're building here + the producer trailer), mirroring
-        # _assemble_document's framing_bytes — including its >cap zeroing — so the
-        # TOC drops the SAME trailing unit the body does at the byte cap.
-        title_page_text = "\n".join(lines)
+        # Seed the cap math with the framing bytes the BODY actually counts before any
+        # unit. The body's framing is the FINAL title_page (this title line + the whole
+        # rendered "## Contents" block) + the producer trailer + a leading separator —
+        # but the TOC block's own bytes depend on which units survive, which depends on
+        # the seed. The fixpoint iteration below resolves that circularity.
         trailer = manifest.get("trailer")
         trailer = trailer if isinstance(trailer, str) else ""
-        framing_bytes = len(title_page_text.encode()) + len(trailer.encode())
-        if framing_bytes > _MAX_TOTAL_BYTES:
-            framing_bytes = 0
-        headings = _unit_headings(
-            manifest.get("units", []), artifacts_root, separator=sep,
-            base_total=framing_bytes,
-        )
-        # #101 Part D: the TOC lists the NORMALIZED sequence, so it agrees with the body
-        # the assembler renumbers (both pass through the same document normalizer).
-        headings, _ = continuity_headings(headings, "document")
+
+        def _toc_head_bytes(hs: "list[str]") -> int:
+            # Byte size of the FULL title_page the body would count, given TOC headings.
+            head_lines = list(lines)
+            if hs:
+                if head_lines:
+                    head_lines.append("")
+                head_lines.append("## Contents")
+                head_lines.extend(f"{i}. {h}" for i, h in enumerate(hs, 1))
+            return len("\n".join(head_lines).encode())
+
+        def _framing(head_bytes: int) -> int:
+            fb = head_bytes + len(trailer.encode())
+            return 0 if fb > _MAX_TOTAL_BYTES else fb
+
+        units = manifest.get("units", [])
+        # The body always prepends this (non-empty) head as blocks[0], so it separates
+        # the first unit too — _unit_headings must charge that leading separator.
+        lead = bool(lines)
+
+        def _headings_for(seed_bytes: int) -> "list[str]":
+            hs = _unit_headings(
+                units, artifacts_root, separator=sep, leading_block=lead,
+                base_total=_framing(seed_bytes),
+            )
+            # #101 Part D: the TOC lists the NORMALIZED sequence, so it agrees with the
+            # body the assembler renumbers (both pass through the same normalizer).
+            return continuity_headings(hs, "document")[0]
+
+        # The body sizes its framing budget on the FINAL title_page (this head + its
+        # rendered TOC block), so the TOC's surviving-unit set and the head's byte size
+        # are mutually dependent: list fewer units → smaller head → more body budget →
+        # the body keeps a unit the TOC dropped (and vice-versa). Iterate toward a
+        # FIXPOINT (head we render == framing the body counts). In a NARROW band right at
+        # the byte cap the system is genuinely bistable (no exact fixpoint — the body's
+        # discrete cap boundary sits between the two head sizes); there we must pick the
+        # SAFE side, so we always seed with the LARGEST head seen — fewer TOC entries —
+        # which makes the TOC a SUBSET of the body's units (never a phantom entry the
+        # reader can't find). re-sweep: a single seed pass let TOC/body diverge by one
+        # unit at the cap. The seed is non-decreasing, so this converges in ≤ N steps.
+        seed = len("\n".join(lines).encode())  # title-only to start
+        headings = _headings_for(seed)
+        for _ in range(len(units) + 1):
+            next_seed = max(seed, _toc_head_bytes(headings))
+            if next_seed == seed:
+                break
+            seed = next_seed
+            headings = _headings_for(seed)
         if headings:
             if lines:
                 lines.append("")

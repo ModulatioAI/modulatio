@@ -474,8 +474,20 @@ def _load_notes(path: Path) -> list[InboxNote]:
 
 def _load_tombstoned_ids(path: Path) -> set[str]:
     """Return the set of note_ids that already have a tombstone row.
-    Used to suppress duplicate tombstones on repeated reads."""
-    return {row["note_id"] for row in _load_jsonl(path)}
+    Used to suppress duplicate tombstones on repeated reads.
+
+    re-sweep: per-row best-effort, mirroring :func:`_load_notes` and the
+    candidate readers. ``_load_jsonl`` only skips JSON-decode errors — a
+    WELL-FORMED row missing ``note_id`` (schema drift, a hand-edit, a
+    future tombstone format, a field rename across versions) would
+    otherwise KeyError here and silently disable EVERY inbox read /
+    enqueue for the recipient. Skip the bad row, keep the rest of the
+    tombstone set live."""
+    return {
+        row["note_id"]
+        for row in _load_jsonl(path)
+        if isinstance(row, dict) and row.get("note_id")
+    }
 
 
 def _live_notes(notes: Iterable[InboxNote], tombstoned: set[str]) -> list[InboxNote]:

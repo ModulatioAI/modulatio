@@ -81,11 +81,20 @@ class Authorization:
     (tomorrow UTC midnight) — fed into the BLOCKER ticket the
     orchestrator opens so #7e's auto-resume picks it up. ``reason``
     is a short human-readable explanation for the ticket body / audit
-    trail."""
+    trail.
+
+    ``idempotent_reuse`` (re-sweep MEDIUM/cost): set True only on the metered
+    idempotent-replay branch — the SAME (cost_class, task, key) call already
+    authorized today, allowed-but-not-re-charged. It is a STRUCTURED signal so
+    the tool runner can short-circuit the provider re-invoke (reuse the prior
+    result) instead of paying again, replacing the fragile ``"idempotent" in
+    reason`` substring contract. Defaults False to keep every existing caller
+    and the ``authorize_escalation`` path back-compatible."""
 
     allowed: bool
     refresh_at: datetime | None
     reason: str
+    idempotent_reuse: bool = False
 
 
 def _config_path(project_code: str) -> Path:
@@ -539,10 +548,16 @@ def authorize_metered_tool(
             project_code, cost_class, task_id, idempotency_key
         )
         if key_seen:
+            # re-sweep MEDIUM/cost: idempotent replay stays ALLOW-not-re-charged
+            # (the contract — same call adds no ledger entry, so it can never
+            # spend past a cap). We flag it structurally so the runner can skip
+            # the provider re-invoke; the per-task cap still bounds DISTINCT
+            # calls below (an identical repeat is not a distinct call).
             return Authorization(
                 allowed=True,
                 refresh_at=None,
                 reason=f"metered tool {tool_name!r}: idempotent re-use (not re-charged)",
+                idempotent_reuse=True,
             )
         if task_count >= per_task_cap:
             return Authorization(

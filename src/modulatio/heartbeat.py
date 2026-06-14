@@ -69,15 +69,28 @@ def _output_dir() -> Path:
 # partial/empty JSON file and silently lose every queued task.
 #
 # `_queue_lock` (an in-process RLock) only serializes threads WITHIN one
-# process. The select-and-claim in `claim_next_pending` ALSO has to be
-# exclusive ACROSS processes — a daemon tick and a separate `modulatio
-# heartbeat run-once` CLI invocation are distinct OS processes sharing the
-# same on-disk queue, and an RLock cannot see across that boundary. For the
-# claim we additionally hold a POSIX `flock` on a sidecar lock file, which
-# attaches to the open file description and therefore serializes across both
-# threads and processes. This mirrors the comptroller-ledger / compaction
-# flock idiom already used elsewhere in the engine.
+# process. EVERY read-modify-write of the queue ALSO has to be exclusive
+# ACROSS processes — a daemon tick and a separate `modulatio heartbeat
+# run-once` CLI invocation are distinct OS processes sharing the same
+# on-disk queue, and an RLock cannot see across that boundary. So every
+# load→mutate→save mutator (add/update/finalize/requeue/cancel/clear/
+# recover_stale AND the select-and-claim) holds a POSIX `flock` on a sidecar
+# lock file, which attaches to the open file description and therefore
+# serializes across both threads and processes. Holding it only around the
+# claim (as an earlier revision did) left every OTHER mutator able to clobber
+# a concurrent process's update (lost update) and to publish a torn file via
+# a shared tmp (see `_save_queue`). This mirrors the comptroller-ledger /
+# compaction flock idiom already used elsewhere in the engine.
 _queue_lock = threading.RLock()
+
+# Per-PROCESS reentrancy depth for the cross-process flock. A second
+# `flock(LOCK_EX)` on a *different* fd within the SAME process blocks (it does
+# not see the process already holds the lock), so nested mutators (e.g.
+# `cancel_task`→`update_task`) would self-deadlock if each opened its own fd.
+# We instead open+lock the fd ONCE at the outermost acquisition and reuse it
+# for inner ones, guarded by `_queue_lock` (an RLock, so reentrant per thread).
+_flock_depth = 0
+_flock_fd: Optional[int] = None
 
 
 def _claim_lock_file() -> Path:
@@ -86,29 +99,44 @@ def _claim_lock_file() -> Path:
 
 @contextlib.contextmanager
 def _cross_process_claim_lock() -> Iterator[None]:
-    """Hold an exclusive POSIX ``flock`` across the select-and-claim window.
+    """Hold an exclusive POSIX ``flock`` across a queue read-modify-write.
 
-    A fresh fd is opened per acquisition so the exclusive lock serializes
-    across both threads and processes (``flock`` attaches to the open file
-    description, not the process). POSIX-only: when ``fcntl`` is unavailable
-    (Windows) the lock is a no-op — the in-process ``_queue_lock`` still
-    serializes the single-process case (mirrors the compaction-lock posture).
+    The exclusive lock serializes across both threads and processes (``flock``
+    attaches to the open file description, not the process). It is REENTRANT
+    within a process: nested acquisitions (a locked mutator calling another)
+    reuse the single locked fd via a depth counter rather than opening a new fd
+    — a new-fd `flock(LOCK_EX)` would block against the process's own held lock
+    and self-deadlock. POSIX-only: when ``fcntl`` is unavailable (Windows) the
+    lock is a no-op — the in-process ``_queue_lock`` still serializes the
+    single-process case (mirrors the compaction-lock posture).
     """
     if fcntl is None:  # pragma: no cover — non-POSIX no-op
         yield
         return
-    lock_path = _claim_lock_file()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
+    global _flock_depth, _flock_fd
+    # `_queue_lock` (RLock) guards the depth/fd bookkeeping so it is consistent
+    # across threads; it is reentrant, so holding it here AND inside the wrapped
+    # mutator is fine.
+    with _queue_lock:
+        if _flock_depth == 0:
+            lock_path = _claim_lock_file()
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            _flock_fd = fd
+        _flock_depth += 1
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:  # pragma: no cover — best-effort release
-            pass
-        os.close(fd)
+            yield
+        finally:
+            _flock_depth -= 1
+            if _flock_depth == 0 and _flock_fd is not None:
+                fd = _flock_fd
+                _flock_fd = None
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:  # pragma: no cover — best-effort release
+                    pass
+                os.close(fd)
 
 
 def _load_queue() -> list:
@@ -125,10 +153,23 @@ def _load_queue() -> list:
 def _save_queue(tasks: list) -> None:
     qf = _queue_file()
     qf.parent.mkdir(parents=True, exist_ok=True)
-    tmp = qf.with_suffix(".json.tmp")
+    # Per-PROCESS-unique tmp name. A single shared `.json.tmp` lets two
+    # processes write the SAME tmp path concurrently; one's `tmp.replace(qf)`
+    # then publishes the OTHER's half-written bytes (a torn/partial queue) even
+    # though rename itself is atomic. Tagging the tmp with pid + a random token
+    # gives each writer its own tmp file, so the atomic rename only ever
+    # publishes bytes this process fully wrote. (The cross-process flock now
+    # serializes the RMW too, but a unique tmp is the belt to that suspenders.)
+    tmp = qf.with_suffix(f".json.tmp.{os.getpid()}.{secrets.token_hex(4)}")
     with _queue_lock:
-        tmp.write_text(json.dumps(tasks, indent=2, default=str), encoding="utf-8")
-        tmp.replace(qf)
+        try:
+            tmp.write_text(json.dumps(tasks, indent=2, default=str), encoding="utf-8")
+            tmp.replace(qf)
+        finally:
+            # If replace() failed, don't leak the tmp.
+            with contextlib.suppress(OSError):
+                if tmp.exists():
+                    tmp.unlink()
 
 
 # === Time helpers ===
@@ -198,7 +239,7 @@ def add_task(
     # lowered form must still match the project-code regex. Anything
     # not str / containing path-traversal / shell-hostile chars raises.
     validated_code = vault.validate_project_code(project_code.lower())
-    with _queue_lock:
+    with _cross_process_claim_lock(), _queue_lock:
         tasks = _load_queue()
         task = {
             "id": _new_id(),
@@ -244,7 +285,7 @@ def list_tasks(*, status: Optional[str] = None, project_code: Optional[str] = No
 
 
 def update_task(task_id: str, **updates) -> Optional[dict]:
-    with _queue_lock:
+    with _cross_process_claim_lock(), _queue_lock:
         tasks = _load_queue()
         for t in tasks:
             if t.get("id") == task_id:
@@ -268,7 +309,7 @@ def finalize_task(task_id: str, **updates) -> Optional[dict]:
     Returns the task (updated, or left as-is if already cancelled), or None if
     the task no longer exists.
     """
-    with _queue_lock:
+    with _cross_process_claim_lock(), _queue_lock:
         tasks = _load_queue()
         for t in tasks:
             if t.get("id") == task_id:
@@ -294,7 +335,7 @@ def requeue_task(task_id: str, **updates) -> Optional[dict]:
     operator's intent wins the race (mirrors ``finalize_task``). Returns the task
     (re-armed, or left cancelled), or None if it no longer exists.
     """
-    with _queue_lock:
+    with _cross_process_claim_lock(), _queue_lock:
         tasks = _load_queue()
         for t in tasks:
             if t.get("id") == task_id:
@@ -314,7 +355,7 @@ def cancel_task(task_id: str) -> bool:
 
 def clear_done() -> int:
     """Remove completed/failed/cancelled tasks. Returns count removed."""
-    with _queue_lock:
+    with _cross_process_claim_lock(), _queue_lock:
         tasks = _load_queue()
         before = len(tasks)
         tasks = [t for t in tasks if t.get("status") in ("pending", "running")]
@@ -330,7 +371,7 @@ def recover_stale_tasks(*, max_age_minutes: int = DEFAULT_STALE_MINUTES) -> int:
     Called automatically by the Heartbeat loop on tick + on startup. Safe
     to invoke manually from CLI for diagnostics.
     """
-    with _queue_lock:
+    with _cross_process_claim_lock(), _queue_lock:
         tasks = _load_queue()
         changed = 0
         now = datetime.now(timezone.utc)

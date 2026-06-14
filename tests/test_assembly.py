@@ -781,7 +781,17 @@ def test_framing_toc_excludes_oversized_unit(tmp_path, monkeypatch):
 
 def test_framing_toc_truncates_at_total_cap_like_body(tmp_path, monkeypatch):
     """When the total-byte cap stops the body before the last units, the TOC stops at
-    the SAME point — it never lists units the cap truncated out of the body."""
+    the SAME point — it never lists units the cap truncated out of the body.
+
+    re-sweep (#101/0.9.0, assembly.py:491): the TOC's cap-math must seed with the
+    framing the BODY actually counts — the FULL title_page (incl. the rendered TOC
+    block) plus a leading separator before unit #1 — not the title line alone. The
+    body fail-CLOSES content to empty once any unit is dropped at the cap, so the
+    honest comparison is against ``units_used`` (the body's accumulated set, which
+    survives the fail-close), and the TOC must be a SUBSET of it — never a phantom
+    entry the reader can't find. (The old assertion ``"Alpha" in tp`` baked in the
+    very divergence this finding fixes: the TOC listed Alpha while the body kept
+    nothing.)"""
     monkeypatch.setattr(assembly, "_MAX_TOTAL_BYTES", 40)
     _units(tmp_path, **{
         "a.md": "# Alpha\n\n" + ("x" * 15),
@@ -792,12 +802,14 @@ def test_framing_toc_truncates_at_total_cap_like_body(tmp_path, monkeypatch):
         {"units": ["a.md", "b.md", "c.md"], "separator": "\n"}, tmp_path,
         "document", title="Anthology", required_structure=("title", "toc"))
     tp = m["title_page"]
-    assert "Alpha" in tp and "Gamma" not in tp
+    assert "Gamma" not in tp   # the cap-dropped unit is never listed
     r = assembly.assemble(m, tmp_path)
     assert "# Gamma" not in r.content
-    # The body kept Alpha (and possibly Beta); the TOC lists exactly those, not Gamma.
-    body_has_beta = "# Beta" in r.content
-    assert ("Beta" in tp) == body_has_beta
+    # The TOC lists only units that survive into the body's accumulation (units_used),
+    # never a unit beyond where the cap stops it.
+    toc_listed = {h for h in ("Alpha", "Beta", "Gamma") if h in tp}
+    body_units = {assembly._first_heading((tmp_path / u).read_text()) for u in r.units_used}
+    assert toc_listed <= body_units
 
 
 def test_document_digest_fail_open_on_missing_unit(tmp_path):

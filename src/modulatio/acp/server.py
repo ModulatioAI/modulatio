@@ -15,6 +15,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import stat
 import threading
 from pathlib import Path
 from typing import Callable
@@ -67,6 +68,22 @@ def _validate_attachment_path(raw_path: str) -> Path:
         if any(part.startswith(".") for part in rel.parts):
             raise ValueError(
                 f"attachment path rejected (dotfile/secret component): {raw_path!r}"
+            )
+        # re-sweep (LOW/resource-leak): confinement + dotfile checks pass a FIFO
+        # / character device sitting inside an allowed root. build_attachment
+        # then stat()s it (size 0) and read_text()s it — an open/read on a named
+        # pipe or device BLOCKS the worker thread indefinitely. Require a regular
+        # file so only ordinary files are ever opened. stat() (follows symlinks,
+        # but resolved is already symlink-free) so a broken link surfaces here.
+        try:
+            mode = resolved.stat().st_mode
+        except OSError as exc:
+            raise ValueError(
+                f"attachment path unreadable: {raw_path!r}") from exc
+        if not stat.S_ISREG(mode):
+            raise ValueError(
+                f"attachment path is not a regular file (FIFO/device/dir "
+                f"rejected): {raw_path!r}"
             )
         return resolved
     raise ValueError(

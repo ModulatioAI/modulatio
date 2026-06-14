@@ -393,9 +393,9 @@ def prune_messages_sliding_window(
 
         # Is the raw already on disk? Either the tool loop persisted it (the
         # inline content carries a persist marker) or a file already exists.
-        already_persisted = content.startswith("[truncated:") or content.startswith(
-            "[summarized:"
-        )
+        # re-sweep finding 1: `[summarized:` content already `continue`d above,
+        # so `[truncated:` is the only persist marker reachable here.
+        already_persisted = content.startswith("[truncated:")
         if not already_persisted and tool_calls_dir is not None:
             try:
                 candidate = (Path(tool_calls_dir) / f"{call_id}.txt").resolve()

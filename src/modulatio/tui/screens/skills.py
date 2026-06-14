@@ -190,7 +190,11 @@ class SkillsScreen(Vertical):
         try:
             roster.save(agent, code)
         except Exception as exc:  # noqa: BLE001 — surface any persistence error
-            status.update(f"Error saving: {type(exc).__name__}: {exc}")
+            # re-sweep: escape exc text — an un-escaped [/] in the message
+            # would raise MarkupError inside the error handler itself.
+            status.update(
+                f"Error saving: {type(exc).__name__}: {escape(str(exc))}"
+            )
             return
         self._hide_bind_panel()
         self._refresh()

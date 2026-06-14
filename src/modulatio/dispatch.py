@@ -250,7 +250,11 @@ class WaveSchedule:
     - ``deferred``: ``(task_id, blocking_agent_id, agent_capacity_cap)`` —
       DEFERRED_CAPACITY tasks, retry next wave. Distinct from a roster gap
       (Lovecraft round-1: keep capacity contention vs capability gap
-      separate for later tuning).
+      separate for later tuning). When the run-wide GLOBAL in-flight cap is
+      the limiter (not any one producer's per-agent capacity), the blocking
+      fields are a sentinel ``("", 0)`` rather than a specific producer —
+      the global cap, not that producer, is what blocked the task, and it
+      may well have a free per-agent slot.
     - ``gaps``: ``task_id``s with ROSTER_GAP (no qualifying agent).
     """
     assignments: dict[str, str] = field(default_factory=dict)
@@ -306,8 +310,12 @@ def schedule_wave(
             gaps.append(task.id)  # no producer exists at all — setup gap
             continue
         if global_remaining is not None and global_remaining <= 0:
-            blocking = candidates[0]
-            deferred.append((task.id, blocking.id, blocking.capacity_cap))
+            # The run-wide global in-flight cap is the limiter, NOT any one
+            # producer's per-agent capacity — candidates[0] may still have a
+            # free slot. Record a sentinel blocking reason ("", 0) so the
+            # deferral's diagnostic metadata names the global cap, not a
+            # producer that isn't actually saturated (0.9.0 finding).
+            deferred.append((task.id, "", 0))
             continue
         # Honor a continuity hint with free capacity, else take the
         # best-ranked producer that still has a slot this wave. Walking the

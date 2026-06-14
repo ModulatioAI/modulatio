@@ -1138,10 +1138,17 @@ def run_llm_with_tools(
                             # Summarizer failed — TRUNCATE, don't keep verbatim:
                             # verbatim accumulation is exactly what storms the
                             # loop. Raw is on disk for read_tool_result.
+                            # re-sweep (Finding 2): budget the kept head with the
+                            # MAIN model's tokenizer (``model``), not the
+                            # summarizer's (``count_model``). The truncated text
+                            # lands in the main model's context, so the head must
+                            # be sized against the tokenizer that will carry it —
+                            # a denser main-model tokenizer would otherwise let
+                            # the head overshoot its real context budget.
                             conv_content = _tool_sum.truncate_tool_result(
                                 result, call_id=call.id,
                                 max_tokens=ts_config.threshold_tokens,
-                                model=count_model,
+                                model=model,
                             )
                     else:
                         # No summarizer configured → model-free truncation so a
@@ -1197,6 +1204,10 @@ def litellm_chat_runner(
 
     from modulatio import model_presets
     presets = model_presets.load_presets()
+    # Alert/refresh accounting mirrors litellm_runner: the preset key when known
+    # (None when a raw id was used → alerts key by the raw id, fine since that
+    # path is interactive-only).
+    provider_id_for_alerts = model if model in presets else None
     endpoint = (presets.get(model, {}) or {}).get("endpoint", "chat")
     if endpoint == "responses":
         raise NotImplementedError(
@@ -1210,12 +1221,18 @@ def litellm_chat_runner(
         tool_choice: "dict | str | None" = None,
     ) -> ChatResponse:
         from litellm import completion
-        from litellm.exceptions import RateLimitError
+        from litellm.exceptions import AuthenticationError, RateLimitError
 
-        def _call():
+        def _call(api_key_override: str | None = None):
             ck = dict(kwargs)
             if pool_base is not None:  # draw ONLY from the unpinned pool; raise
                 ck["api_key"] = _pooled_call_key(pool_base, model)  # if empty
+            elif api_key_override is not None:
+                # Auth-refresh retry: use the REFRESHED token directly (xAI's
+                # refresh is in-memory, a disk re-resolve would read the STALE
+                # one). A pooled preset re-draws above instead (the refreshed
+                # base var may be PINNED), matching litellm_runner.
+                ck["api_key"] = api_key_override
             if tools:
                 ck["tools"] = tools
             # Forced tool_choice (e.g. emit_state for Leader-reflect) makes a
@@ -1227,6 +1244,21 @@ def litellm_chat_runner(
 
         try:
             resp = _call()
+        except AuthenticationError as e:
+            # re-sweep (Finding 1): the tool-loop is the PRIMARY producer path,
+            # yet it had NO 401 recovery — an expired OAuth access token (they
+            # die ~24h) killed every tool-using producer overnight while the
+            # single-shot litellm_runner self-healed. Mirror its refresh-once /
+            # fire-alert / clear-alert dance here.
+            new_token = _try_refresh_for(model)
+            if new_token is None:
+                _fire_auth_alert(model, str(e), provider_id_for_alerts)
+                raise
+            try:
+                resp = _call(api_key_override=new_token)
+            except AuthenticationError as e2:
+                _fire_auth_alert(model, str(e2), provider_id_for_alerts)
+                raise
         except RateLimitError as initial_err:
             # Key-pool failover on the tool-loop path: rotate + retry, bounded.
             if _pool_count(pool_base) <= 1:
@@ -1251,6 +1283,10 @@ def litellm_chat_runner(
                     continue
             if resp is None:
                 raise last_err
+        # re-sweep (Finding 1): clear any prior auth alert on a successful
+        # dispatch so the banner self-heals once creds are good again — same
+        # contract as litellm_runner.
+        _clear_auth_alert(provider_id_for_alerts)
         # Same usage-tracking seam as litellm_runner. Tool-using skills
         # (QC's code-review with run_shell, future agentic loops) loop
         # multiple completions per task — each iteration's tokens +

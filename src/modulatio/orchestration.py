@@ -777,10 +777,20 @@ def _format_kickoff_attachments(attachments: list) -> str:
                 f"— vision content blocks for kickoff are a future slice"
             )
         else:  # document
+            # re-sweep #3: a path-only document (content=None) must not inline as an
+            # empty block — the Leader would see the filename but plan blind. Mirror
+            # _pin_attachments' resilience: best-effort read att.path before falling
+            # back to ''. A binary file fails to decode (UnicodeDecodeError <: ValueError).
+            body = att.content
+            if body is None and getattr(att, "path", None):
+                try:
+                    body = Path(att.path).read_text(encoding="utf-8", errors="replace")
+                except (OSError, ValueError):
+                    body = None
             parts.append(f"## Attached document: `{att.name}`")
             parts.append("")
             parts.append("```")
-            parts.append(att.content or "")
+            parts.append(body or "")
             parts.append("```")
     return "\n".join(parts)
 
@@ -5745,14 +5755,23 @@ class Orchestrator:
         token_count) as the PASSED version so QC re-affirms it. #86."""
         kept_bytes = path.read_bytes()
         kept = kept_bytes.decode(errors="replace")
+        # re-sweep #6: the audit rationale must report the TOKEN measure the gate
+        # (_regression_blocked) actually decides on, not whitespace word-count. A
+        # compact/minified data/code deliverable has near-zero whitespace, so .split()
+        # logged "1 → 1 tokens" while hundreds of real tokens shrank — making the audit
+        # read like nothing happened. (The returned size stays the word-count for
+        # back-compat with _producer_execute's existing consumers/tests.)
+        model = self.project.leader_model
+        kept_tokens = _tool_sum_module.count_tokens(model, text=kept)
+        new_tokens = _tool_sum_module.count_tokens(model, text=new_content)
         task.transitions.append(StateTransition(
             from_state=task.status.value,
             to_state=task.status.value,
             actor="orchestrator",
             rationale=(
                 f"no-regress (#86): refused a generate write shrinking the "
-                f"QC-passed deliverable {len(kept.split())} → "
-                f"{len(new_content.split())} tokens; kept the passed version"
+                f"QC-passed deliverable {kept_tokens} → "
+                f"{new_tokens} tokens; kept the passed version"
             ),
         ))
         self._record_artifact_write(path)
@@ -6296,13 +6315,20 @@ class Orchestrator:
         domain_standards = standards.load(task.artifact_kind, project_code=self.project.code)
         history_hits: list[tuple[qc_history.VerdictRecord, float]] = []
         if self.qc_history_embedder is not None:
-            history_hits = qc_history.similar_verdicts(
-                task.artifact_kind,
-                self.project.code,
-                artifact_body=body,
-                embedder=self.qc_history_embedder,
-                k=self.qc_history_top_k,
-            )
+            # re-sweep #2: advisory precedent must NEVER fail or retry a task.
+            # similar_verdicts can raise (embed_text on a pathological body, or a
+            # lancedb error during the destructive _ensure_verdict_vectors rebuild);
+            # mirror _recall_team_memory's defensive contract and fall back to none.
+            try:
+                history_hits = qc_history.similar_verdicts(
+                    task.artifact_kind,
+                    self.project.code,
+                    artifact_body=body,
+                    embedder=self.qc_history_embedder,
+                    k=self.qc_history_top_k,
+                )
+            except Exception:  # noqa: BLE001 — advisory-only; never block the review
+                history_hits = []
         standing_notes_raw = qc_notes.load_standing_notes(
             task.artifact_kind, self.project.code,
         )
@@ -7552,8 +7578,23 @@ class Orchestrator:
                     and isinstance(new_skills, list)
                     and all(isinstance(s, str) for s in new_skills)
                 ):
-                    t.required_skills = new_skills
-                    changed.append("required_skills")
+                    # re-sweep #8: _select_assembler_skill canonicalization and the
+                    # #73 evidence-family normalization run ONCE in _plan_tasks. A
+                    # reflect 'revise' that introduces/swaps an ASSEMBLER skill would
+                    # leave the executed assembly route diverged from the already-built
+                    # (.md-normalized) evidence — and that normalization is one-way, so
+                    # we can't re-derive the binary-extension evidence here. Forbid an
+                    # assembler-skill CHANGE (mirrors the operator-present authority lock
+                    # above); non-assembler skill revisions still apply, then re-run
+                    # _select_assembler_skill so canonicalization stays consistent.
+                    cur_assemblers = set(t.required_skills) & _ASSEMBLER_SKILLS
+                    new_assemblers = set(new_skills) & _ASSEMBLER_SKILLS
+                    if new_assemblers != cur_assemblers:
+                        pass  # assembler-skill change rejected — keep planned skills
+                    else:
+                        t.required_skills = new_skills
+                        _select_assembler_skill([t], self.project.code)
+                        changed.append("required_skills")
                 if changed:
                     t.transitions.append(StateTransition(
                         from_state=t.status.value,
@@ -8581,15 +8622,21 @@ class Orchestrator:
             * budget available this window → auto-redo (reset tasks,
               re-execute, recursively re-verify). No ticket fires on
               this path; Leader's rationale feeds corrective notes.
-            * budget exhausted → BLOCKER ticket with refresh_at set to
-              tomorrow-midnight-UTC. Goal stays IN_PROGRESS so the
-              auto-resume path picks it up when the budget refreshes.
+            * budget exhausted → ship-with-reservations and COMPLETE the
+              goal (the final ``else`` below). The run is never blocked on
+              the Leader's reservations; the human reads them in the
+              Product Quality Report and decides what to double-check. No
+              retry-budget BLOCKER fires anymore (re-sweep #4: the old
+              budget-exhausted ticket + cross-day auto-resume-from-retry-
+              budget path is retired — ``_open_budget_exhausted_ticket`` is
+              now dead in production, retained only for its plain-English
+              ticket-body contract test).
 
         Ticket semantics (user-defined): MINOR = work continues watch;
         CRITICAL = might need intervention, continuing for now; BLOCKER
-        = stop, human required. BLOCKER is reserved for exhausted
-        budgets (both retry-budget here and cost-budget later when
-        Comptroller lands).
+        = stop, human required. The remaining live BLOCKER path is the
+        Comptroller escalation-budget deny (``_open_budget_ticket``),
+        which DOES carry refresh_at + auto-resume.
         """
         self._emit_activity(
             role="leader",
@@ -9748,6 +9795,11 @@ class Orchestrator:
                     f"higher-tier agent to the roster.\n"
                 ),
                 affected_task_id=task.id,
+                # re-sweep #1: also bind the goal so _auto_resume_refreshable_goals
+                # (which skips affected_goal_id-only tickets) can actually fulfil the
+                # ticket's "next kickoff past refresh auto-resumes" promise — without
+                # it the BLOCKER's refresh_at was dead and recovery never fired.
+                affected_goal_id=task.goal_id,
                 actor="comptroller",
             )
             ticket.refresh_at = refresh_at
@@ -10344,7 +10396,7 @@ class Orchestrator:
         # The repo is the SHARED library (fail) or the PROJECT-LOCAL skills dir (win).
         skill_root = (
             (project_dir(project_code) / "skills")
-            if project_code else skills._SKILLS_ROOT
+            if project_code else skills._skills_root()
         )
         skill_path = skill_root / f"{new_skill.name}.md"
         skill_git.ensure_repo(skill_root)
@@ -11115,6 +11167,21 @@ class Orchestrator:
 
             goal = store.get_goal(self.project.code, ticket.affected_goal_id, run_id=self.project.run_id)
             if goal is None or goal.status in (GoalStatus.COMPLETED, GoalStatus.ABANDONED):
+                # re-sweep #5: the goal already terminalized (e.g. a sibling/duplicate
+                # ticket for the same goal recovered it first, or it completed in the
+                # producing run). Retire this stale ticket instead of leaving it OPEN
+                # forever with a past refresh_at — no lane else reprocesses it.
+                if goal is not None:
+                    store.update_ticket_status(
+                        self.project.code,
+                        ticket.id,
+                        TicketStatus.RESOLVED,
+                        actor="leader",
+                        rationale=(
+                            f"goal already {goal.status.value} — stale refresh ticket retired"
+                        ),
+                        run_id=self.project.run_id,
+                    )
                 continue
 
             # Load the goal's tasks — reset to PENDING for a fresh run.

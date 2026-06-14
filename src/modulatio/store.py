@@ -89,7 +89,24 @@ def _is_quarantined(path: Path) -> bool:
     return ".broken" in path.suffixes or path.name.endswith(".broken.md")
 
 
-def _quarantine_corrupt(path: Path, exc: Exception) -> None:
+def _parse_entity(text: str, model: type[BaseModel]) -> BaseModel:
+    """Turn an entity file's text into a validated model (or raise).
+
+    Factored out of :func:`_read_entity` so :func:`_quarantine_corrupt` can
+    cheaply re-parse the on-disk bytes immediately before renaming, to confirm
+    the file is *still* corrupt and hasn't been replaced by a concurrent valid
+    write in the meantime. Raises members of ``_PARSE_ERRORS`` on bad bytes.
+    """
+    text = _normalize_entity_text(text)
+    meta, body = _split_frontmatter(text)
+    body, transitions = _extract_transitions(body)
+    data = {**meta, "transitions": [t.model_dump() for t in transitions]}
+    return model.model_validate(data)
+
+
+def _quarantine_corrupt(
+    path: Path, exc: Exception, model: type[BaseModel] | None = None
+) -> None:
     """Move a corrupt entity file aside so it stops bricking the read path.
 
     The file is renamed to ``<name>.broken.md`` (preserving the operator's
@@ -97,7 +114,35 @@ def _quarantine_corrupt(path: Path, exc: Exception) -> None:
     prior ``.broken.md`` already exists or the rename fails (read-only FS,
     file vanished), we swallow the secondary error — the primary goal is
     that the *read* degrades to "missing", which it does regardless.
+
+    Re-sweep (lock-free read vs. locked writer race): the reader that decided
+    to quarantine read the bytes, parse-failed, then reaches here — but the
+    decision and the ``rename`` are NOT atomic and run WITHOUT ``_store_lock``,
+    while a concurrent ``_write_entity`` finishes with an atomic
+    ``os.replace(tmp, path)``. If a writer replaced the corrupt file with a
+    VALID one in that window, renaming it aside would quarantine a freshly-fixed
+    record and make it read as missing. So, with the model in hand, re-read and
+    re-parse the file here; if it now parses cleanly the corruption is gone —
+    skip the rename and leave the good bytes in place. IDs are engine-generated
+    and corruption is a during-write transient, so a clean re-parse means the
+    writer won and there is nothing to quarantine.
     """
+    if model is not None:
+        try:
+            _parse_entity(path.read_text(encoding="utf-8"), model)
+        except _PARSE_ERRORS:
+            pass  # still corrupt — fall through and quarantine
+        except OSError:
+            pass  # unreadable now (vanished/perm) — let the rename below decide
+        else:
+            # re-sweep: a writer replaced the corrupt bytes with a valid record
+            # between our parse-fail and now; don't rename the good file aside.
+            _log.info(
+                "entity file %s parses cleanly on re-sweep; a concurrent write "
+                "resolved the corruption, not quarantining",
+                path,
+            )
+            return
     _log.warning(
         "corrupt entity file %s (%s: %s); quarantining as .broken.md and "
         "treating as missing",
@@ -199,16 +244,14 @@ def _read_entity(path: Path, model: type[BaseModel]) -> BaseModel | None:
         # (ASCII under a bare C/POSIX cron/systemd env), so a well-formed utf-8
         # entity carrying any non-ASCII byte (em-dash, accented agent name,
         # curly quote) would falsely UnicodeDecodeError and be quarantined.
-        text = _normalize_entity_text(path.read_text(encoding="utf-8"))
-        meta, body = _split_frontmatter(text)
-        body, transitions = _extract_transitions(body)
-        data = {**meta, "transitions": [t.model_dump() for t in transitions]}
-        entity = model.model_validate(data)
+        entity = _parse_entity(path.read_text(encoding="utf-8"), model)
     except _PARSE_ERRORS as exc:
         # One corrupt file must not take down the whole listing / read.
         # Quarantine it and degrade to "missing" — callers already treat
         # a None return (and list_* already skip None) as "not there".
-        _quarantine_corrupt(path, exc)
+        # Pass ``model`` so the quarantine can re-sweep and skip the rename if
+        # a concurrent valid write has since replaced the corrupt bytes.
+        _quarantine_corrupt(path, exc, model)
         return None
     except OSError as exc:
         # Transient / permission read failure — NOT corruption. Degrade to
