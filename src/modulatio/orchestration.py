@@ -8875,6 +8875,49 @@ class Orchestrator:
                     "suggestion": suggestion,
                 })
 
+    def _settle_zero_completed(
+        self,
+        goal: "Goal",
+        summary: "RunSummary",
+        *,
+        concern: str,
+        rationale: str,
+    ) -> None:
+        """Drive a goal to a terminal state when a redo/resume pass produced
+        ZERO COMPLETED tasks.
+
+        Re-verify is skipped (nothing for the Leader to judge), but the goal must
+        NOT be left permanently IN_PROGRESS — without this it strands forever:
+        the driving ticket is already closed/resolved, the wind-down loop won't
+        re-pick it, and the next kickoff's auto-resume only scans OPEN tickets,
+        so only an F8 teardown ever finalizes it (Opus R2 H1, cross-verified by
+        Nemo + MiniMax). Settle it COMPLETED with a PQR reservation so it
+        surfaces for human review instead of silently hanging the run. No-op if
+        already terminal. Shared by all three redo lanes (leader auto-redo,
+        decline reexecute, budget auto-resume) so the wording + the PQR
+        reservation stay aligned; the ``concern``/``rationale`` carry the
+        lane-specific language so PQR/audit can tell them apart."""
+        if goal.status in (GoalStatus.COMPLETED, GoalStatus.BLOCKED):
+            return
+        summary.recommendations.append({
+            "goal_id": goal.id,
+            "concern": concern,
+            "suggestion": "Human review REQUIRED before relying on this goal.",
+        })
+        goal.transitions.append(
+            StateTransition(
+                from_state=goal.status.value,
+                to_state=GoalStatus.COMPLETED.value,
+                actor="leader",
+                rationale=rationale,
+            )
+        )
+        goal.status = GoalStatus.COMPLETED
+        store.save_goal(self.project.code, goal, run_id=self.project.run_id)
+        self._emit_activity(
+            role="leader", phase="leader_verify_ended", agent_id="leader",
+        )
+
     # ── Leader auto-redo + budget-exhausted BLOCKER (slice #7e) ─────────
     def _leader_auto_redo(
         self,
@@ -9027,38 +9070,20 @@ class Orchestrator:
             # The redo produced ZERO completed tasks (every task landed
             # QC_REJECTED/BLOCKED again). Re-verify is skipped — there is nothing
             # for the Leader to judge — but the goal must STILL reach a terminal
-            # state. Without this it stays permanently IN_PROGRESS: the caller in
-            # _leader_verify_goal already returned right after dispatching us, so
-            # the COMPLETED transition there is never reached. Settle it here with
-            # a reservation so the goal terminates and surfaces in the PQR rather
-            # than silently hanging the run.
-            if goal.status not in (GoalStatus.COMPLETED, GoalStatus.BLOCKED):
-                summary.recommendations.append({
-                    "goal_id": goal.id,
-                    "concern": (
-                        "The Leader auto-redo produced no completed work (every "
-                        "task was rejected again). The goal is settled as-is; the "
-                        f"Leader's concern stands: {leader_rationale[:200]}"
-                    ),
-                    "suggestion": "Human review REQUIRED before relying on this goal.",
-                })
-                goal.transitions.append(
-                    StateTransition(
-                        from_state=goal.status.value,
-                        to_state=GoalStatus.COMPLETED.value,
-                        actor="leader",
-                        rationale=(
-                            "leader auto-redo settled: no task completed on the "
-                            f"redo pass | {leader_rationale[:160]} | report "
-                            f"{report_path.name}"
-                        ),
-                    )
-                )
-                goal.status = GoalStatus.COMPLETED
-                store.save_goal(self.project.code, goal, run_id=self.project.run_id)
-                self._emit_activity(
-                    role="leader", phase="leader_verify_ended", agent_id="leader",
-                )
+            # state (shared settle, used by all three redo lanes).
+            self._settle_zero_completed(
+                goal, summary,
+                concern=(
+                    "The Leader auto-redo produced no completed work (every "
+                    "task was rejected again). The goal is settled as-is; the "
+                    f"Leader's concern stands: {leader_rationale[:200]}"
+                ),
+                rationale=(
+                    "leader auto-redo settled: no task completed on the "
+                    f"redo pass | {leader_rationale[:160]} | report "
+                    f"{report_path.name}"
+                ),
+            )
 
     def _task_artifact_path(self, task: "Task") -> "Path | None":
         """The on-disk path of a task's produced artifact, via the two-tier
@@ -10584,12 +10609,32 @@ class Orchestrator:
         # Re-run the reopened tasks dependency-ordered (topo-sort + dep-gate),
         # still serially through _run_task_with_redo — the original redo
         # semantics, just no longer in arbitrary store-list order (re-filed #1).
-        self._run_reopened_tasks(goal, pending, summary)
+        # Pass the FULL task list (not just the PENDING subset) so the dep-gate
+        # has complete context — _run_reopened_tasks only executes the runnable
+        # (reopened) ones and treats already-COMPLETED deps as satisfied
+        # (Opus R2 MED: PENDING-subset defeated dep ordering).
+        self._run_reopened_tasks(goal, tasks, summary)
 
         # Reload tasks to reflect status changes from execution.
         tasks = store.list_tasks(self.project.code, goal_id=goal.id, run_id=self.project.run_id)
         if any(t.status == TaskStatus.COMPLETED for t in tasks):
             self._leader_verify_goal(goal, tasks, summary)
+        else:
+            # Zero-completed decline redo — settle terminal with a reservation so
+            # the goal can't strand IN_PROGRESS forever (Opus R2 H1). Decline-
+            # specific wording so PQR/audit distinguishes it from auto-redo.
+            self._settle_zero_completed(
+                goal, summary,
+                concern=(
+                    "An operator-declined goal was re-executed and produced no "
+                    "completed work (every reopened task was rejected again). "
+                    "Settled as-is."
+                ),
+                rationale=(
+                    "decline reexecute settled: no task completed on the "
+                    "operator-declined redo pass"
+                ),
+            )
         store.save_goal(self.project.code, goal, run_id=self.project.run_id)
 
     # ── Auto-resume on budget refresh (slice #7e) ───────────────────────
@@ -10698,6 +10743,26 @@ class Orchestrator:
 
             if any(t.status == TaskStatus.COMPLETED for t in tasks):
                 self._leader_verify_goal(goal, tasks, summary)
+            else:
+                # Zero completed on the refreshed budget — settle terminal with a
+                # reservation. Without this the goal strands IN_PROGRESS forever
+                # AND the already-RESOLVED ticket is orphaned (no lane reprocesses
+                # it), silently killing the budget-refresh recovery path (Opus R2
+                # H1 sibling). The settle + PQR reservation is the surfacing, so
+                # the RESOLVED ticket is correctly terminal.
+                self._settle_zero_completed(
+                    goal, summary,
+                    concern=(
+                        f"Goal auto-resumed on budget refresh (ticket {ticket.id}) "
+                        "produced no completed work — every task failed again on "
+                        "the fresh budget. Settled as-is; budget-refresh recovery "
+                        "is exhausted for it."
+                    ),
+                    rationale=(
+                        "budget auto-resume settled: no task completed on the "
+                        f"refreshed-budget pass (ticket {ticket.id})"
+                    ),
+                )
             store.save_goal(self.project.code, goal, run_id=self.project.run_id)
 
     # ── §2: deliverable render lives in the ENGINE (every run path delivers) ──

@@ -422,3 +422,93 @@ def test_kickoff_intake_survives_corrupt_prior_state(project: Project, monkeypat
     summary = orch.kickoff("a brand new objective")
     assert decomposed.get("called"), "kickoff must reach decompose despite intake errors"
     assert any("could not read prior state" in e for e in summary.errors)
+
+
+# ── Opus R2 H1: zero-completed redo/resume lanes must settle, not strand ──────
+
+def test_settle_zero_completed_drives_goal_terminal_and_is_idempotent(project: Project):
+    """The shared settle helper drives a non-terminal goal to COMPLETED with a
+    PQR reservation, and is a no-op once the goal is already terminal."""
+    from modulatio.orchestration import RunSummary
+    orch = _orch(project)
+    goal = _make_goal(project.id)
+    goal.status = GoalStatus.IN_PROGRESS
+    summary = RunSummary(project=project)
+
+    orch._settle_zero_completed(
+        goal, summary, concern="no completed work on the redo", rationale="settled: zero",
+    )
+    assert goal.status == GoalStatus.COMPLETED
+    assert any("no completed work" in r.get("concern", "") for r in summary.recommendations)
+    assert any(t.to_state == GoalStatus.COMPLETED.value for t in goal.transitions)
+
+    # Idempotent: a second call on the now-terminal goal adds nothing.
+    n_before = len(summary.recommendations)
+    orch._settle_zero_completed(goal, summary, concern="again", rationale="again")
+    assert len(summary.recommendations) == n_before
+
+
+def test_reexecute_goal_zero_completed_settles_goal(project: Project):
+    """Opus R2 H1: a decline-driven _reexecute_goal whose reopened task re-fails
+    (zero COMPLETED, no other completed task) must settle the goal terminal with
+    a reservation — NOT leave it permanently IN_PROGRESS."""
+    from modulatio.orchestration import RunSummary
+    orch = _orch(project)
+    goal = _make_goal(project.id)
+    goal.status = GoalStatus.IN_PROGRESS
+    task = _make_task(project.id, "STB-T-001")
+    task.status = TaskStatus.PENDING  # reopened by the decline
+    store.save_goal(PROJECT_CODE, goal, run_id=project.run_id)
+    store.save_task(PROJECT_CODE, task, run_id=project.run_id)
+
+    def _redo(t, summary, initial_corrective_notes=""):
+        t.status = TaskStatus.QC_REJECTED  # re-fails again → zero completed
+        store.save_task(PROJECT_CODE, t, run_id=project.run_id)
+
+    orch._run_task_with_redo = _redo  # type: ignore[assignment]
+    # _leader_verify_goal must NOT be the thing that terminalizes here.
+    orch._leader_verify_goal = lambda *a, **k: None  # type: ignore[assignment]
+
+    orch._reexecute_goal(goal, RunSummary(project=project))
+
+    assert goal.status == GoalStatus.COMPLETED, "zero-completed decline redo must settle the goal"
+    reloaded = store.get_goal(PROJECT_CODE, goal.id, run_id=project.run_id)
+    assert reloaded.status == GoalStatus.COMPLETED
+
+
+def test_auto_resume_zero_completed_settles_goal(project: Project):
+    """Opus R2 H1 sibling: budget auto-resume whose tasks all re-fail on the
+    fresh budget must settle the goal terminal — not strand it IN_PROGRESS with
+    an orphaned RESOLVED ticket."""
+    from datetime import datetime, timedelta, timezone
+
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import Ticket, TicketPriority, TicketStatus
+    orch = _orch(project)
+    goal = _make_goal(project.id)
+    goal.status = GoalStatus.IN_PROGRESS
+    task = _make_task(project.id, "STB-T-001")
+    task.status = TaskStatus.QC_REJECTED
+    store.save_goal(PROJECT_CODE, goal, run_id=project.run_id)
+    store.save_task(PROJECT_CODE, task, run_id=project.run_id)
+
+    # A BLOCKER ticket whose refresh_at has already passed, pointing at the goal.
+    ticket = Ticket(
+        id=f"{PROJECT_CODE}-1", project_id=project.id, priority=TicketPriority.BLOCKER,
+        status=TicketStatus.OPEN, title="budget exhausted", body="b",
+        affected_goal_id=goal.id,
+        refresh_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    store._write_entity(store._ticket_path(PROJECT_CODE, ticket.id, run_id=project.run_id), ticket, "b")
+
+    def _redo(t, summary, initial_corrective_notes=""):
+        t.status = TaskStatus.QC_REJECTED  # fails again on the fresh budget
+        store.save_task(PROJECT_CODE, t, run_id=project.run_id)
+
+    orch._run_task_with_redo = _redo  # type: ignore[assignment]
+    orch._leader_verify_goal = lambda *a, **k: None  # type: ignore[assignment]
+
+    orch._auto_resume_refreshable_goals(RunSummary(project=project))
+
+    reloaded = store.get_goal(PROJECT_CODE, goal.id, run_id=project.run_id)
+    assert reloaded.status == GoalStatus.COMPLETED, "zero-completed auto-resume must settle the goal"
