@@ -508,7 +508,13 @@ def load(plan_id: str, project_code: str) -> Optional[PlanRecord]:
     # defaults to the process locale and a daemon/cron run under a non-UTF-8
     # locale (e.g. C/POSIX) raises UnicodeDecodeError on a legitimate
     # non-ASCII title/body, bricking the load + the whole project listing.
-    raw = target.read_text(encoding="utf-8", errors="replace")
+    try:
+        raw = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        # A corrupt / non-UTF-8 plan is UNLOADABLE — skip it (the malformed-file
+        # contract list_plans relies on). Never decode-with-replacement: that
+        # would surface mojibake as a real operator-approved plan (Nemo).
+        return None
     m = _FRONTMATTER_RE.match(raw)
     if m is None:
         return None
@@ -755,7 +761,14 @@ def set_status(
     with _plan_lock(plan_id, code):
         # UTF-8 to mirror the write path; a non-UTF-8 process locale must
         # not turn a legitimate non-ASCII plan into a UnicodeDecodeError.
-        raw = target.read_text(encoding="utf-8", errors="replace")
+        try:
+            raw = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # Fail CLEAN — never read-with-replacement and write U+FFFD back into
+            # an operator-approved plan during a read-modify-write (Nemo).
+            raise ValueError(
+                f"plan file {target} is not valid UTF-8; refusing to rewrite"
+            ) from exc
         m = _FRONTMATTER_RE.match(raw)
         if m is None:
             raise ValueError(f"plan file {target} has no frontmatter")
@@ -958,7 +971,14 @@ def update_execution_state(
     with _plan_lock(plan_id, code):
         # UTF-8 to mirror the write path; a non-UTF-8 process locale must
         # not turn a legitimate non-ASCII plan into a UnicodeDecodeError.
-        raw = target.read_text(encoding="utf-8", errors="replace")
+        try:
+            raw = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # Fail CLEAN — never read-with-replacement and write U+FFFD back into
+            # an operator-approved plan during a read-modify-write (Nemo).
+            raise ValueError(
+                f"plan file {target} is not valid UTF-8; refusing to rewrite"
+            ) from exc
         m = _FRONTMATTER_RE.match(raw)
         if m is None:
             raise ValueError(f"plan file {target} has no frontmatter")

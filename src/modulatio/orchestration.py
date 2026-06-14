@@ -1485,6 +1485,45 @@ def _dep_failed(
     return failed
 
 
+def _unknown_deps(
+    task: "Task",
+    task_map: "dict[str, Task]",
+    cross_goal_status: "dict[str, TaskStatus] | None" = None,
+) -> list[str]:
+    """Return dep ids that are absent from BOTH this goal's ``task_map`` AND the
+    store-resolved ``cross_goal_status`` — an UNVALIDATED / malformed (typo)
+    dependency edge. Non-empty → the caller must fail closed (block), never run a
+    task against an unresolved dependency. The initial-pass topo-sort already
+    rejects these via store-validation; the iterate-style resume path skips that
+    validation (to avoid #10755), so it enforces the invariant here instead
+    (Nemo HIGH)."""
+    cg = cross_goal_status or {}
+    return [d for d in task.depends_on if d not in task_map and d not in cg]
+
+
+def _unready_deps(
+    task: "Task",
+    task_map: "dict[str, Task]",
+    cross_goal_status: "dict[str, TaskStatus] | None" = None,
+) -> list[str]:
+    """Return dep ids that are PRESENT (in ``task_map`` or resolved in
+    ``cross_goal_status``) but not yet COMPLETED — the task must WAIT, not draft
+    against an input that has not shipped. The shared "COMPLETED-or-wait" gate
+    used by the sequential fallback AND the resume path, so all execution paths
+    enforce the same readiness contract (terminal-FAIL deps are handled first by
+    ``_dep_failed``; unknown deps by ``_unknown_deps``)."""
+    cg = cross_goal_status or {}
+    out: list[str] = []
+    for dep_id in task.depends_on:
+        dep = task_map.get(dep_id)
+        if dep is not None:
+            if dep.status is not TaskStatus.COMPLETED:
+                out.append(dep_id)
+        elif dep_id in cg and cg[dep_id] is not TaskStatus.COMPLETED:
+            out.append(dep_id)
+    return out
+
+
 def _ready_wave(
     tasks: "list[Task]",
     cross_goal_status: "dict[str, TaskStatus] | None" = None,
@@ -11122,18 +11161,33 @@ class Orchestrator:
                 )
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
                 continue
+            # An UNVALIDATED dep (absent from this goal AND not resolved in the
+            # store — a typo / malformed cross-goal edge) must FAIL CLOSED. The
+            # initial-pass topo store-validates and rejects these; the resume
+            # topo skips that validation (to avoid #10755), so enforce the
+            # invariant here — never run a reopened task against an unresolved
+            # dependency (Nemo HIGH).
+            unknown = _unknown_deps(t, task_map, cross_goal_status)
+            if unknown:
+                t.transitions.append(StateTransition(
+                    from_state=t.status.value,
+                    to_state=TaskStatus.BLOCKED.value,
+                    actor="planner",
+                    rationale=(
+                        f"unresolved dependency ids {unknown}; producer skipped"
+                    ),
+                ))
+                t.status = TaskStatus.BLOCKED
+                summary.errors.append(
+                    f"{t.id}: blocked by unresolved dependency {unknown}"
+                )
+                store.save_task(self.project.code, t, run_id=self.project.run_id)
+                continue
             # A dep that hasn't COMPLETED yet (e.g. itself reopened but ordered
             # after, or a cross-goal prior-goal task still in flight) keeps this
             # task waiting — skip it this pass rather than draft against missing
             # input.
-            unready = [
-                d for d in t.depends_on
-                if (task_map.get(d) is not None
-                    and task_map[d].status != TaskStatus.COMPLETED)
-                or (task_map.get(d) is None
-                    and d in cross_goal_status
-                    and cross_goal_status[d] != TaskStatus.COMPLETED)
-            ]
+            unready = _unready_deps(t, task_map, cross_goal_status)
             if unready:
                 continue
             self._run_task_with_redo(
@@ -12105,6 +12159,32 @@ class Orchestrator:
                         f"{t.id}: blocked by failed dependency {failed_deps}"
                     )
                     store.save_task(self.project.code, t, run_id=self.project.run_id)
+                    continue
+
+                # Three-path parity (Nemo): an UNVALIDATED dep fails closed
+                # (defense-in-depth — the initial-pass topo already store-validated
+                # this plan, but the gate matches the resume path exactly)…
+                unknown = _unknown_deps(t, task_map, cross_goal_status)
+                if unknown:
+                    t.transitions.append(StateTransition(
+                        from_state=t.status.value,
+                        to_state=TaskStatus.BLOCKED.value,
+                        actor="planner",
+                        rationale=(
+                            f"unresolved dependency ids {unknown}; producer skipped"
+                        ),
+                    ))
+                    t.status = TaskStatus.BLOCKED
+                    summary.errors.append(
+                        f"{t.id}: blocked by unresolved dependency {unknown}"
+                    )
+                    store.save_task(self.project.code, t, run_id=self.project.run_id)
+                    continue
+                # …and a resolved dep that has not COMPLETED yet keeps the task
+                # WAITING rather than drafting against an input that hasn't
+                # shipped (the COMPLETED-or-wait contract the concurrent
+                # `_ready_wave` and the resume gate already enforce).
+                if _unready_deps(t, task_map, cross_goal_status):
                     continue
 
                 self._run_task_with_redo(t, summary)

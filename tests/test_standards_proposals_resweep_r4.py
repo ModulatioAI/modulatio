@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Re-sweep R4 regressions for standards_proposals.
+"""Re-sweep regressions for standards_proposals encoding handling.
 
-Finding 1 [MEDIUM/error-path]: `_parse_file` read proposal `.md` files
-with strict UTF-8 (no `errors=` fallback), unlike the 0.9.0-hardened JSON
-readers in team_memory which use `errors="replace"`. A single proposal
-containing a non-UTF-8 byte (operator hand-edit in a non-UTF-8 editor)
-would raise UnicodeDecodeError and crash the entire `modulatio-standards`
-review surface — list, show, approve, reject — taking down every OTHER
-(valid) proposal with it. The fix pins `errors="replace"` so a corrupt
-byte degrades the one file rather than the whole surface.
+A standards proposal is DURABLE, human/team-authored POLICY text that
+``approve()`` appends verbatim into the project standards — it is NOT a
+rebuildable cache. The round-4 fix wrongly used ``errors="replace"`` to keep
+the review surface from crashing on a corrupt byte, but that left a corrupt
+proposal listable + approvable as mojibake (U+FFFD grafted into standards).
+
+The corrected contract (Nemo, 0.9.0 cadre review):
+- ``_parse_file`` decodes STRICTLY → raises UnicodeDecodeError on a bad byte.
+- ``list_proposals`` SKIPS a corrupt file (the surface still doesn't crash, and
+  the bad file is excluded rather than surfaced as approvable mojibake).
+- ``load`` / ``approve`` of a corrupt proposal fails closed (raises) — corrupt
+  policy text can never be grafted into standards.
 """
 
 from __future__ import annotations
@@ -32,13 +36,11 @@ def project_vault(tmp_path: Path, monkeypatch) -> Path:
 
 
 def _write_corrupt_proposal(project_code: str, stem: str) -> Path:
-    """Stage a proposal `.md` file whose frontmatter contains a raw
-    non-UTF-8 byte (0xFF), as an operator hand-edit in a non-UTF-8
-    editor would produce."""
+    """Stage a proposal `.md` whose frontmatter contains a raw non-UTF-8 byte."""
     root = standards_proposals._proposals_dir(project_code)
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{stem}.md"
-    raw = (
+    path.write_bytes(
         b"---\n"
         b"domain: text\n"
         b"title: caf\xe9 rule\n"  # 0xe9 is a lone non-UTF-8 byte here
@@ -47,25 +49,21 @@ def _write_corrupt_proposal(project_code: str, stem: str) -> Path:
         b"---\n\n"
         b"Body of the rule.\n"
     )
-    path.write_bytes(raw)
     return path
 
 
-# ── _parse_file resilience ──────────────────────────────────────────────────
-
-def test_parse_file_tolerates_non_utf8_byte(project_vault):
-    """A corrupt byte in a proposal file must not raise — it should
-    decode via replacement and still yield a usable Proposal."""
+def test_parse_file_decodes_strictly_and_raises_on_corrupt_byte(project_vault):
+    """STRICT decode: a corrupt byte must RAISE, not decode-with-replacement —
+    so corrupt policy text can never become approvable mojibake."""
     _write_corrupt_proposal(PROJECT_CODE, "20260101T000000Z__cafe-rule")
     path = standards_proposals._proposals_dir(PROJECT_CODE) / "20260101T000000Z__cafe-rule.md"
-    proposal = standards_proposals._parse_file(path)  # must NOT raise UnicodeDecodeError
-    assert proposal.domain == "text"
-    assert proposal.rule_body == "Body of the rule."
+    with pytest.raises(UnicodeDecodeError):
+        standards_proposals._parse_file(path)
 
 
-def test_list_proposals_skips_no_one_on_corrupt_byte(project_vault):
-    """One corrupt proposal must not crash list_proposals — every
-    proposal (the corrupt one plus a clean one) is still returned."""
+def test_list_proposals_skips_corrupt_file_without_crashing(project_vault):
+    """One corrupt proposal must NOT crash list_proposals AND must NOT be
+    surfaced — only the clean proposal(s) come back."""
     standards_proposals.save(
         standards_proposals.Proposal(
             domain="code", title="Clean rule", rule_body="Use type hints."
@@ -75,25 +73,21 @@ def test_list_proposals_skips_no_one_on_corrupt_byte(project_vault):
     _write_corrupt_proposal(PROJECT_CODE, "20260101T000000Z__corrupt")
     proposals = standards_proposals.list_proposals(PROJECT_CODE)  # must NOT raise
     titles = {p.title for p in proposals}
-    assert "Clean rule" in titles
-    assert len(proposals) == 2
+    assert titles == {"Clean rule"}, "corrupt proposal must be skipped, not surfaced"
+    assert len(proposals) == 1
 
 
-def test_load_corrupt_proposal_does_not_crash(project_vault):
-    """`load` (used by show/approve) must survive a corrupt-byte file."""
+def test_load_corrupt_proposal_fails_closed(project_vault):
+    """`load` (used by show/approve) of a corrupt proposal fails closed — it is
+    not loadable as mojibake."""
     _write_corrupt_proposal(PROJECT_CODE, "20260101T000000Z__corrupt")
-    proposal = standards_proposals.load(
-        "20260101T000000Z__corrupt", PROJECT_CODE
-    )  # must NOT raise
-    assert proposal.domain == "text"
+    with pytest.raises(UnicodeDecodeError):
+        standards_proposals.load("20260101T000000Z__corrupt", PROJECT_CODE)
 
 
-def test_approve_corrupt_proposal_does_not_crash_on_decode(project_vault):
-    """approve() loads via _parse_file; a corrupt byte must not crash the
-    decode. The clean domain ('text') still routes to a safe standards file."""
+def test_approve_corrupt_proposal_cannot_graft_mojibake(project_vault):
+    """approve() loads via _parse_file; a corrupt proposal must fail closed so
+    no U+FFFD-mutated policy text is appended into the project standards."""
     _write_corrupt_proposal(PROJECT_CODE, "20260101T000000Z__corrupt")
-    dest = standards_proposals.approve(
-        "20260101T000000Z__corrupt", PROJECT_CODE
-    )  # must NOT raise UnicodeDecodeError
-    assert dest.name == "text.md"
-    assert dest.exists()
+    with pytest.raises(UnicodeDecodeError):
+        standards_proposals.approve("20260101T000000Z__corrupt", PROJECT_CODE)

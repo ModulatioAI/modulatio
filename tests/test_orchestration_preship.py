@@ -164,8 +164,18 @@ def test_reopened_tasks_preserve_order_with_cross_goal_dep(tmp_path, monkeypatch
         pass
 
     monkeypatch.setattr("modulatio.store.save_task", lambda *a, **k: None)
+    # X-T-999 is a REAL prior-goal task (COMPLETED) — a legitimate cross-goal dep
+    # resolves in the store. (An UNRESOLVABLE/typo id is now fail-closed-blocked;
+    # see test_nemo_resweep_remediation — so a valid cross-goal dep must resolve.)
+    _xdep = Task(id="X-T-999", project_id=uuid4(), goal_id="PRE-G-001",
+                 description="prior-goal unit", depends_on=[],
+                 status=TaskStatus.COMPLETED)
+    monkeypatch.setattr(
+        "modulatio.store.get_task",
+        lambda code, tid, run_id=None: _xdep if tid == "X-T-999" else None,
+    )
 
-    # B depends on A (intra-goal) AND on X-T-999 (a cross-goal id not in this set).
+    # B depends on A (intra-goal) AND on X-T-999 (a real, COMPLETED cross-goal dep).
     a = Task(id="PRE-T-A", project_id=uuid4(), goal_id=goal.id,
              description="a", depends_on=[], status=TaskStatus.PENDING)
     b = Task(id="PRE-T-B", project_id=uuid4(), goal_id=goal.id,

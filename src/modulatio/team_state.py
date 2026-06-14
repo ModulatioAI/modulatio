@@ -137,8 +137,11 @@ def load_body(project_code: str, run_id: str | None) -> str:
     if not path.exists():
         return ""
     try:
-        return path.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
+        return path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        # Strict decode — a corrupt state doc degrades to empty prompt context,
+        # never decode-with-replacement (which on the append RMW below would
+        # persist U+FFFD back into the durable state doc). Nemo.
         return ""
 
 
@@ -469,8 +472,10 @@ def append_activity(
     if not path.exists():
         return None
     try:
-        body = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        body = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # No-op on a corrupt/unreadable state doc — caller rewrites a fresh
+        # state from a structured snapshot. Never splice + write back lossy. Nemo.
         return None
     anchor = "### Recent Activity"
     if anchor not in body:

@@ -124,13 +124,12 @@ def save(proposal: Proposal, project_code: str) -> Path:
 
 
 def _parse_file(path: Path) -> Proposal:
-    # re-sweep: mirror the JSON readers' corrupt-byte resilience
-    # (team_memory uses errors="replace"). A proposal hand-edited in a
-    # non-UTF-8 editor would otherwise raise UnicodeDecodeError and crash
-    # the whole modulatio-standards review surface (list/show/approve/reject)
-    # instead of degrading the one bad file. Strict decoding gives no upside
-    # here — the parser tolerates arbitrary content already.
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    # Strict UTF-8. A standards proposal is DURABLE, human/team-authored POLICY
+    # text that approve() appends verbatim into the project standards — NOT a
+    # rebuildable cache. Decoding with replacement would let a corrupt proposal
+    # stay listable + approvable and graft mojibake (U+FFFD) into standards. So
+    # decode strictly and let list_proposals SKIP a malformed file (Nemo).
+    raw = path.read_text(encoding="utf-8")
     m = _FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}
     body = raw
@@ -157,7 +156,15 @@ def list_proposals(project_code: str) -> list[Proposal]:
     root = _proposals_dir(project_code)
     if not root.exists():
         return []
-    return [_parse_file(p) for p in sorted(root.glob("*.md"))]
+    out: list[Proposal] = []
+    for p in sorted(root.glob("*.md")):
+        try:
+            out.append(_parse_file(p))
+        except UnicodeDecodeError:
+            # Skip a corrupt / non-UTF-8 proposal — never crash the whole review
+            # surface on one bad file, never surface it as approvable mojibake.
+            continue
+    return out
 
 
 def list_ids(project_code: str) -> list[str]:
