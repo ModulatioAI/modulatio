@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,7 +71,7 @@ _log = logging.getLogger("modulatio.store")
 # record that no longer validates) must never brick the read path for every
 # *other* valid entity in the project — so reads catch this union, quarantine
 # the file, and degrade to "missing" rather than propagating.
-_PARSE_ERRORS = (yaml.YAMLError, json.JSONDecodeError, ValueError, KeyError)
+_PARSE_ERRORS = (yaml.YAMLError, json.JSONDecodeError, ValueError, KeyError, TypeError)
 
 
 def _utcnow() -> datetime:
@@ -111,11 +113,37 @@ def _quarantine_corrupt(path: Path, exc: Exception) -> None:
         _log.warning("could not quarantine %s: %s", path, move_exc)
 
 
+def _normalize_entity_text(text: str) -> str:
+    """Normalize an entity file's text before frontmatter parsing: strip a
+    leading UTF-8 BOM and fold CRLF/CR line endings to LF.
+
+    External tools (Excel, Notepad, PowerShell ``Out-File``) routinely emit a
+    BOM and/or CRLF. Without this, the ``^---\\n``-anchored ``_FRONTMATTER_RE``
+    misses, the file is read as a bodyless record, validation fails on the
+    missing required fields, and a *well-formed* entity is wrongly quarantined
+    as corrupt. Entity files are LF/no-BOM canonical (``_compose`` writes LF),
+    so this only repairs externally-mangled inputs."""
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text
+
+
 def _split_frontmatter(text: str) -> tuple[dict, str]:
     match = _FRONTMATTER_RE.match(text)
     if not match:
         return {}, text
-    meta = yaml.safe_load(match.group(1)) or {}
+    meta = yaml.safe_load(match.group(1))
+    if meta is None:
+        meta = {}
+    elif not isinstance(meta, dict):
+        # Valid YAML but the wrong shape (a list/scalar frontmatter). The
+        # downstream ``{**meta, ...}`` spread would raise TypeError; surface an
+        # intelligible parse error so the quarantine reason is legible.
+        raise ValueError(
+            f"frontmatter is not a mapping (got {type(meta).__name__})"
+        )
     return meta, match.group(2)
 
 
@@ -149,8 +177,11 @@ def _extract_transitions(body: str) -> tuple[str, list[StateTransition]]:
 def _read_entity(path: Path, model: type[BaseModel]) -> BaseModel | None:
     if not path.exists():
         return None
-    text = path.read_text()
     try:
+        # read_text is INSIDE the try: a binary / non-UTF-8 file raises
+        # UnicodeDecodeError (a ValueError ∈ _PARSE_ERRORS), which must flow to
+        # quarantine — not escape and brick the whole listing.
+        text = _normalize_entity_text(path.read_text())
         meta, body = _split_frontmatter(text)
         body, transitions = _extract_transitions(body)
         data = {**meta, "transitions": [t.model_dump() for t in transitions]}
@@ -161,6 +192,15 @@ def _read_entity(path: Path, model: type[BaseModel]) -> BaseModel | None:
         # a None return (and list_* already skip None) as "not there".
         _quarantine_corrupt(path, exc)
         return None
+    except OSError as exc:
+        # Transient / permission read failure — NOT corruption. Degrade to
+        # "missing" WITHOUT quarantining: the bytes may be perfectly fine,
+        # just momentarily unreadable, so don't rename a file we couldn't read.
+        _log.warning(
+            "could not read entity file %s (%s: %s); treating as missing",
+            path, type(exc).__name__, exc,
+        )
+        return None
     return entity
 
 
@@ -169,7 +209,31 @@ def _write_entity(path: Path, entity: BaseModel, body: str) -> None:
     transitions_raw = data.pop("transitions", [])
     transitions = [StateTransition.model_validate(t) for t in transitions_raw]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_compose(data, body, transitions))
+    # Atomic write: a concurrent reader (list_*/get_* on a wave worker) must
+    # never observe a half-written file. A direct path.write_text truncates
+    # then streams, so a reader mid-write sees partial bytes, parse-fails, and
+    # quarantines (renames) the file the writer is still streaming into —
+    # corrupting live state. Write to a unique temp sibling, fsync, then
+    # os.replace (atomic rename on the same filesystem): readers see either the
+    # old complete file or the new one, never a torn read. The temp name starts
+    # with '.' and ends '.tmp' so the *.md listing glob never picks it up.
+    rendered = _compose(data, body, transitions)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(rendered)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        # On any failure, leave the original file untouched and clean the temp.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 # ─── Ticket store ───────────────────────────────────────────────────────────
