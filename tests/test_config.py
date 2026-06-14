@@ -302,3 +302,29 @@ def test_set_default_budget_caps_preserves_other_defaults():
     assert raw["vault_root"] == "/tmp/test-vault"
     assert raw["default_models"] == {"leader": "model-x"}
     assert raw["budget_caps"]["max_tokens"] == 10000
+
+
+def test_write_secret_file_concurrent_same_path_no_corruption(tmp_path):
+    """0.9.0 MED: a fixed `<name>.tmp` raced two concurrent writers for the same
+    secret path — shared temp, clobbered bytes, interleaved replace/unlink. With
+    a unique temp per write, concurrent writers each land a complete file (the
+    last replace wins), 0o600 is preserved, and no .tmp debris is left."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    target = tmp_path / "sub" / "secret.json"
+    payload = '{"token": "' + "x" * 4096 + '"}'  # large enough to span writes
+    n = 16
+    barrier = threading.Barrier(n)
+
+    def _w(_i):
+        barrier.wait()
+        config.write_secret_file(target, payload)
+
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        for f in [ex.submit(_w, i) for i in range(n)]:
+            f.result(timeout=30)
+
+    assert target.read_text() == payload, "concurrent writers must not corrupt the secret"
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert not list(target.parent.glob("*.tmp")), "no temp debris after concurrent writes"
