@@ -1176,8 +1176,20 @@ _WRITE_ARTIFACT_MAX_BYTES = 1_048_576  # 1 MiB
 _WRITE_ARTIFACT_BLOCKED_PREFIXES = ("tool_calls/", "tool_calls\\")
 
 
-def make_write_artifact(artifacts_root: Path) -> Callable[..., str]:
+def make_write_artifact(
+    artifacts_root: Path,
+    on_write: "Callable[[Path], None] | None" = None,
+) -> Callable[..., str]:
     """Return a ``write_artifact`` callable bound to ``artifacts_root``.
+
+    ``on_write`` (optional): a callback invoked with the absolute target Path
+    after a successful write. The concurrent-wave orchestrator passes
+    ``_record_artifact_write`` here so a tool-written file in the per-task
+    staging tree is recorded for the merge — without it, a producer's
+    ``write_artifact`` sidecar is written to staging, passes QC there, then
+    deleted with staging and never copied to the shared tree (Nemo R2 HIGH).
+    None (the sequential path / CLI) makes it a no-op; those writes already land
+    directly in the shared artifacts root.
 
     Returned callable signature::
 
@@ -1247,6 +1259,9 @@ def make_write_artifact(artifacts_root: Path) -> Callable[..., str]:
             ) from exc
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
+        if on_write is not None:
+            # Record the write for the concurrent-wave merge (no-op safe).
+            on_write(target)
         rel = target.relative_to(artifacts_root.resolve())
         return (
             f"[OK] wrote {len(encoded)} bytes to artifacts/{rel}"
@@ -1436,6 +1451,7 @@ def build_registry(
     artifacts_root: Path | None = None,
     tool_calls_dir: Path | None = None,
     project_code: str | None = None,
+    on_artifact_write: "Callable[[Path], None] | None" = None,
 ) -> dict[str, Tool]:
     """Return a fresh dict of builtin tools. Callers (CLI / tests)
     merge their own tools in and pass the result into the
@@ -1706,7 +1722,7 @@ def build_registry(
                 "Best practice: write_artifact for probing, AND emit "
                 "the same content as your final response."
             ),
-            call=make_write_artifact(artifacts_root),
+            call=make_write_artifact(artifacts_root, on_write=on_artifact_write),
             params_schema={
                 "type": "object",
                 "properties": {

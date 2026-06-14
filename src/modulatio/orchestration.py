@@ -13,6 +13,7 @@ the flow against stub LLMs before spending real tokens.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -5747,6 +5748,16 @@ class Orchestrator:
             text_twin_rel = _assembly.write_text_twin(
                 result.content, self._artifacts_root(), task.id
             )
+            # Record the twin as a declared artifact write so the concurrent-wave
+            # merge copies it out of the per-task staging tree into the shared
+            # artifacts root. Without this the twin is written under
+            # .staging/<task>/.twins/, never copied, then deleted with staging —
+            # and post-merge Leader-verify reads an absent twin (OSError → '') and
+            # silently drops the readable block, so the verifier goes blind on
+            # binary deliverables (Opus R2 H2, #101 Part 0 regression). Record the
+            # EXACT path, not the whole .twins/ subtree (avoids dragging stale
+            # seeded twins). No-op on the sequential path (no staging buffer).
+            self._record_artifact_write(self._artifacts_root() / text_twin_rel)
         else:
             text_twin_rel = task.output_path  # the text deliverable is readable as-is
         digest = _assembly.build_deliverable_digest(
@@ -6693,6 +6704,10 @@ class Orchestrator:
             artifacts_root=staging,
             tool_calls_dir=staging / "tool_calls",
             project_code=self.project.code,
+            # Record worker write_artifact() calls for the merge — else a
+            # tool-written file in staging passes QC there, then is deleted with
+            # staging and never copied to the shared tree (Nemo R2 HIGH).
+            on_artifact_write=self._record_artifact_write,
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # staging-bound builtins win over shared ones
@@ -7049,12 +7064,24 @@ class Orchestrator:
             done: dict[str, TaskExecutionResult] = {}
             pool_size = max(1, min(len(to_run), self._wave_pool_ceiling()))
             with ThreadPoolExecutor(max_workers=pool_size) as ex:
-                futures = {
-                    ex.submit(
-                        self._execute_task_isolated, t, initial_corrective_notes
-                    ): t.id
-                    for t in to_run
-                }
+                # Carry the main thread's bound ContextVars (the plan
+                # BudgetTracker + the context-budget / tool-summarization binds)
+                # into each worker via a FRESH copy_context per future, run with
+                # ctx.run. ThreadPoolExecutor workers do NOT inherit ContextVars,
+                # so without this every producer's budget.record_usage was a
+                # silent no-op and max_tokens/max_cost_usd caps under-counted
+                # nearly all spend on the default-on concurrent path (Opus R2 H3).
+                # The tracker is a shared mutable object, so the worker's
+                # accumulation is visible to the main-thread cap check. A Context
+                # is single-entry — never share one across futures (RuntimeError:
+                # cannot enter context: already entered), hence a fresh copy each.
+                futures = {}
+                for t in to_run:
+                    ctx = contextvars.copy_context()
+                    futures[ex.submit(
+                        ctx.run,
+                        self._execute_task_isolated, t, initial_corrective_notes,
+                    )] = t.id
                 for fut in as_completed(futures):
                     if fut.cancelled():
                         continue

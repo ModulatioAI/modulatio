@@ -10117,3 +10117,103 @@ def test_regression_blocked_only_in_generate_mode(project, tmp_path):
     assert orch._regression_blocked(Task(producer_mode="generate", **base), p, "stub") is True
     assert orch._regression_blocked(Task(producer_mode="revise", **base), p, "stub") is False
     assert orch._regression_blocked(Task(producer_mode="edit", **base), p, "stub") is False
+
+
+# ── Cluster D: wave worker-state loss (Opus R2 H2/H3 + Nemo write_artifact) ────
+
+def test_concurrent_wave_workers_inherit_budget_tracker(project: Project, monkeypatch):
+    """Opus R2 H3: wave workers must inherit the main-thread BudgetTracker
+    ContextVar (via per-future copy_context). A producer running in a wave worker
+    must see the SAME bound tracker — else its spend is unmetered and
+    max_tokens/max_cost_usd caps under-count (cost bypass)."""
+    import threading
+
+    from modulatio import budget
+    monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "1")
+
+    tracker = budget.BudgetTracker()
+    seen: list = []
+    lock = threading.Lock()
+
+    def _capturing_drafter(prompt: str) -> str:
+        with lock:
+            seen.append(budget.current_tracker())
+        return _drafter_stub(prompt)
+
+    def _coord_two(prompt: str) -> str:
+        tasks = [
+            {"description": f"produce artifact {i}", "assignee_specialist": "drafter",
+             "artifact_kind": "essay",
+             "evidence_required": [{"kind": "artifact", "description": "file"}]}
+            for i in (1, 2)
+        ]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "planner": _coord_two,
+        "drafter": _capturing_drafter, "qc": _qc_stub,
+    })
+    with budget.with_tracker(tracker):
+        orch.kickoff("two independent things")
+
+    assert seen, "producers must have run in the wave"
+    assert all(t is tracker for t in seen), (
+        "every wave worker must inherit the bound BudgetTracker "
+        "(None / a different object => unmetered producer spend)"
+    )
+
+
+def test_staging_write_artifact_is_recorded_for_merge(project: Project):
+    """Nemo R2 HIGH: a producer's write_artifact in a wave worker writes into the
+    per-task staging tree; that write must be RECORDED so _merge_wave_artifacts
+    copies it to the shared tree (else it's deleted with staging and lost)."""
+    orch = Orchestrator(project, {"drafter": _drafter_stub, "qc": _qc_stub})
+    staging = orch._scope_root() / ".staging" / "WA-T-001"
+    staging.mkdir(parents=True)
+
+    buf: list = []
+    orch._tls.artifact_writes = buf
+    orch._tls.staging_root = staging  # makes _artifacts_root() resolve to staging
+    try:
+        reg = orch._staging_tool_registry(staging)
+        reg["write_artifact"].call(path="side.py", content="print(1)\n")
+    finally:
+        orch._tls.artifact_writes = None
+        orch._tls.staging_root = None
+
+    assert "side.py" in buf, "a staged write_artifact must be recorded for the merge"
+    assert (staging / "side.py").read_text() == "print(1)\n"
+
+
+def test_concurrent_merge_copies_recorded_twin_drops_unrecorded(project: Project):
+    """Opus R2 H2: the binary deliverable's readable text-twin must survive the
+    concurrent-wave merge. The merge only copies RECORDED artifact_writes — so the
+    twin must be recorded (the fix). This pins the contract: a recorded staged
+    twin lands in shared; an UNrecorded one is dropped + torn down with staging
+    (exactly how the verifier went blind)."""
+    from modulatio.orchestration import Orchestrator, RunSummary, TaskExecutionResult
+    from modulatio.types import Task, TaskStatus
+    orch = Orchestrator(project, {"drafter": _drafter_stub, "qc": _qc_stub})
+    shared = orch._scope_root() / "artifacts"
+
+    st1 = orch._scope_root() / ".staging" / "TWN-T-001"
+    (st1 / ".twins").mkdir(parents=True)
+    (st1 / ".twins" / "TWN-T-001.md").write_text("readable twin body\n")
+    t1 = Task(id="TWN-T-001", project_id=project.id, goal_id="TWN-G",
+              description="d", status=TaskStatus.COMPLETED)
+    r1 = TaskExecutionResult(task=t1, drafts=[], staging_root=st1,
+                             artifact_writes=[".twins/TWN-T-001.md"])
+
+    st2 = orch._scope_root() / ".staging" / "TWN-T-002"
+    (st2 / ".twins").mkdir(parents=True)
+    (st2 / ".twins" / "TWN-T-002.md").write_text("readable twin body\n")
+    t2 = Task(id="TWN-T-002", project_id=project.id, goal_id="TWN-G",
+              description="d", status=TaskStatus.COMPLETED)
+    r2 = TaskExecutionResult(task=t2, drafts=[], staging_root=st2, artifact_writes=[])
+
+    orch._merge_wave_artifacts({t1.id: r1, t2.id: r2}, RunSummary(project=project))
+
+    assert (shared / ".twins" / "TWN-T-001.md").exists(), "recorded twin must survive the merge"
+    assert not (shared / ".twins" / "TWN-T-002.md").exists(), (
+        "an unrecorded staged file is dropped — the fix records the twin so it doesn't"
+    )

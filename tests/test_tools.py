@@ -1803,3 +1803,35 @@ def test_resolve_under_roots_overlong_path_returns_none(tmp_path):
     root.mkdir()
     overlong = "a/" * 5000 + "x.md"
     assert tools.resolve_under_roots(overlong, [root]) is None
+
+
+# ── write_artifact merge callback (Nemo R2 HIGH) ──────────────────────────────
+
+def test_make_write_artifact_invokes_on_write_callback(tmp_path):
+    """Nemo R2 HIGH: make_write_artifact must invoke the on_write callback with
+    the absolute target path after a successful write, so the concurrent-wave
+    orchestrator can record a tool-written file for the merge."""
+    art = _make_artifacts(tmp_path)
+    recorded: list = []
+    wa = tools.make_write_artifact(art, on_write=recorded.append)
+    wa(path="sub/side.py", content="print(1)\n")
+    assert len(recorded) == 1
+    assert recorded[0].name == "side.py"
+    assert recorded[0].read_text() == "print(1)\n"
+
+
+def test_make_write_artifact_on_write_none_is_safe(tmp_path):
+    """Default (sequential path / CLI): no callback → plain write, no error."""
+    art = _make_artifacts(tmp_path)
+    wa = tools.make_write_artifact(art)  # on_write defaults to None
+    out = wa(path="side.py", content="x\n")
+    assert "[OK]" in out and (art / "side.py").read_text() == "x\n"
+
+
+def test_build_registry_threads_on_artifact_write(tmp_path):
+    """build_registry must thread on_artifact_write into the write_artifact tool."""
+    art = _make_artifacts(tmp_path)
+    recorded: list = []
+    reg = tools.build_registry(artifacts_root=art, on_artifact_write=recorded.append)
+    reg["write_artifact"].call(path="side.py", content="y\n")
+    assert len(recorded) == 1 and recorded[0].name == "side.py"
