@@ -58,9 +58,26 @@ _TRIVIAL_COMMIT_CHARS = 40
 _NO_COMMIT_MIN_OUTPUT_TOKENS = 500
 
 #: Degenerate-repetition signature: an n-gram (this many whitespace tokens)
-#: repeating at least ``_REPEAT_THRESHOLD`` times is a stuck loop.
+#: repeating at least ``_REPEAT_THRESHOLD`` times is a stuck loop. This count
+#: threshold is PROSE-tuned — prose almost never repeats a 12-token phrase 5×
+#: legitimately.
 _NGRAM_N = 12
 _REPEAT_THRESHOLD = 5
+
+#: Families whose deliverable is PROSE — the strict count threshold above is the
+#: right degenerate-loop signature for them.
+_PROSE_FAMILIES = frozenset({"document"})
+
+#: For STRUCTURED families (code / data / media), repetition is LEGITIMATE — a
+#: markdown table, a repeated config block, a media layout, identical data rows.
+#: Applying the prose-tuned count threshold there false-trips and DISCARDS a
+#: committed-good deliverable (a product-agnostic violation: the universal unit
+#: is the token, and a bounded structural repeat is a valid artifact, not a
+#: storm). So for those families we trip ONLY on a DEGENERATE loop — one where
+#: the single most-repeated n-gram DOMINATES the output, filling at least this
+#: fraction of it. ``hard_cap`` (runaway tokens) and ``no_commit`` (no progress)
+#: remain the family-agnostic backstops, and QC reviews the deliverable besides.
+_STRUCTURED_REPEAT_COVERAGE = 0.5
 
 AbortReason = Literal["repetition", "no_commit", "hard_cap"]
 
@@ -160,6 +177,7 @@ def analyze_output(
     role: str,
     budget: OutputBudget | None = None,
     overrides: "dict[str, int] | None" = None,
+    artifact_family: str = "document",
 ) -> DispatchAbort | None:
     """Post-hoc storm detection on a completed producer response.
 
@@ -185,17 +203,35 @@ def analyze_output(
             partial_text=committed_text,
         )
 
-    # Degenerate repetition — a stuck loop regardless of token count.
+    # Degenerate repetition — a stuck loop regardless of token count. PROSE
+    # families trip on a strict identical-phrase COUNT; STRUCTURED families
+    # (code/data/media), where repetition is legitimate, trip only when the
+    # repeated phrase DOMINATES the output (a true runaway loop), so a bounded
+    # structural repeat — a table, a repeated config block, a media layout — is
+    # not discarded (product-agnostic).
     repeat = _max_ngram_repeat(raw_response)
-    if repeat >= _REPEAT_THRESHOLD:
+    if artifact_family in _PROSE_FAMILIES:
+        repetition_tripped = repeat >= _REPEAT_THRESHOLD
+        repeat_detail = (
+            f"a {_NGRAM_N}-token phrase repeated {repeat}x "
+            f"(>= {_REPEAT_THRESHOLD}) — degenerate loop"
+        )
+    else:
+        total_tokens_ws = len(raw_response.split()) or 1
+        coverage = (repeat * _NGRAM_N) / total_tokens_ws
+        repetition_tripped = coverage >= _STRUCTURED_REPEAT_COVERAGE
+        repeat_detail = (
+            f"a {_NGRAM_N}-token phrase repeated {repeat}x, filling "
+            f"{coverage:.0%} of the output (>= "
+            f"{_STRUCTURED_REPEAT_COVERAGE:.0%}) — degenerate loop "
+            f"({artifact_family} family: bounded structural repetition is allowed)"
+        )
+    if repetition_tripped:
         return DispatchAbort(
             "repetition",
             role=role,
             output_tokens=output_tokens,
-            detail=(
-                f"a {_NGRAM_N}-token phrase repeated {repeat}x "
-                f"(>= {_REPEAT_THRESHOLD}) — degenerate loop"
-            ),
+            detail=repeat_detail,
             partial_text=committed_text,
         )
 

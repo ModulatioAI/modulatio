@@ -4254,7 +4254,7 @@ class Orchestrator:
         # default; worker-local + pure so it's merge-safe under concurrent
         # waves. A trip raises DispatchAbort, caught separately by the redo
         # loop and routed to self-heal (NOT the runtime-BLOCKED path).
-        self._maybe_trip_breaker(producer_role, raw_response, response)
+        self._maybe_trip_breaker(producer_role, raw_response, response, task=task)
 
         checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
         # Whitespace-token count; kept as an audit metric, not a quality rule
@@ -4264,13 +4264,17 @@ class Orchestrator:
         return path, checksum, token_count
 
     def _maybe_trip_breaker(
-        self, role: str, raw_response: str, committed_text: str
+        self, role: str, raw_response: str, committed_text: str,
+        task: "Task | None" = None,
     ) -> None:
         """Run the post-hoc circuit breaker when enabled; raise on a trip.
 
         No-op unless ``MODULATIO_DISPATCH_BREAKER=1``. Pure + worker-local
         (delegates to ``dispatch_breaker.analyze_output``) so it adds no
-        shared state under the concurrent wave path.
+        shared state under the concurrent wave path. ``task`` (when known)
+        carries the artifact FAMILY so the prose-tuned repetition heuristic
+        doesn't false-trip on a legitimately-repetitive code/data/media
+        deliverable (R2).
         """
         from modulatio import dispatch_breaker
 
@@ -4285,8 +4289,16 @@ class Orchestrator:
             "output-budget for role=%s: soft=%d hard=%d (overrides=%s)",
             role, budget.soft_cap, budget.hard_cap, overrides or {},
         )
+        family = "document"
+        if task is not None:
+            try:
+                family = _effective_assembly_family(
+                    task.artifact_kind, task.required_skills, self.project.code)
+            except Exception:  # noqa: BLE001 — family is advisory; default safe
+                family = "document"
         abort = dispatch_breaker.analyze_output(
             raw_response, committed_text, role=role, budget=budget,
+            artifact_family=family,
         )
         if abort is not None:
             raise abort
@@ -4411,7 +4423,7 @@ class Orchestrator:
         # edit-mode behavior: write the cleaned body as the new artifact.
         path.write_text(cleaned, encoding="utf-8")
         self._record_artifact_write(path)
-        self._maybe_trip_breaker(producer_role, raw_response, cleaned)
+        self._maybe_trip_breaker(producer_role, raw_response, cleaned, task=task)
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
         return path, checksum, len(cleaned.split())
 
@@ -4516,7 +4528,7 @@ class Orchestrator:
             # producer dispatch and Slice 1 routes code/multi-file fixes
             # here — bind it with the breaker too. Contract-miss (no FILE
             # blocks): committed = the body we wrote.
-            self._maybe_trip_breaker(producer_role, raw_response, cleaned)
+            self._maybe_trip_breaker(producer_role, raw_response, cleaned, task=task)
             checksum = (
                 f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
             )
@@ -4591,7 +4603,7 @@ class Orchestrator:
         # valid sidecar-only diff is NOT falsely flagged no-commit just
         # because the primary marker is small (Nemo's explicit caution).
         self._maybe_trip_breaker(
-            producer_role, raw_response, "".join(written_parts)
+            producer_role, raw_response, "".join(written_parts), task=task
         )
         # Token count over the entire producer response (mirrors the
         # other producer paths' shape — audit metric, not a quality
@@ -5768,7 +5780,7 @@ class Orchestrator:
         # is part of the producer surface — bind it with the same post-hoc
         # circuit breaker as the plain path. ``response`` is the full final
         # body (incl. any thinking); ``cleaned`` is what committed.
-        self._maybe_trip_breaker(producer_role, response, cleaned)
+        self._maybe_trip_breaker(producer_role, response, cleaned, task=task)
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
         token_count = len(cleaned.split())
         return path, checksum, token_count

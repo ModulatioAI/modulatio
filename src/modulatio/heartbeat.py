@@ -89,8 +89,10 @@ _queue_lock = threading.RLock()
 # `cancel_task`→`update_task`) would self-deadlock if each opened its own fd.
 # We instead open+lock the fd ONCE at the outermost acquisition and reuse it
 # for inner ones, guarded by `_queue_lock` (an RLock, so reentrant per thread).
-_flock_depth = 0
-_flock_fd: Optional[int] = None
+# R1 (cadre): the depth/fd bookkeeping is held in a ``threading.local`` (the
+# same idiom cron uses) so it is genuinely PER-THREAD — robust even if the
+# ``_queue_lock`` serialization that already makes it safe were ever weakened.
+_claim_lock_local = threading.local()
 
 
 def _claim_lock_file() -> Path:
@@ -113,25 +115,27 @@ def _cross_process_claim_lock() -> Iterator[None]:
     if fcntl is None:  # pragma: no cover — non-POSIX no-op
         yield
         return
-    global _flock_depth, _flock_fd
     # `_queue_lock` (RLock) guards the depth/fd bookkeeping so it is consistent
     # across threads; it is reentrant, so holding it here AND inside the wrapped
-    # mutator is fine.
+    # mutator is fine. Depth/fd live in a thread-local (R1) so the reentrancy
+    # counter is per-thread by construction.
     with _queue_lock:
-        if _flock_depth == 0:
+        depth = getattr(_claim_lock_local, "depth", 0)
+        if depth == 0:
             lock_path = _claim_lock_file()
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX)
-            _flock_fd = fd
-        _flock_depth += 1
+            _claim_lock_local.fd = fd
+        _claim_lock_local.depth = depth + 1
         try:
             yield
         finally:
-            _flock_depth -= 1
-            if _flock_depth == 0 and _flock_fd is not None:
-                fd = _flock_fd
-                _flock_fd = None
+            _claim_lock_local.depth -= 1
+            if _claim_lock_local.depth == 0 and getattr(
+                    _claim_lock_local, "fd", None) is not None:
+                fd = _claim_lock_local.fd
+                _claim_lock_local.fd = None
                 try:
                     fcntl.flock(fd, fcntl.LOCK_UN)
                 except OSError:  # pragma: no cover — best-effort release
