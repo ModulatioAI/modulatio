@@ -1835,3 +1835,20 @@ def test_build_registry_threads_on_artifact_write(tmp_path):
     reg = tools.build_registry(artifacts_root=art, on_artifact_write=recorded.append)
     reg["write_artifact"].call(path="side.py", content="y\n")
     assert len(recorded) == 1 and recorded[0].name == "side.py"
+
+
+@pytest.mark.parametrize("cmd", [
+    "ruff check --fix",
+    "ruff check --fix .",
+    "ruff check --fix-only ok.py",
+    "ruff check --add-noqa ok.py",
+])
+def test_run_shell_passive_ruff_rejects_mutating_flags(tmp_path, cmd):
+    """Security (0.9.0 MED): the passive (read-only) tier must NOT admit ruff's
+    file-mutating flags — --fix / --fix-only / --add-noqa REWRITE files. They
+    slipped through because _is_safe_file_arg treated '--fix' as a filename."""
+    art = _make_artifacts(tmp_path)
+    (art / "ok.py").write_text("x=1\n")
+    rs = tools.make_run_shell(art)
+    with pytest.raises(ValueError, match="not allowed"):
+        rs(cmd=cmd, profile="passive")

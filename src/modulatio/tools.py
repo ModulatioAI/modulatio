@@ -680,11 +680,15 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
             ):
                 return True
     if head == "ruff":
-        # ruff check  /  ruff check <path>...  — any path arg must be confined
-        # to the artifacts root, else the lint error output leaks arbitrary
-        # source. Bare `ruff check` lints the (already-confined) cwd.
+        # ruff check  /  ruff check <path>...  — read-only lint only. Reject any
+        # flag (leading '-'): the passive tier must NOT admit mutating flags like
+        # --fix / --fix-only / --add-noqa, which REWRITE files in place (a flag
+        # also slips past _is_safe_file_arg, which treats '--fix' as a filename).
+        # Path args are confined to the artifacts root so lint error output can't
+        # leak arbitrary source; bare `ruff check` lints the (confined) cwd.
         if len(argv) >= 2 and argv[1] == "check":
-            if all(_is_safe_file_arg(a, root) for a in argv[2:]):
+            rest = argv[2:]
+            if all(not a.startswith("-") and _is_safe_file_arg(a, root) for a in rest):
                 return True
     if head == "mypy":
         # mypy <file.py>  or  mypy <file.py> <file.py>...  — confine each path
