@@ -438,7 +438,10 @@ def kickoff(
         except FileNotFoundError:
             typer.echo(f"  ! --attach: file not found: {_path}", err=True)
             raise typer.Exit(1)
-        except (ValueError, UnicodeDecodeError) as _e:
+        except (ValueError, UnicodeDecodeError, OSError) as _e:
+            # OSError covers a directory passed as --attach (IsADirectoryError)
+            # and an unreadable file (PermissionError) — both surface as a clean
+            # message instead of an uncaught stack trace.
             typer.echo(f"  ! --attach: cannot attach {_path}: {_e}", err=True)
             raise typer.Exit(1)
 
@@ -665,7 +668,10 @@ def models_add(
         if not env_var:
             typer.echo("--env-var is required when --auth-type=api_key", err=True)
             raise typer.Exit(code=1)
-        auth_config = {"env_var": env_var.upper()}
+        # Env var names are case-sensitive on POSIX — uppercasing would
+        # silently mis-point a lowercase var (e.g. ``my_key`` → ``MY_KEY``).
+        # Store exactly what the operator passed.
+        auth_config = {"env_var": env_var}
     elif env_var:
         # env_var only applies to api_key auth; for any other auth_type it
         # would be silently dropped. Fail loud so the operator notices the
@@ -713,7 +719,10 @@ def models_edit(
         raise typer.Exit(code=1)
     try:
         result = model_presets.update_preset(key, **fields)
-    except KeyError as e:
+    except (KeyError, ValueError) as e:
+        # KeyError: unknown entry key. ValueError: an invalid field value
+        # (e.g. a bad api_format/auth_type) — both are operator errors that
+        # should surface as a clean message, not a stack trace.
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1)
     typer.echo(f"Updated '{key}': {fields}")
@@ -1398,7 +1407,9 @@ def project_runs(
         objective_path = run_path / "objective.md"
         objective = ""
         if objective_path.exists():
-            for line in objective_path.read_text().splitlines():
+            for line in objective_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
                 stripped = line.strip()
                 if stripped and not stripped.startswith(("---", "#", "run_id:", "created:")):
                     objective = stripped[:80]

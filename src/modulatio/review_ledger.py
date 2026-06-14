@@ -44,6 +44,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: separator / trailer) are NOT QC-reviewed content. Bound them so the cheap
 #: structural pass can't be used to smuggle large unreviewed prose past review;
 #: over-bound → fall back to a normal review that actually reads it.
+#:
+#: UNIT: these are a deliberately CONSERVATIVE *character* proxy, not the
+#: token-native floor/budget gate. The pure ``verify_assembly`` bulkhead carries
+#: no model (and must stay import-cycle-free of the token counter), and a char
+#: ceiling strictly UPPER-bounds the smuggled token count for any tokenizer
+#: (1 token ≥ 1 char never holds in reverse — a token spans ≥1 char, so N chars
+#: smuggle ≤ N tokens). Over-bounding only costs a fall-back to a real review,
+#: which is the safe direction. So char-measure here is fail-safe, not a product
+#: assumption about words/pages.
 _MAX_TITLE_CHARS = 4000
 _MAX_TRAILER_CHARS = 4000
 _MAX_SEPARATOR_CHARS = 200
@@ -66,8 +75,16 @@ ORACLE_BY_STRATEGY = {
 
 
 def _norm_unit(name: str) -> str:
-    """Normalize an artifacts-relative unit path for set comparison."""
-    return str(name).strip().lstrip("./")
+    """Normalize an artifacts-relative unit path for set comparison.
+
+    Strips a single leading ``./`` then any leading slashes — a real PREFIX
+    strip, NOT ``lstrip("./")`` (which strips the *character set* ``{'.', '/'}``
+    and would mangle leading-dot filenames like ``.config`` → ``config``).
+    """
+    s = str(name).strip()
+    while s.startswith("./"):
+        s = s[2:]
+    return s.lstrip("/")
 
 
 def file_checksum(path: Path) -> str:

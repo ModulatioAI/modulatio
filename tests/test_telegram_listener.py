@@ -418,3 +418,55 @@ def test_reply_does_not_resend_when_markdown_succeeds(monkeypatch):
     tl._reply("ok")
     assert len(calls) == 1
     assert calls[0]["parse_mode"] == "Markdown"
+
+
+def test_reply_multichunk_only_retries_failed_chunk_no_duplicate(monkeypatch):
+    """Regression: when a reply spans multiple 4000-char chunks and only one
+    chunk's Markdown send fails, _reply must re-send ONLY that chunk in
+    plaintext. A blanket whole-text fallback would re-deliver the chunks
+    that already succeeded, duplicating them for the user."""
+    from modulatio import telegram_notify
+
+    calls: list[dict] = []
+
+    # Build a 3-chunk reply: each line is just under the split size so the
+    # splitter yields one chunk per line.
+    line_len = telegram_notify._MAX_MESSAGE_LENGTH - 10
+    chunk_a = "A" * line_len + "\n"
+    chunk_b = "B" * line_len + "\n"
+    chunk_c = "C" * line_len + "\n"
+    text = chunk_a + chunk_b + chunk_c
+    expected_chunks = telegram_notify._split_chunks(text)
+    assert len(expected_chunks) == 3  # guard: the splitter behaves as assumed
+
+    def fake_send(sent_text, *, parse_mode, bot_token, chat_id):
+        calls.append({"text": sent_text, "parse_mode": parse_mode})
+        # The middle (B) chunk fails on the Markdown pass; everything else
+        # (including its plaintext retry) succeeds.
+        if parse_mode == "Markdown" and sent_text.startswith("B"):
+            return False
+        return True
+
+    monkeypatch.setattr(telegram_notify, "send_message", fake_send)
+
+    tl = telegram_listener.TelegramListener(bot_token="t", chat_id="1")
+    tl._reply(text)
+
+    # 3 Markdown sends + exactly 1 plaintext retry (the B chunk) = 4 total.
+    assert len(calls) == 4, calls
+    markdown_calls = [c for c in calls if c["parse_mode"] == "Markdown"]
+    plain_calls = [c for c in calls if c["parse_mode"] is None]
+    assert len(markdown_calls) == 3
+    assert len(plain_calls) == 1
+    # The single plaintext retry is the failed B chunk — not the whole text.
+    assert plain_calls[0]["text"].startswith("B")
+    # No chunk is delivered twice: each succeeded chunk goes out exactly once.
+    # Count successful deliveries per chunk leader char.
+    delivered = [
+        c["text"]
+        for c in calls
+        if not (c["parse_mode"] == "Markdown" and c["text"].startswith("B"))
+    ]
+    assert sum(t.startswith("A") for t in delivered) == 1
+    assert sum(t.startswith("B") for t in delivered) == 1  # plaintext only
+    assert sum(t.startswith("C") for t in delivered) == 1

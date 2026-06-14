@@ -234,9 +234,43 @@ def _presets_snapshot() -> dict:
         return {}
 
 
+def _system_tools_snapshot() -> dict[str, bool]:
+    """Whether pandoc / the clipboard backend are present on the system.
+
+    The pandoc + clipboard steps can run ``try_auto_install`` (or have the
+    user install manually during the recheck loop), which mutates the system
+    via its package manager *before* any wizard configuration is written. That
+    is a side effect the abort message must not paper over with a blanket
+    "No changes written." Snapshotting installed-ness at wizard start and again
+    at abort lets the message tell the truth about a system tool that appeared
+    during this run. Never raises — a probe failure is treated as "absent" so
+    the abort path can't crash.
+    """
+    snapshot: dict[str, bool] = {}
+    for name, module in (("pandoc", pandoc_step), ("clipboard", clipboard_step)):
+        try:
+            snapshot[name] = bool(module.is_installed())
+        except Exception:
+            snapshot[name] = False
+    return snapshot
+
+
+def _join_tool_names(names: list[str]) -> str:
+    """Render a human-readable list of installed system tool names.
+
+    "pandoc" -> "pandoc"; ["pandoc", "clipboard"] -> "pandoc and clipboard".
+    """
+    labels = {"pandoc": "pandoc", "clipboard": "a clipboard backend"}
+    rendered = [labels.get(n, n) for n in names]
+    if len(rendered) <= 1:
+        return rendered[0] if rendered else ""
+    return " and ".join((", ".join(rendered[:-1]), rendered[-1]))
+
+
 def _run_setup_body() -> bool:
     state = _load_existing_state()
     presets_at_start = _presets_snapshot()
+    tools_at_start = _system_tools_snapshot()
 
     step_order = [
         "pandoc",
@@ -264,10 +298,35 @@ def _run_setup_body() -> bool:
         # written" when the on-disk presets are unchanged from wizard start;
         # otherwise be honest that the configured models persist (intended —
         # presets survive re-invocation by design).
-        if _presets_snapshot() != presets_at_start:
+        #
+        # The pandoc / clipboard steps can also install a system package via
+        # the OS package manager before this point — a real, durable side
+        # effect that survives the abort. Report any system tool that became
+        # available during this run so the abort message can't claim "No
+        # changes written" after mutating the system.
+        tools_at_end = _system_tools_snapshot()
+        newly_installed = [
+            name
+            for name, present in tools_at_end.items()
+            if present and not tools_at_start.get(name, False)
+        ]
+        presets_changed = _presets_snapshot() != presets_at_start
+
+        if presets_changed and newly_installed:
+            theme.muted(
+                "Setup aborted. Configured models were saved and remain available, "
+                f"and {_join_tool_names(newly_installed)} was installed on your system; "
+                "no other settings were written."
+            )
+        elif presets_changed:
             theme.muted(
                 "Setup aborted. Configured models were saved and remain available; "
                 "no other settings were written."
+            )
+        elif newly_installed:
+            theme.muted(
+                f"Setup aborted. {_join_tool_names(newly_installed)} was installed on "
+                "your system; no configuration was written."
             )
         else:
             theme.muted("Setup aborted. No changes written.")

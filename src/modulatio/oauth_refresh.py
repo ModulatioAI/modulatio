@@ -55,6 +55,7 @@ except ImportError:  # pragma: no cover - non-POSIX
 _PROVIDER_LOCKS: dict[str, threading.Lock] = {
     "anthropic": threading.Lock(),
     "openai": threading.Lock(),
+    "xai": threading.Lock(),
 }
 
 
@@ -384,11 +385,32 @@ def refresh_xai_token(*, timeout: float = 30.0) -> str:
         raise RefreshError(
             "no xAI Grok refresh token found — sign in with the Grok CLI"
         )
+    # Serialize the exchange like Anthropic/OpenAI: the OIDC refresh_token grant
+    # rotates (invalidates) the refresh token at the provider on each success.
+    # With several daemon callers (heartbeat + cron + Telegram listener) hitting
+    # a 401 at once, each would POST the SAME refresh token; the first consumes
+    # it and the rest are rejected. The in-process lock + cross-process file lock
+    # collapse the concurrent burst to a single exchange. (We don't write back
+    # the rotated token — the Grok file format is unvalidated — so there's no
+    # under-lock re-check; the lock alone prevents the concurrent double-spend.)
+    lock_path = str(oauth_helpers.XAI_GROK_CREDENTIALS_FILE) + ".lock"
+    with _single_flight("xai", lock_path):
+        return _do_refresh_xai(refresh_token, timeout=timeout)
+
+
+def _do_refresh_xai(refresh_token: str, *, timeout: float) -> str:
+    """Perform the actual xAI OIDC discovery + token exchange. Caller holds the
+    single-flight lock. Returns the new access token (in memory only)."""
     try:
         disc = httpx.get(_XAI_OAUTH_DISCOVERY_URL, timeout=timeout)
-        token_endpoint = disc.json().get("token_endpoint")
+        body = disc.json()
     except (httpx.HTTPError, ValueError) as e:
         raise RefreshError(f"xAI OIDC discovery failed: {e}") from e
+    # A valid-but-non-dict discovery body (list/scalar) would make .get() raise
+    # AttributeError — which is NOT a RefreshError, so it would escape the
+    # strategy's refresh_if_possible (catches only RefreshError) and crash the
+    # producer dispatch instead of degrading to a clean auth alert. Guard shape.
+    token_endpoint = body.get("token_endpoint") if isinstance(body, dict) else None
     if not isinstance(token_endpoint, str) or not token_endpoint:
         raise RefreshError("xAI discovery response missing token_endpoint")
     try:

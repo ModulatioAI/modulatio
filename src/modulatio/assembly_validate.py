@@ -435,15 +435,44 @@ def _media_sub_kind(record: "AssemblyRecord", by_name: "dict[str, Path]") -> str
     return _media_kind(record.manifest, resolved)
 
 
+def _bundle_deliverable_path(
+    record: "AssemblyRecord", assembly_task: "Task", artifacts_root: Path
+) -> "Path | None":
+    """The on-disk composite to validate: the DELIVERABLE at
+    ``assembly_task.output_path`` under ``artifacts_root`` (where the engine moved the
+    temp composite), resolved with the same root-confinement gate as the shared
+    checksum check. ``None`` if the output_path is unset/escapes the root — in which
+    case we fall back to ``record.output_file`` (an un-moved record, e.g. unit test)."""
+    out_rel = getattr(assembly_task, "output_path", None)
+    if out_rel:
+        root = artifacts_root.resolve()
+        candidate = (artifacts_root / out_rel).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return None  # escapes the root → unsafe, never validate it
+        return candidate
+    fallback = record.output_file
+    return Path(fallback) if fallback is not None else None
+
+
 def _validate_bundle(
     record: "AssemblyRecord", assembly_task: "Task", artifacts_root: Path
 ) -> tuple[bool, str]:
     """The bundle oracle (free-local, stdlib ``zipfile``). Proves CONTAINMENT, not
     shape: member-name set == normalized unit set (no dupes), no traversal/absolute
     archive paths, and each member's BYTES equal its resolved unit file (Nemo #1,
-    Hero m1). ``zipfile`` is byte-preserving so this is exact, not tolerance-based."""
-    out = record.output_file
-    if out is None or not Path(out).is_file():
+    Hero m1). ``zipfile`` is byte-preserving so this is exact, not tolerance-based.
+
+    The composite is read from the DELIVERABLE at ``assembly_task.output_path``
+    (under ``artifacts_root``), NOT ``record.output_file``: the engine MOVES the
+    composited temp file onto the deliverable path post-assembly (orchestration.py
+    ~3699/4029) and never rewrites ``record.output_file``, so by QC time it dangles.
+    We resolve the deliverable exactly as the shared checksum gate does
+    (review_ledger.verify_assembly), falling back to ``record.output_file`` only when
+    no ``output_path`` is set (e.g. a directly-built record in a unit test)."""
+    out = _bundle_deliverable_path(record, assembly_task, artifacts_root)
+    if out is None or not out.is_file():
         return False, "bundle: composited output missing on disk"
     by_name, _py = _read_units(assembly_task, record, artifacts_root)
     expected_names = set(by_name.keys())

@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -96,7 +97,15 @@ def _now_iso() -> str:
 
 
 def _new_id() -> str:
-    return _now().strftime("%Y%m%d%H%M%S%f")[:18]
+    # Full UTC timestamp (all 6 microsecond digits) keeps ids sortable by
+    # creation time; a short random suffix makes them collision-resistant when
+    # several jobs are added in the same microsecond window (a setup script or
+    # programmatic adds). Previously this truncated to 18 chars, dropping 2 of 6
+    # microsecond digits (~100µs resolution) with no random suffix → colliding
+    # cron ids that get/update/remove/dispatch_due then act on the wrong job.
+    # Mirrors heartbeat._new_id, which was already fixed for this exact problem.
+    stamp = _now().strftime("%Y%m%d%H%M%S%f")
+    return f"{stamp}{secrets.token_hex(3)}"
 
 
 # === Schedule DSL ===
@@ -279,13 +288,35 @@ def add(
         # is present-but-empty (`{"topic": ""}` / `{"competitors": []}`), not
         # just absent/None. Otherwise a cron could be added here that the
         # headless dispatch's fit-gate would then refuse every cycle.
-        missing = jt.unfilled_required(jt_params or {})
+        bind_params = jt_params or {}
+        missing = jt.unfilled_required(bind_params)
         if missing:
             raise ValueError(
                 f"Job template {jt_id!r} is missing required parameter(s): "
                 f"{', '.join(missing)}. Bind them so the headless run isn't "
                 f"under-specified."
             )
+        # The run-time #97 fit-gate (`_jt_fit`) refuses on TWO more conditions
+        # the operator must fix here, not at a headless 3am dispatch: a supplied
+        # value outside its declared `enum`, and a `per-item` JT whose fan-out
+        # driver param is empty/not-a-list. Mirror both so an add that the
+        # dispatch fit-gate would refuse every cycle is rejected up front.
+        out_of_enum = jt.enum_violations(bind_params)
+        if out_of_enum:
+            raise ValueError(
+                f"Job template {jt_id!r} has parameter(s) outside their allowed "
+                f"values: {', '.join(out_of_enum)}. Bind valid values so the "
+                f"headless run isn't refused."
+            )
+        spec = jt.output_spec
+        if spec.cardinality == "per-item" and spec.per:
+            driver = bind_params.get(spec.per)
+            if not isinstance(driver, (list, tuple)) or len(driver) == 0:
+                raise ValueError(
+                    f"Job template {jt_id!r} is per-item but its fan-out driver "
+                    f"parameter {spec.per!r} is empty. Bind a non-empty list so "
+                    f"the headless run isn't refused."
+                )
     nxt = compute_next_run(parsed)
     job = {
         "id": _new_id(),
@@ -394,6 +425,8 @@ def dispatch_due(*, now: Optional[datetime] = None) -> list[dict]:
     now = now or _now()
     fired: list[dict] = []
     for job in check_due(now=now):
+        dispatch_ok = True
+        status = "ok"
         try:
             heartbeat.add_task(
                 description=f"cron:{job.get('name', job.get('id'))}",
@@ -407,14 +440,31 @@ def dispatch_due(*, now: Optional[datetime] = None) -> list[dict]:
             )
         except Exception as e:
             logger.exception("Cron job %s: heartbeat add_task failed", job.get("id"))
-            update(job["id"], last_run=now.isoformat(timespec="seconds"), last_status=f"error:{e}")
-            continue
-        # Advance next_run regardless — a failed dispatch shouldn't pin us at the same minute forever
+            dispatch_ok = False
+            status = f"error:{e}"
+
+        # Advance next_run REGARDLESS of dispatch outcome — a failed dispatch must
+        # not pin the job at the same minute, where check_due re-selects it every
+        # ~30s daemon tick forever (a retry storm + traceback flood on a degraded
+        # config). The schedule is re-parsed here for the advance; if it became
+        # unparseable (e.g. a hand-edited config) we can't compute a next slot, so
+        # we DISABLE the job fail-closed rather than leave it perpetually due —
+        # this also stops a successful dispatch from re-firing every tick.
         parsed = parse_schedule(job["schedule"])
+        fields = {"last_run": now.isoformat(timespec="seconds"), "last_status": status}
         if parsed is not None:
             new_next = _advance_next_run(parsed, job.get("next_run"), now)
-            update(job["id"], last_run=now.isoformat(timespec="seconds"), last_status="ok", next_run=new_next.isoformat(timespec="seconds"))
-        fired.append(job)
+            fields["next_run"] = new_next.isoformat(timespec="seconds")
+        else:
+            logger.warning(
+                "Cron job %s: schedule %r no longer parses; disabling to stop "
+                "perpetual re-dispatch", job.get("id"), job.get("schedule"))
+            fields["enabled"] = False
+            fields["last_status"] = "error:unparseable-schedule"
+        update(job["id"], **fields)
+
+        if dispatch_ok:
+            fired.append(job)
     return fired
 
 

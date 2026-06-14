@@ -1108,6 +1108,15 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # errors="replace": a child can emit non-UTF-8/binary bytes on
+                # stdout/stderr (a probe that dumps a binary, a tool that writes
+                # latin-1 diagnostics). With text=True the default 'strict'
+                # decoder would raise UnicodeDecodeError inside communicate() —
+                # which is caught by NEITHER the TimeoutExpired nor the
+                # FileNotFoundError handler, so it would propagate and discard
+                # ALL captured output (and crash the chat loop). Substitute the
+                # undecodable bytes so the model still sees a best-effort body.
+                errors="replace",
                 shell=False,
                 env=run_env,
                 start_new_session=True,
@@ -1119,7 +1128,15 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
                 stdout, stderr = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 # Kill the entire process group, then drain. killpg targets the
-                # session we created above so no grandchild survives.
+                # session we created above (start_new_session). For an
+                # UNSANDBOXED child this is what reaps grandchildren. Under the
+                # bwrap sandbox the payload runs in its own PID namespace
+                # (--unshare-pid) whose grandchildren are NOT in our session, so
+                # killpg reaps the bwrap process itself and the kernel then tears
+                # down the whole PID namespace; --die-with-parent is the belt
+                # that also kills the sandbox if we are reaped first. The
+                # bounded drain below covers a double-forking grandchild that
+                # re-parented away and kept the pipes open.
                 try:
                     os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):

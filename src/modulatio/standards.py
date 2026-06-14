@@ -31,7 +31,22 @@ from pathlib import Path
 from modulatio import config
 from modulatio.vault import project_dir
 
-_STANDARDS_ROOT = config.get_shared_resources_path() / "standards"
+#: Override hook for the shared standards directory. ``None`` (the default)
+#: means resolve from ``config.get_shared_resources_path()`` at call time, so a
+#: relocated shared-resources path (e.g. after a config reload) is honored —
+#: matching constitution.py / qc_persona.py, which never freeze the path at
+#: import. Set to a concrete ``Path`` only to pin the directory (tests do this).
+_STANDARDS_ROOT: Path | None = None
+
+
+def _standards_root() -> Path:
+    """The user's shared standards directory, resolved at call time so a
+    relocated shared-resources path / test pin is honored (no import-time
+    freeze)."""
+    if _STANDARDS_ROOT is not None:
+        return _STANDARDS_ROOT
+    return config.get_shared_resources_path() / "standards"
+
 
 #: Package-bundled BASELINE standards, shipped with Modulatio — the lowest
 #: tier, beneath the user's shared defaults and project overrides. Gives a
@@ -88,7 +103,13 @@ def _parse_file(path: Path) -> tuple[dict[str, str], str]:
     structures are used in standards files). Body has the frontmatter block
     removed and leading whitespace trimmed for tidy prompt injection.
     """
-    raw = path.read_text()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # Honor load_with_metadata's documented contract: a present-but-
+        # broken standards file (non-utf-8, unreadable perms) is treated as
+        # absent rather than crashing the producer/QC hot path.
+        return {}, ""
     m = _OWN_FRONTMATTER_RE.match(raw)
     if not m:
         return {}, raw.lstrip()
@@ -107,7 +128,7 @@ def load_with_metadata(domain: str, project_code: str | None = None) -> Standard
     standards are additive leverage, not required infrastructure.
     """
     seed_path = _SEED_STANDARDS_ROOT / f"{domain}.md"
-    shared_path = _STANDARDS_ROOT / f"{domain}.md"
+    shared_path = _standards_root() / f"{domain}.md"
     project_path = (
         project_dir(project_code) / "standards" / f"{domain}.md"
         if project_code is not None

@@ -38,8 +38,10 @@ skip the ledger entirely (no API cost to gate).
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import re
+import time as _time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -49,6 +51,15 @@ from modulatio.vault import project_dir
 
 
 _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+_log = logging.getLogger(__name__)
+
+# Max seconds to wait for the ledger lock before giving up. The critical
+# section is a tiny count→check→append (no LLM/network), so contention
+# should clear in milliseconds; this deadline only guards against a wedged
+# holder so a single stuck call can't block every budget-gated call on the
+# host forever. Env-overridable for ops; non-positive/invalid → default.
+_LOCK_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -222,6 +233,21 @@ def _append_ledger(project_code: str, cost_class: str, agent_id: str) -> None:
         f.write(f"{ts} {cost_class} {agent_id}\n")
 
 
+def _lock_timeout_seconds() -> float:
+    """Effective lock-acquire deadline. ``MODULATIO_COMPTROLLER_LOCK_TIMEOUT``
+    overrides the default; a non-positive or unparseable value falls back to
+    the default so a bad env can't disable the guard."""
+    raw = os.environ.get("MODULATIO_COMPTROLLER_LOCK_TIMEOUT")
+    if raw:
+        try:
+            v = float(raw)
+        except ValueError:
+            return _LOCK_TIMEOUT_SECONDS
+        if v > 0:
+            return v
+    return _LOCK_TIMEOUT_SECONDS
+
+
 @contextmanager
 def _ledger_lock(project_code: str):
     """Serialize the count→check→append critical section of a budget-gated
@@ -234,16 +260,44 @@ def _ledger_lock(project_code: str):
     fd, so the exclusive lock serializes across both threads and processes
     (flock locks attach to the open file description, not the process).
     POSIX-only, which matches the deployment target.
+
+    Yields ``True`` when the exclusive lock was acquired (critical section
+    runs serialized), or ``False`` when it could not be acquired within the
+    deadline. Rather than block forever on a wedged holder — which would
+    freeze *every* budget-gated call on the host — we bound the wait with a
+    non-blocking acquire loop. On timeout the caller decides its fail
+    posture (escalation degrades open, metered fails closed), so a stuck
+    lock is observable and bounded instead of a silent global wedge.
     """
     ledger = _ledger_path(project_code)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     lock_path = ledger.with_suffix(".lock")
     fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    acquired = False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        deadline = _time.monotonic() + _lock_timeout_seconds()
+        backoff = 0.005
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if _time.monotonic() >= deadline:
+                    _log.warning(
+                        "comptroller ledger lock not acquired within %.1fs for "
+                        "project %s (lock=%s); proceeding without serialization",
+                        _lock_timeout_seconds(),
+                        project_code,
+                        lock_path,
+                    )
+                    break
+                _time.sleep(backoff)
+                backoff = min(backoff * 2, 0.1)
+        yield acquired
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
@@ -302,7 +356,11 @@ def authorize_escalation(
     # BOTH the escalation and metered-tool streams: the declared cap is one
     # shared real-money budget per cost_class, so the gate must see every
     # paid call against it (else escalation + metered each spend a full cap).
-    with _ledger_lock(project_code):
+    with _ledger_lock(project_code) as locked:
+        # If the lock couldn't be acquired (wedged holder), escalation keeps
+        # its degrade-OPEN posture: still do the count→check→append, accepting
+        # the small unserialized-overshoot risk the lock guards against rather
+        # than wedging the producer. The warning is logged inside _ledger_lock.
         spent = _count_daily_spend(project_code, cost_class)
         if spent >= cap:
             return Authorization(
@@ -314,6 +372,7 @@ def authorize_escalation(
                 ),
             )
         _append_ledger(project_code, cost_class, agent_id)
+        _ = locked  # posture is identical whether or not the lock was held
     return Authorization(
         allowed=True,
         refresh_at=None,
@@ -431,7 +490,20 @@ def authorize_metered_tool(
                 "comptroller.md to enable metered use)"
             ),
         )
-    with _ledger_lock(project_code):
+    with _ledger_lock(project_code) as locked:
+        if not locked:
+            # Metered spends real money and fails CLOSED: if we can't serialize
+            # the count→check→append (wedged holder), deny rather than risk an
+            # unserialized double-charge. refresh_at = UTC midnight so the
+            # auto-resume pattern retries on the normal cadence.
+            return Authorization(
+                allowed=False,
+                refresh_at=_tomorrow_utc_midnight(),
+                reason=(
+                    f"metered tool {tool_name!r}: ledger lock unavailable "
+                    "(busy/wedged) — denied (fail closed); retries at UTC midnight"
+                ),
+            )
         cost_count, task_count, key_seen = _scan_metered_today(
             project_code, cost_class, task_id, idempotency_key
         )

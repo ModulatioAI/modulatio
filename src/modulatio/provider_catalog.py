@@ -415,6 +415,18 @@ def _is_free(model: dict, free_detect: str) -> bool:
     return False
 
 
+def _coerce_int(value: object) -> Optional[int]:
+    """Best-effort int from a provider feed (handles numeric strings/floats);
+    a non-numeric value (e.g. created='2024-01-01', context_length='128k')
+    becomes None rather than aborting the whole catalog with a ValidationError."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_models(
     provider: Provider, payload: object, *, modality: Modality = "text"
 ) -> list[CatalogModel]:
@@ -424,9 +436,16 @@ def parse_models(
         raw = payload.get("data", payload.get("models", payload))
     else:
         raw = payload
+    # A provider's /models can return an error envelope ({"error": {...}}) with
+    # HTTP 200, a scalar, or a malformed feed. Only a list of dicts is parseable;
+    # anything else degrades to an empty catalog rather than crashing.
+    if not isinstance(raw, list):
+        return []
     out: list[CatalogModel] = []
     strip = provider.id_prefix_strip
-    for m in raw or []:
+    for m in raw:
+        if not isinstance(m, dict):
+            continue
         mid = m.get("id")
         if not mid:
             continue
@@ -439,9 +458,9 @@ def parse_models(
                 name=m.get("name") or mid,
                 provider_id=provider.id,
                 modality=mod,
-                context_length=m.get("context_length"),
+                context_length=_coerce_int(m.get("context_length")),
                 is_free=_is_free(m, provider.free_detect),
-                created=m.get("created"),
+                created=_coerce_int(m.get("created")),
             )
         )
     return out

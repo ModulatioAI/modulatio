@@ -617,6 +617,41 @@ def test_truncate_tool_result_impossible_budget_drops_head(monkeypatch) -> None:
     assert "read_tool_result" in out and "z" in out
 
 
+def test_truncate_tool_result_total_return_fits_budget_with_header() -> None:
+    """Regression (opus r2): the composed return prepends a pointer header whose
+    tokens also count against the agent's context. The function must budget the
+    head against ``max_tokens`` MINUS the header cost so the WHOLE returned
+    string fits ``max_tokens`` — not just the bare head. Before the fix the head
+    was sized to the full ``max_tokens`` and the header pushed the total over."""
+    from modulatio import tool_summarization as ts
+
+    big = "The Israel-Iran conflict escalated sharply. " * 4000  # ~176k chars
+    max_tokens = 500
+    out = ts.truncate_tool_result(big, call_id="abc", max_tokens=max_tokens, model="gpt-4o")
+    # The COMPOSED return (header + head), not just the head, fits the budget.
+    assert ts.count_tokens("gpt-4o", text=out) <= max_tokens
+    assert len(out) < len(big)
+    assert "read_tool_result" in out and "abc" in out
+
+
+def test_truncate_tool_result_total_fits_budget_dense_counter(monkeypatch) -> None:
+    """Same invariant under a dense tokenizer where the header is a sizeable
+    fraction of a small budget: the total still must not exceed ``max_tokens``."""
+    from modulatio import tool_summarization as ts
+
+    def dense_count(model, *, text=None, messages=None):
+        if text is not None:
+            return max(1, len(text) * 2)
+        return sum(len(str(m.get("content") or "")) for m in (messages or [])) * 2
+
+    monkeypatch.setattr(ts, "count_tokens", dense_count)
+    big = "X" * 50_000
+    max_tokens = 600
+    out = ts.truncate_tool_result(big, call_id="dense", max_tokens=max_tokens, model="gpt-4o")
+    assert dense_count("gpt-4o", text=out) <= max_tokens
+    assert "read_tool_result" in out and "dense" in out
+
+
 def test_runner_truncates_large_result_when_no_summarizer(tmp_path: Path) -> None:
     """The live Iran scenario: enabled config, tool_calls_dir set, but NO
     summarizer_model. A large fetch must be TRUNCATED on arrival (not kept

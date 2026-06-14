@@ -242,16 +242,30 @@ def _looks_binary(source: Path) -> bool:
     verbatim). Returns ``False`` if the file can't be read — the caller's
     normal text path then surfaces the real error."""
     try:
-        head = source.open("rb").read(8192)
+        with source.open("rb") as fh:
+            head = fh.read(8192)
     except OSError:
         return False
     if b"\x00" in head:
         return True
+    # Decode tolerantly: a fixed-size read can split a multibyte UTF-8 code
+    # point at the 8192-byte boundary, which would otherwise raise and
+    # mis-classify valid text as binary. ``errors="ignore"`` drops only an
+    # incomplete trailing sequence (and any genuinely invalid bytes), so a
+    # real binary still surfaces via the NUL check above or the replacement
+    # of its non-UTF-8 bytes — but a truncated tail no longer triggers a
+    # false positive. Re-encode and compare to detect genuine decode loss
+    # within the head (true binary), tolerating only a short truncated tail.
     try:
         head.decode("utf-8")
-    except UnicodeDecodeError:
+        return False
+    except UnicodeDecodeError as exc:
+        # If the only undecodable bytes are a short, incomplete multibyte
+        # sequence at the very end of the read (a boundary truncation, never
+        # more than 3 trailing bytes for UTF-8), treat it as text.
+        if exc.start >= len(head) - 3 and exc.end == len(head):
+            return False
         return True
-    return False
 
 
 def _is_prose_source(source: Path) -> bool:

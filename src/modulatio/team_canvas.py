@@ -90,6 +90,28 @@ def build_digest(artifacts_root: Path) -> str:
     out: list[str] = ["## Team canvas — what the team has built so far", ""]
     total_chars = 0
     truncated = False
+    omitted = 0
+
+    def _emit(line: str, *, count_omit: bool = True) -> bool:
+        """Append ``line`` if it fits the char budget; else mark truncated.
+
+        EVERY line (head-excerpts AND name-only listings) counts toward the
+        cap. Without this, a run holding thousands of binary/oversized/
+        non-source files would grow the digest without bound — the exact
+        runaway MAX_DIGEST_CHARS exists to prevent. Returns True if emitted.
+        ``count_omit=False`` skips the omitted-tally bump for a probe line
+        that has a name-only fallback (so the file is counted at most once).
+        """
+        nonlocal total_chars, truncated, omitted
+        if total_chars + len(line) > MAX_DIGEST_CHARS:
+            truncated = True
+            if count_omit:
+                omitted += 1
+            return False
+        out.append(line)
+        total_chars += len(line)
+        return True
+
     for path in files:
         rel = path.relative_to(artifacts_root)
         # Stat first — refusing to read oversized files keeps a multi-MiB
@@ -97,10 +119,10 @@ def build_digest(artifacts_root: Path) -> str:
         try:
             file_size = path.stat().st_size
         except OSError:
-            out.append(f"- `{rel}` — unreadable (stat failed)")
+            _emit(f"- `{rel}` — unreadable (stat failed)")
             continue
         if file_size > MAX_FILE_BYTES_FOR_DIGEST:
-            out.append(
+            _emit(
                 f"- `{rel}` ({file_size:,} bytes) — exceeds digest "
                 f"size cap, listed only"
             )
@@ -109,7 +131,7 @@ def build_digest(artifacts_root: Path) -> str:
             content = path.read_text()
         except (UnicodeDecodeError, OSError):
             # Binary or unreadable — list by name only.
-            out.append(f"- `{rel}` — binary/unreadable, listed only")
+            _emit(f"- `{rel}` — binary/unreadable, listed only")
             continue
 
         line_count = content.count("\n") + (
@@ -117,26 +139,24 @@ def build_digest(artifacts_root: Path) -> str:
         )
 
         if path.suffix.lower() not in TEXT_EXTENSIONS:
-            out.append(f"- `{rel}` ({line_count:,} lines) — listed only")
+            _emit(f"- `{rel}` ({line_count:,} lines) — listed only")
             continue
 
         head = "\n".join(content.splitlines()[:HEAD_LINES])
         block = f"- `{rel}` ({line_count:,} lines) — head:\n```\n{head}\n```"
-        if total_chars + len(block) > MAX_DIGEST_CHARS:
-            truncated = True
-            out.append(
+        if not _emit(block, count_omit=False):
+            # Head-excerpt didn't fit; still try the cheaper name-only line so
+            # the file is at least acknowledged before we give up on the rest.
+            _emit(
                 f"- `{rel}` ({line_count:,} lines) — listed only "
                 f"(digest cap reached)"
             )
-            continue
-        out.append(block)
-        total_chars += len(block)
 
     if truncated:
         out.append("")
         out.append(
             f"_Digest truncated at ~{MAX_DIGEST_CHARS:,} chars — "
-            f"remaining files listed by name only._"
+            f"{omitted:,} remaining file(s) omitted._"
         )
     return "\n".join(out)
 

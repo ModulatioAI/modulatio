@@ -111,9 +111,16 @@ def start(*, stub: bool = True) -> int:
     # redirecting — otherwise their underlying file objects (and the
     # controlling-terminal fds they hold) leak for the daemon's lifetime.
     _old_stdin, _old_stdout, _old_stderr = sys.stdin, sys.stdout, sys.stderr
-    sys.stdin = open(os.devnull, "r")
-    sys.stdout = open(_log_file(), "a", buffering=1)
-    sys.stderr = sys.stdout
+    _new_stdin = open(os.devnull, "r")
+    _new_stdout = open(_log_file(), "a", buffering=1)
+    sys.stdin = _new_stdin
+    sys.stdout = _new_stdout
+    sys.stderr = _new_stdout
+    # Snapshot the new fds BEFORE closing the old streams: the old terminal
+    # streams hold fds 0/1/2, and closing a Python file object closes its
+    # stored fd number, so we must capture our targets first.
+    _stdin_fd = _new_stdin.fileno()
+    _stdout_fd = _new_stdout.fileno()
     for _old in (_old_stdin, _old_stdout, _old_stderr):
         # stderr is commonly aliased to stdout; close each underlying object
         # at most once and never let a benign close error abort detachment.
@@ -122,6 +129,21 @@ def start(*, stub: bool = True) -> int:
                 _old.close()
         except (OSError, ValueError):
             pass
+    # Now redirect the raw fds 0/1/2 onto the new streams (the standard
+    # double-fork daemonize pattern). Closing the inherited terminal streams
+    # above freed fds 0/1/2; without this dup2 they stay closed/invalid, so
+    # any C-level / subprocess write to fd 1 or 2 would land on whatever fd
+    # the kernel next hands out (e.g. a future LanceDB/socket fd), corrupting
+    # it. dup2 restores 0→devnull, 1/2→log file as intended.
+    try:
+        os.dup2(_stdin_fd, 0)
+        os.dup2(_stdout_fd, 1)
+        os.dup2(_stdout_fd, 2)
+    except OSError:
+        # dup2 should not fail with valid source fds; if it does, fall
+        # through rather than abort detachment (streams remain redirected
+        # at the Python level via sys.std* above).
+        pass
 
     config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     _pid_file().write_text(str(os.getpid()))

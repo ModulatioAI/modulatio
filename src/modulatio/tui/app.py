@@ -397,6 +397,18 @@ class ModulatioApp(App):
             )
             return
 
+        # Guard against a double launch (e.g. two fast F5 presses — the button
+        # is disabled below, but F5 reaches here directly and bypasses that).
+        # ``_kickoff_tick`` is live for exactly a kickoff's duration (set just
+        # below, torn down in ``_on_kickoff_done``); if it already exists a run
+        # is in flight, so re-launching would overwrite the timer handle and
+        # leak the prior ``set_interval`` (it would tick forever, unstoppable).
+        if getattr(self, "_kickoff_tick", None) is not None:
+            self._set_kickoff_status(
+                "(a job is already running — F8 to stop it first)"
+            )
+            return
+
         project = self._ensure_project()
         if self.stub:
             runners = default_generic_stub_runners()
@@ -900,6 +912,11 @@ class ModulatioApp(App):
         if team_stream is not None and event.phase in ("kickoff_started", "kickoff_ended"):
             team_stream.active_tasks.clear()
             team_stream._last_producer_count = 0  # Phase 1: reset the wave marker
+        # The agent-name display cache is documented "Cached per run" — drop it
+        # at each run's start so a roster change between runs (a new agent, a
+        # rename) is picked up instead of resolving to a stale/empty name.
+        if event.phase == "kickoff_started":
+            self._agent_name_cache = None
         # Fix: when a run ENDS — normal completion OR an F8 stop, both via the
         # engine's role="orchestrator" kickoff_ended — reset the TEAM spinner to
         # 'done'. Without this it sticks on the last producer phase and the Mod
@@ -1208,6 +1225,20 @@ class ModulatioApp(App):
                 panel.clear_all()
 
 
+def _relaunch_if_restart(app) -> None:
+    """``/restart`` calls ``app.exit(return_code=42)``, which only quits the
+    Textual app — it does NOT re-exec. Honor the documented "Restarting"
+    behavior at the process boundary by re-launching this same interpreter +
+    argv so the TUI actually comes back up. Any other return code is a normal
+    exit and is left alone. Returns normally (no re-exec) when the code isn't
+    42, so it's a no-op on a plain quit."""
+    if getattr(app, "return_code", 0) == 42:
+        import os
+        import sys
+
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
 def run() -> None:
     """Entry point for the ``modulatio-tui`` console script.
 
@@ -1239,7 +1270,9 @@ def run() -> None:
             help="Offline stub mode (default: real when models are configured)",
         ),
     ) -> None:
-        ModulatioApp(project_code=code, stub=stub).run()
+        app = ModulatioApp(project_code=code, stub=stub)
+        app.run()
+        _relaunch_if_restart(app)
 
     import sys
 

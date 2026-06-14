@@ -275,31 +275,50 @@ def truncate_tool_result(
     agent can pull it back with ``read_tool_result`` when it needs more."""
     if count_tokens(model, text=text) <= max_tokens:
         return text
+    # The composed return prepends a pointer header (truncation marker +
+    # read_tool_result hint) ahead of the kept head. Those header tokens count
+    # against the agent's context too, so budget the head against ``max_tokens``
+    # MINUS the header cost — otherwise the return systematically overshoots
+    # ``max_tokens`` by the un-counted header (opus r2 finding). The header text
+    # is fixed except for ``call_id`` and the ``dropped`` count; the latter only
+    # shrinks the head further, so counting the header alone (with a ``dropped``
+    # placeholder no shorter than the real value) is a safe upper bound.
+    def _header(dropped: int) -> str:
+        return (
+            f"[truncated: call_id={call_id} — kept ~{max_tokens} tokens of a "
+            f"larger result; {dropped} more chars on disk]\n"
+            f"Use read_tool_result(call_id={call_id!r}) for the full text.\n\n"
+        )
+
+    header_tokens = count_tokens(model, text=_header(len(text)))
+    head_budget = max_tokens - header_tokens
+    if head_budget <= 0:
+        # The header alone meets or exceeds the whole budget — there is no room
+        # for any head. Return just the pointer (header keeps its trailing
+        # blank line so callers that split on ``\n\n`` still recover an empty
+        # head) so the total stays as close to ``max_tokens`` as the
+        # (irreducible) header allows.
+        return _header(len(text))
     # First cut by the ~4-chars/token heuristic, then tighten until the kept
-    # head GENUINELY fits ``max_tokens`` — termination is keyed on fit, not on a
+    # head GENUINELY fits ``head_budget`` — termination is keyed on fit, not on a
     # fixed iteration budget. Dense tokenization (code/markup, CJK, odd byte
     # runs) can pack far more tokens per char than the 4:1 estimate, so a fixed
     # step count could exit while still over budget. The shrink is monotone (the
     # head strictly loses length while it doesn't fit and isn't a lone char), so
     # the loop is bounded by the head length; the ``len(head) <= 1`` guard caps
     # the degenerate single-char case so we never spin.
-    head = text[: max(1, max_tokens * 4)]
-    while head and count_tokens(model, text=head) > max_tokens:
+    head = text[: max(1, head_budget * 4)]
+    while head and count_tokens(model, text=head) > head_budget:
         nxt = max(1, int(len(head) * 0.8))
         if nxt >= len(head):
             # int(len*0.8) stops shrinking at len==1 (0.8->0->max(1,0)==1);
-            # a single char still over budget means max_tokens is too small to
+            # a single char still over budget means head_budget is too small to
             # ever fit — drop the head entirely rather than loop forever.
             head = ""
             break
         head = head[:nxt]
     dropped = len(text) - len(head)
-    return (
-        f"[truncated: call_id={call_id} — kept ~{max_tokens} tokens of a "
-        f"larger result; {dropped} more chars on disk]\n"
-        f"Use read_tool_result(call_id={call_id!r}) for the full text.\n\n"
-        f"{head}"
-    )
+    return f"{_header(dropped)}{head}"
 
 
 def prune_messages_sliding_window(

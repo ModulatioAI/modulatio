@@ -10,11 +10,15 @@ will fit the model's ``max_input_tokens`` BEFORE sending. Four states:
   1. **Under ``soft_warn_at_pct``** (default 70%) — proceed normally,
      silent.
   2. **In ``[soft_warn_at_pct, prune_at_pct)``** (default 70-80%) —
-     proceed but emit a structured WARNING via Python ``logging`` so
-     the orchestrator / Leader-reflect can see we're trending toward
-     compression. No pruning yet — this is an early signal, not a
-     fix. Production-agnostic: token-count-based, no string parsing
-     for "pages / chapters / etc".
+     proceed but emit a structured soft-warn at DEBUG level via Python
+     ``logging`` so the orchestrator / Leader-reflect can see we're
+     trending toward compression. Emitted at DEBUG (not WARNING) by
+     design: this band is an early, non-actionable tripwire that fires
+     often on healthy runs, so it stays out of operator log noise; the
+     structured ``modulatio_event`` payload remains for telemetry. No
+     pruning yet — this is an early signal, not a fix.
+     Production-agnostic: token-count-based, no string parsing for
+     "pages / chapters / etc".
   3. **In ``[prune_at_pct, 100%)``** (default 80-100%) — soft-compress:
      invoke Slice 2's ``prune_messages_sliding_window`` ad-hoc,
      re-estimate. Proceed if it now fits.
@@ -150,8 +154,9 @@ class ContextBudgetConfig:
                           look up via ``litellm.get_max_tokens(model)``
                           at check time.
       soft_warn_at_pct   — fraction of ``max_input_tokens`` at which a
-                          WARNING log is emitted (0.0-1.0, typically
-                          0.70). Pure signalling — no compression at
+                          soft-warn log is emitted at DEBUG level
+                          (0.0-1.0, typically 0.70). Pure signalling —
+                          no compression at
                           this level. Set ``<= 0`` or ``>= prune_at_pct``
                           to disable. Production-agnostic: based on
                           token count, never on artifact-class
@@ -514,7 +519,7 @@ def check_and_compress(
     second element is True iff this call emitted a soft-warn log, so
     callers in long tool loops can suppress repeat warns within the
     same invocation (F9 — without this, a 20-iteration tool loop
-    that sits in [70%, 80%) emits 20 identical WARNINGs). When the
+    that sits in [70%, 80%) emits 20 identical soft-warn logs). When the
     caller doesn't care about deduping, ignore the second value or
     use the legacy positional unpack.
 

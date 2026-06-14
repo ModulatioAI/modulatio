@@ -354,6 +354,19 @@ class Ticket(BaseModel):
 #: Tuples of unknown context_budget role keys we've already warned about
 #: this process. Validator drops repeats to DEBUG to keep TUI/status
 #: polling from spamming the log.
+#:
+#: Bounded to avoid an unbounded-growth leak across the process lifetime:
+#: keys come from operator-supplied ``Project.context_budgets`` and a
+#: buggy/adversarial caller could feed an endless stream of *distinct*
+#: unknown role tuples, each one a new entry that never expires. We cap
+#: the cache at ``_SEEN_UNKNOWN_BUDGET_ROLES_MAX`` and flush it wholesale
+#: on overflow (kept as a plain set so ``.add`` / ``.discard`` / ``.clear``
+#: / membership all stay valid for callers and tests). The only
+#: observable effect of a flush is that a previously-seen tuple may emit
+#: one fresh WARN if it recurs afterwards — acceptable for what is purely
+#: a log-noise dampener, and the cap is far above the handful of distinct
+#: role tuples a sane config ever produces.
+_SEEN_UNKNOWN_BUDGET_ROLES_MAX = 1024
 _SEEN_UNKNOWN_BUDGET_ROLES: set[tuple[str, ...]] = set()
 #: Guards the check-then-act on ``_SEEN_UNKNOWN_BUDGET_ROLES``. Project
 #: validation runs on concurrent wave-executor threads (waves are ON by
@@ -542,6 +555,15 @@ class Project(BaseModel):
             with _SEEN_UNKNOWN_BUDGET_ROLES_LOCK:
                 first_sighting = unknown not in _SEEN_UNKNOWN_BUDGET_ROLES
                 if first_sighting:
+                    # Flush wholesale past the cap so an endless stream of
+                    # distinct unknown tuples can't grow the cache without
+                    # bound. Flushing before the add keeps the just-seen
+                    # tuple recorded as the sole survivor.
+                    if (
+                        len(_SEEN_UNKNOWN_BUDGET_ROLES)
+                        >= _SEEN_UNKNOWN_BUDGET_ROLES_MAX
+                    ):
+                        _SEEN_UNKNOWN_BUDGET_ROLES.clear()
                     _SEEN_UNKNOWN_BUDGET_ROLES.add(unknown)
             if not first_sighting:
                 logger.debug(

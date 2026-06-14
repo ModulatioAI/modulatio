@@ -21,10 +21,23 @@ The cache-detection heuristic ("any subdir under embeddings/") would
 also report cached for any embedder, even if it wasn't the active one.
 Both fixed: model id comes from config; cache detection is now slug-
 aware (the active model's id must appear in a populated subdir).
+
+Cache location must match the RUNTIME consumer.
+``semantic_router`` instantiates ``TextEmbedding(..., cuda=Device.CPU)``
+with NO ``cache_dir``, so it lands in fastembed's DEFAULT cache root
+(``$FASTEMBED_CACHE_PATH`` or ``<tmpdir>/fastembed_cache``). A prior
+implementation prefetched into ``get_cache_root()/embeddings`` — a
+directory the runtime never reads — so the prefetch was a no-op (the
+first task re-downloaded) and ``is_cached()`` always reported "not
+cached" after a real run. ``cache_dir()`` now resolves to fastembed's
+OWN default root and ``prefetch()`` pins that same root, so the wizard
+writes/checks exactly where the runtime reads.
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +45,10 @@ from modulatio import config, theme
 from modulatio.setup_wizard import steps
 
 
-_CACHE_SUBDIR = "embeddings"
+# Mirror of fastembed.common.utils.define_cache_dir's default when no
+# explicit cache_dir is passed (which is how semantic_router calls it).
+_FASTEMBED_CACHE_ENV = "FASTEMBED_CACHE_PATH"
+_FASTEMBED_DEFAULT_LEAF = "fastembed_cache"
 
 
 def _model_slug(model_id: str) -> str:
@@ -49,9 +65,21 @@ def _model_slug(model_id: str) -> str:
 
 
 def cache_dir() -> Path:
-    """Where the embedder cache lives (single shared root for all
-    embedders the user might switch between)."""
-    return config.get_cache_root() / _CACHE_SUBDIR
+    """Where the embedder cache lives — fastembed's OWN default root.
+
+    This MUST match where the runtime consumer (``semantic_router``)
+    downloads to. That consumer calls ``TextEmbedding(..., cuda=...)``
+    with no ``cache_dir``, so fastembed uses
+    ``$FASTEMBED_CACHE_PATH`` or ``<tmpdir>/fastembed_cache``. We
+    resolve the identical location so the prefetch populates — and
+    ``is_cached()`` inspects — the directory the runtime actually
+    reads. (Previously this returned ``get_cache_root()/embeddings``,
+    which the runtime never reads, making the prefetch a no-op.)
+    """
+    env = os.environ.get(_FASTEMBED_CACHE_ENV, "").strip()
+    if env:
+        return Path(env)
+    return Path(tempfile.gettempdir()) / _FASTEMBED_DEFAULT_LEAF
 
 
 def is_cached(model_id: str | None = None) -> bool:

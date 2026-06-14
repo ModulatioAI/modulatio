@@ -35,10 +35,34 @@ _SECRET_FLAG = re.compile(
     re.IGNORECASE,
 )
 
+# Match a secret embedded as a `key=value` pair INSIDE an otherwise
+# non-secret-named flag value (e.g. `--endpoint=https://h/v1?api_key=sk-x`
+# or a positional `cfg=token=abc`). The `key` is preserved; only the value
+# (up to the next separator) is scrubbed. Belt to `_SECRET_FLAG`'s
+# suspenders, which only redacts when the FLAG name looks secret.
+_EMBEDDED_SECRET = re.compile(
+    r"(?P<key>(?:api[-_]?key|access[-_]?token|token|secret|password|bearer|auth)"
+    r"[\w-]*)(?P<sep>[=:])(?P<val>[^&\s]+)",
+    re.IGNORECASE,
+)
+
 
 def crash_dir() -> Path:
     override = os.environ.get("MODULATIO_CRASH_DIR")
     return Path(override) if override else _DEFAULT_DIR
+
+
+def _scrub_embedded_secrets(value: str) -> str:
+    """Redact `secretkey=value` substrings embedded in a flag value.
+
+    Catches the case a value carries a secret the flag NAME doesn't
+    advertise (a connection string / URL with a `?api_key=...` query
+    param, an inline `token=...`). Preserves the key and separator so the
+    log still shows the shape; only the secret value is replaced.
+    """
+    return _EMBEDDED_SECRET.sub(
+        lambda m: f"{m.group('key')}{m.group('sep')}<redacted>", value
+    )
 
 
 def _redact_argv(argv: Sequence[str]) -> list[str]:
@@ -58,7 +82,7 @@ def _redact_argv(argv: Sequence[str]) -> list[str]:
                 out.append(flag)
                 skip_next = True
         else:
-            out.append(arg)
+            out.append(_scrub_embedded_secrets(arg))
     return out
 
 

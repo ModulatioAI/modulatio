@@ -147,7 +147,9 @@ def test_recall_falls_back_to_recency_when_vector_table_empty(monkeypatch):
 
     assert hits, "empty-table branch dropped real markdown precedent (#67)"
     assert len(hits) == 3
-    # Recency-sorted: every fallback hit carries the sentinel 1.0 score.
-    assert all(score == 1.0 for _, score in hits)
+    # Recency-sorted fallback hits are UNSCORED — score is the None sentinel,
+    # not a fabricated 1.0 (r2 audit: a 1.0 would falsely claim a perfect
+    # semantic match and bypass the min_similarity contract).
+    assert all(score is None for _, score in hits)
     bodies = {rec.body for rec, _ in hits}
     assert bodies == {f"Pattern {i}: mind the seam." for i in range(3)}

@@ -197,7 +197,17 @@ def _parse_csv(raw: str) -> tuple[str, ...]:
 
 
 def _parse_file(path: Path) -> Skill:
-    raw = path.read_text()
+    # Resilience: skill files are human-edited artifacts in the shared/project
+    # vault. A stray non-UTF-8 byte (Latin-1/CP1252 save, truncated write) must
+    # NOT raise UnicodeDecodeError out of the dispatch/wave-floor callbacks and
+    # crash the whole run — a single bad skill file degrades to "missing", never
+    # bricks the read path. ``errors="replace"`` tolerates bad bytes; an
+    # unreadable file (perms/IO) degrades to the empty skill, honoring the
+    # documented "missing → empty, not an error" contract.
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return _EMPTY_SKILL
     m = _OWN_FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}
     body = raw

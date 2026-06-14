@@ -97,6 +97,17 @@ def save(proposal: Proposal, project_code: str) -> Path:
     now = datetime.now(timezone.utc)
     pid = _proposal_id(now, proposal.title)
     path = root / f"{pid}.md"
+    # Same-second + same-title proposals would otherwise collide on the id and
+    # silently overwrite the earlier one. Append a short disambiguating suffix
+    # so each proposal keeps a distinct file (and a distinct stem-as-id).
+    if path.exists():
+        seq = 1
+        while True:
+            candidate = root / f"{pid}-{seq}.md"
+            if not candidate.exists():
+                path = candidate
+                break
+            seq += 1
     evidence_line = ", ".join(_fm_safe(r) for r in proposal.evidence_refs)
     content = (
         f"---\n"

@@ -156,7 +156,14 @@ def _render_verdict(record: VerdictRecord) -> str:
 
 
 def _parse_verdict_file(path: Path) -> VerdictRecord:
-    raw = path.read_text()
+    # Decode defensively: the docstring invites humans to hand-prune /
+    # drop in history files, so a non-UTF-8 or mangled file is plausible.
+    # A bad byte must degrade to a best-effort parse, never raise
+    # UnicodeDecodeError (a ValueError) out of load_verdicts and brick the
+    # whole domain's precedent (and the QC read path / lessons codification
+    # loop that consume it). errors="replace" matches the resilience the
+    # sibling text-review path already has.
+    raw = path.read_text(encoding="utf-8", errors="replace")
     fm = _FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}
     if fm:
@@ -208,7 +215,16 @@ def load_verdicts(domain: str, project_code: str) -> list[VerdictRecord]:
     if not dir_.exists():
         return []
     files = sorted(dir_.glob("*.md"))
-    return [_parse_verdict_file(p) for p in files]
+    records: list[VerdictRecord] = []
+    for p in files:
+        try:
+            records.append(_parse_verdict_file(p))
+        except OSError:
+            # One unreadable file (vanished mid-glob, permission error,
+            # FS hiccup) must not brick the whole domain's precedent.
+            # Decode errors are already absorbed via errors="replace".
+            continue
+    return records
 
 
 # ── Embedded retrieval ────────────────────────────────────────────────────

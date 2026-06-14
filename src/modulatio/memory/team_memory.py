@@ -39,8 +39,14 @@ from modulatio import config
 from modulatio.semantic_router import Embedder
 from modulatio.vault import project_dir
 
-# Single source of truth lives in config.get_embedding_model().
-_EMBED_MODEL = config.get_embedding_model()
+def _embed_model() -> str:
+    """Resolve the active embedding-model identifier from current config.
+
+    Resolved per-call (not captured at import) so a wizard model-swap
+    mid-process flows into the LanceDB metadata fingerprint and triggers a
+    rebuild rather than serving stale vectors. Mirrors qc_history._embed_model.
+    """
+    return config.get_embedding_model()
 
 # Per-project reentrant lock guarding the LanceDB index. Concurrent wave
 # workers call recall() before every dispatch; _ensure_vectors() does a
@@ -148,7 +154,12 @@ def _parse_csv_field(raw: str) -> tuple[str, ...]:
 def _parse(path: Path) -> MemoryEntry | None:
     try:
         text = path.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # A binary / non-UTF-8 / truncated-mid-multibyte .md (crash-during-write,
+        # FS corruption, a stray file) must degrade to "skip this one entry"
+        # rather than bricking list_entries()/recall() for every valid entry.
+        # UnicodeDecodeError is a ValueError subclass, not an OSError, so it
+        # needs its own arm. Mirrors store._read_entity's quarantine contract.
         return None
     fm = _FRONTMATTER_RE.match(text)
     meta: dict[str, str] = {}
@@ -403,7 +414,7 @@ def _db_path(project_code: str) -> Path:
 
 def _config_hash(records: list[MemoryEntry]) -> str:
     ids = "||".join(r.entry_id for r in records)
-    return hashlib.sha256((ids + f"|model={_EMBED_MODEL}").encode()).hexdigest()[:16]
+    return hashlib.sha256((ids + f"|model={_embed_model()}").encode()).hexdigest()[:16]
 
 
 def _load_meta(project_code: str) -> dict:
@@ -432,10 +443,11 @@ def _ensure_vectors(project_code: str, embedder: Embedder) -> list[MemoryEntry]:
         records = list_entries(project_code)
         new_hash = _config_hash(records)
         meta = _load_meta(project_code)
+        active_model = _embed_model()
 
         if (
             meta.get("records_hash") == new_hash
-            and meta.get("embedding_model") == _EMBED_MODEL
+            and meta.get("embedding_model") == active_model
             and meta.get("embed_dim") == embedder.dim
         ):
             return records
@@ -451,7 +463,7 @@ def _ensure_vectors(project_code: str, embedder: Embedder) -> list[MemoryEntry]:
         if not records:
             _save_meta(project_code, {
                 "records_hash": new_hash,
-                "embedding_model": _EMBED_MODEL,
+                "embedding_model": active_model,
                 "embed_dim": embedder.dim,
                 "record_count": 0,
             })
@@ -467,7 +479,7 @@ def _ensure_vectors(project_code: str, embedder: Embedder) -> list[MemoryEntry]:
         db.create_table("team_memory", data=rows, schema=schema)
         _save_meta(project_code, {
             "records_hash": new_hash,
-            "embedding_model": _EMBED_MODEL,
+            "embedding_model": active_model,
             "embed_dim": embedder.dim,
             "record_count": len(records),
         })
@@ -484,8 +496,14 @@ def recall(
     embedder: Optional[Embedder] = None,
     top_k: int = 5,
     min_similarity: float = 0.5,
-) -> list[tuple[MemoryEntry, float]]:
+) -> list[tuple[MemoryEntry, float | None]]:
     """Targeted retrieval — narrow by metadata, then top-K semantic.
+
+    Each hit's score is the cosine similarity (float) when computed
+    semantically, or ``None`` when the result came from a recency fallback
+    (no embedder / no task_description / unavailable cache) — the None
+    signals "unscored precedent" so callers don't mistake it for a perfect
+    semantic match.
 
     Locked design (project_modulatio_v2_memory_architecture.md):
       1. Metadata pre-filter (skill_names ∩, artifact_kind exact, capability_tags ∩)
@@ -517,10 +535,14 @@ def recall(
     if not filtered:
         return []
 
-    # Without embedder or task description: recency-sort filtered subset, take top-K
+    # Without embedder or task description: recency-sort filtered subset, take top-K.
+    # These hits are NOT semantically scored, so similarity is None (a distinct
+    # "unscored / recency" sentinel) rather than a fabricated 1.0 — a 1.0 would
+    # falsely claim perfect relevance, bypass min_similarity, and mislead the
+    # producer. render_for_prompt surfaces None as "recency".
     if embedder is None or not task_description:
         filtered.sort(key=lambda r: r.timestamp, reverse=True)
-        return [(r, 1.0) for r in filtered[:top_k]]
+        return [(r, None) for r in filtered[:top_k]]
 
     # Semantic retrieval within filtered subset. Hold the per-project lock
     # across the rebuild AND the read so no concurrent wave worker drops/
@@ -528,13 +550,15 @@ def recall(
     # nested _ensure_vectors acquire is free).
     import lancedb
 
-    def _recency_fallback() -> list[tuple[MemoryEntry, float]]:
+    def _recency_fallback() -> list[tuple[MemoryEntry, float | None]]:
         # Markdown is the source of truth; LanceDB is a rebuildable cache.
         # When the cache is unavailable (missing path / table / empty table)
         # but the metadata-filtered markdown set is non-empty, surface those
         # entries by recency rather than dropping real precedent on the floor.
+        # similarity is None (unscored) — no semantic score was computed, so we
+        # must not label them sim 1.00 and bypass the min_similarity contract.
         ranked = sorted(filtered, key=lambda r: r.timestamp, reverse=True)
-        return [(r, 1.0) for r in ranked[:top_k]]
+        return [(r, None) for r in ranked[:top_k]]
 
     with _vector_lock(project_code):
         _ensure_vectors(project_code, embedder)
@@ -580,11 +604,13 @@ def recall(
         return hits
 
 
-def render_for_prompt(hits: list[tuple[MemoryEntry, float]]) -> str:
+def render_for_prompt(hits: list[tuple[MemoryEntry, float | None]]) -> str:
     """Format a recall result for injection into a producer prompt's
     ``{team_memory_context}`` slot.
 
-    Empty hits → neutral marker so producers don't see a blank slot."""
+    Empty hits → neutral marker so producers don't see a blank slot.
+    A ``None`` score (recency fallback — no semantic score was computed) is
+    rendered as ``recency`` rather than a fabricated ``sim 1.00``."""
     if not hits:
         return "(no team-memory precedent for this task)"
     lines = []
@@ -592,8 +618,9 @@ def render_for_prompt(hits: list[tuple[MemoryEntry, float]]) -> str:
         author = rec.writer_id
         if rec.proposed_by and rec.proposed_by != rec.writer_id:
             author = f"{rec.proposed_by} (approved by {rec.writer_id})"
+        score = "recency" if sim is None else f"sim {sim:.2f}"
         lines.append(
-            f"- [{rec.entry_id} | {rec.artifact_kind or '?'} | sim {sim:.2f} | by {author}] {rec.body.strip()[:300]}"
+            f"- [{rec.entry_id} | {rec.artifact_kind or '?'} | {score} | by {author}] {rec.body.strip()[:300]}"
         )
     return "\n".join(lines)
 

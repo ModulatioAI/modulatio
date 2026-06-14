@@ -278,19 +278,28 @@ class TelegramListener:
         # error echo — makes Telegram reject the whole message with HTTP
         # 400, and send_message returns False: the reply is silently lost.
         # Fall back to a plain-text send so the user ALWAYS gets a reply.
-        ok = telegram_notify.send_message(
-            text,
-            parse_mode="Markdown",
-            bot_token=self.bot_token,
-            chat_id=self.chat_id,
-        )
-        if not ok:
-            telegram_notify.send_message(
-                text,
-                parse_mode=None,
+        #
+        # Chunk HERE and fall back PER CHUNK. send_message splits a long
+        # reply into 4000-char chunks and reports False if ANY chunk fails;
+        # a blanket plaintext re-send of the whole text would then deliver
+        # every already-succeeded chunk a SECOND time. By chunking first and
+        # retrying only the chunk that actually failed, the user never sees
+        # a duplicate. Each chunk is already <= the split size, so
+        # send_message treats it as a single message (no re-splitting).
+        for chunk in telegram_notify._split_chunks(text):
+            ok = telegram_notify.send_message(
+                chunk,
+                parse_mode="Markdown",
                 bot_token=self.bot_token,
                 chat_id=self.chat_id,
             )
+            if not ok:
+                telegram_notify.send_message(
+                    chunk,
+                    parse_mode=None,
+                    bot_token=self.bot_token,
+                    chat_id=self.chat_id,
+                )
 
 
 # === Default command dispatcher ===

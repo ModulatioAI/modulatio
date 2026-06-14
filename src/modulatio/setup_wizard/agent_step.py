@@ -246,8 +246,19 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
     across the pool. Adds up to ``MAX_AGENTS - 2`` (Leader + QC) producers.
     Sets ``state['worker_agents']``."""
     staged_keys = state.get("staged_api_keys")
-    reserved = len(state.get("triad_agents", [])) or 2  # Leader + QC seats
-    max_producers = max(1, MAX_AGENTS - reserved)
+    # Leader + QC are ALWAYS provisioned (exactly 2 seats) by the triad step,
+    # regardless of what a partial/corrupt re-invocation pre-fill loaded into
+    # ``triad_agents``. Reserve those 2 as a constant so a saved triad with a
+    # missing/extra/unknown-tier entry can't widen ``max_producers`` and let
+    # the final team exceed MAX_AGENTS.
+    max_producers = max(1, MAX_AGENTS - 2)
+
+    # Re-invocation edit/keep: seed the producer picker defaults from the saved
+    # worker pool so a reconfigure starts on the current picks instead of an
+    # empty re-provision (mirrors how _provision_triad seeds from ``by_tier``).
+    prior_models = [
+        a.get("model") for a in state.get("worker_agents", []) if a.get("model")
+    ][:max_producers]
 
     theme.clear_screen()
     theme.step_header(4, 7, "Build your team — add producers")
@@ -263,7 +274,10 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
         n = len(producers) + 1
         theme.clear_screen()
         theme.step_header(4, 7, f"Producer {n} of up to {max_producers}")
-        model = _pick_model(f"producer {n}", default_models, staged_keys=staged_keys)
+        prior = prior_models[n - 1] if n - 1 < len(prior_models) else None
+        model = _pick_model(
+            f"producer {n}", default_models, staged_keys=staged_keys, current=prior
+        )
         if model in (steps.BACK, steps.QUIT):
             # BACK before any producer is added bubbles up; otherwise just
             # stop adding and keep what we have (>=1 enforced below).
@@ -276,6 +290,11 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
         if len(producers) >= max_producers:
             theme.muted(f"  Reached the {MAX_AGENTS}-member team cap.")
             break
+        # While prior picks remain to re-confirm (edit/keep re-invocation),
+        # keep walking them without the "add another?" gate so a reconfigure
+        # presents the WHOLE saved pool rather than stopping after the first.
+        if len(producers) < len(prior_models):
+            continue
         if not steps.confirm_yn("Add another producer to the pool?", default=False):
             break
 

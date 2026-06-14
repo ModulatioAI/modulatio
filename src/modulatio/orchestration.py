@@ -3899,13 +3899,27 @@ class Orchestrator:
                 corrective_notes=corrective_notes,
             )
 
-        if task.producer_mode == "revise" and path.exists():
+        # Revise/edit build IN PLACE on a readable text draft. A BINARY draft has
+        # no readable text to build on — _draft_is_multifile returns False for it,
+        # so the leader-redo/auto-resume lanes route it to "revise", and an
+        # unguarded read_text() would raise UnicodeDecodeError → the redo loop's
+        # generic except masks it as a confusing BLOCKED("…raised UnicodeDecodeError")
+        # instead of regenerating. Treat an unreadable/binary draft as "no draft"
+        # and fall through to generate, mirroring _draft_is_multifile /
+        # _read_task_artifact (which already treat binary as no readable draft).
+        existing_draft = None
+        if task.producer_mode in ("revise", "edit") and path.exists():
+            try:
+                existing_draft = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                existing_draft = None
+
+        if task.producer_mode == "revise" and existing_draft is not None:
             # §3b (2026-06-03): SUBSTANTIVE defect → build on the existing draft
             # with the reviewer's critique as the instruction. Never start from
             # scratch — keep the prior work AND the judgment that's already been
             # formed; the producer reworks/extends in place (cheap recovery, not
             # a clean regen that throws tokens away).
-            existing_draft = path.read_text()
             prompt = self._prompt("drafter-revise", _DRAFTER_REVISE_PROMPT).format(
                 task_id=task.id,
                 artifact_kind=task.artifact_kind,
@@ -3927,8 +3941,7 @@ class Orchestrator:
                     target_agent_id=task.assigned_agent_id,
                 ),
             )
-        elif task.producer_mode == "edit" and path.exists():
-            existing_draft = path.read_text()
+        elif task.producer_mode == "edit" and existing_draft is not None:
             prompt = self._prompt("drafter-edit", _DRAFTER_EDIT_PROMPT).format(
                 task_id=task.id,
                 artifact_kind=task.artifact_kind,
@@ -4614,7 +4627,16 @@ class Orchestrator:
         if not path.exists():
             return []
         turns: list[dict] = []
-        for line in path.read_text().splitlines():
+        # Read defensively: the conversation log is a durable, user-facing,
+        # hand-editable artifact. A single non-UTF-8 byte (crash mid-write of a
+        # future non-ASCII write, an operator paste/edit, external tooling) must
+        # not permanently wedge every converse() turn on the project — degrade
+        # to a best-effort thread instead (mirrors _pin_attachments' resilience).
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        for line in raw.splitlines():
             try:
                 turns.append(json.loads(line))
             except json.JSONDecodeError:
@@ -4701,6 +4723,18 @@ class Orchestrator:
             lines.append("")
             lines.append("(attachments with this message)")
             lines.append(_format_kickoff_attachments(attachments))
+            # _format_kickoff_attachments labels images "vision … is a future
+            # slice" — true for KICKOFF (single-shot decompose), but the converse
+            # vision turn DOES attach images as real content blocks via
+            # _run_multimodal_leader. Correct the contradiction for this surface
+            # so the model examines the image instead of treating it as deferred
+            # (mirrors the decompose corrective note).
+            if any(getattr(a, "kind", None) == "image" for a in attachments):
+                lines.append(
+                    "(Image attachments are included as content blocks below — "
+                    "examine them for visual context; the 'future slice' note "
+                    "above applies only to kickoff, not this conversation.)"
+                )
         transcript = "\n\n".join(lines) if lines else "(first message of the conversation)"
         body = self._prompt("leader-converse", _LEADER_CONVERSE_PROMPT)
         return body.format(
@@ -6810,7 +6844,19 @@ class Orchestrator:
                     remapped.append(d)  # already shared / unrelated
             r.drafts = remapped
 
-        # Transcripts (unique per task) + staging teardown.
+        # Transcripts + raw tool-result files + staging teardown.
+        #
+        # Producer/QC transcripts (``<task>.jsonl`` / ``qc_<task>.jsonl``) are
+        # unique per task and never collide. But raw tool-result files are named
+        # ``<call_id>.txt`` (tool_summarization.persist_raw_result), and call_id
+        # is the MODEL/provider-supplied correlation id — unique only WITHIN one
+        # completion, not across two completions in parallel workers (cheap/local
+        # models routinely reuse short ids like ``call_1``/``0``). A bare
+        # name-keyed copy would let the lexicographically-later task silently
+        # overwrite an earlier task's raw result in the durable audit tree. Guard
+        # the merge: if the destination already exists (claimed by another task)
+        # AND differs, namespace this task's copy under ``tool_calls/<task_id>/``
+        # so the audit record stays intact rather than last-write-wins.
         for tid, r in staged:
             tc = r.staging_root / "tool_calls"
             if tc.is_dir():
@@ -6818,6 +6864,16 @@ class Orchestrator:
                     if f.is_file():
                         dst = shared / "tool_calls" / f.name
                         dst.parent.mkdir(parents=True, exist_ok=True)
+                        if dst.exists():
+                            try:
+                                same = dst.read_bytes() == f.read_bytes()
+                            except OSError:
+                                same = False
+                            if not same:
+                                # Collision on a reused call_id across workers —
+                                # keep both by namespacing under the task id.
+                                dst = shared / "tool_calls" / tid.lower() / f.name
+                                dst.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(f, dst)
             shutil.rmtree(r.staging_root, ignore_errors=True)
 
@@ -7052,6 +7108,33 @@ class Orchestrator:
                 # for capacity with no slot freeing — break to avoid a spin.
                 if conflicts:
                     continue
+                # Every ready task was DEFERRED_CAPACITY and no slot will ever
+                # free (a pathological roster — e.g. the only qualifying
+                # producers carry capacity_cap=0). Without this guard the wave
+                # loop just breaks and leaves those tasks PENDING-and-orphaned:
+                # never run, never BLOCKED, a silent goal stall with no surfaced
+                # signal. Bind it deterministically — BLOCK each still-runnable
+                # ready task with a capacity rationale and surface an error so a
+                # saturated roster fails VISIBLY (mirrors _block_wave_path_conflict).
+                for t in wave:
+                    if not _runnable(t):
+                        continue
+                    t.transitions.append(StateTransition(
+                        from_state=t.status.value,
+                        to_state=TaskStatus.BLOCKED.value,
+                        actor="planner",
+                        rationale=(
+                            "no producer with available capacity could be "
+                            "allocated (all qualifying producers saturated/"
+                            "capacity_cap=0); task deferred with no slot freeing"
+                        ),
+                    ))
+                    t.status = TaskStatus.BLOCKED
+                    summary.errors.append(
+                        f"{t.id}: blocked — no producer capacity available "
+                        "(roster saturated; would otherwise stall silently)"
+                    )
+                    _save(t)
                 break
 
             # 4. Run the wave in parallel; collect results (no shared
@@ -7645,6 +7728,15 @@ class Orchestrator:
             # salvage→re-decompose rung is deferred; fall through to the
             # caller's graceful terminal.
             return False
+        if _draft_is_multifile(t, draft_path):
+            # The producer wrote sibling files to separate paths and QC reviewed
+            # the WHOLE staging tree (cross-file). This single-file rescue reads
+            # and patches ONLY the primary at task.output_path, so a defect QC
+            # rejected in a SIBLING file would survive untouched while the task
+            # is stamped COMPLETED via a qc_authored_fix pass-mark — a partial
+            # fix shipped as a clean completion. Refuse it; fall through to the
+            # graceful QC_REJECTED / breaker terminal so the rejection stands.
+            return False
 
         # Assemble the defects the QC fixer should target. ``last_qc`` is the 2-tuple
         # ``(verdict, notes)``; the real QC ``defect_type`` (Hero code BLOCKER 2) rides
@@ -7736,13 +7828,33 @@ class Orchestrator:
         raw = self._run_agent_call(t.qc_agent_id, "qc", prompt)
         patched = _strip_code_fences(_strip_preamble(_strip_thinking(raw)))
         if _is_code_artifact_kind(t.artifact_kind):
-            extracted = _extract_code_from_prose(patched)
-            if extracted is not None:
-                patched = extracted
-            patched = _trim_leading_prose_from_code(patched)
+            # If the patch came back as an (off-contract) concatenated multi-file
+            # body carrying ``=== FILE: ===`` headers, _extract_code_from_prose
+            # would pick only the single largest fenced block and silently drop
+            # the rest, mangling the artifact. Skip prose-extraction for
+            # header-bearing bodies and write them through verbatim.
+            if not _DIFF_FILE_HEADER_RE.search(patched):
+                extracted = _extract_code_from_prose(patched)
+                if extracted is not None:
+                    patched = extracted
+                patched = _trim_leading_prose_from_code(patched)
         if not patched.strip():
             raise ValueError("QC patch produced an empty artifact")
         draft_path.write_text(patched)
+        # P5 declared-format integrity (HRWT fabrication gate). The QC patch
+        # ALWAYS writes TEXT; on the breaker-abort lane QC-review never ran, so
+        # verify_declared_format never fired on the patched bytes. Writing text
+        # to a declared-binary output_path (e.g. report.pdf) would ship a fake
+        # binary as a clean completion. Re-assert the format invariant here — it
+        # is engine-binding and must not be skippable by the rescue path. A text
+        # blob under a binary extension raises, so the caller falls through to
+        # the graceful QC_REJECTED / breaker terminal instead of completing.
+        from modulatio import review_ledger as _review_ledger
+        fmt_ok, fmt_reason = _review_ledger.verify_declared_format(draft_path)
+        if not fmt_ok:
+            raise ValueError(
+                f"QC patch failed declared-format integrity: {fmt_reason}"
+            )
         self._record_artifact_write(draft_path)  # #151/e2e Blocker 2 staging merge
         return patched
 
@@ -8743,6 +8855,12 @@ class Orchestrator:
             )
         )
         goal.status = GoalStatus.COMPLETED
+        # The redo loop-breaker fingerprint is only meaningful while the goal is
+        # still IN_PROGRESS and redo-eligible. Now that it has terminalized, drop
+        # its entry so the per-run dict doesn't accumulate stale fingerprints for
+        # every goal that ever redid (the _leader_auto_redo branch above returns
+        # early and intentionally KEEPS its entry — that goal is still live).
+        self._goal_redo_fingerprints.pop(goal.id, None)
         self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
 
     def _goal_blind_deliverables(self, tasks: "list[Task]") -> "list[str]":

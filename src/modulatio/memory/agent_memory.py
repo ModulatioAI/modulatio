@@ -22,6 +22,7 @@ v1.3 differences:
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -98,8 +99,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# Monotonic suffix to break same-window id ties. The %f timestamp truncates to
+# ~100µs resolution, so concurrent _create_entry calls (e.g. parallel wave
+# workers writing per-agent memory) landing in the same window would otherwise
+# collide and silently overwrite each other. Mirror of team_memory._new_id().
+_ID_LOCK = threading.Lock()
+_ID_COUNTER = 0
+
+
 def _new_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")[:18]
+    global _ID_COUNTER
+    prefix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")[:18]
+    with _ID_LOCK:
+        _ID_COUNTER = (_ID_COUNTER + 1) % 1000000
+        seq = _ID_COUNTER
+    return f"{prefix}{seq:06d}"
 
 
 def _create_entry(

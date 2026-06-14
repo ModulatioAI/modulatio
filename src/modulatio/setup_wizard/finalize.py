@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from modulatio import config, setup_state, theme, vault
 from modulatio.setup_wizard import steps
@@ -47,14 +48,45 @@ def _derive_default_models(structural: list[dict], workers: list[dict]) -> dict[
     return out
 
 
+def _provider_from_base_url(base_url: str) -> str | None:
+    """Derive a short, human provider name from a model preset's endpoint.
+
+    ``api.openai.com`` → ``openai``; ``generativelanguage.googleapis.com`` →
+    ``googleapis``; a loopback host (``127.0.0.1``/``localhost``) → ``local``.
+    Skips ``api``/``www`` prefixes. Returns ``None`` for an unparseable URL so
+    the caller drops it. Provider-agnostic — nothing is hardcoded to a vendor.
+    """
+    try:
+        host = (urlparse(base_url).hostname or "").lower()
+    except Exception:
+        return None
+    if not host:
+        return None
+    if host in ("127.0.0.1", "::1") or host == "localhost" or host.endswith(".localhost"):
+        return "local"
+    parts = [p for p in host.split(".") if p not in ("api", "www")]
+    if not parts:
+        return None
+    # Drop a trailing public-suffix-ish segment (com/ai/io/xyz/net/org) so
+    # 'api.x.ai' → 'x', 'openrouter.ai' → 'openrouter'.
+    if len(parts) > 1 and parts[-1] in ("com", "ai", "io", "xyz", "net", "org", "dev", "co"):
+        parts = parts[:-1]
+    name = parts[-1] if len(parts) == 1 else parts[0]
+    return name or None
+
+
 def _derive_providers(state: dict) -> list[str]:
-    """Provider names for the summary line, derived from the keys the wizard
-    actually stages. The provider step never writes a ``configured_providers``
-    key (models are self-contained endpoint+auth+id entries), so the prior read
-    of that phantom key always rendered ``(none)``. ``staged_api_keys`` is keyed
-    by env var (``OPENAI_API_KEY`` → ``openai``); strip the ``_API_KEY`` suffix
-    and lowercase. Provider-agnostic: nothing is hardcoded — whatever the user
-    staged appears. Returns a sorted, de-duplicated list.
+    """Provider names for the summary line. The provider step never writes a
+    ``configured_providers`` key (models are self-contained endpoint+auth+id
+    entries), so the prior read of that phantom key always rendered ``(none)``.
+
+    Two sources, unioned: (1) ``staged_api_keys`` keyed by env var
+    (``OPENAI_API_KEY`` → ``openai``; strip the ``_API_KEY`` suffix and
+    lowercase), and (2) the configured model presets' endpoints — so an
+    OAuth-only or local-only setup (which stages NO api keys) is still
+    represented by the provider/endpoint behind each model. Provider-agnostic:
+    nothing is hardcoded — whatever the user configured appears. Returns a
+    sorted, de-duplicated list.
     """
     providers: set[str] = set()
     for env_var in state.get("staged_api_keys", {}):
@@ -64,7 +96,42 @@ def _derive_providers(state: dict) -> list[str]:
         name = name.strip("_").lower()
         if name:
             providers.add(name)
+    # Endpoints behind the configured models — covers OAuth/local presets that
+    # stage no api key. Only the presets the user actually picked this run
+    # (``configured_models``, a list of preset keys) are represented; an
+    # empty/absent list contributes nothing. Best-effort: a presets-load
+    # failure must not break the summary, so it degrades to staged-keys-only.
+    configured = set(state.get("configured_models") or ())
+    if configured:
+        try:
+            from modulatio import model_presets
+
+            presets = model_presets.load_presets()
+        except Exception:
+            presets = {}
+        for key in configured:
+            preset = presets.get(key)
+            if not isinstance(preset, dict):
+                continue
+            name = _provider_from_base_url(str(preset.get("base_url", "")))
+            if name:
+                providers.add(name)
     return sorted(providers)
+
+
+def _producer_label(agent: dict) -> str:
+    """Short summary identity for a producer in the confirm line. Producers are
+    model endpoints (no held skills), so prefer the model id, then capability
+    tags, then the user-given name — never a bare ``?``.
+    """
+    model = str(agent.get("model") or "").strip()
+    if model:
+        return model
+    caps = agent.get("capability_tags") or []
+    if caps:
+        return ", ".join(str(c) for c in caps)
+    name = str(agent.get("name") or "").strip()
+    return name or "?"
 
 
 def confirm(state: dict) -> Any:
@@ -88,7 +155,11 @@ def confirm(state: dict) -> Any:
         for role, model in derived.items():
             print(f"      {role:12s}  {theme.color(model, 'accent')}")
     print(f"    Structural:    {len(structural)} (Leader + QC: {', '.join(a.get('tier', '?') for a in structural)})")
-    print(f"    Skill-holders: {len(workers)} — {', '.join(', '.join(a.get('skills', [])) or '?' for a in workers)}")
+    # Producers are model endpoints (skills are checked out from the shared
+    # library per task — Agent.skills is always empty here), so identify each
+    # by its model, falling back to capability tags or name. The old line read
+    # ``a.get('skills', [])`` and rendered ``?, ?, ?`` for every producer.
+    print(f"    Producers:     {len(workers)} — {', '.join(_producer_label(a) for a in workers) or '(none)'}")
     print(f"    Total team:    {len(structural) + len(workers)}")
     code = state.get("first_project_code")
     if code:
@@ -191,4 +262,4 @@ def commit(state: dict, *, version: str) -> None:
     theme.success(f"Setup completed and recorded at {setup_state.SETUP_STATE_FILE}")
 
 
-__all__ = ["confirm", "commit", "_derive_providers"]
+__all__ = ["confirm", "commit", "_derive_providers", "_provider_from_base_url", "_producer_label"]

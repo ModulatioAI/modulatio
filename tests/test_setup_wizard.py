@@ -140,8 +140,11 @@ def test_build_agent_from_template_unknown_id_raises():
 # === embedded_llm_step ===
 
 def test_is_cached_false_when_dir_empty(tmp_path, monkeypatch):
-    cache = tmp_path / "cache"
-    monkeypatch.setattr(config, "_fallback_cache_root", lambda: str(cache))
+    # cache_dir() resolves to fastembed's OWN default root (the dir the
+    # runtime consumer reads); pin it via FASTEMBED_CACHE_PATH so the
+    # check inspects a sandboxed location.
+    cache = tmp_path / "fastembed_cache"
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
     config.reload()
     assert embedded_llm_step.is_cached() is False
 
@@ -152,8 +155,8 @@ def test_is_cached_true_when_active_model_dir_populated(tmp_path, monkeypatch):
     model's leaf slug counts as cached. The prior "any subdir exists"
     heuristic was wrong — a cache from a previously-active embedder
     would falsely report the new active embedder as cached."""
-    cache = tmp_path / "cache"
-    monkeypatch.setattr(config, "_fallback_cache_root", lambda: str(cache))
+    cache = tmp_path / "fastembed_cache"
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
     config.reload()
     embeddings = embedded_llm_step.cache_dir()
     embeddings.mkdir(parents=True, exist_ok=True)
@@ -172,8 +175,8 @@ def test_is_cached_false_when_only_other_model_present(tmp_path, monkeypatch):
     different embedder, a fresh active-model cache check must NOT
     report the active model as cached. The slug match prevents false
     positives that the old heuristic produced."""
-    cache = tmp_path / "cache"
-    monkeypatch.setattr(config, "_fallback_cache_root", lambda: str(cache))
+    cache = tmp_path / "fastembed_cache"
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
     config.reload()
     embeddings = embedded_llm_step.cache_dir()
     embeddings.mkdir(parents=True, exist_ok=True)
@@ -188,8 +191,8 @@ def test_is_cached_false_when_only_other_model_present(tmp_path, monkeypatch):
 
 def test_is_cached_respects_explicit_model_arg(tmp_path, monkeypatch):
     """Tests can probe specific model ids without monkeypatching config."""
-    cache = tmp_path / "cache"
-    monkeypatch.setattr(config, "_fallback_cache_root", lambda: str(cache))
+    cache = tmp_path / "fastembed_cache"
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
     config.reload()
     embeddings = embedded_llm_step.cache_dir()
     embeddings.mkdir(parents=True, exist_ok=True)
@@ -206,8 +209,8 @@ def test_prefetch_uses_config_get_embedding_model(tmp_path, monkeypatch):
     tried to import a nonexistent `_ROUTING_MODEL` from semantic_router
     and fell back to a hardcoded `BAAI/bge-small-en-v1.5`, which would
     download a different model than the one routing actually used."""
-    cache = tmp_path / "cache"
-    monkeypatch.setattr(config, "_fallback_cache_root", lambda: str(cache))
+    cache = tmp_path / "fastembed_cache"
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
     # Override the embedding model so we can verify resolution.
     monkeypatch.setattr(
         config,
@@ -244,8 +247,8 @@ def test_prefetch_uses_config_get_embedding_model(tmp_path, monkeypatch):
 def test_prefetch_explicit_model_arg_overrides_config(tmp_path, monkeypatch):
     """The `model_id` arg is for advanced/testing use; if passed, it
     takes precedence over the config default."""
-    cache = tmp_path / "cache"
-    monkeypatch.setattr(config, "_fallback_cache_root", lambda: str(cache))
+    cache = tmp_path / "fastembed_cache"
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
     monkeypatch.setattr(
         config, "get_embedding_model", lambda: "config-default/model-x"
     )

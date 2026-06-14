@@ -1391,7 +1391,18 @@ def emit_compaction(
     # fill. An `echo_corrected` row fires ONLY when Leader emitted a
     # non-empty value that diverges from the source. Empty / absent
     # ⇒ silent fill (no drift to report).
-    leader_echo = parsed_state.get("original_user_goal", "") or ""
+    # The echo is orchestrator-owned and is NOT validated by
+    # validate_state_doc (see Step 2), so this field carries arbitrary
+    # LLM-controlled JSON: a Leader-reflect response may emit a list /
+    # int / null here. A non-string value would crash `.strip()` (and
+    # later `EchoCorrection.leader_value_sha256`), silently aborting the
+    # whole compaction with zero forensic trace. Treat any non-string
+    # echo as ABSENT → silent fill with the source value, matching the
+    # empty-echo branch. The engine sanitizes the orchestrator-owned
+    # echo deterministically rather than trusting its type.
+    leader_echo = parsed_state.get("original_user_goal")
+    if not isinstance(leader_echo, str):
+        leader_echo = ""
     correction: EchoCorrection | None = None
     if leader_echo.strip() and leader_echo.strip() != original_user_goal_source.strip():
         correction = EchoCorrection(

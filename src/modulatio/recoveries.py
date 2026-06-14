@@ -43,6 +43,13 @@ from modulatio.vault import project_dir
 #: Hard write-time cap on every stored text field (Nemo #6) — chars, not tokens.
 MAX_RECOVERY_EXCERPT_CHARS = 2000
 
+#: Bound on the delta-window the change-shape fingerprint is computed over (chars).
+#: The STORED excerpts stay clipped at ``MAX_RECOVERY_EXCERPT_CHARS``; the fingerprint
+#: is computed from a delta-CENTERED window so a tail-only fix on a large artifact still
+#: yields a stable shape (and so two head-identical artifacts don't collapse to a false
+#: no-delta singleton) — while still bounding difflib's cost on a pathological artifact.
+_MAX_SHAPE_WINDOW_CHARS = 200_000
+
 #: How many significant rationale tokens make the lexical half of the signature.
 _RATIONALE_KEY_TOKENS = 8
 
@@ -97,6 +104,33 @@ class RecoveryRecord:
 
 def _truncate(s: object) -> str:
     return str(s or "")[:MAX_RECOVERY_EXCERPT_CHARS]
+
+
+def _delta_window(before: object, after: object) -> "tuple[str, str]":
+    """Strip the shared common prefix and suffix from ``before``/``after`` and bound
+    the residual changed region to ``_MAX_SHAPE_WINDOW_CHARS`` each. The change-shape
+    fingerprint is computed over THIS window, not a head-truncated copy: a real fix in
+    the TAIL of a >``MAX_RECOVERY_EXCERPT_CHARS`` artifact would otherwise leave the two
+    head-truncated excerpts identical (``before == after``) and flip a genuinely
+    recurring technique to a permanent ``unclassified`` singleton that never clusters.
+
+    O(n) prefix/suffix scan — no difflib over the full artifact — so this also caps the
+    fingerprint cost on a pathological (300k-token) artifact."""
+    b, a = str(before), str(after)
+    if b == a:
+        return b, a
+    n = min(len(b), len(a))
+    # common prefix length
+    i = 0
+    while i < n and b[i] == a[i]:
+        i += 1
+    # common suffix length (not crossing into the already-matched prefix)
+    j = 0
+    while j < (n - i) and b[len(b) - 1 - j] == a[len(a) - 1 - j]:
+        j += 1
+    bw = b[i: len(b) - j]
+    aw = a[i: len(a) - j]
+    return bw[:_MAX_SHAPE_WINDOW_CHARS], aw[:_MAX_SHAPE_WINDOW_CHARS]
 
 
 # ── change-shape fingerprint (artifact-kind-aware, Hero R3) ────────────────────
@@ -282,7 +316,13 @@ def record_recovery(
     after_x = _truncate(after)
     defects_x = _truncate(defects)
     qc_rationale_x = _truncate(qc_rationale)
-    shape = change_shape(before_x, after_x, artifact_kind)
+    # Fingerprint the CHANGED region of the FULL artifact, not a head-truncated copy
+    # (R2 edge-case): a tail-only fix on a >MAX_RECOVERY_EXCERPT_CHARS artifact leaves
+    # before_x == after_x, which would flip a real recurring technique to a permanent
+    # ``unclassified`` singleton that never clusters. The window is delta-centered and
+    # bounded, so the stored excerpts stay clipped while the shape stays meaningful.
+    shape_before, shape_after = _delta_window(before, after)
+    shape = change_shape(shape_before, shape_after, artifact_kind)
     if shape is None:
         shape = f"unclassified:{eid}"  # permanent singleton — can never false-merge
     rec = RecoveryRecord(
@@ -358,12 +398,24 @@ def mark_consumed(project_code: str, entry_ids) -> None:
                 f.write(e + "\n")
 
 
-def unconsumed_recoveries(project_code: str, limit: int = 30) -> "list[RecoveryRecord]":
-    """Un-consumed recoveries, most-recent first, capped — the raw material the win
-    loop clusters + the Leader judges."""
+def unconsumed_recoveries(
+    project_code: str, limit: "int | None" = None
+) -> "list[RecoveryRecord]":
+    """Un-consumed recoveries, most-recent first — the raw material the win loop
+    clusters + the Leader judges.
+
+    ``limit`` defaults to ``None`` (the FULL unconsumed feed). The recurrence count is
+    computed by :func:`cluster_recoveries` over whatever this returns, so a hard cap
+    here can STARVE a genuinely recurring technique (R2 correctness): with >cap diverse
+    signatures, an older technique with ``>= floor`` members can be sliced out of the
+    window and never reach the floor. Apply the display/evidence cap at the SURFACE
+    (per-cluster), not here. A positive ``limit`` still caps for callers that want a
+    bounded preview; the loaded feed is already write-time-bounded per record."""
     consumed = consumed_ids(project_code)
     rows = [r for r in load_recoveries(project_code) if r.entry_id not in consumed]
     rows.sort(key=lambda r: r.timestamp, reverse=True)
+    if limit is None:
+        return rows
     return rows[: max(1, limit)]
 
 

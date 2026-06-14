@@ -519,10 +519,18 @@ def litellm_runner(
             # re-raises a real error, never ``raise None``.
             last_err: RateLimitError = initial_err
             for _ in range(_pool_count(pool_base)):
-                retry_kwargs = dict(kwargs)
                 rk = _rotated_pool_key(pool_base)  # next key
-                if rk is not None:
-                    retry_kwargs["api_key"] = rk
+                if rk is None:
+                    # TOCTOU pool-shrink: the pool emptied mid-failover (the
+                    # last unpinned key was pinned/unset between iterations).
+                    # Do NOT retry without an explicit api_key — that would let
+                    # LiteLLM resolve the (maybe PINNED) base env var and borrow
+                    # a key the metering keel forbids. Skip this slot; if every
+                    # slot is empty the loop exhausts and re-raises the seeded
+                    # 429 below, never a borrowed-key success.
+                    continue
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["api_key"] = rk
                 try:
                     resp = completion(model=litellm_model, messages=msgs, **retry_kwargs)
                     break
@@ -1159,6 +1167,14 @@ def litellm_chat_runner(
                     break
                 except RateLimitError as e:
                     last_err = e
+                except RuntimeError:
+                    # TOCTOU pool-shrink: ``_pooled_call_key`` raises when the
+                    # pool emptied mid-failover (every unpinned key got pinned/
+                    # unset between iterations). Swallow it and keep iterating —
+                    # if every slot is empty the loop exhausts and re-raises the
+                    # SEEDED 429 below (the real cause), never a bare pool-empty
+                    # RuntimeError that masks the rate limit.
+                    continue
             if resp is None:
                 raise last_err
         # Same usage-tracking seam as litellm_runner. Tool-using skills

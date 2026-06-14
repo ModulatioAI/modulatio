@@ -411,7 +411,14 @@ class ConfigScreen(Vertical):
         try:
             model_presets.add_preset(key, **kwargs)
         except ValueError:
-            # already registered → update it in place
+            # add_preset raises ValueError for distinct reasons: the key already
+            # exists (the intended "update in place" case) AND validation/security
+            # rejections (bad api_format/auth_type, or the secret-leak keel). Only
+            # re-route to update when the entry genuinely exists; otherwise the
+            # rejection is real — re-raise so it surfaces instead of being masked
+            # as a successful update (which would also skip the secret keel).
+            if model_presets.get_preset(key) is None:
+                raise
             kwargs.pop("label", None)
             model_presets.update_preset(key, **kwargs)
         return key

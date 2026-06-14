@@ -115,6 +115,7 @@ def add_task(
     jt_id: Optional[str] = None,
     jt_params: Optional[dict] = None,
     on_refused: Optional[str] = None,
+    next_run: Optional[str] = None,
 ) -> dict:
     """Queue an objective for the given project.
 
@@ -133,6 +134,14 @@ def add_task(
     its bind: ``"skip"`` (the cron default — skip the slot, no greenfield
     substitute) or ``"greenfield"`` (Clif's per-cron override — run the objective
     greenfield). ``None`` ⇒ the dispatch callback's default ("skip" for cron).
+
+    ``next_run`` — pre-set the eligibility timestamp ATOMICALLY at create time so
+    the task is never persisted in an eligible-now state. ``None`` (default) ⇒
+    eligible immediately. ``requeue_recurring`` passes the computed interval
+    next_run here so a recurring child is never briefly on disk with
+    ``next_run=None`` (which ``_select_next_pending`` would treat as
+    eligible-now → a concurrent claim could dispatch it before its interval is
+    set, bypassing the recurrence).
     """
     from modulatio import vault
 
@@ -159,7 +168,7 @@ def add_task(
             "retries": 0,
             "max_retries": max_retries,
             "every": every,
-            "next_run": None,
+            "next_run": next_run,
             "depends_on": list(depends_on or []),
             "jt_id": jt_id or None,
             "jt_params": dict(jt_params) if jt_params else None,
@@ -341,11 +350,22 @@ _INTERVAL_RE = re.compile(r"^(\d+)\s*(m|min|h|hr|hour|d|day)s?$")
 
 
 def parse_interval(interval_str: str) -> Optional[timedelta]:
-    """Parse interval strings like '30m', '6h', '1d' → timedelta. None on failure."""
+    """Parse interval strings like '30m', '6h', '1d' → timedelta. None on failure.
+
+    A zero (or, defensively, negative) value is rejected as *unparseable* (None):
+    a ``"0m"``/``"0h"``/``"0d"`` schedule yields ``timedelta(0)``, whose next_run
+    is perpetually ``now`` — on the cron path that means an unbounded
+    immediate-dispatch loop (every daemon tick re-fires + re-pins to now →
+    runaway cost + queue growth). Rejecting it here closes that hole at the
+    source: cron.parse_schedule then declines the schedule, and
+    ``requeue_recurring`` treats ``"0m"`` as non-recurring.
+    """
     m = _INTERVAL_RE.match(interval_str.strip().lower())
     if not m:
         return None
     val = int(m.group(1))
+    if val <= 0:
+        return None
     unit = m.group(2)
     if unit in ("m", "min"):
         return timedelta(minutes=val)
@@ -371,7 +391,12 @@ def requeue_recurring(task: dict) -> Optional[dict]:
     if not delta:
         return None
     next_run = (datetime.now(timezone.utc) + delta).isoformat(timespec="seconds")
-    new_task = add_task(
+    # Pre-set next_run at create time so the child is persisted ATOMICALLY with
+    # its interval already set — it is never on disk in the eligible-now state
+    # (next_run=None) that _select_next_pending treats as runnable. Otherwise a
+    # concurrent claim_next_pending could dispatch the fresh recurring instance
+    # before its interval next_run is set, silently bypassing the recurrence.
+    return add_task(
         description=task["description"],
         project_code=task["project_code"],
         objective=task["objective"],
@@ -388,8 +413,8 @@ def requeue_recurring(task: dict) -> Optional[dict]:
         jt_id=task.get("jt_id"),
         jt_params=task.get("jt_params"),
         on_refused=task.get("on_refused"),  # #97 R2: carry the refusal policy too
+        next_run=next_run,
     )
-    return update_task(new_task["id"], next_run=next_run)
 
 
 # === Output capture ===

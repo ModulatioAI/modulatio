@@ -48,13 +48,21 @@ is the safer contract.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from modulatio import config
 
+logger = logging.getLogger("modulatio.backup")
+
 BACKUP_FORMAT_VERSION = "2.0.0"
+
+# Per-file cap for vault snapshots. Files larger than this are skipped to
+# keep the backup from bloating; the skip is counted and surfaced (not
+# silent). Measured in bytes — artifact-agnostic, applies to any class.
+_MAX_VAULT_FILE_BYTES = 1_000_000
 
 
 # === Helpers ===
@@ -101,11 +109,16 @@ def _discover_project_codes(vault_root: Path) -> list[str]:
     )
 
 
-def _walk_vault(vault_root: Path, code: str) -> dict[str, str]:
+def _walk_vault(vault_root: Path, code: str) -> tuple[dict[str, str], list[str]]:
     """Snapshot every text file under ``<vault>/<code>/`` as a relative-path → content map.
 
-    Skips binary files (LanceDB, .pyc, anything that fails utf-8 decode).
-    Caps individual file size at 1 MB to avoid bloating the backup.
+    Returns ``(files, skipped)`` where ``skipped`` is the list of
+    project-relative paths that were NOT captured: binary files (LanceDB,
+    .pyc, anything that fails utf-8 decode), files over
+    ``_MAX_VAULT_FILE_BYTES``, and unreadable files. The backup is
+    text-only by design; the skip list makes the lossiness visible to the
+    caller instead of dropping files silently. Cache-like dirs are
+    excluded by convention and are NOT counted as skipped.
     """
     # v2 convention: vault project dirs are lowercase on disk per
     # vault.project_dir. Try as-given first (matches iterdir output), then
@@ -114,21 +127,32 @@ def _walk_vault(vault_root: Path, code: str) -> dict[str, str]:
     if not project.exists():
         project = vault_root / code.lower()
     if not project.exists():
-        return {}
+        return {}, []
     files: dict[str, str] = {}
+    skipped: list[str] = []
     for f in project.rglob("*"):
         if not f.is_file():
             continue
-        # Skip cache-like dirs
+        # Skip cache-like dirs — not part of the project content, so not
+        # counted as a lossy skip.
         if any(part in (".cache", "_proposals", "lance.db") for part in f.parts):
             continue
-        if f.stat().st_size > 1_000_000:
+        rel = str(f.relative_to(project))
+        try:
+            too_big = f.stat().st_size > _MAX_VAULT_FILE_BYTES
+        except OSError:
+            skipped.append(rel)
+            continue
+        if too_big:
+            skipped.append(rel)
             continue
         try:
-            files[str(f.relative_to(project))] = f.read_text()
+            files[rel] = f.read_text()
         except (UnicodeDecodeError, OSError):
+            # Binary or unreadable — text-only backup can't carry it.
+            skipped.append(rel)
             continue
-    return files
+    return files, skipped
 
 
 # === Export ===
@@ -171,10 +195,30 @@ def export_backup(
         vault_root = _cfg.get_vault_root()
 
     vaults: dict[str, dict] = {}
+    skipped_by_code: dict[str, list[str]] = {}
     if vault_root.exists():
         codes = project_codes or _discover_project_codes(vault_root)
         for code in codes:
-            vaults[code] = {"files": _walk_vault(vault_root, code)}
+            files, skipped = _walk_vault(vault_root, code)
+            vaults[code] = {"files": files}
+            if skipped:
+                vaults[code]["skipped"] = skipped
+                skipped_by_code[code] = skipped
+
+    skipped_total = sum(len(s) for s in skipped_by_code.values())
+    if skipped_total:
+        logger.warning(
+            "export_backup: %d vault file(s) NOT captured (binary or over "
+            "%d bytes) — backups are text-only; these will be missing on "
+            "restore: %s",
+            skipped_total,
+            _MAX_VAULT_FILE_BYTES,
+            ", ".join(
+                f"{code}/{rel}"
+                for code, rels in skipped_by_code.items()
+                for rel in rels
+            ),
+        )
 
     vault_env = ""
     env_path = vault_root / ".env" if vault_root else None
@@ -196,6 +240,9 @@ def export_backup(
         "setup_state": setup_state_data,
         "vault_env": vault_env,
         "vaults": vaults,
+        # Count of vault files dropped from this (text-only) backup so the
+        # lossiness is recorded durably in the file, not just at log-time.
+        "skipped_files": skipped_total,
     }
     payload = json.dumps(backup, indent=2, sort_keys=True)
     if strip_secrets:
@@ -246,9 +293,45 @@ def import_backup(
     except (OSError, json.JSONDecodeError) as e:
         raise ValueError(f"Could not parse backup: {e}")
 
-    if backup.get("version") != BACKUP_FORMAT_VERSION:
-        # Future-compat: log but don't refuse — newer formats will add a guard.
-        pass
+    if not isinstance(backup, dict):
+        raise ValueError(
+            f"Backup root is not a JSON object (got {type(backup).__name__}); "
+            f"refusing to import."
+        )
+
+    backup_version = backup.get("version")
+    if backup_version != BACKUP_FORMAT_VERSION:
+        # Refuse a MAJOR-version-newer backup fail-closed: its schema may
+        # have moved keys we'd write to config files, and we can't safely
+        # restore a format we don't understand. Same-or-older MAJOR (e.g.
+        # a future minor bump) is tolerated with a warning for
+        # forward/backward compat.
+        def _major(v: Any) -> Optional[int]:
+            try:
+                return int(str(v).split(".", 1)[0])
+            except (ValueError, AttributeError):
+                return None
+
+        ours = _major(BACKUP_FORMAT_VERSION)
+        theirs = _major(backup_version)
+        if theirs is None:
+            raise ValueError(
+                f"Backup has an unrecognized format version "
+                f"{backup_version!r} (expected {BACKUP_FORMAT_VERSION}); "
+                f"refusing to import."
+            )
+        if ours is not None and theirs > ours:
+            raise ValueError(
+                f"Backup format version {backup_version!r} is newer than "
+                f"this Modulatio supports ({BACKUP_FORMAT_VERSION}); "
+                f"refusing to import. Upgrade Modulatio and retry."
+            )
+        logger.warning(
+            "import_backup: backup format version %r differs from current "
+            "%s; importing on a best-effort basis.",
+            backup_version,
+            BACKUP_FORMAT_VERSION,
+        )
 
     summary: dict[str, Any] = {
         "config_files": [],
