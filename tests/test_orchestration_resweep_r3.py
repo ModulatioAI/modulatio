@@ -141,7 +141,7 @@ def test_qc_review_survives_similar_verdicts_failure(project: Project, monkeypat
     )
 
     verdict, _notes, _defect = orch._qc_review(
-        task, draft, checksum="sha256:deadbeef", token_count=40
+        task, draft, checksum="sha256:deadbeef"
     )
     assert verdict.passed is True
 

@@ -6222,7 +6222,6 @@ class Orchestrator:
         task: Task,
         draft_path: Path,
         checksum: str,
-        token_count: int,
     ) -> tuple[AssertionEvidence, str, str | None]:
         """QC reads the artifact and renders a TQM-framed verdict.
 
@@ -6351,7 +6350,7 @@ class Orchestrator:
             ), "environmental"
         band = _token_band(task)
         # The near-empty GATE below is a deterministic pass/fail, so it MUST judge
-        # real TOKENS — not the whitespace word count `token_count` (a compact
+        # real TOKENS — not a whitespace word count (a compact
         # one-line JSON / minified-code deliverable collapses hundreds of tokens
         # to ~1 "word" and would false-fail as "near-empty"). Mirrors the sibling
         # size gate _regression_blocked, which already uses count_tokens.
@@ -6392,8 +6391,8 @@ class Orchestrator:
             _band_str = f"{_f}–{_c}" if _c else f"≥ {_f}"
             size_block = (
                 f"SIZE — the task declares a target band of {_band_str} tokens "
-                f"(this draft: {token_count}; engine whitespace count, ~1 "
-                f"token/word). Tolerance ±{int(round(_tol * 100))}%. Judge "
+                f"(this draft: {gate_tokens} tokens). Tolerance "
+                f"±{int(round(_tol * 100))}%. Judge "
                 f"size as part of fitness, with discretion:\n"
                 f"  - Within tolerance of the band AND complete/on-quality → "
                 f"PASS (you MAY note the minor deviation; do not fail for it).\n"
@@ -6751,7 +6750,7 @@ class Orchestrator:
             t.evidence_provided.extend([artifact.id, metric.id])
 
             qc_verdict_new, qc_notes_new, defect_new = self._qc_review(
-                t, draft_path, checksum, token_count
+                t, draft_path, checksum
             )
             t.evidence_provided.append(qc_verdict_new.id)
 
@@ -7838,7 +7837,7 @@ class Orchestrator:
                     task_id=t.id,
                     agent_id=t.qc_agent_id,
                 )
-                qc_verdict, qc_notes, defect_type = self._qc_review(t, draft_path, checksum, token_count)
+                qc_verdict, qc_notes, defect_type = self._qc_review(t, draft_path, checksum)
                 t.evidence_provided.append(qc_verdict.id)
                 self._emit_activity(
                     role="qc",
@@ -8124,7 +8123,6 @@ class Orchestrator:
     # sanity pass when one is available, else a human/Leader approval gate.
     # Never presented as a clean producer win.
 
-    _QC_FIX_TRIVIAL_DRAFT_CHARS = 40
 
     def _attempt_qc_fix_forward(
         self,
@@ -8156,7 +8154,7 @@ class Orchestrator:
             # text-patchable; UnicodeDecodeError is a ValueError, not OSError.
             # Fall through to the caller's graceful terminal.
             return False
-        if len(body.strip()) < self._QC_FIX_TRIVIAL_DRAFT_CHARS:
+        if not body.strip():
             # Nothing coherent to patch (e.g. a no-commit storm). The
             # salvage→re-decompose rung is deferred; fall through to the
             # caller's graceful terminal.
@@ -9757,7 +9755,11 @@ class Orchestrator:
                     if p.stat().st_size > 4_000_000:
                         out.append((rel, 0))
                         continue
-                    toks = len(p.read_text(encoding="utf-8").split())
+                    _t = p.read_text(encoding="utf-8")
+                    # Token-native (char/4 floored by words) — NOT a whitespace
+                    # word count, which collapses a compact data/code artifact to
+                    # ~1 "token" and mislabels the inventory (product-agnostic).
+                    toks = max(len(_t) // 4, len(_t.split()))
                 except (OSError, UnicodeDecodeError, MemoryError):
                     toks = 0
                 out.append((rel, toks))

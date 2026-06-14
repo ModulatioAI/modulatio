@@ -190,7 +190,7 @@ def test_escalation_returns_its_own_defect_type(project, monkeypatch):
     # pre-escalation one threaded in via last_qc.
     monkeypatch.setattr(
         orch, "_qc_review",
-        lambda t, p, c, tok: (rejecting, "fix the structure", "substantive"),
+        lambda t, p, c: (rejecting, "fix the structure", "substantive"),
     )
 
     pre_escalation_qc = (
