@@ -52,7 +52,6 @@ OUTPUT_BUDGET_CEILING = 200_000
 
 #: A committed artifact shorter than this (stripped chars) counts as
 #: "nothing committed" for the no-commit storm signal.
-_TRIVIAL_COMMIT_CHARS = 40
 #: No-commit only trips once the producer has generated at least this much
 #: raw output — otherwise a legitimately short empty result would trip.
 _NO_COMMIT_MIN_OUTPUT_TOKENS = 500
@@ -149,9 +148,16 @@ def resolve_output_budget(
 
 
 def _output_token_count(text: str) -> int:
-    """Whitespace token count — matches the orchestrator's audit-metric
-    convention (``len(response.split())``). Approximate by design."""
-    return len(text.split())
+    """Approximate TOKEN count — NOT a bare whitespace word count.
+
+    The runaway cost/OOM backstops compare this against token caps, and the
+    universal unit is the token. A compact/minified deliverable (one-line JSON,
+    minified code, base64, CJK prose) has FEW whitespace 'words' but MANY real
+    tokens, so a word count would let the backstop fire far too late — or never —
+    for non-prose families (product-agnostic). char/4 is the standard token
+    estimate and never undercounts whitespace-light output; the word-count floor
+    keeps it sane on the rare token-dense-but-space-light edge."""
+    return max(len(text) // 4, len(text.split()))
 
 
 def _max_ngram_repeat(text: str, n: int = _NGRAM_N) -> int:
@@ -235,12 +241,15 @@ def analyze_output(
             partial_text=committed_text,
         )
 
-    # No-commit storm — generated substantial output, committed ~nothing.
-    # This is the no-progress signal that lets the soft ceiling matter;
-    # the ceiling never trips on its own.
-    committed_len = len(committed_text.strip())
+    # No-commit storm — generated substantial output, committed NOTHING. This
+    # is the no-progress signal that lets the soft ceiling matter; the ceiling
+    # never trips on its own. "Nothing" means an EMPTY (whitespace-only) commit,
+    # NOT a small one: a compact-but-valid deliverable (a one-line JSON, a terse
+    # data answer, a tiny code stub) is a real artifact for the code/data
+    # families and must not be discarded as no-progress (product-agnostic — QC
+    # judges its quality; the breaker only catches a true empty storm).
     if (
-        committed_len < _TRIVIAL_COMMIT_CHARS
+        not committed_text.strip()
         and output_tokens >= _NO_COMMIT_MIN_OUTPUT_TOKENS
     ):
         return DispatchAbort(
@@ -248,8 +257,8 @@ def analyze_output(
             role=role,
             output_tokens=output_tokens,
             detail=(
-                f"generated {output_tokens} tok but committed only "
-                f"{committed_len} chars — produced no artifact"
+                f"generated {output_tokens} tok but committed nothing — "
+                f"produced no artifact"
             ),
             partial_text=committed_text,
         )

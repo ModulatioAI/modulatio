@@ -7759,7 +7759,11 @@ def test_qc_review_judges_short_draft_not_mechanical_bounce(project, tmp_path):
         "leader": _leader_stub, "drafter": _drafter_stub, "qc": runner,
     })
     draft = tmp_path / "deliverable.md"
-    draft.write_text("# Short\n\nthis is a short but real draft\n")
+    # A genuine "short but real" draft: well above the 350 near-empty floor for a
+    # 3500 band, but short of the band. The near-empty gate now measures REAL
+    # tokens of the body (not a passed-in word count), so the body must actually
+    # carry the tokens it claims.
+    draft.write_text("# Short\n\n" + " ".join("para%04d" % i for i in range(840)))
     task = _task_with("Unit", evidence_required=[_floor_metric("token_count >= 3500")])
     task.artifact_kind = "text"
 
@@ -7811,6 +7815,30 @@ def test_qc_review_small_band_not_backstopped(project, tmp_path):
 
     assert verdict.passed is True            # 30 > max(1, 20*0.1=2) → QC judges
     assert len(qc_calls) == 1                # QC consulted, not backstopped
+
+
+def test_qc_review_compact_data_not_false_failed_near_empty(project, tmp_path):
+    """Product-agnostic regression (agnostic sweep): a COMPACT but complete data
+    deliverable — a minified single-line JSON, MANY real tokens but ~1 whitespace
+    word — with a declared band must NOT be mechanically failed as 'near-empty'.
+    The gate now measures REAL tokens of the body, not the whitespace word count
+    the producer passes, so a compact JSON/minified-code deliverable reaches QC."""
+    runner, qc_calls = _qc_spy()
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": runner,
+    })
+    draft = tmp_path / "deliverable.json"
+    # ~2.4K-char minified JSON ~= 600 real tokens (>> the 350 floor for a 3500
+    # band), but exactly ONE whitespace word — the OLD word-count gate (token_count
+    # below) would false-fail this as near-empty.
+    draft.write_text("{" + ",".join(f'"k{i}":{i}' for i in range(300)) + "}")
+    task = _task_with("Data", evidence_required=[_floor_metric("token_count >= 3500")])
+    task.artifact_kind = "data"
+
+    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef", token_count=1)
+
+    assert verdict.passed is True            # NOT false-failed near-empty
+    assert len(qc_calls) == 1                # real tokens cleared the floor → QC consulted
 
 
 def test_qc_review_no_band_runs_qc_without_size_block(project, tmp_path):
@@ -8693,15 +8721,18 @@ def test_read_deliverable_rejects_traversal(tmp_path, monkeypatch):
     assert "Can't read" in out and "nope" not in out
 
 
-def test_read_deliverable_binary_points_to_md(tmp_path, monkeypatch):
-    """A binary file (rendered .docx) isn't dumped as garbage — the Leader is
-    told to read the .md source instead."""
+def test_read_deliverable_binary_is_family_neutral(tmp_path, monkeypatch):
+    """A binary file isn't dumped as garbage — and the message is FAMILY-NEUTRAL:
+    the deliverable may BE the binary (media/data/compiled), so it never assumes a
+    document/.md source (output-agnostic, agnostic sweep)."""
     orch = _redo_orch(tmp_path, monkeypatch, _leader_stub, code="RDC")
     art = orch._run_artifacts_root("run-1")
     art.mkdir(parents=True, exist_ok=True)
-    (art / "out.docx").write_bytes(b"PK\x03\x04\x00\x01\x02\xff\xfe binary")
-    out = orch._leader_function_tools()["read_deliverable"].call(path="out.docx")
-    assert "binary" in out and ".md source" in out
+    (art / "out.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x01\x02\xff\xfe binary")
+    out = orch._leader_function_tools()["read_deliverable"].call(path="out.png")
+    assert "binary" in out
+    assert ".md" not in out and "source" not in out.replace("text-readable", "")
+    assert "delivery folder" in out
 
 
 def test_read_deliverable_rejects_oversize_file(tmp_path, monkeypatch):

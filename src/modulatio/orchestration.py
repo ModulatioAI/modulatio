@@ -5233,8 +5233,12 @@ class Orchestrator:
             try:
                 text = raw.decode("utf-8")
             except UnicodeDecodeError:
-                return (f"{path!r} is {len(raw):,} bytes of binary (likely a rendered "
-                        ".docx/.pdf) — read the .md source instead for its content.")
+                # Family-neutral: the deliverable may BE the binary (a media
+                # .png/.mp4, a data .xlsx/.parquet, a compiled artifact) with no
+                # text source to point at — never assume a document/.md source.
+                return (f"{path!r} is {len(raw):,} bytes of binary content — not "
+                        "text-readable here. It's in the delivery folder; open it "
+                        "there or have the team summarize it.")
             if len(text) > cap:
                 text = text[:cap] + f"\n\n... [truncated at {cap:,} chars]"
             return f"--- {path} ---\n{text}"
@@ -6346,6 +6350,14 @@ class Orchestrator:
                 "a human must verify it."
             ), "environmental"
         band = _token_band(task)
+        # The near-empty GATE below is a deterministic pass/fail, so it MUST judge
+        # real TOKENS — not the whitespace word count `token_count` (a compact
+        # one-line JSON / minified-code deliverable collapses hundreds of tokens
+        # to ~1 "word" and would false-fail as "near-empty"). Mirrors the sibling
+        # size gate _regression_blocked, which already uses count_tokens.
+        # Product-agnostic: the unit is the token, not the word.
+        gate_tokens = _tool_sum_module.count_tokens(
+            self.project.leader_model, text=body)
 
         # NEAR-EMPTY BACKSTOP (engine binds the genuine invariant only). Size
         # adequacy is QC's JUDGMENT — but when the planner DECLARED a size band,
@@ -6357,14 +6369,14 @@ class Orchestrator:
         # abstract); QC owns everything from "thin draft" upward. We do NOT
         # re-introduce the rigid gate. With NO declared band the engine invents
         # nothing: QC judges all sizes, including empties.
-        if band is not None and token_count < max(1, int(band[0] * 0.10)):
+        if band is not None and gate_tokens < max(1, int(band[0] * 0.10)):
             verdict = AssertionEvidence(
                 producer="qc", primary=False,
-                check=f"non-deliverable: {token_count} tokens (near-empty)",
+                check=f"non-deliverable: {gate_tokens} tokens (near-empty)",
                 passed=False,
             )
             notes = (
-                f"The artifact is near-empty ({token_count} tokens) — this reads "
+                f"The artifact is near-empty ({gate_tokens} tokens) — this reads "
                 f"as a missing or truncated deliverable, not merely a short one. "
                 f"Produce the actual content the task asks for."
             )

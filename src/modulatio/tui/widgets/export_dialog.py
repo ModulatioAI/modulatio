@@ -26,6 +26,11 @@ from textual.widgets import Button, Input, Label, Select, Static
 
 from modulatio.export import ExportError, ExportResult, export_artifact
 
+# Prose/document family — these get the document render path (docx/pdf/markdown).
+# Every other artifact class (code/data/web/media) defaults to a raw COPY and is
+# never run through pandoc (which would mangle non-prose). Product/output-agnostic.
+_DOCUMENT_EXTS = frozenset({".md", ".markdown", ".txt", ""})
+
 
 class ExportDialog(Vertical):
     """Inline export panel. Source path is set externally via
@@ -69,11 +74,28 @@ class ExportDialog(Vertical):
         yield Static("", id="export-status")
 
     def set_source(self, source: Path) -> None:
-        """Point the dialog at a new source file. Defaults the destination
-        path to ``~/<stem>.<format-ext>`` using the current format."""
+        """Point the dialog at a new source file. The offered formats + default
+        are ARTIFACT-CLASS-AWARE: a prose/document file (.md/.txt/…) defaults to
+        DOCX (the document render); a code/data/web/media artifact defaults to a
+        raw COPY (no pandoc conversion, which would mangle non-prose) and only
+        offers doc conversion as a secondary option. Product/output-agnostic."""
         self._source = source
+        sel = self.query_one("#export-format", Select)
+        if source.suffix.lower() in _DOCUMENT_EXTS:
+            sel.set_options(
+                [("DOCX", "docx"), ("PDF", "pdf"), ("Markdown", "markdown")])
+            sel.value = "docx"
+        else:
+            sel.set_options(
+                [("Copy (as-is)", "copy"), ("DOCX", "docx"), ("PDF", "pdf")])
+            sel.value = "copy"
         fmt = self._current_format()
-        ext = "md" if fmt == "markdown" else fmt
+        if fmt == "copy":
+            ext = source.suffix.lstrip(".") or "txt"
+        elif fmt == "markdown":
+            ext = "md"
+        else:
+            ext = fmt
         default_dest = Path.home() / f"{source.stem}.{ext}"
         self.query_one("#export-dest-path", Input).value = str(default_dest)
         self.query_one("#export-status", Static).update("")
