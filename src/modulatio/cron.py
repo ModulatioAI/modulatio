@@ -82,7 +82,7 @@ def _save(jobs: list[dict]) -> None:
     cf.parent.mkdir(parents=True, exist_ok=True)
     tmp = cf.with_suffix(".json.tmp")
     with _cron_lock:
-        tmp.write_text(json.dumps({"jobs": jobs}, indent=2, default=str))
+        tmp.write_text(json.dumps({"jobs": jobs}, indent=2, default=str), encoding="utf-8")
         tmp.replace(cf)
 
 

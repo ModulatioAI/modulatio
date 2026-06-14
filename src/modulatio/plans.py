@@ -634,7 +634,7 @@ def set_status(
     text = "---\n" + yaml.safe_dump(
         meta, sort_keys=False, allow_unicode=True,
     ) + "---\n\n" + body + "\n"
-    target.write_text(text)
+    target.write_text(text, encoding="utf-8")
 
     # Return the up-to-date record
     record = load(plan_id, code)
@@ -839,7 +839,7 @@ def update_execution_state(
     text = "---\n" + yaml.safe_dump(
         meta, sort_keys=False, allow_unicode=True,
     ) + "---\n\n" + body + "\n"
-    target.write_text(text)
+    target.write_text(text, encoding="utf-8")
 
     record = load(plan_id, code)
     if record is None:  # pragma: no cover

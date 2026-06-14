@@ -261,7 +261,7 @@ def export_backup(
         # No tokens in the file — write at default umask, easy to email
         # or commit to a sharing repo.
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(payload)
+        out.write_text(payload, encoding="utf-8")
     else:
         # Backup contains vault_env + telegram bot token + provider
         # OAuth state. write_secret_file gives 0600 throughout, no
@@ -372,7 +372,7 @@ def import_backup(
             # window between write and chmod.
             config.write_secret_file(target, payload)
         else:
-            target.write_text(payload)
+            target.write_text(payload, encoding="utf-8")
         summary["config_files"].append(fname)
 
     config.reload()  # paths in defaults may have changed
@@ -429,7 +429,7 @@ def import_backup(
             if target.exists() and not overwrite:
                 summary["vault_files_skipped"] += 1
                 continue
-            target.write_text(content)
+            target.write_text(content, encoding="utf-8")
             summary["vault_files_written"] += 1
 
     return summary

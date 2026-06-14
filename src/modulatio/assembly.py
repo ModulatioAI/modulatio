@@ -614,7 +614,7 @@ def write_text_twin(content: str, artifacts_root: Path, name: str) -> str:
     twins = artifacts_root / ".twins"
     twins.mkdir(parents=True, exist_ok=True)
     out = twins / f"{safe}.md"
-    out.write_text(content)
+    out.write_text(content, encoding="utf-8")
     return str(out.relative_to(artifacts_root))
 
 
@@ -1221,7 +1221,7 @@ def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path
     unrendered — it NEVER fabricates a binary (the HRWT text-named-.pdf failure)."""
     fmt = (fmt or "").lower().lstrip(".")
     src = _media_out(artifacts_root, ".md")
-    src.write_text(content)
+    src.write_text(content, encoding="utf-8")
     try:
         if fmt in _PANDOC_DIRECT_FORMATS:
             out = _media_out(artifacts_root, f".{fmt}")
@@ -1306,7 +1306,7 @@ def _join_av(resolved: "list[tuple[str, Path]]", artifacts_root: Path, kind: str
         # path are escaped per ffmpeg's rule ('\'').
         lines = [f"file '{str(p).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'"
                  for _n, p in resolved]
-        listfile.write_text("\n".join(lines) + "\n")
+        listfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
         try:
             _run_media_join(
                 ["ffmpeg", "-y", "-f", "concat", "-safe", "0",

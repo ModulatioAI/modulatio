@@ -379,7 +379,7 @@ def deliver_product(
     try:
         with tempfile.TemporaryDirectory() as td:
             md = Path(td) / "deliverable.md"
-            md.write_text(text)
+            md.write_text(text, encoding="utf-8")
             result = export_artifact(md, dest, fmt)
     except ExportError as exc:
         # The renderer (pandoc/pypandoc) isn't installed. A missing OPTIONAL
@@ -390,7 +390,7 @@ def deliver_product(
         if md_dest.exists():
             md_dest = dest_dir / f"{name} ({task_id}).md"
         try:
-            md_dest.write_text(text)
+            md_dest.write_text(text, encoding="utf-8")
         except OSError as werr:
             return DeliveredProduct(task_id, source_md, dest, name, f"copy failed: {werr}")
         note = (
@@ -500,7 +500,7 @@ def deliver_product_quality_report(
     try:
         with tempfile.TemporaryDirectory() as td:
             md = Path(td) / "product-quality-report.md"
-            md.write_text(body)
+            md.write_text(body, encoding="utf-8")
             return deliver_product(
                 md, project_code=project_code,
                 task_id="product-quality-report", fmt="docx",

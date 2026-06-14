@@ -261,7 +261,7 @@ def _load_meta(project_code: str) -> dict:
 
 def _save_meta(project_code: str, meta: dict) -> None:
     _cache_dir(project_code).mkdir(parents=True, exist_ok=True)
-    _meta_path(project_code).write_text(json.dumps(meta, indent=2))
+    _meta_path(project_code).write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
 def ensure_agent_vectors(project_code: str, embedder: Embedder) -> bool:

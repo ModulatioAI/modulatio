@@ -262,7 +262,7 @@ def save(agent: Agent, project_code: str) -> Path:
         fm_lines.append(f"context_budget: {agent.context_budget}")
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + agent.identity.rstrip() + "\n"
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     return path
 
 

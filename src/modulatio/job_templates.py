@@ -472,7 +472,7 @@ def save(jt: JobTemplate, project_code: str | None = None) -> Path:
         fm_lines.append(f"last_verified_at: {_fm(jt.last_verified_at)}")
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + jt.interview_body.rstrip() + "\n"
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     return path
 
 

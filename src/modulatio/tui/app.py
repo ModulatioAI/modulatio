@@ -13,6 +13,7 @@ and the F1 command modal land in later Phase 2 + Phase 3 slices.
 """
 from __future__ import annotations
 
+from rich.markup import escape
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -981,13 +982,13 @@ class ModulatioApp(App):
 
     def _set_response(self, text: str) -> None:
         self.last_summary_text = text
-        self.query_one("#prompt-response", Static).update(text)
+        self.query_one("#prompt-response", Static).update(escape(text))
 
     def _set_kickoff_status(self, text: str) -> None:
         """Update the KICK OFF box's status line on the TEAM floor."""
         self.last_summary_text = text
         try:
-            self.query_one("#kickoff-response", Static).update(text)
+            self.query_one("#kickoff-response", Static).update(escape(text))
         except NoMatches:
             pass
 

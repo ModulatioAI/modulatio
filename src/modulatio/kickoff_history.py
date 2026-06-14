@@ -84,7 +84,7 @@ def record(
         )
         path = vault.run_dir(project_code, run_id) / _HISTORY_FILENAME
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(rec), ensure_ascii=False, indent=2))
+        path.write_text(json.dumps(asdict(rec), ensure_ascii=False, indent=2), encoding="utf-8")
         return path
     except Exception:  # noqa: BLE001 — observability must never break a run
         return None

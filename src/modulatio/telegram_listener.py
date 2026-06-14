@@ -81,7 +81,7 @@ def _save_offset(path: Path, last_update_id: int) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps({"last_update_id": int(last_update_id)}))
+        tmp.write_text(json.dumps({"last_update_id": int(last_update_id)}), encoding="utf-8")
         tmp.replace(path)
     except OSError as e:
         # A failed persist must not crash the poll loop — worst case we

@@ -223,7 +223,7 @@ def append_verdict(domain: str, project_code: str, record: VerdictRecord) -> Pat
     dir_ = _domain_dir(domain, project_code)
     dir_.mkdir(parents=True, exist_ok=True)
     path = dir_ / _verdict_filename(record)
-    path.write_text(_render_verdict(record))
+    path.write_text(_render_verdict(record), encoding="utf-8")
     return path
 
 
@@ -285,7 +285,7 @@ def _load_meta(project_code: str, domain: str) -> dict:
 
 def _save_meta(project_code: str, domain: str, meta: dict) -> None:
     _cache_dir(project_code, domain).mkdir(parents=True, exist_ok=True)
-    _meta_path(project_code, domain).write_text(json.dumps(meta, indent=2))
+    _meta_path(project_code, domain).write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
 def _ensure_verdict_vectors(

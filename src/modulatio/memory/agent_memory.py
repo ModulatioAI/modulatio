@@ -64,7 +64,7 @@ def _load_json(path: Path) -> list:
 
 def _save_json(path: Path, data: list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, default=str))
+    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
 
 # Per-file read-modify-write lock. add_episodic/get_episodic/add_semantic/

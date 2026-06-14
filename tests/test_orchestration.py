@@ -10387,3 +10387,59 @@ def test_concurrent_merge_copies_recorded_twin_drops_unrecorded(project: Project
     assert not (shared / ".twins" / "TWN-T-002.md").exists(), (
         "an unrecorded staged file is dropped — the fix records the twin so it doesn't"
     )
+
+
+# ── #11628: cross-goal assembler dependency (product-agnostic) ────────────────
+
+def test_ready_wave_treats_cross_goal_dep_as_satisfied():
+    """#11628: a task whose dependency lives in ANOTHER goal (a prior goal's
+    unit, already completed) — absent from THIS goal's task_map — must be
+    treated as satisfied, not silently stalled. Product-agnostic: the 'unit'
+    could be a code module, a data partition, a media segment, or a doc
+    section; the assembler is family-neutral here."""
+    from modulatio.orchestration import _ready_wave
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    pid = uuid4()
+    # The assembler task depends on a unit id from a PRIOR goal (not in `tasks`).
+    assembler = Task(id="G2-T-001", project_id=pid, goal_id="G-002",
+                     description="assemble", required_skills=["data-assembly"],
+                     depends_on=["G1-T-007"], status=TaskStatus.PENDING)
+    wave = _ready_wave([assembler])
+    assert assembler in wave, "a cross-goal (prior-goal) dependency must count as satisfied"
+
+
+def test_ready_wave_still_holds_on_incomplete_intra_goal_dep():
+    """Guard: a dep that IS in this goal and is NOT completed still holds the
+    task back (we only loosened cross-goal/absent deps)."""
+    from modulatio.orchestration import _ready_wave
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    pid = uuid4()
+    dep = Task(id="G-T-001", project_id=pid, goal_id="G", description="unit",
+               status=TaskStatus.PENDING)
+    consumer = Task(id="G-T-002", project_id=pid, goal_id="G", description="assemble",
+                    depends_on=["G-T-001"], status=TaskStatus.PENDING)
+    wave = _ready_wave([dep, consumer])
+    assert dep in wave and consumer not in wave, "intra-goal incomplete dep still holds"
+
+
+def test_main_path_topo_filters_cross_goal_deps_no_reject():
+    """#11628: _topological_sort over intra-goal-filtered deps must NOT raise on
+    a cross-goal id (the main planning path used to reject the whole plan). The
+    real tasks keep their full depends_on for execution-time enforcement."""
+    from modulatio.orchestration import _topological_sort
+    from modulatio.types import Task, TaskStatus
+    from uuid import uuid4
+    pid = uuid4()
+    tasks = [
+        Task(id="G2-T-001", project_id=pid, goal_id="G-002", description="assemble",
+             required_skills=["code-assembly"], depends_on=["G1-T-001", "G1-T-002"],
+             status=TaskStatus.PENDING),
+    ]
+    tmap = {t.id: t for t in tasks}
+    # the filtered view (what the main path now sorts) — no cross-goal ids
+    view = [t.model_copy(update={"depends_on": [d for d in t.depends_on if d in tmap]})
+            for t in tasks]
+    ordered = _topological_sort(view)  # must NOT raise _DependencyError
+    assert [t.id for t in ordered] == ["G2-T-001"]

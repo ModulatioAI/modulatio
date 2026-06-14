@@ -245,7 +245,7 @@ def write(
     )
     dir_ = _team_dir(project_code)
     dir_.mkdir(parents=True, exist_ok=True)
-    (dir_ / _entry_filename(record)).write_text(_render(record))
+    (dir_ / _entry_filename(record)).write_text(_render(record), encoding="utf-8")
     return record
 
 
@@ -307,7 +307,7 @@ def propose(
         "artifact_kind": artifact_kind,
         "capability_tags": list(proposal.capability_tags),
         "rationale": rationale,
-    }, indent=2))
+    }, indent=2), encoding="utf-8")
     return proposal
 
 
@@ -429,7 +429,7 @@ def _load_meta(project_code: str) -> dict:
 
 def _save_meta(project_code: str, meta: dict) -> None:
     _cache_dir(project_code).mkdir(parents=True, exist_ok=True)
-    _meta_path(project_code).write_text(json.dumps(meta, indent=2))
+    _meta_path(project_code).write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
 def _ensure_vectors(project_code: str, embedder: Embedder) -> list[MemoryEntry]:

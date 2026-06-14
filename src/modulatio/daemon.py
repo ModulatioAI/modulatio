@@ -160,7 +160,7 @@ def start(*, stub: bool = True) -> int:
         pass
 
     config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    _pid_file().write_text(str(os.getpid()))
+    _pid_file().write_text(str(os.getpid()), encoding="utf-8")
 
     # Configure logging now that stdout is the log file
     logging.basicConfig(

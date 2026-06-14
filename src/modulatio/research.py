@@ -179,7 +179,7 @@ def save(
         fm_lines.extend(f"- {s}" for s in sources)
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + body.rstrip() + "\n"
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     return path
 
 

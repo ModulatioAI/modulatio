@@ -1473,8 +1473,12 @@ def _ready_wave(tasks: "list[Task]") -> "list[Task]":
         if _dep_failed(t, task_map):
             continue  # dead — cascade-blocked by the caller, not run
         deps_done = all(
-            task_map.get(dep_id) is not None
-            and task_map[dep_id].status is TaskStatus.COMPLETED
+            # A dep absent from THIS goal's task_map is a CROSS-GOAL dependency
+            # (a prior goal's task, completed before this goal) — treat it as
+            # satisfied, matching the sequential resume gate. Else the in-goal
+            # dep must be COMPLETED.
+            task_map.get(dep_id) is None
+            or task_map[dep_id].status is TaskStatus.COMPLETED
             for dep_id in t.depends_on
         )
         if deps_done:
@@ -3801,7 +3805,7 @@ class Orchestrator:
             return path, _rl.file_checksum(path), 0
         # Text deliverable: the mechanically-joined body.
         response = assembled if assembled is not None else ""
-        path.write_text(response)
+        path.write_text(response, encoding="utf-8")
         self._record_artifact_write(path)
         checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
         return path, checksum, len(response.split())
@@ -4158,7 +4162,7 @@ class Orchestrator:
                 response = _trim_leading_prose_from_code(response)
         if self._regression_blocked(task, path, response):
             return self._note_regression_kept(task, path, response)
-        path.write_text(response)
+        path.write_text(response, encoding="utf-8")
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
 
         # QC-as-fixer Slice 2: per-dispatch circuit breaker (post-hoc).
@@ -4289,7 +4293,7 @@ class Orchestrator:
         if blocks:
             new_content, applied, failures = _apply_search_replace(current, blocks)
             if applied > 0:
-                path.write_text(new_content)
+                path.write_text(new_content, encoding="utf-8")
                 self._record_artifact_write(path)
                 if failures:
                     task.transitions.append(StateTransition(
@@ -4322,7 +4326,7 @@ class Orchestrator:
 
         # No SEARCH/REPLACE blocks → producer returned a full file. Fall back to
         # edit-mode behavior: write the cleaned body as the new artifact.
-        path.write_text(cleaned)
+        path.write_text(cleaned, encoding="utf-8")
         self._record_artifact_write(path)
         self._maybe_trip_breaker(producer_role, raw_response, cleaned)
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
@@ -4423,7 +4427,7 @@ class Orchestrator:
             # actual output (mechanical defect: producer should have
             # emitted FILE blocks). Don't silently swallow.
             primary_path.parent.mkdir(parents=True, exist_ok=True)
-            primary_path.write_text(cleaned)
+            primary_path.write_text(cleaned, encoding="utf-8")
             self._record_artifact_write(primary_path)  # staging merge
             # QC-as-fixer Slice 2 (Nemo impl-sweep B1): diff-mode is a
             # producer dispatch and Slice 1 routes code/multi-file fixes
@@ -4485,7 +4489,8 @@ class Orchestrator:
             primary_path.parent.mkdir(parents=True, exist_ok=True)
             primary_path.write_text(
                 "(diff-mode producer wrote sibling files but not this "
-                "primary path — see artifacts tree)\n"
+                "primary path — see artifacts tree)\n",
+                encoding="utf-8",
             )
             self._record_artifact_write(primary_path)  # staging merge
             primary_content = primary_path.read_text()
@@ -4543,7 +4548,7 @@ class Orchestrator:
                 f"(required by skill {skill.name!r})"
             )
         response = str(tool.call(**task.tool_args))
-        path.write_text(response)
+        path.write_text(response, encoding="utf-8")
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
         checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
         token_count = len(response.split())
@@ -5652,7 +5657,7 @@ class Orchestrator:
                 cleaned = _trim_leading_prose_from_code(cleaned)
         if self._regression_blocked(task, path, cleaned):
             return self._note_regression_kept(task, path, cleaned)
-        path.write_text(cleaned)
+        path.write_text(cleaned, encoding="utf-8")
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
         # QC-as-fixer Slice 2 (Nemo impl-sweep B2): the tool-loop producer
         # is part of the producer surface — bind it with the same post-hoc
@@ -8005,7 +8010,7 @@ class Orchestrator:
                 patched = _trim_leading_prose_from_code(patched)
         if not patched.strip():
             raise ValueError("QC patch produced an empty artifact")
-        draft_path.write_text(patched)
+        draft_path.write_text(patched, encoding="utf-8")
         # P5 declared-format integrity (HRWT fabrication gate). The QC patch
         # ALWAYS writes TEXT; on the breaker-abort lane QC-review never ran, so
         # verify_declared_format never fired on the patched bytes. Writing text
@@ -8710,7 +8715,7 @@ class Orchestrator:
             "---\n\n"
             f"{report_body.rstrip()}\n"
         )
-        report_path.write_text(report_content)
+        report_path.write_text(report_content, encoding="utf-8")
         summary.goal_reports.append(report_path)
 
         # Normalize unknown verdicts to "disappointed" — better to
@@ -11624,8 +11629,34 @@ class Orchestrator:
             # the whole plan — open a CRITICAL ticket, mark every task
             # BLOCKED, skip producer/QC/Leader-verify. That's a bad
             # plan output case, same shape as #6d capability tickets.
+            # Order on intra-goal edges. An assembler task can legitimately
+            # depend on a PRIOR goal's unit tasks (cross-goal ids absent from
+            # this goal's `tasks`); feeding those to _topological_sort makes it
+            # raise and reject the whole plan (#11628 — the same hazard the
+            # resume path guards at ~10880). But a genuinely unknown ref (a
+            # planner typo, e.g. an out-of-range index) must STILL reject (the
+            # #7a safety gate). So filter out ONLY deps that resolve to a real
+            # task elsewhere in this run — a VALIDATED cross-goal edge; an id
+            # that resolves to nothing stays in and trips _topological_sort. The
+            # cross-goal deps remain on the real tasks for execution-time
+            # enforcement (_dep_failed / _ready_wave treat an absent dep as a
+            # satisfied prior-goal completion). A real intra-goal cycle rejects.
+            _tmap_topo = {t.id: t for t in tasks}
+            _cross_goal_ids = {
+                rt.id
+                for rt in store.list_tasks(
+                    self.project.code, run_id=self.project.run_id)
+            } - set(_tmap_topo)
             try:
-                tasks = _topological_sort(tasks)
+                _ordered = _topological_sort([
+                    t.model_copy(update={
+                        "depends_on": [
+                            d for d in t.depends_on if d not in _cross_goal_ids
+                        ]
+                    })
+                    for t in tasks
+                ])
+                tasks = [_tmap_topo[v.id] for v in _ordered]
             except _DependencyError as exc:
                 self._reject_task_plan(g, tasks, exc.reason, summary)
                 continue

@@ -127,7 +127,7 @@ def _save_queue(tasks: list) -> None:
     qf.parent.mkdir(parents=True, exist_ok=True)
     tmp = qf.with_suffix(".json.tmp")
     with _queue_lock:
-        tmp.write_text(json.dumps(tasks, indent=2, default=str))
+        tmp.write_text(json.dumps(tasks, indent=2, default=str), encoding="utf-8")
         tmp.replace(qf)
 
 
@@ -527,7 +527,7 @@ def save_task_output(task: dict, result: str) -> Path:
     if task.get("every"):
         body += f"**Recurring:** every {task['every']}\n"
     body += f"\n---\n\n{result}\n"
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
     return path
 
 

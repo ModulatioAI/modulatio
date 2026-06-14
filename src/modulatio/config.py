@@ -155,7 +155,7 @@ def defaults_exist() -> bool:
 def write_secret_file(path: Path, content: str) -> None:
     """Atomically write *content* to *path* with mode 0o600 throughout.
 
-    The naive ``path.write_text(...); path.chmod(0o600)`` pattern leaves
+    The naive ``path.write_text(..., encoding="utf-8"); path.chmod(0o600)`` pattern leaves
     the file briefly world-readable between create-with-default-umask
     and the explicit chmod. On a multi-user host, that window is enough
     to leak credentials; the pre-V2 security audit (2026-05-02) flagged

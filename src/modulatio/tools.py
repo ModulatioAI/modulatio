@@ -1314,7 +1314,7 @@ def make_write_artifact(
                 f"write_artifact: resolved path escapes artifacts root: {path!r}"
             ) from exc
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
+        target.write_text(content, encoding="utf-8")
         if on_write is not None:
             # Record the write for the concurrent-wave merge (no-op safe).
             on_write(target)

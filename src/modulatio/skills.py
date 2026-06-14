@@ -429,7 +429,7 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
         fm_lines.append(f"pass_env: {_fm(', '.join(skill.pass_env))}")
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + skill.prompt_template.rstrip() + "\n"
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     return path
 
 
