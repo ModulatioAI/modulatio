@@ -1057,6 +1057,42 @@ def _format_run_shell_result(returncode: int, stdout: str, stderr: str) -> str:
     )
 
 
+def _resolve_payload_binary(head: str) -> str | None:
+    """Return the resolved executable path for ``head`` (the first real
+    payload token), or ``None`` when it isn't installed on this host.
+
+    re-sweep (prlimit-masks-INFO): the ``prlimit`` wrapper prefix means
+    ``Popen`` execs ``prlimit`` (which exists) for a standalone payload like
+    ``ruby``/``go``/``node``, so a missing payload no longer raises
+    ``FileNotFoundError`` — ``prlimit`` runs and exits 127, and the friendly
+    ``[INFO] tool 'X' not installed`` body never fires. We therefore pre-check
+    the payload binary BEFORE building the wrapper. The sandbox ``--ro-bind /
+    /``s the host root, so host-PATH resolution is the right authority on both
+    the sandboxed and unsandboxed paths.
+
+    An absolute/relative path that points at an existing executable file is
+    treated as present (``shutil.which`` only searches PATH for bare names).
+    """
+    import shutil
+
+    if not head:
+        return None
+    if os.sep in head or (os.altsep and os.altsep in head):
+        # Explicit path form: present iff it's an existing executable file.
+        return head if os.path.isfile(head) and os.access(head, os.X_OK) else None
+    return shutil.which(head)
+
+
+def _not_installed_body(missing: str, detail: str = "") -> str:
+    """The friendly ``[INFO] tool '<missing>' not installed`` body."""
+    suffix = f" Underlying error: {detail}" if detail else ""
+    return (
+        f"[INFO] tool {missing!r} not installed in this "
+        f"environment. If a probe relied on it, treat as 'not "
+        f"configured' and skip — do not retry.{suffix}"
+    )
+
+
 def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
     """Return a ``run_shell`` callable bound to ``artifacts_root``.
 
@@ -1125,6 +1161,19 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
         # a transparent execution helper that lets ``pytest`` /
         # ``python3`` find their package home.
         exec_argv = _rewrite_argv_to_running_python(argv)
+        # re-sweep (prlimit-masks-INFO): pre-check the real payload binary
+        # BEFORE wrapping it in the prlimit prefix. Once exec_argv is wrapped,
+        # Popen execs `prlimit` (which exists) and a missing standalone payload
+        # (ruby/go/node/bash/rubocop/...) makes prlimit exit 127 rather than
+        # raising FileNotFoundError — so the friendly [INFO] body below would
+        # never fire on the production prlimit path. Resolve against the host
+        # PATH (the sandbox ro-binds `/`), and return the [INFO] body directly
+        # when the payload isn't installed. The FileNotFoundError handler stays
+        # as a backstop (e.g. prlimit-absent hosts, races).
+        if exec_argv and _resolve_payload_binary(exec_argv[0]) is None:
+            return _format_run_shell_result(
+                -1, "", _not_installed_body(exec_argv[0])
+            )
         # SEC-001 + SEC-002: sandbox the child process.
         # The argv allowlist above is defense in depth; the trust
         # boundary is here. Three paths:
@@ -1266,13 +1315,9 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
             # the model can read [INFO] and skip the probe rather than
             # raising and crashing the chat loop.
             missing = exec_argv[0] if exec_argv else "(unknown)"
-            stderr = (
-                f"[INFO] tool {missing!r} not installed in this "
-                f"environment. If a probe relied on it, treat as 'not "
-                f"configured' and skip — do not retry. Underlying "
-                f"error: {exc}"
+            return _format_run_shell_result(
+                -1, "", _not_installed_body(missing, str(exc))
             )
-            return _format_run_shell_result(-1, "", stderr)
 
     return run_shell
 

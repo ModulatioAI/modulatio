@@ -34,6 +34,40 @@ from typing import TYPE_CHECKING, Callable
 
 from modulatio import comptroller, review_ledger
 
+
+class AuthorizerResult(tuple):
+    """The metered authorizer's return value.
+
+    re-sweep MEDIUM/integration (Finding 1): the comptroller flags an
+    idempotent replay structurally (``Authorization.idempotent_reuse``) so the
+    tool runner can short-circuit the provider re-invoke (reuse the prior
+    result) instead of paying again. ``build_metered_authorizer`` previously
+    collapsed that signal to ``(allowed, reason)`` and dropped it, leaving the
+    contract unfulfilled — the runner would re-pay on an identical metered call.
+
+    This is a length-2 ``(allowed, reason)`` tuple so EVERY existing 2-tuple
+    unpacker (the runner's ``allowed, why = metered_authorizer(...)`` and the
+    test suite) stays back-compatible, while carrying ``idempotent_reuse`` as a
+    structured side-channel the runner reads to skip the re-invoke.
+    """
+
+    def __new__(cls, allowed: bool, reason: str, idempotent_reuse: bool = False):
+        self = super().__new__(cls, (allowed, reason))
+        self._idempotent_reuse = idempotent_reuse  # type: ignore[attr-defined]
+        return self
+
+    @property
+    def allowed(self) -> bool:
+        return self[0]
+
+    @property
+    def reason(self) -> str:
+        return self[1]
+
+    @property
+    def idempotent_reuse(self) -> bool:
+        return self._idempotent_reuse  # type: ignore[attr-defined,no-any-return]
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pathlib import Path
 
@@ -162,9 +196,16 @@ def build_metered_authorizer(
             project_code, cost_class, tool_name, task_id, key, agent_id,
             per_task_cap=per_task_cap,
         )
-        return auth.allowed, auth.reason
+        # re-sweep (Finding 1): thread the structured idempotent-replay signal
+        # through to the runner (length-2 (allowed, reason) for back-compat).
+        return AuthorizerResult(auth.allowed, auth.reason, auth.idempotent_reuse)
 
     return authorize
 
 
-__all__ = ["FORBIDDEN_ARG_KEYS", "build_metered_authorizer", "metered_idempotency_key"]
+__all__ = [
+    "AuthorizerResult",
+    "FORBIDDEN_ARG_KEYS",
+    "build_metered_authorizer",
+    "metered_idempotency_key",
+]

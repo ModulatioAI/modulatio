@@ -230,7 +230,10 @@ class PromptScreen(Vertical):
         it without modal interaction."""
         try:
             att = build_attachment(path, kind=kind)
-        except (FileNotFoundError, UnicodeDecodeError) as exc:
+        # re-sweep: build_attachment also raises ValueError (size cap) and
+        # OSError (IsADirectoryError/permission) — catch them so an oversized
+        # or unreadable attachment surfaces as a status, not a TUI crash.
+        except (FileNotFoundError, UnicodeDecodeError, ValueError, OSError) as exc:
             self.query_one("#prompt-response", Static).update(
                 f"[bold red]Attach failed:[/] {escape(str(exc))}"
             )
@@ -251,7 +254,9 @@ class PromptScreen(Vertical):
         so the 📎/🖼 buttons (via modal callback) and tests can drive it."""
         try:
             att = build_attachment(path, kind=kind)
-        except (FileNotFoundError, UnicodeDecodeError) as exc:
+        # re-sweep: also catch ValueError (size cap) / OSError so an oversized
+        # or unreadable chat attachment surfaces as a status, not a crash.
+        except (FileNotFoundError, UnicodeDecodeError, ValueError, OSError) as exc:
             self.query_one("#prompt-response", Static).update(
                 f"[bold red]Attach failed:[/] {escape(str(exc))}"
             )

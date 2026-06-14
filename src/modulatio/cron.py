@@ -373,12 +373,18 @@ def add(
         jt = job_template_library.checkout(jt_id, project_code)
         if not jt.name:
             raise ValueError(f"Job template {jt_id!r} not found for project {project_code!r}")
-        # Use the STRICT predicate (the same one the run-time #97 fit-gate
-        # applies, `_jt_fit` → `unfilled_required`): catch a required param that
-        # is present-but-empty (`{"topic": ""}` / `{"competitors": []}`), not
-        # just absent/None. Otherwise a cron could be added here that the
-        # headless dispatch's fit-gate would then refuse every cycle.
-        bind_params = jt_params or {}
+        # Mirror the run-time bind EXACTLY so the add-time gate neither
+        # over- nor under-rejects relative to the headless dispatch's #97
+        # fit-gate. `_run_jt_interview` starts from the JT's standing
+        # `defaults()` and overlays only the non-None supplied params; the
+        # fit-gate (`_jt_fit`) then runs against that MERGED dict. Gating the
+        # raw `jt_params` alone (ignoring the JT's own defaults) made the
+        # add-time gate STRICTER than dispatch — a cron whose required blanks
+        # are filled by the template's defaults would be rejected here yet would
+        # run fine every cycle. Fold defaults in (dropping None overlays, as the
+        # interview does) so this gate is a true mirror of post-interview `_jt_fit`.
+        bind_params = dict(jt.defaults())
+        bind_params.update({k: v for k, v in (jt_params or {}).items() if v is not None})
         missing = jt.unfilled_required(bind_params)
         if missing:
             raise ValueError(

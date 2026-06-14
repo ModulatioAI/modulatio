@@ -412,7 +412,12 @@ def _load_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
     rows: list[dict] = []
-    with path.open("r", encoding="utf-8") as fh:
+    # re-sweep (0.9.0): errors="replace" so a non-UTF-8 byte from a Latin-1
+    # hand-edit or a torn write degrades to U+FFFD on that line (caught below
+    # as a JSONDecodeError) instead of raising UnicodeDecodeError during
+    # iteration and making the whole inbox unreadable. Matches the sibling
+    # JSONL/text readers across this package (qc_history, comptroller, …).
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
             if not line:

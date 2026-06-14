@@ -58,6 +58,18 @@ _SEED_STANDARDS_ROOT = Path(__file__).parent / "_seed_standards"
 
 _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
+#: A standards file lives at ``<root>/<domain>.md`` across three tiers. The
+#: domain is the task's ``artifact_kind`` — a free-form ``str`` (types.py)
+#: sourced from planner JSON with no slug validation upstream — so it is not
+#: trusted to be a bare slug. This validator is the engine-bound guard that
+#: makes a path-traversal domain (``../../secrets`` → arbitrary ``.md`` read
+#: across the seed / shared / project roots) *impossible*, not merely
+#: discouraged — mirroring ``qc_notes._DOMAIN_RE``. Non-conforming domains
+#: load as the empty entry (treated as absent), exactly like qc_notes returns
+#: empty standing notes. Bind it once here so every consumer (``load`` and
+#: ``load_with_metadata``) inherits the guard.
+_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
 
 @dataclass(frozen=True)
 class StandardsEntry:
@@ -126,7 +138,14 @@ def load_with_metadata(domain: str, project_code: str | None = None) -> Standard
 
     Returns an empty entry (rather than raising) when nothing is found —
     standards are additive leverage, not required infrastructure.
+
+    A ``domain`` that isn't a bare slug (the artifact_kind is free-form and
+    planner-sourced) is rejected fail-closed → empty entry, so a traversal
+    value like ``../../secrets`` can never read an arbitrary ``.md`` off the
+    seed / shared / project roots. Mirrors ``qc_notes.load_standing_notes``.
     """
+    if not isinstance(domain, str) or not _DOMAIN_RE.match(domain):
+        return _EMPTY_ENTRY
     seed_path = _SEED_STANDARDS_ROOT / f"{domain}.md"
     shared_path = _standards_root() / f"{domain}.md"
     project_path = (

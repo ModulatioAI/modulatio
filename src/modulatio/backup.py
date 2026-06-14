@@ -133,11 +133,16 @@ def _walk_vault(vault_root: Path, code: str) -> tuple[dict[str, str], list[str]]
     for f in project.rglob("*"):
         if not f.is_file():
             continue
-        # Skip cache-like dirs — not part of the project content, so not
-        # counted as a lossy skip.
-        if any(part in (".cache", "_proposals", "lance.db") for part in f.parts):
-            continue
         rel = str(f.relative_to(project))
+        # re-sweep (F1): scope the cache-dir skip to the PROJECT tree, not
+        # the absolute path. f.parts includes every ancestor up to "/", so
+        # a vault root mounted under a dir named .cache/_proposals/lance.db
+        # (e.g. ~/.cache/...) would match on the ancestor and silently drop
+        # every file. Compare project-relative parts, like the dotfile check
+        # below already does.
+        rel_parts = f.relative_to(project).parts
+        if any(p in (".cache", "_proposals", "lance.db") for p in rel_parts):
+            continue
         # Skip files with a dot-prefixed path component (e.g. .obsidian/*).
         # import_backup validates every captured rel_path with
         # tools._is_safe_relative_file_arg, which REJECTS any dotfile
@@ -429,6 +434,16 @@ def import_backup(
             if target.exists() and not overwrite:
                 summary["vault_files_skipped"] += 1
                 continue
+            # re-sweep (F2): a corrupt/hand-crafted backup may carry a
+            # non-string value for a file entry (dict, number, null).
+            # write_text would raise TypeError mid-restore; fail closed with
+            # a clean ValueError matching the other malformed-input guards.
+            if not isinstance(content, str):
+                raise ValueError(
+                    f"backup file {rel_path!r} for project {code!r} has "
+                    f"non-text content ({type(content).__name__}); "
+                    f"refusing to import."
+                )
             target.write_text(content, encoding="utf-8")
             summary["vault_files_written"] += 1
 

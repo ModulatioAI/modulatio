@@ -986,6 +986,11 @@ def run_llm_with_tools(
     # WARNINGs. Track whether we've already warned in this invocation
     # so the gate fires once per loop instead of once per iteration.
     soft_warn_seen = False
+    # re-sweep (metered Finding 1): cache each metered tool's successful result
+    # keyed by (name, canonical args) so an idempotent replay — flagged
+    # structurally by the authorizer (``idempotent_reuse``) — reuses the prior
+    # result instead of re-invoking (and re-paying) the provider.
+    metered_result_cache: dict[tuple[str, str], str] = {}
 
     for iteration in range(max_iters):
         # Slice 90: pre-flight context-budget check. Compresses
@@ -1078,17 +1083,37 @@ def run_llm_with_tools(
                         f"authorizer is wired — fail closed."
                     )
                 else:
+                    idempotent_reuse = False
                     try:
-                        allowed, why = metered_authorizer(call.name, dict(call.args))
+                        auth = metered_authorizer(call.name, dict(call.args))
+                        allowed, why = auth[0], auth[1]
+                        # re-sweep (metered Finding 1): read the structured
+                        # idempotent-replay signal (back-compat: defaults False
+                        # for a plain 2-tuple authorizer).
+                        idempotent_reuse = bool(getattr(auth, "idempotent_reuse", False))
                     except Exception as exc:
                         allowed, why = False, f"authorizer error: {type(exc).__name__}: {exc}"
                     if not allowed:
                         result = f"DENIED (metered): {why}"
                     else:
-                        try:
-                            result = str(tool.call(**call.args))
-                        except Exception as exc:
-                            result = f"ERROR: {type(exc).__name__}: {exc}"
+                        cache_key = (
+                            call.name,
+                            json.dumps(call.args, sort_keys=True, default=str),
+                        )
+                        # Idempotent replay: the comptroller authorized this
+                        # identical call WITHOUT re-charging, so reuse the prior
+                        # result rather than re-invoking (and re-paying) the
+                        # provider. Falls through to a live call if no prior
+                        # result was cached (e.g. reuse flagged across a fresh
+                        # loop) — still correct, just no saving that time.
+                        if idempotent_reuse and cache_key in metered_result_cache:
+                            result = metered_result_cache[cache_key]
+                        else:
+                            try:
+                                result = str(tool.call(**call.args))
+                                metered_result_cache[cache_key] = result
+                            except Exception as exc:
+                                result = f"ERROR: {type(exc).__name__}: {exc}"
             else:
                 try:
                     result = str(tool.call(**call.args))
@@ -1155,10 +1180,18 @@ def run_llm_with_tools(
                         # multi-fetch producer can't accumulate raw results past
                         # its role budget. The producer extracts + cites what it
                         # needs; the bulky raw never piles up (2026-05-30).
+                        # re-sweep (Finding 1, sibling of Finding 2 above): budget
+                        # the kept head with the MAIN model's tokenizer (``model``),
+                        # not ``count_model`` (= summarizer_model or model). The
+                        # truncated head lands in the MAIN model's context
+                        # regardless of why summarization was skipped — including
+                        # when summarizer_model is set but the factory is unwired
+                        # (have_summarizer False). count_model drives only the
+                        # threshold MEASUREMENT above, not the head sizing.
                         conv_content = _tool_sum.truncate_tool_result(
                             result, call_id=call.id,
                             max_tokens=ts_config.threshold_tokens,
-                            model=count_model,
+                            model=model,
                         )
 
             messages.append({

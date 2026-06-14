@@ -22,6 +22,8 @@ v1.3 differences:
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -64,7 +66,31 @@ def _load_json(path: Path) -> list:
 
 def _save_json(path: Path, data: list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    # re-sweep: atomic, crash-safe write (mirror of store._write_entity). A plain
+    # path.write_text truncates-then-streams, so the lock-free readers (get_semantic,
+    # search, stats, promote_candidates — they don't take _file_lock) can observe a
+    # half-written file mid-rewrite; _load_json then swallows the JSONDecodeError and
+    # returns [] — a silent whole-store loss on every torn read. A crash mid-write
+    # would likewise leave the live store truncated. Write to a unique temp sibling,
+    # fsync, then os.replace (atomic rename on the same filesystem): a reader always
+    # sees either the complete old file or the complete new one, never torn, and a
+    # crash can never truncate the live store.
+    rendered = json.dumps(data, indent=2, default=str)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(rendered)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 # Per-file read-modify-write lock. add_episodic/get_episodic/add_semantic/

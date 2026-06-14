@@ -787,11 +787,22 @@ def _format_kickoff_attachments(attachments: list) -> str:
                     body = Path(att.path).read_text(encoding="utf-8", errors="replace")
                 except (OSError, ValueError):
                     body = None
+            # re-sweep R4 #2: fence the document body with a backtick run longer
+            # than any run inside it (min 3), so a document whose own content
+            # carries a ``` line can't break out of the wrapper and bleed into the
+            # Leader's instruction context (prompt-injection / context-bleed). This
+            # matches the multimodal user-text path (multimodal._render_user_text);
+            # the shared helper lives there so both surfaces stay consistent.
+            from modulatio import multimodal as _multimodal
+            doc_body = body or ""
+            fence = "`" * (_multimodal._longest_backtick_run(doc_body) + 1)
+            if len(fence) < 3:
+                fence = "```"
             parts.append(f"## Attached document: `{att.name}`")
             parts.append("")
-            parts.append("```")
-            parts.append(body or "")
-            parts.append("```")
+            parts.append(fence)
+            parts.append(doc_body)
+            parts.append(fence)
     return "\n".join(parts)
 
 
@@ -5676,6 +5687,28 @@ class Orchestrator:
         # files from disk, no output-token re-emission). Parse from body_text
         # BEFORE fence-stripping, since the manifest is itself a fenced block.
         assembled = self._apply_assembly_manifest(task, body_text)
+        _asm_rec = self._assembly_records.get(task.id)
+        if _asm_rec is not None and getattr(_asm_rec, "output_file", None) is not None:
+            # re-sweep R4 #1: binary (media) deliverable — the engine composited a
+            # file in the vault (ffmpeg/ImageMagick/zip). Mirror the other two
+            # assembly callers (_engine_assemble_deliverable, _producer_execute):
+            # move that file onto the deliverable path (NOT a text write of the
+            # human-readable receipt), skip the prose-strip + breaker + regression
+            # guard (all text-only), and leak nothing. Without this the tool-loop
+            # path wrote the receipt string ("media assembly (image): composite …")
+            # as the deliverable and stranded the binary temp file.
+            import shutil
+            src = _asm_rec.output_file
+            try:
+                shutil.move(str(src), str(path))
+            except OSError:
+                shutil.copyfile(str(src), str(path))
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
+            self._record_artifact_write(path)
+            return path, _asm_rec.final_checksum, 0
         if assembled is not None:
             cleaned = assembled
         else:
@@ -6547,8 +6580,10 @@ class Orchestrator:
         the current agent (last-ditch — flaky QC sometimes resolves).
         Caller decides: escalation helper returns the sentinels
         :data:`_ESCALATION_COMPLETED` / :data:`_ESCALATION_EXCEPTION`
-        for terminal outcomes, or a fresh ``(qc_verdict, qc_notes)``
-        tuple when QC still rejects (caller settles QC_REJECTED).
+        for terminal outcomes, or a fresh
+        ``(qc_verdict, qc_notes, defect_type)`` tuple when QC still rejects
+        (caller settles QC_REJECTED and threads ``defect_type`` to the
+        QC-authored fixer / recovery witness).
 
         The producer+QC cycle reuses the same dispatch path as the
         normal redo loop — skill-floor callable, per-agent runner
@@ -6652,7 +6687,7 @@ class Orchestrator:
             )
             t.evidence_provided.extend([artifact.id, metric.id])
 
-            qc_verdict_new, qc_notes_new, _defect = self._qc_review(
+            qc_verdict_new, qc_notes_new, defect_new = self._qc_review(
                 t, draft_path, checksum, token_count
             )
             t.evidence_provided.append(qc_verdict_new.id)
@@ -6678,10 +6713,12 @@ class Orchestrator:
                     summary.drafts.append(draft_path)
                 return _ESCALATION_COMPLETED
 
-            # Escalation attempt QC-failed. Return the fresh verdict so
-            # the caller settles QC_REJECTED using the most recent
-            # context, not the pre-escalation one.
-            return (qc_verdict_new, qc_notes_new)
+            # Escalation attempt QC-failed. Return the fresh verdict AND its
+            # defect class (re-sweep R4 #3) so the caller settles QC_REJECTED —
+            # and runs the QC-authored fixer / recovery witness — using THIS
+            # attempt's context, not the pre-escalation ``rescue_defect_type``
+            # (last set inside the retry loop from a different QC verdict).
+            return (qc_verdict_new, qc_notes_new, defect_new)
 
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
@@ -7071,6 +7108,15 @@ class Orchestrator:
                 claimed[pk] = tid
                 _copy(r.staging_root, pk)
 
+        # re-sweep R4 #4: reserve EVERY task's declared primary path up front —
+        # even one that pass 1 never claimed because the task didn't actually
+        # write it (empty/failed producer). The pass-2 guard below only skips a
+        # task's OWN primary (``k == pk``), so without this a SIBLING task's
+        # sidecar write at the same path would find ``claimed.get(k) is None``
+        # and land on the absent task's primary slot. Reserving the path keeps a
+        # sidecar from ever claiming another task's primary, written or not.
+        reserved_primaries = set(primary_keys.values())
+
         # Pass 2: sidecars — deterministic (task-id, path) order.
         for tid, r in staged:
             pk = primary_keys[tid]
@@ -7078,6 +7124,23 @@ class Orchestrator:
                 k = _key(rel)
                 if k == pk:
                     continue  # already merged in pass 1
+                if k in reserved_primaries and claimed.get(k) != tid:
+                    # Another task's declared primary path — never let a sidecar
+                    # land here. Surface it as a dropped-sidecar merge transition
+                    # (same shape as the claimed-owner conflict below).
+                    r.task.transitions.append(
+                        StateTransition(
+                            from_state=r.task.status.value,
+                            to_state=r.task.status.value,
+                            actor="merge",
+                            rationale=(
+                                f"artifact path {rel!r} is another task's declared "
+                                f"primary output — this task's sidecar dropped, not "
+                                f"merged"
+                            ),
+                        )
+                    )
+                    continue
                 owner = claimed.get(k)
                 if owner is not None and owner != tid:
                     r.task.transitions.append(
@@ -7880,10 +7943,11 @@ class Orchestrator:
             # Exception on the escalation cycle → BLOCKED. The helper
             # has already written the transition + summary line.
             return
-        # Fall through to QC_REJECTED settlement using the last_qc
-        # from the escalation attempt (helper updates last_qc in
-        # place via return).
-        qc_verdict, qc_notes = escalation_outcome  # type: ignore[misc]
+        # Fall through to QC_REJECTED settlement using the verdict from the
+        # escalation attempt (re-sweep R4 #3: the helper now also returns the
+        # escalation attempt's OWN defect class, so the QC-fixer / witness see
+        # this attempt's defect, not the stale loop-scoped rescue_defect_type).
+        qc_verdict, qc_notes, escalation_defect_type = escalation_outcome  # type: ignore[misc]
 
         # QC-as-fixer Slice 3: producer exhausted retries AND escalation.
         # Before settling a dead QC_REJECTED, try a QC-authored rescue of
@@ -7891,7 +7955,7 @@ class Orchestrator:
         # nothing salvageable).
         if self._attempt_qc_fix_forward(
             t, self._resolve_draft_path(t), (qc_verdict, qc_notes), summary,
-            defect_type=rescue_defect_type,
+            defect_type=escalation_defect_type,
         ):
             return
 

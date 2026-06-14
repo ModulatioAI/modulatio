@@ -12,6 +12,7 @@ add_agent raises on duplicates and has no update variant for agents
 """
 from __future__ import annotations
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Label, Select, Static, TextArea
@@ -137,14 +138,16 @@ class AgentWizard(Vertical):
                 tier=tier,
             )
         except FileExistsError as exc:
-            status.update(f"[red]Agent already exists: {exc}[/red]")
+            # re-sweep: escape — exc embeds the operator-typed agent id/path
+            status.update(f"[red]Agent already exists: {escape(str(exc))}[/red]")
             return None
         except Exception as exc:
-            status.update(f"[red]Failed to create agent: {exc}[/red]")
+            status.update(f"[red]Failed to create agent: {escape(str(exc))}[/red]")
             return None
 
         self.last_created = agent
-        status.update(f"[green]Created {agent.id}[/green]")
+        # re-sweep: escape — agent.id is operator-typed, may contain markup
+        status.update(f"[green]Created {escape(str(agent.id))}[/green]")
         return agent
 
 

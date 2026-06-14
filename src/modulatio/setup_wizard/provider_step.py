@@ -67,8 +67,14 @@ def _load_oauth_picklists() -> dict[str, tuple[str, ...]]:
             "use manual model entry."
         )
         return {}
+    # re-sweep (finding 1, r4): the comprehension sits OUTSIDE the try above,
+    # so a hand-edited seed whose list mixes uncomparable elements (e.g. a str
+    # and a null → sorted() raises TypeError) would still brick the wizard at
+    # import despite the stated "malformed seed never bricks" intent. Filter to
+    # str elements before sorting so heterogeneous/None entries are dropped, not
+    # fatal — the curated list only ever holds model-id strings anyway.
     return {
-        vendor: tuple(sorted(models))
+        vendor: tuple(sorted(m for m in models if isinstance(m, str)))
         for vendor, models in raw.items()
         if isinstance(models, list)
     }
@@ -633,7 +639,10 @@ def run(state: dict) -> Any:
                     # column width isn't thrown off by invisible ANSI escapes.
                     f"{theme.color(f'{key:24s}', 'accent', bold=True)}  "
                     f"{label:30s}  "
-                    f"→ {api_format}/{model:24s}  "
+                    # re-sweep (finding 2, r4): pad api_format to a fixed width
+                    # so the model + trailing badge columns stay aligned across
+                    # rows whose api_format differs in width ('openai' vs '?').
+                    f"→ {api_format:>9s}/{model:24s}  "
                     f"{badge}"
                 )
                 print(line)

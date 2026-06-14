@@ -1148,6 +1148,13 @@ def _run_execution_loop(
                 started_dt = datetime.fromisoformat(plan_started_at)
             except (TypeError, ValueError):
                 started_dt = None
+            # re-sweep: ``execution_started_at`` may be hand-edited in the
+            # frontmatter to a timezone-NAIVE value (no offset), which
+            # parses fine but then explodes the aware-minus-naive
+            # subtraction below with a TypeError. Coerce naive → UTC so the
+            # cap math stays inside one guarded shape (mirrors heartbeat.py).
+            if started_dt is not None and started_dt.tzinfo is None:
+                started_dt = started_dt.replace(tzinfo=timezone.utc)
             if started_dt is not None:
                 elapsed_min = (
                     datetime.now(timezone.utc) - started_dt

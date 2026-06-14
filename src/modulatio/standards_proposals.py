@@ -124,7 +124,13 @@ def save(proposal: Proposal, project_code: str) -> Path:
 
 
 def _parse_file(path: Path) -> Proposal:
-    raw = path.read_text(encoding="utf-8")
+    # re-sweep: mirror the JSON readers' corrupt-byte resilience
+    # (team_memory uses errors="replace"). A proposal hand-edited in a
+    # non-UTF-8 editor would otherwise raise UnicodeDecodeError and crash
+    # the whole modulatio-standards review surface (list/show/approve/reject)
+    # instead of degrading the one bad file. Strict decoding gives no upside
+    # here — the parser tolerates arbitrary content already.
+    raw = path.read_text(encoding="utf-8", errors="replace")
     m = _FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}
     body = raw

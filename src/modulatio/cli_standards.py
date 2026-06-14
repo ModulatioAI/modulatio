@@ -93,6 +93,19 @@ def approve_cmd(
     except FileNotFoundError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1)
+    except ValueError as exc:
+        # re-sweep: the proposal's domain becomes a standards FILE NAME, so
+        # approve() routes it through validate_registry_name (fail-closed on a
+        # separator / space / '..' / leading dot). A QC-emitted domain tracks
+        # the planner-free-text artifact_kind ('slide deck', 'data/viz', …),
+        # which can violate that rule — without this catch the ValueError would
+        # propagate and CRASH the CLI rather than report a clean, actionable
+        # error. Exit non-zero so scripts notice; tell the operator the
+        # proposal can't be approved as-is and should be rejected.
+        typer.echo(
+            f"error: proposal {proposal_id!r} has an unsafe domain: {exc}", err=True
+        )
+        raise typer.Exit(code=1)
     typer.echo(f"approved {proposal_id} → appended to {dest}")
 
 

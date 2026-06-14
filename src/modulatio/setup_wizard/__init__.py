@@ -131,7 +131,17 @@ def _pop_state(step_name: str, state: dict) -> None:
         # 'configured_models' is a list of preset keys, losslessly rebuilt
         # from disk on re-entry, so it may still be cleared.
         "models": ["configured_models"],
-        "agents": ["triad_agents", "worker_agents"],
+        # re-sweep (Finding 1): do NOT pop 'triad_agents'/'worker_agents' on
+        # BACK. _load_existing_state pre-populates these from the saved
+        # team_template.json so the agents step starts on the user's current
+        # team with edit/keep semantics. Popping them on a BACK-out (e.g. the
+        # user enters agents then returns to the models step) discards the
+        # disk-loaded pre-fill the user never touched — and any in-progress
+        # picks — so re-entry restarts on an empty re-provision instead of the
+        # current team. The agents step re-walks every role and overwrites
+        # both keys on re-entry (by_tier/producers rebuild), so keeping the
+        # prior values is lossless: the next entry replaces them.
+        "agents": [],
         "budget": ["budget_caps"],
         "first_project": ["first_project_code", "first_project_objective"],
         "confirm": [],
@@ -402,10 +412,17 @@ def _run_setup_body() -> bool:
                 body = ", and ".join((", ".join(clauses[:-1]), clauses[-1]))
             else:
                 body = clauses[0]
-            # Capitalize the lead only when the preset clause leads — matches the
-            # prior wording (a leading tool name like "pandoc" stays lowercase so
-            # callers/tests can match it verbatim).
-            if presets_changed:
+            # Capitalize the lead unless the LEADING clause is a verbatim
+            # tool-name match (a tool-install clause leads only when no presets
+            # changed) — those stay lowercase so callers/tests can match the
+            # name verbatim ("pandoc was installed ..."). The preset clause and
+            # an embed-led clause (cache warm with no preset/install ahead of
+            # it) are prose, so they get capitalized.
+            # re-sweep (Finding 2): an embed-cache-only abort used to read
+            # "Setup aborted. the embedded routing model ..." because the lead
+            # was only capitalized on presets_changed.
+            tool_install_leads = bool(newly_installed) and not presets_changed
+            if not tool_install_leads:
                 body = f"{body[0].upper()}{body[1:]}"
             # A config/cache side effect ("other settings") vs a system-only
             # install ("no configuration") — mirrors the prior tail wording.
