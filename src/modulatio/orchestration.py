@@ -492,26 +492,37 @@ def _effective_assembly_family(
 ) -> str:
     """The assembly family the engine will ACTUALLY route this work to —
     ``media`` / ``document`` / ``code`` / ``data`` — used to gate render-path
-    normalization (#73, Nemo design review). Priority:
+    normalization (#73). It MUST mirror ``_select_assembler_skill``'s authority
+    precedence exactly, or evidence normalization can diverge from the executed
+    route (Nemo code review: ``artifact_kind=image`` + ``required_skills=
+    [document-assembly]`` is canonicalized to media-assembly later, so its
+    evidence must NOT be document-normalized to ``.md``). Precedence:
 
-    (a) an explicit assembler skill the planner named in ``required_skills`` WINS
-        — this closes the planner-forgot-``artifact_kind`` seam: a task with
-        ``required_skills=["media-assembly"]`` but ``artifact_kind="text"`` is
-        media work and its evidence must NOT be document-normalized to ``.md``;
-    (b) else the standards-declared ``assembler_skill`` for ``artifact_kind``
-        (the same single authority ``_select_assembler_skill`` uses);
-    (c) else the safe ``document`` default (also on any standards lookup error).
+    (a) the standards-declared ``assembler_skill`` for ``artifact_kind`` WINS —
+        the standards file is the SOLE routing authority, and
+        ``_select_assembler_skill`` canonicalizes the task's assembler skill to
+        it, overriding whatever the planner put in ``required_skills``;
+    (b) else the explicit assembler skill the planner named in ``required_skills``
+        — the backstop when standards declares none for this kind (e.g.
+        ``artifact_kind="text"``: ``_select_assembler_skill`` keeps the planner's
+        ``media-assembly``, so ``required_skills=["media-assembly"]`` still routes
+        to media — the planner-forgot-``artifact_kind`` seam stays closed);
+    (c) else the safe ``document`` default (also on any standards lookup error,
+        matching ``_select_assembler_skill``'s ``except: continue`` → keep skill).
     """
-    for skill in required_skills:
-        if skill in _ASSEMBLER_STRATEGY:
-            return _ASSEMBLER_STRATEGY[skill]
+    family: str | None = None
     try:
         entry = standards.load_with_metadata(artifact_kind, project_code=project_code)
         skill = entry.assembler_skill
         if skill and skill in _ASSEMBLER_STRATEGY:
+            family = _ASSEMBLER_STRATEGY[skill]
+    except Exception:  # noqa: BLE001 — fall through to required_skills/default
+        family = None
+    if family is not None:
+        return family
+    for skill in required_skills:
+        if skill in _ASSEMBLER_STRATEGY:
             return _ASSEMBLER_STRATEGY[skill]
-    except Exception:  # noqa: BLE001 — safe document default on any lookup error
-        pass
     return "document"
 
 

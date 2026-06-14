@@ -7880,22 +7880,26 @@ def test_leader_verify_prompt_carries_the_md_satisfies_render_rule():
 # ── #73: family-aware render-path normalization ──────────────────────────────
 
 def test_effective_assembly_family_priority():
-    """#73 (Nemo design): the EFFECTIVE family — required_skills assembler skill
-    wins (closes the planner-forgot-artifact_kind seam), then artifact_kind's
-    standards, then the safe document default."""
+    """#73: the EFFECTIVE family MUST mirror _select_assembler_skill's authority:
+    (a) standards(artifact_kind).assembler_skill WINS (the sole routing
+    authority); (b) else the planner's required_skills assembler skill (backstop
+    when standards is silent — the planner-forgot-artifact_kind seam); (c) else
+    document default."""
     from modulatio.orchestration import _effective_assembly_family as fam
-    # (a) explicit assembler skill in required_skills wins
-    assert fam("text", ["media-assembly"], None) == "media"
+    # (a) standards for artifact_kind wins (seed image/video → media-assembly)
+    assert fam("image", [], None) == "media"
+    assert fam("video", [], None) == "media"
+    # (a) standards WINS over a CONFLICTING required_skills — _select_assembler_skill
+    # canonicalizes image→media-assembly, so evidence must follow (Nemo code review).
+    assert fam("image", ["document-assembly"], None) == "media"
+    assert fam("text", ["media-assembly"], None) == "media"  # text: standards silent → backstop
+    # (b) backstop: artifact_kind 'text' declares no assembler_skill, so the
+    # planner's explicit assembler skill routes (the forgot-artifact_kind seam)
     assert fam("text", ["document-assembly"], None) == "document"
     assert fam("text", ["code-assembly"], None) == "code"
     assert fam("text", ["data-assembly"], None) == "data"
-    # (a) WINS over artifact_kind — a media task that forgot artifact_kind=image
-    assert fam("text", ["media-assembly"], None) == "media"
-    # (b) standards-declared family for artifact_kind (seed image/video → media)
-    assert fam("image", [], None) == "media"
-    assert fam("video", [], None) == "media"
+    # (c) default
     assert fam("text", [], None) == "document"
-    # (c) unknown kind / lookup error → safe document default
     assert fam("zzz-nope", [], None) == "document"
 
 
@@ -7969,6 +7973,43 @@ def test_plan_tasks_document_evidence_normalizes_to_md(project: Project):
         ],
     })
     assert ev.target == "out/report.md", "document evidence names the authored .md source"
+
+
+def test_plan_tasks_conflicting_skill_vs_kind_evidence_follows_route(project: Project):
+    """#73 / Nemo code review: when the planner's required_skills CONFLICT with
+    artifact_kind's standards family, evidence normalization must follow the SAME
+    route `_select_assembler_skill` canonicalizes to — no split-brain. Here
+    artifact_kind=image (standards → media-assembly) overrides a planner
+    required_skills=['document-assembly'], so the task routes to MEDIA and its
+    evidence must keep the binary extension, NOT be document-normalized to .md."""
+    from uuid import uuid4
+
+    from modulatio.types import Goal, GoalStatus
+    orch = Orchestrator(project, {"leader": _leader_stub, "planner": _planner_stub,
+                                  "drafter": _drafter_stub, "qc": _qc_stub})
+    item = {
+        "description": "composite the deck",
+        "artifact_kind": "image",                  # standards → media-assembly
+        "required_skills": ["document-assembly"],  # conflicting planner choice
+        "output_path": "report.pdf",
+        "deliverable": True,
+        "evidence_required": [
+            {"kind": "artifact", "description": "the deck", "target": "out/report.pdf"},
+        ],
+    }
+    orch.runners["planner"] = lambda prompt: f"```json\n{json.dumps([item])}\n```"
+    goal = Goal(id=f"{PROJECT_CODE}-G-001", project_id=uuid4(),
+                description="make a deck", success_criteria="it exists",
+                status=GoalStatus.PENDING)
+    tasks = orch._plan_tasks(goal)
+    assert tasks
+    t = tasks[0]
+    # the engine canonicalizes the route to the standards family...
+    assert "media-assembly" in t.required_skills, "route canonicalized to media-assembly"
+    # ...and evidence FOLLOWED that route (kept binary, not document-normalized)
+    assert t.evidence_required[0].target == "out/report.pdf", (
+        "evidence must follow the canonicalized media route, not be rewritten to .md"
+    )
 
 
 def test_decompose_keeps_goal_prose_unnormalized(project: Project):
