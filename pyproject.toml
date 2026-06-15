@@ -88,3 +88,9 @@ target-version = "py312"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Put the repo root on sys.path so `from tests._thread_check import ...` (and any
+# other `tests.*` helper import) resolves under the bare `pytest` console script,
+# not only under `python -m pytest` (which adds cwd implicitly). CI runs bare
+# `pytest`; without this, the concurrency tests fail collection with
+# "No module named 'tests'".
+pythonpath = ["."]
