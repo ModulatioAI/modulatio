@@ -24,12 +24,8 @@ from textual.containers import Horizontal, Vertical
 from textual.markup import escape
 from textual.widgets import Button, Input, Label, Select, Static
 
+from modulatio import families
 from modulatio.export import ExportError, ExportResult, export_artifact
-
-# Prose/document family — these get the document render path (docx/pdf/markdown).
-# Every other artifact class (code/data/web/media) defaults to a raw COPY and is
-# never run through pandoc (which would mangle non-prose). Product/output-agnostic.
-_DOCUMENT_EXTS = frozenset({".md", ".markdown", ".txt", ""})
 
 
 class ExportDialog(Vertical):
@@ -73,15 +69,16 @@ class ExportDialog(Vertical):
             yield Button("Cancel", id="export-cancel-btn")
         yield Static("", id="export-status")
 
-    def set_source(self, source: Path) -> None:
+    def set_source(self, source: Path, *, family: str | None = None) -> None:
         """Point the dialog at a new source file. The offered formats + default
-        are ARTIFACT-CLASS-AWARE: a prose/document file (.md/.txt/…) defaults to
+        are ARTIFACT-CLASS-AWARE: a prose/document artifact defaults to
         DOCX (the document render); a code/data/web/media artifact defaults to a
         raw COPY (no pandoc conversion, which would mangle non-prose) and only
         offers doc conversion as a secondary option. Product/output-agnostic."""
         self._source = source
         sel = self.query_one("#export-format", Select)
-        if source.suffix.lower() in _DOCUMENT_EXTS:
+        artifact_family = family or families.infer_artifact_family_from_path(source)
+        if artifact_family == "document":
             sel.set_options(
                 [("DOCX", "docx"), ("PDF", "pdf"), ("Markdown", "markdown")])
             sel.value = "docx"

@@ -20,7 +20,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Button, Label, ListItem, ListView, Static
 
-from modulatio import vault
+from modulatio import families, vault
 from modulatio.tui.widgets.export_dialog import ExportDialog
 from modulatio.tui.widgets.file_picker import FolderPickerModal
 
@@ -219,7 +219,10 @@ class ArtifactsScreen(Vertical):
         idx = listview.index
         if idx is None or idx < 0 or idx >= len(self._paths):
             return
-        panel.set_source(self._paths[idx])
+        path = self._paths[idx]
+        panel.set_source(
+            path, family=families.infer_artifact_family_from_path(path)
+        )
         panel.remove_class("hidden")
 
     def _open_folder_picker(self, panel: ExportDialog) -> None:
