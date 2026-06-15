@@ -35,6 +35,12 @@ from modulatio import context_budget as _ctx_budget_module
 from modulatio import dispatch_breaker as _dispatch_breaker_module
 from modulatio import tool_summarization as _tool_sum_module
 from modulatio.semantic_router import Embedder
+from modulatio.families import (
+    _ASSEMBLER_SKILLS,
+    _ASSEMBLER_STRATEGY,
+    draft_fallback_name as _draft_fallback_name,
+    effective_assembly_family as _effective_assembly_family,
+)
 from modulatio.types import (
     ActivityEvent,
     ArtifactEvidence,
@@ -426,20 +432,7 @@ def _normalize_render_paths(text: str | None) -> str | None:
     return _RENDER_DELIVERABLE_RE.sub(lambda m: f"{m.group(1)}.md", text)
 
 
-#: Assembler skill → mechanical-join STRATEGY (Part B). The assembler SKILL the
-#: planner picks (by artifact_kind, via the standards file) selects the family;
-#: the ENGINE owns the join (assembly._STRATEGIES). ``consolidation`` is the
-#: original seed name, kept as a back-compat alias for ``document-assembly``.
-_ASSEMBLER_STRATEGY: dict[str, str] = {
-    "consolidation": "document",
-    "document-assembly": "document",
-    "code-assembly": "code",
-    "media-assembly": "media",
-    "data-assembly": "data",
-}
-#: Skills whose task is a multi-unit ASSEMBLY step (it combines already-produced
-#: units into one deliverable).
-_ASSEMBLER_SKILLS: frozenset[str] = frozenset(_ASSEMBLER_STRATEGY)
+# Family resolution moved to families.py (shared with delivery).
 
 #: No-regress guard (Part A / A3, #86): a generate-mode RETRY that collapses a
 #: QC-passed deliverable to a fraction of its size is almost certainly a drifted
@@ -494,69 +487,7 @@ def _select_assembler_skill(tasks: "list[Task]", project_code: str | None) -> No
             ]
 
 
-def _effective_assembly_family(
-    artifact_kind: str,
-    required_skills: "list[str]",
-    project_code: str | None,
-) -> str:
-    """The assembly family the engine will ACTUALLY route this work to —
-    ``media`` / ``document`` / ``code`` / ``data`` — used to gate render-path
-    normalization (#73). It MUST mirror ``_select_assembler_skill``'s authority
-    precedence exactly, or evidence normalization can diverge from the executed
-    route (Nemo code review: ``artifact_kind=image`` + ``required_skills=
-    [document-assembly]`` is canonicalized to media-assembly later, so its
-    evidence must NOT be document-normalized to ``.md``). Precedence:
-
-    (a) the standards-declared ``assembler_skill`` for ``artifact_kind`` WINS —
-        the standards file is the SOLE routing authority, and
-        ``_select_assembler_skill`` canonicalizes the task's assembler skill to
-        it, overriding whatever the planner put in ``required_skills``;
-    (b) else the explicit assembler skill the planner named in ``required_skills``
-        — the backstop when standards declares none for this kind (e.g.
-        ``artifact_kind="text"``: ``_select_assembler_skill`` keeps the planner's
-        ``media-assembly``, so ``required_skills=["media-assembly"]`` still routes
-        to media — the planner-forgot-``artifact_kind`` seam stays closed);
-    (c) else the safe ``document`` default (also on any standards lookup error,
-        matching ``_select_assembler_skill``'s ``except: continue`` → keep skill).
-    """
-    family: str | None = None
-    try:
-        entry = standards.load_with_metadata(artifact_kind, project_code=project_code)
-        skill = entry.assembler_skill
-        if skill and skill in _ASSEMBLER_STRATEGY:
-            family = _ASSEMBLER_STRATEGY[skill]
-    except Exception:  # noqa: BLE001 — fall through to required_skills/default
-        family = None
-    if family is not None:
-        return family
-    for skill in required_skills:
-        if skill in _ASSEMBLER_STRATEGY:
-            return _ASSEMBLER_STRATEGY[skill]
-    return "document"
-
-
-#: Fallback draft extension by assembly family — used only when a task declares
-#: NO output_path. document stays .md (no change for the common case); a
-#: non-document family gets a non-prose extension so extension-switching
-#: consumers don't mis-classify the deliverable (cadre agnostic audit F2-2).
-_FALLBACK_EXT_BY_FAMILY = {
-    "document": "md", "code": "txt", "data": "json", "media": "bin",
-}
-
-
-def _draft_fallback_name(task: "Task") -> str:
-    """The fallback draft FILENAME (``<id>.<ext>``) for a task with no declared
-    output_path. Family-aware so a code/data/media deliverable does NOT land at a
-    document-shaped ``.md`` path that downstream consumers (export / delivery /
-    the Artifacts tab) mis-read by extension. Deterministic from the task alone,
-    so the write path and EVERY lookup path always agree on the extension."""
-    try:
-        family = _effective_assembly_family(
-            task.artifact_kind, task.required_skills, None)
-    except Exception:  # noqa: BLE001 — best-effort; default to document
-        family = "document"
-    ext = _FALLBACK_EXT_BY_FAMILY.get(family, "md")
-    return f"{task.id.lower()}.{ext}"
+# (effective_assembly_family / _draft_fallback_name moved to families.py)
 
 def _wire_assembler_dependencies(tasks: list["Task"]) -> None:
     """Engine bind (Part A / A2, #85): give each assembler task in a goal an
@@ -11550,12 +11481,12 @@ class Orchestrator:
             # final withheld set (don't overwrite).
             policy_withheld = set(summary.withheld_deliverables)
             grounded = [
-                (tid, p, f) for (tid, p, f) in all_delivs
+                (tid, p, f, fam) for (tid, p, f, fam) in all_delivs
                 if _grounded(tid) and tid not in policy_withheld
             ]
             summary.withheld_deliverables = sorted(
                 policy_withheld
-                | {tid for (tid, _p, _f) in all_delivs if tid not in {g[0] for g in grounded}}
+                | {tid for (tid, _p, _f, _fam) in all_delivs if tid not in {g[0] for g in grounded}}
             )
             # Cross-goal grounding advisory: goals have no explicit dep model, so
             # per-task grounding can't see an IMPLICIT reliance (a shipped goal that
