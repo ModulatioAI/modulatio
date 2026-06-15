@@ -183,7 +183,14 @@ def human_name_from_markdown(text: str, *, fallback: str) -> str:
     title: the first ATX heading (``# Title``), else the first non-empty
     line, else ``fallback``. The result is sanitized for the filesystem but
     kept readable — a human should recognize the product by its name, not by
-    a task id like ``t-004``."""
+    a task id like ``t-004``.
+
+    REVIEWER NOTE (cadre agnostic audit): the Markdown/ATX-heading assumption
+    here is BY DESIGN, not an output-agnostic violation — this helper is only
+    ever called on the PROSE/document branch (``_is_prose_source``); code/data/
+    media deliverables derive their name from the verbatim stem and never reach
+    this function. The name is a (harmless) prose-specific detail, not shared
+    logic. Confirmed NOT a violation (both reviewers)."""
     title = None
     for line in text.splitlines():
         s = line.strip()

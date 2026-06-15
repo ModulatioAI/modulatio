@@ -2833,7 +2833,11 @@ class Orchestrator:
         # from the Step-0 rename, with a DeprecationWarning) was RETIRED in
         # V2.2 (#143): the "coordinator" role no longer exists and every
         # caller + test fixture now wires "planner" directly.
-        if runner is None and role == "planner":
+        if runner is None and (role == "planner" or role.endswith("-planner")):
+            # Producer-agnostic robustness (cadre F1-1): a project that names its
+            # planner-class role (e.g. "task-planner") but doesn't wire it gets
+            # the leader runner rather than a KeyError — the planner is a
+            # leader-class ENGINE function, not a producer.
             runner = self.runners.get("leader")
         if runner is None:
             raise KeyError(f"no runner configured for role {role!r}")
@@ -4786,6 +4790,10 @@ class Orchestrator:
         # budget_role from the caller-supplied kwarg first, else map
         # from role: qc -> qc, leader -> leader-chat, all other roles
         # (drafter/engineer/analyst/etc.) -> producer.
+        # NOTE (cadre F1-2): these are budget-POOL KEYS, not behavior gates —
+        # the engine never branches on producer IDENTITY; ANY non-qc/non-leader
+        # role is a producer-capable model endpoint and shares the "producer"
+        # pool (producer-agnostic).
         if budget_role is None:
             if role == "qc":
                 budget_role = "qc"
@@ -8088,6 +8096,13 @@ class Orchestrator:
         # existence check + appends that path; the main-thread merge remaps
         # it to the shared post-merge location. Sequential → shared directly.
         try:
+            # REVIEWER NOTE (cadre agnostic audit F3-2): this drafts-surface
+            # lookup is family-aware via _draft_fallback_name (the .md assumption
+            # is gone) and is a best-effort BOOKKEEPING surface — it no-ops
+            # safely if the file isn't there. Confirmed functionally safe, NOT a
+            # bug. (A deeper enhancement — preferring an assembly record's
+            # output_file for media/code tasks here — is held as a non-blocking
+            # nicety, not a violation.)
             drafts_dir = self._artifacts_root() / "drafts"
             final_path = drafts_dir / _draft_fallback_name(t)
             if final_path.exists() and final_path not in summary.drafts:

@@ -1069,3 +1069,21 @@ def test_44_user_override_under_warn_threshold_silent(caplog):
         and "exceeds warn threshold" in r.message
     ]
     assert len(warns) == 0
+
+
+def test_run_tolerates_renamed_planner_role(project):
+    """F1-1 (producer-agnostic robustness, cadre audit): a renamed planner-class
+    role with no wired runner falls back to the leader runner — not a KeyError.
+    An unrelated unconfigured role still fails closed (the guard is scoped to
+    planner-class roles)."""
+    calls: list[str] = []
+
+    def leader(prompt: str) -> str:
+        calls.append("leader")
+        return "OK"
+
+    o = Orchestrator(project, runners={"leader": leader})
+    o._run("task-planner", "make the tasks")      # renamed planner → leader
+    assert calls == ["leader"]
+    with pytest.raises(KeyError):
+        o._run("totally-unknown-role", "x")       # unrelated role still fails closed

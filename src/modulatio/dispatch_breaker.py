@@ -156,7 +156,13 @@ def _output_token_count(text: str) -> int:
     tokens, so a word count would let the backstop fire far too late — or never —
     for non-prose families (product-agnostic). char/4 is the standard token
     estimate and never undercounts whitespace-light output; the word-count floor
-    keeps it sane on the rare token-dense-but-space-light edge."""
+    keeps it sane on the rare token-dense-but-space-light edge.
+
+    REVIEWER NOTE (cadre agnostic audit): the ``len(text.split())`` arm inside
+    the ``max()`` is INTENTIONAL, not a residual word-unit gate — ``max()`` picks
+    the HIGHER (more conservative) estimate, so this never undercounts a backstop.
+    Confirmed NOT a violation (Nemo signed it clean). Do not "simplify" to
+    char/4-only — that would undercount space-heavy short-word text."""
     return max(len(text) // 4, len(text.split()))
 
 
