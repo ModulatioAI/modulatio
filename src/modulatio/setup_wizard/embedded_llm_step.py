@@ -139,6 +139,20 @@ def prefetch(model_id: str | None = None) -> bool:
     except Exception as e:
         theme.error(f"Prefetch failed: {e}")
         theme.muted("Will be downloaded on first task instead.")
+        # Capture the handled setup failure as an error log so it surfaces in the
+        # LOGS tab / `modulatio logs` — the install-time pain the user can report.
+        # Best-effort: a capture failure must never break setup.
+        try:
+            from modulatio import logstore
+
+            logstore.write_error_log(
+                f"setup: embedded-LLM prefetch failed ({resolved_id})",
+                exc=e,
+                context={"surface": "setup wizard — embedded LLM prefetch",
+                         "model": resolved_id},
+            )
+        except Exception:  # noqa: BLE001 — capture is best-effort, never fatal
+            pass
         return False
 
 

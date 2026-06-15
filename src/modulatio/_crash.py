@@ -17,7 +17,7 @@ import platform
 import re
 import sys
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -52,14 +52,29 @@ _EMBEDDED_SECRET = re.compile(
     re.IGNORECASE,
 )
 
-# Match a space-separated `Bearer <token>` (optionally prefixed by an
-# `Authorization:` header label). LLM-client exceptions (litellm/httpx auth
-# errors) routinely echo a request header like
-# `Authorization: Bearer sk-...` in the traceback body; the `key=value`
-# form above won't catch the space-delimited credential, so this is a
-# second pass applied alongside `_scrub_embedded_secrets`.
+# Match a space-separated `Bearer <token>` / `Basic <credential>` (optionally
+# prefixed by an `Authorization:` header label). LLM-client exceptions
+# (litellm/httpx auth errors) routinely echo a request header like
+# `Authorization: Bearer sk-...` / `Authorization: Basic dXNlcjpwYXNz` in the
+# traceback body; the `key=value` form above won't catch the space-delimited
+# credential, so this is a second pass applied alongside `_scrub_embedded_secrets`.
+# (Nemo/Wild Bill hull review 2026-06-14: `Basic` was missed.)
 _BEARER_TOKEN = re.compile(
-    r"(?P<scheme>\bBearer)\s+(?P<val>[A-Za-z0-9._\-+/=~]+)",
+    r"(?P<scheme>\b(?:Bearer|Basic))\s+(?P<val>[A-Za-z0-9._\-+/=~]+)",
+    re.IGNORECASE,
+)
+
+# Match a secret-shaped `label: value` / `label = value` where a SPACE may
+# follow the separator and the label may be multi-word (`API key: sk-...`,
+# `token: abc`, `client secret = ...`). `_EMBEDDED_SECRET` above only catches
+# the no-whitespace `key=value` form; this catches the spaced/labelled form that
+# routinely appears in error-message prose (Wild Bill hull review 2026-06-14).
+# Deliberately EXCLUDES `auth`/`bearer` labels — those are handled by
+# `_BEARER_TOKEN` above, and including them here would consume the scheme word
+# (`Bearer`) as the "value" and re-expose the real credential.
+_LABELED_SECRET = re.compile(
+    r"(?P<lbl>\b(?:api[ _-]?key|access[ _-]?token|client[ _-]?secret|"
+    r"secret[ _-]?key|secret|password|passwd|token))\s*(?P<sep>[:=])\s*(?P<val>[^\s&]+)",
     re.IGNORECASE,
 )
 
@@ -79,6 +94,9 @@ def _scrub_embedded_secrets(value: str) -> str:
     """
     scrubbed = _EMBEDDED_SECRET.sub(
         lambda m: f"{m.group('key')}{m.group('sep')}<redacted>", value
+    )
+    scrubbed = _LABELED_SECRET.sub(
+        lambda m: f"{m.group('lbl')}{m.group('sep')}<redacted>", scrubbed
     )
     return _BEARER_TOKEN.sub(
         lambda m: f"{m.group('scheme')} <redacted>", scrubbed
@@ -106,6 +124,24 @@ def _redact_argv(argv: Sequence[str]) -> list[str]:
     return out
 
 
+def open_unique_0600(path_for: "Callable[[datetime], Path]", now: datetime) -> "tuple[int, Path]":
+    """Create a 0600 file with ``O_EXCL``, retrying with a bumped microsecond on a
+    name collision. Two THREADS in one process can hit the same pid + same
+    microsecond → the same filename; a plain ``O_TRUNC`` open would silently
+    overwrite the first thread's bytes (Nemo hull review 2026-06-14, H1). Returns
+    ``(fd, path)``. After many retries it falls back to ``O_TRUNC`` — a clobber
+    then is astronomically unlikely and still beats raising into a failure path."""
+    candidate = now
+    for _ in range(64):
+        path = path_for(candidate)
+        try:
+            return os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), path
+        except FileExistsError:
+            candidate = candidate + timedelta(microseconds=1)
+    path = path_for(candidate)
+    return os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), path
+
+
 def write_crash_log(exc: BaseException, argv: Sequence[str]) -> Path:
     """Write a redacted crash report and return the file path."""
     try:
@@ -116,9 +152,6 @@ def write_crash_log(exc: BaseException, argv: Sequence[str]) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     ts = now.strftime("%Y%m%dT%H%M%SZ")
-    # Filename carries microseconds + PID so two crashes in the same second
-    # (or two processes crashing at once) don't overwrite each other's log.
-    path = d / f"crash-{now.strftime('%Y%m%dT%H%M%S_%fZ')}-{os.getpid()}.log"
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     # The traceback can embed secrets the same way argv can — an LLM/HTTP
     # client exception often echoes the request URL (`?api_key=...`) or an
@@ -138,9 +171,14 @@ def write_crash_log(exc: BaseException, argv: Sequence[str]) -> Path:
         "---------\n"
         f"{tb}"
     )
-    # Mode 0o600 from creation — the report carries a traceback and
-    # (redacted) argv; on a shared host it must not be world-readable.
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Mode 0o600 from creation — the report carries a traceback and (redacted)
+    # argv; on a shared host it must not be world-readable. Filename carries
+    # microseconds + PID; open_unique_0600 retries on a same-pid/microsecond
+    # thread collision so a concurrent write can't silently overwrite this one.
+    fd, path = open_unique_0600(
+        lambda n: d / f"crash-{n.strftime('%Y%m%dT%H%M%S_%fZ')}-{os.getpid()}.log",
+        now,
+    )
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(body)
     _prune_old_logs(d)
@@ -207,12 +245,13 @@ def run_with_crash_handler(main_fn: Callable[[], object]) -> int:
             "\n"
             f"{log_msg}\n"
             "\n"
-            "Please file a bug:\n"
-            f"  {ISSUE_URL}\n"
+            "Please file it — easiest:\n"
+            "  - open Modulatio's TUI, go to the LOGS tab, select the crash, Send; or\n"
+            "  - run:  modulatio logs send --last\n"
             "\n"
-            "Paste the contents of the crash log into the 'Logs' field of\n"
-            "the bug template. The log is auto-redacted for common secret\n"
-            "flags but please re-check before pasting.\n",
+            "Either way it's auto-redacted for common secrets and you review it\n"
+            "before it's sent. Or file it by hand at:\n"
+            f"  {ISSUE_URL}\n",
             file=sys.stderr,
         )
         return 1
