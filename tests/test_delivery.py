@@ -248,6 +248,36 @@ class _FakeTask:
         self.required_skills = required_skills or []
 
 
+def test_code_bundle_signals_on_family_not_just_suffix(monkeypatch, tmp_path):
+    """Wild Bill LOW: a code bundle is detected by FAMILY too, not only suffix.
+
+    A code-family fallback lands at `*.txt` (`_is_code_source` is false), so a
+    README.md companion beside it must still ship VERBATIM as part of the
+    runnable folder — never rendered to .docx."""
+    from modulatio import families
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "out"))
+    art = tmp_path / "art"
+    code_task = _FakeTask("CODE-T-1", deliverable=True, output_path=None,
+                          artifact_kind="code")
+    readme_task = _FakeTask("README-T-1", deliverable=True,
+                            output_path="README.md", artifact_kind="document")
+    # writer drops the code at the family-aware fallback (drafts/code-t-1.txt)
+    code_file = art / "drafts" / families.draft_fallback_name(code_task)
+    code_file.parent.mkdir(parents=True, exist_ok=True)
+    code_file.write_text("print('hi')\n")
+    readme = art / "README.md"
+    readme.write_text("# Demo\n\nRun it.\n")
+    # pandoc must NOT run for EITHER file — the README is a code-bundle companion
+    def _poison(*a, **k):  # pragma: no cover — must not run in a code bundle
+        raise AssertionError("export_artifact called inside a code bundle")
+    monkeypatch.setattr(delivery, "export_artifact", _poison)
+    delivs = delivery.deliverables_from_tasks([code_task, readme_task], art)
+    out = delivery.deliver_finished_products(delivs, project_code="MOD")
+    names = sorted(p.dest.name for p in out)
+    assert names == ["README.md", "code-t-1.txt"]      # NOT Demo.docx
+    assert out[1].dest.read_text() == "# Demo\n\nRun it.\n"  # companion verbatim
+
+
 def test_code_fallback_path_consistency_and_verbatim(monkeypatch, tmp_path):
     """Wild Bill HIGH+MED: a CODE task with NO output_path is written to the
     family-aware fallback (drafts/<id>.txt). Delivery must (1) resolve the SAME

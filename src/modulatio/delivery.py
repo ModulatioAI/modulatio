@@ -431,7 +431,14 @@ def deliver_finished_products(
     folder — instead of being rendered to a stray ``.docx``. A pure-prose run
     (no code) is unaffected: its deliverables still render to ``fmt``."""
     present = [(t, Path(s), f, fam) for t, s, f, fam in deliverables if Path(s).exists()]
-    bundle_has_code = any(_is_code_source(s) for _, s, _, _ in present)
+    # A code bundle is signalled by EITHER a recognizable code suffix OR the
+    # resolved assembly family (Wild Bill): a code-family fallback lands at a
+    # `.txt` path (`_is_code_source` false), so the family must count too — else
+    # a README.md companion beside it would render to .docx instead of shipping
+    # verbatim as part of the runnable folder.
+    bundle_has_code = any(
+        _is_code_source(s) or fam == "code" for _, s, _, fam in present
+    )
     out: list[DeliveredProduct] = []
     for task_id, src, fallback, family in present:
         # markdown companion in a code bundle → keep it verbatim (README.md)
