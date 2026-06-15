@@ -207,12 +207,13 @@ def run_with_crash_handler(main_fn: Callable[[], object]) -> int:
             "\n"
             f"{log_msg}\n"
             "\n"
-            "Please file a bug:\n"
-            f"  {ISSUE_URL}\n"
+            "Please file it — easiest:\n"
+            "  - open Modulatio's TUI, go to the LOGS tab, select the crash, Send; or\n"
+            "  - run:  modulatio logs send --last\n"
             "\n"
-            "Paste the contents of the crash log into the 'Logs' field of\n"
-            "the bug template. The log is auto-redacted for common secret\n"
-            "flags but please re-check before pasting.\n",
+            "Either way it's auto-redacted for common secrets and you review it\n"
+            "before it's sent. Or file it by hand at:\n"
+            f"  {ISSUE_URL}\n",
             file=sys.stderr,
         )
         return 1

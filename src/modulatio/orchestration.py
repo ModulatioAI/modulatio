@@ -7941,6 +7941,10 @@ class Orchestrator:
             )
             t.status = TaskStatus.BLOCKED
             summary.errors.append(f"{t.id}: {err}")
+            self._capture_error_log(
+                t, f"task {t.id} failed after {t.retry_count} retries: {err}",
+                surface="task execution failure", exc=last_exc,
+            )
             return
 
         # QC-as-fixer Slice 2: the FINAL attempt was bound by the circuit
@@ -8022,6 +8026,10 @@ class Orchestrator:
         if qc_notes:
             summary_line += f" (notes: {qc_notes})"
         summary.errors.append(summary_line)
+        self._capture_error_log(
+            t, f"task {t.id} QC-rejected: {qc_verdict.check}",
+            surface="QC hard-reject", detail=reject_rationale,
+        )
         # Surface the final (rejected) draft path so human can inspect.
         # Uses the worker view (staging in a concurrent worker) for the
         # existence check + appends that path; the main-thread merge remaps
@@ -8075,6 +8083,42 @@ class Orchestrator:
         )
         t.status = TaskStatus.QC_REJECTED
         summary.errors.append(f"{t.id}: dispatch aborted by circuit breaker — {reason}")
+        self._capture_error_log(
+            t, f"task {t.id} dispatch aborted by circuit breaker",
+            surface="dispatch breaker abort", detail=rationale,
+        )
+
+    def _capture_error_log(
+        self,
+        t: Task,
+        summary_text: str,
+        *,
+        surface: str,
+        exc: "BaseException | None" = None,
+        detail: str = "",
+    ) -> None:
+        """Record a TERMINAL handled task failure as an ``error-*.log`` for the
+        LOGS tab / ``modulatio logs``. Best-effort and fully guarded — capturing
+        a failure must NEVER raise into the settle path that's already handling
+        one. The log writer redacts before disk; nothing here is user-facing."""
+        try:
+            from modulatio import logstore
+
+            logstore.write_error_log(
+                summary_text,
+                exc=exc,
+                detail=detail,
+                context={
+                    "surface": surface,
+                    "project": getattr(self.project, "code", ""),
+                    "run_id": getattr(self.project, "run_id", "") or "",
+                    "task": getattr(t, "id", ""),
+                    "goal": getattr(t, "goal_id", ""),
+                    "retries": getattr(t, "retry_count", ""),
+                },
+            )
+        except Exception:  # noqa: BLE001 — capture is best-effort, never fatal
+            pass
 
     def _resolve_draft_path(self, t: Task) -> "Path":
         """The artifact path for a task — mirrors ``_producer_execute``'s

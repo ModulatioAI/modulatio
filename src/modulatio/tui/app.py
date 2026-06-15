@@ -42,6 +42,7 @@ from modulatio.tui.screens.memory import build_memory_panel
 from modulatio.tui.screens.prompt import build_prompt_panel
 from modulatio.tui.screens.skills import build_skills_panel
 from modulatio.tui.screens.jt_library import build_jt_library_panel
+from modulatio.tui.screens.logs import build_logs_panel
 from modulatio.tui.screens.tickets import build_tickets_panel
 from modulatio.tui.widgets.activity_log import ActivityLog
 from modulatio.tui.widgets.chat_input import ChatInput
@@ -367,6 +368,8 @@ class ModulatioApp(App):
                 yield build_memory_panel()
             with TabPane("CRON", id="tab-cron"):
                 yield build_cron_panel()
+            with TabPane("LOGS", id="tab-logs"):
+                yield build_logs_panel()
             for tab_id, label, coming_in in _PLACEHOLDER_TABS:
                 with TabPane(label.upper(), id=tab_id):
                     yield Label(f"{label} — coming in {coming_in}")

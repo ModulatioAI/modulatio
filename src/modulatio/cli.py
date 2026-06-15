@@ -248,6 +248,8 @@ cron_app = typer.Typer(help="Cron — scheduled-job shim over heartbeat (slice 7
 app.add_typer(cron_app, name="cron")
 project_app = typer.Typer(help="Project workspace — list runs, clean prior runs, prune outputs.")
 app.add_typer(project_app, name="project")
+logs_app = typer.Typer(help="Diagnostic logs — list captured crash/error/doctor logs, send one to the Modulatio team, or delete.")
+app.add_typer(logs_app, name="logs")
 
 
 # === Shared helpers ===
@@ -818,10 +820,72 @@ def auth_clear_all() -> None:
 def doctor() -> None:
     """System health check — providers + models + active alerts + token expiry.
 
-    Prints diagnostic output without making any network calls. Use this
-    after re-authing or before kicking off a long-running daemon to
-    confirm everything is wired correctly.
+    Prints diagnostic output without making any network calls, writes the read to
+    a doctor log, and (interactively) offers to send it — bundled with recent
+    crash/error logs — to the Modulatio team. Use this after re-authing or before
+    kicking off a long-running daemon to confirm everything is wired correctly.
     """
+    report = _capture_stdout(_run_doctor_checks)
+    _doctor_offer_logs(report)
+
+
+def _capture_stdout(fn) -> str:
+    """Run ``fn`` while teeing its stdout to the terminal AND a buffer — so the
+    doctor read both prints live and is captured for the doctor log."""
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    real = sys.stdout
+
+    class _Tee:
+        def write(self, s: str) -> int:
+            real.write(s)
+            buf.write(s)
+            return len(s)
+
+        def flush(self) -> None:
+            real.flush()
+
+    with redirect_stdout(_Tee()):
+        fn()
+    return buf.getvalue()
+
+
+def _doctor_offer_logs(report: str) -> None:
+    """Write the doctor read as a ``doctor-*.log`` (bundling recent crash/error
+    logs), then — only when interactive — offer to send it to the Modulatio team.
+    Capture-always, submit-on-consent: the report is saved regardless."""
+    from modulatio import bug_report, logstore
+
+    recent = [e for e in logstore.list_logs() if e.kind in ("crash", "error")][:5]
+    doc_path = logstore.write_doctor_report(
+        report, attachments=tuple(e.path for e in recent)
+    )
+    typer.echo(f"\nDoctor report saved: {doc_path}")
+    if recent:
+        typer.echo(f"  ({len(recent)} recent crash/error log(s) bundled in.)")
+    if not sys.stdin.isatty():
+        typer.echo("  Send it with:  modulatio logs send --last")
+        return
+    if not typer.confirm(
+        "\nSend most recent logs to the Modulatio team?", default=False
+    ):
+        return
+    entry = next((e for e in logstore.list_logs() if e.path == doc_path), None)
+    if entry is None:
+        return
+    title, body = logstore.compose_issue(entry)
+    result = bug_report.submit_issue(title, body)
+    if result.submitted:
+        logstore.mark_sent(entry.path, result.url)
+        typer.echo(f"Filed: {result.url}")
+    else:
+        typer.echo(result.detail)
+        typer.echo(result.url)
+
+
+def _run_doctor_checks() -> None:
     import time
     from modulatio import auth_alerts, oauth_helpers
 
@@ -993,6 +1057,78 @@ def doctor() -> None:
     for pid, alert in alerts.items():
         typer.echo(f"  {pid}: {alert.get('error_message', '')[:80]}")
         typer.echo(f"    Fix: {alert.get('suggested_fix', '')}")
+
+
+# === modulatio logs <list|send|rm> ===
+
+@logs_app.command("list")
+def logs_list() -> None:
+    """List captured crash / error / doctor logs (newest first)."""
+    from modulatio import logstore
+
+    entries = logstore.list_logs()
+    if not entries:
+        typer.echo("No logs captured.")
+        return
+    for e in entries:
+        mark = "sent" if e.sent else " -- "
+        typer.echo(f"  [{mark}] {e.label:<13} {e.timestamp:<18} {e.id}")
+        typer.echo(f"          {e.summary}")
+
+
+@logs_app.command("send")
+def logs_send(
+    log_id: str = typer.Argument(
+        None, help="Log id from `logs list` (omit when using --last)."
+    ),
+    last: bool = typer.Option(False, "--last", help="Send the most recent log."),
+) -> None:
+    """File a captured log to the Modulatio GitHub — redacted, and via a
+    prefilled new-issue URL when no MODULATIO_GITHUB_TOKEN is set."""
+    from modulatio import bug_report, logstore
+
+    entries = logstore.list_logs()
+    entry = entries[0] if (last and entries) else (
+        logstore.find_log(log_id) if log_id else None
+    )
+    if entry is None:
+        typer.echo("No matching log. Run `modulatio logs list`.", err=True)
+        raise typer.Exit(code=1)
+    title, body = logstore.compose_issue(entry)
+    result = bug_report.submit_issue(title, body)
+    if result.submitted:
+        logstore.mark_sent(entry.path, result.url)
+        typer.echo(f"Filed: {result.url}")
+    else:
+        typer.echo(result.detail)
+        typer.echo(result.url)
+
+
+@logs_app.command("rm")
+def logs_rm(
+    log_id: str = typer.Argument(None, help="Log id from `logs list`."),
+    sent: bool = typer.Option(
+        False, "--sent", help="Delete every already-sent log."
+    ),
+) -> None:
+    """Delete a captured crash/error/doctor log (run logs are not deletable)."""
+    from modulatio import logstore
+
+    if sent:
+        deleted = sum(
+            1 for e in logstore.list_logs() if e.sent and logstore.delete_log(e)
+        )
+        typer.echo(f"Deleted {deleted} sent log(s).")
+        return
+    entry = logstore.find_log(log_id) if log_id else None
+    if entry is None:
+        typer.echo("No matching log. Run `modulatio logs list`.", err=True)
+        raise typer.Exit(code=1)
+    if logstore.delete_log(entry):
+        typer.echo(f"Deleted {entry.id}.")
+    else:
+        typer.echo(f"Cannot delete a {entry.label}.", err=True)
+        raise typer.Exit(code=1)
 
 
 # === modulatio heartbeat <add|list|cancel|clear-done|run-once> ===
