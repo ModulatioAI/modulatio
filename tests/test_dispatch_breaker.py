@@ -31,10 +31,16 @@ def test_healthy_committed_artifact_passes():
 
 
 def test_large_monotonic_artifact_above_soft_cap_passes():
-    # 35K unique tokens — ABOVE the 30K soft cap but below the hard cap:
-    # no repetition, fully committed. Soft cap alone must NOT trip (the
-    # whole "trip on no-progress, not volume" contract).
-    raw = " ".join(f"token{i}" for i in range(35_000))
+    # A monotonic artifact whose REAL token count is above the 30K soft cap but
+    # below the 60K hard cap: no repetition, fully committed. Soft cap alone must
+    # NOT trip (the "trip on no-progress, not volume" contract). Size is now
+    # measured token-native (not whitespace words), so build the body to a known
+    # token window and assert it actually lands there.
+    from modulatio.dispatch_breaker import _output_token_count, resolve_output_budget
+    raw = " ".join("word%05d" % i for i in range(18_000))  # 18K distinct 8-char words
+    b = resolve_output_budget("producer")
+    toks = _output_token_count(raw)
+    assert b.soft_cap < toks < b.hard_cap, f"setup: {toks} not in ({b.soft_cap}, {b.hard_cap})"
     assert analyze_output(raw, raw, role="producer") is None
 
 

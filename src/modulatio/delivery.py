@@ -31,6 +31,7 @@ from modulatio.review_ledger import (
     _FTYP_EXTS,
     verify_declared_format,
 )
+from modulatio import families
 
 #: Default finished-product format. Producers write Markdown; the engine
 #: renders to this. DOCX is the chosen default (editable, wraps correctly,
@@ -183,7 +184,14 @@ def human_name_from_markdown(text: str, *, fallback: str) -> str:
     title: the first ATX heading (``# Title``), else the first non-empty
     line, else ``fallback``. The result is sanitized for the filesystem but
     kept readable — a human should recognize the product by its name, not by
-    a task id like ``t-004``."""
+    a task id like ``t-004``.
+
+    REVIEWER NOTE (cadre agnostic audit): the Markdown/ATX-heading assumption
+    here is BY DESIGN, not an output-agnostic violation — this helper is only
+    ever called on the PROSE/document branch (``_is_prose_source``); code/data/
+    media deliverables derive their name from the verbatim stem and never reach
+    this function. The name is a (harmless) prose-specific detail, not shared
+    logic. Confirmed NOT a violation (both reviewers)."""
     title = None
     for line in text.splitlines():
         s = line.strip()
@@ -402,7 +410,7 @@ def deliver_product(
 
 
 def deliver_finished_products(
-    deliverables: "list[tuple[str, Path, str | None]]",
+    deliverables: "list[tuple[str, Path, str | None, str]]",
     *,
     project_code: str,
     fmt: ExportFormat = DEFAULT_DELIVERY_FORMAT,
@@ -422,12 +430,22 @@ def deliver_finished_products(
     (``README.md`` etc.) ship VERBATIM beside the code — a coherent runnable
     folder — instead of being rendered to a stray ``.docx``. A pure-prose run
     (no code) is unaffected: its deliverables still render to ``fmt``."""
-    present = [(t, Path(s), f) for t, s, f in deliverables if Path(s).exists()]
-    bundle_has_code = any(_is_code_source(s) for _, s, _ in present)
+    present = [(t, Path(s), f, fam) for t, s, f, fam in deliverables if Path(s).exists()]
+    # A code bundle is signalled by EITHER a recognizable code suffix OR the
+    # resolved assembly family (Wild Bill): a code-family fallback lands at a
+    # `.txt` path (`_is_code_source` false), so the family must count too — else
+    # a README.md companion beside it would render to .docx instead of shipping
+    # verbatim as part of the runnable folder.
+    bundle_has_code = any(
+        _is_code_source(s) or fam == "code" for _, s, _, fam in present
+    )
     out: list[DeliveredProduct] = []
-    for task_id, src, fallback in present:
+    for task_id, src, fallback, family in present:
         # markdown companion in a code bundle → keep it verbatim (README.md)
-        verbatim = bundle_has_code and not _is_code_source(src)
+        # Family-aware (cadre/Wild Bill): a non-document deliverable (code/data/
+        # media) ships VERBATIM regardless of its extension — `.txt` is globally
+        # classified as prose, so the suffix can't be trusted; the family can.
+        verbatim = (bundle_has_code and not _is_code_source(src)) or family != "document"
         out.append(
             deliver_product(
                 src, project_code=project_code, task_id=task_id,
@@ -512,7 +530,7 @@ def deliver_product_quality_report(
 
 def deliverables_from_tasks(
     tasks, artifacts_root: Path,
-) -> "list[tuple[str, Path, str | None]]":
+) -> "list[tuple[str, Path, str | None, str]]":
     """Map deliverable-tagged tasks to ``(task_id, artifact_path,
     fallback_name)`` tuples for :func:`deliver_finished_products`.
 
@@ -527,7 +545,7 @@ def deliverables_from_tasks(
     emitted ONCE, keyed to the LAST such task (its on-disk content is the final
     state). Without this, one improved file shipped as three identical copies."""
     artifacts_root = Path(artifacts_root)
-    by_path: "dict[Path, tuple[str, Path, str | None]]" = {}
+    by_path: "dict[Path, tuple[str, Path, str | None, str]]" = {}
     for t in tasks:
         if not getattr(t, "deliverable", False):
             continue
@@ -535,10 +553,16 @@ def deliverables_from_tasks(
         # task id (orchestration ``drafts/{task.id.lower()}.md``). Using the raw
         # id here silently misses the file for an uppercase id (e.g. ABC-T-001),
         # so the deliverable never ships. Honor an explicit ``output_path`` as-is.
-        rel = getattr(t, "output_path", None) or f"drafts/{str(getattr(t, 'id')).lower()}.md"
+        # Family-aware fallback — MUST match the writer (families.draft_fallback_name
+        # at the producer write site), or a non-document deliverable written to
+        # drafts/<id>.txt is looked for at drafts/<id>.md and silently lost.
+        rel = getattr(t, "output_path", None) or f"drafts/{families.draft_fallback_name(t)}"
         path = artifacts_root / rel
         # Last writer wins — later tasks edited the same file after earlier ones.
-        by_path[path] = (getattr(t, "id"), path, getattr(t, "description", None))
+        # The 4th element is the assembly FAMILY: a non-document deliverable ships
+        # VERBATIM (never rendered), keyed on family not on the unreliable suffix.
+        by_path[path] = (getattr(t, "id"), path, getattr(t, "description", None),
+                         families.family_for_task(t))
     return list(by_path.values())
 
 

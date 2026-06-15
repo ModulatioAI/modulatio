@@ -245,6 +245,87 @@ async def test_cancel_button_hides_panel(tui_vault_with_artifacts):
         assert app.query_one("#artifacts-export-panel").has_class("hidden")
 
 
+# ─── Export defaults: family-aware, not suffix-only ───────────────────────────
+
+
+@pytest.fixture
+def tui_vault_with_export_family_artifacts(tmp_path: Path, monkeypatch):
+    """Artifacts whose suffix alone is not enough for export defaults."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(PROJECT_CODE, "Export family fixture", "obj")
+    run_id = "20260428T121500Z-ffff"
+    vault.init_run(PROJECT_CODE, run_id, "export families")
+    run_root = vault.run_dir(PROJECT_CODE, run_id)
+    art = run_root / "artifacts"
+    drafts = art / "drafts"
+    drafts.mkdir(parents=True, exist_ok=True)
+    (drafts / "code-t-1.txt").write_text("def f():\n    return 42\n")
+    (art / "data.json").write_text('{"items": [1, 2, 3]}\n')
+    (art / "note.txt").write_text("A plain prose note for a human reader.\n")
+    return tmp_path
+
+
+async def test_export_defaults_code_txt_and_data_to_copy(
+    tui_vault_with_export_family_artifacts,
+):
+    from textual.widgets import ListView, Select, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        listview = app.query_one("#artifacts-list", ListView)
+        items = [str(item.children[0].render()) for item in listview.children]
+        for name in ("code-t-1.txt", "data.json"):
+            listview.index = next(i for i, text in enumerate(items) if name in text)
+            await pilot.pause()
+            await pilot.click("#artifacts-export-btn")
+            await pilot.pause()
+            assert app.query_one("#export-format", Select).value == "copy"
+
+
+async def test_export_defaults_prose_txt_to_docx(
+    tui_vault_with_export_family_artifacts,
+):
+    from textual.widgets import ListView, Select, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        listview = app.query_one("#artifacts-list", ListView)
+        items = [str(item.children[0].render()) for item in listview.children]
+        listview.index = next(i for i, text in enumerate(items) if "note.txt" in text)
+        await pilot.pause()
+        await pilot.click("#artifacts-export-btn")
+        await pilot.pause()
+        assert app.query_one("#export-format", Select).value == "docx"
+
+
+async def test_export_dialog_defaults_binary_media_to_copy(tmp_path):
+    from textual.app import App, ComposeResult
+    from textual.widgets import Select
+
+    from modulatio.tui.widgets.export_dialog import ExportDialog
+
+    class _Harness(App):
+        def compose(self) -> ComposeResult:
+            yield ExportDialog(id="export-dialog")
+
+    media = tmp_path / "clip.bin"
+    media.write_bytes(b"\x00\x01media")
+    app = _Harness()
+    async with app.run_test() as pilot:
+        dialog = app.query_one(ExportDialog)
+        dialog.set_source(media)
+        await pilot.pause()
+        assert dialog.query_one("#export-format", Select).value == "copy"
+
+
 # ─── Per-run isolation awareness ───────────────────────────────────────────
 
 

@@ -147,7 +147,7 @@ def test_deliver_finished_products_skips_missing(monkeypatch, tmp_path, _mock_ex
     real = tmp_path / "real.md"
     real.write_text("# Real Deliverable\n\nx")
     out = delivery.deliver_finished_products(
-        [("T-1", real, None), ("T-2", tmp_path / "missing.md", None)],
+        [("T-1", real, None, "document"), ("T-2", tmp_path / "missing.md", None, "document")],
         project_code="P",
     )
     assert len(out) == 1  # missing one skipped
@@ -238,11 +238,74 @@ def test_leader_named_pdf_still_markdown_text_renders(monkeypatch, tmp_path):
 # ── deliverables_from_tasks (the wiring adapter) ─────────────────────────
 
 class _FakeTask:
-    def __init__(self, id, deliverable=False, output_path=None, description=None):
+    def __init__(self, id, deliverable=False, output_path=None, description=None,
+                 artifact_kind="document", required_skills=None):
         self.id = id
         self.deliverable = deliverable
         self.output_path = output_path
         self.description = description
+        self.artifact_kind = artifact_kind
+        self.required_skills = required_skills or []
+
+
+def test_code_bundle_signals_on_family_not_just_suffix(monkeypatch, tmp_path):
+    """Wild Bill LOW: a code bundle is detected by FAMILY too, not only suffix.
+
+    A code-family fallback lands at `*.txt` (`_is_code_source` is false), so a
+    README.md companion beside it must still ship VERBATIM as part of the
+    runnable folder — never rendered to .docx."""
+    from modulatio import families
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "out"))
+    art = tmp_path / "art"
+    code_task = _FakeTask("CODE-T-1", deliverable=True, output_path=None,
+                          artifact_kind="code")
+    readme_task = _FakeTask("README-T-1", deliverable=True,
+                            output_path="README.md", artifact_kind="document")
+    # writer drops the code at the family-aware fallback (drafts/code-t-1.txt)
+    code_file = art / "drafts" / families.draft_fallback_name(code_task)
+    code_file.parent.mkdir(parents=True, exist_ok=True)
+    code_file.write_text("print('hi')\n")
+    readme = art / "README.md"
+    readme.write_text("# Demo\n\nRun it.\n")
+    # pandoc must NOT run for EITHER file — the README is a code-bundle companion
+    def _poison(*a, **k):  # pragma: no cover — must not run in a code bundle
+        raise AssertionError("export_artifact called inside a code bundle")
+    monkeypatch.setattr(delivery, "export_artifact", _poison)
+    delivs = delivery.deliverables_from_tasks([code_task, readme_task], art)
+    out = delivery.deliver_finished_products(delivs, project_code="MOD")
+    names = sorted(p.dest.name for p in out)
+    assert names == ["README.md", "code-t-1.txt"]      # NOT Demo.docx
+    assert out[1].dest.read_text() == "# Demo\n\nRun it.\n"  # companion verbatim
+
+
+def test_code_fallback_path_consistency_and_verbatim(monkeypatch, tmp_path):
+    """Wild Bill HIGH+MED: a CODE task with NO output_path is written to the
+    family-aware fallback (drafts/<id>.txt). Delivery must (1) resolve the SAME
+    path so it is not silently lost, and (2) ship it VERBATIM — code is NOT
+    pandoc-rendered, keyed on the FAMILY not the .txt suffix (which is globally
+    classified as prose)."""
+    from modulatio import families
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "out"))
+    art = tmp_path / "art"
+    task = _FakeTask("CODE-T-1", deliverable=True, output_path=None,
+                     artifact_kind="code")
+    written = families.draft_fallback_name(task)
+    assert written == "code-t-1.txt"               # writer's family-aware path
+    code_file = art / "drafts" / written
+    code_file.parent.mkdir(parents=True, exist_ok=True)
+    raw = "def f():\n    return {'x': [1, 2, 3]}\n"
+    code_file.write_text(raw)
+    # (1) HIGH: delivery resolves the SAME path + carries the family
+    delivs = delivery.deliverables_from_tasks([task], art)
+    assert delivs[0][1] == code_file
+    assert delivs[0][3] == "code"
+    # (2) MED: a code family ships VERBATIM — pandoc export must NOT run
+    def _poison(*a, **k):  # pragma: no cover — must not run for code
+        raise AssertionError("export_artifact called for a code deliverable")
+    monkeypatch.setattr(delivery, "export_artifact", _poison)
+    out = delivery.deliver_finished_products(delivs, project_code="MOD")
+    assert len(out) == 1                            # delivered, not silently lost
+    assert out[0].dest.read_text() == raw           # raw code preserved
 
 
 def test_deliverables_from_tasks_filters_and_resolves(tmp_path):
@@ -253,9 +316,9 @@ def test_deliverables_from_tasks_filters_and_resolves(tmp_path):
     ]
     out = delivery.deliverables_from_tasks(tasks, tmp_path)
     assert len(out) == 2  # only the deliverables
-    assert out[0] == ("T-2", tmp_path / "paper.md", "the paper")
+    assert out[0] == ("T-2", tmp_path / "paper.md", "the paper", "document")
     # default drafts/<id>.md — lowercased to match the producer's writer
-    assert out[1] == ("T-3", tmp_path / "drafts/t-3.md", "report")
+    assert out[1] == ("T-3", tmp_path / "drafts/t-3.md", "report", "document")
 
 
 def test_deliverables_from_tasks_lowercases_default_path(tmp_path):
@@ -268,8 +331,8 @@ def test_deliverables_from_tasks_lowercases_default_path(tmp_path):
         _FakeTask("XYZ-T-002", deliverable=True, output_path="Sub/Keep-Case.md", description="explicit"),
     ]
     out = delivery.deliverables_from_tasks(tasks, tmp_path)
-    assert out[0] == ("ABC-T-001", tmp_path / "drafts/abc-t-001.md", "upper id")
-    assert out[1] == ("XYZ-T-002", tmp_path / "Sub/Keep-Case.md", "explicit")
+    assert out[0] == ("ABC-T-001", tmp_path / "drafts/abc-t-001.md", "upper id", "document")
+    assert out[1] == ("XYZ-T-002", tmp_path / "Sub/Keep-Case.md", "explicit", "document")
 
 
 # ── real render (integration; skipped without pandoc) ────────────────────
@@ -457,7 +520,7 @@ def test_code_bundle_markdown_companion_ships_verbatim(monkeypatch, tmp_path):
     (art / "game.py").write_text("import pygame\n")
     (art / "README.md").write_text("# Hollow Knight Demo\n\nRun: python game.py\n")
     out = delivery.deliver_finished_products(
-        [("T-1", art / "game.py", None), ("T-2", art / "README.md", "readme")],
+        [("T-1", art / "game.py", None, "code"), ("T-2", art / "README.md", "readme", "document")],
         project_code="MOD",
     )
     names = sorted(d.dest.name for d in out)
@@ -472,7 +535,7 @@ def test_pure_prose_run_still_renders_docx(monkeypatch, tmp_path, _mock_export):
     art.mkdir()
     (art / "paper.md").write_text("# Annual Report\n\nbody")
     out = delivery.deliver_finished_products(
-        [("T-1", art / "paper.md", None)], project_code="MOD",
+        [("T-1", art / "paper.md", None, "document")], project_code="MOD",
     )
     assert out[0].dest.name == "Annual Report.docx"  # unchanged behavior
 
@@ -567,6 +630,6 @@ def test_deliver_finished_products_threads_dest_override(monkeypatch, tmp_path, 
     art.mkdir()
     (art / "paper.md").write_text("# Brief\n\nbody")
     out = delivery.deliver_finished_products(
-        [("T-1", art / "paper.md", None)], project_code="MOD", dest_override=job,
+        [("T-1", art / "paper.md", None, "document")], project_code="MOD", dest_override=job,
     )
     assert out[0].dest == job / "Brief.docx"

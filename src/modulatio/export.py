@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-ExportFormat = Literal["docx", "pdf", "markdown"]
+ExportFormat = Literal["docx", "pdf", "markdown", "copy"]
 
 
 class ExportError(Exception):
@@ -93,18 +93,20 @@ def export_artifact(
     ``dest`` is resolved to an absolute path before writing. Caller
     is responsible for ensuring the destination directory is writable.
     """
-    if format not in ("docx", "pdf", "markdown"):
+    if format not in ("docx", "pdf", "markdown", "copy"):
         raise ValueError(
             f"unsupported export format {format!r}; "
-            "valid: docx, pdf, markdown"
+            "valid: docx, pdf, markdown, copy"
         )
 
     source = source.resolve()
     dest = dest.resolve()
 
-    if format == "markdown":
-        # source/dest already resolved above; if they're the same file the
-        # copy is a no-op and shutil.copy would raise SameFileError.
+    if format in ("markdown", "copy"):
+        # Raw passthrough — NO document conversion. "markdown" is the prose-family
+        # copy; "copy" is the family-NEUTRAL one for code/data/web/media artifacts
+        # that must NOT be run through pandoc (which would mangle non-prose).
+        # source/dest already resolved above; same-file copy is a no-op.
         if source != dest:
             shutil.copy(source, dest)
         return ExportResult(source=source, dest=dest, format=format, error=None)

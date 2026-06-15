@@ -35,6 +35,12 @@ from modulatio import context_budget as _ctx_budget_module
 from modulatio import dispatch_breaker as _dispatch_breaker_module
 from modulatio import tool_summarization as _tool_sum_module
 from modulatio.semantic_router import Embedder
+from modulatio.families import (
+    _ASSEMBLER_SKILLS,
+    _ASSEMBLER_STRATEGY,
+    draft_fallback_name as _draft_fallback_name,
+    effective_assembly_family as _effective_assembly_family,
+)
 from modulatio.types import (
     ActivityEvent,
     ArtifactEvidence,
@@ -426,20 +432,7 @@ def _normalize_render_paths(text: str | None) -> str | None:
     return _RENDER_DELIVERABLE_RE.sub(lambda m: f"{m.group(1)}.md", text)
 
 
-#: Assembler skill → mechanical-join STRATEGY (Part B). The assembler SKILL the
-#: planner picks (by artifact_kind, via the standards file) selects the family;
-#: the ENGINE owns the join (assembly._STRATEGIES). ``consolidation`` is the
-#: original seed name, kept as a back-compat alias for ``document-assembly``.
-_ASSEMBLER_STRATEGY: dict[str, str] = {
-    "consolidation": "document",
-    "document-assembly": "document",
-    "code-assembly": "code",
-    "media-assembly": "media",
-    "data-assembly": "data",
-}
-#: Skills whose task is a multi-unit ASSEMBLY step (it combines already-produced
-#: units into one deliverable).
-_ASSEMBLER_SKILLS: frozenset[str] = frozenset(_ASSEMBLER_STRATEGY)
+# Family resolution moved to families.py (shared with delivery).
 
 #: No-regress guard (Part A / A3, #86): a generate-mode RETRY that collapses a
 #: QC-passed deliverable to a fraction of its size is almost certainly a drifted
@@ -494,46 +487,7 @@ def _select_assembler_skill(tasks: "list[Task]", project_code: str | None) -> No
             ]
 
 
-def _effective_assembly_family(
-    artifact_kind: str,
-    required_skills: "list[str]",
-    project_code: str | None,
-) -> str:
-    """The assembly family the engine will ACTUALLY route this work to —
-    ``media`` / ``document`` / ``code`` / ``data`` — used to gate render-path
-    normalization (#73). It MUST mirror ``_select_assembler_skill``'s authority
-    precedence exactly, or evidence normalization can diverge from the executed
-    route (Nemo code review: ``artifact_kind=image`` + ``required_skills=
-    [document-assembly]`` is canonicalized to media-assembly later, so its
-    evidence must NOT be document-normalized to ``.md``). Precedence:
-
-    (a) the standards-declared ``assembler_skill`` for ``artifact_kind`` WINS —
-        the standards file is the SOLE routing authority, and
-        ``_select_assembler_skill`` canonicalizes the task's assembler skill to
-        it, overriding whatever the planner put in ``required_skills``;
-    (b) else the explicit assembler skill the planner named in ``required_skills``
-        — the backstop when standards declares none for this kind (e.g.
-        ``artifact_kind="text"``: ``_select_assembler_skill`` keeps the planner's
-        ``media-assembly``, so ``required_skills=["media-assembly"]`` still routes
-        to media — the planner-forgot-``artifact_kind`` seam stays closed);
-    (c) else the safe ``document`` default (also on any standards lookup error,
-        matching ``_select_assembler_skill``'s ``except: continue`` → keep skill).
-    """
-    family: str | None = None
-    try:
-        entry = standards.load_with_metadata(artifact_kind, project_code=project_code)
-        skill = entry.assembler_skill
-        if skill and skill in _ASSEMBLER_STRATEGY:
-            family = _ASSEMBLER_STRATEGY[skill]
-    except Exception:  # noqa: BLE001 — fall through to required_skills/default
-        family = None
-    if family is not None:
-        return family
-    for skill in required_skills:
-        if skill in _ASSEMBLER_STRATEGY:
-            return _ASSEMBLER_STRATEGY[skill]
-    return "document"
-
+# (effective_assembly_family / _draft_fallback_name moved to families.py)
 
 def _wire_assembler_dependencies(tasks: list["Task"]) -> None:
     """Engine bind (Part A / A2, #85): give each assembler task in a goal an
@@ -784,7 +738,11 @@ def _format_kickoff_attachments(attachments: list) -> str:
             body = att.content
             if body is None and getattr(att, "path", None):
                 try:
-                    body = Path(att.path).read_text(encoding="utf-8", errors="replace")
+                    # Strict decode (matches attachments.build_attachment's
+                    # "binary fails fast" contract): a binary file raises
+                    # UnicodeDecodeError (a ValueError) → caught below → no body,
+                    # NOT a garbled errors="replace" inline (cadre audit F2-3).
+                    body = Path(att.path).read_text(encoding="utf-8")
                 except (OSError, ValueError):
                     body = None
             # re-sweep R4 #2: fence the document body with a backtick run longer
@@ -2806,7 +2764,11 @@ class Orchestrator:
         # from the Step-0 rename, with a DeprecationWarning) was RETIRED in
         # V2.2 (#143): the "coordinator" role no longer exists and every
         # caller + test fixture now wires "planner" directly.
-        if runner is None and role == "planner":
+        if runner is None and (role == "planner" or role.endswith("-planner")):
+            # Producer-agnostic robustness (cadre F1-1): a project that names its
+            # planner-class role (e.g. "task-planner") but doesn't wire it gets
+            # the leader runner rather than a KeyError — the planner is a
+            # leader-class ENGINE function, not a producer.
             runner = self.runners.get("leader")
         if runner is None:
             raise KeyError(f"no runner configured for role {role!r}")
@@ -3928,7 +3890,7 @@ class Orchestrator:
         if task.output_path:
             path = artifacts_root / task.output_path
         else:
-            path = artifacts_root / "drafts" / f"{task.id.lower()}.md"
+            path = artifacts_root / "drafts" / _draft_fallback_name(task)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # P1 (engine binds the assembly): an assembler task is a MECHANICAL
@@ -4260,7 +4222,8 @@ class Orchestrator:
         # Whitespace-token count; kept as an audit metric, not a quality rule
         # (length constraints are user inputs that live in the standards
         # file for the domain, not baked into the orchestrator).
-        token_count = len(response.split())
+        token_count = _tool_sum_module.count_tokens(
+            self.project.leader_model, text=response)
         return path, checksum, token_count
 
     def _maybe_trip_breaker(
@@ -4608,7 +4571,8 @@ class Orchestrator:
         # Token count over the entire producer response (mirrors the
         # other producer paths' shape — audit metric, not a quality
         # rule).
-        token_count = len(cleaned.split())
+        token_count = _tool_sum_module.count_tokens(
+            self.project.leader_model, text=cleaned)
         return primary_path, checksum, token_count
 
     # ── Tool executor (slice #9e) ────────────────────────────────────────
@@ -4646,7 +4610,8 @@ class Orchestrator:
         path.write_text(response, encoding="utf-8")
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
         checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
-        token_count = len(response.split())
+        token_count = _tool_sum_module.count_tokens(
+            self.project.leader_model, text=response)
         return path, checksum, token_count
 
     # ── LLM-with-tools executor (Phase 2A) ───────────────────────────────
@@ -4756,6 +4721,10 @@ class Orchestrator:
         # budget_role from the caller-supplied kwarg first, else map
         # from role: qc -> qc, leader -> leader-chat, all other roles
         # (drafter/engineer/analyst/etc.) -> producer.
+        # NOTE (cadre F1-2): these are budget-POOL KEYS, not behavior gates —
+        # the engine never branches on producer IDENTITY; ANY non-qc/non-leader
+        # role is a producer-capable model endpoint and shares the "producer"
+        # pool (producer-agnostic).
         if budget_role is None:
             if role == "qc":
                 budget_role = "qc"
@@ -5233,8 +5202,12 @@ class Orchestrator:
             try:
                 text = raw.decode("utf-8")
             except UnicodeDecodeError:
-                return (f"{path!r} is {len(raw):,} bytes of binary (likely a rendered "
-                        ".docx/.pdf) — read the .md source instead for its content.")
+                # Family-neutral: the deliverable may BE the binary (a media
+                # .png/.mp4, a data .xlsx/.parquet, a compiled artifact) with no
+                # text source to point at — never assume a document/.md source.
+                return (f"{path!r} is {len(raw):,} bytes of binary content — not "
+                        "text-readable here. It's in the delivery folder; open it "
+                        "there or have the team summarize it.")
             if len(text) > cap:
                 text = text[:cap] + f"\n\n... [truncated at {cap:,} chars]"
             return f"--- {path} ---\n{text}"
@@ -5782,7 +5755,8 @@ class Orchestrator:
         # body (incl. any thinking); ``cleaned`` is what committed.
         self._maybe_trip_breaker(producer_role, response, cleaned, task=task)
         checksum = f"sha256:{hashlib.sha256(cleaned.encode()).hexdigest()}"
-        token_count = len(cleaned.split())
+        token_count = _tool_sum_module.count_tokens(
+            self.project.leader_model, text=cleaned)
         return path, checksum, token_count
 
     def _regression_blocked(self, task: Task, path: Path, new_content: str) -> bool:
@@ -6218,7 +6192,6 @@ class Orchestrator:
         task: Task,
         draft_path: Path,
         checksum: str,
-        token_count: int,
     ) -> tuple[AssertionEvidence, str, str | None]:
         """QC reads the artifact and renders a TQM-framed verdict.
 
@@ -6346,6 +6319,14 @@ class Orchestrator:
                 "a human must verify it."
             ), "environmental"
         band = _token_band(task)
+        # The near-empty GATE below is a deterministic pass/fail, so it MUST judge
+        # real TOKENS — not a whitespace word count (a compact
+        # one-line JSON / minified-code deliverable collapses hundreds of tokens
+        # to ~1 "word" and would false-fail as "near-empty"). Mirrors the sibling
+        # size gate _regression_blocked, which already uses count_tokens.
+        # Product-agnostic: the unit is the token, not the word.
+        gate_tokens = _tool_sum_module.count_tokens(
+            self.project.leader_model, text=body)
 
         # NEAR-EMPTY BACKSTOP (engine binds the genuine invariant only). Size
         # adequacy is QC's JUDGMENT — but when the planner DECLARED a size band,
@@ -6357,14 +6338,14 @@ class Orchestrator:
         # abstract); QC owns everything from "thin draft" upward. We do NOT
         # re-introduce the rigid gate. With NO declared band the engine invents
         # nothing: QC judges all sizes, including empties.
-        if band is not None and token_count < max(1, int(band[0] * 0.10)):
+        if band is not None and gate_tokens < max(1, int(band[0] * 0.10)):
             verdict = AssertionEvidence(
                 producer="qc", primary=False,
-                check=f"non-deliverable: {token_count} tokens (near-empty)",
+                check=f"non-deliverable: {gate_tokens} tokens (near-empty)",
                 passed=False,
             )
             notes = (
-                f"The artifact is near-empty ({token_count} tokens) — this reads "
+                f"The artifact is near-empty ({gate_tokens} tokens) — this reads "
                 f"as a missing or truncated deliverable, not merely a short one. "
                 f"Produce the actual content the task asks for."
             )
@@ -6380,8 +6361,8 @@ class Orchestrator:
             _band_str = f"{_f}–{_c}" if _c else f"≥ {_f}"
             size_block = (
                 f"SIZE — the task declares a target band of {_band_str} tokens "
-                f"(this draft: {token_count}; engine whitespace count, ~1 "
-                f"token/word). Tolerance ±{int(round(_tol * 100))}%. Judge "
+                f"(this draft: {gate_tokens} tokens). Tolerance "
+                f"±{int(round(_tol * 100))}%. Judge "
                 f"size as part of fitness, with discretion:\n"
                 f"  - Within tolerance of the band AND complete/on-quality → "
                 f"PASS (you MAY note the minor deviation; do not fail for it).\n"
@@ -6734,12 +6715,12 @@ class Orchestrator:
                 name="token_count",
                 value=float(token_count),
                 target="see domain standards",
-                source=f"whitespace-split token count of {draft_path.name}",
+                source=f"token count of {draft_path.name}",
             )
             t.evidence_provided.extend([artifact.id, metric.id])
 
             qc_verdict_new, qc_notes_new, defect_new = self._qc_review(
-                t, draft_path, checksum, token_count
+                t, draft_path, checksum
             )
             t.evidence_provided.append(qc_verdict_new.id)
 
@@ -7021,7 +7002,7 @@ class Orchestrator:
         logic: explicit Task.output_path, else drafts/<task.id>.md."""
         if task.output_path:
             return task.output_path
-        return f"drafts/{task.id.lower()}.md"
+        return f"drafts/{_draft_fallback_name(task)}"
 
     # ── #151/e2e Blocker 2: per-task artifact staging + deterministic merge ──
     def _artifacts_root(self) -> Path:
@@ -7816,7 +7797,7 @@ class Orchestrator:
                     name="token_count",
                     value=float(token_count),
                     target="see domain standards",
-                    source=f"whitespace-split token count of {draft_path.name}",
+                    source=f"token count of {draft_path.name}",
                 )
                 t.evidence_provided.extend([artifact.id, metric.id])
 
@@ -7826,7 +7807,7 @@ class Orchestrator:
                     task_id=t.id,
                     agent_id=t.qc_agent_id,
                 )
-                qc_verdict, qc_notes, defect_type = self._qc_review(t, draft_path, checksum, token_count)
+                qc_verdict, qc_notes, defect_type = self._qc_review(t, draft_path, checksum)
                 t.evidence_provided.append(qc_verdict.id)
                 self._emit_activity(
                     role="qc",
@@ -8046,8 +8027,15 @@ class Orchestrator:
         # existence check + appends that path; the main-thread merge remaps
         # it to the shared post-merge location. Sequential → shared directly.
         try:
+            # REVIEWER NOTE (cadre agnostic audit F3-2): this drafts-surface
+            # lookup is family-aware via _draft_fallback_name (the .md assumption
+            # is gone) and is a best-effort BOOKKEEPING surface — it no-ops
+            # safely if the file isn't there. Confirmed functionally safe, NOT a
+            # bug. (A deeper enhancement — preferring an assembly record's
+            # output_file for media/code tasks here — is held as a non-blocking
+            # nicety, not a violation.)
             drafts_dir = self._artifacts_root() / "drafts"
-            final_path = drafts_dir / f"{t.id.lower()}.md"
+            final_path = drafts_dir / _draft_fallback_name(t)
             if final_path.exists() and final_path not in summary.drafts:
                 summary.drafts.append(final_path)
         except Exception:
@@ -8099,7 +8087,7 @@ class Orchestrator:
         artifacts_root = self._artifacts_root()
         if t.output_path:
             return artifacts_root / t.output_path
-        return artifacts_root / "drafts" / f"{t.id.lower()}.md"
+        return artifacts_root / "drafts" / _draft_fallback_name(t)
 
     # ── QC-as-fixer (Slice 3): last-resort QC-authored rescue ─────────
     #
@@ -8112,7 +8100,6 @@ class Orchestrator:
     # sanity pass when one is available, else a human/Leader approval gate.
     # Never presented as a clean producer win.
 
-    _QC_FIX_TRIVIAL_DRAFT_CHARS = 40
 
     def _attempt_qc_fix_forward(
         self,
@@ -8144,7 +8131,7 @@ class Orchestrator:
             # text-patchable; UnicodeDecodeError is a ValueError, not OSError.
             # Fall through to the caller's graceful terminal.
             return False
-        if len(body.strip()) < self._QC_FIX_TRIVIAL_DRAFT_CHARS:
+        if not body.strip():
             # Nothing coherent to patch (e.g. a no-commit storm). The
             # salvage→re-decompose rung is deferred; fall through to the
             # caller's graceful terminal.
@@ -8838,7 +8825,7 @@ class Orchestrator:
                     if primary.exists():
                         candidate = primary
                 if candidate is None:
-                    fallback = artifacts_root / "drafts" / f"{t.id.lower()}.md"
+                    fallback = artifacts_root / "drafts" / _draft_fallback_name(t)
                     if fallback.exists():
                         candidate = fallback
                 if candidate is not None:
@@ -9691,7 +9678,7 @@ class Orchestrator:
             primary = artifacts_root / task.output_path
             if primary.exists():
                 return primary
-        fallback = artifacts_root / "drafts" / f"{task.id.lower()}.md"
+        fallback = artifacts_root / "drafts" / _draft_fallback_name(task)
         if fallback.exists():
             return fallback
         return None
@@ -9745,7 +9732,11 @@ class Orchestrator:
                     if p.stat().st_size > 4_000_000:
                         out.append((rel, 0))
                         continue
-                    toks = len(p.read_text(encoding="utf-8").split())
+                    _t = p.read_text(encoding="utf-8")
+                    # Token-native (char/4 floored by words) — NOT a whitespace
+                    # word count, which collapses a compact data/code artifact to
+                    # ~1 "token" and mislabels the inventory (product-agnostic).
+                    toks = max(len(_t) // 4, len(_t.split()))
                 except (OSError, UnicodeDecodeError, MemoryError):
                     toks = 0
                 out.append((rel, toks))
@@ -11490,12 +11481,12 @@ class Orchestrator:
             # final withheld set (don't overwrite).
             policy_withheld = set(summary.withheld_deliverables)
             grounded = [
-                (tid, p, f) for (tid, p, f) in all_delivs
+                (tid, p, f, fam) for (tid, p, f, fam) in all_delivs
                 if _grounded(tid) and tid not in policy_withheld
             ]
             summary.withheld_deliverables = sorted(
                 policy_withheld
-                | {tid for (tid, _p, _f) in all_delivs if tid not in {g[0] for g in grounded}}
+                | {tid for (tid, _p, _f, _fam) in all_delivs if tid not in {g[0] for g in grounded}}
             )
             # Cross-goal grounding advisory: goals have no explicit dep model, so
             # per-task grounding can't see an IMPLICIT reliance (a shipped goal that

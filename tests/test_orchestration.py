@@ -6929,7 +6929,7 @@ def test_qc_review_defers_team_memory_proposal_when_isolated(
 
     # Isolated worker active.
     orch._tls.deferred_writes = []
-    orch._qc_review(task, draft, "deadbeef", 42)
+    orch._qc_review(task, draft, "deadbeef")
     buf = orch._tls.deferred_writes
     orch._tls.deferred_writes = None
 
@@ -7219,7 +7219,7 @@ def test_qc_fix_forward_trivial_draft_falls_through(project, monkeypatch):
     task = _qcfix_task(project_id=project.id)
     draft = orch._resolve_draft_path(task)
     draft.parent.mkdir(parents=True, exist_ok=True)
-    draft.write_text("tiny")  # below the trivial-draft threshold
+    draft.write_text("   \n  ")  # whitespace-only — nothing to salvage
     summary = RunSummary(project=project)
 
     handled = orch._attempt_qc_fix_forward(task, draft, None, summary)
@@ -7759,16 +7759,21 @@ def test_qc_review_judges_short_draft_not_mechanical_bounce(project, tmp_path):
         "leader": _leader_stub, "drafter": _drafter_stub, "qc": runner,
     })
     draft = tmp_path / "deliverable.md"
-    draft.write_text("# Short\n\nthis is a short but real draft\n")
+    # A genuine "short but real" draft: well above the 350 near-empty floor for a
+    # 3500 band, but short of the band. The near-empty gate now measures REAL
+    # tokens of the body (not a passed-in word count), so the body must actually
+    # carry the tokens it claims.
+    draft.write_text("# Short\n\n" + " ".join("para%04d" % i for i in range(840)))
     task = _task_with("Unit", evidence_required=[_floor_metric("token_count >= 3500")])
     task.artifact_kind = "text"
 
-    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef", token_count=846)
+    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef")
 
     assert verdict.passed is True            # QC's call, not a mechanical bounce
     assert len(qc_calls) == 1                # the QC model WAS consulted
     p = qc_calls[0]
-    assert "3500" in p and "846" in p        # band + count surfaced to QC
+    assert "3500" in p                        # the band is surfaced to QC
+    assert "tolerance" in p.lower()           # tolerance surfaced
     assert "tolerance" in p.lower()          # tolerance surfaced
     assert "senior editor" in p.lower()      # constructive persona injected
 
@@ -7786,7 +7791,7 @@ def test_qc_review_near_empty_backstop_fails_without_qc(project, tmp_path):
     task = _task_with("Unit", evidence_required=[_floor_metric("token_count >= 3500")])
     task.artifact_kind = "text"
 
-    verdict, notes, defect = orch._qc_review(task, draft, "deadbeef", token_count=12)
+    verdict, notes, defect = orch._qc_review(task, draft, "deadbeef")
 
     assert verdict.passed is False           # 12 < max(1, 3500*0.1=350)
     assert defect == "substantive"
@@ -7807,10 +7812,34 @@ def test_qc_review_small_band_not_backstopped(project, tmp_path):
     task = _task_with("Headline", evidence_required=[_floor_metric("word_count 20-40")])
     task.artifact_kind = "text"
 
-    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef", token_count=30)
+    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef")
 
     assert verdict.passed is True            # 30 > max(1, 20*0.1=2) → QC judges
     assert len(qc_calls) == 1                # QC consulted, not backstopped
+
+
+def test_qc_review_compact_data_not_false_failed_near_empty(project, tmp_path):
+    """Product-agnostic regression (agnostic sweep): a COMPACT but complete data
+    deliverable — a minified single-line JSON, MANY real tokens but ~1 whitespace
+    word — with a declared band must NOT be mechanically failed as 'near-empty'.
+    The gate now measures REAL tokens of the body, not the whitespace word count
+    the producer passes, so a compact JSON/minified-code deliverable reaches QC."""
+    runner, qc_calls = _qc_spy()
+    orch = Orchestrator(project, {
+        "leader": _leader_stub, "drafter": _drafter_stub, "qc": runner,
+    })
+    draft = tmp_path / "deliverable.json"
+    # ~2.4K-char minified JSON ~= 600 real tokens (>> the 350 floor for a 3500
+    # band), but exactly ONE whitespace word — the OLD word-count gate (token_count
+    # below) would false-fail this as near-empty.
+    draft.write_text("{" + ",".join(f'"k{i}":{i}' for i in range(300)) + "}")
+    task = _task_with("Data", evidence_required=[_floor_metric("token_count >= 3500")])
+    task.artifact_kind = "data"
+
+    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef")
+
+    assert verdict.passed is True            # NOT false-failed near-empty
+    assert len(qc_calls) == 1                # real tokens cleared the floor → QC consulted
 
 
 def test_qc_review_no_band_runs_qc_without_size_block(project, tmp_path):
@@ -7825,7 +7854,7 @@ def test_qc_review_no_band_runs_qc_without_size_block(project, tmp_path):
     task = _task_with("Unit")  # no evidence metric
     task.artifact_kind = "text"
 
-    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef", token_count=500)
+    verdict, _notes, _defect = orch._qc_review(task, draft, "deadbeef")
 
     assert verdict.passed is True
     assert len(qc_calls) == 1
@@ -8693,15 +8722,18 @@ def test_read_deliverable_rejects_traversal(tmp_path, monkeypatch):
     assert "Can't read" in out and "nope" not in out
 
 
-def test_read_deliverable_binary_points_to_md(tmp_path, monkeypatch):
-    """A binary file (rendered .docx) isn't dumped as garbage — the Leader is
-    told to read the .md source instead."""
+def test_read_deliverable_binary_is_family_neutral(tmp_path, monkeypatch):
+    """A binary file isn't dumped as garbage — and the message is FAMILY-NEUTRAL:
+    the deliverable may BE the binary (media/data/compiled), so it never assumes a
+    document/.md source (output-agnostic, agnostic sweep)."""
     orch = _redo_orch(tmp_path, monkeypatch, _leader_stub, code="RDC")
     art = orch._run_artifacts_root("run-1")
     art.mkdir(parents=True, exist_ok=True)
-    (art / "out.docx").write_bytes(b"PK\x03\x04\x00\x01\x02\xff\xfe binary")
-    out = orch._leader_function_tools()["read_deliverable"].call(path="out.docx")
-    assert "binary" in out and ".md source" in out
+    (art / "out.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x01\x02\xff\xfe binary")
+    out = orch._leader_function_tools()["read_deliverable"].call(path="out.png")
+    assert "binary" in out
+    assert ".md" not in out and "source" not in out.replace("text-readable", "")
+    assert "delivery folder" in out
 
 
 def test_read_deliverable_rejects_oversize_file(tmp_path, monkeypatch):
@@ -9850,7 +9882,7 @@ def test_qc_review_media_binary_does_not_crash_and_verifies_provenance(project, 
         complete=True, strategy="media", output_file=deliverable,
     )
     # full _qc_review must not raise on the binary bytes
-    verdict, notes, defect = orch._qc_review(task, deliverable, "sha256:x", 0)
+    verdict, notes, defect = orch._qc_review(task, deliverable, "sha256:x")
     assert verdict.passed is True
     assert "not machine-verifiable" in verdict.check.lower() or "human spot-check" in verdict.check.lower()
 
@@ -9858,7 +9890,7 @@ def test_qc_review_media_binary_does_not_crash_and_verifies_provenance(project, 
     # this exercises the PROVENANCE/checksum check, not the P5 declared-format gate
     # (which has its own test) — the bytes differ from the recorded checksum.
     deliverable.write_bytes(b"PK\x03\x04 tampered but still a zip header \x00\xff")
-    verdict2, _n, defect2 = orch._qc_review(task, deliverable, "sha256:x", 0)
+    verdict2, _n, defect2 = orch._qc_review(task, deliverable, "sha256:x")
     assert verdict2.passed is False and "changed since assembly" in verdict2.check
     assert defect2 == "environmental"  # integrity failure → human, not blind-retry
 
@@ -9997,14 +10029,14 @@ def test_qc_review_rejects_fabricated_binary(project, tmp_path):
                 description="assemble", output_path="anthology.pdf")
     checksum = review_ledger.file_checksum(fake)
 
-    verdict, notes, defect = orch._qc_review(task, fake, checksum, 50)
+    verdict, notes, defect = orch._qc_review(task, fake, checksum)
 
     assert verdict.passed is False
     assert defect == "environmental"
     assert "declared-format" in verdict.check
     # even a prior cheap-pass mark cannot wave the fake through
     task.qc_passed_checksum = checksum
-    verdict2, _n, defect2 = orch._qc_review(task, fake, checksum, 50)
+    verdict2, _n, defect2 = orch._qc_review(task, fake, checksum)
     assert verdict2.passed is False and defect2 == "environmental"
 
 
@@ -10140,7 +10172,7 @@ def test_qc_review_assembly_structural_pass(project, tmp_path, monkeypatch):
     monkeypatch.setattr("modulatio.store.list_tasks", lambda *a, **k: [u1, u2, asm])
     # If the branch fell through to normal QC it would call the (unwired) qc
     # runner and blow up; a clean pass proves the structural path fired.
-    verdict, notes, defect = orch._qc_review(asm, art / "book.md", cs(assembled), 3)
+    verdict, notes, defect = orch._qc_review(asm, art / "book.md", cs(assembled))
     assert verdict.passed
     assert "structural verification" in verdict.check
     assert defect is None
@@ -10182,7 +10214,7 @@ def test_qc_review_assembly_bad_manifest_falls_back(project, tmp_path, monkeypat
     # has no runner wired -> raises. The raise proves fall-through, not a pass.
     import pytest as _pytest
     with _pytest.raises(Exception):
-        orch._qc_review(asm, art / "book.md", cs(assembled), 3)
+        orch._qc_review(asm, art / "book.md", cs(assembled))
 
 
 # ── A3: no-regress guard + content-addressed QC short-circuit (#86) ────────
@@ -10265,7 +10297,7 @@ def test_qc_review_content_unchanged_short_circuits(project, tmp_path):
              output_path="book.md", qc_passed_checksum=cs(body))
     orch = _regress_orch(project)
     orch._artifacts_root = lambda: art  # type: ignore[method-assign]
-    verdict, notes, defect = orch._qc_review(t, p, cs(body), len(body.split()))
+    verdict, notes, defect = orch._qc_review(t, p, cs(body))
     assert verdict.passed and defect is None
     assert "unchanged since QC pass" in verdict.check
 

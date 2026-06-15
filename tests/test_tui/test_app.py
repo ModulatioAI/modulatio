@@ -145,6 +145,8 @@ async def test_stub_kickoff_updates_response_text(tui_vault):
         inp = app.query_one("#kickoff-objective", TextArea)
         inp.text = "Write a stub note on memory gardens"
         await pilot.click("#prompt-kickoff")
+        kickoff_workers = [w for w in app.workers if w.group == "kickoff"]
+        await app.workers.wait_for_complete(kickoff_workers)
         await pilot.pause()
 
     assert app.last_summary_text, "kickoff should populate last_summary_text"
