@@ -6,6 +6,51 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-06-15
+
+**Stability + reporting.** A stability release: **two full-codebase debug passes** — an
+exhaustive primary sweep, then an independent re-debug — each adversarially verified and
+reviewed by a multi-model cadre (an independent *hull* pass and a *coherence* pass), plus a
+producer/product/output **agnostic audit**. Hundreds of edge-case, error-path, concurrency,
+and cost fixes, with **no behavior change for a normal run** — the engine is simply harder to
+wedge. Plus one net-new operator feature: a built-in **crash / error / doctor log** system you
+can review and send to the team — capture-always, submit-on-consent, auto-redacted.
+
+### Added
+
+- **A LOGS surface for diagnostics.** Three kinds, each named in its filename and labelled in
+  plain English: **crash logs** (an uncaught exception — already captured), a new **error log**
+  (a *handled*, non-fatal failure the engine survived — a task / QC / dispatch terminal, or a
+  failed setup-wizard step), and a **doctor report** (`modulatio doctor` writes its read and
+  bundles recent logs).
+- **A TUI `LOGS` tab** — list every captured log, preview it, **send** it to GitHub (redacted,
+  after your review), or **delete** it (with a confirmation).
+- **`modulatio logs list | send | rm`** — the same, headless; and `modulatio doctor` now offers
+  to send its read (with recent crash/error logs) to the Modulatio team.
+- **Capture-always, submit-on-consent.** Nothing is ever auto-filed; every log that could reach
+  a public issue is re-redacted and shown to you before it is sent.
+
+### Changed
+
+- Engine-wide hardening from two full-codebase debug passes + the agnostic audit: token-native
+  size gates (the unit is the TOKEN, never words/chars/pages), family-aware deliverable routing,
+  and no fixed-role assumptions in shared logic. Invisible on a normal run.
+
+### Fixed
+
+- High-impact concurrency + correctness fixes surfaced by the debug passes: store reads resilient
+  to binary / non-UTF-8 / BOM / CRLF input; the QC-history index serialized across wave workers;
+  wave worker-state never lost; goals never stranded on a zero-completed redo/resume lane;
+  render-path normalization deferred to the task (a media deliverable is no longer rewritten to a
+  document source); `run_shell` resource limits applied without a fork-from-thread deadlock.
+
+### Security
+
+- The secret-redaction applied before any log is written or sent now also catches spaced
+  `API key: …`, `Authorization: Basic …`, and multi-word label forms, and redacts issue **titles**
+  as well as bodies. Setup-wizard front-matter injection and concurrent secret-file writes
+  hardened.
+
 ## [0.8.9] — 2026-06-13
 
 **Security hardening release.** A full-codebase security audit of the agent engine, then
