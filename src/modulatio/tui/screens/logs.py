@@ -26,6 +26,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, Static
 
 from modulatio import logstore
+from modulatio.tui.widgets.confirm_modal import ConfirmModal
 from modulatio.tui.widgets.send_log_modal import SendLogModal
 
 #: Shared with `modulatio logs list` so both surfaces format the stamp identically.
@@ -120,13 +121,22 @@ class LogsScreen(Vertical):
         entry = self._by_id.get(self._selected_id or "")
         if entry is None:
             return
-        if logstore.delete_log(entry):
-            self.refresh_logs()
-            self.app.notify(f"Deleted {entry.label}.")
-        else:
+        if not entry.deletable:
             self.app.notify(
                 f"A {entry.label} can't be deleted here.", severity="warning"
             )
+            return
+        # Confirm first — a captured log is gone for good, and the send side
+        # already requires a review step (L1, Nemo/Cowboy review 2026-06-14).
+        self.app.push_screen(
+            ConfirmModal(f"Delete this {entry.label}?\n\n{entry.summary[:80]}"),
+            lambda ok: self._do_delete(entry) if ok else None,
+        )
+
+    def _do_delete(self, entry: logstore.LogEntry) -> None:
+        if logstore.delete_log(entry):
+            self.refresh_logs()
+            self.app.notify(f"Deleted {entry.label}.")
 
     # ── Preview pane ────────────────────────────────────────────────────
 

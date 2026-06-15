@@ -13,6 +13,7 @@ from textual.widgets import DataTable, Static, TabbedContent
 from modulatio import logstore, vault
 from modulatio.tui.app import ModulatioApp
 from modulatio.tui.screens.logs import LogsScreen
+from modulatio.tui.widgets.confirm_modal import ConfirmModal
 from modulatio.tui.widgets.send_log_modal import SendLogModal
 
 PROJECT_CODE = "LOG"
@@ -43,26 +44,46 @@ async def test_logs_tab_lists_captured_logs(tui_logs):
         assert "Error log" in labels and "Run log" in labels
 
 
-async def test_delete_removes_error_log_but_refuses_run_log(tui_logs):
+async def test_delete_confirms_then_removes_error_but_refuses_run_log(tui_logs):
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         app.query_one(TabbedContent).active = "tab-logs"
         await pilot.pause()
         screen = app.query_one(LogsScreen)
 
-        # delete the error log → gone
+        # error log: delete prompts a confirm, and confirming removes it
         err_id = next(e.id for e in logstore.list_logs() if e.kind == "error")
         screen._selected_id = err_id
         screen.action_delete()
         await pilot.pause()
+        assert isinstance(app.screen, ConfirmModal)        # L1: confirm first
+        await pilot.click("#confirm-yes")
+        await pilot.pause()
         assert all(e.kind != "error" for e in logstore.list_logs())
 
-        # a run log is refused — survives
+        # a run log is refused outright — no confirm prompt, file survives
         run_id = next(e.id for e in logstore.list_logs() if e.kind == "run")
         screen._selected_id = run_id
         screen.action_delete()
         await pilot.pause()
+        assert not isinstance(app.screen, ConfirmModal)
         assert any(e.kind == "run" for e in logstore.list_logs())
+
+
+async def test_delete_cancel_keeps_the_log(tui_logs):
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        app.query_one(TabbedContent).active = "tab-logs"
+        await pilot.pause()
+        screen = app.query_one(LogsScreen)
+        err_id = next(e.id for e in logstore.list_logs() if e.kind == "error")
+        screen._selected_id = err_id
+        screen.action_delete()
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmModal)
+        await pilot.click("#confirm-no")                   # cancel → keep
+        await pilot.pause()
+        assert any(e.kind == "error" for e in logstore.list_logs())
 
 
 async def test_send_opens_review_modal(tui_logs):
