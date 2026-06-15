@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from textual.widgets import DataTable, TabbedContent
+from textual.widgets import DataTable, Static, TabbedContent
 
 from modulatio import logstore, vault
 from modulatio.tui.app import ModulatioApp
@@ -77,3 +77,33 @@ async def test_send_opens_review_modal(tui_logs):
         screen.action_send()
         await pilot.pause()
         assert isinstance(app.screen, SendLogModal)
+
+
+async def test_send_modal_survives_a_submit_exception(tui_logs, monkeypatch):
+    """Nemo M2: a raise in submit_issue must surface in the modal (not strand it
+    on 'Filing…' and re-raise as WorkerFailed), and re-enable Send."""
+    from textual.widgets import Button
+
+    from modulatio import bug_report
+    monkeypatch.setattr(
+        bug_report, "submit_issue",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("network blew up")),
+    )
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        app.query_one(TabbedContent).active = "tab-logs"
+        await pilot.pause()
+        screen = app.query_one(LogsScreen)
+        screen._selected_id = next(
+            e.id for e in logstore.list_logs() if e.kind == "error"
+        )
+        screen.action_send()
+        await pilot.pause()
+        modal = app.screen
+        assert isinstance(modal, SendLogModal)
+        modal._submit()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        status = modal.query_one("#send-status", Static).render()
+        assert "Couldn't file issue" in str(status)              # surfaced, not stranded
+        assert modal.query_one("#send-submit", Button).disabled is False  # retry enabled

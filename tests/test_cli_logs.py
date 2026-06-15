@@ -62,6 +62,16 @@ def test_logs_send_no_match_exits_nonzero(capsys):
     assert ei.value.exit_code == 1
 
 
+def test_logs_send_ambiguous_id_reports_distinctly(capsys):
+    # Two logs share the `error-` prefix → ambiguous, NOT a "no match" typo (L2).
+    logstore.write_error_log("first")
+    logstore.write_error_log("second")
+    with pytest.raises(typer.Exit) as ei:
+        logs_send(log_id="error", last=False)
+    assert ei.value.exit_code == 1
+    assert "matches 2 logs" in capsys.readouterr().err
+
+
 def test_logs_rm_deletes_by_id_and_refuses_run_log(capsys, _store: Path):
     err = logstore.write_error_log("disposable")
     run = _store / "run-20260101T010101_000000Z-1.log"

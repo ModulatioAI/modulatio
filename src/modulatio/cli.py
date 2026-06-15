@@ -838,7 +838,10 @@ def _capture_stdout(fn) -> str:
     buf = io.StringIO()
     real = sys.stdout
 
-    class _Tee:
+    # Subclass TextIOBase so the tee answers the full stdout protocol
+    # (isatty/fileno/writable/...) — a doctor check or a library it calls that
+    # introspects sys.stdout would otherwise hit AttributeError (Nemo M1).
+    class _Tee(io.TextIOBase):
         def write(self, s: str) -> int:
             real.write(s)
             buf.write(s)
@@ -846,6 +849,9 @@ def _capture_stdout(fn) -> str:
 
         def flush(self) -> None:
             real.flush()
+
+        def isatty(self) -> bool:
+            return False
 
     with redirect_stdout(_Tee()):
         fn()
@@ -1072,7 +1078,8 @@ def logs_list() -> None:
         return
     for e in entries:
         mark = "sent" if e.sent else " -- "
-        typer.echo(f"  [{mark}] {e.label:<13} {e.timestamp:<18} {e.id}")
+        when = logstore.format_timestamp(e.timestamp)
+        typer.echo(f"  [{mark}] {e.label:<13} {when:<17} {e.id}")
         typer.echo(f"          {e.summary}")
 
 
@@ -1088,9 +1095,19 @@ def logs_send(
     from modulatio import bug_report, logstore
 
     entries = logstore.list_logs()
-    entry = entries[0] if (last and entries) else (
-        logstore.find_log(log_id) if log_id else None
-    )
+    if last and entries:
+        entry = entries[0]
+    elif log_id:
+        matches = logstore.match_logs(log_id)
+        if len(matches) > 1:
+            typer.echo(
+                f"'{log_id}' matches {len(matches)} logs — give a longer id "
+                "(see `modulatio logs list`).", err=True,
+            )
+            raise typer.Exit(code=1)
+        entry = matches[0] if matches else None
+    else:
+        entry = None
     if entry is None:
         typer.echo("No matching log. Run `modulatio logs list`.", err=True)
         raise typer.Exit(code=1)
@@ -1120,7 +1137,17 @@ def logs_rm(
         )
         typer.echo(f"Deleted {deleted} sent log(s).")
         return
-    entry = logstore.find_log(log_id) if log_id else None
+    if log_id:
+        matches = logstore.match_logs(log_id)
+        if len(matches) > 1:
+            typer.echo(
+                f"'{log_id}' matches {len(matches)} logs — give a longer id "
+                "(see `modulatio logs list`).", err=True,
+            )
+            raise typer.Exit(code=1)
+        entry = matches[0] if matches else None
+    else:
+        entry = None
     if entry is None:
         typer.echo("No matching log. Run `modulatio logs list`.", err=True)
         raise typer.Exit(code=1)

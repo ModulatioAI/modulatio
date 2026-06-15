@@ -19,8 +19,6 @@ lets the user review before anything reaches a public issue.
 """
 from __future__ import annotations
 
-from datetime import datetime
-
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -30,14 +28,8 @@ from textual.widgets import DataTable, Static
 from modulatio import logstore
 from modulatio.tui.widgets.send_log_modal import SendLogModal
 
-
-def _fmt_ts(stamp: str) -> str:
-    """``20260615T035914_718851Z`` → ``2026-06-15 03:59`` (best-effort)."""
-    try:
-        core = stamp.split("_", 1)[0]
-        return datetime.strptime(core, "%Y%m%dT%H%M%S").strftime("%Y-%m-%d %H:%M")
-    except (ValueError, IndexError):
-        return stamp[:16]
+#: Shared with `modulatio logs list` so both surfaces format the stamp identically.
+_fmt_ts = logstore.format_timestamp
 
 
 class LogsScreen(Vertical):

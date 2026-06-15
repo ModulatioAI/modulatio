@@ -87,12 +87,26 @@ class SendLogModal(ModalScreen[bool]):
         if not title:
             self._set_status("[bold red]A title is required.[/]")
             return
+        # Re-apply the redaction + size cap to whatever the user EDITED. The
+        # prefilled body was already safe, but free-text edits bypass both, and
+        # the "auto-redacted" promise must hold for the sent bytes (Nemo M3).
+        title = logstore.scrub_secrets(title)[:240]
+        body = logstore.scrub_and_cap(body)
+        self.query_one("#send-submit", Button).disabled = True  # no double-file (L6)
         self._set_status("Filing…")
         self._submit_worker(title, body)
 
     @work(thread=True, exclusive=True)
     def _submit_worker(self, title: str, body: str) -> None:
-        result = bug_report.submit_issue(title, body)
+        # Guard so a raise can't strand the modal on "Filing…" forever and
+        # re-raise as WorkerFailed on app exit (Nemo M2).
+        try:
+            result = bug_report.submit_issue(title, body)
+        except Exception as exc:  # noqa: BLE001 — surface, never strand
+            result = bug_report.BugReportResult(
+                submitted=False, url="",
+                detail=f"Couldn't file issue: {type(exc).__name__}: {exc}",
+            )
         self.app.call_from_thread(self._show_result, result)
 
     def _show_result(self, result: "bug_report.BugReportResult") -> None:
@@ -101,9 +115,13 @@ class SendLogModal(ModalScreen[bool]):
             self._set_status(f"[bold]Filed:[/] {result.url}")
             self.set_timer(1.4, lambda: self.dismiss(True))
         else:
-            # Prefilled-URL fallback (no token) — NOT filed; leave it open so the
-            # user can copy the URL, and don't claim it sent.
-            self._set_status(f"{result.detail}\n{result.url}")
+            # Prefilled-URL fallback / a surfaced error — NOT filed; leave the
+            # modal open so the user can copy the URL or retry, and re-enable Send.
+            self._set_status(f"{result.detail}\n{result.url}".strip())
+            try:
+                self.query_one("#send-submit", Button).disabled = False
+            except NoMatches:
+                pass
 
 
 __all__ = ["SendLogModal"]

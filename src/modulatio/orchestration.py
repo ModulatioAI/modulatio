@@ -8100,7 +8100,12 @@ class Orchestrator:
         """Record a TERMINAL handled task failure as an ``error-*.log`` for the
         LOGS tab / ``modulatio logs``. Best-effort and fully guarded — capturing
         a failure must NEVER raise into the settle path that's already handling
-        one. The log writer redacts before disk; nothing here is user-facing."""
+        one. The log writer redacts before disk; nothing here is user-facing.
+
+        NOTE (trust boundary): ``surface`` is engine-controlled (a fixed string
+        from the call site), never user input. A new seam passing user-controlled
+        text here is still redacted at ``_write`` time, but keep ``surface`` an
+        engine constant so the log's framing can't be spoofed."""
         try:
             from modulatio import logstore
 

@@ -31,6 +31,7 @@ from modulatio._crash import (
     _crash_keep,
     _scrub_embedded_secrets as scrub_secrets,
     crash_dir,
+    open_unique_0600,
 )
 
 #: English labels by filename-prefix kind. ``run`` is surfaced read-only from
@@ -92,6 +93,26 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def scrub_and_cap(text: str) -> str:
+    """Redact secrets, then truncate to GitHub's issue-body ceiling. The single
+    safe-for-public transform — used by ``compose_issue`` AND re-applied to a
+    user-EDITED body before it is sent (Nemo M3: edits otherwise bypass both)."""
+    text = scrub_secrets(text)
+    if len(text) > _MAX_ISSUE_BODY:
+        text = text[:_MAX_ISSUE_BODY] + "\n\n…[truncated]"
+    return text
+
+
+def format_timestamp(stamp: str) -> str:
+    """``20260615T035914_718851Z`` → ``2026-06-15 03:59`` (best-effort). Shared by
+    the LOGS tab and ``modulatio logs list`` so both columns align (Nemo L3)."""
+    try:
+        core = stamp.split("_", 1)[0]
+        return datetime.strptime(core, "%Y%m%dT%H%M%S").strftime("%Y-%m-%d %H:%M")
+    except (ValueError, IndexError):
+        return stamp[:16]
+
+
 def _modulatio_version() -> str:
     try:
         from modulatio import __version__
@@ -127,7 +148,6 @@ def _write(kind: str, summary: str, body: str) -> Path:
     d = log_dir()
     d.mkdir(parents=True, exist_ok=True)
     now = _now()
-    path = d / _log_filename(kind, now)
     text = (
         f"Modulatio {kind} log\n"
         f"{'=' * (len(kind) + 16)}\n"
@@ -142,10 +162,19 @@ def _write(kind: str, summary: str, body: str) -> Path:
     # Redact before it touches disk — a handled failure / doctor read can carry a
     # request URL (?api_key=) or an Authorization header the same way argv can.
     text = scrub_secrets(text)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_EXCL + microsecond-bump retry: two wave-worker THREADS in one process can
+    # hit the same pid+microsecond filename; a plain O_TRUNC would silently lose
+    # the first error log (Nemo hull review 2026-06-14, H1).
+    fd, path = open_unique_0600(lambda n: d / _log_filename(kind, n), now)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(text)
-    _prune(kind)
+    # Prune AFTER the file is safely written, and never let a prune failure
+    # change the write outcome — a non-OSError prune raise would otherwise make
+    # the caller return a sentinel path for a log that IS on disk (Nemo M4).
+    try:
+        _prune(kind)
+    except Exception:  # noqa: BLE001 — best-effort retention; the write succeeded
+        pass
     return path
 
 
@@ -231,6 +260,13 @@ def _parse_stamp_pid(path: Path) -> "tuple[str, int | None]":
 
 
 def _summary_of(path: Path, kind: str) -> str:
+    """A one-line gist, REDACTED — it feeds the issue TITLE (and the TUI/CLI
+    list), and a run log's first line is raw user content that could carry a
+    secret (Wild Bill H1: the title was never scrubbed)."""
+    return scrub_secrets(_raw_summary_of(path, kind))
+
+
+def _raw_summary_of(path: Path, kind: str) -> str:
     """A one-line gist: the stored ``summary:`` header, else the last traceback
     line (crash logs have no summary header), else the first content line."""
     try:
@@ -288,11 +324,17 @@ def list_logs() -> list[LogEntry]:
     return out
 
 
+def match_logs(log_id: str) -> list[LogEntry]:
+    """Every entry matching a CLI-supplied id — an exact stem wins, else every
+    prefix match (so the caller can tell "no match" from "ambiguous", Nemo L2)."""
+    entries = list_logs()
+    exact = [e for e in entries if e.id == log_id]
+    return exact or [e for e in entries if e.id.startswith(log_id)]
+
+
 def find_log(log_id: str) -> LogEntry | None:
-    """Resolve a CLI-supplied id (filename stem, or a unique prefix of it)."""
-    matches = [e for e in list_logs() if e.id == log_id]
-    if not matches:
-        matches = [e for e in list_logs() if e.id.startswith(log_id)]
+    """Resolve a CLI-supplied id to a SINGLE entry (None if absent OR ambiguous)."""
+    matches = match_logs(log_id)
     return matches[0] if len(matches) == 1 else None
 
 
@@ -324,14 +366,17 @@ def compose_issue(entry: LogEntry) -> "tuple[str, str]":
     at rest) and truncated to GitHub's size ceiling — defence in depth before the
     user's own review.
     """
-    title = f"{_ISSUE_TITLE_PREFIX.get(entry.kind, '[Log]')} {entry.summary}"[:240]
+    # Scrub the TITLE too — entry.summary is already redacted at source, but the
+    # prefix-join is re-scrubbed as defence in depth (Wild Bill H1: the title
+    # flows verbatim into the prefilled URL query AND the API payload).
+    title = scrub_secrets(
+        f"{_ISSUE_TITLE_PREFIX.get(entry.kind, '[Log]')} {entry.summary}"
+    )[:240]
     try:
         content = entry.path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         content = f"(could not read log: {exc})"
-    content = scrub_secrets(content)
-    if len(content) > _MAX_ISSUE_BODY:
-        content = content[:_MAX_ISSUE_BODY] + "\n\n…[truncated]"
+    content = scrub_and_cap(content)
     body = f"Filed from the Modulatio **{entry.label}** store.\n\n```\n{content}\n```"
     return title, body
 
@@ -345,7 +390,11 @@ __all__ = [
     "write_doctor_report",
     "list_logs",
     "find_log",
+    "match_logs",
     "mark_sent",
     "delete_log",
     "compose_issue",
+    "scrub_and_cap",
+    "scrub_secrets",
+    "format_timestamp",
 ]
