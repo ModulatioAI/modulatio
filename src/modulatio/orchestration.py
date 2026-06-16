@@ -8864,6 +8864,7 @@ class Orchestrator:
                                 + f"\n\n... [truncated; full readable twin at {twin_path}]"
                             )
                             block += f"\n\nreadable content (twin):\n{snip}"
+                    block += self._operation_bar_directive(t)
                     artifact_blocks.append(
                         f"### Deliverable for {t.id} (engine-assembled)\n\n{block}"
                     )
@@ -8894,6 +8895,7 @@ class Orchestrator:
                     artifact_blocks.append(
                         f"### Artifact for {t.id} — `{candidate}`\n\n"
                         f"```\n{snippet}\n```"
+                        + self._operation_bar_directive(t)
                     )
 
         prior_approvals_block = _format_prior_approvals(
@@ -9384,6 +9386,24 @@ class Orchestrator:
         return _assembly.check_deliverable(
             digest, expected_count=None, part_floor=floor,
             required_structure=spec.required_structure,
+        )
+
+    def _operation_bar_directive(self, t: "Task") -> str:
+        """The per-operation definition of "done" the verifier must judge this
+        deliverable against — selected deterministically from the task's ``operation``
+        (a sibling to the DeliverableSpec check: that judges the per-artifact facts,
+        this judges by the standard the operation demands — a build on function, a fix
+        on the symptom being gone, an assessment on evidence). Empty/absent operation →
+        "" (today's behavior: the verifier judges fitness as before). The engine binds
+        WHICH bar; the verifier judges AGAINST it."""
+        from modulatio.operation_bars import bar_for_operation
+
+        bar = bar_for_operation(getattr(t, "operation", ""))
+        if bar.is_empty():
+            return ""
+        return (
+            f"\n\nOPERATION BAR ({bar.operation}) — judge this deliverable against the "
+            f'definition of "done" this operation requires:\n  {bar.definition_of_done}'
         )
 
     def _spec_size_metric(self) -> "EvidenceRequirement | None":
