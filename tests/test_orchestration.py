@@ -1847,6 +1847,50 @@ def test_planner_defaults_operation_to_construct_when_absent_or_garbage(
     assert all(t.operation == "construct" for t in tasks)
 
 
+def test_operation_bar_reaches_the_verifier_end_to_end(project: Project):
+    """The JOIN (verify observed reality): a debug-triaged task flows plan ->
+    execute -> verify, and the Leader-verifier literally sees the debug bar in what
+    it is asked to judge. Proves the axis is active end-to-end, not just unit-wired."""
+    seen_verify_prompts: list[str] = []
+
+    def _leader_capture(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            seen_verify_prompts.append(prompt)
+        return _leader_stub(prompt)
+
+    def _coord_debug(prompt: str) -> str:
+        # Product-agnostic: a neutral artifact + size floor (the general
+        # producer/QC completion path), so the task completes and verify runs.
+        # The only thing under test is the triaged operation — the axis is
+        # independent of what class of artifact the task produces.
+        tasks = [{
+            "description": "Resolve the reported defect in the target artifact",
+            "assignee_specialist": "drafter",
+            "artifact_kind": "text",
+            "operation": "debug",
+            "evidence_required": [
+                {"kind": "artifact", "description": "artifact file exists"},
+                {"kind": "metric", "description": "size",
+                 "target": "word_count >= 200"},
+            ],
+        }]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    runners = {
+        "leader": _leader_capture,
+        "planner": _coord_debug,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    Orchestrator(project, runners).kickoff("join")
+
+    assert seen_verify_prompts, "verify path never ran"
+    joined = "\n".join(seen_verify_prompts)
+    from modulatio.operation_bars import bar_for_operation
+    assert "OPERATION BAR (debug)" in joined
+    assert bar_for_operation("debug").definition_of_done in joined
+
+
 def test_artifacts_expansion_plays_nicely_with_depends_on(project: Project):
     """A later task that depends on the expanded-parent's index waits
     for ALL sub-tasks to complete. `depends_on: [N]` where N is a
