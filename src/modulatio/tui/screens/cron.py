@@ -17,9 +17,13 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Label, Select
 
 from modulatio import cron
+from modulatio.tui.widgets.confirm_modal import ConfirmModal
 
 
 _ALL = "__all__"
+
+#: Glyph per last-run status — paired with the WORD (Feng-Tui §10).
+_STATUS_GLYPH = {"ok": "✓", "failed": "✖", "running": "▸", "skipped": "·"}
 
 
 class CronScreen(Vertical):
@@ -38,7 +42,7 @@ class CronScreen(Vertical):
     }
     CronScreen DataTable {
         height: 1fr;
-        border: solid $panel;
+        border: round $frame-dim;   /* theme-aware (was solid $panel) */
     }
     """
 
@@ -139,7 +143,17 @@ class CronScreen(Vertical):
 
     def action_remove(self) -> None:
         jid = self._selected_id()
-        if jid and cron.remove(jid):
+        if not jid:
+            return
+        # Removing a cron job deletes the schedule — guard it (consistent with
+        # the other destructive deletes, cadre 2026-06-16).
+        self.app.push_screen(
+            ConfirmModal(f"Remove cron job '{jid}'?\n\nThe schedule is deleted."),
+            lambda ok: self._do_remove(jid) if ok else None,
+        )
+
+    def _do_remove(self, jid: str) -> None:
+        if cron.remove(jid):
             self.notify(f"Removed {jid}.", severity="warning")
             self._refresh()
 
@@ -183,14 +197,16 @@ class CronScreen(Vertical):
         # Sort: enabled first, then by next_run asc
         jobs.sort(key=lambda j: (not j.get("enabled"), j.get("next_run", "")))
         for j in jobs:
+            status = j.get("last_status") or ""
+            last = f"{_STATUS_GLYPH.get(status, '·')} {status}" if status else ""
             table.add_row(
                 escape(j.get("id", "?")),
                 escape(j.get("name", "?")),
                 escape(j.get("project_code", "?")),
                 escape(j.get("schedule", "?")),
-                "yes" if j.get("enabled") else "no",
+                "● on" if j.get("enabled") else "○ off",   # glyph + WORD (§10)
                 escape((j.get("next_run", "") or "")[:19]),
-                escape(j.get("last_status") or ""),
+                escape(last),
                 key=j.get("id"),
             )
 
