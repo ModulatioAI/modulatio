@@ -12,6 +12,7 @@ from modulatio.operation_bars import (
     OperationBar,
     bar_for_operation,
     known_operations,
+    normalize_operation,
 )
 
 
@@ -66,6 +67,24 @@ def test_operation_bar_is_frozen_and_default_empty():
     assert bar.is_empty()
     with pytest.raises(Exception):
         bar.operation = "debug"  # frozen
+
+
+def test_normalize_keeps_a_known_operation_canonicalized():
+    for op in known_operations():
+        assert normalize_operation(op) == op
+    assert normalize_operation("  Debug ") == "debug"  # case/space-insensitive
+
+
+def test_normalize_falls_back_to_construct_for_empty_or_unknown():
+    # H-3 safe-default: an absent or garbage operation degrades to construct,
+    # never to a non-taxonomy value and never to a symptom-required bar.
+    for bad in ("", None, "   ", "not-an-op", "review", "build"):
+        assert normalize_operation(bad) == "construct"
+
+
+def test_normalize_always_returns_a_taxonomy_member():
+    for value in ("", "debug", "garbage", None, "RESEARCH"):
+        assert normalize_operation(value) in known_operations()
 
 
 def test_task_carries_operation_default_empty():

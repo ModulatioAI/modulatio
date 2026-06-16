@@ -132,14 +132,20 @@ def test_template_is_under_post_terse_threshold() -> None:
     Each is contract the planner must honor, not prose. Keep new additions
     justified by contract; the cap catches padding regressions.
 
+    The OPERATION-AXIS field (~420 chars, role refinement — the planner names the
+    class of work, which selects the verification bar the engine judges the
+    deliverable against; orthogonal to artifact_kind) is the most recent budgeted
+    component; it is contract (it picks the bar), not prose.
+
     When a future PR applies terse-prose to Leader-reflect / Producer
     / QC, replicate this pattern with their respective baselines.
     """
     char_count = len(orchestration._TASK_PLAN_PROMPT)
-    assert char_count < 9500, (
+    assert char_count < 10_000, (
         f"_TASK_PLAN_PROMPT is {char_count} chars — should stay under "
-        f"9,500 (terse baseline + sweep + rigorous-sourcing + web-search "
-        f"+ size-floor + parallel-deliverables + assembly + output-format)."
+        f"10,000 (terse baseline + sweep + rigorous-sourcing + web-search "
+        f"+ size-floor + parallel-deliverables + assembly + output-format "
+        f"+ operation-axis)."
     )
     # Lower bound too — a vacuous trim that drops the contract is
     # worse than no trim. 2,500 chars is a sanity floor.

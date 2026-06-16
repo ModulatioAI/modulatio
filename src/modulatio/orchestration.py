@@ -3434,6 +3434,12 @@ class Orchestrator:
             # evidence, differing only in id, description, and
             # output_path.
             artifact_kind = str(item.get("artifact_kind") or "text")
+            # The operation (class of work) the Leader triaged for this spec —
+            # selects the verification bar, orthogonal to artifact_kind. Normalized
+            # to a taxonomy member (construct safe-default) so it can never carry a
+            # free-form planner token downstream. Whole spec-group inherits it.
+            from modulatio.operation_bars import normalize_operation
+            operation = normalize_operation(item.get("operation"))
             # #73: the effective assembly family (and the rewritten evidence it
             # gates) is identical for every sub-task of this spec — it keys only
             # off artifact_kind + required_skills, which are spec-level. Compute
@@ -3455,6 +3461,7 @@ class Orchestrator:
                     goal_id=goal.id,
                     description=sub_desc,
                     artifact_kind=artifact_kind,
+                    operation=operation,
                     research_topics=research_topics,
                     required_skills=required_skills,
                     required_capabilities=required_capabilities,
@@ -12720,6 +12727,12 @@ Each task fields:
   "application", "code", "marketing", "research", "wordpress".
   Default "text" (neutral). Specify real kind so correct standards
   load.
+- operation: the CLASS OF WORK (what "done" means), apart from artifact_kind
+  (you can debug code OR data). One of: construct (make new), enhance (improve,
+  no regression), debug (a reported defect must stop), experiment (run + report
+  vs a baseline), comprehend (explain real source), research (synthesize real,
+  citable sources), evaluate (assess on evidence), operate (leave a system in a
+  target state). Name what the task is FOR; unsure → "construct".
 - required_skills: REGISTERED SKILL NAMES from available-skills list
   above. Do NOT invent. Do NOT put capability tags here ("writing",
   "research", "structured-output", "long-context", "reasoning-heavy"

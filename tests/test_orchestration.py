@@ -1774,6 +1774,79 @@ def test_artifacts_expansion_inherits_parent_fields(project: Project):
     assert all(t.required_skills == ["drafter"] for t in tasks)
 
 
+def test_planner_stamps_the_triaged_operation_on_tasks(project: Project):
+    """S1: the Leader triages a CLASS OF WORK and the engine stamps it onto each
+    task (exactly as artifact_kind), so the verifier judges against the right bar."""
+
+    def _coord_with_operation(prompt: str) -> str:
+        tasks = [{
+            "description": "Fix the login crash",
+            "assignee_specialist": "drafter",
+            "artifact_kind": "code",
+            "operation": "debug",
+            "required_skills": ["drafter"],
+            "artifacts": [
+                {"path": "a.py", "description": "a"},
+                {"path": "b.py", "description": "b"},
+            ],
+            "evidence_required": [{"kind": "artifact", "description": "file"}],
+        }]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    runners = {
+        "leader": _leader_stub,
+        "planner": _coord_with_operation,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    Orchestrator(project, runners).kickoff("triage")
+
+    tasks = store.list_tasks(PROJECT_CODE)
+    assert len(tasks) == 2
+    # The whole spec-group inherits the triaged operation.
+    assert all(t.operation == "debug" for t in tasks)
+
+
+def test_planner_defaults_operation_to_construct_when_absent_or_garbage(
+    project: Project,
+):
+    """H-3 safe-default: a task the Leader leaves un-triaged (or names with a
+    non-taxonomy token) is stamped ``construct`` — the degrading miss — never left
+    free-form and never a symptom-required bar."""
+
+    def _coord_no_operation(prompt: str) -> str:
+        tasks = [
+            {
+                "description": "Write the overview",
+                "assignee_specialist": "drafter",
+                "artifact_kind": "text",
+                "required_skills": ["drafter"],
+                "evidence_required": [{"kind": "artifact", "description": "f"}],
+            },
+            {
+                "description": "Write the appendix",
+                "assignee_specialist": "drafter",
+                "artifact_kind": "text",
+                "operation": "not-a-real-operation",
+                "required_skills": ["drafter"],
+                "evidence_required": [{"kind": "artifact", "description": "f"}],
+            },
+        ]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    runners = {
+        "leader": _leader_stub,
+        "planner": _coord_no_operation,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    Orchestrator(project, runners).kickoff("defaulting")
+
+    tasks = store.list_tasks(PROJECT_CODE)
+    assert len(tasks) == 2
+    assert all(t.operation == "construct" for t in tasks)
+
+
 def test_artifacts_expansion_plays_nicely_with_depends_on(project: Project):
     """A later task that depends on the expanded-parent's index waits
     for ALL sub-tasks to complete. `depends_on: [N]` where N is a

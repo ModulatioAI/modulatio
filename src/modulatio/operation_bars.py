@@ -85,4 +85,25 @@ def known_operations() -> tuple[str, ...]:
     return tuple(_BARS)
 
 
-__all__ = ["OperationBar", "bar_for_operation", "known_operations"]
+#: The operation stamped when the planner names none / an unrecognized one.
+#: ``construct`` is the SAFE default by the asymmetry: stamping ``construct`` on a
+#: task that is really a ``debug`` only loses the symptom-evidence check (it
+#: degrades gracefully); stamping ``debug`` on a real ``construct`` fires the
+#: symptom-required bar and wrongly rejects a clean build. Prefer the degrading miss.
+_SAFE_DEFAULT_OPERATION = "construct"
+
+
+def normalize_operation(operation: "str | None") -> str:
+    """The operation to STAMP on a task: the planner's value when it names a known
+    operation, else the ``construct`` safe-default. Always returns a taxonomy member
+    (never a free-form planner token), so downstream lookups stay on the allow-list."""
+    op = (operation or "").strip().lower()
+    return op if op in _BARS else _SAFE_DEFAULT_OPERATION
+
+
+__all__ = [
+    "OperationBar",
+    "bar_for_operation",
+    "known_operations",
+    "normalize_operation",
+]
