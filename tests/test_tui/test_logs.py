@@ -40,7 +40,8 @@ async def test_logs_tab_lists_captured_logs(tui_logs):
         await pilot.pause()
         table = app.query_one("#logs-table", DataTable)
         assert table.row_count == 2                      # error + run
-        labels = {str(table.get_row_at(i)[0]) for i in range(table.row_count)}
+        # Feng-Tui: the KIND cell is now "<glyph> <label>" (glyph+WORD).
+        labels = " ".join(str(table.get_row_at(i)[0]) for i in range(table.row_count))
         assert "Error log" in labels and "Run log" in labels
 
 

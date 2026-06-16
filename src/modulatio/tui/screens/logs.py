@@ -20,17 +20,23 @@ lets the user review before anything reaches a public issue.
 from __future__ import annotations
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import DataTable, Static
 
 from modulatio import logstore
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
+from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.send_log_modal import SendLogModal
 
 #: Shared with `modulatio logs list` so both surfaces format the stamp identically.
 _fmt_ts = logstore.format_timestamp
+
+#: Glyph per log kind — paired with the WORD label (never colour alone) so the
+#: KIND reads at a glance (Feng-Tui §10 accessibility).
+_KIND_GLYPH = {"crash": "✖", "error": "▲", "doctor": "✚", "run": "▸"}
 
 
 class LogsScreen(Vertical):
@@ -42,24 +48,10 @@ class LogsScreen(Vertical):
         Binding("d", "delete", "Delete", show=True),
     ]
 
+    # The two-column split + full-height divider live in MasterDetail now.
     DEFAULT_CSS = """
-    LogsScreen {
-        padding: 1;
-    }
-    LogsScreen #logs-layout {
-        height: 1fr;
-    }
-    LogsScreen #logs-table {
-        width: 55%;
-    }
-    LogsScreen #log-preview-pane {
-        width: 45%;
-        border-left: solid $accent;
-        padding: 0 1;
-    }
-    LogsScreen #log-preview {
-        height: 1fr;
-    }
+    LogsScreen { padding: 1; }
+    LogsScreen #logs-table { height: 1fr; }
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -68,13 +60,13 @@ class LogsScreen(Vertical):
         self._selected_id: str | None = None
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="logs-layout"):
-            table = DataTable(id="logs-table", cursor_type="row")
-            table.add_columns("Kind", "When", "Summary", "Sent")
-            yield table
-            with Vertical(id="log-preview-pane"):
-                with VerticalScroll(id="log-preview"):
-                    yield Static("Select a log to preview.", id="log-preview-text")
+        with MasterDetail():
+            with Vertical(id="md-list"):
+                table = DataTable(id="logs-table", cursor_type="row")
+                table.add_columns("Kind", "When", "Summary", "Sent")
+                yield table
+            with VerticalScroll(id="md-detail"):
+                yield Static("Select a log to preview.", id="log-preview-text")
 
     def on_mount(self) -> None:
         self.refresh_logs()
@@ -89,9 +81,11 @@ class LogsScreen(Vertical):
         self._by_id = {}
         for e in logstore.list_logs():
             self._by_id[e.id] = e
+            glyph = _KIND_GLYPH.get(e.kind, "·")
             table.add_row(
-                e.label, _fmt_ts(e.timestamp), e.summary[:60],
-                "sent" if e.sent else "", key=e.id,
+                Text(f"{glyph} {e.label}"),
+                _fmt_ts(e.timestamp), e.summary[:60],
+                Text("sent ✓") if e.sent else Text("—"), key=e.id,
             )
         if table.row_count > 0:
             first = list(table.rows.keys())[0].value

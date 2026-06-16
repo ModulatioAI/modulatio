@@ -34,6 +34,7 @@ from modulatio import setup_state, vault
 from modulatio.orchestration import Orchestrator
 from modulatio.runners import default_generic_stub_runners, litellm_runner
 from modulatio.tui import commands as commands_mod
+from modulatio.tui.feng_theme import FENG_THEMES, FENG_THEME_NAMES
 from modulatio.tui.screens.agent_builder import AgentBuilderScreen
 from modulatio.tui.screens.artifacts import build_artifacts_panel
 from modulatio.tui.screens.configuration import ConfigScreen
@@ -148,35 +149,23 @@ class ModulatioApp(App):
     # ``MODULATIO :: PROJECT <CODE> :: <MODE>``.
     TITLE = "MODULATIO"
 
-    # 1980s mainframe-terminal aesthetic — IBM-3270 phosphor amber over a
-    # deep-navy CRT, light-blue frames, a single beacon-orange hot accent.
-    # Matches modulatio.ai (see ~/modulatio-site/src/styles/modulatio.css).
-    # Override Textual's design-system tokens at the App level so every
-    # screen/widget that uses $primary / $accent / $text picks up the
-    # palette automatically; per-screen CSS rarely hardcodes raw hex, so
-    # this swap cascades broadly. The web dashboard (future) reuses these
-    # token names — keep them in sync.
+    # Feng-Tui aesthetic — pure-black phosphor, thin frames, a single monochrome
+    # accent (amber / green / cyan) in brightness tiers. Colours come from the
+    # active Feng-Tui Theme (feng_theme.py), registered in on_mount; App.theme
+    # re-resolves the design-system tokens LIVE across every screen, so the
+    # per-screen CSS (which uses $primary / $accent / $frame-dim / $text)
+    # recolours by cascade. The web dashboard (future) reuses these token names —
+    # keep them in sync.
     CSS = """
-    /* ── Palette: IBM-3270 phosphor amber on deep navy (modulatio.ai) ── */
-    /* $panel / $boost intentionally NOT overridden — Textual's
-       -maximized-view rule uses $panel in a hatch that expects a
-       percentage, not a color; overriding crashes CSS parsing. */
-    $background: #0a1628;   /* deep navy CRT */
-    $surface: #0e1c30;      /* elevated navy */
-
-    $primary: #ffb000;      /* phosphor amber — accents, headings, cursor */
-    $secondary: #b08858;    /* dim amber — secondary text / meta */
-    $accent: #ff6b35;       /* beacon orange — the single hot accent */
-    $success: #ffb000;      /* monochrome phosphor — amber family */
-    $warning: #ff6b35;
-    $error: #ff5555;        /* terminal red — failures only */
-
-    $foreground: #e8d8b4;   /* aged-parchment phosphor body */
-    $text: #e8d8b4;
-    $text-muted: #b08858;
-
-    /* $frame / $frame-dim (light-blue chrome) are registered globally in
-       get_css_variables() so they resolve in widget DEFAULT_CSS too. */
+    /* ── Palette: Feng-Tui — the harmonious terminal interface. ──
+       Colours come from the active Feng-Tui Theme (feng_theme.py): pure-black
+       background, monochrome amber / green / cyan accent in brightness tiers.
+       The theme maps onto these variable NAMES, so the swap cascades to every
+       screen and App.theme re-resolves them LIVE. $panel / $boost intentionally
+       NOT overridden — Textual's -maximized-view rule uses $panel in a hatch
+       that expects a percentage, not a colour; overriding crashes CSS parsing.
+       $frame / $frame-dim are carried in each Theme's `variables` (with a
+       fallback in get_css_variables) so they resolve in widget DEFAULT_CSS. */
 
     /* ── Base app + screen background ── */
     Screen {
@@ -185,12 +174,12 @@ class ModulatioApp(App):
 
     /* ── Header / Footer (the always-visible chrome) ── */
     Header {
-        background: #0e1c30;
+        background: $surface;
         color: $primary;
         text-style: bold;
     }
     Footer {
-        background: #0e1c30;
+        background: $surface;
         color: $text-muted;
     }
 
@@ -204,7 +193,7 @@ class ModulatioApp(App):
         padding: 0 2;
     }
     Button:hover {
-        background: #0e1c30;
+        background: $surface;
         border: round $frame;
         color: $primary;
         text-style: bold;
@@ -232,7 +221,7 @@ class ModulatioApp(App):
     }
     Button:disabled {
         border: round $frame-dim;
-        color: #5e4828;
+        color: $text-muted;
     }
 
     /* ── DataTable: phosphor grid ── */
@@ -240,16 +229,16 @@ class ModulatioApp(App):
         background: $surface;
     }
     DataTable > .datatable--header {
-        background: #0e1c30;
+        background: $surface;
         color: $primary;
         text-style: bold;
     }
     DataTable > .datatable--cursor {
-        background: #14263c;
+        background: #1f1f1f;
         color: $primary;
     }
     DataTable > .datatable--hover {
-        background: #14263c;
+        background: #1f1f1f;
     }
 
     /* ── Inputs / TextArea: rounded light-blue frame, amber on focus ── */
@@ -299,8 +288,11 @@ class ModulatioApp(App):
         # Conversation-first keymap. The old F1–F9 per-agent chat-focus
         # bindings are retired (we no longer chat with producers/QC — the
         # Leader works with them on the operator's behalf) and recycled:
-        ("f2", "flip_stream", "LEADER/TEAM"),
+        # F2 cycles the Feng-Tui variant (amber/green/cyan); LEADER/TEAM flip
+        # moved to F4 (F3 is COMPOSE).
+        ("f2", "cycle_theme", "THEME"),
         ("f3", "focus_jobdrop", "COMPOSE"),
+        ("f4", "flip_stream", "LEADER/TEAM"),
         # KICK OFF is the deliberate, separated job-launch — never Enter.
         ("f5", "kickoff", "KICK OFF"),
         # STOP the running job — the operator's kill-switch (Fix C). Cooperative:
@@ -333,12 +325,14 @@ class ModulatioApp(App):
         self.last_summary_text: str = ""
 
     def get_css_variables(self) -> dict[str, str]:
-        """Register Modulatio's custom CSS variables globally so they resolve
-        in widget DEFAULT_CSS as well as the App stylesheet. The light-blue
-        frame chrome ($frame / $frame-dim) pairs with the amber phosphor."""
+        """Register Modulatio's custom CSS variables globally so they resolve in
+        widget DEFAULT_CSS as well as the App stylesheet. The active Feng-Tui
+        Theme supplies $frame / $frame-dim via its ``variables``, so these
+        setdefaults are no-ops while a feng theme is active — they only guard CSS
+        parsing if some other theme is ever set."""
         variables = super().get_css_variables()
-        variables.setdefault("frame", "#6cb6e4")
-        variables.setdefault("frame-dim", "#3f6d8c")
+        variables.setdefault("frame", "#FFC933")
+        variables.setdefault("frame-dim", "#FFB300")
         return variables
 
     def compose(self) -> ComposeResult:
@@ -1101,6 +1095,13 @@ class ModulatioApp(App):
         """First-launch detection (slice 5). If the wizard has never run,
         surface a one-time banner in the response area pointing the user
         at `modulatio setup`."""
+        # Feng-Tui: register the three variants and set the default (amber).
+        # Setting App.theme re-resolves the design-system tokens live, so every
+        # mounted screen recolours by cascade when F2 cycles the variant.
+        for theme in FENG_THEMES:
+            self.register_theme(theme)
+        self.theme = "feng-amber"
+        self.sub_title = self._feng_subtitle()   # surface the active variant
         if not setup_state.setup_completed():
             self._set_response(
                 "First-launch detected — Modulatio has no saved setup state.\n"
@@ -1121,12 +1122,31 @@ class ModulatioApp(App):
     # ── Console keymap actions ──────────────────────────────────────────
 
     def action_flip_stream(self) -> None:
-        """F2 → flip the Console's LEADER ↔ TEAM stream tabs."""
+        """F4 → flip the Console's LEADER ↔ TEAM stream tabs."""
         from modulatio.tui.screens.prompt import PromptScreen
         try:
             self.query_one(PromptScreen).flip_stream()
         except Exception:
             pass
+
+    def action_cycle_theme(self) -> None:
+        """F2 → cycle the Feng-Tui variant (amber → green → cyan), live.
+
+        Setting ``self.theme`` reparses the stylesheet and re-applies it to the
+        whole screen stack, so the accent recolours everywhere at once."""
+        names = FENG_THEME_NAMES
+        try:
+            i = names.index(self.theme)
+        except ValueError:
+            i = -1
+        self.theme = names[(i + 1) % len(names)]
+        self.sub_title = self._feng_subtitle()
+
+    def _feng_subtitle(self) -> str:
+        """Header breadcrumb — surfaces the active Feng-Tui variant so the
+        operator can see which one is live (e.g. ``feng-tui · amber``)."""
+        variant = (self.theme or "feng-amber").replace("feng-", "")
+        return f":: PROJECT {self.project_code.upper()} :: feng-tui · {variant}"
 
     def action_kickoff(self) -> None:
         """F5 → deliberately launch the job in the TEAM KICK OFF box. Enter
