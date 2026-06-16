@@ -3,9 +3,10 @@
 """Approval badge renderer — slice #22.
 
 Pure function that turns a Ticket's approval state into a compact cell
-string with Rich markup. Plain notifications (approval_required=False
-and no decision) render blank so the column stays visually quiet —
-only tickets that are or were gated get a visible marker.
+string. Feng-Tui is monochrome, so state reads as GLYPH + WORD (never colour
+alone, §10) and the cell inherits the active theme's accent/dim tier. Plain
+notifications (approval_required=False and no decision) render blank so the
+column stays visually quiet — only gated tickets get a visible marker.
 """
 from __future__ import annotations
 
@@ -15,19 +16,19 @@ from modulatio.types import Ticket
 def approval_badge(ticket: Ticket) -> str:
     """Return the approval-column string for ``ticket``.
 
-    - approved: ``[green]✓ <decider>[/green]``
-    - denied:   ``[red]✗ <decider>[/red]``
-    - approval_required + no decision: ``[yellow]⏳ awaiting[/yellow]``
+    - approved: ``✓ approved · <decider>``
+    - denied:   ``✗ denied · <decider>``
+    - approval_required + no decision: ``⏳ awaiting``
     - plain notification: empty string
     """
     if ticket.approval_decision == "approved":
         decider = ticket.approval_decided_by or "?"
-        return f"[green]✓ {decider}[/green]"
+        return f"✓ approved · {decider}"
     if ticket.approval_decision == "denied":
         decider = ticket.approval_decided_by or "?"
-        return f"[red]✗ {decider}[/red]"
+        return f"✗ denied · {decider}"
     if ticket.approval_required:
-        return "[yellow]⏳ awaiting[/yellow]"
+        return "⏳ awaiting"
     return ""
 
 

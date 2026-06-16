@@ -404,3 +404,22 @@ async def test_tickets_tab_uses_lex_latest_run_when_multiple_exist(tui_vault):
         assert table.row_count == 1
 
 
+async def test_tickets_tab_adopts_master_detail():
+    """Feng-Tui: TICKETS uses the shared MasterDetail full-height divider and
+    keeps its existing selectors (layout-only reskin)."""
+    from textual.widgets import DataTable, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.tickets import TicketsScreen
+    from modulatio.tui.widgets.master_detail import MasterDetail
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        app.query_one(TabbedContent).active = "tab-tickets"
+        await pilot.pause()
+        screen = app.query_one(TicketsScreen)
+        detail = screen.query_one(MasterDetail).query_one("#md-detail")
+        assert detail.styles.border_left[0] is not None       # full-height divider
+        assert app.query_one("#tickets-table", DataTable) is not None
+        assert screen.query_one("#ticket-preview-md") is not None
+
+

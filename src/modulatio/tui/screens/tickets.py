@@ -27,12 +27,18 @@ from rich.text import Text
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import DataTable, Markdown
 
 from modulatio import store, vault
+from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.ticket_row import ticket_row
 from modulatio.types import Ticket
+
+#: Glyph per priority / status — paired with the WORD (Feng-Tui §10), never
+#: colour alone.
+_PRIO_GLYPH = {"blocker": "⛔", "critical": "▲", "minor": "◇"}
+_STATUS_GLYPH = {"open": "○", "in_progress": "▸", "resolved": "✓", "closed": "✕"}
 
 
 class TicketsScreen(Vertical):
@@ -42,24 +48,10 @@ class TicketsScreen(Vertical):
         Binding("r", "refresh", "Refresh", show=True),
     ]
 
+    # The split + full-height divider live in MasterDetail now.
     DEFAULT_CSS = """
-    TicketsScreen {
-        padding: 1;
-    }
-    TicketsScreen #tickets-layout {
-        height: 1fr;
-    }
-    TicketsScreen #tickets-table {
-        width: 55%;
-    }
-    TicketsScreen #ticket-preview-pane {
-        width: 45%;
-        border-left: solid $accent;
-        padding: 0 1;
-    }
-    TicketsScreen #ticket-preview {
-        height: 1fr;
-    }
+    TicketsScreen { padding: 1; }
+    TicketsScreen #tickets-table { height: 1fr; }
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -67,18 +59,18 @@ class TicketsScreen(Vertical):
         self.preview_source: str = ""
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="tickets-layout"):
-            table = DataTable(id="tickets-table", cursor_type="row")
-            table.add_columns(
-                "ID", "Priority", "Status", "Title", "Approval", "Created"
-            )
-            yield table
-            with Vertical(id="ticket-preview-pane"):
-                with VerticalScroll(id="ticket-preview"):
-                    yield Markdown(
-                        "_Select a ticket to preview._",
-                        id="ticket-preview-md",
-                    )
+        with MasterDetail():
+            with Vertical(id="md-list"):
+                table = DataTable(id="tickets-table", cursor_type="row")
+                table.add_columns(
+                    "ID", "Priority", "Status", "Title", "Approval", "Created"
+                )
+                yield table
+            with VerticalScroll(id="md-detail"):
+                yield Markdown(
+                    "_Select a ticket to preview._",
+                    id="ticket-preview-md",
+                )
 
     def on_mount(self) -> None:
         self.refresh_tickets()
@@ -103,10 +95,14 @@ class TicketsScreen(Vertical):
         run_id = self._scope_run_id(code)
         for t in store.list_tickets(code, run_id=run_id):
             row = ticket_row(t)
-            # escape raw (operator-authored) string cells; the badge (cell 4) is
-            # an intentional-markup Text object built below.
+            # escape raw (operator-authored) string cells.
             cells = [escape(c) if isinstance(c, str) else c for c in row]
-            cells[4] = Text.from_markup(row[4]) if row[4] else ""
+            # Priority / Status read as glyph + WORD (Feng-Tui §10).
+            cells[1] = Text(f"{_PRIO_GLYPH.get(row[1], '·')} {row[1]}")
+            cells[2] = Text(f"{_STATUS_GLYPH.get(row[2], '·')} {row[2]}")
+            # The badge is now plain glyph+WORD text — render verbatim (no markup
+            # parse on operator-authored decider names).
+            cells[4] = Text(row[4]) if row[4] else ""
             table.add_row(*cells, key=t.id)
         if table.row_count > 0:
             first_id = list(table.rows.keys())[0].value
