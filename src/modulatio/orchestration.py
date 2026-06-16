@@ -687,6 +687,8 @@ def _with_operation_card(task: "Task", raw_standards: str) -> str:
     never a loose generic. Card rides the existing ``{standards}`` slot."""
     from modulatio import operation_cards
 
+    if raw_standards is None:  # Nemo R1: fail-closed against the str|None signature,
+        raw_standards = ""     # independent of caller discipline.
     card = operation_cards.render(getattr(task, "operation", ""))
     return f"{card}\n\n{raw_standards}" if raw_standards.strip() else card
 
@@ -3153,8 +3155,9 @@ class Orchestrator:
 
         Conservative: only INDEPENDENT (dep-free) single-output specs merge, grouped
         by an exact (artifact_kind, required_skills, required_capabilities,
-        deliverable) key — a differently-skilled research/compile task never folds
-        in. Plans without the pattern pass through byte-identical.
+        deliverable, …, operation) key — a differently-skilled research/compile task,
+        or one of a different operation, never folds in. Plans without the pattern
+        pass through byte-identical.
         """
         if not isinstance(data, list) or len(data) < 2:
             return data
@@ -3168,15 +3171,20 @@ class Orchestrator:
                 and not (spec.get("depends_on") or [])
             )
 
+        from modulatio.operation_bars import normalize_operation
+
         def _key(spec: dict) -> tuple:
             # Nemo P1.5 #1/#2: the key must include EVERY field the artifacts
             # expansion copies from the parent spec onto each sub-task —
             # artifact_kind / required_skills / required_capabilities / deliverable
-            # AND research_topics / tool_args / evidence_required. Only specs
-            # IDENTICAL in all of them may merge; otherwise a sibling would inherit
-            # the wrong prompt/tool/evidence contract (and a same-skill scaffolding
-            # task can't fold into the deliverable fan-out). Description + output_path
-            # stay per-artifact, so they legitimately differ within a group.
+            # AND research_topics / tool_args / evidence_required AND operation.
+            # Only specs IDENTICAL in all of them may merge; otherwise a sibling
+            # would inherit the wrong prompt/tool/evidence contract — or the wrong
+            # OPERATION (a construct task folded under a debug lead would be judged
+            # against the symptom-gone bar it never had: the very "wrong bar" scar
+            # the axis closes). Normalize the operation so it canonicalizes/defaults
+            # exactly as _plan_tasks stamps it (Debug == debug; missing == construct).
+            # Description + output_path stay per-artifact, so they legitimately differ.
             return (
                 str(spec.get("artifact_kind") or "text"),
                 tuple(str(s) for s in (spec.get("required_skills") or [])),
@@ -3185,6 +3193,7 @@ class Orchestrator:
                 tuple(str(t) for t in (spec.get("research_topics") or [])),
                 json.dumps(spec.get("tool_args") or {}, sort_keys=True, default=str),
                 json.dumps(spec.get("evidence_required") or [], sort_keys=True, default=str),
+                normalize_operation(spec.get("operation")),
             )
 
         groups: dict[tuple, list[int]] = {}

@@ -1944,6 +1944,50 @@ def test_operation_card_reaches_the_producer_but_not_qc_review(project: Project)
     assert bar_for_operation("debug").definition_of_done in qc
 
 
+def test_wide_bind_does_not_merge_specs_with_different_operations(project: Project):
+    """Wild Bill HIGH: the wide-artifact merge key must include operation. Two
+    independent same-kind specs differing ONLY by operation must NOT fold into one
+    artifacts-spec — else a construct child inherits the lead's debug bar/card (the
+    exact 'wrong bar' scar the axis closes)."""
+    runners = {"leader": _leader_stub, "planner": _planner_stub,
+               "drafter": _drafter_stub, "qc": _qc_stub}
+    orch = Orchestrator(project, runners)
+    data = [
+        {"description": "fix a", "output_path": "a.py", "artifact_kind": "code",
+         "operation": "debug",
+         "evidence_required": [{"kind": "artifact", "description": "f"}]},
+        {"description": "make b", "output_path": "b.py", "artifact_kind": "code",
+         "operation": "construct",
+         "evidence_required": [{"kind": "artifact", "description": "f"}]},
+    ]
+    result = orch._bind_wide_artifacts(data)
+    # Not merged: two separate single-output specs survive, no artifacts fan-out.
+    assert len(result) == 2
+    assert all("artifacts" not in spec for spec in result)
+    assert {s["operation"] for s in result} == {"debug", "construct"}
+
+
+def test_wide_bind_merges_specs_with_the_same_operation(project: Project):
+    """Complement: same operation (incl. normalize-equivalent — 'debug' vs ' Debug ')
+    DOES still fold into one parallel artifacts-spec; the merge key normalizes the
+    operation exactly as _plan_tasks stamps it."""
+    runners = {"leader": _leader_stub, "planner": _planner_stub,
+               "drafter": _drafter_stub, "qc": _qc_stub}
+    orch = Orchestrator(project, runners)
+    data = [
+        {"description": "fix a", "output_path": "a.py", "artifact_kind": "code",
+         "operation": "debug",
+         "evidence_required": [{"kind": "artifact", "description": "f"}]},
+        {"description": "fix b", "output_path": "b.py", "artifact_kind": "code",
+         "operation": " Debug ",
+         "evidence_required": [{"kind": "artifact", "description": "f"}]},
+    ]
+    result = orch._bind_wide_artifacts(data)
+    assert len(result) == 1
+    assert len(result[0]["artifacts"]) == 2
+    assert result[0]["operation"] == "debug"
+
+
 def test_artifacts_expansion_plays_nicely_with_depends_on(project: Project):
     """A later task that depends on the expanded-parent's index waits
     for ALL sub-tasks to complete. `depends_on: [N]` where N is a
