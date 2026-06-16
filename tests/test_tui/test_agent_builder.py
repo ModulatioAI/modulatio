@@ -113,7 +113,10 @@ async def test_remove_producer(project):
         table.move_cursor(row=1)
         await pilot.pause()
         assert screen._selected_agent_id() == "marlow"
+        # Removal is guarded by a ConfirmModal.
         await screen._remove_selected()
+        await pilot.pause()
+        await pilot.click("#confirm-yes")
         await pilot.pause()
         assert "marlow" not in {a.id for a in roster.list_agents(project)}
 
@@ -128,13 +131,11 @@ async def test_remove_and_readd_the_leader(project):
         table.move_cursor(row=0)
         await pilot.pause()
         assert screen._selected_agent_id() == "leader"
-        # Leader IS removable now, but it's a two-step confirm (Nemo, hull):
-        # the first Remove warns, the second confirms.
+        # Leader IS removable, but it's guarded by a ConfirmModal.
         await screen._remove_selected()
         await pilot.pause()
-        assert roster.load("leader", project) is not None  # warned, not yet gone
-        assert screen._pending_remove == "leader"  # awaiting confirm
-        await screen._remove_selected()  # confirm
+        assert roster.load("leader", project) is not None  # modal up, not yet gone
+        await pilot.click("#confirm-yes")
         await pilot.pause()
         assert roster.load("leader", project) is None
 
