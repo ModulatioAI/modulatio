@@ -17,12 +17,16 @@ from pathlib import Path
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Label, ListItem, ListView, Static
 
 from modulatio import families, vault
 from modulatio.tui.widgets.export_dialog import ExportDialog
 from modulatio.tui.widgets.file_picker import FolderPickerModal
+from modulatio.tui.widgets.master_detail import MasterDetail
+
+#: Glyph per artifact family — paired with the filename (Feng-Tui §10).
+_FAMILY_GLYPH = {"document": "▤", "code": "▩", "data": "▦", "media": "◈"}
 
 
 #: Subdirs walked recursively under the run's (or project's) root.
@@ -97,28 +101,22 @@ def _is_artifact_file(path: Path) -> bool:
 class ArtifactsScreen(Vertical):
     """Artifacts tab content."""
 
+    # The split + full-height divider live in MasterDetail; borders are theme-aware.
     DEFAULT_CSS = """
-    ArtifactsScreen {
-        padding: 1;
-    }
-    ArtifactsScreen ListView {
-        height: 12;
-        border: solid $panel;
-    }
-    ArtifactsScreen #artifact-preview {
-        height: 10;
-        padding: 1;
-        border: solid $panel;
-        background: $surface;
-    }
+    ArtifactsScreen { padding: 1; }
+    ArtifactsScreen #artifacts-list { height: 1fr; border: round $frame-dim; }
+    ArtifactsScreen #artifact-preview { height: 1fr; padding: 0 1; }
     """
 
     def compose(self) -> ComposeResult:
-        yield Label("Artifacts")
-        yield ListView(id="artifacts-list")
-        yield Static("(select an artifact to preview)", id="artifact-preview")
-        yield Button("Export…", id="artifacts-export-btn", variant="primary")
-        yield ExportDialog(id="artifacts-export-panel", classes="hidden")
+        with MasterDetail():
+            with Vertical(id="md-list"):
+                yield Label("Artifacts")
+                yield ListView(id="artifacts-list")
+                yield Button("Export…", id="artifacts-export-btn", variant="primary")
+                yield ExportDialog(id="artifacts-export-panel", classes="hidden")
+            with VerticalScroll(id="md-detail"):
+                yield Static("(select an artifact to preview)", id="artifact-preview")
 
     def on_mount(self) -> None:
         self._load_files()
@@ -157,9 +155,12 @@ class ArtifactsScreen(Vertical):
                     continue
                 self._paths.append(p)
                 # Display the path as <rel>/<rest> so the user sees
-                # which artifact subdir AND any nested folders.
+                # which artifact subdir AND any nested folders, prefixed with a
+                # family glyph (glyph + name, §10).
                 rel_path = p.relative_to(d)
-                listview.append(ListItem(Label(f"{rel}/{rel_path}")))
+                glyph = _FAMILY_GLYPH.get(
+                    families.infer_artifact_family_from_path(p), "·")
+                listview.append(ListItem(Label(f"{glyph} {rel}/{rel_path}")))
 
     # ── Selection preview ───────────────────────────────────────────────
 

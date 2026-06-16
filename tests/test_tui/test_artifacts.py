@@ -656,3 +656,21 @@ async def test_artifacts_tab_drafts_md_still_visible(
         listview = app.query_one("#artifacts-list", ListView)
         items = [str(item.children[0].render()) for item in listview.children]
         assert any("drafts/doc.md" in s for s in items)
+
+
+async def test_artifacts_tab_adopts_master_detail(tui_vault_with_artifacts):
+    """Feng-Tui: ARTIFACTS uses the shared MasterDetail full-height divider."""
+    from textual.widgets import ListView, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.artifacts import ArtifactsScreen
+    from modulatio.tui.widgets.master_detail import MasterDetail
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        screen = app.query_one(ArtifactsScreen)
+        detail = screen.query_one(MasterDetail).query_one("#md-detail")
+        assert detail.styles.border_left[0] is not None       # full-height divider
+        assert app.query_one("#artifacts-list", ListView) is not None
+        assert screen.query_one("#artifact-preview") is not None
