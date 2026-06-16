@@ -48,6 +48,26 @@ def _feng(name: str, accent: str, dim: str) -> Theme:
     )
 
 
+def theme_tiers(app) -> tuple[str, str, str, str]:
+    """(accent, dim, base, error) hex for the ACTIVE theme.
+
+    For Rich ``Text`` styles that can't reference ``$variables`` (the live stream
+    feeds, status line) — call this at render time so each rendered line tracks
+    the current Feng-Tui variant. accent = focal (primary), dim = secondary,
+    base = foreground, error = terminal-red.
+    """
+    try:
+        th = app.current_theme
+        return (
+            th.primary or "#FFC933",
+            th.secondary or "#FFB300",
+            th.foreground or "#E0E0E0",
+            th.error or "#FF5555",
+        )
+    except Exception:
+        return ("#FFC933", "#FFB300", "#E0E0E0", "#FF5555")
+
+
 FENG_AMBER = _feng("feng-amber", "#FFC933", "#FFB300")
 FENG_GREEN = _feng("feng-green", "#7DFF9C", "#44FF77")
 FENG_CYAN = _feng("feng-cyan", "#80EEFF", "#44E8FF")
@@ -56,4 +76,7 @@ FENG_CYAN = _feng("feng-cyan", "#80EEFF", "#44E8FF")
 FENG_THEMES = [FENG_AMBER, FENG_GREEN, FENG_CYAN]
 FENG_THEME_NAMES = [t.name for t in FENG_THEMES]
 
-__all__ = ["FENG_THEMES", "FENG_THEME_NAMES", "FENG_AMBER", "FENG_GREEN", "FENG_CYAN"]
+__all__ = [
+    "FENG_THEMES", "FENG_THEME_NAMES", "FENG_AMBER", "FENG_GREEN", "FENG_CYAN",
+    "theme_tiers",
+]
