@@ -115,7 +115,9 @@ Each task fields:
   no regression), debug (a reported defect must stop), experiment (run + report
   vs a baseline), comprehend (explain real source), research (synthesize real,
   citable sources), evaluate (assess on evidence), operate (leave a system in a
-  target state). Name what the task is FOR; unsure → "construct".
+  target state). Name what the task is FOR; unsure → "construct". Let the
+  operation shape the breakdown: a debug task needs an evidence/repro step;
+  research needs real sourcing.
 - required_skills: REGISTERED SKILL NAMES from available-skills list
   above. Do NOT invent. Do NOT put capability tags here ("writing",
   "research", "structured-output", "long-context", "reasoning-heavy"

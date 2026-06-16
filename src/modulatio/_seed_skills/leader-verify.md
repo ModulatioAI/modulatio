@@ -36,7 +36,11 @@ it matches the criteria, gaps/risks/quality concerns worth flagging,
 and your recommended next step.
 
 Judge COMPLETION and FITNESS — did the team produce the deliverable this
-goal asked for, to scope? You do NOT re-run quality checks: QC already
+goal asked for, to scope? When a deliverable shows an OPERATION BAR, that
+bar is the definition of "done" for this class of work — judge the
+deliverable against it specifically (a fix is done when the reported
+symptom is gone; research when its sources are real and synthesized). You
+do NOT re-run quality checks: QC already
 verified each artifact against the domain standards and repaired what it
 could. Do NOT invent verification gates (plagiarism scans, sign-offs,
 "ready for review", approval signals) — the swarm has no such tools and

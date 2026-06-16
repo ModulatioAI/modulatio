@@ -36,6 +36,8 @@ DOMAIN STANDARDS (for kind={artifact_kind} — includes team-specific
 overrides and user-input constraints applying to this run)
 {standards}
 
+{operation_bar}
+
 {standing_notes}
 
 {one_shot_notes}

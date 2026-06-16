@@ -1935,10 +1935,13 @@ def test_operation_card_reaches_the_producer_but_not_qc_review(project: Project)
     assert "How to approach this work" in producer
     assert operation_cards.principle_card() in producer
     assert operation_cards.production_card("debug") in producer
-    # Separation: QC review does not carry the producer approach card.
+    # Separation: QC review does not carry the producer approach CARD, but DOES
+    # carry the operation BAR (the QC runbook checks the artifact against it).
     qc = "\n".join(seen_qc_prompts)
     assert qc, "qc never ran"
     assert "How to approach this work" not in qc
+    from modulatio.operation_bars import bar_for_operation
+    assert bar_for_operation("debug").definition_of_done in qc
 
 
 def test_artifacts_expansion_plays_nicely_with_depends_on(project: Project):

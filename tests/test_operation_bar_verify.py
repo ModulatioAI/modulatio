@@ -56,3 +56,34 @@ def test_directive_is_robust_to_a_task_missing_the_attribute():
         pass
 
     assert Orchestrator._operation_bar_directive(None, _Bare()) == ""
+
+
+# ── Phase 3: the Leader & QC runbooks (S5) ───────────────────────────────────
+
+def test_qc_bar_block_surfaces_the_operation_bar_as_a_defect_standard():
+    block = Orchestrator._qc_operation_bar_block(None, _task("debug"))
+    assert "OPERATION BAR (debug)" in block
+    assert bar_for_operation("debug").definition_of_done in block
+    assert "defect" in block.lower()
+
+
+def test_qc_bar_block_is_neutral_for_an_untriaged_task():
+    block = Orchestrator._qc_operation_bar_block(None, _task(""))
+    assert "OPERATION BAR" not in block
+    assert "no operation-specific bar" in block.lower()
+
+
+def test_leader_verify_runbook_makes_the_bar_authoritative():
+    from modulatio import orchestration
+    assert "OPERATION BAR" in orchestration._LEADER_VERIFY_PROMPT
+    assert 'definition of "done"' in orchestration._LEADER_VERIFY_PROMPT
+
+
+def test_qc_prompt_has_an_operation_bar_slot():
+    from modulatio import orchestration
+    assert "{operation_bar}" in orchestration._QC_REVIEW_PROMPT
+
+
+def test_task_plan_prompt_carries_the_decomposition_hint():
+    from modulatio import orchestration
+    assert "shape the breakdown" in orchestration._TASK_PLAN_PROMPT

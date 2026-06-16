@@ -6440,6 +6440,7 @@ class Orchestrator:
             size_block=size_block,
             team_state=team_state_block_for_qc,
             standards=_format_standards_block(domain_standards),
+            operation_bar=self._qc_operation_bar_block(task),
             standing_notes=_format_standing_notes(standing_notes_raw),
             one_shot_notes=_format_one_shot_notes(self.qc_one_shot_notes),
             history=_format_qc_history_block(history_hits),
@@ -9427,6 +9428,22 @@ class Orchestrator:
         return (
             f"\n\nOPERATION BAR ({bar.operation}) — judge this deliverable against the "
             f'definition of "done" this operation requires:\n  {bar.definition_of_done}'
+        )
+
+    def _qc_operation_bar_block(self, task: "Task") -> str:
+        """The QC runbook's view of the operation bar (S5): the definition of "done"
+        for this task's class of work, so QC counts a shortfall against it as a defect —
+        the same bar the verifier judges the whole deliverable against, applied per
+        artifact. Empty/absent operation → a neutral marker (today's behavior)."""
+        from modulatio.operation_bars import bar_for_operation
+
+        bar = bar_for_operation(getattr(task, "operation", ""))
+        if bar.is_empty():
+            return "(no operation-specific bar — judge against the contract and standards)"
+        return (
+            f"OPERATION BAR ({bar.operation}) — the definition of \"done\" for this "
+            f"class of work; a shortfall against it is a defect:\n  "
+            f"{bar.definition_of_done}"
         )
 
     def _spec_size_metric(self) -> "EvidenceRequirement | None":
@@ -12473,7 +12490,11 @@ it matches the criteria, gaps/risks/quality concerns worth flagging,
 and your recommended next step.
 
 Judge COMPLETION and FITNESS — did the team produce the deliverable this
-goal asked for, to scope? You do NOT re-run quality checks: QC already
+goal asked for, to scope? When a deliverable shows an OPERATION BAR, that
+bar is the definition of "done" for this class of work — judge the
+deliverable against it specifically (a fix is done when the reported
+symptom is gone; research when its sources are real and synthesized). You
+do NOT re-run quality checks: QC already
 verified each artifact against the domain standards and repaired what it
 could. Do NOT invent verification gates (plagiarism scans, sign-offs,
 "ready for review", approval signals) — the swarm has no such tools and
@@ -12748,7 +12769,9 @@ Each task fields:
   no regression), debug (a reported defect must stop), experiment (run + report
   vs a baseline), comprehend (explain real source), research (synthesize real,
   citable sources), evaluate (assess on evidence), operate (leave a system in a
-  target state). Name what the task is FOR; unsure → "construct".
+  target state). Name what the task is FOR; unsure → "construct". Let the
+  operation shape the breakdown: a debug task needs an evidence/repro step;
+  research needs real sourcing.
 - required_skills: REGISTERED SKILL NAMES from available-skills list
   above. Do NOT invent. Do NOT put capability tags here ("writing",
   "research", "structured-output", "long-context", "reasoning-heavy"
@@ -13310,6 +13333,8 @@ TASK CONTRACT
 DOMAIN STANDARDS (for kind={artifact_kind} — includes team-specific
 overrides and user-input constraints applying to this run)
 {standards}
+
+{operation_bar}
 
 {standing_notes}
 

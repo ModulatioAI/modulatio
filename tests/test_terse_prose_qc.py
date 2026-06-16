@@ -219,6 +219,7 @@ def test_template_renders_with_format(py_template: str) -> None:
         body="def foo(): pass\n",
         team_state="## Team State\n(empty)",
         standards="(no standards)",
+        operation_bar="(no operation-specific bar)",
         standing_notes="(none)", one_shot_notes="(none)",
         history="(no history)",
         inbox_notes="(no inbox notes this turn)",
