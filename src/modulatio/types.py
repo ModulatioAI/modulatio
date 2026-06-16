@@ -183,6 +183,12 @@ class Task(BaseModel):
     # Default is the neutral placeholder "text" so a task without an
     # explicit kind does not silently route to any one domain's standards.
     artifact_kind: str = "text"
+    # The OPERATION this task performs (build / fix / review / research / measure /
+    # …) — orthogonal to ``artifact_kind`` (the output): you can debug code OR data.
+    # It selects the verification bar the operation demands (see ``operation_bars``).
+    # Default empty → no operation-specific bar (today's behavior). A task property,
+    # never a role.
+    operation: str = ""
     # External knowledge the producer may need. Each topic is checked
     # against the research cache before delegating to the Researcher; fresh
     # results are cached to `<project>/research/<slug>.md` for reuse.
