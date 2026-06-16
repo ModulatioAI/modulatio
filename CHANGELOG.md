@@ -6,6 +6,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-06-15
+
+**Agent role refinement.** Producers, the Leader, and QC now work to a *per-operation*
+standard. Every task is classified by the **kind of work** it is — building, improving,
+fixing, measuring, explaining, researching, assessing, operating — and that classification
+selects three things: the **definition of "done"** the work is judged against, the **approach
+guidance** handed to the producer, and the **bar** the Leader and QC verify against. The
+result is more consistent production and tighter, better-aimed verification: a fix is judged
+on the reported problem actually being gone, a research task on its sources being real and
+synthesized, an assessment on every judgment tying to evidence — instead of one generic bar
+for every kind of work. Fully reviewed (coherence, hull, and code passes). No behavior change
+for work that declares no operation — it defaults safely.
+
+### Added
+
+- A per-task **operation** classification (orthogonal to artifact kind) that deterministically
+  selects a per-operation **verification bar** (the definition of "done") and an injected,
+  product-agnostic producer **approach card**.
+- The Leader and QC now judge each deliverable against the standard its operation demands; an
+  un-classified task defaults to a strict general standard, never a loose one.
+
 ## [0.9.0] — 2026-06-15
 
 **Stability + reporting.** A stability release: **two full-codebase debug passes** — an
