@@ -678,6 +678,19 @@ def _format_standards_block(raw: str) -> str:
     )
 
 
+def _with_operation_card(task: "Task", raw_standards: str) -> str:
+    """Prepend the engine-injected operation approach card (principle + the operation's
+    production card) to a producer's standards body, so a factory of producers works to
+    a consistent discipline regardless of model strength. PRODUCE paths only — QC review
+    judges against the bar, not the approach. The operation is normalized with the
+    ``construct`` safe-default, so an un-triaged task still gets a real (strict) card and
+    never a loose generic. Card rides the existing ``{standards}`` slot."""
+    from modulatio import operation_cards
+
+    card = operation_cards.render(getattr(task, "operation", ""))
+    return f"{card}\n\n{raw_standards}" if raw_standards.strip() else card
+
+
 #: Soft scope-drift threshold: kickoffs whose objective is shorter than
 #: this character count and decompose into more goals than
 #: ``_HEAVY_GOAL_COUNT`` get a non-blocking warning in summary.errors.
@@ -3941,6 +3954,7 @@ class Orchestrator:
 
         research_context = self._ensure_research(task)
         domain_standards = standards.load(task.artifact_kind, project_code=self.project.code)
+        domain_standards = _with_operation_card(task, domain_standards)
         # Slice 4 (Phase 2.5 merge): pre-task team memory consultation.
         # Targeted recall — narrow by skill+kind+capabilities, top-K
         # semantic against task description. Locked design: never the
@@ -5625,6 +5639,7 @@ class Orchestrator:
         domain_standards = standards.load(
             task.artifact_kind, project_code=self.project.code
         )
+        domain_standards = _with_operation_card(task, domain_standards)
         team_memory_context = self._recall_team_memory(task)
         team_canvas_block = self._build_team_canvas_digest()
         from modulatio import design_intent as _design_intent
@@ -8281,6 +8296,7 @@ class Orchestrator:
         domain_standards = standards.load(
             t.artifact_kind, project_code=self.project.code
         )
+        domain_standards = _with_operation_card(t, domain_standards)
         prompt = self._prompt("qc-patch", _QC_PATCH_PROMPT).format(
             task_id=t.id,
             artifact_kind=t.artifact_kind,

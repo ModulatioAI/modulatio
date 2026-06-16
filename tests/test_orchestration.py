@@ -1891,6 +1891,56 @@ def test_operation_bar_reaches_the_verifier_end_to_end(project: Project):
     assert bar_for_operation("debug").definition_of_done in joined
 
 
+def test_operation_card_reaches_the_producer_but_not_qc_review(project: Project):
+    """Phase 2: the engine injects the approach card into the PRODUCER brief (a
+    debug-triaged task hands the producer the universal principle + the debug
+    approach), and keeps it OUT of QC review — review judges against the bar, not
+    the producer's approach. Product-agnostic: neutral artifact + size floor."""
+    seen_producer_prompts: list[str] = []
+    seen_qc_prompts: list[str] = []
+
+    def _drafter_capture(prompt: str) -> str:
+        seen_producer_prompts.append(prompt)
+        return _drafter_stub(prompt)
+
+    def _qc_capture(prompt: str) -> str:
+        seen_qc_prompts.append(prompt)
+        return _qc_stub(prompt)
+
+    def _coord_debug(prompt: str) -> str:
+        tasks = [{
+            "description": "Resolve the reported defect in the target artifact",
+            "assignee_specialist": "drafter",
+            "artifact_kind": "text",
+            "operation": "debug",
+            "evidence_required": [
+                {"kind": "artifact", "description": "artifact file exists"},
+                {"kind": "metric", "description": "size",
+                 "target": "word_count >= 200"},
+            ],
+        }]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    runners = {
+        "leader": _leader_stub,
+        "planner": _coord_debug,
+        "drafter": _drafter_capture,
+        "qc": _qc_capture,
+    }
+    Orchestrator(project, runners).kickoff("card")
+
+    from modulatio import operation_cards
+    producer = "\n".join(seen_producer_prompts)
+    assert seen_producer_prompts, "producer never ran"
+    assert "How to approach this work" in producer
+    assert operation_cards.principle_card() in producer
+    assert operation_cards.production_card("debug") in producer
+    # Separation: QC review does not carry the producer approach card.
+    qc = "\n".join(seen_qc_prompts)
+    assert qc, "qc never ran"
+    assert "How to approach this work" not in qc
+
+
 def test_artifacts_expansion_plays_nicely_with_depends_on(project: Project):
     """A later task that depends on the expanded-parent's index waits
     for ALL sub-tasks to complete. `depends_on: [N]` where N is a
