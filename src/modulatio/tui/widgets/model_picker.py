@@ -134,10 +134,12 @@ class ModelPicker(Vertical):
             opt_list.add_option(Option(self._label(m), id=m.id))
 
     def _label(self, m: pc.CatalogModel) -> Text:
+        # Feng-Tui: theme-tracked tiers (base id, accent for the free marker).
+        th = self.app.current_theme
         line = Text()
-        line.append(m.id, style="#e8d8b4")
+        line.append(m.id, style=th.foreground or "#E0E0E0")
         if m.is_free:
-            line.append("  [FREE]", style="bold #ff6b35")
+            line.append("  [FREE]", style=f"bold {th.primary}")
         return line
 
     def on_input_changed(self, event: Input.Changed) -> None:
