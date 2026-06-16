@@ -26,10 +26,11 @@ from rich.markup import escape
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import DataTable, Input, Markdown
 
 from modulatio import job_template_library
+from modulatio.tui.widgets.master_detail import MasterDetail
 
 
 class JTLibraryScreen(Vertical):
@@ -39,27 +40,11 @@ class JTLibraryScreen(Vertical):
         Binding("r", "refresh", "Refresh", show=True),
     ]
 
+    # The split + full-height divider live in MasterDetail now.
     DEFAULT_CSS = """
-    JTLibraryScreen {
-        padding: 1;
-    }
-    JTLibraryScreen #jt-search {
-        margin-bottom: 1;
-    }
-    JTLibraryScreen #jt-layout {
-        height: 1fr;
-    }
-    JTLibraryScreen #jt-table {
-        width: 50%;
-    }
-    JTLibraryScreen #jt-detail-pane {
-        width: 50%;
-        border-left: solid $accent;
-        padding: 0 1;
-    }
-    JTLibraryScreen #jt-detail {
-        height: 1fr;
-    }
+    JTLibraryScreen { padding: 1; }
+    JTLibraryScreen #jt-search { margin-bottom: 1; }
+    JTLibraryScreen #jt-table { height: 1fr; }
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -68,17 +53,17 @@ class JTLibraryScreen(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder="search templates…", id="jt-search")
-        with Horizontal(id="jt-layout"):
-            table = DataTable(id="jt-table", cursor_type="row")
-            table.add_columns("Template", "Description", "Capabilities")
-            yield table
-            with Vertical(id="jt-detail-pane"):
-                with VerticalScroll(id="jt-detail"):
-                    yield Markdown(
-                        "_Select a template to view its parameters, output "
-                        "contract, and interview._",
-                        id="jt-detail-md",
-                    )
+        with MasterDetail():
+            with Vertical(id="md-list"):
+                table = DataTable(id="jt-table", cursor_type="row")
+                table.add_columns("Template", "Description", "Capabilities")
+                yield table
+            with VerticalScroll(id="md-detail"):
+                yield Markdown(
+                    "_Select a template to view its parameters, output "
+                    "contract, and interview._",
+                    id="jt-detail-md",
+                )
 
     def on_mount(self) -> None:
         self.refresh_templates()
