@@ -186,3 +186,52 @@ def test_cancel_not_clobbered_by_concurrent_update(isolated_vault):
             )
     finally:
         os.environ.pop("MODULATIO_PLAN_LOCK_TIMEOUT", None)
+
+
+# ── Finding 2b: a lock-free load() must never observe a torn write ──────
+
+
+def test_concurrent_load_never_observes_torn_write(isolated_vault):
+    # Atomic-write regression (re-sweep F2b — the ROOT of the cancel-vs-update
+    # flake). The per-plan lock serializes the read-modify-WRITE mutators, but
+    # pure readers (load(), and list_plans through it) run lock-free. The old
+    # writer used Path.write_text — open("w") TRUNCATES before writing — so a
+    # concurrent reader could catch the empty/partial window, fail to match the
+    # frontmatter, and get None: a live plan looks *missing*, which is exactly
+    # why cancel() raised "plan not found" and never flipped status. The fix
+    # writes a same-dir temp then os.replace (atomic), so a reader sees either
+    # the complete old or complete new file — never a torn one.
+    #
+    # Pre-fix this trips within a second under contention; post-fix never.
+    saved = _make_plan()
+    plans.set_status(saved.id, "tst", "executing", decided_by="dispatcher")
+    stop = threading.Event()
+    torn: list[str] = []
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            plans.update_execution_state(
+                saved.id, "tst", current_index=i, tokens_used=i,
+            )
+            i += 1
+
+    def reader():
+        while not stop.is_set():
+            rec = plans.load(saved.id, "tst")
+            if rec is None:
+                torn.append("load() saw a torn/empty plan file")
+                return
+
+    w = threading.Thread(target=writer)
+    readers = [threading.Thread(target=reader) for _ in range(4)]
+    w.start()
+    for r in readers:
+        r.start()
+    time.sleep(1.5)
+    stop.set()
+    w.join(5.0)
+    for r in readers:
+        r.join(5.0)
+
+    assert not torn, torn[0]
