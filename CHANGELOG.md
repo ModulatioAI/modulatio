@@ -20,6 +20,9 @@ independent hull pass, and a hooks/regression pass before merge.
 
 - **Three Feng-Tui themes** (`feng-amber` default, `feng-green`, `feng-cyan`), registered
   natively so a single F2 cycle re-resolves the palette across all mounted screens at once.
+  The TUI **remembers the variant you last used** and reopens on it next launch.
+- **A boot splash** — a low-res 1980s frame with the dithered `MODULATIO` wordmark, the
+  tagline, and "powered by Feng-Tui", shown on launch (any key begins; F2 re-tints it live).
 - **A reusable full-height-divider master-detail layout** adopted by the LOGS, TICKETS,
   ARTIFACTS, JT LIBRARY, and SKILLS tabs — one list/detail split instead of five bespoke ones.
 - **A read-only SKILLS preview pane** surfacing a skill's routing (tags, requires, tool
