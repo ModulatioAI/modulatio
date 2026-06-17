@@ -6,7 +6,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.9.2] — 2026-06-16
+## [0.9.3] — 2026-06-16
+
+> Supersedes the interim `v0.9.2` tag, which was cut mid-release before the boot splash
+> and theme-persistence landed; `0.9.3` is the complete, released snapshot.
 
 **Feng-Tui — the harmonious terminal interface.** A full phosphor-terminal reskin of the
 TUI: a pure-black ground, thin frames, and a monochrome accent in one of three live-cycling
