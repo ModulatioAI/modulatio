@@ -83,6 +83,35 @@ async def test_f2_keybinding_cycles_theme():
         assert app.theme == "feng-green"
 
 
+async def test_theme_persists_across_launches():
+    # Cycling the variant is remembered; the NEXT launch reopens on it instead
+    # of resetting to amber. (PREFS_FILE is tmp-isolated by the conftest fixture,
+    # so this exercises the real save/restore round-trip hermetically.)
+    app1 = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app1.run_test() as pilot:
+        await pilot.pause()
+        assert app1.theme == "feng-amber"   # empty prefs → amber default
+        app1.action_cycle_theme()           # → feng-green, persisted
+        await pilot.pause()
+        assert app1.theme == "feng-green"
+
+    # a fresh app instance restores the saved variant on mount
+    app2 = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app2.run_test() as pilot:
+        await pilot.pause()
+        assert app2.theme == "feng-green"
+
+
+async def test_unknown_saved_theme_falls_back_to_amber():
+    # A stale/garbage saved value must not crash boot — it falls back to amber.
+    from modulatio import preferences
+    preferences.set_theme("feng-ultraviolet")  # not a registered variant
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.theme == "feng-amber"
+
+
 async def test_f4_keybinding_flips_stream_without_error():
     # F4 (the remapped LEADER/TEAM flip) must dispatch without raising.
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)

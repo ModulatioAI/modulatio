@@ -1105,7 +1105,11 @@ class ModulatioApp(App):
         # mounted screen recolours by cascade when F2 cycles the variant.
         for theme in FENG_THEMES:
             self.register_theme(theme)
-        self.theme = "feng-amber"
+        # Reload the variant the operator last used (default amber). A stale or
+        # unknown saved value falls back to amber — never crash boot on it.
+        from modulatio import preferences
+        saved = preferences.get_theme()
+        self.theme = saved if saved in FENG_THEME_NAMES else "feng-amber"
         self.sub_title = self._feng_subtitle()   # surface the active variant
         # Feng-Tui boot frame — the dithered MODULATIO wordmark + tagline. Pushed
         # over the TUI on a real launch; dismisses on any key. Opt-in so tests
@@ -1152,6 +1156,12 @@ class ModulatioApp(App):
             i = -1
         self.theme = names[(i + 1) % len(names)]
         self.sub_title = self._feng_subtitle()
+        # Remember it so the next launch reopens on this variant.
+        try:
+            from modulatio import preferences
+            preferences.set_theme(self.theme)
+        except Exception:
+            pass
 
     def _feng_subtitle(self) -> str:
         """Header breadcrumb — surfaces the active Feng-Tui variant so the

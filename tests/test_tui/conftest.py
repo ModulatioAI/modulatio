@@ -28,6 +28,21 @@ import asyncio
 
 import pytest
 
+from modulatio import preferences
+
+
+@pytest.fixture(autouse=True)
+def _isolate_preferences(tmp_path, monkeypatch):
+    """Point the prefs file at a per-test tmp path.
+
+    The TUI now restores the last Feng-Tui variant from preferences on mount and
+    persists it on F2. Without isolation, tests asserting the amber default would
+    read the developer's real saved theme (flaky), and the theme-cycle tests
+    would WRITE the variant into the real ~/.config prefs (pollution). A fresh
+    empty tmp file makes the boot default deterministic and contains the writes.
+    """
+    monkeypatch.setattr(preferences, "PREFS_FILE", tmp_path / "preferences.json")
+
 
 @pytest.fixture(autouse=True)
 async def _detach_textual_default_executor():

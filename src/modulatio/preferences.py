@@ -45,3 +45,21 @@ def set_backup_dir(path: str) -> None:
     prefs = load_prefs()
     prefs["backup_dir"] = path
     save_prefs(prefs)
+
+
+def get_theme(default: str = "feng-amber") -> str:
+    """The Feng-Tui variant the TUI last used, so it reloads where you left it.
+
+    Returns the stored variant name (e.g. ``feng-green``) or ``default`` if none
+    is saved. The caller validates membership against the registered variants —
+    a stale/garbage value should fall back, never crash boot."""
+    prefs = load_prefs()
+    val = prefs.get("theme")
+    return val if isinstance(val, str) and val else default
+
+
+def set_theme(name: str) -> None:
+    """Remember the active Feng-Tui variant for the next launch."""
+    prefs = load_prefs()
+    prefs["theme"] = name
+    save_prefs(prefs)
