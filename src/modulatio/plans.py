@@ -180,6 +180,11 @@ def _atomic_overwrite(target: Path, text: str) -> None:
     The temp is named ``.<plan>.md.<rand>.tmp`` (leading dot + ``.tmp`` suffix)
     so it never matches the anchored ``<CODE>-PLAN-\\d+\\.md$`` scan that
     ``list_plans`` / ``next_plan_id`` use.
+
+    Same-filesystem invariant: the temp is created in ``target.parent`` (via
+    ``mkstemp(dir=...)``), so it is co-located with the target by construction
+    and ``os.replace`` stays on one filesystem (a cross-fs rename would raise).
+    A plans root split across filesystems would already break ``_plan_lock``.
     """
     tmp_fd, tmp_name = tempfile.mkstemp(
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp",
@@ -207,6 +212,11 @@ def _atomic_create(target: Path, text: str) -> None:
     is atomic and raises ``FileExistsError`` on collision, so the target
     appears fully-formed AND ``persist``'s O_EXCL id-allocation race (the
     retry-on-``FileExistsError`` loop) is preserved.
+
+    Same-filesystem invariant: the temp is created in ``target.parent`` (via
+    ``mkstemp(dir=...)``), so ``os.link`` stays on one filesystem (a cross-fs
+    link would raise). A plans root split across filesystems would already
+    break ``_plan_lock``.
     """
     tmp_fd, tmp_name = tempfile.mkstemp(
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp",
