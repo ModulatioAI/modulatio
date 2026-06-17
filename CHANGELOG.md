@@ -6,6 +6,47 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-06-16
+
+**Feng-Tui — the harmonious terminal interface.** A full phosphor-terminal reskin of the
+TUI: a pure-black ground, thin frames, and a monochrome accent in one of three live-cycling
+variants — **amber / green / cyan** (press **F2** to cycle; the whole interface re-tints
+instantly across every tab). State is now read as **glyph + WORD** rather than colour alone,
+so it survives a monochrome palette and a colour-blind operator. The look is layout-only —
+no backend wiring changed — and the whole port was reviewed across a coherence pass, an
+independent hull pass, and a hooks/regression pass before merge.
+
+### Added
+
+- **Three Feng-Tui themes** (`feng-amber` default, `feng-green`, `feng-cyan`), registered
+  natively so a single F2 cycle re-resolves the palette across all mounted screens at once.
+- **A reusable full-height-divider master-detail layout** adopted by the LOGS, TICKETS,
+  ARTIFACTS, JT LIBRARY, and SKILLS tabs — one list/detail split instead of five bespoke ones.
+- **A read-only SKILLS preview pane** surfacing a skill's routing (tags, requires, tool
+  loadout, executor, freshness, version) and body — replacing the retired add-to-agent bind
+  (skills are JIT-pool, not agent-bound).
+- **App-wide copy & paste** (OSC 52) — copy a detail entry to the host clipboard and paste
+  into composers, search boxes, and wizards, including to and from outside apps.
+- An empty-state on the MEMORY tab that surfaces the **memory-persists-per-project** invariant.
+
+### Changed
+
+- Destructive deletes (model preset, provider key, agent, cron job) now route through a uniform
+  **ConfirmModal** instead of bespoke two-step flashes — the consequence is stated in the modal.
+- The LOGS `s` action reads **"Report a problem"** (it opens the review-before-send report flow).
+- CONSOLE-only key bindings (`flip_stream` / `focus_jobdrop` / `kickoff` / `stop_job`) are now
+  hidden on non-console tabs.
+
+### Fixed
+
+- The reusable `MasterDetail` / `IndicatorPanel` widgets now parse standalone (outside the app),
+  the model/provider pickers render off-app without an active app, and the configuration
+  add/remove-key status lands on the freshly remounted widget. (Pre-merge full-suite regressions.)
+
+### Internal
+
+- A guard test pins memory storage at the **project** level — never under a run folder.
+
 ## [0.9.1] — 2026-06-15
 
 **Agent role refinement.** Producers, the Leader, and QC now work to a *per-operation*
