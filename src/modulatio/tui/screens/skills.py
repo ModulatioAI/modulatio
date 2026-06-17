@@ -13,10 +13,11 @@ from __future__ import annotations
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Label
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, DataTable, Label, Markdown
 
 from modulatio import skills
+from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.skill_wizard import SkillWizard
 from modulatio.vault import project_dir
 
@@ -31,13 +32,19 @@ class SkillsScreen(Vertical):
     """
 
     def compose(self) -> ComposeResult:
-        yield Label("Skills registry — a just-in-time floating pool")
-        table = DataTable(id="skills-table", cursor_type="row")
-        table.add_columns("Name", "Description", "Capability Tags", "Project-Local?")
-        yield table
-        with Horizontal(id="skills-actions"):
-            yield Button("Add skill", id="skills-add-btn", variant="primary")
-        yield SkillWizard(id="skill-wizard-panel", classes="hidden")
+        # Master-detail: the pool on the left, the selected skill on the right.
+        with MasterDetail():
+            with Vertical(id="md-list"):
+                yield Label("Skills registry — a just-in-time floating pool")
+                table = DataTable(id="skills-table", cursor_type="row")
+                table.add_columns(
+                    "Name", "Description", "Capability Tags", "Project-Local?")
+                yield table
+                with Horizontal(id="skills-actions"):
+                    yield Button("Add skill", id="skills-add-btn", variant="primary")
+                yield SkillWizard(id="skill-wizard-panel", classes="hidden")
+            with VerticalScroll(id="md-detail"):
+                yield Markdown("_Select a skill to view it._", id="skill-detail-md")
 
     def on_mount(self) -> None:
         self._refresh()
@@ -60,6 +67,59 @@ class SkillsScreen(Vertical):
                 "yes" if is_local else "no",
                 key=s.name,
             )
+        if table.row_count > 0:
+            first = list(table.rows.keys())[0].value
+            if first:
+                self._render_detail(first)
+        else:
+            self._set_detail(
+                "_No skills yet._  Author one with **Add skill**, or ask the "
+                "Leader to create one in the LEADER tab.")
+
+    # ── Detail pane ─────────────────────────────────────────────────────────
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key is not None and event.row_key.value:
+            self._render_detail(event.row_key.value)
+
+    def _render_detail(self, name: str) -> None:
+        code = self.app.project_code  # type: ignore[attr-defined]
+        try:
+            s = skills.load_with_metadata(name, project_code=code)
+        except Exception:
+            self._set_detail(f"_Could not load skill '{escape(name)}'._")
+            return
+        lines = [f"# {escape(s.name)}", ""]
+        if s.description:
+            lines += [escape(s.description), ""]
+        lines.append("**capability tags:** " + (", ".join(s.capability_tags) or "—"))
+        req = getattr(s, "required_capabilities", ()) or ()
+        lines.append("**requires:** " + (", ".join(req) or "—"))
+        tools = getattr(s, "tool_loadout", ()) or ()
+        lines.append("**tool loadout:** " + (", ".join(tools) or "none — pure prose"))
+        meta = []
+        if getattr(s, "executor", None):
+            meta.append(f"executor `{s.executor}`")
+        if getattr(s, "freshness_class", None):
+            meta.append(f"freshness `{s.freshness_class}`")
+        if getattr(s, "version", None):
+            meta.append(f"version `{s.version}`")
+        if meta:
+            lines += ["", "  ·  ".join(meta)]
+        lines += [
+            "",
+            "_routing: capability-match · checked out just-in-time from the pool._",
+        ]
+        body = getattr(s, "prompt_template", "") or ""
+        if body:
+            lines += ["", "---", "", body]
+        self._set_detail("\n".join(lines))
+
+    def _set_detail(self, source: str) -> None:
+        try:
+            self.query_one("#skill-detail-md", Markdown).update(source)
+        except Exception:
+            pass
 
     # ── Button routing ──────────────────────────────────────────────────────
 

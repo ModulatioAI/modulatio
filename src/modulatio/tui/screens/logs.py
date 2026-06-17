@@ -44,7 +44,7 @@ class LogsScreen(Vertical):
 
     BINDINGS = [
         Binding("r", "refresh", "Refresh", show=True),
-        Binding("s", "send", "Send to GitHub", show=True),
+        Binding("s", "send", "Report a problem", show=True),
         Binding("d", "delete", "Delete", show=True),
     ]
 

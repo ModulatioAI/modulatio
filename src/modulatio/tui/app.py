@@ -1349,6 +1349,22 @@ class ModulatioApp(App):
             panel = self._indicator_panel()
             if panel is not None:
                 panel.clear_all()
+        # Re-evaluate which footer keys show: the CONSOLE-only keys hide on
+        # other tabs (see check_action).
+        self.refresh_bindings()
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """Hide the CONSOLE-only keys (LEADER/TEAM flip, COMPOSE, KICK OFF, STOP)
+        from the footer when another top-level tab is active — they only apply on
+        the Console. Returning None hides + disables; True is the default."""
+        console_only = {"flip_stream", "focus_jobdrop", "kickoff", "stop_job"}
+        if action in console_only:
+            try:
+                if self.query_one("#app-tabs", TabbedContent).active != "tab-prompt":
+                    return None
+            except Exception:
+                pass
+        return True
 
 
 def _relaunch_if_restart(app) -> None:

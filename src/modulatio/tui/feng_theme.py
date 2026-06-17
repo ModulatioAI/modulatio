@@ -39,11 +39,17 @@ def _feng(name: str, accent: str, dim: str) -> Theme:
         warning=dim,
         error=_ERROR,
         # Carried in ``variables`` so they survive App.get_css_variables() and track
-        # the active accent: frame chrome + the dim muted tone.
+        # the active accent: frame chrome + the dim muted tone + the block cursor.
+        # The block cursor (active Tab, OptionList highlight) is a SUBTLE dark
+        # highlight with bright accent text — never a bright fill that hides the
+        # label (the default $block-cursor-background == primary did exactly that).
         variables={
             "frame": accent,
             "frame-dim": dim,
             "text-muted": dim,
+            "block-cursor-background": "#1f1f1f",
+            "block-cursor-foreground": accent,
+            "block-cursor-text-style": "bold",
         },
     )
 
