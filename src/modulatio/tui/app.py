@@ -311,10 +311,15 @@ class ModulatioApp(App):
         Binding("ctrl+v", "paste", "PASTE", priority=True),
     ]
 
-    def __init__(self, *, project_code: str = "TUI", stub: bool = True):
+    def __init__(self, *, project_code: str = "TUI", stub: bool = True,
+                 splash: bool = False):
         super().__init__()
         self.project_code = project_code
         self.stub = stub
+        # Show the Feng-Tui boot frame on launch. Opt-in (default off) so the
+        # stub test harness never trips over a blocking splash screen — only the
+        # real `run()` entry point sets it True.
+        self.splash = splash
         # ``MODULATIO :: PROJECT <CODE> :: PLAN MODE`` — aesthetic
         # breadcrumb. Cheap and inert; reads as the system telling you
         # what context you're in.
@@ -1102,6 +1107,12 @@ class ModulatioApp(App):
             self.register_theme(theme)
         self.theme = "feng-amber"
         self.sub_title = self._feng_subtitle()   # surface the active variant
+        # Feng-Tui boot frame — the dithered MODULATIO wordmark + tagline. Pushed
+        # over the TUI on a real launch; dismisses on any key. Opt-in so tests
+        # (which never pass splash=True) reach the tab surface unblocked.
+        if self.splash:
+            from modulatio.tui.screens.splash import SplashScreen
+            self.push_screen(SplashScreen())
         if not setup_state.setup_completed():
             self._set_response(
                 "First-launch detected — Modulatio has no saved setup state.\n"
@@ -1412,7 +1423,7 @@ def run() -> None:
             help="Offline stub mode (default: real when models are configured)",
         ),
     ) -> None:
-        app = ModulatioApp(project_code=code, stub=stub)
+        app = ModulatioApp(project_code=code, stub=stub, splash=True)
         app.run()
         _relaunch_if_restart(app)
 

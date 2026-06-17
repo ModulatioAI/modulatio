@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
+"""SplashScreen — the Feng-Tui boot frame loads the wordmark + tagline.
+
+Proves the boot art renders the MODULATIO wordmark + tagline + "powered by
+Feng-Tui", re-tints on F2, dismisses on a key, and — critically — is opt-in so
+the default (test) construction reaches the tab surface without a blocking
+splash on top.
+"""
+from textual.widgets import Static, TabbedContent
+
+from modulatio.tui.app import ModulatioApp
+from modulatio.tui.screens.splash import SplashScreen, _TAGLINE
+
+PROJECT_CODE = "FENG"
+
+
+async def test_splash_default_off_tabs_reachable_immediately():
+    # The stub harness constructs the app without splash=True, so no boot frame
+    # blocks the tab surface — the whole existing TUI suite depends on this.
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert not isinstance(app.screen, SplashScreen)
+        # the tab surface is right there
+        app.query_one(TabbedContent)
+
+
+async def test_splash_loads_wordmark_and_tagline():
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True, splash=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, SplashScreen)
+        art = app.screen.query_one("#splash-art", Static).render()
+        text = art.plain if hasattr(art, "plain") else str(art)
+        # the block wordmark renders with the heavy block glyph…
+        assert "█" in text
+        # …and the tagline + Feng-Tui credit load
+        assert _TAGLINE in text
+        assert "Feng-Tui" in text
+
+
+async def test_splash_dismisses_on_key():
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True, splash=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, SplashScreen)
+        await pilot.press("enter")
+        await pilot.pause()
+        # boot frame gone — the TUI is revealed underneath
+        assert not isinstance(app.screen, SplashScreen)
+        app.query_one(TabbedContent)
+
+
+async def test_splash_retints_on_f2():
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True, splash=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.theme == "feng-amber"
+        # F2 on the splash cycles the variant (and re-renders the art)
+        await pilot.press("f2")
+        await pilot.pause()
+        assert app.theme == "feng-green"
+        art = app.screen.query_one("#splash-art", Static).render()
+        text = art.plain if hasattr(art, "plain") else str(art)
+        assert "green" in text  # the variant name credit updated
