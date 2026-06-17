@@ -18,6 +18,7 @@ from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
 from modulatio import provider_catalog as pc
+from modulatio.tui.feng_theme import theme_tiers
 
 
 def _auth_word(provider: pc.Provider) -> str:
@@ -70,10 +71,13 @@ class ProviderPicker(OptionList):
             self.add_option(Option(self._label(p), id=p.id))
 
     def _label(self, p: pc.Provider) -> Text:
-        # Feng-Tui: monochrome accent/dim tiers read from the active theme so
-        # the row tracks amber/green/cyan (rebuilt on populate).
-        th = self.app.current_theme
-        accent, dim = th.primary, th.secondary
+        # Feng-Tui: monochrome accent/dim tiers from the active theme so the row
+        # tracks amber/green/cyan. Defensive — _label may be called off-app in a
+        # unit harness where self.app raises NoActiveAppError.
+        try:
+            accent, dim, _base, _err = theme_tiers(self.app)
+        except Exception:
+            accent, dim = "#FFC933", "#FFB300"
         line = Text()
         line.append(f"{p.name:18}", style=f"bold {accent}")
         line.append(f" {_auth_word(p):11}", style=dim)

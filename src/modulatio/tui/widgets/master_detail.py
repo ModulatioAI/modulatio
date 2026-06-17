@@ -44,7 +44,11 @@ class MasterDetail(Horizontal):
     MasterDetail > #md-list { width: 1fr; }
     MasterDetail > #md-detail {
         width: 40%;
-        border-left: solid $frame-dim;   /* the full-height divider; tracks the theme */
+        /* $secondary (not the custom $frame-dim) so this reusable widget's CSS
+           parses even when mounted outside ModulatioApp (standalone test
+           harnesses don't define $frame-dim). In the feng themes $secondary IS
+           the dim-accent tier, so the divider colour is unchanged + theme-tracked. */
+        border-left: solid $secondary;
         padding: 0 1;
     }
     MasterDetail.-wide-detail > #md-detail { width: 60%; }

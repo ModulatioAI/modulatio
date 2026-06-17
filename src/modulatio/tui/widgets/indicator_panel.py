@@ -93,7 +93,7 @@ class IndicatorPanel(Horizontal):
     IndicatorPanel {
         height: 3;
         width: auto;
-        border: round $frame-dim;
+        border: round $secondary;   /* $secondary, not custom $frame-dim, so it parses standalone */
         border-title-color: $secondary;
         padding: 0 1;
         background: $surface;   /* pure black (was navy #0e1c30) */

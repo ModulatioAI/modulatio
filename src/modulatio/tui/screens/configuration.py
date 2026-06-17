@@ -330,7 +330,7 @@ class ConfigScreen(Vertical):
 
     # ── provider key manager (no model needed — add / remove keys) ──────
 
-    async def _show_provider_keys(self, provider_id: str) -> None:
+    async def _show_provider_keys(self, provider_id: str, message: str = "") -> None:
         prov = pc.get_provider(provider_id)
         base = self._provider_base(prov) if prov else None
         body = self._body()
@@ -354,7 +354,9 @@ class ConfigScreen(Vertical):
                 Button("Remove key", id="cfg-rmkey", variant="warning"),
                 id="cfg-provkey-buttons",
             ),
-            Static("", id="cfg-status"),
+            # `message` set on the FRESH status widget (a remount discards the old
+            # one, so a status set before this would be lost — Wild Bill L3).
+            Static(message, id="cfg-status"),
             Button("Back", id="cfg-cancel"),
         )
 
@@ -367,8 +369,9 @@ class ConfigScreen(Vertical):
             return
         label = self.query_one("#cfg-newkeylabel", Input).value.strip()
         provider_keys.add_key(self._prov_base, val, label or None)
-        await self._show_provider_keys(self._prov_id)
-        self._set_status("Added a key to the shared pool.")
+        # Status into the remount (the old #cfg-status is discarded — Wild Bill L3).
+        await self._show_provider_keys(
+            self._prov_id, message="Added a key to the shared pool.")
 
     def _do_remove_model(self, key: str) -> None:
         model_presets.remove_preset(key)
@@ -400,8 +403,9 @@ class ConfigScreen(Vertical):
                 model_presets.update_preset(
                     model_key, auth_config={"env_var": base, "pool": True})
         provider_keys.remove_key(ev)
-        self.run_worker(self._show_provider_keys(self._prov_id))
-        self._set_status(f"Removed {ev} from Modulatio.")
+        # Pass the status into the remount so it lands on the fresh widget.
+        self.run_worker(self._show_provider_keys(
+            self._prov_id, message=f"Removed {ev} from Modulatio."))
 
     async def on_option_list_option_selected(
         self, event: OptionList.OptionSelected
