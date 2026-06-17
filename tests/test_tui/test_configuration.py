@@ -201,7 +201,9 @@ async def test_provider_key_manager_removes_a_key_and_repoints_pins(
         assert app.query("#cfg-provkeylist")
 
         screen._prov_selected_key = "OPENROUTER_API_KEY_2"
-        await screen._remove_provider_key()
+        await screen._remove_provider_key()   # opens the confirm guard
+        await pilot.pause()
+        await pilot.click("#confirm-yes")
         await pilot.pause()
         # the key is gone from Modulatio entirely…
         assert "OPENROUTER_API_KEY_2" not in os.environ
@@ -259,7 +261,9 @@ async def test_remove_deletes_the_selected_preset(tmp_path, monkeypatch):
         table.move_cursor(row=0)
         await pilot.pause()
         assert screen._selected_preset_key() == "dead_one"
-        await pilot.click("#cfg-remove")
+        await pilot.click("#cfg-remove")     # opens the confirm guard
+        await pilot.pause()
+        await pilot.click("#confirm-yes")
         await pilot.pause()
         assert model_presets.get_preset("dead_one") is None
         assert model_presets.get_preset("op_free") is not None

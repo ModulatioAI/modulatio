@@ -32,6 +32,7 @@ from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
+from modulatio.tui.feng_theme import theme_tiers
 from modulatio.types import ActivityEvent
 
 # Lane membership by the event ``role`` the orchestrator emits. AGENT-AGNOSTIC by
@@ -191,17 +192,19 @@ class StreamView(VerticalScroll):
     def add_operator_message(self, text: str) -> None:
         """Render the operator's own message in the conversation transcript
         (the LEADER lane)."""
+        accent, _dim, base, _err = theme_tiers(self.app)
         line = Text()
-        line.append("▸ you  ", style="bold #6cb6e4")
-        line.append(text, style="#e8d8b4")
+        line.append("▸ you  ", style=f"bold {accent}")
+        line.append(text, style=base)
         self._append(line)
 
     def add_leader_message(self, text: str) -> None:
         """Render the Leader's reply in the conversation transcript. (Phase B
         will stream this token-by-token; Phase A writes the whole reply.)"""
+        accent, _dim, base, _err = theme_tiers(self.app)
         line = Text()
-        line.append("◆ Leader  ", style="bold #ffb000")
-        line.append(text, style="#e8d8b4")
+        line.append("◆ Leader  ", style=f"bold {accent}")
+        line.append(text, style=base)
         self._append(line)
         self.last_leader_text = text
 
@@ -257,22 +260,23 @@ class StreamView(VerticalScroll):
         # parallel — so concurrent work reads as concurrent, not fast-serial. Only
         # on the RISE THROUGH the threshold (Nemo B1 #3 — not again as the wave
         # grows 2→3→4), so it marks the wave once, not each new producer.
+        accent, dim, base, _err = theme_tiers(self.app)
         count = len(self.active_producer_names())
         if self._last_producer_count < 2 <= count:
             marker = Text()
-            marker.append("  ▶ ", style="bold #ff6b35")
-            marker.append(self.concurrency_label(), style="bold #ffb000")
+            marker.append("  ▶ ", style=f"bold {accent}")
+            marker.append(self.concurrency_label(), style=f"bold {accent}")
             self._append(marker)
         self._last_producer_count = count
         glyph, verb = _PHASE.get(event.phase, ("·", event.phase))
         name = self._display_name(event.agent_id, event.role)
         line = Text()
-        line.append(f"{event.timestamp:%H:%M:%S} ", style="#b08858")
-        line.append(f"{glyph} ", style="#ff6b35")
-        line.append(name, style="bold #ffb000")
-        line.append(f" {verb}", style="#e8d8b4")
+        line.append(f"{event.timestamp:%H:%M:%S} ", style=dim)
+        line.append(f"{glyph} ", style=accent)
+        line.append(name, style=f"bold {accent}")
+        line.append(f" {verb}", style=base)
         if event.task_id:
-            line.append(f"  ·{event.task_id}", style="#b08858")
+            line.append(f"  ·{event.task_id}", style=dim)
         self._append(line)
 
 

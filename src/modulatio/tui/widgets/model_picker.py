@@ -25,6 +25,7 @@ from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from modulatio import provider_catalog as pc
+from modulatio.tui.feng_theme import theme_tiers
 
 
 class ModelPicker(Vertical):
@@ -134,10 +135,16 @@ class ModelPicker(Vertical):
             opt_list.add_option(Option(self._label(m), id=m.id))
 
     def _label(self, m: pc.CatalogModel) -> Text:
+        # Feng-Tui: theme-tracked tiers (base id, accent for the free marker).
+        # Defensive — called off-app in a unit harness (self.app would raise).
+        try:
+            accent, _dim, base, _err = theme_tiers(self.app)
+        except Exception:
+            accent, base = "#FFC933", "#E0E0E0"
         line = Text()
-        line.append(m.id, style="#e8d8b4")
+        line.append(m.id, style=base)
         if m.is_free:
-            line.append("  [FREE]", style="bold #ff6b35")
+            line.append("  [FREE]", style=f"bold {accent}")
         return line
 
     def on_input_changed(self, event: Input.Changed) -> None:

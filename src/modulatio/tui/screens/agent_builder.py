@@ -35,6 +35,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from modulatio import model_presets, roster
+from modulatio.tui.widgets.confirm_modal import ConfirmModal
 
 
 class AgentBuilderScreen(Vertical):
@@ -214,28 +215,31 @@ class AgentBuilderScreen(Vertical):
         await self.show_list(f"Added {tier} '{name}'.")
 
     async def _remove_selected(self) -> None:
-        # Any agent is removable now — Leader and QC included (remove + re-add).
+        # Any agent is removable (Leader/QC included — remove + re-add). All
+        # removals are guarded by a ConfirmModal (cadre 2026-06-16 — standardise
+        # destructive ops); removing the Leader/QC is load-bearing, so its
+        # message warns that kickoffs degrade until you re-add one.
         agent_id = self._selected_agent_id()
         if not agent_id:
             return
         agent = roster.load(agent_id, self.project_code)
         if agent is None:
             return
-        # Removing the Leader or QC is load-bearing: with no Leader a kickoff
-        # has no orchestrator; with no QC nothing reviews producer output. Make
-        # it a deliberate two-step (Nemo, hull 2026-06-02) — first Remove warns,
-        # a second confirms. Producers remove in one step (unchanged).
-        if agent.tier in ("leader", "qc") and self._pending_remove != agent_id:
-            self._pending_remove = agent_id
+        if agent.tier in ("leader", "qc"):
             role = agent.tier.upper()
-            self.query_one("#agt-status", Static).update(
-                f"⚠ Removing the {role} leaves no {role} — kickoffs will degrade "
-                f"until you re-add one. Press Remove again to confirm."
-            )
-            return
+            msg = (f"Remove the {role} '{agent_id}'?\n\nWith no {role}, kickoffs "
+                   f"degrade until you re-add one.")
+        else:
+            msg = f"Remove producer '{agent_id}'?"
+        self.app.push_screen(
+            ConfirmModal(msg),
+            lambda ok: self._do_remove_agent(agent_id) if ok else None,
+        )
+
+    def _do_remove_agent(self, agent_id: str) -> None:
         self._pending_remove = None
         roster.remove_agent(project_code=self.project_code, agent_id=agent_id)
-        await self.show_list(f"Removed '{agent_id}'.")
+        self.run_worker(self.show_list(f"Removed '{agent_id}'."))
 
 
 __all__ = ["AgentBuilderScreen"]

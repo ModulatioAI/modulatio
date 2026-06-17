@@ -18,6 +18,7 @@ from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
 from modulatio import provider_catalog as pc
+from modulatio.tui.feng_theme import theme_tiers
 
 
 def _auth_word(provider: pc.Provider) -> str:
@@ -70,26 +71,33 @@ class ProviderPicker(OptionList):
             self.add_option(Option(self._label(p), id=p.id))
 
     def _label(self, p: pc.Provider) -> Text:
+        # Feng-Tui: monochrome accent/dim tiers from the active theme so the row
+        # tracks amber/green/cyan. Defensive — _label may be called off-app in a
+        # unit harness where self.app raises NoActiveAppError.
+        try:
+            accent, dim, _base, _err = theme_tiers(self.app)
+        except Exception:
+            accent, dim = "#FFC933", "#FFB300"
         line = Text()
-        line.append(f"{p.name:18}", style="bold #ffb000")
-        line.append(f" {_auth_word(p):11}", style="#b08858")
+        line.append(f"{p.name:18}", style=f"bold {accent}")
+        line.append(f" {_auth_word(p):11}", style=dim)
         # free badge
         if p.free_detect != "none":
-            line.append(" free", style="bold #ff6b35")
+            line.append(" free", style=f"bold {accent}")
         else:
-            line.append("     ", style="#b08858")
+            line.append("     ", style=dim)
         # readiness — beta OAuth providers note it
         beta = any(a.beta for a in p.auth_options)
         if p.models_source.kind == "custom":
-            line.append("  set up", style="#b08858")  # always manual entry
+            line.append("  set up", style=dim)  # always manual entry
         elif _provider_ready(p):
-            line.append("  ready ✓", style="#6cb6e4")
+            line.append("  ready ✓", style=accent)
         elif p.models_source.kind == "local_probe":
-            line.append("  set up", style="#b08858")
+            line.append("  set up", style=dim)
         else:
-            line.append("  needs key", style="#b08858")
+            line.append("  needs key", style=dim)
         if beta:
-            line.append("  (oauth beta)", style="#b08858")
+            line.append("  (oauth beta)", style=dim)
         return line
 
     def on_option_list_option_selected(

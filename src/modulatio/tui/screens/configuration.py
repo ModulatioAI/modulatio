@@ -26,6 +26,7 @@ from modulatio import model_presets
 from modulatio import provider_catalog as pc
 from modulatio import provider_keys
 from modulatio.tui.widgets.auth_step import AuthStep
+from modulatio.tui.widgets.confirm_modal import ConfirmModal
 from modulatio.tui.widgets.model_picker import ModelPicker
 from modulatio.tui.widgets.provider_picker import ProviderPicker
 
@@ -168,10 +169,11 @@ class ConfigScreen(Vertical):
             if not key:
                 self._set_status("Select a model row first, then Remove.")
                 return
-            model_presets.remove_preset(key)
-            provider_keys.unpin_model(key)  # its keys rejoin the pool
-            self._refresh_table()
-            self._set_status(f"Removed '{key}'.")
+            # Guard the delete (cadre 2026-06-16 — standardise destructive ops).
+            self.app.push_screen(
+                ConfirmModal(f"Remove model '{key}'?"),
+                lambda ok: self._do_remove_model(key) if ok else None,
+            )
         elif event.button.id == "cfg-pinkey":
             key = self._selected_preset_key()
             if not key:
@@ -328,7 +330,7 @@ class ConfigScreen(Vertical):
 
     # ── provider key manager (no model needed — add / remove keys) ──────
 
-    async def _show_provider_keys(self, provider_id: str) -> None:
+    async def _show_provider_keys(self, provider_id: str, message: str = "") -> None:
         prov = pc.get_provider(provider_id)
         base = self._provider_base(prov) if prov else None
         body = self._body()
@@ -352,7 +354,9 @@ class ConfigScreen(Vertical):
                 Button("Remove key", id="cfg-rmkey", variant="warning"),
                 id="cfg-provkey-buttons",
             ),
-            Static("", id="cfg-status"),
+            # `message` set on the FRESH status widget (a remount discards the old
+            # one, so a status set before this would be lost — Wild Bill L3).
+            Static(message, id="cfg-status"),
             Button("Back", id="cfg-cancel"),
         )
 
@@ -365,14 +369,31 @@ class ConfigScreen(Vertical):
             return
         label = self.query_one("#cfg-newkeylabel", Input).value.strip()
         provider_keys.add_key(self._prov_base, val, label or None)
-        await self._show_provider_keys(self._prov_id)
-        self._set_status("Added a key to the shared pool.")
+        # Status into the remount (the old #cfg-status is discarded — Wild Bill L3).
+        await self._show_provider_keys(
+            self._prov_id, message="Added a key to the shared pool.")
+
+    def _do_remove_model(self, key: str) -> None:
+        model_presets.remove_preset(key)
+        provider_keys.unpin_model(key)  # its keys rejoin the pool
+        self._refresh_table()
+        self._set_status(f"Removed '{key}'.")
 
     async def _remove_provider_key(self) -> None:
         if not self._prov_selected_key or not self._prov_id:
             self._set_status("Pick a key from the list first.")
             return
         ev = self._prov_selected_key
+        # Guard — removing a key repoints pinned models back to the shared pool.
+        self.app.push_screen(
+            ConfirmModal(
+                f"Remove key '{ev}'?\n\nModels pinned to it rejoin the shared pool."),
+            lambda ok: self._do_remove_provider_key(ev) if ok else None,
+        )
+
+    def _do_remove_provider_key(self, ev: str) -> None:
+        if not self._prov_id:
+            return
         base = self._prov_base or ""
         # repoint any models pinned to this key back to the shared pool so a
         # removal never leaves a model dangling on a dead env var.
@@ -382,8 +403,9 @@ class ConfigScreen(Vertical):
                 model_presets.update_preset(
                     model_key, auth_config={"env_var": base, "pool": True})
         provider_keys.remove_key(ev)
-        await self._show_provider_keys(self._prov_id)
-        self._set_status(f"Removed {ev} from Modulatio.")
+        # Pass the status into the remount so it lands on the fresh widget.
+        self.run_worker(self._show_provider_keys(
+            self._prov_id, message=f"Removed {ev} from Modulatio."))
 
     async def on_option_list_option_selected(
         self, event: OptionList.OptionSelected

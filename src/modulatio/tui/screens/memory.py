@@ -249,6 +249,28 @@ class MemoryScreen(Vertical):
                 _cell((entry.body or "")[:80]),
             )
 
+        # Empty-state guidance (team-only view) — an empty screen shouldn't read
+        # as broken. Memory PERSISTS AT THE PROJECT LEVEL (not per run), so it
+        # accrues across jobs.
+        if not self._focused_agent and not team_entries:
+            try:
+                roster_has_agents = bool(roster.list_agents(self._project_code))
+            except Exception:
+                roster_has_agents = False
+            if not roster_has_agents:
+                stats_widget.update(
+                    "No memory yet for this project. Memory persists at the PROJECT "
+                    "level (not per run): agents accrue episodic + semantic memory as "
+                    "they work, and QC promotes validated findings into the shared team "
+                    "pool. Run a job (or add agents) to populate it."
+                )
+            else:
+                stats_widget.update(
+                    "No team memory yet — select an agent above for its per-agent "
+                    "memory, or run a job so QC can promote findings into the shared "
+                    "pool. (Memory persists per project, across runs.)"
+                )
+
 
 def build_memory_panel() -> MemoryScreen:
     return MemoryScreen()

@@ -20,7 +20,9 @@ from rich.text import Text
 from textual.containers import Horizontal
 from textual.widgets import Static
 
-# Idle (unlit) lamp shades — barely-there filament glow on a dark panel.
+from modulatio.tui.feng_theme import theme_tiers
+
+# Idle (unlit) lamp shades — barely-there filament glow on pure black.
 _OFF_LAMP = "#241a0e"
 _OFF_LABEL = "#5e4828"
 
@@ -68,6 +70,11 @@ class Bulb(Static):
     def is_lit(self) -> bool:
         return self._lit
 
+    def set_on_color(self, color: str) -> None:
+        """Re-point the lit colour (Feng-Tui theme change) and re-render."""
+        self._on = color
+        self._render_lamp()
+
     def _render_lamp(self) -> None:
         glowing = self._lit and self._phase
         lamp_color = self._on if glowing else _OFF_LAMP
@@ -86,10 +93,10 @@ class IndicatorPanel(Horizontal):
     IndicatorPanel {
         height: 3;
         width: auto;
-        border: round $frame-dim;
+        border: round $secondary;   /* $secondary, not custom $frame-dim, so it parses standalone */
         border-title-color: $secondary;
         padding: 0 1;
-        background: #0e1c30;
+        background: $surface;   /* pure black (was navy #0e1c30) */
     }
     IndicatorPanel Bulb {
         margin-right: 3;
@@ -99,8 +106,27 @@ class IndicatorPanel(Horizontal):
     BORDER_TITLE = "STATUS"
 
     def compose(self):
-        yield Bulb("MSG", "#ffb000", id="bulb-msg")
-        yield Bulb("PROBLEM", "#ff6b35", id="bulb-problem")
+        # MSG tracks the accent; PROBLEM stays terminal-red ($error) — a problem
+        # reads as a problem in every variant.
+        accent, _dim, _base, error = theme_tiers(self.app)
+        yield Bulb("MSG", accent, id="bulb-msg")
+        yield Bulb("PROBLEM", error, id="bulb-problem")
+
+    def on_mount(self) -> None:
+        # Re-tint the lamps live when the Feng-Tui variant changes (the one
+        # programmatic spot — the bulb colours are Rich-text, not CSS vars).
+        try:
+            self.app.theme_changed_signal.subscribe(self, self._on_theme_change)
+        except Exception:
+            pass
+
+    def _on_theme_change(self, *_args) -> None:
+        accent, _dim, _base, error = theme_tiers(self.app)
+        try:
+            self.query_one("#bulb-msg", Bulb).set_on_color(accent)
+            self.query_one("#bulb-problem", Bulb).set_on_color(error)
+        except Exception:
+            pass
 
     def signal_msg(self) -> None:
         """Amber: the Leader has something for you."""

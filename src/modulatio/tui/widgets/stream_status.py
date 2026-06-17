@@ -26,6 +26,8 @@ import time
 from rich.text import Text
 from textual.widgets import Static
 
+from modulatio.tui.feng_theme import theme_tiers
+
 # phase → human verb. Unmapped phases fall back to a tidied phase string, so a
 # new engine phase still narrates (just plainly) until it's named here.
 _VERB: dict[str, str] = {
@@ -145,16 +147,19 @@ class StreamStatus(Static):
         self._render_status()
 
     def _render_status(self) -> None:
+        # Feng-Tui: read the active theme each render (this widget re-renders on a
+        # timer, so the status line recolours live on F2).
+        accent, dim, _base, error = theme_tiers(self.app)
         text = Text()
         if self._error is not None:
-            text.append("✗ ", style="bold #ff5555")
-            text.append(self._error, style="#ff5555")
+            text.append("✗ ", style=f"bold {error}")
+            text.append(self._error, style=error)
         elif self._verb is not None:
-            text.append(f"{_SPINNER[self._frame]} ", style="bold #ff6b35")
+            text.append(f"{_SPINNER[self._frame]} ", style=f"bold {accent}")
             phrase = self._verb
             if self._lane == "team" and self._actor:
                 phrase = f"{self._actor} is {self._verb}"
-            text.append(f"{phrase}…", style="#ffb000")
+            text.append(f"{phrase}…", style=accent)
             # §5 + Phase 1: surface parallelism — N producers working at once, BY
             # NAME when we have them ("· 3 producers working: a, b, c"), else the
             # count alone. Names make concurrent work read as concurrent.
@@ -162,18 +167,18 @@ class StreamStatus(Static):
                 label = f"  · {self._working} producers working"
                 if self._working_names:
                     label += ": " + ", ".join(self._working_names)
-                text.append(label, style="bold #ff6b35")
+                text.append(label, style=f"bold {accent}")
             elapsed = time.monotonic() - self._started_at
             if elapsed >= _ELAPSED_AFTER:
-                text.append(f"  ({int(elapsed)}s)", style="#b08858")
+                text.append(f"  ({int(elapsed)}s)", style=dim)
         elif self._done:
-            text.append("✓ ", style="bold #ffb000")
-            text.append("done", style="#b08858")
+            text.append("✓ ", style=f"bold {accent}")
+            text.append("done", style=dim)
         else:
             # Blinking standby cursor — old gear awaiting input.
             cursor_on = (self._frame // 5) % 2 == 0
-            text.append("▮ " if cursor_on else "  ", style="#3f6d8c")
-            text.append("standby", style="#5e4828")
+            text.append("▮ " if cursor_on else "  ", style=dim)
+            text.append("standby", style=dim)
         self.update(text)
 
 
