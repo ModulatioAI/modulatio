@@ -5425,6 +5425,7 @@ class Orchestrator:
         attachments: list | None = None,
         on_token: "Callable[[str], None] | None" = None,
         permission_callback: "Callable[[str, dict], bool] | None" = None,
+        prompt_fn: "Callable | None" = None,
     ) -> str:
         """The Leader's conversational function: reply to the operator as a
         fully-capable partner, tool-using and persistent. Returns the reply
@@ -5438,6 +5439,16 @@ class Orchestrator:
         stub mode) returns a plain acknowledgement so the UI flow still works.
         """
         attachments = attachments or []
+        # Wire the cross-cutting permission gate into the tool-loop: when the
+        # caller supplies a prompt surface (the TUI's approval modal), build the
+        # gate-backed callback so every out-of-workspace tool call is gated
+        # (extractor -> gate.decide -> bool). An explicit permission_callback
+        # (e.g. ACP) wins. The gate persists on the Orchestrator across turns.
+        if prompt_fn is not None and permission_callback is None:
+            from modulatio import leader_gate as _lg
+            permission_callback = _lg.build_permission_callback(
+                self.leader_gate(), root=self._leader_workspace(), prompt_fn=prompt_fn,
+            )
         # Serialize the whole turn so two concurrent operator sessions on one
         # project can't interleave the durable log or race on shared state.
         with self._converse_lock:
