@@ -2,6 +2,7 @@
 name = "modulatio"
 version = "0.9.4"
 description = "Multi-model agent framework with plan-mode orchestration, integrated TUI, and team-state working memory."
+readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
