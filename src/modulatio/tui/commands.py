@@ -169,6 +169,31 @@ def _handle_cron(args: list[str]) -> CommandResult:
     )
 
 
+def _handle_rp(args: list[str]) -> CommandResult:
+    """`/rp` — revoke ALL Leader permissions (the escape hatch). Clears every
+    persisted + session grant; the app rebuilds the Leader's tool registry so
+    his hands snap back to the default ``leader_workspace``."""
+    return CommandResult(
+        output="Revoking all Leader permissions — back to the workspace floor.",
+        side_effect="leader_revoke_permissions",
+    )
+
+
+def _handle_work(args: list[str]) -> CommandResult:
+    """`/work <path>` — point the Leader's hands at a real folder. The app
+    surfaces the approval modal (once / this session / always / deny) before
+    any access is allowed; the path is kept verbatim (raw remainder)."""
+    if not args or not args[0]:
+        return CommandResult(
+            output="Usage: /work <path> — point the Leader at a folder to work in.",
+            ok=False,
+        )
+    return CommandResult(
+        output=f"Requesting access to {args[0]} …",
+        side_effect=f"leader_work_here:{args[0]}",
+    )
+
+
 def _handle_bug(args: list[str]) -> CommandResult:
     """Open the bug-report form."""
     return CommandResult(
@@ -306,6 +331,20 @@ COMMANDS: tuple[Command, ...] = (
         category="Help",
         handler=_handle_bug,
     ),
+    Command(
+        shortcut="/work",
+        name="Work in a folder",
+        description="`/work <path>` — point the Leader's solo hands at a real folder (asks approval).",
+        category="Leader",
+        handler=_handle_work,
+    ),
+    Command(
+        shortcut="/rp",
+        name="Revoke permissions",
+        description="Revoke ALL Leader folder permissions (escape hatch).",
+        category="Leader",
+        handler=_handle_rp,
+    ),
 )
 
 
@@ -316,7 +355,7 @@ COMMANDS: tuple[Command, ...] = (
 # backslashes, corrupting Windows-style paths (e.g. ``/open C:\Users\me\f.md``
 # becomes ``C:Usersmef.md``). For these we take the literal remainder after the
 # command token, stripped of an optional single pair of surrounding quotes.
-_RAW_REMAINDER_COMMANDS: frozenset[str] = frozenset({"/open"})
+_RAW_REMAINDER_COMMANDS: frozenset[str] = frozenset({"/open", "/work"})
 
 
 def _strip_one_quote_pair(s: str) -> str:

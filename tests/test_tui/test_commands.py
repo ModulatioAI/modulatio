@@ -86,6 +86,33 @@ def test_open_with_path_emits_side_effect():
     assert result.side_effect == "open_file:notes/leader.md"
 
 
+# === Leader permission commands (two-lane Leader widen) ===
+
+def test_rp_revokes_all_permissions():
+    """`/rp` = revoke ALL Leader grants (the escape hatch)."""
+    result = cmd_mod.dispatch("/rp")
+    assert result.ok is True
+    assert result.side_effect == "leader_revoke_permissions"
+
+
+def test_work_requires_argument():
+    result = cmd_mod.dispatch("/work")
+    assert result.ok is False
+    assert "Usage" in result.output
+
+
+def test_work_with_path_emits_widen_side_effect():
+    result = cmd_mod.dispatch("/work /home/cknox/projects/myapp")
+    assert result.ok is True
+    assert result.side_effect == "leader_work_here:/home/cknox/projects/myapp"
+
+
+def test_work_preserves_backslash_path_verbatim():
+    """Raw-remainder: a Windows-style path must survive shlex un-mangled."""
+    result = cmd_mod.dispatch(r"/work C:\Users\me\proj")
+    assert result.side_effect == r"leader_work_here:C:\Users\me\proj"
+
+
 def test_refresh_emits_refresh_all_tabs():
     result = cmd_mod.dispatch("/refresh")
     assert result.side_effect == "refresh_all_tabs"
