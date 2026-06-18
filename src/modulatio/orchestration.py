@@ -2069,6 +2069,10 @@ class Orchestrator:
         #: or read a half-written thread. Held for the whole turn — converse is an
         #: operator-facing single-flight, never a parallel-wave hot path.
         self._converse_lock = threading.Lock()
+        #: §2 autonomy mode for the conversational session (set by a leading
+        #: /yolo //goal //yolo-goal //default command; persists across turns).
+        from modulatio.permissions import RunMode as _RunMode
+        self._session_mode = _RunMode.DEFAULT
         #: Fix B (2026-06-03): serializes the activity_callback so concurrent wave
         #: workers can fire ActivityEvents LIVE (not buffer-til-merge) without
         #: racing a non-thread-safe subscriber — the operator sees producers work
@@ -5426,6 +5430,40 @@ class Orchestrator:
             ),
         }
 
+    def _consume_mode_command(self, message: str) -> "tuple[bool, str]":
+        """§2 Task 1. If ``message`` leads with a mode command (/yolo //goal
+        //yolo-goal //default), set the session mode and return ``(True, remainder)``
+        — the remainder is the Leader's view of the message, command token stripped
+        (empty for a bare command). Returns ``(False, message)`` unchanged when the
+        first token isn't a mode command."""
+        from modulatio.permissions import RunMode as _RunMode
+        mode = _RunMode.from_command(message)
+        if mode is None:
+            return (False, message)
+        self._session_mode = mode
+        parts = (message or "").strip().split(maxsplit=1)
+        remainder = (parts[1] if len(parts) > 1 else "").strip()
+        return (True, remainder)
+
+    def _mode_ack(self, mode) -> str:
+        """The reply to a BARE mode command — a mode-set acknowledgement, not an
+        empty turn. Each ack surfaces the fence invariant: a new folder always
+        needs /work, in every mode."""
+        from modulatio.permissions import RunMode as _RunMode
+        if mode is _RunMode.YOLO:
+            return ("Autonomy: YOLO — I won't stop to ask before reaching for a "
+                    "capability (network, shell), and the sandbox stays on. "
+                    "Crossing into a new folder still needs your /work approval.")
+        if mode is _RunMode.GOAL:
+            return ("Autonomy: GOAL — I'll decide how to proceed without checking "
+                    "each step, but I'll still ask before a new capability, and a "
+                    "new folder still needs your /work approval.")
+        if mode is _RunMode.YOLO_GOAL:
+            return ("Autonomy: YOLO-GOAL — I'll run free on judgment AND auto-grant "
+                    "capabilities. A new folder still needs your /work approval.")
+        return ("Autonomy: DEFAULT — I'll confirm direction on consequential "
+                "choices and ask before a new capability or folder.")
+
     def converse(
         self,
         message: str,
@@ -5447,6 +5485,19 @@ class Orchestrator:
         stub mode) returns a plain acknowledgement so the UI flow still works.
         """
         attachments = attachments or []
+        # §2 Task 1 — autonomy mode at the converse boundary. A leading mode
+        # command sets the session mode (persists on the Orchestrator) and is
+        # STRIPPED so the Leader sees the task, not the command. A BARE command is
+        # a mode-ack (recorded as a turn), not an empty message into the loop.
+        matched, stripped = self._consume_mode_command(message)
+        if matched and not stripped:
+            ack = self._mode_ack(self._session_mode)
+            with self._converse_lock:
+                self._append_conversation("operator", message)
+                self._append_conversation("leader", ack)
+            return ack
+        if matched:
+            message = stripped
         # Wire the cross-cutting permission gate into the tool-loop: when the
         # caller supplies a prompt surface (the TUI's approval modal), build the
         # gate-backed callback so every out-of-workspace tool call is gated

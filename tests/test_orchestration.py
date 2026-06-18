@@ -138,6 +138,41 @@ def test_leader_tool_registry_rebinds_to_leader_workspace(project: Project):
         reg["read_file"].call(path="../escape.txt")  # confinement holds
 
 
+def test_consume_mode_command_parses_strips_and_sets_mode(project: Project):
+    """§2 Task 1: a leading mode command sets the session mode + is stripped so the
+    Leader sees the task; a bare command sets the mode with empty remainder; an
+    ordinary message leaves the mode unchanged."""
+    from modulatio.permissions import RunMode
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    assert orch._session_mode is RunMode.DEFAULT          # default
+
+    matched, stripped = orch._consume_mode_command("/goal build a site")
+    assert matched is True and stripped == "build a site"  # command stripped
+    assert orch._session_mode is RunMode.GOAL
+
+    matched, stripped = orch._consume_mode_command("/yolo")
+    assert matched is True and stripped == ""              # bare command
+    assert orch._session_mode is RunMode.YOLO
+
+    matched, stripped = orch._consume_mode_command("hello there")
+    assert matched is False and stripped == "hello there"  # not a command
+    assert orch._session_mode is RunMode.YOLO              # unchanged
+
+    orch._consume_mode_command("/default")
+    assert orch._session_mode is RunMode.DEFAULT           # reset
+
+
+def test_converse_bare_mode_command_returns_ack(project: Project):
+    """A bare /yolo is a mode-ack (not an empty turn), and the ack states the fence
+    invariant — a new folder still needs /work, even under yolo."""
+    from modulatio.permissions import RunMode
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    ack = orch.converse("/yolo")
+    assert orch._session_mode is RunMode.YOLO
+    assert "yolo" in ack.lower()
+    assert "/work" in ack.lower() or "folder" in ack.lower()  # fence invariant surfaced
+
+
 def test_converse_prompt_injects_runbook_at_head(project: Project):
     """The Leader's embedded runbook (the always-on bar-commit spine) is injected
     at the HEAD of every converse prompt — not a JIT pull-skill, so the
