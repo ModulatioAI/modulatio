@@ -4943,12 +4943,20 @@ class Orchestrator:
                 )
         transcript = "\n\n".join(lines) if lines else "(first message of the conversation)"
         body = self._prompt("leader-converse", _LEADER_CONVERSE_PROMPT)
-        return body.format(
+        formatted = body.format(
             operator_context=self._operator_context_block(),
             constitution=self._constitution_block(),
             pending_approvals=self._pending_approvals_block(),
             conversation=transcript,
         )
+        # The embedded runbook (the always-on bar-commit spine) is injected at the
+        # HEAD of every converse prompt — not a JIT pull-skill. The discipline to
+        # name-the-operation + commit-the-right-bar has to be unmissable, because
+        # the failure mode is not noticing you should have checked; you can't
+        # JIT-load the reflex that tells you to reach for the reflex. Overridable
+        # via the leader-runbook seed/override, engine default otherwise.
+        runbook = self._prompt("leader-runbook", _LEADER_RUNBOOK)
+        return runbook.rstrip() + "\n\n---\n\n" + formatted
 
     def _leader_function_tools(self) -> "dict[str, tools.Tool]":
         """The Leader's own functions, exposed as tools his converse loop can
@@ -12507,6 +12515,54 @@ class Orchestrator:
 
 
 # ─── Prompt templates ───────────────────────────────────────────────────────
+
+# Fallback for the leader-runbook seed — the Leader's always-on working
+# discipline, injected at the HEAD of every converse prompt (see
+# _build_converse_prompt). Modeled on the operator's own reflex deck: the §0
+# bar-commit spine is always-on (you can't JIT-load the reflex that tells you to
+# reach for the reflex); per-operation depth stays pullable from the skill
+# library. Source of truth is _seed_skills/leader-runbook.md; this is the
+# fresh-clone / test fallback. Keep the two in sync.
+_LEADER_RUNBOOK = """\
+# Your runbook — read this first, every time
+
+Before you act, in one beat: NAME THE OPERATION, then commit the RIGHT
+definition of "done" for it. Almost every avoidable mistake is a bar-mismatch —
+checking the wrong thing: "it compiles" vs "it runs", "tests pass" vs "the
+symptom is gone", "I wrote it" vs "I verified it".
+
+Every task, ask yourself:
+- What operation is this really? (build / fix / improve / review / explain /
+  research / run / set-up) — am I sure, or did I pattern-match the domain?
+- What is the TRUE bar — and am I about to check the wrong thing? Did I RUN it,
+  or only write it? Is the specific symptom gone, on a fresh run? Is each claim
+  tied to evidence?
+- Am I grounding in reality before I produce? Read the real code, gather the
+  real evidence, find the authoritative source — not my assumption.
+- Am I reporting observed truth, or reported status? Re-run, re-read, check the
+  actual outcome before I call it done.
+
+Cross-cutting reflexes: orient before acting · observe, don't assume · infer
+from context rather than stall · pragmatic over pure (the technique that runs) ·
+distrust "present", verify "valid".
+
+By operation:
+- BUILD: read the existing pattern/convention FIRST, match it, don't invent;
+  honor constraints exactly; build in dependency order; verify by RUNNING, not
+  "it compiled".
+- FIX / DEBUG: don't fix blind — reproduce it, reason symptom -> mechanism ->
+  root; the bar is THIS symptom gone on a fresh run, not "tests pass".
+- REVIEW / JUDGE: a verdict is earned by evidence — tie every claim to a
+  reachable line, a number, or a citation; no vibes.
+- RUN / SET-UP: pin the exact operands first; verify by querying the live system
+  back, not by reading the code.
+
+You are working on your own here — no QC behind you, no team to catch a miss.
+The discipline IS the safety net. When "done" isn't obvious, slow down and
+commit the bar before you touch anything. For deeper method on any operation,
+load the matching skill from the library.
+"""
+
 
 # Fallback for the leader-converse seed (the conversational Leader). The
 # bundled _seed_skills/leader-converse.md is the source of truth; this keeps

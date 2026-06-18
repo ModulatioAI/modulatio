@@ -138,6 +138,32 @@ def test_leader_tool_registry_rebinds_to_leader_workspace(project: Project):
         reg["read_file"].call(path="../escape.txt")  # confinement holds
 
 
+def test_converse_prompt_injects_runbook_at_head(project: Project):
+    """The Leader's embedded runbook (the always-on bar-commit spine) is injected
+    at the HEAD of every converse prompt — not a JIT pull-skill, so the
+    discipline is unmissable for whatever model drives the solo Leader."""
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    prompt = orch._build_converse_prompt([], "help me refactor this module")
+    low = prompt.lower()
+    assert "name the operation" in low          # the bar-commit spine is present
+    assert "bar" in low                          # commit the RIGHT bar
+    # it's at the HEAD — the runbook precedes the conversation transcript
+    assert low.index("name the operation") < prompt.index("help me refactor this module")
+
+
+def test_converse_runbook_is_overridable(project: Project, monkeypatch):
+    """The runbook loads via _prompt (seed/override + engine fallback), so a
+    project can override it like any other prompt."""
+    from modulatio import skills
+    monkeypatch.setattr(
+        skills, "load",
+        lambda name, project_code=None: "CUSTOM RUNBOOK XYZZY" if name == "leader-runbook" else "",
+    )
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    prompt = orch._build_converse_prompt([], "hi")
+    assert "CUSTOM RUNBOOK XYZZY" in prompt
+
+
 def test_solo_leader_can_jit_load_coding_skill(project: Project):
     """Plan Piece A acceptance: the solo Leader's converse loadout includes the
     skill-library tools, and `coding.md` is in the floating pool — so he can
