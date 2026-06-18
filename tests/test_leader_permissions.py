@@ -65,3 +65,36 @@ def test_is_allowed_workspace_and_approved_roots(tmp_path):
     assert not lp.is_allowed("/etc/passwd", workspace=workspace, extra_roots=[str(extra)])
     # under extra but NOT granted → refused
     assert not lp.is_allowed(str(extra / "x.py"), workspace=workspace, extra_roots=[])
+
+
+def test_symlink_root_grant_pins_to_realpath(tmp_path, monkeypatch):
+    """Wild Bill HIGH#1: a durable grant pins to the resolved REALPATH at grant
+    time, so retargeting the symlink later can't silently widen the grant."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(CODE, "x", "y")
+    real_a = tmp_path / "real_a"
+    real_a.mkdir()
+    real_b = tmp_path / "real_b"
+    real_b.mkdir()
+    link = tmp_path / "current"
+    link.symlink_to(real_a)
+    lp.add_allowed_root(CODE, str(link))
+    roots = lp.load_allowed_roots(CODE)
+    assert roots == [str(real_a.resolve())]  # pinned to real_a, not the link path
+    link.unlink()
+    link.symlink_to(real_b)  # retarget the symlink
+    ws = tmp_path / "ws"
+    assert lp.is_allowed(str(real_a / "f.py"), workspace=ws, extra_roots=roots)
+    assert not lp.is_allowed(str(real_b / "f.py"), workspace=ws, extra_roots=roots)
+
+
+def test_load_drops_relative_and_nonstring_entries(project):
+    """Wild Bill #7: fail-closed strictness — only absolute string roots load."""
+    import json
+
+    pf = vault.project_dir(CODE) / "leader_permissions.json"
+    pf.write_text(
+        json.dumps({"allowed_roots": ["/ok/abs", "relative/path", 42, "../up"]}),
+        encoding="utf-8",
+    )
+    assert lp.load_allowed_roots(CODE) == ["/ok/abs"]

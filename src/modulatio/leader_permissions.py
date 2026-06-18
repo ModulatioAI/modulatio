@@ -45,9 +45,11 @@ def _permission_file(code: str) -> Path:
 
 
 def _normalize(path: str) -> str:
-    """Absolute, normalized form — strips trailing slashes and collapses ``..``
-    so grants dedup and compare cleanly. Pure string op; no filesystem touch."""
-    return os.path.normpath(os.path.abspath(str(path)))
+    """Canonical REALPATH — resolves symlinks (a filesystem touch) so a durable
+    grant pins to the concrete directory at grant time; retargeting the symlink
+    later cannot silently widen the grant (Wild Bill HIGH#1). Also collapses
+    ``..`` and strips trailing slashes via ``Path.resolve()``."""
+    return str(Path(path).resolve())
 
 
 def load_allowed_roots(code: str) -> list[str]:
@@ -62,7 +64,11 @@ def load_allowed_roots(code: str) -> list[str]:
         except (OSError, json.JSONDecodeError):
             return []
         roots = data.get("allowed_roots", [])
-        return [str(r) for r in roots] if isinstance(roots, list) else []
+        if not isinstance(roots, list):
+            return []
+        # Fail-closed strictness (Wild Bill #7): only absolute string roots load;
+        # relative paths, traversal, and non-strings are dropped, not trusted.
+        return [r for r in roots if isinstance(r, str) and os.path.isabs(r)]
 
 
 def _save_allowed_roots(code: str, roots: list[str]) -> None:
