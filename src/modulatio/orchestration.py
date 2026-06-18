@@ -4694,6 +4694,7 @@ class Orchestrator:
         budget_role: str | None = None,
         goal_id: str | None = None,
         permission_callback: "Callable[[str, dict], bool] | None" = None,
+        permission_broker: "object | None" = None,
     ) -> str:
         """Shared helper: run the function-calling loop with a JSONL
         transcript sidecar and per-call activity events. Returns the
@@ -4810,6 +4811,7 @@ class Orchestrator:
                     self.summarizer_chat_runner_factory
                 ),
                 permission_callback=permission_callback,
+                permission_broker=permission_broker,
             )
 
     # ── Leader: the CONVERSE function (the conversational partner) ───────
@@ -5464,6 +5466,46 @@ class Orchestrator:
         return ("Autonomy: DEFAULT — I'll confirm direction on consequential "
                 "choices and ask before a new capability or folder.")
 
+    def _permission_grants(self):
+        """The broker's GrantStore, cached on the Orchestrator so SESSION grants
+        survive across converse turns (ALWAYS grants persist to an engine-owned
+        ``permissions.json`` — a SEPARATE store from leader_gate's path/exec
+        grants; the two never collide)."""
+        cached = getattr(self, "_perm_grants_cache", None)
+        if cached is None:
+            from modulatio import permissions as _perm, vault as _vault
+            cached = _perm.GrantStore(
+                _vault.project_dir(self.project.code) / "permissions.json"
+            )
+            self._perm_grants_cache = cached
+        return cached
+
+    def _build_permission_broker(self, mode, ask):
+        """§2 Task 2 — construct the per-session ``PermissionBroker`` from the
+        session ``mode`` + the live sandbox substrate. The broker gates the
+        CAPABILITY axis (network/shell/spend); it COMPOSES with the leader_gate
+        (filesystem axis) as a separate deny-chain arm in the runner — it never
+        touches the folder fence (the gate-reconcile invariant)."""
+        from modulatio import permissions as _perm, sandbox as _sandbox
+        return _perm.PermissionBroker(
+            mode=mode,
+            grants=self._permission_grants(),
+            ask=ask,
+            sandbox_available=_sandbox.is_sandbox_available,
+            unsafe_posture=(
+                _sandbox.is_bypass_requested() or _sandbox.current_profile() == "off"
+            ),
+            on_decision=self._audit_permission_decision,
+        )
+
+    def _audit_permission_decision(self, cap, decision) -> None:
+        """Best-effort audit of a broker grant/deny to the activity stream. The
+        broker swallows any exception this raises (§6 audit-relay safety)."""
+        self._emit_activity(
+            role="leader", phase="permission", agent_id="leader",
+            detail=f"{getattr(decision, 'value', decision)}: {getattr(cap, 'label', cap)}",
+        )
+
     def converse(
         self,
         message: str,
@@ -5472,6 +5514,7 @@ class Orchestrator:
         on_token: "Callable[[str], None] | None" = None,
         permission_callback: "Callable[[str, dict], bool] | None" = None,
         prompt_fn: "Callable | None" = None,
+        ask: "Callable | None" = None,
     ) -> str:
         """The Leader's conversational function: reply to the operator as a
         fully-capable partner, tool-using and persistent. Returns the reply
@@ -5508,6 +5551,15 @@ class Orchestrator:
             permission_callback = _lg.build_permission_callback(
                 self.leader_gate(), root=self._leader_workspace(), prompt_fn=prompt_fn,
             )
+        # §2 Task 2 — the autonomy-mode broker (CAPABILITY axis), composed with the
+        # gate above (FILESYSTEM axis) as a separate deny-chain arm in the runner.
+        # Wire it when a mode is active (/yolo auto-grants; /goal asks) OR an ask
+        # surface is supplied; DEFAULT + no ask keeps legacy behavior (no broker,
+        # no regression — the leader_gate still fences folders).
+        from modulatio.permissions import RunMode as _RunMode
+        permission_broker = None
+        if self._session_mode is not _RunMode.DEFAULT or ask is not None:
+            permission_broker = self._build_permission_broker(self._session_mode, ask)
         # Serialize the whole turn so two concurrent operator sessions on one
         # project can't interleave the durable log or race on shared state.
         with self._converse_lock:
@@ -5583,6 +5635,7 @@ class Orchestrator:
                             needs_network=True,
                             budget_role="leader-chat",
                             permission_callback=permission_callback,
+                            permission_broker=permission_broker,
                         )
                     finally:
                         self._tls.tool_registry_override = None
