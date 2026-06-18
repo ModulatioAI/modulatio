@@ -1210,11 +1210,26 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
         _payload_argv = _prlimit_wrapper_prefix() + list(exec_argv)
         run_argv = _payload_argv
         _profile = _sandbox.current_profile()
+        # exec-widen HIGH-3 (Wild Bill): a WIDENED-root run requires a FUNCTIONAL
+        # sandbox, fail-closed — checked BEFORE the bypass/off branch, so the
+        # global dev/test bypass (MODULATIO_RUN_SHELL_UNSAFE / profile=off) does
+        # NOT reach widened exec (that would leak the parent env + provider keys
+        # into a real project folder). The workspace path keeps its bypass/soft-
+        # fallback below (the Leader's own confined home, lower risk).
+        _art_resolved = artifacts_root.resolve()
+        _wd_widened = not (wd == _art_resolved or _art_resolved in wd.parents)
+        if _wd_widened and not _sandbox.is_sandbox_available():
+            raise RuntimeError(
+                "widened exec refused: bwrap sandbox unavailable. Running "
+                "commands in an operator-granted folder requires a functional "
+                "sandbox (no bypass). Install/repair bubblewrap."
+            )
         if _sandbox.is_bypass_requested() or _profile == "off":
             pass  # explicit opt-out (UNSAFE env or profile=off), run as-is
         elif _sandbox.is_sandbox_available():
             run_argv, run_env = _sandbox.build_sandboxed_argv(
                 _payload_argv, artifacts_root, profile=_profile,
+                extra_rw_roots=tuple(Path(r) for r in extra_roots),
             )
         elif _sandbox.is_sandbox_required():
             # H3c: operator demanded a working sandbox (MODULATIO_REQUIRE_SANDBOX=1)

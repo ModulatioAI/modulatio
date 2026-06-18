@@ -642,6 +642,35 @@ def test_profile_checks_honor_extra_roots(tmp_path):
     assert tools._check_full(["cat", abs_arg], art) is False
 
 
+def test_widened_exec_refused_without_functional_sandbox(tmp_path, monkeypatch):
+    """exec-widen 2d (HIGH-3): a run_shell whose cwd is a granted WIDENED root
+    REFUSES when bwrap is non-functional — regardless of the global bypass/off
+    env. The workspace path keeps its soft-fallback/bypass (lower-risk home)."""
+    from modulatio import sandbox
+    art = _make_artifacts(tmp_path)
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    (granted / "x.py").write_text("print(1)\n")
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    rs = tools.make_run_shell(art, extra_roots=(granted,))
+
+    # widened cwd + no functional sandbox → REFUSE, even with the global bypass set
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    with pytest.raises(RuntimeError, match="widened exec refused"):
+        rs(cmd="cat x.py", profile="full", cwd=str(granted))
+    # ...and even with profile=off
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "off")
+    with pytest.raises(RuntimeError, match="widened exec refused"):
+        rs(cmd="cat x.py", profile="full", cwd=str(granted))
+
+    # workspace cwd (NOT widened) with bypass + no sandbox → no widened-exec raise
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "off")
+    out = rs(cmd="python3 --version", profile="passive", cwd="")
+    assert isinstance(out, str)  # ran (soft path preserved for the workspace)
+
+
 def test_run_shell_cwd_must_exist(tmp_path):
     """Non-existent cwd raises early — clearer error than letting
     subprocess fail with a confusing FileNotFoundError downstream."""

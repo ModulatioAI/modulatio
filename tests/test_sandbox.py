@@ -76,6 +76,22 @@ def test_extra_binds_added_as_ro(tmp_path):
     assert str(extra.resolve()) in argv
 
 
+def test_extra_rw_roots_bound_writable(tmp_path):
+    """exec-widen 2c: a granted exec root is rw `--bind`-ed into the sandbox so
+    commands can write there (pytest .pyc, build output)."""
+    artifacts = tmp_path / "a"
+    artifacts.mkdir()
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    argv, _ = sandbox.build_sandboxed_argv(
+        ["true"], artifacts, profile="standard", extra_rw_roots=(granted,),
+    )
+    g = str(granted.resolve())
+    # a writable --bind (not --ro-bind) pair for the granted root
+    joined = " ".join(argv)
+    assert f"--bind {g} {g}" in joined
+
+
 # ── Env stripping policy ─────────────────────────────────────────────────
 
 
