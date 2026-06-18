@@ -113,6 +113,41 @@ def test_file_tools_refuse_traversal(tmp_path):
         registry["edit_file"].call(path="../x", old="a", new="b")
 
 
+def test_file_tools_honor_granted_extra_root(tmp_path):
+    """tools-honor-granted-roots: a granted root is reachable via an ABSOLUTE
+    path; the primary root stays reachable via relative paths; the secret-floor
+    (dotfiles like .env) stays refused even inside a granted root."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "home.py").write_text("home\n", encoding="utf-8")
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    (granted / "x.py").write_text("x = 1\n", encoding="utf-8")
+    (granted / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    reg = tools.build_registry(artifacts_root=ws, extra_roots=[granted])
+    rf, ef = reg["read_file"].call, reg["edit_file"].call
+    # relative under the primary root → still works
+    assert "home" in rf(path="home.py")
+    # absolute under the GRANTED root → reachable
+    assert "x = 1" in rf(path=str(granted / "x.py"))
+    ef(path=str(granted / "x.py"), old="x = 1", new="x = 9")
+    assert (granted / "x.py").read_text(encoding="utf-8") == "x = 9\n"
+    # secret-floor: a dotfile inside the granted root is STILL refused
+    with pytest.raises(ValueError):
+        rf(path=str(granted / ".env"))
+    # absolute outside every root → refused
+    with pytest.raises(ValueError):
+        rf(path="/etc/passwd")
+
+
+def test_file_tools_without_grants_still_refuse_absolute(tmp_path):
+    """Fail-closed: with no granted extra_roots, an absolute path is refused
+    (unchanged default-confinement behavior)."""
+    reg = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError):
+        reg["read_file"].call(path="/etc/passwd")
+
+
 # ── http_get ───────────────────────────────────────────────────────────────
 
 class _FakeResponse:

@@ -1450,40 +1450,54 @@ def make_write_artifact(
 _READ_FILE_MAX_BYTES = 1_048_576  # 1 MiB — keep a huge file from blowing context
 
 
-def _resolve_file_under_root(path: str, root: Path) -> Path:
-    """Resolve a relative ``path`` under ``root`` and refuse any escape.
+def _resolve_file_under_root(path: str, root: Path, extra_roots=()) -> Path:
+    """Resolve ``path`` under ``root`` (or a granted ``extra_root``) and refuse
+    any escape. The in-process file tools are NOT wrapped by bwrap, so THIS is
+    their confinement.
 
-    The in-process file tools are NOT wrapped by bwrap, so THIS is their
-    confinement. Refuses absolute paths, ``..`` traversal, dotfile components
-    (via ``_is_safe_relative_file_arg``) and — defense in depth — anything that
-    resolves outside ``root`` (e.g. a symlink pointing out)."""
+    - A RELATIVE path must be safe (no ``..`` / dotfile components) and resolve
+      under the PRIMARY ``root`` (the Leader's own workspace).
+    - An ABSOLUTE path is allowed ONLY if it resolves under ``root`` or one of
+      the operator-granted ``extra_roots`` — and even then the SECRET FLOOR holds:
+      no dotfile component BELOW the matched root (so ``.env`` / ``.ssh`` inside a
+      granted project stay unreadable). With no ``extra_roots``, absolute paths
+      are refused (fail-closed default confinement)."""
     if not isinstance(path, str) or not path:
         raise ValueError("path must be a non-empty string")
+    roots = [Path(root).resolve(), *[Path(r).resolve() for r in extra_roots]]
+    if os.path.isabs(path):
+        target = Path(path).resolve()
+        matched = next((r for r in roots if target == r or r in target.parents), None)
+        if matched is None:
+            raise ValueError(f"path {path!r} is outside the confined/granted roots")
+        rel_parts = [p for p in target.relative_to(matched).parts if p != "."]
+        if any(p.startswith(".") for p in rel_parts):
+            raise ValueError(f"path {path!r} has a dotfile component (refused — secret floor)")
+        return target
     if not _is_safe_relative_file_arg(path):
         raise ValueError(
             f"path {path!r} not safe — must be relative, with no traversal "
             f"segments or dotfile components"
         )
-    root_resolved = Path(root).resolve()
-    target = (root_resolved / path).resolve()
-    if target != root_resolved and root_resolved not in target.parents:
+    primary = roots[0]
+    target = (primary / path).resolve()
+    if target != primary and primary not in target.parents:
         raise ValueError(f"path {path!r} escapes the confined root")
     return target
 
 
-def make_read_file(artifacts_root: Path) -> "Callable[..., str]":
-    """Return a ``read_file`` callable bound to ``artifacts_root``.
-
-    Confined to the root. Returns the file's UTF-8 text, truncated to 1 MiB so
-    a huge file can't blow the context. Raises ``ValueError`` for a safety
-    violation or a missing file::
+def make_read_file(artifacts_root: Path, extra_roots=()) -> "Callable[..., str]":
+    """Return a ``read_file`` callable bound to ``artifacts_root`` (+ any granted
+    ``extra_roots`` reachable via absolute path). Returns the file's UTF-8 text,
+    truncated to 1 MiB. Raises ``ValueError`` for a safety violation or missing
+    file::
 
         read_file(path: str) -> str
     """
     root = Path(artifacts_root)
 
     def read_file(path: str) -> str:
-        target = _resolve_file_under_root(path, root)
+        target = _resolve_file_under_root(path, root, extra_roots)
         if not target.is_file():
             raise ValueError(f"read_file: {path!r} does not exist")
         data = target.read_bytes()
@@ -1495,7 +1509,7 @@ def make_read_file(artifacts_root: Path) -> "Callable[..., str]":
     return read_file
 
 
-def make_edit_file(artifacts_root: Path) -> "Callable[..., str]":
+def make_edit_file(artifacts_root: Path, extra_roots=()) -> "Callable[..., str]":
     """Return an ``edit_file`` callable bound to ``artifacts_root``.
 
     Surgical string-replace, confined to the root. ``old`` must match EXACTLY
@@ -1511,7 +1525,7 @@ def make_edit_file(artifacts_root: Path) -> "Callable[..., str]":
             raise ValueError("edit_file: 'old' and 'new' must be strings")
         if old == "":
             raise ValueError("edit_file: 'old' must be a non-empty string")
-        target = _resolve_file_under_root(path, root)
+        target = _resolve_file_under_root(path, root, extra_roots)
         if not target.is_file():
             raise ValueError(f"edit_file: {path!r} does not exist")
         text = target.read_text(encoding="utf-8")
@@ -1711,6 +1725,7 @@ def build_registry(
     tool_calls_dir: Path | None = None,
     project_code: str | None = None,
     on_artifact_write: "Callable[[Path], None] | None" = None,
+    extra_roots=(),
 ) -> dict[str, Tool]:
     """Return a fresh dict of builtin tools. Callers (CLI / tests)
     merge their own tools in and pass the result into the
@@ -2008,7 +2023,7 @@ def build_registry(
                 "``..`` traversal, and dotfiles are refused. Read a file "
                 "before you edit it."
             ),
-            call=make_read_file(artifacts_root),
+            call=make_read_file(artifacts_root, extra_roots),
             params_schema={
                 "type": "object",
                 "properties": {
@@ -2030,7 +2045,7 @@ def build_registry(
                 "rather than guessed. Confined to the root; traversal and "
                 "dotfiles refused."
             ),
-            call=make_edit_file(artifacts_root),
+            call=make_edit_file(artifacts_root, extra_roots),
             params_schema={
                 "type": "object",
                 "properties": {
