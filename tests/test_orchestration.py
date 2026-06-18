@@ -138,6 +138,19 @@ def test_leader_tool_registry_rebinds_to_leader_workspace(project: Project):
         reg["read_file"].call(path="../escape.txt")  # confinement holds
 
 
+def test_solo_leader_can_jit_load_coding_skill(project: Project):
+    """Plan Piece A acceptance: the solo Leader's converse loadout includes the
+    skill-library tools, and `coding.md` is in the floating pool — so he can
+    JIT-load the coding know-how (skills from the library, no private silo)."""
+    from modulatio import skills
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    loadout = set(orch._leader_tool_registry()) | set(orch._leader_function_tools())
+    for t in ("search_skills", "load_skill", "drop_skill"):
+        assert t in loadout, f"solo Leader cannot reach the skill library: {t} missing"
+    assert "coding" in skills.list_skills(project_code=project.code)
+
+
 def test_leader_registry_does_not_disturb_run_registry(project: Project):
     """Re-rooting the Leader's solo hands must NOT mutate ``self.tool_registry``
     (the run path's registry) — the rebound builtins live only in the returned
