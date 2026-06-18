@@ -624,6 +624,24 @@ def test_validate_run_shell_cwd_honors_extra_roots(tmp_path):
         tools._validate_run_shell_cwd(str(other), art, extra_roots=(granted,))
 
 
+def test_profile_checks_honor_extra_roots(tmp_path):
+    """exec-widen 2b: the profile allowlists accept a file-arg under a granted
+    exec root — else a legit `pytest tests/foo.py` in a widened folder is refused.
+    Without the grant the same arg is refused (confinement intact)."""
+    art = _make_artifacts(tmp_path)
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    (granted / "x.py").write_text("x\n")
+    abs_arg = str(granted / "x.py")
+    # passive: python3 -m py_compile <file> under a granted root
+    pc = ["python3", "-m", "py_compile", abs_arg]
+    assert tools._check_passive(pc, art, extra_roots=(granted,)) is True
+    assert tools._check_passive(pc, art) is False  # no grant → refused
+    # full: a read of the granted file
+    assert tools._check_full(["cat", abs_arg], art, extra_roots=(granted,)) is True
+    assert tools._check_full(["cat", abs_arg], art) is False
+
+
 def test_run_shell_cwd_must_exist(tmp_path):
     """Non-existent cwd raises early — clearer error than letting
     subprocess fail with a confusing FileNotFoundError downstream."""
