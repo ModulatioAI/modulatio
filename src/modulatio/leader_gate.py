@@ -112,9 +112,14 @@ class LeaderPermissionGate:
         * a ``path`` widen that overlaps a broad/system root or a swarm
           deliverable tree is refused (Wild Bill BLOCK-1)."""
         if request.request_class == "exec":
-            return None if self._in_workspace(request.resource) else (
-                "running commands outside the workspace is not enabled yet"
-            )
+            # Workspace exec is always allowed (the Leader's own bwrap home).
+            # exec-widen: an out-of-workspace exec is GRANTABLE (prompts), but the
+            # cheat-guard applies (Nemo #5) — exec is at least as dangerous as a
+            # path widen, so refuse a broad/system root or one overlapping a swarm
+            # deliverable tree. The exec resource IS the cwd dir (realpath-stable).
+            if self._in_workspace(request.resource):
+                return None
+            return dangerous_widen_root(request.resource, self._blocked_subtrees)
         if request.request_class == lp.REQUEST_CLASS_PATH:
             # Check the GRANTED ROOT (the folder that would be widened — a file
             # access grants its parent dir), not the individual file path.
@@ -216,17 +221,35 @@ def extract_tool_requests(tool_name: str, args: dict, *, root) -> list[SecurityR
     reqs: list[SecurityRequest] = []
     cwd = args.get("cwd") or ""
     exec_dir = str((root / cwd).resolve()) if cwd else str(root.resolve())
-    reqs.append(SecurityRequest(action="exec", resource=exec_dir, request_class="exec",
-                                why=f"run_shell exec in {cwd or '.'}"))
+    exec_dir_path = Path(exec_dir)
+    # exec offers once/session/deny only — NO persisted `always` (Decision B (ii));
+    # the "RUN COMMANDS" copy is engine-rendered (MED-5), sharper than read/edit.
+    reqs.append(SecurityRequest(
+        action="exec", resource=exec_dir, request_class="exec",
+        why=f"run_shell: RUN COMMANDS in {cwd or '.'}",
+        available_scopes=(SCOPE_ONCE, SCOPE_SESSION, SCOPE_DENY),
+    ))
     cmd = args.get("cmd") or ""
     try:
         tokens = shlex.split(cmd)
     except ValueError:
         tokens = cmd.split()
     for tok in tokens:
-        if tok.startswith("-") or "/" not in tok:
-            continue  # flags + bare command names are not path resources
-        resource = str(Path(tok).resolve()) if os.path.isabs(tok) else str((root / tok).resolve())
+        if tok.startswith("-"):
+            continue  # flags are not path resources
+        if "/" in tok:
+            resource = (str(Path(tok).resolve()) if os.path.isabs(tok)
+                        else str((exec_dir_path / tok).resolve()))
+        else:
+            # Bare filename (no slash): gate a dotfile-leading name (.env, .ssh)
+            # OR a name resolving to a REAL FILE under the cwd (Nemo #3 — a bare
+            # `cat .env` must not ride the exec grant ungated). Plain command
+            # names (cat, make, pytest) and subcommands matching dir names are not
+            # files in the cwd, so they are not gated.
+            cand = exec_dir_path / tok
+            if not (tok.startswith(".") or cand.is_file()):
+                continue
+            resource = str(cand.resolve())
         reqs.append(SecurityRequest(action="read", resource=resource,
                                     request_class=lp.REQUEST_CLASS_PATH,
                                     why=f"run_shell file arg {tok}"))
