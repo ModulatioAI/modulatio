@@ -207,7 +207,7 @@ class _BlockingOrch:
         self.entered = 0
         self._lock = threading.Lock()
 
-    def converse(self, message, *, attachments=None, permission_callback=None):
+    def converse(self, message, *, attachments=None, permission_callback=None, ask=None):
         with self._lock:
             self.entered += 1
         self.gate.wait(timeout=10)
@@ -246,7 +246,7 @@ class _PermissionGateOrch:
         self.permission_result = None
         self.entered = threading.Event()
 
-    def converse(self, message, *, attachments=None, permission_callback=None):
+    def converse(self, message, *, attachments=None, permission_callback=None, ask=None):
         self.entered.set()
         # This blocks in request_and_wait until the client responds OR the
         # session is cancelled (which resolves the slot with None → deny).
@@ -347,3 +347,69 @@ def test_unknown_method_errors(vault_root):
         assert resp["error"]["code"] == rpc.METHOD_NOT_FOUND
     finally:
         client.close()
+
+
+# ── §2.3: the four-option capability ask (PermissionBroker's ask surface) ─────
+
+class _StubServer:
+    def __init__(self, response):
+        self.response = response
+        self.sent = None
+
+    def request_and_wait(self, method, params, cancel_check=None):
+        self.sent = (method, params)
+        return self.response
+
+
+def _session_with(response):
+    from modulatio.acp.session import ACPSession
+    return ACPSession("sid", _StubServer(response))
+
+
+def test_ask_capability_maps_each_option_to_decision():
+    from modulatio.permissions import Decision, capability_for
+    cap = capability_for("http_get", {"url": "https://example.com"})
+    cases = [("once", Decision.ALLOW_ONCE), ("session", Decision.ALLOW_SESSION),
+             ("always", Decision.ALLOW_ALWAYS), ("deny", Decision.DENY)]
+    last = None
+    for opt, expected in cases:
+        s = _session_with({"outcome": {"outcome": "selected", "optionId": opt}})
+        assert s.ask_capability(cap) is expected
+        last = s
+    # four options were offered (once/session/always/deny)
+    assert len(last._server.sent[1]["options"]) == 4
+
+
+def test_ask_capability_cancelled_or_unknown_is_deny():
+    from modulatio.permissions import Decision, capability_for
+    cap = capability_for("http_get", {"url": "https://example.com"})
+    assert _session_with({"outcome": {"outcome": "cancelled"}}).ask_capability(cap) is Decision.DENY
+    assert _session_with({"outcome": {"outcome": "selected", "optionId": "wat"}}).ask_capability(cap) is Decision.DENY
+    assert _session_with("garbage").ask_capability(cap) is Decision.DENY
+    # a cancelled session denies without even asking
+    s = _session_with({"outcome": {"optionId": "always"}})
+    s.cancelled = True
+    assert s.ask_capability(cap) is Decision.DENY
+    assert s._server.sent is None
+
+
+def test_acp_run_prompt_wires_ask_capability_into_converse():
+    """The WIRING (not the part): the ACP server passes ask=session.ask_capability
+    AND permission_callback=session.permission_cb into converse — so the broker's
+    capability questions reach the ACP client and the gate stays on the callback."""
+    import io
+    from modulatio.acp.server import ACPServer
+    from modulatio.acp.session import ACPSession
+    captured = {}
+
+    class _Orch:
+        def converse(self, message, **kw):
+            captured.update(kw)
+            return "reply"
+
+    srv = ACPServer("CODE", stub=True, stdin=io.StringIO(), stdout=io.StringIO())
+    sess = ACPSession("sid", srv)
+    sess.orch = _Orch()
+    srv._run_prompt("r1", sess, "hello", [])
+    assert captured.get("ask") == sess.ask_capability          # broker ask wired
+    assert captured.get("permission_callback") == sess.permission_cb  # gate wired
