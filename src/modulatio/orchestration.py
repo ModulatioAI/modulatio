@@ -7140,9 +7140,14 @@ class Orchestrator:
         output) and the persistent artifacts root. Fed to the gate so the
         cheat-guard is engine-enforced with REAL roots, not left advisory."""
         from modulatio import vault as _vault
+        from modulatio import delivery as _delivery
         return [
             str(_vault.runs_dir(self.project.code)),
             str(_vault.project_dir(self.project.code) / "artifacts"),
+            # the final delivery tree too (Wild Bill r2 follow-up) — adding the
+            # per-project dir also refuses its ~/Documents/Modulatio ancestor via
+            # the bidirectional overlap check.
+            str(_delivery.project_delivery_dir(self.project.code)),
         ]
 
     def leader_gate(self):

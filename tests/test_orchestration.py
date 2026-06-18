@@ -185,6 +185,23 @@ def test_leader_gate_refuses_widen_over_run_tree(project: Project):
     assert lp.load_grants(project.code, "path") == []
 
 
+def test_leader_gate_refuses_widen_over_delivery_tree(project: Project, tmp_path, monkeypatch):
+    """Wild Bill r2 follow-up: the cheat-guard also covers the final DELIVERY
+    folder, not just runs/+artifacts — the operator can't widen the Leader onto
+    finished products either."""
+    from modulatio import leader_gate as lg, leader_permissions as lp, delivery
+
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "delivered"))
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    gate = orch.leader_gate()
+    deliv = delivery.project_delivery_dir(project.code)
+    req = lg.SecurityRequest(action="edit", resource=str(deliv / "final.docx"),
+                             request_class=lp.REQUEST_CLASS_PATH, why="t")
+    d = gate.decide(req, prompt_fn=lambda r: lg.ScopedDecision(scope=lp.SCOPE_ALWAYS))
+    assert d.scope == lp.SCOPE_DENY
+    assert lp.load_grants(project.code, "path") == []
+
+
 def test_orchestrator_runs_end_to_end(project: Project):
     runners = {
         "leader": _leader_stub,
