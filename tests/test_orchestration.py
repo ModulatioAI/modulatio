@@ -148,6 +148,27 @@ def test_leader_registry_does_not_disturb_run_registry(project: Project):
     assert "run_shell" not in orch.tool_registry
 
 
+def test_leader_registry_honors_gate_granted_root(project: Project, tmp_path):
+    """End-to-end: a store grant flows through the gate into the Leader's
+    registry as an extra_root, so a deliberately-widened folder becomes
+    reachable — while an un-granted sibling stays refused."""
+    from modulatio import leader_permissions as lp
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    granted = tmp_path / "realproj"
+    granted.mkdir()
+    (granted / "x.py").write_text("hello\n", encoding="utf-8")
+    lp.add_grant(project.code, request_class="path", resource=str(granted),
+                 actions=lp.PATH_ACTIONS)
+    reg = orch._leader_tool_registry()
+    assert "hello" in reg["read_file"].call(path=str(granted / "x.py"))  # granted → reachable
+    other = tmp_path / "secret"
+    other.mkdir()
+    (other / "s.py").write_text("nope\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        reg["read_file"].call(path=str(other / "s.py"))  # un-granted → refused
+
+
 def test_orchestrator_runs_end_to_end(project: Project):
     runners = {
         "leader": _leader_stub,

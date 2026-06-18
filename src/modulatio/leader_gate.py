@@ -91,6 +91,12 @@ class LeaderPermissionGate:
                 return True
         return False
 
+    def granted_roots(self, request_class: str = lp.REQUEST_CLASS_PATH) -> list[str]:
+        """The granted resources for a class (persisted + session) — the
+        ``extra_roots`` the Leader's tool registry confines to, beyond the
+        workspace."""
+        return [g["resource"] for g in self._grants(request_class)]
+
     @staticmethod
     def _grant_root(request: SecurityRequest) -> str:
         """The resource to record. For ``path``, the GRANTED root is the

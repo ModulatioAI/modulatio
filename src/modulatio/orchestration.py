@@ -7116,25 +7116,38 @@ class Orchestrator:
         merged.update(rebound)  # staging-bound builtins win over shared ones
         return merged
 
+    def _leader_workspace(self) -> "Path":
+        """The Leader's own per-project solo-coding folder (created on demand)."""
+        from modulatio import vault as _vault
+        ws = _vault.project_dir(self.project.code) / "leader_workspace"
+        ws.mkdir(parents=True, exist_ok=True)
+        return ws
+
+    def leader_gate(self):
+        """The per-project cross-cutting permission gate (cached so in-memory
+        session grants persist across converse turns)."""
+        cached = getattr(self, "_leader_gate_cache", None)
+        if cached is None:
+            from modulatio import leader_gate as _lg
+            cached = _lg.LeaderPermissionGate(self.project.code, workspace=self._leader_workspace())
+            self._leader_gate_cache = cached
+        return cached
+
     def _leader_tool_registry(self) -> "dict[str, tools.Tool]":
         """The conversational Leader's SOLO-coding registry: path-bound builtins
         (run_shell, write_artifact, read_file, edit_file, …) rebound to the
-        Leader's OWN workspace inside the project — a stable per-project folder,
-        NOT the per-run artifacts scratch and NOT the producers' deliverable
-        tree. Confined there, the Leader physically cannot edit a swarm run's
-        output: the sandbox root IS the boundary (so he can't short-circuit a
-        kickoff by hand-writing its deliverable). Mirrors
-        ``_staging_tool_registry``'s rebind; non-path tools are preserved.
-
-        (Operator-directed widening to a real project path is a separate,
-        deliberate override — not wired here; the default is the safe folder.)"""
-        from modulatio import vault as _vault
-        workspace = _vault.project_dir(self.project.code) / "leader_workspace"
-        workspace.mkdir(parents=True, exist_ok=True)
+        Leader's OWN workspace inside the project — NOT the per-run artifacts
+        scratch and NOT the producers' deliverable tree. Confined there, the
+        Leader physically cannot edit a swarm run's output: the sandbox root IS
+        the boundary. Operator-granted roots (via the gate) are added as
+        ``extra_roots`` so a deliberately-widened folder becomes reachable.
+        Mirrors ``_staging_tool_registry``'s rebind; non-path tools preserved."""
+        workspace = self._leader_workspace()
         rebound = tools.build_registry(
             artifacts_root=workspace,
             tool_calls_dir=workspace / "tool_calls",
             project_code=self.project.code,
+            extra_roots=self.leader_gate().granted_roots(),
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # workspace-bound builtins win over shared ones
