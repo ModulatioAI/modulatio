@@ -6,6 +6,51 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-06-18
+
+**The two-lane Leader — a standalone coding agent, and modes to turn it loose.** The same
+Leader that orchestrates the team can now also work on its own, like a terminal coding
+agent: read, edit, and run files in a folder you point it at — when you'd rather pair with
+it directly than delegate to the swarm. By default it's confined to its own per-project
+workspace (a *structural* cheat-guard — it physically cannot touch the team's deliverables);
+widening it to a real folder is an explicit, scoped operator approval. Alongside the solo
+hands, three autonomy modes let you turn the Leader loose *within bounds* — and one invariant
+holds through all of them: **you can be turned loose, but running free outside your own yard
+needs permission.** Every arc here cleared full design **and** code cadre review (coherence,
+hull, bypass-surface, contract) with each BLOCK remediated to sign-off before merge.
+
+### Added
+
+- **The standalone Leader (solo coding hands).** Read, edit, write, and run, confined by
+  default to a per-project `leader_workspace`. `/work <path>` points it at a real project
+  folder; `/rp` revokes every grant. The know-how stays a JIT library skill — no private
+  Leader silo.
+- **The operator-widen permission gate.** One cross-cutting approval surface for every gated
+  Leader request: **once / this session / always (persists) / deny**. Engine-rendered (never
+  model-narrated), realpath-pinned at grant time, fail-closed, with a **dotfile secret-floor**
+  (`.env` / `.ssh` stay refused even inside a granted folder) and a **cheat-guard** that
+  refuses any folder overlapping the team's run / artifact / delivery trees.
+- **Run commands in a widened folder.** With explicit approval the solo Leader can run
+  `pytest` / builds / `git` in your project — **sandbox-required, fail-closed**: a widened
+  command will not run without a functional sandbox, regardless of any global bypass flag, so
+  it can never leak the parent environment or provider keys.
+- **The embedded runbook.** A working-discipline spine — *name the operation, commit the right
+  definition of "done"* — injected at the head of every conversational turn, so the Leader
+  stays rigorous when it works alone.
+- **Autonomy modes — `/yolo`, `/goal`, `/yolo-goal`.** `/yolo` auto-grants capabilities
+  (network, shell) without stopping to ask; `/goal` delegates judgment (decide *how* without
+  asking); `/yolo-goal` does both. A four-option capability ask (once / session / always /
+  deny) reaches you over ACP, and a two-row status (**Access** · **Sandbox**) means a mode can
+  never hide that the sandbox is off.
+
+### Security
+
+- **The folder fence is mode-independent.** No autonomy mode ever opens it — crossing into a
+  new folder is always an explicit `/work` approval, in every mode. The capability broker
+  (network / shell / spend) and the filesystem gate (path / exec) **compose** as independent
+  deny-chain arms: a tool runs only if *both* pass, the filesystem gate is checked first and
+  regardless of mode, and either failure fails closed.
+
 ## [0.9.3] — 2026-06-16
 
 > Supersedes the interim `v0.9.2` tag, which was cut mid-release before the boot splash
