@@ -111,3 +111,36 @@ def test_revoke_all_clears_session_and_persisted(env):
     seen = []
     gate.decide(_req("edit", proj / "b.py"), prompt_fn=_record(seen))
     assert len(seen) == 1  # re-prompts after /rp
+
+
+# ── resource extractor (Nemo-BLOCK4/6 — the bypass surface) ──────────────────
+
+def test_file_tools_extract_path_requests(tmp_path):
+    root = tmp_path
+    assert lg.extract_tool_requests("read_file", {"path": "a.py"}, root=root)[0].action == "read"
+    assert lg.extract_tool_requests("edit_file", {"path": "a.py", "old": "x", "new": "y"},
+                                    root=root)[0].action == "edit"
+    assert lg.extract_tool_requests("write_artifact", {"path": "a.py", "content": "x"},
+                                    root=root)[0].action == "write"
+    r = lg.extract_tool_requests("read_file", {"path": "sub/a.py"}, root=root)[0]
+    assert r.request_class == "path"
+    assert r.resource == str((root / "sub/a.py").resolve())
+
+
+def test_run_shell_catches_absolute_path_token_in_cmd(tmp_path):
+    # Nemo's bypass: `cat /etc/passwd` must surface a path request for the file,
+    # AND run_shell itself is an exec request — not just args["path"].
+    reqs = lg.extract_tool_requests(
+        "run_shell", {"cmd": "cat /etc/passwd", "cwd": "", "profile": "full"}, root=tmp_path
+    )
+    resources = [r.resource for r in reqs]
+    assert "/etc/passwd" in resources           # the out-of-root file IS gated
+    assert any(r.request_class == "exec" for r in reqs)   # run_shell = exec request
+    # flags and bare command names are not treated as paths
+    assert "cat" not in resources
+
+
+def test_ungated_tools_extract_nothing(tmp_path):
+    for name in ("search_skills", "load_skill", "drop_skill", "team_status",
+                 "web_search", "http_get", "read_deliverable", "decide_approval"):
+        assert lg.extract_tool_requests(name, {"query": "x"}, root=tmp_path) == []

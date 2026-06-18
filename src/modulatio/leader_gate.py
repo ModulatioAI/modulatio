@@ -22,6 +22,8 @@ set. ``revoke_all`` (the ``/rp`` escape hatch) clears session + persisted.
 
 from __future__ import annotations
 
+import os
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -134,6 +136,53 @@ class LeaderPermissionGate:
         self._session.clear()
 
 
+# ── resource extractor (Nemo-BLOCK4/6) ───────────────────────────────────────
+# Maps a tool call to the SecurityRequest(s) it needs gated — or [] if ungated.
+# The headline: run_shell has NO `path` arg; its paths hide in `cwd` AND inside
+# the shlex-split `cmd`, so a gate that only reads args["path"] is bypassable
+# (`run_shell(cmd="cat /etc/passwd")`). run_shell is ALSO an exec request,
+# separate from any path read/edit/write (Wild Bill HIGH-2).
+
+#: Only these tools are gated; others (search/skills/status/web) carry no
+#: out-of-workspace resource (Nemo-BLOCK7).
+_GATED_TOOLS = {"read_file", "edit_file", "write_artifact", "run_shell"}
+_PATH_ACTION_BY_TOOL = {"read_file": "read", "edit_file": "edit", "write_artifact": "write"}
+
+
+def extract_tool_requests(tool_name: str, args: dict, *, root) -> list[SecurityRequest]:
+    """The SecurityRequests a tool call needs gated, resolved to absolute paths
+    under ``root`` (the tool's bound workspace). ``[]`` for ungated tools."""
+    root = Path(root)
+    if tool_name not in _GATED_TOOLS:
+        return []
+    if tool_name in _PATH_ACTION_BY_TOOL:
+        p = args.get("path")
+        if not isinstance(p, str) or not p:
+            return []
+        resource = str((root / p).resolve())
+        return [SecurityRequest(action=_PATH_ACTION_BY_TOOL[tool_name], resource=resource,
+                                request_class=lp.REQUEST_CLASS_PATH, why=f"{tool_name} {p}")]
+    # run_shell — exec request for the cwd + a path request per path-like cmd token
+    reqs: list[SecurityRequest] = []
+    cwd = args.get("cwd") or ""
+    exec_dir = str((root / cwd).resolve()) if cwd else str(root.resolve())
+    reqs.append(SecurityRequest(action="exec", resource=exec_dir, request_class="exec",
+                                why=f"run_shell exec in {cwd or '.'}"))
+    cmd = args.get("cmd") or ""
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    for tok in tokens:
+        if tok.startswith("-") or "/" not in tok:
+            continue  # flags + bare command names are not path resources
+        resource = str(Path(tok).resolve()) if os.path.isabs(tok) else str((root / tok).resolve())
+        reqs.append(SecurityRequest(action="read", resource=resource,
+                                    request_class=lp.REQUEST_CLASS_PATH,
+                                    why=f"run_shell file arg {tok}"))
+    return reqs
+
+
 __all__ = [
     "SCOPE_ALWAYS",
     "SCOPE_DENY",
@@ -142,4 +191,5 @@ __all__ = [
     "LeaderPermissionGate",
     "ScopedDecision",
     "SecurityRequest",
+    "extract_tool_requests",
 ]
