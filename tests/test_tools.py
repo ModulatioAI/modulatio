@@ -60,6 +60,59 @@ def test_tool_dataclass_carries_name_description_callable():
     assert t.call(text="hello") == "hello"
 
 
+# ── file-edit trio: read_file / edit_file (Leader solo-coding hands) ─────────
+# Root-bound builtins like run_shell/write_artifact: registered only when
+# build_registry is given a root, and confined to it (the sandbox root IS the
+# boundary). They give the conversational Leader fluent file editing for
+# operator-guided standalone coding. write_file is served by write_artifact.
+
+def test_read_file_and_edit_file_registered_only_with_root(tmp_path):
+    with_root = tools.build_registry(artifacts_root=tmp_path)
+    assert "read_file" in with_root
+    assert "edit_file" in with_root
+    assert callable(with_root["read_file"].call)
+    assert callable(with_root["edit_file"].call)
+    no_root = tools.build_registry()
+    assert "read_file" not in no_root
+    assert "edit_file" not in no_root
+
+
+def test_read_file_returns_content(tmp_path):
+    (tmp_path / "a.py").write_text("hello\nworld\n", encoding="utf-8")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    out = registry["read_file"].call(path="a.py")
+    assert "hello" in out and "world" in out
+
+
+def test_edit_file_str_replaces_unique_match(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    registry["edit_file"].call(path="a.py", old="x = 1", new="x = 42")
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 42\ny = 2\n"
+
+
+def test_edit_file_refuses_ambiguous_match(tmp_path):
+    (tmp_path / "a.py").write_text("v = 1\nv = 1\n", encoding="utf-8")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError):
+        registry["edit_file"].call(path="a.py", old="v = 1", new="v = 9")
+
+
+def test_edit_file_refuses_missing_match(tmp_path):
+    (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError):
+        registry["edit_file"].call(path="a.py", old="nope", new="x")
+
+
+def test_file_tools_refuse_traversal(tmp_path):
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError):
+        registry["read_file"].call(path="../etc/passwd")
+    with pytest.raises(ValueError):
+        registry["edit_file"].call(path="../x", old="a", new="b")
+
+
 # ── http_get ───────────────────────────────────────────────────────────────
 
 class _FakeResponse:
