@@ -48,15 +48,29 @@ metered_authorizer gate …`. Each arm fires ONLY when its gate DENIES; a gate t
 allows falls through to the next; the tool runs iff NO arm denies. `permission_callback`
 (leader_gate) and `metered_authorizer` already compose this way.
 
-**The broker slots in as another arm in the same chain** — NOT an if/elif replacement:
+**The broker slots in as another arm in the same chain** — NOT an if/elif replacement.
+The broker call is WRAPPED in try/except → deny, mirroring the metered arm at
+`runners.py:1087-1095` (Nemo CHANGES — `authorize` calls `self._sandbox_available()`,
+an operator-supplied callable that may do I/O, so a bare call could propagate):
 ```
-elif permission_broker is not None and not permission_broker.authorize(call.name, dict(call.args)):
-    result = f"DENIED: the operator/mode declined capability for {call.name!r}."
+elif permission_broker is not None:
+    try:
+        broker_allowed = permission_broker.authorize(call.name, dict(call.args))
+    except Exception:
+        broker_allowed = False   # any broker-side failure is a deterministic DENY
+    if not broker_allowed:
+        result = f"DENIED: the operator/mode declined capability for {call.name!r}."
 ```
+**Belt-and-braces (Nemo):** ALSO add a top-level `try/except Exception → return False`
+inside `PermissionBroker.authorize` (`permissions.py`) — an exception must never let a
+sandbox-requiring capability run open, record a grant, or escalate an audit. Both
+layers, matching §6.C's "no exception out" guarantee.
+
 Order: leader_gate (filesystem) → broker (capability) → metered (spend). A `run_shell`
 call must pass the leader_gate (path/exec confined) AND the broker (shell capability
-granted/auto-granted) to run. Either denies → refused. Fail-closed throughout (a
-broker exception → deny, per §1's `authorize`).
+granted/auto-granted) to run. Either denies → refused. Correct security ordering:
+refuse on filesystem grounds before asking about capability; refuse on capability
+before spending — no path where a later arm lets an earlier refusal through.
 
 **The §1→main merge** resolves the `runners.py` conflict by ADOPTING main's deny-chain
 and ADDING the broker arm (discarding §1's pre-widen if/elif). `permissions.py` and
@@ -82,7 +96,9 @@ and ADDING the broker arm (discarding §1's pre-widen if/elif). `permissions.py`
 - **no mode opens the fence**: `/yolo`, `/goal`, `/yolo-goal` all leave the leader_gate
   path/exec confinement byte-identical (the gate callback is constructed the same
   regardless of mode).
-- **fail-closed**: a broker that raises → tool denied.
+- **fail-closed (Nemo CHANGES)**: a `PermissionBroker.authorize` that raises (e.g.
+  `_sandbox_available()` does failing I/O) → tool DENIED, at BOTH layers — the
+  `authorize` top-level try/except returns False AND the compose-seam wrapper denies.
 - **no-regress**: a DEFAULT converse with no mode command is byte-identical to today;
   the widen's existing tests (path/exec cheat-guard, secret-floor, HIGH-3) all still pass.
 
