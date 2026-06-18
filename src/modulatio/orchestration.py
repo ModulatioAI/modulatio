@@ -4962,7 +4962,21 @@ class Orchestrator:
         # JIT-load the reflex that tells you to reach for the reflex. Overridable
         # via the leader-runbook seed/override, engine default otherwise.
         runbook = self._prompt("leader-runbook", _LEADER_RUNBOOK)
-        return runbook.rstrip() + "\n\n---\n\n" + formatted
+        return runbook.rstrip() + "\n\n---\n\n" + formatted + self._autonomy_block()
+
+    def _autonomy_block(self) -> str:
+        """§2.4 — the judgment-posture framing for the active mode, injected at the
+        tail of the converse prompt. /goal + /yolo-goal DELEGATE judgment (decide
+        freely, don't ask how); DEFAULT + /yolo keep confirm-direction. This is the
+        JUDGMENT axis only — the broker (capability access) is untouched, so the
+        §6.F orthogonality holds (the broker never reads delegates_judgment)."""
+        if self._session_mode.delegates_judgment:
+            return ("\n\n---\n\nAUTONOMY — DELEGATED JUDGMENT (/goal): decide freely "
+                    "how to proceed; don't stop to ask the operator which approach. "
+                    "You STILL ask before a new capability, and a new folder STILL "
+                    "needs the operator's /work approval.")
+        return ("\n\n---\n\nAUTONOMY — CONFIRM DIRECTION: check with the operator on "
+                "consequential choices before committing.")
 
     def _leader_function_tools(self) -> "dict[str, tools.Tool]":
         """The Leader's own functions, exposed as tools his converse loop can

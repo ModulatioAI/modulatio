@@ -236,6 +236,25 @@ def test_converse_bare_mode_command_returns_ack(project: Project):
     assert "/work" in ack.lower() or "folder" in ack.lower()  # fence invariant surfaced
 
 
+def test_converse_prompt_autonomy_block_reflects_mode(project: Project):
+    """§2.4: /goal (and /yolo-goal) delegate JUDGMENT — the converse prompt tells
+    the Leader to decide freely; DEFAULT and /yolo-alone keep confirm-direction.
+    /yolo is a CAPABILITY mode, not a judgment one (orthogonality)."""
+    from modulatio.permissions import RunMode
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    assert "confirm direction" in orch._build_converse_prompt([], "do X").lower()  # default
+
+    orch._session_mode = RunMode.GOAL
+    p = orch._build_converse_prompt([], "do X").lower()
+    assert "delegated judgment" in p and ("decide freely" in p or "don't stop to ask" in p)
+
+    orch._session_mode = RunMode.YOLO_GOAL
+    assert "delegated judgment" in orch._build_converse_prompt([], "x").lower()
+
+    orch._session_mode = RunMode.YOLO   # capability auto-grant, NOT judgment
+    assert "confirm direction" in orch._build_converse_prompt([], "x").lower()
+
+
 def test_converse_prompt_injects_runbook_at_head(project: Project):
     """The Leader's embedded runbook (the always-on bar-commit spine) is injected
     at the HEAD of every converse prompt — not a JIT pull-skill, so the
