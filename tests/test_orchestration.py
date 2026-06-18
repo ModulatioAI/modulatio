@@ -138,6 +138,45 @@ def test_leader_tool_registry_rebinds_to_leader_workspace(project: Project):
         reg["read_file"].call(path="../escape.txt")  # confinement holds
 
 
+def test_converse_prompt_injects_runbook_at_head(project: Project):
+    """The Leader's embedded runbook (the always-on bar-commit spine) is injected
+    at the HEAD of every converse prompt — not a JIT pull-skill, so the
+    discipline is unmissable for whatever model drives the solo Leader."""
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    prompt = orch._build_converse_prompt([], "help me refactor this module")
+    low = prompt.lower()
+    assert "name the operation" in low          # the bar-commit spine is present
+    assert "bar" in low                          # commit the RIGHT bar
+    # it's at the HEAD — the runbook precedes the conversation transcript
+    assert low.index("name the operation") < prompt.index("help me refactor this module")
+
+
+def test_converse_runbook_is_overridable(project: Project, monkeypatch):
+    """The runbook loads via _prompt (seed/override + engine fallback), so a
+    project can override it like any other prompt."""
+    from modulatio import skills
+    monkeypatch.setattr(
+        skills, "load",
+        lambda name, project_code=None: "CUSTOM RUNBOOK XYZZY" if name == "leader-runbook" else "",
+    )
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    prompt = orch._build_converse_prompt([], "hi")
+    assert "CUSTOM RUNBOOK XYZZY" in prompt
+
+
+def test_solo_leader_can_jit_load_coding_skill(project: Project):
+    """Plan Piece A acceptance: the solo Leader's converse loadout includes the
+    skill-library tools, and `coding.md` is in the floating pool — so he can
+    JIT-load the coding know-how (skills from the library, no private silo)."""
+    from modulatio import skills
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    loadout = set(orch._leader_tool_registry()) | set(orch._leader_function_tools())
+    for t in ("search_skills", "load_skill", "drop_skill"):
+        assert t in loadout, f"solo Leader cannot reach the skill library: {t} missing"
+    assert "coding" in skills.list_skills(project_code=project.code)
+
+
 def test_leader_registry_does_not_disturb_run_registry(project: Project):
     """Re-rooting the Leader's solo hands must NOT mutate ``self.tool_registry``
     (the run path's registry) — the rebound builtins live only in the returned
@@ -169,6 +208,27 @@ def test_leader_registry_honors_gate_granted_root(project: Project, tmp_path):
         reg["read_file"].call(path=str(other / "s.py"))  # un-granted → refused
 
 
+def test_leader_registry_threads_exec_grant_into_run_shell(project: Project, tmp_path, monkeypatch):
+    """exec-widen 2e: an exec grant flows through the gate into run_shell's
+    extra_roots, so run_shell can operate in the granted folder; a path grant
+    does NOT confer exec (separate class)."""
+    from modulatio import leader_permissions as lp, sandbox
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    granted = tmp_path / "realproj"
+    granted.mkdir()
+    (granted / "x.py").write_text("print(1)\n")
+    lp.add_grant(project.code, request_class="exec", resource=str(granted), actions=("exec",))
+    reg = orch._leader_tool_registry()
+    # run_shell in the granted exec root works (sandbox available here); refuse if
+    # the sandbox is down (HIGH-3) — prove the root reached run_shell either way.
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="widened exec refused"):
+        reg["run_shell"].call(cmd="cat x.py", profile="full", cwd=str(granted))
+
+
 def test_leader_gate_refuses_widen_over_run_tree(project: Project):
     """Wild Bill BLOCK-1, wired: the gate is fed the project's real deliverable
     roots (runs/ + artifacts), so the operator cannot widen the Leader onto the
@@ -182,6 +242,23 @@ def test_leader_gate_refuses_widen_over_run_tree(project: Project):
                              request_class=lp.REQUEST_CLASS_PATH, why="t")
     d = gate.decide(req, prompt_fn=lambda r: lg.ScopedDecision(scope=lp.SCOPE_ALWAYS))
     assert d.scope == lp.SCOPE_DENY          # refused even though prompt said ALWAYS
+    assert lp.load_grants(project.code, "path") == []
+
+
+def test_leader_gate_refuses_widen_over_delivery_tree(project: Project, tmp_path, monkeypatch):
+    """Wild Bill r2 follow-up: the cheat-guard also covers the final DELIVERY
+    folder, not just runs/+artifacts — the operator can't widen the Leader onto
+    finished products either."""
+    from modulatio import leader_gate as lg, leader_permissions as lp, delivery
+
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "delivered"))
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    gate = orch.leader_gate()
+    deliv = delivery.project_delivery_dir(project.code)
+    req = lg.SecurityRequest(action="edit", resource=str(deliv / "final.docx"),
+                             request_class=lp.REQUEST_CLASS_PATH, why="t")
+    d = gate.decide(req, prompt_fn=lambda r: lg.ScopedDecision(scope=lp.SCOPE_ALWAYS))
+    assert d.scope == lp.SCOPE_DENY
     assert lp.load_grants(project.code, "path") == []
 
 

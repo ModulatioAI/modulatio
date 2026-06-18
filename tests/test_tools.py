@@ -589,6 +589,88 @@ def test_run_shell_cwd_blocks_dotfile_components(tmp_path):
         rs(cmd="python3 --version", profile="passive", cwd=".secret")
 
 
+# ── exec-widen 2a: the two confinement helpers honor granted extra_roots ──────
+
+def test_is_safe_file_arg_honors_extra_roots(tmp_path):
+    art = _make_artifacts(tmp_path)
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    (granted / "x.py").write_text("x\n")
+    # absolute path under a granted extra_root → safe
+    assert tools._is_safe_file_arg(str(granted / "x.py"), art, extra_roots=(granted,)) is True
+    # under neither root → refused
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    assert tools._is_safe_file_arg(str(other / "y.py"), art, extra_roots=(granted,)) is False
+    # secret-floor holds INSIDE a granted root — a dotfile component is refused
+    (granted / ".env").write_text("SECRET=1\n")
+    assert tools._is_safe_file_arg(str(granted / ".env"), art, extra_roots=(granted,)) is False
+
+
+def test_validate_run_shell_cwd_honors_extra_roots(tmp_path):
+    art = _make_artifacts(tmp_path)
+    granted = tmp_path / "proj"
+    (granted / "sub").mkdir(parents=True)
+    # an absolute cwd under a granted root resolves + is accepted
+    assert tools._validate_run_shell_cwd(str(granted / "sub"), art, extra_roots=(granted,)) == (granted / "sub").resolve()
+    # dotfile component under a granted root still refused (secret-floor)
+    (granted / ".secret").mkdir()
+    with pytest.raises(ValueError, match="dotfile"):
+        tools._validate_run_shell_cwd(str(granted / ".secret"), art, extra_roots=(granted,))
+    # a dir under no granted root is refused
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    with pytest.raises(ValueError, match="escape"):
+        tools._validate_run_shell_cwd(str(other), art, extra_roots=(granted,))
+
+
+def test_profile_checks_honor_extra_roots(tmp_path):
+    """exec-widen 2b: the profile allowlists accept a file-arg under a granted
+    exec root — else a legit `pytest tests/foo.py` in a widened folder is refused.
+    Without the grant the same arg is refused (confinement intact)."""
+    art = _make_artifacts(tmp_path)
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    (granted / "x.py").write_text("x\n")
+    abs_arg = str(granted / "x.py")
+    # passive: python3 -m py_compile <file> under a granted root
+    pc = ["python3", "-m", "py_compile", abs_arg]
+    assert tools._check_passive(pc, art, extra_roots=(granted,)) is True
+    assert tools._check_passive(pc, art) is False  # no grant → refused
+    # full: a read of the granted file
+    assert tools._check_full(["cat", abs_arg], art, extra_roots=(granted,)) is True
+    assert tools._check_full(["cat", abs_arg], art) is False
+
+
+def test_widened_exec_refused_without_functional_sandbox(tmp_path, monkeypatch):
+    """exec-widen 2d (HIGH-3): a run_shell whose cwd is a granted WIDENED root
+    REFUSES when bwrap is non-functional — regardless of the global bypass/off
+    env. The workspace path keeps its soft-fallback/bypass (lower-risk home)."""
+    from modulatio import sandbox
+    art = _make_artifacts(tmp_path)
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    (granted / "x.py").write_text("print(1)\n")
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    rs = tools.make_run_shell(art, extra_roots=(granted,))
+
+    # widened cwd + no functional sandbox → REFUSE, even with the global bypass set
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    with pytest.raises(RuntimeError, match="widened exec refused"):
+        rs(cmd="cat x.py", profile="full", cwd=str(granted))
+    # ...and even with profile=off
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "off")
+    with pytest.raises(RuntimeError, match="widened exec refused"):
+        rs(cmd="cat x.py", profile="full", cwd=str(granted))
+
+    # workspace cwd (NOT widened) with bypass + no sandbox → no widened-exec raise
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "off")
+    out = rs(cmd="python3 --version", profile="passive", cwd="")
+    assert isinstance(out, str)  # ran (soft path preserved for the workspace)
+
+
 def test_run_shell_cwd_must_exist(tmp_path):
     """Non-existent cwd raises early — clearer error than letting
     subprocess fail with a confusing FileNotFoundError downstream."""

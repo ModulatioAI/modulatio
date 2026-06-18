@@ -121,7 +121,10 @@ def test_sandboxed_payload_is_prlimit_wrapped_inside_bwrap(tmp_path, monkeypatch
 
     captured: dict[str, list[str]] = {}
 
-    def _fake_build(payload_argv, artifacts_root, *, profile=None):
+    def _fake_build(payload_argv, artifacts_root, *, profile=None, **kwargs):
+        # **kwargs absorbs build_sandboxed_argv's optional binds (extra_binds,
+        # extra_rw_roots [exec-widen], allow_network, pass_env) so this stub
+        # tracks the real signature without re-listing each.
         captured["payload"] = list(payload_argv)
         return (["bwrap", "--die-with-parent", "--", *payload_argv], {})
 

@@ -91,10 +91,12 @@ def test_action_scope_enforced_across_classes(env):
     tmp, ws, proj = env
     gate = lg.LeaderPermissionGate(CODE, workspace=ws)
     gate.decide(_req("edit", proj / "a.py"), prompt_fn=_allow(lp.SCOPE_ALWAYS))
-    # an EXEC request on the same tree is NOT covered by the edit grant — and in
-    # v1 (exec-widen deferred) out-of-workspace exec is REFUSED without prompting.
-    d = gate.decide(_req("exec", proj / "a.py", request_class="exec"), prompt_fn=_never)
-    assert d.scope == lp.SCOPE_DENY
+    # an EXEC request on the same tree is NOT covered by the edit grant — exec is
+    # a separate class (HIGH-2). With exec-widen it is grantable (prompts), but
+    # the file grant doesn't confer it, so the prompt IS reached.
+    seen = []
+    gate.decide(_req("exec", proj / "a.py", request_class="exec"), prompt_fn=_record(seen))
+    assert len(seen) == 1  # prompted — edit grant did not cover exec
 
 
 def test_decide_refuses_dangerous_root_even_if_prompt_returns_always(env):
@@ -114,15 +116,66 @@ def test_decide_refuses_dangerous_root_even_if_prompt_returns_always(env):
         _req("edit", proj / "y.py"), prompt_fn=_never).scope == lp.SCOPE_DENY
 
 
-def test_decide_refuses_exec_outside_workspace_not_persisted(env):
-    """v1 exec policy (Wild Bill CHANGES-2): out-of-workspace exec is refused and
-    never persisted, even on ALWAYS — exec-widen is deferred."""
+def test_exec_outside_workspace_is_grantable_session(env):
+    """exec-widen: out-of-workspace exec on a SAFE dir is now grantable (prompts).
+    A session grant covers the root within the gate; a fresh gate re-prompts
+    (no persisted exec — Decision B (ii))."""
     tmp, ws, proj = env
     gate = lg.LeaderPermissionGate(CODE, workspace=ws)
-    d = gate.decide(_req("exec", proj / "a.py", request_class="exec"),
-                    prompt_fn=_allow(lp.SCOPE_ALWAYS))
+    d = gate.decide(_req("exec", proj, request_class="exec"),
+                    prompt_fn=_allow(lp.SCOPE_SESSION))
+    assert d.scope == lp.SCOPE_SESSION
+    # same gate: the session exec grant now covers the root (no re-prompt)
+    seen = []
+    gate.decide(_req("exec", proj, request_class="exec"), prompt_fn=_record(seen))
+    assert seen == []
+    # nothing persisted; a fresh gate re-prompts
+    assert lp.load_grants(CODE, "exec") == []
+    seen2 = []
+    lg.LeaderPermissionGate(CODE, workspace=ws).decide(
+        _req("exec", proj, request_class="exec"), prompt_fn=_record(seen2))
+    assert len(seen2) == 1
+
+
+def test_exec_widen_refused_over_deliverable_tree(env):
+    """Nemo #5: the cheat-guard covers exec too — an exec root overlapping a
+    deliverable tree is REFUSED even on ALWAYS (prompt never reached)."""
+    tmp, ws, proj = env
+    deliv = proj / "runs" / "r1"
+    deliv.mkdir(parents=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws, blocked_subtrees=[str(deliv)])
+    d = gate.decide(_req("exec", proj, request_class="exec"), prompt_fn=_never)
     assert d.scope == lp.SCOPE_DENY
     assert lp.load_grants(CODE, "exec") == []
+
+
+def test_exec_request_excludes_always_scope(env):
+    """Decision B (ii): the run_shell exec request offers once/session/deny only;
+    a prompt returning ALWAYS for it raises (gate enforces the per-class set)."""
+    tmp, ws, proj = env
+    reqs = lg.extract_tool_requests("run_shell", {"cmd": "pytest", "cwd": ""}, root=proj)
+    exec_req = next(r for r in reqs if r.request_class == "exec")
+    assert set(exec_req.available_scopes) == {lp.SCOPE_ONCE, lp.SCOPE_SESSION, lp.SCOPE_DENY}
+    assert lp.SCOPE_ALWAYS not in exec_req.available_scopes
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    with pytest.raises(ValueError):
+        gate.decide(_req("exec", proj, request_class="exec",
+                         available_scopes=(lp.SCOPE_ONCE, lp.SCOPE_SESSION, lp.SCOPE_DENY)),
+                    prompt_fn=_allow(lp.SCOPE_ALWAYS))
+
+
+def test_extractor_gates_bare_dotfile(tmp_path):
+    """Nemo #3: `cat .env` (a bare dotfile, no slash) must surface a read request
+    — it must not ride the exec grant ungated."""
+    (tmp_path / ".env").write_text("SECRET=1\n")
+    reqs = lg.extract_tool_requests("run_shell", {"cmd": "cat .env", "cwd": ""}, root=tmp_path)
+    resources = [r.resource for r in reqs]
+    assert str((tmp_path / ".env").resolve()) in resources
+    # a real file in cwd is gated too; a plain command name is not
+    (tmp_path / "secrets.txt").write_text("x\n")
+    reqs2 = lg.extract_tool_requests("run_shell", {"cmd": "cat secrets.txt", "cwd": ""}, root=tmp_path)
+    assert str((tmp_path / "secrets.txt").resolve()) in [r.resource for r in reqs2]
+    assert str((tmp_path / "cat").resolve()) not in [r.resource for r in reqs2]  # bare command name
 
 
 def test_available_scopes_refuses_out_of_set(env):

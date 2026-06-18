@@ -402,6 +402,15 @@ def _build_env(pass_env: tuple[str, ...], *, profile: str = "standard") -> dict[
     return out
 
 
+def _rw_root_binds(roots: "tuple[Path, ...]") -> list[str]:
+    """``--bind`` (writable) pairs for each operator-granted exec root."""
+    out: list[str] = []
+    for r in roots:
+        rs = str(Path(r).resolve())
+        out += ["--bind", rs, rs]
+    return out
+
+
 def build_sandboxed_argv(
     exec_argv: list[str],
     artifacts_root: Path,
@@ -409,6 +418,7 @@ def build_sandboxed_argv(
     allow_network: bool | None = None,
     pass_env: tuple[str, ...] | None = None,
     extra_binds: tuple[Path, ...] = (),
+    extra_rw_roots: tuple[Path, ...] = (),
     profile: str | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Wrap ``exec_argv`` in a ``bwrap ... -- exec_argv`` invocation.
@@ -464,6 +474,11 @@ def build_sandboxed_argv(
         # The producer's only writable host path: the project's
         # artifacts root
         "--bind", artifacts_root_str, artifacts_root_str,
+        # Operator-granted exec roots (exec-widen): writable so commands can
+        # build/test in a real project folder. The grant is the operator's
+        # explicit, sandbox-gated decision; the cheat-guard already refuses a
+        # root overlapping the swarm deliverable tree.
+        *_rw_root_binds(extra_rw_roots),
         # Namespace isolation
         "--unshare-pid",
         "--unshare-uts",

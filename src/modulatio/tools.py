@@ -514,7 +514,7 @@ def _is_safe_relative_file_arg(arg: str) -> bool:
     return True
 
 
-def _is_safe_file_arg(arg: str, root: Path | None) -> bool:
+def _is_safe_file_arg(arg: str, root: Path | None, extra_roots=()) -> bool:
     """Same intent as :func:`_is_safe_relative_file_arg` but accepts
     absolute paths IF they resolve under ``root`` (the artifacts dir)
     with no dotfile components.
@@ -548,21 +548,30 @@ def _is_safe_file_arg(arg: str, root: Path | None) -> bool:
     if arg.startswith("-"):
         return False
     if arg.startswith("/") or arg.startswith("\\"):
-        if root is None:
+        if root is None and not extra_roots:
             return False
         try:
             resolved = Path(arg).resolve()
-            rel = resolved.relative_to(root.resolve())
         except (ValueError, OSError):
             return False
-        for p in rel.parts:
-            if p.startswith("."):
-                return False
-        return True
+        # Safe if it resolves under the primary root OR any granted extra_root
+        # (exec-widen), with the SAME dotfile secret-floor on every root — a
+        # `.env`/`.ssh` BELOW the matched root stays refused (Nemo #2).
+        roots = [root] if root is not None else []
+        roots += list(extra_roots)
+        for r in roots:
+            try:
+                rel = resolved.relative_to(Path(r).resolve())
+            except (ValueError, OSError):
+                continue
+            if any(p.startswith(".") for p in rel.parts):
+                return False  # dotfile component under the matched root
+            return True
+        return False
     return _is_safe_relative_file_arg(arg)
 
 
-def _is_safe_go_target(arg: str, root: Path | None) -> bool:
+def _is_safe_go_target(arg: str, root: Path | None, extra_roots=()) -> bool:
     """True iff ``arg`` is a Go vet target that cannot leak a file outside
     the artifacts root. Go package patterns (``.``, ``./...``,
     ``./pkg/...``) legitimately begin with ``.`` and address the confined
@@ -587,11 +596,11 @@ def _is_safe_go_target(arg: str, root: Path | None) -> bool:
         # value-less flag (``-json``) carries no path and is accepted.
         if "=" in arg:
             value = arg.split("=", 1)[1]
-            return _is_safe_go_target(value, root)
+            return _is_safe_go_target(value, root, extra_roots)
         return True
     if arg.startswith("/") or arg.startswith("\\"):
         # An absolute path is only safe if it resolves under root.
-        return _is_safe_file_arg(arg, root)
+        return _is_safe_file_arg(arg, root, extra_roots)
     parts = arg.replace("\\", "/").split("/")
     # Reject traversal segments; a lone leading ``.`` (the Go package marker)
     # is fine, but ``..`` would climb out of the confined cwd.
@@ -637,7 +646,7 @@ def resolve_under_roots(arg: str, roots: "list[Path]") -> "Path | None":
     return None
 
 
-def _check_passive(argv: list[str], root: Path | None = None) -> bool:
+def _check_passive(argv: list[str], root: Path | None = None, extra_roots=()) -> bool:
     """True iff ``argv`` is genuinely no-execution for the passive profile.
 
     "Passive" means: nothing in ``argv`` causes user-controlled code
@@ -681,7 +690,7 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
             and argv[1] == "-m"
             and argv[2] == "py_compile"
             and argv[3].endswith(".py")
-            and _is_safe_file_arg(argv[3], root)
+            and _is_safe_file_arg(argv[3], root, extra_roots)
         ):
             return True
         # python3 -c <body>, python3 file.py --help, and
@@ -707,7 +716,7 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
             len(argv) == 3
             and argv[1] == "-c"
             and argv[2].endswith(".rb")
-            and _is_safe_file_arg(argv[2], root)
+            and _is_safe_file_arg(argv[2], root, extra_roots)
         ):
             return True
         # ruby file.rb --help runs file.rb's top-level — not passive.
@@ -718,7 +727,7 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
     if head == "rubocop":
         # rubocop file.rb [more files]  (linter; read-only)
         if len(argv) >= 2 and all(
-            a.endswith(".rb") and _is_safe_file_arg(a, root) for a in argv[1:]
+            a.endswith(".rb") and _is_safe_file_arg(a, root, extra_roots) for a in argv[1:]
         ):
             return True
     # ── Go ───────────────────────────────────────────────────────────
@@ -734,14 +743,14 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
         # so are accepted explicitly; only absolute paths and ``..`` traversal
         # (which can escape the artifacts root) are refused.
         if len(argv) >= 2 and argv[1] == "vet":
-            if all(_is_safe_go_target(a, root) for a in argv[2:]):
+            if all(_is_safe_go_target(a, root, extra_roots) for a in argv[2:]):
                 return True
     if head == "gofmt":
         # gofmt -l <file>.go  (lists files needing reformat; no modification)
         # gofmt -d <file>.go  (shows diff; no modification)
         if len(argv) >= 3 and argv[1] in ("-l", "-d"):
             if all(
-                a.endswith(".go") and _is_safe_file_arg(a, root)
+                a.endswith(".go") and _is_safe_file_arg(a, root, extra_roots)
                 for a in argv[2:]
             ):
                 return True
@@ -754,19 +763,19 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
         # leak arbitrary source; bare `ruff check` lints the (confined) cwd.
         if len(argv) >= 2 and argv[1] == "check":
             rest = argv[2:]
-            if all(not a.startswith("-") and _is_safe_file_arg(a, root) for a in rest):
+            if all(not a.startswith("-") and _is_safe_file_arg(a, root, extra_roots) for a in rest):
                 return True
     if head == "mypy":
         # mypy <file.py>  or  mypy <file.py> <file.py>...  — confine each path
         # (a lint tool echoes offending source lines, so an unconfined path is
         # an arbitrary-file read).
         if len(argv) >= 2 and all(
-            a.endswith(".py") and _is_safe_file_arg(a, root) for a in argv[1:]
+            a.endswith(".py") and _is_safe_file_arg(a, root, extra_roots) for a in argv[1:]
         ):
             return True
     if head == "pyflakes":
         if len(argv) >= 2 and all(
-            a.endswith(".py") and _is_safe_file_arg(a, root) for a in argv[1:]
+            a.endswith(".py") and _is_safe_file_arg(a, root, extra_roots) for a in argv[1:]
         ):
             return True
     # ── Read-only filesystem inspection (cwd already confined) ──────
@@ -777,46 +786,46 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
         # ls (no args), ls -l/-la/-a, ls <file>, ls -la <file>
         if len(argv) == 1:
             return True
-        if all(a in ("-l", "-la", "-al", "-a") or _is_safe_file_arg(a, root) for a in argv[1:]):
+        if all(a in ("-l", "-la", "-al", "-a") or _is_safe_file_arg(a, root, extra_roots) for a in argv[1:]):
             return True
     if head == "cat":
         # cat <file> [<file> ...] — read-only file inspection
-        if len(argv) >= 2 and all(_is_safe_file_arg(a, root) for a in argv[1:]):
+        if len(argv) >= 2 and all(_is_safe_file_arg(a, root, extra_roots) for a in argv[1:]):
             return True
     if head == "head":
         # head <file>, head -<N> <file>, head -n <N> <file>
-        if len(argv) == 2 and _is_safe_file_arg(argv[1], root):
+        if len(argv) == 2 and _is_safe_file_arg(argv[1], root, extra_roots):
             return True
         if (
             len(argv) == 3
             and argv[1].startswith("-")
             and argv[1][1:].isdigit()
-            and _is_safe_file_arg(argv[2], root)
+            and _is_safe_file_arg(argv[2], root, extra_roots)
         ):
             return True
         if (
             len(argv) == 4
             and argv[1] == "-n"
             and argv[2].isdigit()
-            and _is_safe_file_arg(argv[3], root)
+            and _is_safe_file_arg(argv[3], root, extra_roots)
         ):
             return True
     if head == "tail":
         # tail <file>, tail -<N> <file>, tail -n <N> <file>  (head's twin)
-        if len(argv) == 2 and _is_safe_file_arg(argv[1], root):
+        if len(argv) == 2 and _is_safe_file_arg(argv[1], root, extra_roots):
             return True
         if (
             len(argv) == 3
             and argv[1].startswith("-")
             and argv[1][1:].isdigit()
-            and _is_safe_file_arg(argv[2], root)
+            and _is_safe_file_arg(argv[2], root, extra_roots)
         ):
             return True
         if (
             len(argv) == 4
             and argv[1] == "-n"
             and argv[2].isdigit()
-            and _is_safe_file_arg(argv[3], root)
+            and _is_safe_file_arg(argv[3], root, extra_roots)
         ):
             return True
     if head == "wc":
@@ -827,7 +836,7 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
         if (
             files
             and all(set(f[1:]) <= set("lwcmL") for f in flags)
-            and all(_is_safe_file_arg(a, root) for a in files)
+            and all(_is_safe_file_arg(a, root, extra_roots) for a in files)
         ):
             return True
     if head == "grep":
@@ -847,7 +856,7 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
         )
         if safe_flags and len(nonflags) >= 2:  # PATTERN + >=1 file
             files = nonflags[1:]
-            if all(_is_safe_file_arg(f, root) for f in files):
+            if all(_is_safe_file_arg(f, root, extra_roots) for f in files):
                 return True
     if head == "sed":
         # ONLY the read-only line-range print form: ``sed -n 'A,Bp' <file>``.
@@ -859,14 +868,14 @@ def _check_passive(argv: list[str], root: Path | None = None) -> bool:
             len(argv) == 4
             and argv[1] == "-n"
             and re.fullmatch(r"\d+,\d+p", argv[2])
-            and _is_safe_file_arg(argv[3], root)
+            and _is_safe_file_arg(argv[3], root, extra_roots)
         ):
             return True
     return False
 
 
-def _check_full(argv: list[str], root: Path | None = None) -> bool:
-    if _check_passive(argv, root):
+def _check_full(argv: list[str], root: Path | None = None, extra_roots=()) -> bool:
+    if _check_passive(argv, root, extra_roots):
         return True
     if not argv:
         return False
@@ -880,7 +889,7 @@ def _check_full(argv: list[str], root: Path | None = None) -> bool:
         if (
             len(argv) >= 2
             and argv[1].endswith(".py")
-            and _is_safe_file_arg(argv[1], root)
+            and _is_safe_file_arg(argv[1], root, extra_roots)
         ):
             return True
         # python3 -c '<any body>'  — full profile authorizes execution,
@@ -896,7 +905,7 @@ def _check_full(argv: list[str], root: Path | None = None) -> bool:
         if (
             len(argv) >= 2
             and argv[1].endswith(".js")
-            and _is_safe_file_arg(argv[1], root)
+            and _is_safe_file_arg(argv[1], root, extra_roots)
         ):
             return True
     if head == "npm":
@@ -915,7 +924,7 @@ def _check_full(argv: list[str], root: Path | None = None) -> bool:
         if (
             len(argv) >= 2
             and argv[1].endswith(".rb")
-            and _is_safe_file_arg(argv[1], root)
+            and _is_safe_file_arg(argv[1], root, extra_roots)
         ):
             return True
     if head == "bundle":
@@ -954,7 +963,7 @@ def _check_full(argv: list[str], root: Path | None = None) -> bool:
         if (
             len(argv) == 2
             and argv[1].endswith(".sh")
-            and _is_safe_file_arg(argv[1], root)
+            and _is_safe_file_arg(argv[1], root, extra_roots)
         ):
             return True
     return False
@@ -1010,22 +1019,22 @@ def _rewrite_argv_to_running_python(argv: list[str]) -> list[str]:
     return argv
 
 
-def _validate_run_shell_cwd(cwd_str: str, artifacts_root: Path) -> Path:
-    """Resolve ``cwd_str`` under ``artifacts_root`` and return the
-    absolute Path. Empty string → root itself. Raises ``ValueError``
-    on traversal escape, dotfile component, or missing dir.
+def _validate_run_shell_cwd(cwd_str: str, artifacts_root: Path, extra_roots=()) -> Path:
+    """Resolve ``cwd_str`` under ``artifacts_root`` OR a granted ``extra_root``
+    (exec-widen) and return the absolute Path. Empty string → root itself.
+    Raises ``ValueError`` on traversal escape (under no allowed root), dotfile
+    component, or missing dir. The dotfile secret-floor applies under EVERY
+    allowed root (Nemo #2 — both run_shell confinement helpers share the rule).
     """
     root_resolved = artifacts_root.resolve()
     if not cwd_str:
         return root_resolved
     candidate = (artifacts_root / cwd_str).resolve()
-    try:
-        rel = candidate.relative_to(root_resolved)
-    except ValueError as exc:
-        raise ValueError(
-            f"cwd escapes artifacts root: {cwd_str!r}"
-        ) from exc
-    for part in rel.parts:
+    roots = [root_resolved, *[Path(r).resolve() for r in extra_roots]]
+    matched = next((r for r in roots if candidate == r or r in candidate.parents), None)
+    if matched is None:
+        raise ValueError(f"cwd escapes artifacts root: {cwd_str!r}")
+    for part in candidate.relative_to(matched).parts:
         if part.startswith("."):
             raise ValueError(
                 f"cwd contains dotfile component {part!r}; phase 1 refuses "
@@ -1093,8 +1102,10 @@ def _not_installed_body(missing: str, detail: str = "") -> str:
     )
 
 
-def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
-    """Return a ``run_shell`` callable bound to ``artifacts_root``.
+def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
+    """Return a ``run_shell`` callable bound to ``artifacts_root`` (plus any
+    operator-granted ``extra_roots`` for exec-widen — cwd + file-args may resolve
+    under a granted root, and widened-root execution is sandbox-REQUIRED).
 
     Closing over the root rather than accepting it per-call keeps the
     skill-authored ``tool_args`` minimal AND makes path confinement a
@@ -1151,11 +1162,11 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
             argv = shlex.split(cmd)
         except ValueError as exc:
             raise ValueError(f"unparseable cmd: {exc}") from exc
-        if not check(argv, artifacts_root):
+        if not check(argv, artifacts_root, extra_roots):
             raise ValueError(
                 f"command not allowed by profile {profile!r}: {cmd!r}"
             )
-        wd = _validate_run_shell_cwd(cwd, artifacts_root)
+        wd = _validate_run_shell_cwd(cwd, artifacts_root, extra_roots)
         # Rewrite happens AFTER the allowlist check so the safety
         # surface enforces user-visible cmd shapes; the rewrite is
         # a transparent execution helper that lets ``pytest`` /
@@ -1199,11 +1210,26 @@ def make_run_shell(artifacts_root: Path) -> Callable[..., str]:
         _payload_argv = _prlimit_wrapper_prefix() + list(exec_argv)
         run_argv = _payload_argv
         _profile = _sandbox.current_profile()
+        # exec-widen HIGH-3 (Wild Bill): a WIDENED-root run requires a FUNCTIONAL
+        # sandbox, fail-closed — checked BEFORE the bypass/off branch, so the
+        # global dev/test bypass (MODULATIO_RUN_SHELL_UNSAFE / profile=off) does
+        # NOT reach widened exec (that would leak the parent env + provider keys
+        # into a real project folder). The workspace path keeps its bypass/soft-
+        # fallback below (the Leader's own confined home, lower risk).
+        _art_resolved = artifacts_root.resolve()
+        _wd_widened = not (wd == _art_resolved or _art_resolved in wd.parents)
+        if _wd_widened and not _sandbox.is_sandbox_available():
+            raise RuntimeError(
+                "widened exec refused: bwrap sandbox unavailable. Running "
+                "commands in an operator-granted folder requires a functional "
+                "sandbox (no bypass). Install/repair bubblewrap."
+            )
         if _sandbox.is_bypass_requested() or _profile == "off":
             pass  # explicit opt-out (UNSAFE env or profile=off), run as-is
         elif _sandbox.is_sandbox_available():
             run_argv, run_env = _sandbox.build_sandboxed_argv(
                 _payload_argv, artifacts_root, profile=_profile,
+                extra_rw_roots=tuple(Path(r) for r in extra_roots),
             )
         elif _sandbox.is_sandbox_required():
             # H3c: operator demanded a working sandbox (MODULATIO_REQUIRE_SANDBOX=1)
@@ -1726,6 +1752,7 @@ def build_registry(
     project_code: str | None = None,
     on_artifact_write: "Callable[[Path], None] | None" = None,
     extra_roots=(),
+    run_shell_extra_roots=(),
 ) -> dict[str, Tool]:
     """Return a fresh dict of builtin tools. Callers (CLI / tests)
     merge their own tools in and pass the result into the
@@ -1933,7 +1960,7 @@ def build_registry(
                 "Non-zero exit codes and stderr tracebacks are evidence, "
                 "not noise — read them."
             ),
-            call=make_run_shell(artifacts_root),
+            call=make_run_shell(artifacts_root, run_shell_extra_roots),
             params_schema={
                 "type": "object",
                 "properties": {
