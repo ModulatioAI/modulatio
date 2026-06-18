@@ -514,7 +514,7 @@ def _is_safe_relative_file_arg(arg: str) -> bool:
     return True
 
 
-def _is_safe_file_arg(arg: str, root: Path | None) -> bool:
+def _is_safe_file_arg(arg: str, root: Path | None, extra_roots=()) -> bool:
     """Same intent as :func:`_is_safe_relative_file_arg` but accepts
     absolute paths IF they resolve under ``root`` (the artifacts dir)
     with no dotfile components.
@@ -548,17 +548,26 @@ def _is_safe_file_arg(arg: str, root: Path | None) -> bool:
     if arg.startswith("-"):
         return False
     if arg.startswith("/") or arg.startswith("\\"):
-        if root is None:
+        if root is None and not extra_roots:
             return False
         try:
             resolved = Path(arg).resolve()
-            rel = resolved.relative_to(root.resolve())
         except (ValueError, OSError):
             return False
-        for p in rel.parts:
-            if p.startswith("."):
-                return False
-        return True
+        # Safe if it resolves under the primary root OR any granted extra_root
+        # (exec-widen), with the SAME dotfile secret-floor on every root — a
+        # `.env`/`.ssh` BELOW the matched root stays refused (Nemo #2).
+        roots = [root] if root is not None else []
+        roots += list(extra_roots)
+        for r in roots:
+            try:
+                rel = resolved.relative_to(Path(r).resolve())
+            except (ValueError, OSError):
+                continue
+            if any(p.startswith(".") for p in rel.parts):
+                return False  # dotfile component under the matched root
+            return True
+        return False
     return _is_safe_relative_file_arg(arg)
 
 
@@ -1010,22 +1019,22 @@ def _rewrite_argv_to_running_python(argv: list[str]) -> list[str]:
     return argv
 
 
-def _validate_run_shell_cwd(cwd_str: str, artifacts_root: Path) -> Path:
-    """Resolve ``cwd_str`` under ``artifacts_root`` and return the
-    absolute Path. Empty string → root itself. Raises ``ValueError``
-    on traversal escape, dotfile component, or missing dir.
+def _validate_run_shell_cwd(cwd_str: str, artifacts_root: Path, extra_roots=()) -> Path:
+    """Resolve ``cwd_str`` under ``artifacts_root`` OR a granted ``extra_root``
+    (exec-widen) and return the absolute Path. Empty string → root itself.
+    Raises ``ValueError`` on traversal escape (under no allowed root), dotfile
+    component, or missing dir. The dotfile secret-floor applies under EVERY
+    allowed root (Nemo #2 — both run_shell confinement helpers share the rule).
     """
     root_resolved = artifacts_root.resolve()
     if not cwd_str:
         return root_resolved
     candidate = (artifacts_root / cwd_str).resolve()
-    try:
-        rel = candidate.relative_to(root_resolved)
-    except ValueError as exc:
-        raise ValueError(
-            f"cwd escapes artifacts root: {cwd_str!r}"
-        ) from exc
-    for part in rel.parts:
+    roots = [root_resolved, *[Path(r).resolve() for r in extra_roots]]
+    matched = next((r for r in roots if candidate == r or r in candidate.parents), None)
+    if matched is None:
+        raise ValueError(f"cwd escapes artifacts root: {cwd_str!r}")
+    for part in candidate.relative_to(matched).parts:
         if part.startswith("."):
             raise ValueError(
                 f"cwd contains dotfile component {part!r}; phase 1 refuses "

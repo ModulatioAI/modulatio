@@ -589,6 +589,41 @@ def test_run_shell_cwd_blocks_dotfile_components(tmp_path):
         rs(cmd="python3 --version", profile="passive", cwd=".secret")
 
 
+# ── exec-widen 2a: the two confinement helpers honor granted extra_roots ──────
+
+def test_is_safe_file_arg_honors_extra_roots(tmp_path):
+    art = _make_artifacts(tmp_path)
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    (granted / "x.py").write_text("x\n")
+    # absolute path under a granted extra_root → safe
+    assert tools._is_safe_file_arg(str(granted / "x.py"), art, extra_roots=(granted,)) is True
+    # under neither root → refused
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    assert tools._is_safe_file_arg(str(other / "y.py"), art, extra_roots=(granted,)) is False
+    # secret-floor holds INSIDE a granted root — a dotfile component is refused
+    (granted / ".env").write_text("SECRET=1\n")
+    assert tools._is_safe_file_arg(str(granted / ".env"), art, extra_roots=(granted,)) is False
+
+
+def test_validate_run_shell_cwd_honors_extra_roots(tmp_path):
+    art = _make_artifacts(tmp_path)
+    granted = tmp_path / "proj"
+    (granted / "sub").mkdir(parents=True)
+    # an absolute cwd under a granted root resolves + is accepted
+    assert tools._validate_run_shell_cwd(str(granted / "sub"), art, extra_roots=(granted,)) == (granted / "sub").resolve()
+    # dotfile component under a granted root still refused (secret-floor)
+    (granted / ".secret").mkdir()
+    with pytest.raises(ValueError, match="dotfile"):
+        tools._validate_run_shell_cwd(str(granted / ".secret"), art, extra_roots=(granted,))
+    # a dir under no granted root is refused
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    with pytest.raises(ValueError, match="escape"):
+        tools._validate_run_shell_cwd(str(other), art, extra_roots=(granted,))
+
+
 def test_run_shell_cwd_must_exist(tmp_path):
     """Non-existent cwd raises early — clearer error than letting
     subprocess fail with a confusing FileNotFoundError downstream."""
