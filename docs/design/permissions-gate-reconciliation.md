@@ -102,6 +102,17 @@ and ADDING the broker arm (discarding §1's pre-widen if/elif). `permissions.py`
 - **no-regress**: a DEFAULT converse with no mode command is byte-identical to today;
   the widen's existing tests (path/exec cheat-guard, secret-floor, HIGH-3) all still pass.
 
+## Revoke boundary (Jenny CHANGES — operator clarity)
+The two gates have **disjoint grant stores** (leader_gate: `leader_permissions`, path/exec
+classes, realpath grants; broker: `GrantStore`, typed capability-prefix keys). They cannot
+collide — but the revokes are therefore also separate. **`/rp` clears leader_gate grants only
+(path/exec — "revoke all folder widen"). It does NOT clear the broker's capability `GrantStore`.**
+A `/rp` that silently left an `always` `network:domain=…` grant live would mislead the operator.
+**§2 decision (flagged, not decided here):** either (a) extend `/rp` to ALSO call the broker's
+revoke (one command clears BOTH stores — preserves orthogonal stores while giving the operator the
+expected "revoke all" UX; recommended), or (b) a separate broker-revoke command with clear messaging.
+The stores stay orthogonal either way; this is purely the revoke UX surface.
+
 ## Scope
 IN: the compose seam in `runners.py` (broker as a deny-chain arm), the §1→main merge,
 and the orthogonality invariant + tests. The 5 §2 tasks (mode parse, broker-per-session,
