@@ -913,6 +913,7 @@ def run_llm_with_tools(
     summarizer_chat_runner_factory: Callable[[str], Callable[..., str]] | None = None,
     model: str | None = None,
     permission_callback: Callable[[str, dict], bool] | None = None,
+    permission_broker: "object | None" = None,
     metered_authorizer: Callable[[str, dict], "tuple[bool, str]"] | None = None,
 ) -> str:
     """Run a function-calling loop. Returns the model's final text.
@@ -980,6 +981,23 @@ def run_llm_with_tools(
     # name isn't in the declared loadout — otherwise a web-only skill reaches
     # run_shell / write_artifact / read_tool_result whenever they're registered.
     allowed_tools = set(tool_loadout)
+
+    def _broker_denies(call) -> bool:
+        # The scoped PermissionBroker (§6) gates the CAPABILITY axis (network /
+        # shell / file-write / spend) — it asks the four access questions, honors
+        # remembered/preauthorized grants, and binds the substrate preflight.
+        # This COMPOSES with the leader_gate (permission_callback, the FILESYSTEM
+        # axis) — they are SEPARATE deny-chain arms, both must pass (gate-reconcile
+        # design: the broker never shadows the gate). Fail-closed: any broker-side
+        # exception (e.g. the sandbox-availability probe doing I/O) is a DENY,
+        # mirroring the metered arm (Nemo). No broker wired → no capability check.
+        if permission_broker is None:
+            return False
+        try:
+            return not permission_broker.authorize(call.name, dict(call.args))
+        except Exception:
+            return True
+
     messages: list[dict] = [{"role": "user", "content": prompt}]
     # W5-lite F9 audit follow-up: a 20-iteration tool loop that
     # sits in the soft-warn band would otherwise emit 20 identical
@@ -1066,11 +1084,21 @@ def run_llm_with_tools(
                 permission_callback is not None
                 and not permission_callback(call.name, dict(call.args))
             ):
-                # The operator (via an ACP client) declined this tool. Feed the
-                # denial back as the tool result so the model can re-plan — same
-                # contract as an error string. Fail-closed: the tool never runs.
+                # FILESYSTEM axis (the leader_gate / ACP allow-deny callback): the
+                # operator declined this path/exec, or it's outside the granted
+                # folders (the fence). Runs FIRST + mode-independent — no autonomy
+                # mode can shortcut past path-confinement. Fail-closed.
                 result = (
                     f"DENIED: the operator declined to run tool {call.name!r}."
+                )
+            elif _broker_denies(call):
+                # CAPABILITY axis (the scoped PermissionBroker — once/session/
+                # always/no): a separate deny-chain arm that COMPOSES with the
+                # filesystem gate above (both must pass). /yolo auto-grants here;
+                # it never reaches the fence above. Fail-closed (wrapped).
+                result = (
+                    f"DENIED: the operator's permission policy declined "
+                    f"{call.name!r}."
                 )
             elif getattr(tool, "cost_class", None) in ("paid-cloud", "premium-cloud"):
                 # Metered tool (Part B4): gate the spend BEFORE the call. The engine

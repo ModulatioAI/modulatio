@@ -607,3 +607,66 @@ def test_permission_callback_allows_tool_execution():
     )
     assert out == "done"
     assert ran["n"] == 1                        # the tool ran
+
+
+# ── compose keystone: leader_gate (callback) + PermissionBroker compose ──────
+# Proves the gate-reconcile invariant AT THE CALL PATH (not the part): the broker
+# is a SEPARATE deny-chain arm, never shadows the callback. Both must pass; either
+# denies → tool refused; a broker exception → deny (fail-closed).
+
+class _Broker:
+    def __init__(self, allow=True, boom=False):
+        self.allow, self.boom = allow, boom
+        self.seen = []
+
+    def authorize(self, name, args):
+        self.seen.append(name)
+        if self.boom:
+            raise RuntimeError("sandbox probe I/O failed")
+        return self.allow
+
+
+def _compose_run(*, callback_allows, broker):
+    ran = {"n": 0}
+
+    def echo(**k):
+        ran["n"] += 1
+        return "executed"
+
+    registry = {"echo": tools.Tool(name="echo", description="echo", call=echo)}
+    scripted = [
+        ChatResponse(content=None, tool_calls=(ToolCall(id="c1", name="echo", args={}),)),
+        ChatResponse(content="done", tool_calls=()),
+    ]
+    out = runners.run_llm_with_tools(
+        chat_runner=runners.stub_chat_runner(scripted),
+        prompt="go", tool_loadout=("echo",), tool_registry=registry, max_iters=5,
+        permission_callback=lambda name, args: callback_allows,
+        permission_broker=broker,
+    )
+    return ran["n"], out
+
+
+def test_compose_both_allow_runs():
+    ran, out = _compose_run(callback_allows=True, broker=_Broker(allow=True))
+    assert ran == 1 and out == "done"
+
+
+def test_compose_callback_denies_broker_allows_refuses():
+    # the FENCE (leader_gate) denies — the broker (even allowing) cannot run it.
+    b = _Broker(allow=True)
+    ran, _ = _compose_run(callback_allows=False, broker=b)
+    assert ran == 0                              # tool refused by the gate arm
+    assert b.seen == []                          # gate denied FIRST; broker never reached
+
+
+def test_compose_broker_denies_callback_allows_refuses():
+    # the CAPABILITY gate (broker) denies — the gate allowing the path doesn't help.
+    ran, _ = _compose_run(callback_allows=True, broker=_Broker(allow=False))
+    assert ran == 0                              # tool refused by the broker arm
+
+
+def test_compose_broker_exception_is_fail_closed():
+    # a broker-side exception (e.g. sandbox-probe I/O) → DENY, never run.
+    ran, _ = _compose_run(callback_allows=True, broker=_Broker(boom=True))
+    assert ran == 0
