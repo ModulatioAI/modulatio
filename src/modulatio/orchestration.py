@@ -5425,6 +5425,7 @@ class Orchestrator:
         attachments: list | None = None,
         on_token: "Callable[[str], None] | None" = None,
         permission_callback: "Callable[[str, dict], bool] | None" = None,
+        prompt_fn: "Callable | None" = None,
     ) -> str:
         """The Leader's conversational function: reply to the operator as a
         fully-capable partner, tool-using and persistent. Returns the reply
@@ -5438,6 +5439,16 @@ class Orchestrator:
         stub mode) returns a plain acknowledgement so the UI flow still works.
         """
         attachments = attachments or []
+        # Wire the cross-cutting permission gate into the tool-loop: when the
+        # caller supplies a prompt surface (the TUI's approval modal), build the
+        # gate-backed callback so every out-of-workspace tool call is gated
+        # (extractor -> gate.decide -> bool). An explicit permission_callback
+        # (e.g. ACP) wins. The gate persists on the Orchestrator across turns.
+        if prompt_fn is not None and permission_callback is None:
+            from modulatio import leader_gate as _lg
+            permission_callback = _lg.build_permission_callback(
+                self.leader_gate(), root=self._leader_workspace(), prompt_fn=prompt_fn,
+            )
         # Serialize the whole turn so two concurrent operator sessions on one
         # project can't interleave the durable log or race on shared state.
         with self._converse_lock:
@@ -5490,11 +5501,15 @@ class Orchestrator:
                         _vault.project_dir(self.project.code)
                         / "tool_calls" / "leader_converse.jsonl"
                     )
-                    # Augment the registry with the Leader's own functions (run_job,
-                    # …) for the duration of the loop. _run_chat_loop reads the
-                    # registry through _active_tool_registry(), which honors this
-                    # thread-local override.
-                    augmented = dict(self._active_tool_registry())
+                    # The Leader's SOLO registry: path-bound builtins (run_shell,
+                    # read_file, edit_file, write_artifact) rebound to his OWN
+                    # workspace inside the project (_leader_tool_registry) — NOT
+                    # the run-artifacts scratch, NOT the producers' tree — so his
+                    # hands can't reach a kickoff's deliverable. Augment it with
+                    # his own functions (run_job, team_status, …) for the loop.
+                    # _run_chat_loop reads via _active_tool_registry(), which
+                    # honors this thread-local override.
+                    augmented = dict(self._leader_tool_registry())
                     augmented.update(self._leader_function_tools())
                     self._tls.tool_registry_override = augmented
                     try:
@@ -7110,6 +7125,57 @@ class Orchestrator:
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # staging-bound builtins win over shared ones
+        return merged
+
+    def _leader_workspace(self) -> "Path":
+        """The Leader's own per-project solo-coding folder (created on demand)."""
+        from modulatio import vault as _vault
+        ws = _vault.project_dir(self.project.code) / "leader_workspace"
+        ws.mkdir(parents=True, exist_ok=True)
+        return ws
+
+    def _leader_blocked_subtrees(self) -> "list[str]":
+        """The swarm deliverable/run trees the Leader may never be widened over
+        or into (Wild Bill BLOCK-1): the per-project runs root (every kickoff's
+        output) and the persistent artifacts root. Fed to the gate so the
+        cheat-guard is engine-enforced with REAL roots, not left advisory."""
+        from modulatio import vault as _vault
+        return [
+            str(_vault.runs_dir(self.project.code)),
+            str(_vault.project_dir(self.project.code) / "artifacts"),
+        ]
+
+    def leader_gate(self):
+        """The per-project cross-cutting permission gate (cached so in-memory
+        session grants persist across converse turns)."""
+        cached = getattr(self, "_leader_gate_cache", None)
+        if cached is None:
+            from modulatio import leader_gate as _lg
+            cached = _lg.LeaderPermissionGate(
+                self.project.code, workspace=self._leader_workspace(),
+                blocked_subtrees=self._leader_blocked_subtrees(),
+            )
+            self._leader_gate_cache = cached
+        return cached
+
+    def _leader_tool_registry(self) -> "dict[str, tools.Tool]":
+        """The conversational Leader's SOLO-coding registry: path-bound builtins
+        (run_shell, write_artifact, read_file, edit_file, …) rebound to the
+        Leader's OWN workspace inside the project — NOT the per-run artifacts
+        scratch and NOT the producers' deliverable tree. Confined there, the
+        Leader physically cannot edit a swarm run's output: the sandbox root IS
+        the boundary. Operator-granted roots (via the gate) are added as
+        ``extra_roots`` so a deliberately-widened folder becomes reachable.
+        Mirrors ``_staging_tool_registry``'s rebind; non-path tools preserved."""
+        workspace = self._leader_workspace()
+        rebound = tools.build_registry(
+            artifacts_root=workspace,
+            tool_calls_dir=workspace / "tool_calls",
+            project_code=self.project.code,
+            extra_roots=self.leader_gate().granted_roots(),
+        )
+        merged = dict(self.tool_registry)
+        merged.update(rebound)  # workspace-bound builtins win over shared ones
         return merged
 
     def _merge_wave_artifacts(

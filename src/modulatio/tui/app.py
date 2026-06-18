@@ -832,7 +832,17 @@ class ModulatioApp(App):
                 "(no models are configured — run `modulatio setup` to wire the "
                 "Leader's model.)"
             )
-        return orch.converse(text, attachments=attachments or [])
+        return self._run_converse(orch, text, attachments or [])
+
+    def _run_converse(self, orch, text: str, attachments) -> str:
+        """The converse call itself (split out of the @work worker so it's
+        testable off the event loop). Supplies the cross-cutting permission
+        gate's UI surface — the approval modal bridged from this worker thread —
+        so any out-of-workspace tool call the Leader attempts is gated."""
+        from modulatio.tui.leader_prompt import make_modal_prompt_fn
+        return orch.converse(
+            text, attachments=attachments, prompt_fn=make_modal_prompt_fn(self)
+        )
 
     def _on_converse_done(self, reply: str) -> None:
         try:
@@ -935,6 +945,12 @@ class ModulatioApp(App):
             from modulatio.tui.widgets.bug_report_modal import BugReportModal
             self.push_screen(BugReportModal())
             return
+        if side_effect == "leader_revoke_permissions":
+            self._leader_revoke_all()
+            return
+        if side_effect.startswith("leader_work_here:"):
+            self._leader_work_here(side_effect.split(":", 1)[1])
+            return
         if side_effect == "refresh_all_tabs":
             # Best-effort: trigger ``on_show`` on every tab panel that defines
             # it. The tab panels are ``Vertical`` subclasses (not Textual
@@ -962,6 +978,72 @@ class ModulatioApp(App):
         # pass-through hints for the user — no automatic shell action
         # this slice. CLI launching of the wizard from inside the TUI
         # arrives in Phase 3 polish.
+
+    # ── Leader permission widen (/work, /rp) ────────────────────────────
+    def _leader_revoke_all(self) -> None:
+        """`/rp` — revoke ALL the Leader's folder grants. The conversation
+        orchestrator's gate is the single source of truth; the next converse
+        turn rebuilds the registry with no granted roots, so the hands snap
+        back to the workspace floor. No-op if no conversation exists yet."""
+        orch = getattr(self, "_conv_orch", None)
+        if orch is not None:
+            orch.leader_gate().revoke_all()
+        self._set_response(
+            "All Leader permissions revoked — back to the workspace floor."
+        )
+
+    def _leader_work_here(self, raw_path: str) -> None:
+        """`/work <path>` — proactively prompt the operator to widen the Leader
+        into ``raw_path``. The decision is recorded on the gate at its scope
+        (always persists, session in-memory, once is one-shot, deny refuses);
+        the next converse turn's registry then reaches the granted root."""
+        from pathlib import Path
+        from modulatio import leader_gate as lg, leader_permissions as lp
+        from modulatio.tui.widgets.leader_approval_modal import LeaderApprovalModal
+
+        orch = self._conversation_orchestrator()
+        if orch is None:
+            self._set_response(
+                "(no Leader configured — run `modulatio setup` first.)"
+            )
+            return
+        p = Path(raw_path).expanduser()
+        if not p.exists():
+            self._set_response(f"No such folder: {p}")
+            return
+        resource = str(p.resolve())
+        request = lg.SecurityRequest(
+            action="edit", resource=resource,
+            request_class=lp.REQUEST_CLASS_PATH,
+            why=f"operator ran /work {raw_path}",
+        )
+        gate = orch.leader_gate()
+        # Engine-bound refusal: a root overlapping a swarm deliverable tree (or a
+        # broad system dir) can never be granted — don't show a pointless modal,
+        # just surface the reason. The gate enforces this regardless (decide
+        # refuses before prompting), so this is UX, not the security boundary.
+        refused = gate.refusal_reason(request)
+        if refused is not None:
+            self._set_response(f"Can't work there — {refused}.")
+            return
+        warning = lg.dangerous_widen_root(resource)
+
+        def on_dismiss(scope: str | None) -> None:
+            scope = scope or lp.SCOPE_DENY
+            # Reuse the gate's own recording logic (always→persist / session→
+            # memory / once→nothing / deny→refuse) by feeding it the scope the
+            # operator already chose — no second modal.
+            gate.decide(request, prompt_fn=lambda _r: lg.ScopedDecision(scope=scope))
+            if scope == lp.SCOPE_DENY:
+                self._set_response(
+                    "Denied — the Leader stays in its workspace."
+                )
+            else:
+                self._set_response(
+                    f"Granted ({scope}): the Leader can now work in {resource}."
+                )
+
+        self.push_screen(LeaderApprovalModal(request, warning=warning), on_dismiss)
 
     def _record_activity(self, event: ActivityEvent) -> None:
         """Thread-safe activity bridge. Called by the Orchestrator; may

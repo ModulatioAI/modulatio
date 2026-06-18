@@ -60,6 +60,94 @@ def test_tool_dataclass_carries_name_description_callable():
     assert t.call(text="hello") == "hello"
 
 
+# ── file-edit trio: read_file / edit_file (Leader solo-coding hands) ─────────
+# Root-bound builtins like run_shell/write_artifact: registered only when
+# build_registry is given a root, and confined to it (the sandbox root IS the
+# boundary). They give the conversational Leader fluent file editing for
+# operator-guided standalone coding. write_file is served by write_artifact.
+
+def test_read_file_and_edit_file_registered_only_with_root(tmp_path):
+    with_root = tools.build_registry(artifacts_root=tmp_path)
+    assert "read_file" in with_root
+    assert "edit_file" in with_root
+    assert callable(with_root["read_file"].call)
+    assert callable(with_root["edit_file"].call)
+    no_root = tools.build_registry()
+    assert "read_file" not in no_root
+    assert "edit_file" not in no_root
+
+
+def test_read_file_returns_content(tmp_path):
+    (tmp_path / "a.py").write_text("hello\nworld\n", encoding="utf-8")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    out = registry["read_file"].call(path="a.py")
+    assert "hello" in out and "world" in out
+
+
+def test_edit_file_str_replaces_unique_match(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    registry["edit_file"].call(path="a.py", old="x = 1", new="x = 42")
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 42\ny = 2\n"
+
+
+def test_edit_file_refuses_ambiguous_match(tmp_path):
+    (tmp_path / "a.py").write_text("v = 1\nv = 1\n", encoding="utf-8")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError):
+        registry["edit_file"].call(path="a.py", old="v = 1", new="v = 9")
+
+
+def test_edit_file_refuses_missing_match(tmp_path):
+    (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError):
+        registry["edit_file"].call(path="a.py", old="nope", new="x")
+
+
+def test_file_tools_refuse_traversal(tmp_path):
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError):
+        registry["read_file"].call(path="../etc/passwd")
+    with pytest.raises(ValueError):
+        registry["edit_file"].call(path="../x", old="a", new="b")
+
+
+def test_file_tools_honor_granted_extra_root(tmp_path):
+    """tools-honor-granted-roots: a granted root is reachable via an ABSOLUTE
+    path; the primary root stays reachable via relative paths; the secret-floor
+    (dotfiles like .env) stays refused even inside a granted root."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "home.py").write_text("home\n", encoding="utf-8")
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    (granted / "x.py").write_text("x = 1\n", encoding="utf-8")
+    (granted / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    reg = tools.build_registry(artifacts_root=ws, extra_roots=[granted])
+    rf, ef = reg["read_file"].call, reg["edit_file"].call
+    # relative under the primary root → still works
+    assert "home" in rf(path="home.py")
+    # absolute under the GRANTED root → reachable
+    assert "x = 1" in rf(path=str(granted / "x.py"))
+    ef(path=str(granted / "x.py"), old="x = 1", new="x = 9")
+    assert (granted / "x.py").read_text(encoding="utf-8") == "x = 9\n"
+    # secret-floor: a dotfile inside the granted root is STILL refused
+    with pytest.raises(ValueError):
+        rf(path=str(granted / ".env"))
+    # absolute outside every root → refused
+    with pytest.raises(ValueError):
+        rf(path="/etc/passwd")
+
+
+def test_file_tools_without_grants_still_refuse_absolute(tmp_path):
+    """Fail-closed: with no granted extra_roots, an absolute path is refused
+    (unchanged default-confinement behavior)."""
+    reg = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError):
+        reg["read_file"].call(path="/etc/passwd")
+
+
 # ── http_get ───────────────────────────────────────────────────────────────
 
 class _FakeResponse:

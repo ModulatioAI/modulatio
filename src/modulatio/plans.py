@@ -33,6 +33,7 @@ import contextlib
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -159,6 +160,76 @@ def _plan_lock_timeout() -> float:
         return float(raw)
     except ValueError:
         return _PLAN_LOCK_TIMEOUT_DEFAULT
+
+
+def _atomic_overwrite(target: Path, text: str) -> None:
+    """Overwrite ``target`` with ``text`` atomically.
+
+    re-sweep (F2b): the per-plan lock serializes the read-modify-WRITE
+    *mutators* against one another, but pure *readers* (``load``, and
+    ``list_plans`` through it) run lock-free. A plain ``Path.write_text`` opens
+    in ``"w"`` mode, which TRUNCATES the file before writing — so a lock-free
+    reader can observe the empty/partial window mid-write, fail to match the
+    frontmatter, and treat a live plan as *missing* (``load`` → ``None`` →
+    ``cancel`` raises "plan not found" and never flips status; the
+    cancel-vs-update flake). Writing a same-dir temp then ``os.replace`` (an
+    atomic rename on POSIX) closes that window: a reader sees either the
+    complete OLD file or the complete NEW file, never a torn one — without
+    having to lock every read.
+
+    The temp is named ``.<plan>.md.<rand>.tmp`` (leading dot + ``.tmp`` suffix)
+    so it never matches the anchored ``<CODE>-PLAN-\\d+\\.md$`` scan that
+    ``list_plans`` / ``next_plan_id`` use.
+
+    Same-filesystem invariant: the temp is created in ``target.parent`` (via
+    ``mkstemp(dir=...)``), so it is co-located with the target by construction
+    and ``os.replace`` stays on one filesystem (a cross-fs rename would raise).
+    A plans root split across filesystems would already break ``_plan_lock``.
+    """
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
+def _atomic_create(target: Path, text: str) -> None:
+    """Create ``target`` with ``text`` atomically, raising ``FileExistsError``
+    if it already exists.
+
+    Same torn-read fix as :func:`_atomic_overwrite` for the CREATE path
+    (``persist``): a plain ``open(target, "x")`` creates an empty file first
+    and only then writes the body, so a concurrent reader can catch the empty
+    window. We write a same-dir temp, then ``os.link`` it into place — the link
+    is atomic and raises ``FileExistsError`` on collision, so the target
+    appears fully-formed AND ``persist``'s O_EXCL id-allocation race (the
+    retry-on-``FileExistsError`` loop) is preserved.
+
+    Same-filesystem invariant: the temp is created in ``target.parent`` (via
+    ``mkstemp(dir=...)``), so ``os.link`` stays on one filesystem (a cross-fs
+    link would raise). A plans root split across filesystems would already
+    break ``_plan_lock``.
+    """
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.link(tmp_name, target)  # atomic; raises FileExistsError if it exists
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
 
 
 #: Thread-local re-entrancy depths, keyed by absolute lock-file path. The
@@ -431,8 +502,11 @@ def persist(
             frontmatter, sort_keys=False, allow_unicode=True,
         ) + "---\n\n" + body.rstrip() + "\n"
         try:
-            with open(target, "x", encoding="utf-8") as fh:
-                fh.write(text)
+            # Atomic create (temp + os.link): the plan appears fully-formed, so
+            # a concurrent lock-free load() never catches the empty-create
+            # window — while os.link still raises FileExistsError on an id
+            # collision, preserving the O_EXCL retry below (re-sweep F2b).
+            _atomic_create(target, text)
             break
         except FileExistsError:
             # Lost the id race to a concurrent persist (or a pre-existing
@@ -789,7 +863,9 @@ def set_status(
         text = "---\n" + yaml.safe_dump(
             meta, sort_keys=False, allow_unicode=True,
         ) + "---\n\n" + body + "\n"
-        target.write_text(text, encoding="utf-8")
+        # Atomic overwrite so a concurrent lock-free load() can't observe a
+        # torn/empty file mid-write (re-sweep F2b — the cancel-vs-update flake).
+        _atomic_overwrite(target, text)
 
     # Return the up-to-date record
     record = load(plan_id, code)
@@ -1005,7 +1081,9 @@ def update_execution_state(
         text = "---\n" + yaml.safe_dump(
             meta, sort_keys=False, allow_unicode=True,
         ) + "---\n\n" + body + "\n"
-        target.write_text(text, encoding="utf-8")
+        # Atomic overwrite so a concurrent lock-free load() can't observe a
+        # torn/empty file mid-write (re-sweep F2b — the cancel-vs-update flake).
+        _atomic_overwrite(target, text)
 
     record = load(plan_id, code)
     if record is None:  # pragma: no cover

@@ -1434,6 +1434,115 @@ def make_write_artifact(
     return write_artifact
 
 
+# ── builtins: read_file / edit_file (the Leader's solo-coding pen-set) ───────
+#
+# write_artifact already covers "write a file" (root-bound). The genuinely
+# missing fluent capability for operator-guided standalone coding is READING a
+# file and SURGICALLY EDITING one — doing those through run_shell's argv
+# allowlist (sed/cat gymnastics) is clumsy. These are TOOLS (registry builtins),
+# NOT skills: the conversational Leader gets them via the whole-registry loadout,
+# producers get them only if a skill's tool_loadout names them. The coding
+# KNOW-HOW stays a library skill (``coding.md``).
+#
+# SECURITY: unlike run_shell (bwrap subprocess), these run IN-PROCESS — so the
+# path check in ``_resolve_file_under_root`` IS their confinement boundary.
+
+_READ_FILE_MAX_BYTES = 1_048_576  # 1 MiB — keep a huge file from blowing context
+
+
+def _resolve_file_under_root(path: str, root: Path, extra_roots=()) -> Path:
+    """Resolve ``path`` under ``root`` (or a granted ``extra_root``) and refuse
+    any escape. The in-process file tools are NOT wrapped by bwrap, so THIS is
+    their confinement.
+
+    - A RELATIVE path must be safe (no ``..`` / dotfile components) and resolve
+      under the PRIMARY ``root`` (the Leader's own workspace).
+    - An ABSOLUTE path is allowed ONLY if it resolves under ``root`` or one of
+      the operator-granted ``extra_roots`` — and even then the SECRET FLOOR holds:
+      no dotfile component BELOW the matched root (so ``.env`` / ``.ssh`` inside a
+      granted project stay unreadable). With no ``extra_roots``, absolute paths
+      are refused (fail-closed default confinement)."""
+    if not isinstance(path, str) or not path:
+        raise ValueError("path must be a non-empty string")
+    roots = [Path(root).resolve(), *[Path(r).resolve() for r in extra_roots]]
+    if os.path.isabs(path):
+        target = Path(path).resolve()
+        matched = next((r for r in roots if target == r or r in target.parents), None)
+        if matched is None:
+            raise ValueError(f"path {path!r} is outside the confined/granted roots")
+        rel_parts = [p for p in target.relative_to(matched).parts if p != "."]
+        if any(p.startswith(".") for p in rel_parts):
+            raise ValueError(f"path {path!r} has a dotfile component (refused — secret floor)")
+        return target
+    if not _is_safe_relative_file_arg(path):
+        raise ValueError(
+            f"path {path!r} not safe — must be relative, with no traversal "
+            f"segments or dotfile components"
+        )
+    primary = roots[0]
+    target = (primary / path).resolve()
+    if target != primary and primary not in target.parents:
+        raise ValueError(f"path {path!r} escapes the confined root")
+    return target
+
+
+def make_read_file(artifacts_root: Path, extra_roots=()) -> "Callable[..., str]":
+    """Return a ``read_file`` callable bound to ``artifacts_root`` (+ any granted
+    ``extra_roots`` reachable via absolute path). Returns the file's UTF-8 text,
+    truncated to 1 MiB. Raises ``ValueError`` for a safety violation or missing
+    file::
+
+        read_file(path: str) -> str
+    """
+    root = Path(artifacts_root)
+
+    def read_file(path: str) -> str:
+        target = _resolve_file_under_root(path, root, extra_roots)
+        if not target.is_file():
+            raise ValueError(f"read_file: {path!r} does not exist")
+        data = target.read_bytes()
+        text = data[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
+        if len(data) > _READ_FILE_MAX_BYTES:
+            text += f"\n[...truncated at {_READ_FILE_MAX_BYTES} bytes]"
+        return text
+
+    return read_file
+
+
+def make_edit_file(artifacts_root: Path, extra_roots=()) -> "Callable[..., str]":
+    """Return an ``edit_file`` callable bound to ``artifacts_root``.
+
+    Surgical string-replace, confined to the root. ``old`` must match EXACTLY
+    ONCE (unique-match, like a careful editor) — a zero or ambiguous match
+    raises ``ValueError`` rather than guess. Returns a confirmation::
+
+        edit_file(path: str, old: str, new: str) -> str
+    """
+    root = Path(artifacts_root)
+
+    def edit_file(path: str, old: str, new: str) -> str:
+        if not isinstance(old, str) or not isinstance(new, str):
+            raise ValueError("edit_file: 'old' and 'new' must be strings")
+        if old == "":
+            raise ValueError("edit_file: 'old' must be a non-empty string")
+        target = _resolve_file_under_root(path, root, extra_roots)
+        if not target.is_file():
+            raise ValueError(f"edit_file: {path!r} does not exist")
+        text = target.read_text(encoding="utf-8")
+        count = text.count(old)
+        if count == 0:
+            raise ValueError(f"edit_file: 'old' not found in {path!r}")
+        if count > 1:
+            raise ValueError(
+                f"edit_file: 'old' matches {count} times in {path!r} — make it "
+                f"unique by including surrounding context"
+            )
+        target.write_text(text.replace(old, new, 1), encoding="utf-8")
+        return f"edited {path}: replaced 1 occurrence"
+
+    return edit_file
+
+
 # ── builtin: web_search (DuckDuckGo, no API key) ────────────────────────────
 
 #: Caps for the search tool. A handful of ranked hits is enough for an agent to
@@ -1616,6 +1725,7 @@ def build_registry(
     tool_calls_dir: Path | None = None,
     project_code: str | None = None,
     on_artifact_write: "Callable[[Path], None] | None" = None,
+    extra_roots=(),
 ) -> dict[str, Tool]:
     """Return a fresh dict of builtin tools. Callers (CLI / tests)
     merge their own tools in and pass the result into the
@@ -1905,6 +2015,56 @@ def build_registry(
                 "required": ["path", "content"],
             },
         )
+        registry["read_file"] = Tool(
+            name="read_file",
+            description=(
+                "Read a text file from the working root and return its "
+                "contents. Path is relative to the root; absolute paths, "
+                "``..`` traversal, and dotfiles are refused. Read a file "
+                "before you edit it."
+            ),
+            call=make_read_file(artifacts_root, extra_roots),
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path under the working root.",
+                    },
+                },
+                "required": ["path"],
+            },
+        )
+        registry["edit_file"] = Tool(
+            name="edit_file",
+            description=(
+                "Make a surgical edit to a file under the working root: "
+                "replace an exact, UNIQUE ``old`` string with ``new``. "
+                "``old`` must occur exactly once — include enough surrounding "
+                "context to be unique; a zero or ambiguous match is refused "
+                "rather than guessed. Confined to the root; traversal and "
+                "dotfiles refused."
+            ),
+            call=make_edit_file(artifacts_root, extra_roots),
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path under the working root.",
+                    },
+                    "old": {
+                        "type": "string",
+                        "description": "Exact text to replace; must be unique in the file.",
+                    },
+                    "new": {
+                        "type": "string",
+                        "description": "Replacement text.",
+                    },
+                },
+                "required": ["path", "old", "new"],
+            },
+        )
     if tool_calls_dir is not None:
         registry["read_tool_result"] = Tool(
             name="read_tool_result",
@@ -1982,6 +2142,8 @@ __all__ = [
     "Tool",
     "build_registry",
     "http_get",
+    "make_edit_file",
+    "make_read_file",
     "make_read_tool_result",
     "make_run_shell",
     "make_write_artifact",
