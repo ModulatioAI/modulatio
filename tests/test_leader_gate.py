@@ -180,3 +180,26 @@ def test_callback_allows_after_always_grant(env):
     rel2 = _os.path.relpath(proj / "y.py", ws)
     assert cb2("edit_file", {"path": rel2, "old": "a", "new": "b"}) is True
     assert seen == []  # same granted tree → no re-prompt
+
+
+# ── broad-ancestor / delivery-folder refusal (Wild Bill note) ────────────────
+
+def test_dangerous_widen_root_flags_broad_dirs():
+    from pathlib import Path as _P
+    assert lg.dangerous_widen_root("/") is not None
+    assert lg.dangerous_widen_root("/home") is not None
+    assert lg.dangerous_widen_root("/etc") is not None
+    assert lg.dangerous_widen_root(str(_P.home())) is not None
+    # a normal project dir is fine
+    assert lg.dangerous_widen_root("/home/cknox/projects/myapp") is None
+
+
+def test_dangerous_widen_root_flags_root_over_a_deliverable_tree(tmp_path):
+    deliv = tmp_path / "proj" / "runs" / "run1" / "artifacts"
+    deliv.mkdir(parents=True)
+    # widening tmp_path/proj would expose the deliverable tree under it → refused
+    assert lg.dangerous_widen_root(str(tmp_path / "proj"), blocked_subtrees=[str(deliv)]) is not None
+    # a sibling that does NOT contain the deliverables is fine
+    sib = tmp_path / "other"
+    sib.mkdir()
+    assert lg.dangerous_widen_root(str(sib), blocked_subtrees=[str(deliv)]) is None

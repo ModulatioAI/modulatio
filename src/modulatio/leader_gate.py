@@ -212,6 +212,28 @@ def build_permission_callback(gate: LeaderPermissionGate, *, root, prompt_fn):
     return permission_callback
 
 
+#: Broad system/home dirs no widen should ever cover.
+_BROAD_ROOTS = frozenset({"/", "/home", "/etc", "/usr", "/var", "/bin", "/sbin",
+                          "/lib", "/opt", "/root", "/tmp", "/boot", "/dev", "/proc", "/sys"})
+
+
+def dangerous_widen_root(root: str, blocked_subtrees=()) -> "str | None":
+    """A reason string if ``root`` is unsafe to widen the Leader into, else
+    ``None``. Refuses broad system/home dirs, and any root that is an ancestor of
+    (or equal to) a swarm deliverable/run tree — so the operator can't grant away
+    the structural cheat-guard (Wild Bill note). The modal surfaces the reason;
+    the gate refuses absent an explicit override."""
+    r = Path(root).resolve()
+    rs = str(r)
+    if rs in _BROAD_ROOTS or r == Path.home():
+        return f"{rs} is a broad system/home directory — too broad to widen into"
+    for sub in blocked_subtrees:
+        s = Path(sub).resolve()
+        if s == r or r in s.parents:
+            return f"{rs} contains a swarm deliverable tree ({s}) — widening here would expose it"
+    return None
+
+
 __all__ = [
     "SCOPE_ALWAYS",
     "SCOPE_DENY",
@@ -221,5 +243,6 @@ __all__ = [
     "ScopedDecision",
     "SecurityRequest",
     "build_permission_callback",
+    "dangerous_widen_root",
     "extract_tool_requests",
 ]
