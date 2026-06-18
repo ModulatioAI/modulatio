@@ -98,3 +98,56 @@ def test_load_drops_relative_and_nonstring_entries(project):
         encoding="utf-8",
     )
     assert lp.load_allowed_roots(CODE) == ["/ok/abs"]
+
+
+# ── keyed, action-scoped grants (Jenny-B / Nemo-BLOCK2 / Wild Bill HIGH-2) ───
+
+def test_add_grant_is_keyed_by_request_class_and_action_scoped(project):
+    lp.add_grant(CODE, request_class="path", resource="/home/proj",
+                 actions=("read", "edit"), granted_via="modal")
+    grants = lp.load_grants(CODE, "path")
+    assert len(grants) == 1
+    g = grants[0]
+    assert g["resource"] == "/home/proj"
+    assert set(g["actions"]) == {"read", "edit"}  # stored sorted, compare as set
+    assert g["granted_via"] == "modal"
+    # a different request_class is a separate bucket (here: none granted)
+    assert lp.load_grants(CODE, "network") == []
+
+
+def test_is_action_allowed_respects_the_grant_action_set(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    grants = [{"resource": str(proj), "actions": ["read", "edit"], "scope": "always"}]
+    # workspace: any action allowed
+    assert lp.is_action_allowed(str(ws / "a.py"), "exec", workspace=ws, grants=grants)
+    # granted root: only the granted actions
+    assert lp.is_action_allowed(str(proj / "x.py"), "read", workspace=ws, grants=grants)
+    assert lp.is_action_allowed(str(proj / "x.py"), "edit", workspace=ws, grants=grants)
+    # exec NOT in the grant's action set → refused (Wild Bill HIGH-2: read/edit ≠ exec)
+    assert not lp.is_action_allowed(str(proj / "x.py"), "exec", workspace=ws, grants=grants)
+    # outside everything → refused
+    assert not lp.is_action_allowed("/etc/passwd", "read", workspace=ws, grants=grants)
+
+
+def test_v1_allowed_roots_migrates_to_path_grants(project):
+    """Forward-compat: a v1 bare allowed_roots list reads as path grants with
+    full action set (Nemo-BLOCK9)."""
+    import json
+
+    pf = vault.project_dir(CODE) / "leader_permissions.json"
+    pf.write_text(json.dumps({"allowed_roots": ["/legacy/root"]}), encoding="utf-8")
+    grants = lp.load_grants(CODE, "path")
+    assert len(grants) == 1
+    assert grants[0]["resource"] == "/legacy/root"
+    assert "*" in grants[0]["actions"]  # legacy = full access
+
+
+def test_revoke_all_clears_every_request_class(project):
+    lp.add_grant(CODE, request_class="path", resource="/p", actions=("read",))
+    lp.add_grant(CODE, request_class="network", resource="example.com", actions=("egress",))
+    lp.revoke_all(CODE)
+    assert lp.load_grants(CODE, "path") == []
+    assert lp.load_grants(CODE, "network") == []
