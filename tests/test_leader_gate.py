@@ -144,3 +144,39 @@ def test_ungated_tools_extract_nothing(tmp_path):
     for name in ("search_skills", "load_skill", "drop_skill", "team_status",
                  "web_search", "http_get", "read_deliverable", "decide_approval"):
         assert lg.extract_tool_requests(name, {"query": "x"}, root=tmp_path) == []
+
+
+# ── the converse permission_callback (Wild Bill MED-4 regression) ────────────
+
+def test_callback_denies_run_shell_reading_outside_file(env):
+    tmp, ws, proj = env
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    cb = lg.build_permission_callback(gate, root=ws, prompt_fn=_allow(lp.SCOPE_DENY))
+    # Nemo's bypass through the callback: cat /etc/passwd → denied
+    assert cb("run_shell", {"cmd": "cat /etc/passwd", "cwd": "", "profile": "full"}) is False
+    # benign in-workspace read → allowed, no prompt
+    assert cb("read_file", {"path": "ok.py"}) is True
+
+
+def test_callback_exec_in_own_workspace_allowed(env):
+    tmp, ws, proj = env
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    seen = []
+    cb = lg.build_permission_callback(gate, root=ws, prompt_fn=_record(seen))
+    # run_shell in the OWN workspace (no out-of-root file) → exec auto-allowed
+    assert cb("run_shell", {"cmd": "pytest -q", "cwd": "", "profile": "full"}) is True
+    assert seen == []
+
+
+def test_callback_allows_after_always_grant(env):
+    import os as _os
+    tmp, ws, proj = env
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    cb = lg.build_permission_callback(gate, root=ws, prompt_fn=_allow(lp.SCOPE_ALWAYS))
+    rel = _os.path.relpath(proj / "x.py", ws)  # ../proj/x.py → resolves into proj
+    assert cb("edit_file", {"path": rel, "old": "a", "new": "b"}) is True
+    seen = []
+    cb2 = lg.build_permission_callback(gate, root=ws, prompt_fn=_record(seen))
+    rel2 = _os.path.relpath(proj / "y.py", ws)
+    assert cb2("edit_file", {"path": rel2, "old": "a", "new": "b"}) is True
+    assert seen == []  # same granted tree → no re-prompt

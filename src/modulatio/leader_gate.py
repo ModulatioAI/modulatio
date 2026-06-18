@@ -34,6 +34,10 @@ SCOPE_SESSION = lp.SCOPE_SESSION
 SCOPE_ALWAYS = lp.SCOPE_ALWAYS
 SCOPE_DENY = lp.SCOPE_DENY
 
+#: Classes whose resource is a filesystem path — the Leader's own workspace is
+#: auto-allowed for these. (network/spend are NOT here.)
+_FS_CLASSES = {lp.REQUEST_CLASS_PATH, "exec"}
+
 
 @dataclass(frozen=True)
 class SecurityRequest:
@@ -71,14 +75,17 @@ class LeaderPermissionGate:
         return lp.load_grants(self.code, request_class) + self._session.get(request_class, [])
 
     def is_granted(self, request: SecurityRequest) -> bool:
-        """Per-call check: is this request already covered (workspace, or a
-        persisted/session grant with the action)?"""
+        """Per-call check: is this request already covered? The Leader's own
+        ``workspace`` is auto-allowed for any FILESYSTEM action (path + exec) —
+        it's his bwrap-confined home. A WIDENED path grant (read/edit/write) does
+        NOT cover exec (separate class) — Wild Bill HIGH-2. Non-filesystem
+        classes (network/spend) need an exact resource match (no workspace)."""
         grants = self._grants(request.request_class)
-        if request.request_class == lp.REQUEST_CLASS_PATH:
+        if request.request_class in _FS_CLASSES:
             return lp.is_action_allowed(
                 request.resource, request.action, workspace=self.workspace, grants=grants
             )
-        for g in grants:  # non-path classes: exact resource match + action
+        for g in grants:  # non-filesystem classes: exact resource match + action
             acts = g.get("actions", [])
             if g["resource"] == request.resource and (request.action in acts or lp.ACTION_ALL in acts):
                 return True
@@ -183,6 +190,22 @@ def extract_tool_requests(tool_name: str, args: dict, *, root) -> list[SecurityR
     return reqs
 
 
+def build_permission_callback(gate: LeaderPermissionGate, *, root, prompt_fn):
+    """Wrap the gate into the engine's bool ``permission_callback(name, args)``
+    (`runners.py:915`). Extracts every gated resource from the tool call, runs
+    each through ``gate.decide`` (which prompts + records the scope), and DENIES
+    the whole call if any request is denied — fail-closed. The runner sees a
+    bool; the once/session/always scope is honored inside the gate (Jenny-A)."""
+
+    def permission_callback(name: str, args: dict) -> bool:
+        for req in extract_tool_requests(name, args, root=root):
+            if gate.decide(req, prompt_fn=prompt_fn).scope == SCOPE_DENY:
+                return False
+        return True
+
+    return permission_callback
+
+
 __all__ = [
     "SCOPE_ALWAYS",
     "SCOPE_DENY",
@@ -191,5 +214,6 @@ __all__ = [
     "LeaderPermissionGate",
     "ScopedDecision",
     "SecurityRequest",
+    "build_permission_callback",
     "extract_tool_requests",
 ]
