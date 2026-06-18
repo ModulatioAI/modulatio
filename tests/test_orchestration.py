@@ -120,6 +120,34 @@ def _qc_stub(prompt: str) -> str:
     return f"```json\n{json.dumps(verdict)}\n```"
 
 
+def test_leader_tool_registry_rebinds_to_leader_workspace(project: Project):
+    """Piece A part 2: the conversational Leader's solo-coding hands are rebound
+    to a stable per-project ``leader_workspace`` — NOT the run-artifacts scratch,
+    NOT the producers' tree — so the sandbox root structurally bars him from a
+    kickoff's deliverable."""
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    reg = orch._leader_tool_registry()
+    for name in ("read_file", "edit_file", "run_shell", "write_artifact"):
+        assert name in reg, f"{name} missing from the Leader's solo registry"
+    workspace = vault.project_dir(project.code) / "leader_workspace"
+    assert workspace.exists()
+    (workspace / "note.txt").write_text("hello\n", encoding="utf-8")
+    reg["edit_file"].call(path="note.txt", old="hello", new="world")
+    assert (workspace / "note.txt").read_text(encoding="utf-8") == "world\n"
+    with pytest.raises(ValueError):
+        reg["read_file"].call(path="../escape.txt")  # confinement holds
+
+
+def test_leader_registry_does_not_disturb_run_registry(project: Project):
+    """Re-rooting the Leader's solo hands must NOT mutate ``self.tool_registry``
+    (the run path's registry) — the rebound builtins live only in the returned
+    registry, so producers/runs are unaffected."""
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    orch._leader_tool_registry()
+    assert "edit_file" not in orch.tool_registry
+    assert "run_shell" not in orch.tool_registry
+
+
 def test_orchestrator_runs_end_to_end(project: Project):
     runners = {
         "leader": _leader_stub,

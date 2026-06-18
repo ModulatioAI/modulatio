@@ -5490,11 +5490,15 @@ class Orchestrator:
                         _vault.project_dir(self.project.code)
                         / "tool_calls" / "leader_converse.jsonl"
                     )
-                    # Augment the registry with the Leader's own functions (run_job,
-                    # …) for the duration of the loop. _run_chat_loop reads the
-                    # registry through _active_tool_registry(), which honors this
-                    # thread-local override.
-                    augmented = dict(self._active_tool_registry())
+                    # The Leader's SOLO registry: path-bound builtins (run_shell,
+                    # read_file, edit_file, write_artifact) rebound to his OWN
+                    # workspace inside the project (_leader_tool_registry) — NOT
+                    # the run-artifacts scratch, NOT the producers' tree — so his
+                    # hands can't reach a kickoff's deliverable. Augment it with
+                    # his own functions (run_job, team_status, …) for the loop.
+                    # _run_chat_loop reads via _active_tool_registry(), which
+                    # honors this thread-local override.
+                    augmented = dict(self._leader_tool_registry())
                     augmented.update(self._leader_function_tools())
                     self._tls.tool_registry_override = augmented
                     try:
@@ -7110,6 +7114,30 @@ class Orchestrator:
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # staging-bound builtins win over shared ones
+        return merged
+
+    def _leader_tool_registry(self) -> "dict[str, tools.Tool]":
+        """The conversational Leader's SOLO-coding registry: path-bound builtins
+        (run_shell, write_artifact, read_file, edit_file, …) rebound to the
+        Leader's OWN workspace inside the project — a stable per-project folder,
+        NOT the per-run artifacts scratch and NOT the producers' deliverable
+        tree. Confined there, the Leader physically cannot edit a swarm run's
+        output: the sandbox root IS the boundary (so he can't short-circuit a
+        kickoff by hand-writing its deliverable). Mirrors
+        ``_staging_tool_registry``'s rebind; non-path tools are preserved.
+
+        (Operator-directed widening to a real project path is a separate,
+        deliberate override — not wired here; the default is the safe folder.)"""
+        from modulatio import vault as _vault
+        workspace = _vault.project_dir(self.project.code) / "leader_workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        rebound = tools.build_registry(
+            artifacts_root=workspace,
+            tool_calls_dir=workspace / "tool_calls",
+            project_code=self.project.code,
+        )
+        merged = dict(self.tool_registry)
+        merged.update(rebound)  # workspace-bound builtins win over shared ones
         return merged
 
     def _merge_wave_artifacts(
