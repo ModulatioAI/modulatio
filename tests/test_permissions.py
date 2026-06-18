@@ -402,3 +402,25 @@ def test_trailing_dot_host_normalized():
     b = capability_for("http_get", {"url": "https://safe.com/x"})
     assert a.scoped_key(Decision.ALLOW_SESSION) == b.scoped_key(Decision.ALLOW_SESSION)
     assert a.scoped_key(Decision.ALLOW_ALWAYS) == b.scoped_key(Decision.ALLOW_ALWAYS)
+
+
+# ── §2.5: two-row mode visibility (Access + Sandbox, so /yolo can't hide off) ──
+
+def test_mode_status_rows_yolo_does_not_hide_sandbox_down():
+    from modulatio.permissions import mode_status_rows, RunMode
+    access, sandbox = mode_status_rows(
+        RunMode.YOLO, sandbox_available=False, profile="standard", bypass=False)
+    assert "auto-grant" in access.lower()
+    assert "unavailable" in sandbox.lower() and "refus" in sandbox.lower()
+
+
+def test_mode_status_rows_default_and_off_and_bypass():
+    from modulatio.permissions import mode_status_rows, RunMode
+    a, s = mode_status_rows(RunMode.DEFAULT, sandbox_available=True, profile="standard", bypass=False)
+    assert "ask" in a.lower() and "standard" in s.lower()
+    _, s_off = mode_status_rows(RunMode.YOLO, sandbox_available=True, profile="off", bypass=False)
+    assert "off" in s_off.lower()
+    _, s_bypass = mode_status_rows(RunMode.GOAL, sandbox_available=True, profile="standard", bypass=True)
+    assert "off" in s_bypass.lower()       # explicit unsafe bypass surfaces as OFF
+    a_goal, _ = mode_status_rows(RunMode.GOAL, sandbox_available=True, profile="standard", bypass=False)
+    assert "ask" in a_goal.lower()         # /goal still asks for capabilities

@@ -159,6 +159,26 @@ class Capability:
         return tuple(seen)
 
 
+def mode_status_rows(
+    mode: "RunMode", *, sandbox_available: bool, profile: str, bypass: bool
+) -> "tuple[str, str]":
+    """§2.5 — two INDEPENDENT status rows the surface renders, so an autonomy mode
+    can never HIDE the substrate posture (§6.A/§4): a `/yolo` that auto-grants the
+    ask must still show plainly when the sandbox is off/unavailable. Pure logic
+    (web-UI-safe): the caller supplies the live substrate state.
+
+    Row 1 = ACCESS (ask vs auto-grant — the mode). Row 2 = SANDBOX (the substrate,
+    independent of the mode)."""
+    access = "auto-grant" if mode.auto_grants_capabilities else "ask"
+    if bypass or profile == "off":
+        sandbox = "OFF (unsandboxed — provider secrets exposed)"
+    elif not sandbox_available:
+        sandbox = "UNAVAILABLE — shell will be refused"
+    else:
+        sandbox = profile or "standard"
+    return (f"Access: {access}", f"Sandbox: {sandbox}")
+
+
 def _host_of(url: str) -> str:
     # rstrip('.') normalizes a trailing-dot FQDN ("safe.com." → "safe.com") so the
     # session/host and always/domain keys derive from the same host string

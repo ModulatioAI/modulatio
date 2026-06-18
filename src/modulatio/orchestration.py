@@ -5480,6 +5480,18 @@ class Orchestrator:
         return ("Autonomy: DEFAULT — I'll confirm direction on consequential "
                 "choices and ask before a new capability or folder.")
 
+    def _autonomy_status(self) -> "tuple[str, str]":
+        """§2.5 — the two-row autonomy status (Access · Sandbox) for the live
+        session mode + substrate, for the TUI/ACP to render so a mode can never
+        hide the sandbox posture."""
+        from modulatio import permissions as _perm, sandbox as _sandbox
+        return _perm.mode_status_rows(
+            self._session_mode,
+            sandbox_available=_sandbox.is_sandbox_available(),
+            profile=_sandbox.current_profile(),
+            bypass=_sandbox.is_bypass_requested(),
+        )
+
     def _permission_grants(self):
         """The broker's GrantStore, cached on the Orchestrator so SESSION grants
         survive across converse turns (ALWAYS grants persist to an engine-owned

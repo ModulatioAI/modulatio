@@ -138,6 +138,20 @@ def test_leader_tool_registry_rebinds_to_leader_workspace(project: Project):
         reg["read_file"].call(path="../escape.txt")  # confinement holds
 
 
+def test_autonomy_status_reads_live_substrate(project: Project, monkeypatch):
+    """§2.5: the orch's two-row status reflects the live mode + sandbox — /yolo
+    with the sandbox down still shows UNAVAILABLE (mode can't hide the substrate)."""
+    from modulatio import sandbox
+    from modulatio.permissions import RunMode
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    orch._session_mode = RunMode.YOLO
+    access, sb = orch._autonomy_status()
+    assert "auto-grant" in access.lower() and "unavailable" in sb.lower()
+
+
 def test_consume_mode_command_parses_strips_and_sets_mode(project: Project):
     """§2 Task 1: a leading mode command sets the session mode + is stripped so the
     Leader sees the task; a bare command sets the mode with empty remainder; an
