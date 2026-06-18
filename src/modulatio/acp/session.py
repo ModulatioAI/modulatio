@@ -27,6 +27,21 @@ def _permission_allows(result) -> bool:
     return str(outcome).startswith("allow")
 
 
+def _decision_from_result(result):
+    """Map an ACP ``session/request_permission`` response to a four-way
+    ``Decision`` (§2.3). Accepts the nested ACP shape + a flat one; cancelled,
+    missing, or unrecognized → DENY (§6.C fail-closed)."""
+    from modulatio.permissions import Decision
+    if not isinstance(result, dict):
+        return Decision.DENY
+    outcome = result.get("outcome", result)
+    if isinstance(outcome, dict):
+        if outcome.get("outcome") == "cancelled":
+            return Decision.DENY
+        return Decision.coerce(outcome.get("optionId"))
+    return Decision.coerce(outcome if isinstance(outcome, str) else None)
+
+
 class ACPSession:
     """State + bridges for one ACP session."""
 
@@ -86,6 +101,34 @@ class ACPSession:
             cancel_check=lambda: self.cancelled,
         )
         return _permission_allows(result)
+
+    def ask_capability(self, cap):
+        """§2.3 — the PermissionBroker's four-option ask surface. Offers
+        once/session/always/deny carrying the capability's plain-language label +
+        detail; maps the chosen optionId → ``Decision``. Cancelled / unknown /
+        no answer → DENY (§6.C fail-closed). Supplied to ``converse(ask=...)`` so
+        the broker can route a capability question to the ACP client."""
+        from modulatio.permissions import Decision
+        if self.cancelled:
+            return Decision.DENY
+        result = self._server.request_and_wait(
+            "session/request_permission",
+            {
+                "sessionId": self.id,
+                "toolCall": {
+                    "name": getattr(cap, "label", ""),
+                    "rawInput": {"detail": getattr(cap, "detail", "")},
+                },
+                "options": [
+                    {"optionId": "once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "session", "name": "Allow this session", "kind": "allow_always"},
+                    {"optionId": "always", "name": "Allow always", "kind": "allow_always"},
+                    {"optionId": "deny", "name": "Deny", "kind": "reject_once"},
+                ],
+            },
+            cancel_check=lambda: self.cancelled,
+        )
+        return _decision_from_result(result)
 
     # ── ask_operator → input request (kickoff/JT path only in v1) ───────
     def ask_operator(self, prompt: str):

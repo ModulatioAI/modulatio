@@ -138,6 +138,137 @@ def test_leader_tool_registry_rebinds_to_leader_workspace(project: Project):
         reg["read_file"].call(path="../escape.txt")  # confinement holds
 
 
+def test_autonomy_status_reads_live_substrate(project: Project, monkeypatch):
+    """§2.5: the orch's two-row status reflects the live mode + sandbox — /yolo
+    with the sandbox down still shows UNAVAILABLE (mode can't hide the substrate)."""
+    from modulatio import sandbox
+    from modulatio.permissions import RunMode
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    orch._session_mode = RunMode.YOLO
+    access, sb = orch._autonomy_status()
+    assert "auto-grant" in access.lower() and "unavailable" in sb.lower()
+
+
+def test_consume_mode_command_parses_strips_and_sets_mode(project: Project):
+    """§2 Task 1: a leading mode command sets the session mode + is stripped so the
+    Leader sees the task; a bare command sets the mode with empty remainder; an
+    ordinary message leaves the mode unchanged."""
+    from modulatio.permissions import RunMode
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    assert orch._session_mode is RunMode.DEFAULT          # default
+
+    matched, stripped = orch._consume_mode_command("/goal build a site")
+    assert matched is True and stripped == "build a site"  # command stripped
+    assert orch._session_mode is RunMode.GOAL
+
+    matched, stripped = orch._consume_mode_command("/yolo")
+    assert matched is True and stripped == ""              # bare command
+    assert orch._session_mode is RunMode.YOLO
+
+    matched, stripped = orch._consume_mode_command("hello there")
+    assert matched is False and stripped == "hello there"  # not a command
+    assert orch._session_mode is RunMode.YOLO              # unchanged
+
+    orch._consume_mode_command("/default")
+    assert orch._session_mode is RunMode.DEFAULT           # reset
+
+
+def test_build_permission_broker_yolo_auto_grants(project: Project, monkeypatch):
+    """§2 Task 2: a YOLO broker auto-grants a capability without asking."""
+    from modulatio import sandbox
+    from modulatio.permissions import RunMode
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    asked = []
+    broker = orch._build_permission_broker(RunMode.YOLO, ask=lambda cap: asked.append(cap))
+    assert broker.authorize("http_get", {"url": "https://x"}) is True
+    assert asked == []                                   # YOLO never asks
+
+
+def test_build_permission_broker_default_asks(project: Project, monkeypatch):
+    """A DEFAULT broker routes a capability through the ask surface."""
+    from modulatio import sandbox
+    from modulatio.permissions import RunMode, Decision
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    asked = []
+    broker = orch._build_permission_broker(
+        RunMode.DEFAULT, ask=lambda cap: (asked.append(cap), Decision.ALLOW_ONCE)[1])
+    assert broker.authorize("http_get", {"url": "https://x"}) is True
+    assert len(asked) == 1                               # DEFAULT asks
+
+
+def test_build_permission_broker_substrate_down_denies_shell(project: Project, monkeypatch):
+    """§6.A substrate is the hull: no live sandbox → a shell capability is denied
+    even under YOLO (auto-grant can't override a missing substrate)."""
+    from modulatio import sandbox
+    from modulatio.permissions import RunMode
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    broker = orch._build_permission_broker(RunMode.YOLO, ask=None)
+    assert broker.authorize("run_shell", {"cmd": "ls"}) is False
+
+
+def test_converse_threads_broker_when_mode_active(project: Project, monkeypatch):
+    """The wiring (not just the part): an active mode makes converse construct +
+    pass a broker to the tool loop; DEFAULT + no ask passes none (legacy)."""
+    from modulatio.permissions import RunMode
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    captured = {}
+
+    def fake_loop(**kw):
+        captured.update(kw)
+        return "ok"
+
+    # make converse reach the loop (non-offline) without a real model
+    monkeypatch.setattr(orch, "_resolve_chat_runner", lambda *a, **k: (lambda **kw: "x"))
+    monkeypatch.setattr(orch, "_run_chat_loop", fake_loop)
+    orch._session_mode = RunMode.YOLO
+    orch.converse("do a thing")
+    assert captured.get("permission_broker") is not None       # broker wired under YOLO
+    assert captured["permission_broker"].mode is RunMode.YOLO
+
+    captured.clear()
+    orch._session_mode = RunMode.DEFAULT
+    orch.converse("do a thing")
+    assert captured.get("permission_broker") is None           # legacy: no broker
+
+
+def test_converse_bare_mode_command_returns_ack(project: Project):
+    """A bare /yolo is a mode-ack (not an empty turn), and the ack states the fence
+    invariant — a new folder still needs /work, even under yolo."""
+    from modulatio.permissions import RunMode
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    ack = orch.converse("/yolo")
+    assert orch._session_mode is RunMode.YOLO
+    assert "yolo" in ack.lower()
+    assert "/work" in ack.lower() or "folder" in ack.lower()  # fence invariant surfaced
+
+
+def test_converse_prompt_autonomy_block_reflects_mode(project: Project):
+    """§2.4: /goal (and /yolo-goal) delegate JUDGMENT — the converse prompt tells
+    the Leader to decide freely; DEFAULT and /yolo-alone keep confirm-direction.
+    /yolo is a CAPABILITY mode, not a judgment one (orthogonality)."""
+    from modulatio.permissions import RunMode
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    assert "confirm direction" in orch._build_converse_prompt([], "do X").lower()  # default
+
+    orch._session_mode = RunMode.GOAL
+    p = orch._build_converse_prompt([], "do X").lower()
+    assert "delegated judgment" in p and ("decide freely" in p or "don't stop to ask" in p)
+
+    orch._session_mode = RunMode.YOLO_GOAL
+    assert "delegated judgment" in orch._build_converse_prompt([], "x").lower()
+
+    orch._session_mode = RunMode.YOLO   # capability auto-grant, NOT judgment
+    assert "confirm direction" in orch._build_converse_prompt([], "x").lower()
+
+
 def test_converse_prompt_injects_runbook_at_head(project: Project):
     """The Leader's embedded runbook (the always-on bar-commit spine) is injected
     at the HEAD of every converse prompt — not a JIT pull-skill, so the

@@ -326,6 +326,10 @@ class ACPServer:
                 message,
                 attachments=attachments,
                 permission_callback=session.permission_cb,
+                # §2.3: the four-option capability ask — routes the broker's access
+                # questions (network/shell) to the ACP client (once/session/always/
+                # deny). The leader_gate fence stays on permission_callback above.
+                ask=session.ask_capability,
             )
             self._respond(req_id, {"stopReason": "end_turn", "reply": reply})
         except Exception as exc:
