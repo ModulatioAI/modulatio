@@ -7181,11 +7181,16 @@ class Orchestrator:
         ``extra_roots`` so a deliberately-widened folder becomes reachable.
         Mirrors ``_staging_tool_registry``'s rebind; non-path tools preserved."""
         workspace = self._leader_workspace()
+        gate = self.leader_gate()
         rebound = tools.build_registry(
             artifacts_root=workspace,
             tool_calls_dir=workspace / "tool_calls",
             project_code=self.project.code,
-            extra_roots=self.leader_gate().granted_roots(),
+            # PATH-granted roots reach the file tools (read/edit/write); EXEC-
+            # granted roots reach run_shell (a separate, sharper grant class —
+            # a folder widen never confers exec, Wild Bill HIGH-2).
+            extra_roots=gate.granted_roots(),
+            run_shell_extra_roots=gate.granted_roots("exec"),
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # workspace-bound builtins win over shared ones

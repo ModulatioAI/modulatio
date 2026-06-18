@@ -208,6 +208,27 @@ def test_leader_registry_honors_gate_granted_root(project: Project, tmp_path):
         reg["read_file"].call(path=str(other / "s.py"))  # un-granted → refused
 
 
+def test_leader_registry_threads_exec_grant_into_run_shell(project: Project, tmp_path, monkeypatch):
+    """exec-widen 2e: an exec grant flows through the gate into run_shell's
+    extra_roots, so run_shell can operate in the granted folder; a path grant
+    does NOT confer exec (separate class)."""
+    from modulatio import leader_permissions as lp, sandbox
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    granted = tmp_path / "realproj"
+    granted.mkdir()
+    (granted / "x.py").write_text("print(1)\n")
+    lp.add_grant(project.code, request_class="exec", resource=str(granted), actions=("exec",))
+    reg = orch._leader_tool_registry()
+    # run_shell in the granted exec root works (sandbox available here); refuse if
+    # the sandbox is down (HIGH-3) — prove the root reached run_shell either way.
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="widened exec refused"):
+        reg["run_shell"].call(cmd="cat x.py", profile="full", cwd=str(granted))
+
+
 def test_leader_gate_refuses_widen_over_run_tree(project: Project):
     """Wild Bill BLOCK-1, wired: the gate is fed the project's real deliverable
     roots (runs/ + artifacts), so the operator cannot widen the Leader onto the

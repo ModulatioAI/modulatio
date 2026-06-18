@@ -1752,6 +1752,7 @@ def build_registry(
     project_code: str | None = None,
     on_artifact_write: "Callable[[Path], None] | None" = None,
     extra_roots=(),
+    run_shell_extra_roots=(),
 ) -> dict[str, Tool]:
     """Return a fresh dict of builtin tools. Callers (CLI / tests)
     merge their own tools in and pass the result into the
@@ -1959,7 +1960,7 @@ def build_registry(
                 "Non-zero exit codes and stderr tracebacks are evidence, "
                 "not noise — read them."
             ),
-            call=make_run_shell(artifacts_root),
+            call=make_run_shell(artifacts_root, run_shell_extra_roots),
             params_schema={
                 "type": "object",
                 "properties": {
