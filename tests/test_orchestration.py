@@ -169,6 +169,22 @@ def test_leader_registry_honors_gate_granted_root(project: Project, tmp_path):
         reg["read_file"].call(path=str(other / "s.py"))  # un-granted → refused
 
 
+def test_leader_gate_refuses_widen_over_run_tree(project: Project):
+    """Wild Bill BLOCK-1, wired: the gate is fed the project's real deliverable
+    roots (runs/ + artifacts), so the operator cannot widen the Leader onto the
+    swarm's output tree — the cheat-guard is engine-enforced, not advisory."""
+    from modulatio import leader_gate as lg, leader_permissions as lp, vault
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    gate = orch.leader_gate()
+    runs = vault.runs_dir(project.code)
+    req = lg.SecurityRequest(action="edit", resource=str(runs / "r1" / "out.md"),
+                             request_class=lp.REQUEST_CLASS_PATH, why="t")
+    d = gate.decide(req, prompt_fn=lambda r: lg.ScopedDecision(scope=lp.SCOPE_ALWAYS))
+    assert d.scope == lp.SCOPE_DENY          # refused even though prompt said ALWAYS
+    assert lp.load_grants(project.code, "path") == []
+
+
 def test_orchestrator_runs_end_to_end(project: Project):
     runners = {
         "leader": _leader_stub,

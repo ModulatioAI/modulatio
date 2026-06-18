@@ -83,14 +83,46 @@ def test_session_grant_not_persisted(env):
     assert len(seen2) == 1  # session grant gone → re-prompts
 
 
+def _never(r):
+    raise AssertionError("prompt_fn must not be called for an engine-refused request")
+
+
 def test_action_scope_enforced_across_classes(env):
     tmp, ws, proj = env
     gate = lg.LeaderPermissionGate(CODE, workspace=ws)
     gate.decide(_req("edit", proj / "a.py"), prompt_fn=_allow(lp.SCOPE_ALWAYS))
-    # an EXEC request on the same tree is NOT covered by the edit grant
-    seen = []
-    gate.decide(_req("exec", proj / "a.py", request_class="exec"), prompt_fn=_record(seen))
-    assert len(seen) == 1
+    # an EXEC request on the same tree is NOT covered by the edit grant — and in
+    # v1 (exec-widen deferred) out-of-workspace exec is REFUSED without prompting.
+    d = gate.decide(_req("exec", proj / "a.py", request_class="exec"), prompt_fn=_never)
+    assert d.scope == lp.SCOPE_DENY
+
+
+def test_decide_refuses_dangerous_root_even_if_prompt_returns_always(env):
+    """Engine-bound cheat-guard (Wild Bill BLOCK-1): a root overlapping a swarm
+    deliverable tree CANNOT be granted, even if the prompt returns ALWAYS — the
+    prompt is never reached and nothing persists."""
+    tmp, ws, proj = env
+    deliv = proj / "runs" / "r1" / "artifacts"
+    deliv.mkdir(parents=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws, blocked_subtrees=[str(deliv)])
+    # widening `proj` (an ancestor of the deliverable tree) is refused
+    d = gate.decide(_req("edit", proj / "x.py"), prompt_fn=_allow(lp.SCOPE_ALWAYS))
+    assert d.scope == lp.SCOPE_DENY
+    assert lp.load_grants(CODE, "path") == []          # nothing persisted
+    # and a fresh gate still refuses (no stale grant snuck through)
+    assert lg.LeaderPermissionGate(CODE, workspace=ws, blocked_subtrees=[str(deliv)]).decide(
+        _req("edit", proj / "y.py"), prompt_fn=_never).scope == lp.SCOPE_DENY
+
+
+def test_decide_refuses_exec_outside_workspace_not_persisted(env):
+    """v1 exec policy (Wild Bill CHANGES-2): out-of-workspace exec is refused and
+    never persisted, even on ALWAYS — exec-widen is deferred."""
+    tmp, ws, proj = env
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    d = gate.decide(_req("exec", proj / "a.py", request_class="exec"),
+                    prompt_fn=_allow(lp.SCOPE_ALWAYS))
+    assert d.scope == lp.SCOPE_DENY
+    assert lp.load_grants(CODE, "exec") == []
 
 
 def test_available_scopes_refuses_out_of_set(env):
@@ -203,3 +235,7 @@ def test_dangerous_widen_root_flags_root_over_a_deliverable_tree(tmp_path):
     sib = tmp_path / "other"
     sib.mkdir()
     assert lg.dangerous_widen_root(str(sib), blocked_subtrees=[str(deliv)]) is None
+    # widening INTO the deliverable tree (a descendant) is ALSO refused
+    inside = deliv / "sub"
+    inside.mkdir()
+    assert lg.dangerous_widen_root(str(inside), blocked_subtrees=[str(deliv)]) is not None

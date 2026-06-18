@@ -36,6 +36,13 @@ class _SpyGate:
     def revoke_all(self):
         self.revoked = True
 
+    def refusal_reason(self, request):
+        return None  # stub gate allows everything (the refusal logic is tested in test_leader_gate)
+
+    def decide(self, request, *, prompt_fn):
+        import modulatio.leader_gate as lg
+        return lg.ScopedDecision(scope=prompt_fn(request).scope)
+
 
 class _SpyOrch:
     def __init__(self):
@@ -95,6 +102,34 @@ def test_work_here_existing_path_prompts(tmp_path, monkeypatch):
     app._apply_side_effect(f"leader_work_here:{target}")
     from modulatio.tui.widgets.leader_approval_modal import LeaderApprovalModal
     assert isinstance(pushed["screen"], LeaderApprovalModal)
+
+
+def test_work_here_refused_root_does_not_prompt(tmp_path, monkeypatch):
+    """A /work target overlapping a deliverable tree is engine-refused — the
+    operator sees the reason and is NOT shown a (pointless) approval modal."""
+    from modulatio import leader_gate as lg
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    target = tmp_path / "proj"
+    deliv = target / "runs" / "r1"
+    deliv.mkdir(parents=True)
+
+    class _GateOrch:
+        def __init__(self):
+            self._gate = lg.LeaderPermissionGate(
+                PROJECT_CODE, workspace=tmp_path / "ws",
+                blocked_subtrees=[str(deliv)],
+            )
+
+        def leader_gate(self):
+            return self._gate
+
+    monkeypatch.setattr(app, "_conversation_orchestrator", lambda: _GateOrch())
+    out = {}
+    monkeypatch.setattr(app, "_set_response", lambda msg, *a, **k: out.__setitem__("msg", msg))
+    monkeypatch.setattr(app, "push_screen", lambda *a, **k: pytest.fail("must not prompt for a refused root"))
+    app._apply_side_effect(f"leader_work_here:{target}")
+    assert "deliverable" in out["msg"].lower() or "overlaps" in out["msg"].lower()
 
 
 def test_run_converse_passes_prompt_fn():

@@ -7134,13 +7134,27 @@ class Orchestrator:
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
+    def _leader_blocked_subtrees(self) -> "list[str]":
+        """The swarm deliverable/run trees the Leader may never be widened over
+        or into (Wild Bill BLOCK-1): the per-project runs root (every kickoff's
+        output) and the persistent artifacts root. Fed to the gate so the
+        cheat-guard is engine-enforced with REAL roots, not left advisory."""
+        from modulatio import vault as _vault
+        return [
+            str(_vault.runs_dir(self.project.code)),
+            str(_vault.project_dir(self.project.code) / "artifacts"),
+        ]
+
     def leader_gate(self):
         """The per-project cross-cutting permission gate (cached so in-memory
         session grants persist across converse turns)."""
         cached = getattr(self, "_leader_gate_cache", None)
         if cached is None:
             from modulatio import leader_gate as _lg
-            cached = _lg.LeaderPermissionGate(self.project.code, workspace=self._leader_workspace())
+            cached = _lg.LeaderPermissionGate(
+                self.project.code, workspace=self._leader_workspace(),
+                blocked_subtrees=self._leader_blocked_subtrees(),
+            )
             self._leader_gate_cache = cached
         return cached
 

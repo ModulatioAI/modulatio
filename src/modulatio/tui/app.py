@@ -1012,13 +1012,21 @@ class ModulatioApp(App):
             self._set_response(f"No such folder: {p}")
             return
         resource = str(p.resolve())
-        warning = lg.dangerous_widen_root(resource)
         request = lg.SecurityRequest(
             action="edit", resource=resource,
             request_class=lp.REQUEST_CLASS_PATH,
             why=f"operator ran /work {raw_path}",
         )
         gate = orch.leader_gate()
+        # Engine-bound refusal: a root overlapping a swarm deliverable tree (or a
+        # broad system dir) can never be granted — don't show a pointless modal,
+        # just surface the reason. The gate enforces this regardless (decide
+        # refuses before prompting), so this is UX, not the security boundary.
+        refused = gate.refusal_reason(request)
+        if refused is not None:
+            self._set_response(f"Can't work there — {refused}.")
+            return
+        warning = lg.dangerous_widen_root(resource)
 
         def on_dismiss(scope: str | None) -> None:
             scope = scope or lp.SCOPE_DENY

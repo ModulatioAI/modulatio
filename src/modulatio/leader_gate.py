@@ -65,9 +65,13 @@ class LeaderPermissionGate:
     ``session`` grants are held here in memory. The ``workspace`` (the Leader's
     own folder) is silently allowed for any action."""
 
-    def __init__(self, code: str, *, workspace):
+    def __init__(self, code: str, *, workspace, blocked_subtrees=()):
         self.code = code
         self.workspace = Path(workspace)
+        # Swarm deliverable/run trees the Leader must never be widened over OR
+        # into (the structural cheat-guard, Wild Bill BLOCK-1). Engine-enforced
+        # in ``refusal_reason``, not merely warned about.
+        self._blocked_subtrees = tuple(str(s) for s in blocked_subtrees)
         self._session: dict[str, list[dict]] = {}  # {request_class: [grant, ...]}
 
     # ── lookups ──────────────────────────────────────────────────────────────
@@ -90,6 +94,32 @@ class LeaderPermissionGate:
             if g["resource"] == request.resource and (request.action in acts or lp.ACTION_ALL in acts):
                 return True
         return False
+
+    def _in_workspace(self, resource: str) -> bool:
+        r = Path(resource).resolve()
+        ws = self.workspace.resolve()
+        return r == ws or ws in r.parents
+
+    def refusal_reason(self, request: SecurityRequest) -> "str | None":
+        """Engine-bound HARD refusal: a reason this request can NEVER be granted
+        in v1 (regardless of the scope the operator picks) — else ``None``. This
+        is the enforcement Wild Bill required: a warning string alone let a
+        dangerous root still be granted. Two binds:
+
+        * ``exec`` outside the workspace is refused outright (exec-widen is
+          deferred) — even if a stale exec grant exists, so v1 never accumulates
+          one (Wild Bill CHANGES-2).
+        * a ``path`` widen that overlaps a broad/system root or a swarm
+          deliverable tree is refused (Wild Bill BLOCK-1)."""
+        if request.request_class == "exec":
+            return None if self._in_workspace(request.resource) else (
+                "running commands outside the workspace is not enabled yet"
+            )
+        if request.request_class == lp.REQUEST_CLASS_PATH:
+            # Check the GRANTED ROOT (the folder that would be widened — a file
+            # access grants its parent dir), not the individual file path.
+            return dangerous_widen_root(self._grant_root(request), self._blocked_subtrees)
+        return None
 
     def granted_roots(self, request_class: str = lp.REQUEST_CLASS_PATH) -> list[str]:
         """The granted resources for a class (persisted + session) — the
@@ -119,6 +149,13 @@ class LeaderPermissionGate:
     def decide(self, request: SecurityRequest, *, prompt_fn) -> ScopedDecision:
         """Return a ``ScopedDecision``. Silent-allow if already granted; else
         prompt the operator (``prompt_fn``) and record at the chosen scope."""
+        # Engine-bound refusal FIRST: a dangerous/deliverable-overlapping path or
+        # an out-of-workspace exec can never be granted — the operator is never
+        # even prompted, and any stale grant is ignored (Wild Bill BLOCK-1 /
+        # CHANGES-2). Checked before is_granted so a pre-existing grant can't
+        # resurrect a now-refused resource.
+        if self.refusal_reason(request) is not None:
+            return ScopedDecision(scope=SCOPE_DENY, granted_via="refused")
         if self.is_granted(request):
             return ScopedDecision(scope=SCOPE_SESSION, granted_via="prior")
         decision = prompt_fn(request)
@@ -229,8 +266,10 @@ def dangerous_widen_root(root: str, blocked_subtrees=()) -> "str | None":
         return f"{rs} is a broad system/home directory — too broad to widen into"
     for sub in blocked_subtrees:
         s = Path(sub).resolve()
-        if s == r or r in s.parents:
-            return f"{rs} contains a swarm deliverable tree ({s}) — widening here would expose it"
+        # Refuse overlap in EITHER direction: widening OVER the tree (r is an
+        # ancestor of/equal to s) or INTO it (r is a descendant of s).
+        if s == r or r in s.parents or s in r.parents:
+            return f"{rs} overlaps a swarm deliverable tree ({s}) — widening here would expose it"
     return None
 
 
