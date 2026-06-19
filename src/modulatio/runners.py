@@ -596,6 +596,35 @@ def litellm_runner(
                 retry["api_key"] = _pooled_call_key(pool_base, model)
             return retry
 
+        # ── Codex (ChatGPT-subscription) Responses path ──────────────
+        if endpoint == "codex":
+            from modulatio import codex_responses as _cr
+            instructions, inp = _cr.codex_input_from_messages(
+                [{"role": "user", "content": body}]
+            )
+
+            def _codex_call(kw: dict) -> str:
+                stream = responses(
+                    model=litellm_model, instructions=instructions, input=inp,
+                    store=False, stream=True, **kw,
+                )
+                return _cr.chat_response_from_codex_stream(stream).content or ""
+
+            try:
+                out = _codex_call(call_kwargs)
+            except AuthenticationError as e:
+                retry = _refreshed_retry_kwargs()
+                if retry is None:
+                    _fire_auth_alert(model, str(e), provider_id_for_alerts)
+                    raise
+                try:
+                    out = _codex_call(retry)
+                except AuthenticationError as e2:
+                    _fire_auth_alert(model, str(e2), provider_id_for_alerts)
+                    raise
+            _clear_auth_alert(provider_id_for_alerts)
+            return out
+
         # ── Responses API path ───────────────────────────────────────
         if endpoint == "responses":
             try:
