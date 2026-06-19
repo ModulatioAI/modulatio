@@ -59,8 +59,17 @@ _DITHER_BAR = "░░▒▒▓▓████▓▓▒▒░░"
 
 _TAGLINE = "the harmonious terminal interface"
 
-# Auto-advance so an unattended launch still reaches the TUI.
-_AUTO_ADVANCE_SECONDS = 6.0
+# Auto-advance so an unattended launch still reaches the TUI — a generous beat
+# to actually read the wordmark + tagline. The operator can dismiss sooner with
+# any key (after the opening dwell below); otherwise the frame holds this long.
+_AUTO_ADVANCE_SECONDS = 10.0
+
+# A short window after the boot frame appears during which a keystroke can't
+# dismiss it. The Enter that ran ``modulatio`` can leak into the fresh
+# alt-screen as a key event and instantly skip the splash before it's been
+# seen — so the tagline never registers. Swallow keys for this beat so the
+# frame is guaranteed a moment on screen; after it, any key dismisses.
+_MIN_DWELL_SECONDS = 0.75
 
 
 class SplashScreen(ModalScreen):
@@ -98,6 +107,8 @@ class SplashScreen(ModalScreen):
     def __init__(self) -> None:
         super().__init__()
         self._cursor_on = True
+        # Guard against a buffered launch keystroke skipping the frame at t≈0.
+        self._dismissable = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="splash-frame"):
@@ -108,6 +119,8 @@ class SplashScreen(ModalScreen):
         self._render_art()
         self._render_prompt()
         self.set_interval(0.5, self._blink)
+        # Open the dismiss gate after a short readable beat (see _MIN_DWELL).
+        self.set_timer(_MIN_DWELL_SECONDS, self._enable_dismiss)
         # Safety: don't trap an unattended launch on the boot frame forever.
         self.set_timer(_AUTO_ADVANCE_SECONDS, self._advance)
 
@@ -170,7 +183,15 @@ class SplashScreen(ModalScreen):
         if event.key in ("f2", "ctrl+q"):
             return
         event.stop()
+        # Swallow a key that arrives within the opening dwell — a buffered
+        # launch keystroke must not skip the frame before it's been seen.
+        if not self._dismissable:
+            return
         self._advance()
+
+    def _enable_dismiss(self) -> None:
+        # The opening dwell has elapsed — keys may now dismiss the frame.
+        self._dismissable = True
 
     def _advance(self) -> None:
         # Idempotent — the auto-advance timer and a keypress can both fire.

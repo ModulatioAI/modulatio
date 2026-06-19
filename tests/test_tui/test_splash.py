@@ -45,11 +45,28 @@ async def test_splash_dismisses_on_key():
     async with app.run_test() as pilot:
         await pilot.pause()
         assert isinstance(app.screen, SplashScreen)
+        # Past the opening dwell, any key begins.
+        app.screen._enable_dismiss()
         await pilot.press("enter")
         await pilot.pause()
         # boot frame gone — the TUI is revealed underneath
         assert not isinstance(app.screen, SplashScreen)
         app.query_one(TabbedContent)
+
+
+async def test_splash_swallows_early_keystroke():
+    # The bug: the Enter that launched `modulatio` can leak into the alt-screen
+    # and skip the boot frame at t≈0, so the tagline never registers. A key
+    # within the opening dwell must be swallowed, leaving the frame on screen.
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True, splash=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, SplashScreen)
+        assert app.screen._dismissable is False  # gate starts closed
+        await pilot.press("enter")               # a leaked launch keystroke
+        await pilot.pause()
+        # still on the boot frame — the early key did NOT skip it
+        assert isinstance(app.screen, SplashScreen)
 
 
 async def test_splash_retints_on_f2():
