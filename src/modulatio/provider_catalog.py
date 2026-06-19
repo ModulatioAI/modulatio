@@ -85,6 +85,10 @@ class Provider(BaseModel):
     name: str
     base_url: str
     api_format: Literal["openai", "anthropic"]
+    #: Request endpoint dialect carried onto presets: "chat" (default), "responses"
+    #: (xAI multi-agent / o1), or "codex" (GPT-5.5 via the Codex subscription —
+    #: the ChatGPT-backend Responses API with tool-calling).
+    request_endpoint: Optional[str] = None
     auth_options: list[AuthOption]
     models_source: ModelsSource  # the primary (text) source
     extra_sources: list[ModelsSource] = Field(default_factory=list)  # image/video/…
@@ -246,6 +250,32 @@ OPENAI = Provider(
     notes="GPT models (text). ChatGPT/Codex OAuth or API key. No free tier.",
 )
 
+OPENAI_CODEX = Provider(
+    id="openai_codex",
+    name="OpenAI Codex (subscription)",
+    # The ChatGPT/Codex backend (Responses API) — NOT the metered api.openai.com,
+    # which has no subscription quota. ``request_endpoint="codex"`` routes presets
+    # to the Codex Responses tool-loop with the chatgpt-account-id header.
+    base_url="https://chatgpt.com/backend-api/codex",
+    api_format="openai",
+    request_endpoint="codex",
+    # Subscription access is OAuth-only (sign in via `codex login`).
+    auth_options=[
+        AuthOption(
+            auth_type="oauth_openai",
+            label="Sign in with ChatGPT (OAuth)",
+            oauth_hint="run `codex login`",
+        ),
+    ],
+    models_source=ModelsSource(
+        kind="picklist", picklist_key="openai_codex", modality="text"
+    ),
+    signup_url="https://chatgpt.com/codex",
+    free_detect="none",
+    notes="GPT-5.5 via the ChatGPT/Codex subscription (OAuth, ChatGPT backend). "
+          "Separate from the metered OpenAI API.",
+)
+
 NVIDIA = Provider(
     id="nvidia",
     name="NVIDIA",
@@ -345,6 +375,7 @@ PROVIDERS: dict[str, Provider] = {
     XAI.id: XAI,
     ANTHROPIC.id: ANTHROPIC,
     OPENAI.id: OPENAI,
+    OPENAI_CODEX.id: OPENAI_CODEX,
     NVIDIA.id: NVIDIA,
     GOOGLE.id: GOOGLE,
     OLLAMA_LOCAL.id: OLLAMA_LOCAL,
@@ -710,6 +741,8 @@ def preset_kwargs(
         kwargs["model_tier"] = model_tier
     if cost_class is not None:
         kwargs["cost_class"] = cost_class
+    if provider.request_endpoint:
+        kwargs["endpoint"] = provider.request_endpoint
     return kwargs
 
 

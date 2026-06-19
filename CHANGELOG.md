@@ -8,6 +8,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **GPT-5.5 via the OpenAI Codex subscription.** A model on your Codex (ChatGPT)
+  OAuth subscription now works as any seat — Leader, QC, or producer, including
+  tool use. Modulatio reaches it through the ChatGPT backend's Responses API
+  (where the subscription is valid) instead of the metered `api.openai.com`
+  (which rejects subscription tokens with "insufficient_quota"). Configure it in
+  **Config → Models**: add the **"OpenAI Codex (subscription)"** provider, sign in
+  with `codex login`, pick `gpt-5.5`. OpenAI permits third-party harness use of
+  the OAuth subscription.
 - **Per-seat model fallbacks.** Each seat (Leader, QC, Producer) can carry its own
   ordered list of backup models. When a seat's model is unavailable for a provider
   reason (rate limit, auth failure, timeout, 5xx), the engine **warns and restarts

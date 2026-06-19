@@ -226,6 +226,18 @@ def default_generic_stub_runners() -> dict[str, Callable[[str], str]]:
     }
 
 
+def _openai_oauth_host_ok(base_url: "str | None") -> bool:
+    """The OpenAI/Codex OAuth subscription token + ``chatgpt-account-id`` header
+    may only be sent to OpenAI-controlled hosts over HTTPS — the Codex/ChatGPT
+    backend or the platform API. Any other host, OR a cleartext ``http://``
+    scheme (a bearer-token downgrade leak), is refused so the subscription
+    credential can't be exfiltrated by a hand-edited preset base_url."""
+    from urllib.parse import urlparse
+    parsed = urlparse(base_url or "")
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and host in ("chatgpt.com", "api.openai.com")
+
+
 def _resolve_model_call_args(
     model_or_preset_key: str,
 ) -> tuple[str, dict]:
@@ -307,9 +319,30 @@ def _resolve_model_call_args(
         # ``modulatio doctor`` separately.
         strategy = auth_strategies.NoneStrategy()
     token = strategy.load_token()
+    # SECURITY (engine binds): the OpenAI/Codex OAuth SUBSCRIPTION token + the
+    # chatgpt-account-id header may ONLY be sent to OpenAI-controlled hosts over
+    # HTTPS. A hand-edited oauth_openai preset with a malicious (or cleartext)
+    # base_url must NOT exfiltrate the subscription credential — fail closed:
+    # drop the token AND skip the attribution headers.
+    attach_attribution = True
+    if auth_type == "oauth_openai":
+        if not _openai_oauth_host_ok(base_url):
+            _log.warning(
+                "oauth_openai preset points at an untrusted/cleartext host %r — "
+                "refusing to send the Codex subscription token / account-id "
+                "header.", base_url,
+            )
+            token = None
+            attach_attribution = False
+        elif preset.get("endpoint") != "codex":
+            # Trusted OpenAI HTTPS host but NOT the Codex backend: the
+            # codex-specific attribution headers (chatgpt-account-id +
+            # originator: codex-tui) are meaningless off the Codex backend and
+            # needlessly disclose the account id — keep them Codex-host-only.
+            attach_attribution = False
     if token:
         kwargs["api_key"] = token
-    elif base_url and api_format == "openai":
+    elif base_url and api_format == "openai" and auth_type != "oauth_openai":
         # A local / custom OpenAI-compatible endpoint (LM Studio, llama.cpp,
         # Ollama-local, …) with no auth: LiteLLM's openai handler REQUIRES an
         # api_key even when the server ignores it, so a keyless local preset
@@ -317,7 +350,8 @@ def _resolve_model_call_args(
         # placeholder so a local model is usable out of the box. (Bare OpenAI —
         # no base_url — still correctly demands a real key.)
         kwargs["api_key"] = "modulatio-local"
-    kwargs.update(strategy.attribution_kwargs())
+    if attach_attribution:
+        kwargs.update(strategy.attribution_kwargs())
 
     return litellm_model, kwargs
 
@@ -595,6 +629,42 @@ def litellm_runner(
             if pool_base is not None:
                 retry["api_key"] = _pooled_call_key(pool_base, model)
             return retry
+
+        # ── Codex (ChatGPT-subscription) Responses path ──────────────
+        if endpoint == "codex":
+            # NOTE (usage metering): Codex runs on a FLAT-RATE OAuth subscription,
+            # not metered per-token, and the streamed Responses result is not a
+            # litellm ModelResponse with a ``.usage`` object — so this branch does
+            # NOT call ``_record_call_usage``. Codex seats are intentionally OUTSIDE
+            # the per-token budget meter for now. Wiring stream usage (from the
+            # ``response.completed`` event) is a tracked follow-up before the budget
+            # cap is turned up to hard enforcement for a Codex-backed seat.
+            from modulatio import codex_responses as _cr
+            instructions, inp = _cr.codex_input_from_messages(
+                [{"role": "user", "content": body}]
+            )
+
+            def _codex_call(kw: dict) -> str:
+                stream = responses(
+                    model=litellm_model, instructions=instructions, input=inp,
+                    store=False, stream=True, **kw,
+                )
+                return _cr.chat_response_from_codex_stream(stream).content or ""
+
+            try:
+                out = _codex_call(call_kwargs)
+            except AuthenticationError as e:
+                retry = _refreshed_retry_kwargs()
+                if retry is None:
+                    _fire_auth_alert(model, str(e), provider_id_for_alerts)
+                    raise
+                try:
+                    out = _codex_call(retry)
+                except AuthenticationError as e2:
+                    _fire_auth_alert(model, str(e2), provider_id_for_alerts)
+                    raise
+            _clear_auth_alert(provider_id_for_alerts)
+            return out
 
         # ── Responses API path ───────────────────────────────────────
         if endpoint == "responses":
@@ -1305,6 +1375,73 @@ def run_llm_with_tools(
     )
 
 
+def _codex_tool_choice(tc: "dict | str | None") -> "dict | str | None":
+    """Translate a chat-completions ``tool_choice`` to the Responses shape.
+    Strings (``auto``/``none``/``required``) pass through; a forced
+    ``{type:function, function:{name}}`` becomes ``{type:function, name}``."""
+    if isinstance(tc, dict):
+        fn = tc.get("function")
+        if isinstance(fn, dict) and fn.get("name"):
+            return {"type": "function", "name": fn["name"]}
+    return tc
+
+
+def _build_codex_chat_runner(
+    litellm_model: str, kwargs: dict, model: str,
+    provider_id_for_alerts: "str | None", pool_base: "str | None",
+) -> Callable[..., ChatResponse]:
+    """Tool-loop runner for the Codex (ChatGPT-subscription) Responses backend.
+
+    Translates the chat-completions protocol (messages/tools) to the Responses
+    API, streams (the backend requires ``stream=True``), and aggregates back into
+    a ``ChatResponse``. Mirrors ``litellm_chat_runner``'s auth-refresh-once
+    recovery (``oauth_openai`` isn't pooled, so no key-pool rotation)."""
+    from modulatio import codex_responses as _cr
+
+    def run(
+        *, messages: list[dict], tools: list[dict],
+        tool_choice: "dict | str | None" = None,
+    ) -> ChatResponse:
+        from litellm import responses as _responses
+        from litellm.exceptions import AuthenticationError
+
+        instructions, inp = _cr.codex_input_from_messages(messages)
+        rtools = _cr.codex_tools_from_chat(tools)
+
+        def _call(api_key_override: str | None = None):
+            ck = dict(kwargs)
+            if pool_base is not None:
+                ck["api_key"] = _pooled_call_key(pool_base, model)
+            elif api_key_override is not None:
+                ck["api_key"] = api_key_override
+            if rtools:
+                ck["tools"] = rtools
+            if tool_choice is not None:
+                ck["tool_choice"] = _codex_tool_choice(tool_choice)
+            stream = _responses(
+                model=litellm_model, instructions=instructions, input=inp,
+                store=False, stream=True, **ck,
+            )
+            return _cr.chat_response_from_codex_stream(stream)
+
+        try:
+            result = _call()
+        except AuthenticationError as e:
+            new_token = _try_refresh_for(model)
+            if new_token is None:
+                _fire_auth_alert(model, str(e), provider_id_for_alerts)
+                raise
+            try:
+                result = _call(api_key_override=new_token)
+            except AuthenticationError as e2:
+                _fire_auth_alert(model, str(e2), provider_id_for_alerts)
+                raise
+        _clear_auth_alert(provider_id_for_alerts)
+        return result
+
+    return run
+
+
 def litellm_chat_runner(
     model: str,
     *,
@@ -1342,6 +1479,17 @@ def litellm_chat_runner(
     # path is interactive-only).
     provider_id_for_alerts = model if model in presets else None
     endpoint = (presets.get(model, {}) or {}).get("endpoint", "chat")
+    if endpoint == "codex":
+        # GPT-5.5 via the OpenAI Codex subscription (ChatGPT backend, Responses
+        # API with tool-calling). The headers (chatgpt-account-id + originator)
+        # arrive in kwargs via the oauth_openai strategy's attribution_kwargs.
+        # Usage: Codex is a flat-rate subscription and the stream carries no
+        # litellm usage object, so this seat is OUTSIDE the per-token budget
+        # meter (see the single-shot branch note); stream-usage wiring is a
+        # tracked follow-up before hard budget enforcement on a Codex seat.
+        return _build_codex_chat_runner(
+            litellm_model, kwargs, model, provider_id_for_alerts, pool_base,
+        )
     if endpoint == "responses":
         raise NotImplementedError(
             f"litellm_chat_runner does not yet support the Responses API "

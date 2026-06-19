@@ -123,8 +123,14 @@ def add_preset(
     model_tier: str | None = None,
     cost_class: str | None = None,
     capability_tags: list[str] | tuple[str, ...] | None = None,
+    endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Register a new model entry. Raises ValueError on collision or invalid input.
+
+    ``endpoint`` (optional): the request endpoint dialect — ``"chat"`` (default,
+    omitted), ``"responses"`` (xAI multi-agent / o1), or ``"codex"`` (GPT-5.5 via
+    the OpenAI Codex subscription, the ChatGPT-backend Responses API). Drives
+    which runner path the model takes.
 
     ``default_params`` (optional): provider call-kwargs merged into every
     ``litellm.completion`` for this model — e.g.
@@ -175,6 +181,8 @@ def add_preset(
         entry["cost_class"] = cost_class
     if capability_tags:
         entry["capability_tags"] = [t for t in capability_tags if t]
+    if endpoint and endpoint != "chat":
+        entry["endpoint"] = endpoint
     presets[key] = entry
     save_presets(presets)
     return entry
