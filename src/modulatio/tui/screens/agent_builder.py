@@ -35,7 +35,49 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from modulatio import model_presets, roster
+from modulatio import provider_catalog as pc
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
+
+
+def _method_label(auth_type: "str | None") -> str:
+    """Human label for a preset's auth method (the fallback picker's Method column)."""
+    if not auth_type or auth_type == "none":
+        return "none"
+    if str(auth_type).startswith("oauth_"):
+        return "OAuth"
+    if auth_type == "api_key":
+        return "API key"
+    return str(auth_type)
+
+
+def _fallback_display_rows(chain: "list[str]") -> "list[tuple[str, str, str, str]]":
+    """Pure: ``(order, model, provider, method)`` rows for an ordered chain of
+    preset keys. A key with no preset still renders (the bare key) so a stale
+    entry stays visible."""
+    rows: list[tuple[str, str, str, str]] = []
+    for i, key in enumerate(chain, start=1):
+        preset = model_presets.get_preset(key) or {}
+        rows.append((
+            str(i),
+            preset.get("model") or key,
+            pc.provider_name_for_base_url(preset.get("base_url")),
+            _method_label(preset.get("auth_type")),
+        ))
+    return rows
+
+
+def _eligible_fallback_models(primary_key: "str | None", chain: "list[str]") -> "list[str]":
+    """Pure: preset keys offerable as a fallback for a seat whose model is
+    ``primary_key`` — every OTHER preset not already in the chain and not a
+    routing-policy violation (so the picker never offers a choice persistence
+    would drop). Sorted for stable display."""
+    presets = model_presets.load_presets()
+    primary = presets.get(primary_key or "", {}) or {}
+    return [
+        key for key in sorted(presets)
+        if key != primary_key and key not in chain
+        and not model_presets.fallback_violates_routing_policy(primary, presets[key])
+    ]
 
 
 class AgentBuilderScreen(Vertical):
@@ -100,6 +142,7 @@ class AgentBuilderScreen(Vertical):
             )
         buttons = Horizontal(
             Button("Change model", id="agt-change", variant="primary"),
+            Button("Fallbacks", id="agt-fallbacks"),
             Button("+ Agent", id="agt-add"),
             Button("Remove", id="agt-remove", variant="warning"),
             id="agt-buttons",
@@ -127,6 +170,113 @@ class AgentBuilderScreen(Vertical):
             self._preset_list(),
             Button("Cancel", id="agt-cancel"),
         )
+
+    # ── fallback chain flow (#8: per-seat model fallbacks) ──────────────
+
+    def _fb_current_chain(self) -> list[str]:
+        """The target seat's saved fallback chain (preset keys)."""
+        if not self._target_agent:
+            return []
+        agent = roster.load(self._target_agent, self.project_code)
+        return list(agent.fallbacks) if agent else []
+
+    def _fb_index(self) -> "int | None":
+        """Selected row index in the chain table (= position in the chain)."""
+        try:
+            table = self.query_one("#agt-fb-table", DataTable)
+            if table.row_count == 0:
+                return None
+            return table.cursor_coordinate.row
+        except Exception:
+            return None
+
+    def _persist_fb(self, agent_id: str, chain: list[str]) -> None:
+        roster.set_fallbacks(
+            project_code=self.project_code, agent_id=agent_id, fallback_keys=chain,
+        )
+
+    async def _show_fallbacks(self, agent_id: str, message: str = "") -> None:
+        """The chain editor: the seat's ordered fallbacks (Model · Provider ·
+        Method) with Add / Remove / Up / Down / Done."""
+        self._flow, self._target_agent = "fallbacks", agent_id
+        agent = roster.load(agent_id, self.project_code)
+        chain = list(agent.fallbacks) if agent else []
+        body = self._body()
+        await body.remove_children()
+        header = (
+            f"Fallback models for '{escape(agent_id)}' "
+            f"(model: {escape((agent.model if agent else None) or '—')}) — "
+            f"tried top-to-bottom when the model is unavailable."
+        )
+        table = DataTable(id="agt-fb-table", cursor_type="row")
+        table.add_columns("#", "Model", "Provider", "Method")
+        for row in _fallback_display_rows(chain):
+            table.add_row(*[escape(c) for c in row])
+        buttons = Horizontal(
+            Button("Add fallback", id="agt-fb-add", variant="primary"),
+            Button("Remove", id="agt-fb-remove", variant="warning"),
+            Button("Up", id="agt-fb-up"),
+            Button("Down", id="agt-fb-down"),
+            Button("Done", id="agt-cancel"),
+            id="agt-fb-buttons",
+        )
+        await body.mount(Static(header), table, buttons, Static(message, id="agt-status"))
+
+    async def _show_fallback_picker(self) -> None:
+        """Pick a model to append to the chain (excludes self, in-chain, and
+        routing-policy violations)."""
+        if not self._target_agent:
+            return
+        agent = roster.load(self._target_agent, self.project_code)
+        chain = list(agent.fallbacks) if agent else []
+        avail = _eligible_fallback_models(agent.model if agent else None, chain)
+        if not avail:
+            await self._show_fallbacks(
+                self._target_agent, "No other eligible models to add as a fallback."
+            )
+            return
+        self._flow = "fallbacks_pick"
+        presets = model_presets.load_presets()
+        ol = OptionList(id="agt-fb-presets")
+        for key in avail:
+            p = presets[key]
+            ol.add_option(Option(
+                f"{key} — {p.get('model', '?')} "
+                f"({pc.provider_name_for_base_url(p.get('base_url'))}, "
+                f"{_method_label(p.get('auth_type'))})",
+                id=key,
+            ))
+        body = self._body()
+        await body.remove_children()
+        await body.mount(
+            Static(f"Add a fallback for '{escape(self._target_agent)}' — pick a model:"),
+            ol, Button("Cancel", id="agt-cancel"),
+        )
+
+    async def _fb_remove(self) -> None:
+        if not self._target_agent:
+            return
+        chain = self._fb_current_chain()
+        idx = self._fb_index()
+        if idx is None or idx >= len(chain):
+            return
+        removed = chain.pop(idx)
+        self._persist_fb(self._target_agent, chain)
+        await self._show_fallbacks(self._target_agent, f"Removed '{removed}'.")
+
+    async def _fb_move(self, delta: int) -> None:
+        if not self._target_agent:
+            return
+        chain = self._fb_current_chain()
+        idx = self._fb_index()
+        if idx is None:
+            return
+        j = idx + delta
+        if j < 0 or j >= len(chain):
+            return
+        chain[idx], chain[j] = chain[j], chain[idx]
+        self._persist_fb(self._target_agent, chain)
+        await self._show_fallbacks(self._target_agent)
 
     _ROLES = ("producer", "leader", "qc")
 
@@ -156,18 +306,40 @@ class AgentBuilderScreen(Vertical):
             agent_id = self._selected_agent_id()
             if agent_id:
                 await self._show_change_model(agent_id)
+        elif bid == "agt-fallbacks":
+            agent_id = self._selected_agent_id()
+            if agent_id:
+                await self._show_fallbacks(agent_id)
+        elif bid == "agt-fb-add":
+            await self._show_fallback_picker()
+        elif bid == "agt-fb-remove":
+            await self._fb_remove()
+        elif bid == "agt-fb-up":
+            await self._fb_move(-1)
+        elif bid == "agt-fb-down":
+            await self._fb_move(1)
         elif bid == "agt-add":
             await self._show_add_agent()
         elif bid == "agt-remove":
             await self._remove_selected()
         elif bid == "agt-cancel":
-            await self.show_list()
+            # Cancel from the fallback PICKER returns to the chain view; from any
+            # other flow it returns to the roster list.
+            if self._flow == "fallbacks_pick" and self._target_agent:
+                await self._show_fallbacks(self._target_agent)
+            else:
+                await self.show_list()
 
     async def on_option_list_option_selected(
         self, event: OptionList.OptionSelected
     ) -> None:
         preset = event.option.id
         if not preset:
+            return
+        if self._flow == "fallbacks_pick" and self._target_agent:
+            chain = self._fb_current_chain()
+            self._persist_fb(self._target_agent, chain + [preset])
+            await self._show_fallbacks(self._target_agent, f"Added fallback '{preset}'.")
             return
         if self._flow == "change" and self._target_agent:
             roster.add_model(

@@ -211,6 +211,61 @@ def update_preset(key: str, **fields: Any) -> dict[str, Any]:
     return merged
 
 
+def _is_openrouter_route(preset: dict[str, Any]) -> bool:
+    """True if this preset dispatches via OpenRouter (by base_url host or model
+    prefix). api_format alone can't tell — xAI, OpenAI, and OpenRouter all use
+    ``openai`` format — so we key on the endpoint identity."""
+    base = str(preset.get("base_url", "")).lower()
+    model = str(preset.get("model", "")).lower()
+    return "openrouter.ai" in base or model.startswith("openrouter/")
+
+
+def _is_openrouter_protected(preset: dict[str, Any]) -> bool:
+    """True if this preset is a model that must NEVER silently route through
+    OpenRouter — the operator keeps Grok on its xAI-direct path and GPT-5.5 on
+    its Codex-OAuth path on purpose. Detected by the direct-subscription auth
+    types, with a model-id belt for an api_key-configured Grok/GPT-5.5."""
+    if preset.get("auth_type") in ("oauth_xai", "oauth_openai"):
+        return True
+    model = str(preset.get("model", "")).lower()
+    return "grok" in model or "gpt-5.5" in model or "gpt5.5" in model
+
+
+def fallback_violates_routing_policy(
+    primary: dict[str, Any], fallback: dict[str, Any]
+) -> bool:
+    """True if routing ``primary`` → ``fallback`` would send a protected
+    direct-subscription model (Grok via xAI, GPT-5.5 via Codex OAuth) through
+    OpenRouter — which the operator forbids even by accident. Enforced at BOTH
+    persistence and runtime so a hand-edited config can't smuggle it past the UI.
+    """
+    return _is_openrouter_protected(primary) and _is_openrouter_route(fallback)
+
+
+def sanitize_fallback_chain(
+    primary_key: str, candidate_keys: list[str] | tuple[str, ...]
+) -> list[str]:
+    """Pure, UI-agnostic: keep only valid fallback preset-keys for a seat whose
+    primary model is ``primary_key`` — drop a self-reference, unknown keys,
+    duplicates, and any that would route a protected model through OpenRouter
+    (:func:`fallback_violates_routing_policy`) — preserving order. Shared by the
+    per-seat (agent) config path and the runtime chain build, so the write-scope
+    and read-scope can never disagree. ``primary_key`` not in the registry → []
+    (a seat with an unknown/empty primary can't carry a meaningful chain)."""
+    presets = load_presets()
+    if primary_key not in presets:
+        return []  # no valid primary ⇒ no meaningful chain
+    primary = presets[primary_key]
+    cleaned: list[str] = []
+    seen = {primary_key}
+    for k in candidate_keys or []:
+        if (k and k not in seen and k in presets
+                and not fallback_violates_routing_policy(primary, presets[k])):
+            cleaned.append(k)
+            seen.add(k)
+    return cleaned
+
+
 def get_preset(key: str) -> dict[str, Any] | None:
     return load_presets().get(key)
 

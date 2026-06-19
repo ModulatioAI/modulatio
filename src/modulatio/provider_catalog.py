@@ -385,6 +385,23 @@ def list_providers() -> list[Provider]:
     return list(PROVIDERS.values())
 
 
+def provider_name_for_base_url(base_url: "str | None") -> str:
+    """Best-effort display name of the provider serving ``base_url`` — matched by
+    host against the catalog, else ``local`` for loopback, else the bare host.
+    Display-only (no network); used by the fallback picker's Provider column."""
+    if not base_url:
+        return "—"
+    from urllib.parse import urlparse
+    host = (urlparse(base_url).hostname or base_url).lower()
+    if host in ("127.0.0.1", "localhost", "0.0.0.0", "::1"):
+        return "local"
+    for p in list_providers():
+        ph = (urlparse(p.base_url).hostname or "").lower()
+        if ph and ph == host:
+            return p.name
+    return host
+
+
 # ── model discovery (pure parse + thin HTTP wrapper) ─────────────────────────
 
 

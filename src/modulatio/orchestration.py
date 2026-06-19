@@ -1899,6 +1899,7 @@ class Orchestrator:
         chat_runner_models: "dict[str, str] | None" = None,
         chat_runner_default_model: "str | None" = None,
         summarizer_chat_runner_factory: "Callable[[str], Callable[[str], str]] | None" = None,
+        chat_runner_factory: "Callable[[str], Callable[..., Any] | None] | None" = None,
         activity_callback: "Callable[[ActivityEvent], None] | None" = None,
         operator_present: bool = False,
         fix_window_callback: "Callable[[FixWindowNotice], WindowDecision] | None" = None,
@@ -2019,6 +2020,11 @@ class Orchestrator:
         #: config that opts in to summarization sets a summarizer_model
         #: + this factory). Production wires litellm_runner.
         self.summarizer_chat_runner_factory = summarizer_chat_runner_factory
+        #: #8 per-seat fallbacks: model_key -> chat runner (or None), used to
+        #: build a seat's fallback runners on demand so the whole task can be
+        #: restarted on the next model when the primary is unavailable.
+        #: Production wires ``runners.maybe_build_chat_runner``.
+        self.chat_runner_factory = chat_runner_factory
         #: Slice #17: activity event subscriber. ``None`` → no events
         #: emitted (CLI path is unchanged). TUI supplies a callback to
         #: feed the Status-tab activity log widget (slice #21). Events
@@ -4679,6 +4685,37 @@ class Orchestrator:
             return self.chat_runner_models[agent_id]
         return self.chat_runner_default_model
 
+    def _seat_fallback_chain(
+        self, agent_id: str, primary_model: "str | None", primary_runner: "Callable[..., Any]",
+    ) -> "list[tuple[str | None, Callable[..., Any]]]":
+        """Ordered ``[(model_key, chat_runner), …]`` for a seat — primary first,
+        then the seat agent's sanitized ``fallbacks`` built via
+        ``chat_runner_factory``. A seat with no fallbacks (or no factory wired)
+        yields just the primary, so the no-fallback path stays unchanged. Built
+        fresh per task → no shared mutable state (concurrency-safe)."""
+        chain: "list[tuple[str | None, Callable[..., Any]]]" = [(primary_model, primary_runner)]
+        if not agent_id or not primary_model:
+            return chain
+        from modulatio import model_presets, roster
+        from modulatio import runners as _runners
+        # Default to the real chat-runner builder; tests inject a fake.
+        factory = self.chat_runner_factory or _runners.maybe_build_chat_runner
+        try:
+            agent = roster.load(agent_id, self.project.code)
+        except Exception:
+            return chain
+        raw = list(getattr(agent, "fallbacks", None) or [])
+        if not raw:
+            return chain
+        for key in model_presets.sanitize_fallback_chain(primary_model, raw):
+            try:
+                runner = factory(key)
+            except Exception:
+                runner = None
+            if runner is not None:
+                chain.append((key, runner))
+        return chain
+
     def _run_chat_loop(
         self,
         *,
@@ -4799,19 +4836,36 @@ class Orchestrator:
             # ``model`` is falsy. ``chat_runner_models[agent_id]``
             # is populated by _make_default_kickoff in production;
             # tests that exercise the gates set it explicitly.
-            return _runners.run_llm_with_tools(
-                chat_runner=active_chat_runner,
-                prompt=prompt,
-                tool_loadout=tool_loadout,
-                tool_registry=self._active_tool_registry(),
-                max_iters=16,
-                on_tool_call=on_tool_call,
-                model=self._resolve_chat_runner_model(agent_id),
-                summarizer_chat_runner_factory=(
-                    self.summarizer_chat_runner_factory
+            primary_model = self._resolve_chat_runner_model(agent_id)
+
+            def _run_one(_model: "str | None", _runner: "Callable[..., Any]") -> str:
+                return _runners.run_llm_with_tools(
+                    chat_runner=_runner,
+                    prompt=prompt,
+                    tool_loadout=tool_loadout,
+                    tool_registry=self._active_tool_registry(),
+                    max_iters=16,
+                    on_tool_call=on_tool_call,
+                    model=_model,
+                    summarizer_chat_runner_factory=(
+                        self.summarizer_chat_runner_factory
+                    ),
+                    permission_callback=permission_callback,
+                    permission_broker=permission_broker,
+                )
+
+            # #8 per-seat fallback: run the WHOLE task on the primary; if it's
+            # unavailable, restart on the next seat fallback (never mid-task). A
+            # seat with no fallbacks yields a 1-entry chain → identical behavior.
+            chain = self._seat_fallback_chain(agent_id, primary_model, active_chat_runner)
+            return _runners.run_with_model_fallbacks(
+                chain, _run_one,
+                on_fallback=lambda failed, nxt, exc: self._emit_activity(
+                    role=role, phase="model_fallback", task_id=task_id,
+                    agent_id=agent_id,
+                    detail=(f"Model '{failed}' unavailable ({type(exc).__name__}) "
+                            f"— restarting this task on fallback '{nxt}'."),
                 ),
-                permission_callback=permission_callback,
-                permission_broker=permission_broker,
             )
 
     # ── Leader: the CONVERSE function (the conversational partner) ───────

@@ -66,6 +66,10 @@ class Agent(BaseModel):
     model_tier: str | None = None
     cost_class: str | None = None
     capability_tags: list[str] = Field(default_factory=list)
+    #: Ordered fallback model preset-keys for THIS seat. When this seat's
+    #: primary model is unavailable for a provider reason, the whole task is
+    #: restarted on the next entry (engine-level, per-task — never mid-task).
+    fallbacks: list[str] = Field(default_factory=list)
     capacity_cap: int = 1
     template_origin: str | None = None
     freshness_class: str | None = None
@@ -215,6 +219,7 @@ def _parse_file(path: Path) -> Agent:
         model_tier=model_tier,
         cost_class=cost_class,
         capability_tags=capability_tags,
+        fallbacks=_parse_csv(meta.get("fallbacks", "")),
         capacity_cap=_parse_int(meta.get("capacity_cap", ""), 1),
         template_origin=meta.get("template_origin") or None,
         freshness_class=meta.get("freshness_class") or None,
@@ -266,6 +271,7 @@ def save(agent: Agent, project_code: str) -> Path:
         f"model_tier: {agent.model_tier or ''}",
         f"cost_class: {agent.cost_class or ''}",
         f"capability_tags: {', '.join(agent.capability_tags)}",
+        f"fallbacks: {', '.join(agent.fallbacks)}",
         f"capacity_cap: {agent.capacity_cap}",
     ]
     if agent.template_origin is not None:
@@ -444,6 +450,32 @@ def add_model(
             f"agent {agent_id!r} not found under project {project_code!r}"
         )
     updated = existing.model_copy(update={"model": model})
+    save(updated, project_code)
+    return updated
+
+
+def set_fallbacks(
+    *,
+    project_code: str,
+    agent_id: str,
+    fallback_keys: "list[str] | tuple[str, ...]",
+) -> Agent:
+    """Set a seat's ordered fallback model chain. Sanitized against the agent's
+    own model via :func:`modulatio.model_presets.sanitize_fallback_chain` — drops
+    a self-reference, unknown keys, duplicates, and any that would route a
+    protected model through OpenRouter. Mirrors :func:`add_model` (preserves the
+    rest of the agent). Raises ``FileNotFoundError`` when the agent doesn't exist.
+    """
+    from modulatio import model_presets
+    existing = load(agent_id, project_code)
+    if existing is None:
+        raise FileNotFoundError(
+            f"agent {agent_id!r} not found under project {project_code!r}"
+        )
+    cleaned = model_presets.sanitize_fallback_chain(
+        existing.model or "", list(fallback_keys or [])
+    )
+    updated = existing.model_copy(update={"fallbacks": cleaned})
     save(updated, project_code)
     return updated
 

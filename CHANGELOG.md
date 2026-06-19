@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Per-seat model fallbacks.** Each seat (Leader, QC, Producer) can carry its own
+  ordered list of backup models. When a seat's model is unavailable for a provider
+  reason (rate limit, auth failure, timeout, 5xx), the engine **warns and restarts
+  the whole task on the next backup** — so a down provider (e.g. an out-of-quota
+  API) no longer stalls the team, and one model handles a task start-to-finish
+  (never a mid-task model switch that degrades the result). The primary is tried
+  first on every new task, so it auto-resumes once it recovers. Configure it in
+  the **Config → Agents** tab: select a seat → **Fallbacks** → add backups in
+  priority order (each shown with its provider + auth method). Protected
+  direct-subscription models (Grok via xAI, GPT-5.5 via Codex OAuth) can never be
+  given an OpenRouter fallback, enforced in the engine. Request-level errors (a
+  bad request) are never masked by fallback.
+
 ## [0.9.4.2] — 2026-06-18
 
 Pure bug-fix patch.

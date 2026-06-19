@@ -27,7 +27,7 @@ import json
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 
@@ -423,6 +423,70 @@ def _record_call_usage(resp, model: str) -> None:
         cost_usd=cost_usd,
         model=model,
     )
+
+
+def _fallback_error_types() -> tuple[type[BaseException], ...]:
+    """LiteLLM exceptions that mean the model/provider is UNAVAILABLE — the only
+    failures that should advance to a fallback model. Deliberately excludes the
+    broad ``APIError`` / ``BadRequestError`` (a 400 is a request bug that would
+    fail on every model and must surface) and any context/config error. Imported
+    lazily — litellm is a heavy import the module otherwise defers."""
+    from litellm.exceptions import (
+        APIConnectionError,
+        AuthenticationError,
+        InternalServerError,
+        RateLimitError,
+        ServiceUnavailableError,
+        Timeout,
+    )
+    return (
+        RateLimitError,
+        AuthenticationError,
+        Timeout,
+        ServiceUnavailableError,
+        InternalServerError,
+        APIConnectionError,
+    )
+
+
+def run_with_model_fallbacks(
+    chain: "list[tuple[str, Any]]",
+    run_one: "Callable[[str, Any], Any]",
+    *,
+    on_fallback: "Callable[[str, str, BaseException], None] | None" = None,
+) -> Any:
+    """Run a WHOLE task with per-task (not per-call) model fallback.
+
+    ``chain`` is the seat's ordered ``[(model_label, runner), …]`` (primary
+    first). ``run_one(model_label, runner)`` executes the ENTIRE task on a single
+    model and returns its result (the label lets the caller pass ``model=``
+    through). When a model is unavailable for a provider reason
+    (``_fallback_error_types`` — key-pool rotation + OAuth refresh have already
+    been exhausted inside the single runner), the task is RESTARTED from scratch
+    on the next model — so one model does one task start-to-finish and a result
+    is never a mid-task mix of models. ``on_fallback(failed_label, next_label,
+    exc)`` fires first so the operator is warned. A non-availability error (a
+    real request/logic bug) propagates immediately, never masked. If every model
+    is unavailable, the last error re-raises. A single-entry chain is just
+    ``run_one`` with negligible overhead.
+    """
+    errors = _fallback_error_types()
+    last_exc: BaseException | None = None
+    for idx, (label, runner) in enumerate(chain):
+        try:
+            return run_one(label, runner)
+        except errors as exc:
+            last_exc = exc
+            nxt = chain[idx + 1][0] if idx + 1 < len(chain) else None
+            if nxt is not None:
+                if on_fallback is not None:
+                    on_fallback(label, nxt, exc)
+                _log.warning(
+                    "seat model %r unavailable (%s) — restarting task on %r.",
+                    label, type(exc).__name__, nxt,
+                )
+    assert last_exc is not None  # loop ran ≥1 iteration and only `errors` caught
+    raise last_exc
 
 
 def litellm_runner(
