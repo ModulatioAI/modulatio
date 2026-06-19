@@ -309,6 +309,14 @@ def _resolve_model_call_args(
     token = strategy.load_token()
     if token:
         kwargs["api_key"] = token
+    elif base_url and api_format == "openai":
+        # A local / custom OpenAI-compatible endpoint (LM Studio, llama.cpp,
+        # Ollama-local, …) with no auth: LiteLLM's openai handler REQUIRES an
+        # api_key even when the server ignores it, so a keyless local preset
+        # raises "Missing credentials" on the first call. Inject a harmless
+        # placeholder so a local model is usable out of the box. (Bare OpenAI —
+        # no base_url — still correctly demands a real key.)
+        kwargs["api_key"] = "modulatio-local"
     kwargs.update(strategy.attribution_kwargs())
 
     return litellm_model, kwargs

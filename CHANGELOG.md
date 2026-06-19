@@ -6,6 +6,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.4.1] — 2026-06-18
+
+Pure bug-fix patch.
+
+### Fixed
+
+- **Local models work out of the box again.** A keyless local OpenAI-compatible
+  endpoint configured through the setup wizard (LM Studio, llama.cpp, Ollama-local
+  — `api_format: openai`, `auth_type: none`, a `base_url` like
+  `http://127.0.0.1:1234/v1`) crashed on the first Leader call with
+  `InternalServerError: Missing credentials`. LiteLLM's OpenAI handler requires an
+  `api_key` even when the local server ignores it. The runner now injects a harmless
+  placeholder key for local/custom OpenAI-compatible endpoints, so wizard-created
+  local presets are usable immediately. Bare OpenAI (no `base_url`) still correctly
+  requires a real key.
+- **Bare `modulatio` no longer dead-ends when no project is recorded.** If setup
+  completed but no default project was captured (or it was lost), launching bare
+  `modulatio` printed an error and exited instead of starting. It now creates (or
+  reuses) a `default` project, records it, and launches the TUI — a fresh install
+  always lands you in the app rather than failing.
+
 ## [0.9.4] — 2026-06-18
 
 **The two-lane Leader — a standalone coding agent, and modes to turn it loose.** The same

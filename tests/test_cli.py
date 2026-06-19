@@ -207,3 +207,43 @@ def test_kickoff_preserves_existing_roster_on_rerun(tmp_path, monkeypatch):
     reloaded = roster.load("qc", project_code="OLD")
     assert reloaded is not None
     assert reloaded.template_origin == "human-edited"
+
+
+def test_ensure_launch_project_code_uses_recorded_default(monkeypatch):
+    """When the wizard recorded a default project, bare-launch uses it as-is
+    and creates nothing."""
+    monkeypatch.setattr("modulatio.config.get_default_project_code", lambda: "myproj")
+
+    def _no_init(*a, **k):
+        raise AssertionError("must not create a project when one is recorded")
+
+    monkeypatch.setattr("modulatio.vault.init_project", _no_init)
+
+    code, created = cli._ensure_launch_project_code()
+    assert code == "myproj"
+    assert created is False
+
+
+def test_ensure_launch_project_code_creates_default_when_none(monkeypatch):
+    """A fresh install whose wizard captured no project must NOT dead-end:
+    bare-launch creates+records a 'default' project and reports created=True
+    (0.9.4.1 — create the folder rather than crash)."""
+    calls: dict = {}
+    monkeypatch.setattr("modulatio.config.get_default_project_code", lambda: None)
+    monkeypatch.setattr(
+        "modulatio.vault.init_project",
+        lambda code, name, objective, *, exist_ok=False: calls.__setitem__(
+            "init", (code, name, objective, exist_ok)
+        ),
+    )
+    monkeypatch.setattr(
+        "modulatio.config.set_default_project_code",
+        lambda code: calls.__setitem__("set", code),
+    )
+
+    code, created = cli._ensure_launch_project_code()
+    assert code == "default"
+    assert created is True
+    # Idempotent create (exist_ok) so a pre-existing 'default' is reused.
+    assert calls["init"] == ("default", "Default", "", True)
+    assert calls["set"] == "default"

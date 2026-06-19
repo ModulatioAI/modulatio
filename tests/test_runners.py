@@ -548,3 +548,55 @@ def test_build_chat_runners_keys_by_agent_id_skips_model_less_and_unbuildable(mo
     assert set(chat_runners) == {"a", "b"}        # keyed by agent.id
     assert models == {"a": "m1", "b": "m2"}
     assert chat_runners["a"]() == "chat:m1"
+
+
+def _local_openai_preset(**overrides):
+    """A wizard-shaped LM-Studio/llama.cpp local OpenAI-compatible preset."""
+    preset = {
+        "label": "google/gemma-4-31b (LM Studio)",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "api_format": "openai",
+        "auth_type": "none",
+        "auth_config": {},
+        "model": "google/gemma-4-31b",
+    }
+    preset.update(overrides)
+    return preset
+
+
+def test_keyless_local_openai_endpoint_gets_placeholder_api_key(monkeypatch):
+    """A keyless local OpenAI-compatible preset (LM Studio / llama.cpp /
+    Ollama-local: auth_type=none, base_url set, api_format=openai) must
+    resolve a placeholder api_key. LiteLLM's openai handler raises
+    "Missing credentials" without one, even though the local server ignores
+    it — so a wizard-created local preset was crashing on first call."""
+    from modulatio import runners
+
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {"local": _local_openai_preset()},
+    )
+
+    litellm_model, kwargs = runners._resolve_model_call_args("local")
+
+    assert litellm_model == "openai/google/gemma-4-31b"
+    assert kwargs["api_key"] == "modulatio-local"
+    assert kwargs["api_base"] == "http://127.0.0.1:1234/v1"
+
+
+def test_bare_openai_without_base_url_gets_no_placeholder_key(monkeypatch):
+    """The placeholder is ONLY for local/custom endpoints. Bare OpenAI
+    (api_format=openai, no base_url, no token) must NOT get a placeholder —
+    it should still correctly demand a real key from litellm."""
+    from modulatio import runners
+
+    preset = _local_openai_preset()
+    preset.pop("base_url")
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {"bare": preset},
+    )
+
+    _litellm_model, kwargs = runners._resolve_model_call_args("bare")
+
+    assert "api_key" not in kwargs

@@ -28,8 +28,9 @@ Four findings fixed in this file; one regression apiece.
 def test_default_params_cannot_override_api_key_for_none_auth_preset(monkeypatch):
     """A none-auth preset whose ``default_params`` smuggles an api_key/api_base
     must NOT have those reach the resolved kwargs — the dedicated base_url +
-    strategy token fields are authoritative, and a none-auth strategy emits no
-    token, so nothing downstream would otherwise overwrite a smuggled key."""
+    strategy token fields are authoritative. The smuggled api_key is stripped
+    before auth resolution, so even though a local openai endpoint now resolves
+    a hardcoded placeholder key (0.9.4.1), the smuggled value can never be it."""
     from modulatio.runners import _resolve_model_call_args
 
     monkeypatch.setattr(
@@ -54,7 +55,10 @@ def test_default_params_cannot_override_api_key_for_none_auth_preset(monkeypatch
     _model, kwargs = _resolve_model_call_args("local")
     # The tuning param survives; the smuggled auth fields do NOT.
     assert kwargs["extra_body"] == {"reasoning": {"enabled": False}}
-    assert "api_key" not in kwargs  # none-auth → no key at all
+    # A local openai endpoint resolves the hardcoded placeholder key (0.9.4.1) —
+    # NOT the value smuggled via default_params. The smuggle is still defeated.
+    assert kwargs["api_key"] == "modulatio-local"
+    assert kwargs["api_key"] != "sk-SMUGGLED-INTO-DEFAULT-PARAMS"
     assert kwargs["api_base"] == "http://localhost:11434"  # dedicated field wins
 
 

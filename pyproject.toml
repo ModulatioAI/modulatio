@@ -1,6 +1,6 @@
 [project]
 name = "modulatio"
-version = "0.9.4"
+version = "0.9.4.1"
 description = "Multi-model agent framework with plan-mode orchestration, integrated TUI, and team-state working memory."
 readme = "README.md"
 requires-python = ">=3.12"

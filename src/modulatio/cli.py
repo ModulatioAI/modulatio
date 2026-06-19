@@ -210,7 +210,7 @@ def _root(
     if ctx.invoked_subcommand is not None:
         return  # a subcommand was supplied; let it run
 
-    from modulatio import setup_state, config as _cfg
+    from modulatio import setup_state
 
     if not setup_state.setup_completed():
         typer.echo("First-run detected. Launching setup wizard...\n")
@@ -218,15 +218,9 @@ def _root(
         success = setup_wizard.run_setup()
         raise typer.Exit(code=0 if success else 1)
 
-    code = _cfg.get_default_project_code()
-    if not code:
-        typer.echo(
-            "Setup complete but no default project recorded.\n"
-            "Run `modulatio-tui --code <code>` to launch on a specific project,\n"
-            "or `modulatio setup` to re-run the wizard and capture one.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    code, created = _ensure_launch_project_code()
+    if created:
+        typer.echo(f"No default project was recorded — created '{code}'.")
 
     typer.echo(f"Launching Modulatio TUI on '{code}' (real-mode)...\n")
     from modulatio.tui.app import ModulatioApp, _relaunch_if_restart
@@ -236,6 +230,27 @@ def _root(
     # CLI launch path previously swallowed it, so the TUI never came back up.
     _relaunch_if_restart(app_inst)
     raise typer.Exit(code=0)
+
+
+def _ensure_launch_project_code() -> tuple[str, bool]:
+    """Resolve the project bare ``modulatio`` launches on — never failing.
+
+    If the wizard recorded a default project, use it. Otherwise create (or
+    reuse) a ``default`` project and record it as the default, returning
+    ``created=True``. A fresh install whose wizard didn't capture a project
+    must still land the operator in the TUI rather than dead-ending with an
+    error (0.9.4.1). ``init_project`` is idempotent under ``exist_ok``, so a
+    pre-existing ``default`` folder is reused, not clobbered.
+    """
+    from modulatio import config as _cfg, vault
+
+    code = _cfg.get_default_project_code()
+    if code:
+        return code, False
+    code = "default"
+    vault.init_project(code, "Default", "", exist_ok=True)
+    _cfg.set_default_project_code(code)
+    return code, True
 
 
 models_app = typer.Typer(help="Model registry — list, add, remove, edit. Each entry is self-contained (endpoint + auth + model id).")

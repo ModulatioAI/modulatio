@@ -54,7 +54,11 @@ def test_resolve_preset_with_api_key_auth(monkeypatch):
     assert kwargs["api_key"] == "sk-ollama-test"
 
 
-def test_resolve_preset_with_local_endpoint_omits_api_key():
+def test_resolve_preset_with_local_endpoint_gets_placeholder_api_key():
+    # A keyless local OpenAI-compatible endpoint (LM Studio / llama.cpp /
+    # Ollama-local) must resolve a placeholder api_key (0.9.4.1 fix): LiteLLM's
+    # openai handler raises "Missing credentials" without one even though the
+    # local server ignores it.
     model_presets.add_preset(
         "llama", label="Llama", base_url="http://127.0.0.1:11434/v1",
         api_format="openai", auth_type="none", model="llama3",
@@ -62,7 +66,7 @@ def test_resolve_preset_with_local_endpoint_omits_api_key():
     model, kwargs = runners._resolve_model_call_args("llama")
     assert model == "openai/llama3"
     assert kwargs["api_base"] == "http://127.0.0.1:11434/v1"
-    assert "api_key" not in kwargs
+    assert kwargs["api_key"] == "modulatio-local"
 
 
 def test_resolve_preset_with_oauth_anthropic_reads_token():
