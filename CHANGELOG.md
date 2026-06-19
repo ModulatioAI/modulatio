@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.4.2] — 2026-06-18
+
+Pure bug-fix patch.
+
+### Fixed
+
+- **The test suite no longer clobbers your real config.** Some tests wrote to
+  the developer's live `~/.config/modulatio` instead of an isolated temp dir
+  (most visibly `backup.import_backup`, which stamps `defaults.json`). Running
+  the suite could therefore overwrite a real install's `vault_root` and
+  `default_project_code` with a pytest path — which is what dead-ended a fresh
+  install's bare launch. Config isolation is now the default for every test, so
+  no test can touch the live config. (Test-only change; production behavior is
+  unchanged.)
+
+### Added
+
+- **`modulatio doctor` now checks the vault and default project.** A new *Vault*
+  section reports whether `vault_root` exists and is a directory, and whether a
+  recorded default project's folder is present — the two most common
+  fresh-install failures, which doctor previously couldn't see while reporting
+  everything else green.
+
 ## [0.9.4.1] — 2026-06-18
 
 Pure bug-fix patch.

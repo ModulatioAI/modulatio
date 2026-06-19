@@ -925,6 +925,42 @@ def _run_doctor_checks() -> None:
             f"({p.get('auth_type', '?')}, {p.get('api_format', '?')}/{p.get('model', '?')})"
         )
 
+    # Vault + default project (0.9.4.2). The most common fresh-install breakage
+    # is a vault_root that points nowhere (e.g. a stale path) or no default
+    # project recorded — bare `modulatio` can't launch without both, yet doctor
+    # was previously blind to them while reporting everything else green.
+    from modulatio import config, vault as _vault
+    typer.echo("\nVault:")
+    vault_root = config.get_vault_root()
+    if vault_root.is_dir():
+        typer.echo(f"  ✓ vault_root: {vault_root}")
+    elif vault_root.exists():
+        typer.echo(f"  ✗ vault_root is not a directory: {vault_root}")
+    else:
+        typer.echo(
+            f"  ✗ vault_root does not exist: {vault_root}  "
+            "(run `modulatio setup`)"
+        )
+    _vault.reload()  # rebind VAULT_ROOT to the current vault_root before resolving
+    code = config.get_default_project_code()
+    if not code:
+        typer.echo(
+            "  ! no default project recorded — bare `modulatio` will create a "
+            "'default' project on launch"
+        )
+    else:
+        try:
+            proj = _vault.project_dir(code)
+        except Exception:
+            proj = vault_root / code
+        if proj.is_dir():
+            typer.echo(f"  ✓ default project: {code}")
+        else:
+            typer.echo(
+                f"  ✗ default project '{code}' recorded but its folder is "
+                f"missing: {proj}  (run `modulatio setup`)"
+            )
+
     # Token expiry
     typer.echo("\nOAuth tokens:")
     if oauth_helpers.has_anthropic_credentials():

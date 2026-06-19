@@ -247,3 +247,49 @@ def test_ensure_launch_project_code_creates_default_when_none(monkeypatch):
     # Idempotent create (exist_ok) so a pre-existing 'default' is reused.
     assert calls["init"] == ("default", "Default", "", True)
     assert calls["set"] == "default"
+
+
+# === doctor vault/project health check (0.9.4.2) ===
+
+def test_doctor_flags_missing_vault_root(capsys, tmp_path):
+    """doctor's Vault section flags a vault_root that doesn't exist — the most
+    common fresh-install breakage it used to be blind to."""
+    from modulatio import config
+    config.save_defaults({"vault_root": str(tmp_path / "ghost-vault")})
+
+    cli._run_doctor_checks()
+
+    out = capsys.readouterr().out
+    assert "Vault:" in out
+    assert "vault_root does not exist" in out
+
+
+def test_doctor_reports_healthy_vault_and_default_project(capsys, tmp_path):
+    """A real vault_root + a recorded project whose folder exists both read ✓."""
+    from modulatio import config, vault
+    vroot = tmp_path / "vault"
+    vroot.mkdir()
+    config.save_defaults({"vault_root": str(vroot), "default_project_code": "proj1"})
+    vault.reload()
+    vault.init_project("proj1", "Proj1", "", exist_ok=True)
+
+    cli._run_doctor_checks()
+
+    out = capsys.readouterr().out
+    assert "✓ vault_root" in out
+    assert "✓ default project: proj1" in out
+
+
+def test_doctor_flags_recorded_project_with_missing_folder(capsys, tmp_path):
+    """A default project recorded in config but with no folder on disk is
+    flagged — the exact post-clobber state that dead-ended bare launch."""
+    from modulatio import config, vault
+    vroot = tmp_path / "vault"
+    vroot.mkdir()
+    config.save_defaults({"vault_root": str(vroot), "default_project_code": "gone"})
+    vault.reload()
+
+    cli._run_doctor_checks()
+
+    out = capsys.readouterr().out
+    assert "default project 'gone' recorded but its folder is missing" in out

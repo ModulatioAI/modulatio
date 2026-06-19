@@ -38,3 +38,42 @@ def _modulatio_sequential_by_default(monkeypatch):
     ``monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "1")``.
     """
     monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "0")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_modulatio_config(tmp_path, monkeypatch):
+    """Redirect Modulatio's config dir to a per-test tmp dir so NO test can read
+    or WRITE the developer's real ``~/.config/modulatio``.
+
+    Isolation used to be per-file opt-in (each config-touching test added its own
+    ``isolate`` fixture). A test that forgot it and wrote config — e.g.
+    ``backup.import_backup``, which stamps ``defaults.json`` from a backup — would
+    clobber the live config of whoever ran the suite. That is exactly what wiped a
+    fresh install's ``vault_root`` + ``default_project_code`` mid-run (the suite
+    overwrote the user's config with a pytest temp path). Making isolation the
+    default closes the leak for every present and future test. Tests that set
+    their own config paths simply re-point to the same per-test ``tmp_path`` and
+    stay consistent. (Production behavior is unchanged — only tests are redirected.)
+    """
+    from modulatio import (
+        config,
+        preferences,
+        setup_state,
+        model_presets,
+        telegram_notify,
+    )
+
+    cfg = tmp_path / "_mod_config"
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg)
+    monkeypatch.setattr(config, "DEFAULTS_FILE", cfg / "defaults.json")
+    monkeypatch.setattr(config, "TEAM_TEMPLATE_FILE", cfg / "team_template.json")
+    monkeypatch.setattr(config, "AUTH_ALERTS_FILE", cfg / "auth_alerts.json")
+    monkeypatch.setattr(preferences, "PREFS_FILE", cfg / "preferences.json")
+    monkeypatch.setattr(setup_state, "SETUP_STATE_FILE", cfg / "setup-state.json")
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", cfg / "model_presets.json")
+    monkeypatch.setattr(telegram_notify, "CONFIG_FILE", cfg / "telegram-config.json")
+    # Drop any cached defaults loaded from the real config before the redirect.
+    config.reload()
+    yield
+    # Leave no cached state from this test's tmp config for the next test.
+    config.reload()
