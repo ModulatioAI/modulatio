@@ -242,7 +242,21 @@ class OAuthOpenAIStrategy:
             return None
 
     def attribution_kwargs(self) -> dict[str, Any]:
-        return {}
+        """Codex-subscription requests to the ChatGPT backend are gated on the
+        ``chatgpt-account-id`` header (+ an ``originator``); without it the
+        backend rejects the call. Supplied as ``extra_headers`` so it flows
+        through the runner's ``kwargs.update(attribution_kwargs())`` into the
+        litellm call. Empty when no account_id (e.g. the api.openai.com path)."""
+        from modulatio import oauth_helpers
+        account_id = oauth_helpers.read_openai_account_id()
+        if not account_id:
+            return {}
+        return {
+            "extra_headers": {
+                "chatgpt-account-id": account_id,
+                "originator": "codex-tui",
+            }
+        }
 
     def is_available(self, extra_env: dict[str, str] | None = None) -> bool:
         del extra_env

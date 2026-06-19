@@ -133,6 +133,20 @@ def read_openai_token() -> str | None:
     return token if isinstance(token, str) and token else None
 
 
+def read_openai_account_id() -> str | None:
+    """Return the Codex OAuth ``account_id``, or None. Sent as the
+    ``chatgpt-account-id`` header when reaching GPT-5.5 via the Codex
+    subscription (the ChatGPT backend gates on it)."""
+    creds = read_openai_credentials()
+    if not creds:
+        return None
+    tokens = creds.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    acc = tokens.get("account_id")
+    return acc if isinstance(acc, str) and acc else None
+
+
 def write_openai_credentials(updated: dict[str, Any]) -> None:
     """Atomic write back to the Codex credentials file. Mode 0600 throughout."""
     config.write_secret_file(
