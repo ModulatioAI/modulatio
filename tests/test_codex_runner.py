@@ -145,6 +145,21 @@ def test_oauth_openai_creds_refused_for_untrusted_host(monkeypatch):
     assert "SECRET-ACC" not in str(kwargs)                   # not anywhere in the call args
 
 
+def test_oauth_openai_creds_refused_over_cleartext_http(monkeypatch):
+    """A bearer token must never ride cleartext HTTP: even the right hostname on
+    http:// (a downgrade) must withhold the token + chatgpt-account-id header."""
+    downgrade = dict(_CODEX_PRESET, base_url="http://chatgpt.com/backend-api/codex")
+    monkeypatch.setattr(model_presets, "load_presets", lambda: {"d": downgrade})
+    monkeypatch.setattr(oauth_helpers, "read_openai_token", lambda: "SECRET-TOKEN")
+    monkeypatch.setattr(oauth_helpers, "read_openai_account_id", lambda: "SECRET-ACC")
+
+    _model, kwargs = runners._resolve_model_call_args("d")
+
+    assert kwargs.get("api_key") != "SECRET-TOKEN"
+    assert "chatgpt-account-id" not in kwargs.get("extra_headers", {})
+    assert "SECRET-ACC" not in str(kwargs)
+
+
 def test_oauth_openai_creds_sent_to_codex_host(monkeypatch):
     """The legit Codex backend DOES receive the token + account-id header."""
     monkeypatch.setattr(model_presets, "load_presets", lambda: {"g": dict(_CODEX_PRESET)})
@@ -155,3 +170,19 @@ def test_oauth_openai_creds_sent_to_codex_host(monkeypatch):
 
     assert kwargs["api_key"] == "SECRET-TOKEN"
     assert kwargs["extra_headers"]["chatgpt-account-id"] == "acc-1"
+
+
+def test_codex_headers_not_sent_off_codex_backend(monkeypatch):
+    """Hardening: the chatgpt-account-id / originator headers are Codex-host-only.
+    A trusted OpenAI HTTPS host that is NOT the Codex endpoint gets the token but
+    NOT the codex-specific attribution headers (no needless account-id leak)."""
+    plain = dict(_CODEX_PRESET, base_url="https://api.openai.com/v1", endpoint="chat")
+    monkeypatch.setattr(model_presets, "load_presets", lambda: {"p": plain})
+    monkeypatch.setattr(oauth_helpers, "read_openai_token", lambda: "SECRET-TOKEN")
+    monkeypatch.setattr(oauth_helpers, "read_openai_account_id", lambda: "acc-1")
+
+    _model, kwargs = runners._resolve_model_call_args("p")
+
+    assert kwargs["api_key"] == "SECRET-TOKEN"          # token still allowed (OpenAI host)
+    assert "chatgpt-account-id" not in kwargs.get("extra_headers", {})
+    assert "acc-1" not in str(kwargs.get("extra_headers", {}))

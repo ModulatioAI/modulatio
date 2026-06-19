@@ -228,12 +228,14 @@ def default_generic_stub_runners() -> dict[str, Callable[[str], str]]:
 
 def _openai_oauth_host_ok(base_url: "str | None") -> bool:
     """The OpenAI/Codex OAuth subscription token + ``chatgpt-account-id`` header
-    may only be sent to OpenAI-controlled hosts — the Codex/ChatGPT backend or
-    the platform API. Any other host (e.g. a hand-edited preset base_url) is
-    refused so the subscription credential can't be exfiltrated."""
+    may only be sent to OpenAI-controlled hosts over HTTPS — the Codex/ChatGPT
+    backend or the platform API. Any other host, OR a cleartext ``http://``
+    scheme (a bearer-token downgrade leak), is refused so the subscription
+    credential can't be exfiltrated by a hand-edited preset base_url."""
     from urllib.parse import urlparse
-    host = (urlparse(base_url or "").hostname or "").lower()
-    return host in ("chatgpt.com", "api.openai.com")
+    parsed = urlparse(base_url or "")
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and host in ("chatgpt.com", "api.openai.com")
 
 
 def _resolve_model_call_args(
@@ -318,18 +320,26 @@ def _resolve_model_call_args(
         strategy = auth_strategies.NoneStrategy()
     token = strategy.load_token()
     # SECURITY (engine binds): the OpenAI/Codex OAuth SUBSCRIPTION token + the
-    # chatgpt-account-id header may ONLY be sent to OpenAI-controlled hosts. A
-    # hand-edited oauth_openai preset with a malicious base_url must NOT
-    # exfiltrate the subscription credential — fail closed: drop the token AND
-    # skip the attribution headers, so neither reaches an untrusted host.
+    # chatgpt-account-id header may ONLY be sent to OpenAI-controlled hosts over
+    # HTTPS. A hand-edited oauth_openai preset with a malicious (or cleartext)
+    # base_url must NOT exfiltrate the subscription credential — fail closed:
+    # drop the token AND skip the attribution headers.
     attach_attribution = True
-    if auth_type == "oauth_openai" and not _openai_oauth_host_ok(base_url):
-        _log.warning(
-            "oauth_openai preset points at a non-OpenAI host %r — refusing to "
-            "send the Codex subscription token / account-id header.", base_url,
-        )
-        token = None
-        attach_attribution = False
+    if auth_type == "oauth_openai":
+        if not _openai_oauth_host_ok(base_url):
+            _log.warning(
+                "oauth_openai preset points at an untrusted/cleartext host %r — "
+                "refusing to send the Codex subscription token / account-id "
+                "header.", base_url,
+            )
+            token = None
+            attach_attribution = False
+        elif preset.get("endpoint") != "codex":
+            # Trusted OpenAI HTTPS host but NOT the Codex backend: the
+            # codex-specific attribution headers (chatgpt-account-id +
+            # originator: codex-tui) are meaningless off the Codex backend and
+            # needlessly disclose the account id — keep them Codex-host-only.
+            attach_attribution = False
     if token:
         kwargs["api_key"] = token
     elif base_url and api_format == "openai" and auth_type != "oauth_openai":
