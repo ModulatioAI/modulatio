@@ -1305,6 +1305,73 @@ def run_llm_with_tools(
     )
 
 
+def _codex_tool_choice(tc: "dict | str | None") -> "dict | str | None":
+    """Translate a chat-completions ``tool_choice`` to the Responses shape.
+    Strings (``auto``/``none``/``required``) pass through; a forced
+    ``{type:function, function:{name}}`` becomes ``{type:function, name}``."""
+    if isinstance(tc, dict):
+        fn = tc.get("function")
+        if isinstance(fn, dict) and fn.get("name"):
+            return {"type": "function", "name": fn["name"]}
+    return tc
+
+
+def _build_codex_chat_runner(
+    litellm_model: str, kwargs: dict, model: str,
+    provider_id_for_alerts: "str | None", pool_base: "str | None",
+) -> Callable[..., ChatResponse]:
+    """Tool-loop runner for the Codex (ChatGPT-subscription) Responses backend.
+
+    Translates the chat-completions protocol (messages/tools) to the Responses
+    API, streams (the backend requires ``stream=True``), and aggregates back into
+    a ``ChatResponse``. Mirrors ``litellm_chat_runner``'s auth-refresh-once
+    recovery (``oauth_openai`` isn't pooled, so no key-pool rotation)."""
+    from modulatio import codex_responses as _cr
+
+    def run(
+        *, messages: list[dict], tools: list[dict],
+        tool_choice: "dict | str | None" = None,
+    ) -> ChatResponse:
+        from litellm import responses as _responses
+        from litellm.exceptions import AuthenticationError
+
+        instructions, inp = _cr.codex_input_from_messages(messages)
+        rtools = _cr.codex_tools_from_chat(tools)
+
+        def _call(api_key_override: str | None = None):
+            ck = dict(kwargs)
+            if pool_base is not None:
+                ck["api_key"] = _pooled_call_key(pool_base, model)
+            elif api_key_override is not None:
+                ck["api_key"] = api_key_override
+            if rtools:
+                ck["tools"] = rtools
+            if tool_choice is not None:
+                ck["tool_choice"] = _codex_tool_choice(tool_choice)
+            stream = _responses(
+                model=litellm_model, instructions=instructions, input=inp,
+                store=False, stream=True, **ck,
+            )
+            return _cr.chat_response_from_codex_stream(stream)
+
+        try:
+            result = _call()
+        except AuthenticationError as e:
+            new_token = _try_refresh_for(model)
+            if new_token is None:
+                _fire_auth_alert(model, str(e), provider_id_for_alerts)
+                raise
+            try:
+                result = _call(api_key_override=new_token)
+            except AuthenticationError as e2:
+                _fire_auth_alert(model, str(e2), provider_id_for_alerts)
+                raise
+        _clear_auth_alert(provider_id_for_alerts)
+        return result
+
+    return run
+
+
 def litellm_chat_runner(
     model: str,
     *,
@@ -1342,6 +1409,13 @@ def litellm_chat_runner(
     # path is interactive-only).
     provider_id_for_alerts = model if model in presets else None
     endpoint = (presets.get(model, {}) or {}).get("endpoint", "chat")
+    if endpoint == "codex":
+        # GPT-5.5 via the OpenAI Codex subscription (ChatGPT backend, Responses
+        # API with tool-calling). The headers (chatgpt-account-id + originator)
+        # arrive in kwargs via the oauth_openai strategy's attribution_kwargs.
+        return _build_codex_chat_runner(
+            litellm_model, kwargs, model, provider_id_for_alerts, pool_base,
+        )
     if endpoint == "responses":
         raise NotImplementedError(
             f"litellm_chat_runner does not yet support the Responses API "
