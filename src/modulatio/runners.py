@@ -226,6 +226,16 @@ def default_generic_stub_runners() -> dict[str, Callable[[str], str]]:
     }
 
 
+def _openai_oauth_host_ok(base_url: "str | None") -> bool:
+    """The OpenAI/Codex OAuth subscription token + ``chatgpt-account-id`` header
+    may only be sent to OpenAI-controlled hosts — the Codex/ChatGPT backend or
+    the platform API. Any other host (e.g. a hand-edited preset base_url) is
+    refused so the subscription credential can't be exfiltrated."""
+    from urllib.parse import urlparse
+    host = (urlparse(base_url or "").hostname or "").lower()
+    return host in ("chatgpt.com", "api.openai.com")
+
+
 def _resolve_model_call_args(
     model_or_preset_key: str,
 ) -> tuple[str, dict]:
@@ -307,9 +317,22 @@ def _resolve_model_call_args(
         # ``modulatio doctor`` separately.
         strategy = auth_strategies.NoneStrategy()
     token = strategy.load_token()
+    # SECURITY (engine binds): the OpenAI/Codex OAuth SUBSCRIPTION token + the
+    # chatgpt-account-id header may ONLY be sent to OpenAI-controlled hosts. A
+    # hand-edited oauth_openai preset with a malicious base_url must NOT
+    # exfiltrate the subscription credential — fail closed: drop the token AND
+    # skip the attribution headers, so neither reaches an untrusted host.
+    attach_attribution = True
+    if auth_type == "oauth_openai" and not _openai_oauth_host_ok(base_url):
+        _log.warning(
+            "oauth_openai preset points at a non-OpenAI host %r — refusing to "
+            "send the Codex subscription token / account-id header.", base_url,
+        )
+        token = None
+        attach_attribution = False
     if token:
         kwargs["api_key"] = token
-    elif base_url and api_format == "openai":
+    elif base_url and api_format == "openai" and auth_type != "oauth_openai":
         # A local / custom OpenAI-compatible endpoint (LM Studio, llama.cpp,
         # Ollama-local, …) with no auth: LiteLLM's openai handler REQUIRES an
         # api_key even when the server ignores it, so a keyless local preset
@@ -317,7 +340,8 @@ def _resolve_model_call_args(
         # placeholder so a local model is usable out of the box. (Bare OpenAI —
         # no base_url — still correctly demands a real key.)
         kwargs["api_key"] = "modulatio-local"
-    kwargs.update(strategy.attribution_kwargs())
+    if attach_attribution:
+        kwargs.update(strategy.attribution_kwargs())
 
     return litellm_model, kwargs
 
@@ -598,6 +622,13 @@ def litellm_runner(
 
         # ── Codex (ChatGPT-subscription) Responses path ──────────────
         if endpoint == "codex":
+            # NOTE (usage metering): Codex runs on a FLAT-RATE OAuth subscription,
+            # not metered per-token, and the streamed Responses result is not a
+            # litellm ModelResponse with a ``.usage`` object — so this branch does
+            # NOT call ``_record_call_usage``. Codex seats are intentionally OUTSIDE
+            # the per-token budget meter for now. Wiring stream usage (from the
+            # ``response.completed`` event) is a tracked follow-up before the budget
+            # cap is turned up to hard enforcement for a Codex-backed seat.
             from modulatio import codex_responses as _cr
             instructions, inp = _cr.codex_input_from_messages(
                 [{"role": "user", "content": body}]
@@ -1442,6 +1473,10 @@ def litellm_chat_runner(
         # GPT-5.5 via the OpenAI Codex subscription (ChatGPT backend, Responses
         # API with tool-calling). The headers (chatgpt-account-id + originator)
         # arrive in kwargs via the oauth_openai strategy's attribution_kwargs.
+        # Usage: Codex is a flat-rate subscription and the stream carries no
+        # litellm usage object, so this seat is OUTSIDE the per-token budget
+        # meter (see the single-shot branch note); stream-usage wiring is a
+        # tracked follow-up before hard budget enforcement on a Codex seat.
         return _build_codex_chat_runner(
             litellm_model, kwargs, model, provider_id_for_alerts, pool_base,
         )

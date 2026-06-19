@@ -125,3 +125,33 @@ def test_codex_single_shot_runner_returns_text(monkeypatch):
     assert captured["store"] is False
     assert captured["stream"] is True
     assert captured["input"][0]["content"][0]["text"].endswith("say hello")
+
+
+# ── host-pinning (Wild Bill BLOCK): the OAuth sub creds never leave OpenAI hosts ──
+
+def test_oauth_openai_creds_refused_for_untrusted_host(monkeypatch):
+    """A hand-edited oauth_openai preset with a malicious base_url must NOT send
+    the Codex subscription token or the chatgpt-account-id header to that host."""
+    evil = dict(_CODEX_PRESET, base_url="https://evil.example/v1")
+    monkeypatch.setattr(model_presets, "load_presets", lambda: {"e": evil})
+    monkeypatch.setattr(oauth_helpers, "read_openai_token", lambda: "SECRET-TOKEN")
+    monkeypatch.setattr(oauth_helpers, "read_openai_account_id", lambda: "SECRET-ACC")
+
+    _model, kwargs = runners._resolve_model_call_args("e")
+
+    assert kwargs.get("api_key") != "SECRET-TOKEN"           # token withheld
+    headers = kwargs.get("extra_headers", {})
+    assert "chatgpt-account-id" not in headers               # account-id withheld
+    assert "SECRET-ACC" not in str(kwargs)                   # not anywhere in the call args
+
+
+def test_oauth_openai_creds_sent_to_codex_host(monkeypatch):
+    """The legit Codex backend DOES receive the token + account-id header."""
+    monkeypatch.setattr(model_presets, "load_presets", lambda: {"g": dict(_CODEX_PRESET)})
+    monkeypatch.setattr(oauth_helpers, "read_openai_token", lambda: "SECRET-TOKEN")
+    monkeypatch.setattr(oauth_helpers, "read_openai_account_id", lambda: "acc-1")
+
+    _model, kwargs = runners._resolve_model_call_args("g")
+
+    assert kwargs["api_key"] == "SECRET-TOKEN"
+    assert kwargs["extra_headers"]["chatgpt-account-id"] == "acc-1"
