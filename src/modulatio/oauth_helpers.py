@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -212,10 +213,23 @@ def read_xai_refresh_token() -> str | None:
     return token if isinstance(token, str) and token else None
 
 
+# === Claude Code CLI ===
+
+
+def find_claude_binary() -> str | None:
+    """Locate the Claude Code CLI. MODULATIO_CLAUDE_BIN overrides; else PATH.
+    Returns None if not installed (doctor + the runner surface a clear error)."""
+    override = os.environ.get("MODULATIO_CLAUDE_BIN")
+    if override and os.path.exists(override):
+        return override
+    return shutil.which("claude")
+
+
 __all__ = [
     "ANTHROPIC_CREDENTIALS_FILE",
     "OPENAI_CODEX_CREDENTIALS_FILE",
     "XAI_GROK_CREDENTIALS_FILE",
+    "find_claude_binary",
     "has_anthropic_credentials",
     "read_anthropic_credentials",
     "read_anthropic_token",

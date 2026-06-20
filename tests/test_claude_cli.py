@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 import json
-from modulatio import claude_cli
+from modulatio import claude_cli, oauth_helpers
 
 
 def test_build_claude_argv_single_shot():
@@ -39,3 +39,23 @@ def test_seat_context_sets_and_restores(tmp_path):
         assert ws == tmp_path and add_dirs == ["/granted"]
     # restored after the block → temp fallback (never the leaked prior workspace)
     assert claude_cli.seat_context_var.get() == (None, ())  # var restored to default
+
+
+def test_find_claude_binary_env_override(monkeypatch, tmp_path):
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("MODULATIO_CLAUDE_BIN", str(fake))
+    assert oauth_helpers.find_claude_binary() == str(fake)
+
+
+def test_find_claude_binary_path(monkeypatch):
+    monkeypatch.delenv("MODULATIO_CLAUDE_BIN", raising=False)
+    monkeypatch.setattr(oauth_helpers.shutil, "which", lambda n: "/x/claude" if n == "claude" else None)
+    assert oauth_helpers.find_claude_binary() == "/x/claude"
+
+
+def test_find_claude_binary_missing(monkeypatch):
+    monkeypatch.delenv("MODULATIO_CLAUDE_BIN", raising=False)
+    monkeypatch.setattr(oauth_helpers.shutil, "which", lambda n: None)
+    assert oauth_helpers.find_claude_binary() is None
