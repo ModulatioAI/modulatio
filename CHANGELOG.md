@@ -4,6 +4,33 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5.1] — 2026-06-20
+
+Fresh-install fixes for the 0.9.5 subscription-seats release.
+
+### Fixed
+
+- **Setup now offers Clay instead of a broken Anthropic OAuth path.** The
+  wizard's Anthropic quick-add registered a raw OAuth preset pointed at
+  `api.anthropic.com`, which **401s a Claude subscription token** — and Clay
+  was never surfaced in setup at all. The Anthropic quick-add is now
+  **"Clay — Claude avatar (claude -p subscription)"**, registering a Claude
+  Code seat. Straight Claude/ChatGPT OAuth is also removed from the model
+  picker and the manual auth menu: the **Anthropic** and **OpenAI** providers
+  are now API-key only, and the subscription paths route exclusively through the
+  dedicated **Clay** and **OpenAI Codex** provider entries.
+- **GPT-5.5 Codex quick-add targets the subscription backend.** The OpenAI
+  Codex quick-add pointed at the metered `api.openai.com` (which also 401s a
+  subscription token); it now targets the ChatGPT/Codex Responses backend, where
+  the subscription is valid.
+- **The Feng-Tui splash now appears on launch.** The boot splash was enabled
+  only on the `modulatio-tui` entry point, so the common `modulatio` launch and
+  the post-setup auto-launch went straight to the TUI with no splash. Both real
+  launch paths now show it.
+
+(OAuth strategies remain in the engine for back-compat with any existing
+presets — only the new-preset surfaces changed.)
+
 ## [0.9.5] — 2026-06-19
 
 **Subscription seats** — bring your own Claude and GPT-5.5 subscriptions to the

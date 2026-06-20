@@ -285,8 +285,9 @@ def test_anthropic_dual_auth_anthropic_format_no_free():
     assert p is not None
     assert p.api_format == "anthropic"
     assert p.free_detect == "none"
-    # both ways in: OAuth and an API key
-    assert [a.auth_type for a in p.auth_options] == ["oauth_anthropic", "api_key"]
+    # API key only — the subscription path is Clay (CLAUDE_CLI), not straight
+    # OAuth against api.anthropic.com (which 401s a subscription token).
+    assert [a.auth_type for a in p.auth_options] == ["api_key"]
     assert p.models_source.kind == "picklist"
     assert p.models_source.picklist_key == "anthropic"
 
@@ -304,7 +305,9 @@ def test_openai_dual_auth_picklist_no_free():
     p = pc.get_provider("openai")
     assert p is not None
     assert p.api_format == "openai"
-    assert [a.auth_type for a in p.auth_options] == ["oauth_openai", "api_key"]
+    # API key only — the subscription path is OPENAI_CODEX, not straight OAuth
+    # against api.openai.com (which 401s a subscription token).
+    assert [a.auth_type for a in p.auth_options] == ["api_key"]
     assert p.models_source.kind == "picklist"
     assert p.models_source.picklist_key == "openai"
     assert p.free_detect == "none"
@@ -481,9 +484,9 @@ def test_auth_status_api_key_gives_setup_hint_when_missing(monkeypatch):
 
 
 def test_auth_status_oauth_reports_login_hint(monkeypatch):
-    # Anthropic OAuth option → status reflects whether `claude login` is done
-    oauth = pc.ANTHROPIC.auth_options[0]
-    assert oauth.auth_type == "oauth_anthropic"
+    # Codex OAuth option → status reflects whether `codex login` is done
+    oauth = pc.OPENAI_CODEX.auth_options[0]
+    assert oauth.auth_type == "oauth_openai"
     ok, hint = pc.auth_status(oauth)
     assert isinstance(ok, bool)
     if not ok:

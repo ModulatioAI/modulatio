@@ -48,14 +48,17 @@ def test_non_object_json_seed_does_not_raise(monkeypatch):
 def test_module_globals_are_tuples():
     # re-sweep finding 1: the exported globals stay tuples regardless of seed
     # health (empty tuple when the curated list is unavailable).
-    assert isinstance(provider_step.ANTHROPIC_OAUTH_MODELS, tuple)
-    assert isinstance(provider_step.OPENAI_OAUTH_MODELS, tuple)
+    assert isinstance(provider_step.CLAUDE_CLI_MODELS, tuple)
+    assert isinstance(provider_step.OPENAI_CODEX_MODELS, tuple)
 
 
 def test_empty_picklist_still_offers_manual_entry(monkeypatch):
-    # re-sweep finding 1: with an empty curated list the OAuth picker must
+    # re-sweep finding 1: with an empty curated list the Clay picker must
     # still offer the '_manual' escape so registration is possible.
-    monkeypatch.setattr(provider_step, "ANTHROPIC_OAUTH_MODELS", ())
+    monkeypatch.setattr(provider_step, "CLAUDE_CLI_MODELS", ())
+    monkeypatch.setattr(
+        provider_step.oauth_helpers, "find_claude_binary", lambda: "/x/claude"
+    )
 
     captured = {}
 
@@ -64,8 +67,7 @@ def test_empty_picklist_still_offers_manual_entry(monkeypatch):
         return provider_step.steps.QUIT  # bail before model_presets writes
 
     monkeypatch.setattr(provider_step.steps, "pick_option", _fake_pick)
-    monkeypatch.setattr(provider_step, "_print_oauth_warning", lambda: None)
 
-    assert provider_step._quick_add_anthropic_oauth() is None
+    assert provider_step._quick_add_clay() is None
     values = [val for _, val in captured["options"]]
     assert "_manual" in values

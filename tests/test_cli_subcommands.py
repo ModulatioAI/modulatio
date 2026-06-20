@@ -408,3 +408,30 @@ def test_banner_suppressed_by_env_var(monkeypatch):
     r2 = CliRunner()  # Click 8.2+ separates stderr by default (mix_stderr removed)
     result = r2.invoke(app, ["doctor"])
     assert "AUTH ALERT" not in (result.stderr or "")
+
+
+def test_bare_launch_enables_splash(monkeypatch):
+    """Bare ``modulatio`` (no subcommand) must launch the TUI with the Feng-Tui
+    splash enabled — the fresh-install bug was the splash never appearing
+    because this launch path dropped ``splash=True``."""
+    import modulatio.tui.app as tui_app
+    from modulatio import setup_state
+
+    monkeypatch.setattr(setup_state, "setup_completed", lambda: True)
+    monkeypatch.setattr("modulatio.cli._ensure_launch_project_code", lambda: ("TEST", False))
+
+    captured: dict = {}
+
+    class _FakeApp:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr(tui_app, "ModulatioApp", _FakeApp)
+    monkeypatch.setattr(tui_app, "_relaunch_if_restart", lambda app: None)
+
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == 0
+    assert captured.get("splash") is True

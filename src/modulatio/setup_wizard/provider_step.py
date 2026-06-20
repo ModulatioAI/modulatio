@@ -83,8 +83,8 @@ def _load_oauth_picklists() -> dict[str, tuple[str, ...]]:
 _OAUTH_PICKLISTS = _load_oauth_picklists()
 # re-sweep (finding 1): .get(vendor, ()) — a seed missing either key disables
 # only that vendor's curated list, not the whole wizard.
-ANTHROPIC_OAUTH_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS.get("anthropic", ())
-OPENAI_OAUTH_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS.get("openai", ())
+CLAUDE_CLI_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS.get("claude_cli", ())
+OPENAI_CODEX_MODELS: tuple[str, ...] = _OAUTH_PICKLISTS.get("openai_codex", ())
 
 
 # === Env-var smart default (slice #23) ===
@@ -248,76 +248,86 @@ def _next_unique_key(prefix: str) -> str:
     return f"{prefix}_{i}"
 
 
-def _quick_add_anthropic_oauth() -> str | None:
-    """One-click registration of an Anthropic-OAuth-backed model.
-    Picker over the curated Anthropic model list, with manual-override
-    escape for advanced users (model just released, not in catalog)."""
-    _print_oauth_warning()
+def _quick_add_clay() -> str | None:
+    """One-click registration of Clay — a Claude model running through your
+    Claude Code subscription (``claude -p``), NOT the metered Anthropic API and
+    NOT the OAuth token. Picker over the curated Claude model list, with a
+    manual-override escape for advanced users (model not yet in the catalog)."""
+    if not oauth_helpers.find_claude_binary():
+        theme.warn(
+            "Claude Code (`claude`) not found on PATH. Install it and run "
+            "`claude` to sign in — Clay needs the binary to run."
+        )
     print()
-    print(theme.color("  Pick an Anthropic model:", "primary", bold=True))
-    options: list[tuple[str, str]] = [(m, m) for m in ANTHROPIC_OAUTH_MODELS]
+    print(theme.color("  Pick a Claude model for Clay:", "primary", bold=True))
+    options: list[tuple[str, str]] = [(m, m) for m in CLAUDE_CLI_MODELS]
     options.append(
         (theme.color("+ Type a model id manually (advanced)", "highlight"), "_manual")
     )
     pick = steps.pick_option(
-        "Anthropic OAuth model", options, default_index=0,
+        "Clay (Claude Code) model", options, default_index=0,
     )
     if pick in (steps.BACK, steps.QUIT):
         return None
     if pick == "_manual":
         model_raw = steps.prompt_nav(
-            "Model id at api.anthropic.com", required=True,
+            "Claude model id (e.g. claude-opus-4-8)", required=True,
         )
     else:
         model_raw = pick
     if model_raw in (steps.BACK, steps.QUIT) or not isinstance(model_raw, str):
         return None
-    key = _next_unique_key(f"anthropic_{model_raw.replace('.', '_').replace('-', '_')}")
+    key = _next_unique_key(f"clay_{model_raw.replace('.', '_').replace('-', '_')}")
     model_presets.add_preset(
         key,
-        label=f"{model_raw} (Anthropic OAuth)",
-        base_url="https://api.anthropic.com",
+        label=f"{model_raw} (Clay — Claude Code)",
+        base_url="claude-cli",
         api_format="anthropic",
-        auth_type="oauth_anthropic",
+        auth_type="claude_cli",
         auth_config={},
+        endpoint="claude_cli",
         model=model_raw,
     )
-    theme.success(f"Registered '{key}' → anthropic/{model_raw} via Claude CLI OAuth.")
+    theme.success(f"Registered '{key}' → Clay (claude -p) running {model_raw}.")
     return key
 
 
 def _quick_add_openai_oauth() -> str | None:
+    """One-click registration of GPT-5.5 via the OpenAI Codex subscription —
+    the ChatGPT/Codex backend (Responses API), NOT the metered api.openai.com
+    (which has no subscription quota and 401s a subscription token)."""
     _print_oauth_warning()
     print()
-    print(theme.color("  Pick an OpenAI model:", "primary", bold=True))
-    options: list[tuple[str, str]] = [(m, m) for m in OPENAI_OAUTH_MODELS]
+    print(theme.color("  Pick an OpenAI Codex model:", "primary", bold=True))
+    options: list[tuple[str, str]] = [(m, m) for m in OPENAI_CODEX_MODELS]
     options.append(
         (theme.color("+ Type a model id manually (advanced)", "highlight"), "_manual")
     )
     pick = steps.pick_option(
-        "OpenAI Codex OAuth model", options, default_index=0,
+        "OpenAI Codex subscription model", options, default_index=0,
     )
     if pick in (steps.BACK, steps.QUIT):
         return None
     if pick == "_manual":
         model_raw = steps.prompt_nav(
-            "Model id at api.openai.com", required=True,
+            "Codex model id (e.g. gpt-5.5)", required=True,
         )
     else:
         model_raw = pick
     if model_raw in (steps.BACK, steps.QUIT) or not isinstance(model_raw, str):
         return None
-    key = _next_unique_key(f"openai_{model_raw.replace('.', '_').replace('-', '_')}")
+    key = _next_unique_key(f"codex_{model_raw.replace('.', '_').replace('-', '_')}")
     model_presets.add_preset(
         key,
-        label=f"{model_raw} (OpenAI Codex OAuth)",
-        base_url="https://api.openai.com/v1",
+        label=f"{model_raw} (OpenAI Codex subscription)",
+        base_url="https://chatgpt.com/backend-api/codex",
         api_format="openai",
         auth_type="oauth_openai",
         auth_config={},
+        endpoint="codex",
         model=model_raw,
     )
-    theme.success(f"Registered '{key}' → openai/{model_raw} via Codex CLI OAuth.")
+    theme.success(f"Registered '{key}' → Codex subscription running {model_raw}.")
     return key
 
 
@@ -466,8 +476,6 @@ def _custom_add_flow(staged_keys: dict[str, str]) -> str | None:
         [
             ("none — local endpoint, no auth (Local Ollama, LM Studio, etc.)", "none"),
             ("api_key — paste an API key + env var name", "api_key"),
-            ("oauth_anthropic — reuse Claude CLI OAuth (~/.claude/.credentials.json)", "oauth_anthropic"),
-            ("oauth_openai — reuse Codex CLI OAuth (~/.codex/auth.json)", "oauth_openai"),
         ],
         default_index=1,
     )
@@ -491,14 +499,6 @@ def _custom_add_flow(staged_keys: dict[str, str]) -> str | None:
         auth_config = {"env_var": env_var.upper()}
         if not _enter_api_key(env_var.upper(), staged_keys):
             theme.muted("You can enter the key later via the menu.")
-    elif auth_type == "oauth_anthropic":
-        _print_oauth_warning()
-        if not oauth_helpers.has_anthropic_credentials():
-            theme.warn("~/.claude/.credentials.json not found. Run `claude login` before using.")
-    elif auth_type == "oauth_openai":
-        _print_oauth_warning()
-        if not oauth_helpers.has_openai_credentials():
-            theme.warn("~/.codex/auth.json not found. Run `codex login` before using.")
 
     model_raw = _ask(
         "Model id at the endpoint (the vendor's identifier — check the provider's docs)"
@@ -652,10 +652,10 @@ def run(state: dict) -> Any:
 
         # Quick-add rows — only when their credentials/services exist.
         quick_options: list[tuple[str, str, Any]] = []
-        if oauth_helpers.has_anthropic_credentials():
-            quick_options.append(("qa", "+ Quick-add Anthropic OAuth model (detected ~/.claude/.credentials.json)", _quick_add_anthropic_oauth))
+        if oauth_helpers.find_claude_binary():
+            quick_options.append(("qa", "+ Quick-add Clay — Claude avatar (claude -p subscription)", _quick_add_clay))
         if oauth_helpers.has_openai_credentials():
-            quick_options.append(("qo", "+ Quick-add OpenAI Codex OAuth model (detected ~/.codex/auth.json)", _quick_add_openai_oauth))
+            quick_options.append(("qo", "+ Quick-add OpenAI Codex (GPT-5.5 subscription, detected ~/.codex/auth.json)", _quick_add_openai_oauth))
         if has_local_ollama():
             quick_options.append(("ql", "+ Quick-add Local Ollama model (detected at 127.0.0.1:11434)", _quick_add_local_ollama))
         if has_lm_studio():

@@ -222,7 +222,7 @@ def _auto_launch_tui(state: dict) -> None:
     print()
 
     from modulatio.tui.app import ModulatioApp
-    ModulatioApp(project_code=code, stub=False).run()
+    ModulatioApp(project_code=code, stub=False, splash=True).run()
 
 
 def run_setup() -> bool:

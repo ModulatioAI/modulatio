@@ -207,17 +207,14 @@ ANTHROPIC = Provider(
     name="Anthropic",
     base_url="https://api.anthropic.com",
     api_format="anthropic",
-    # Two ways in: Claude OAuth (subscription sign-in) OR a plain API key.
+    # API key only. The subscription path is Clay (the CLAUDE_CLI provider,
+    # `claude -p`) — straight OAuth against api.anthropic.com 401s a
+    # subscription token, so it is NOT offered here.
     auth_options=[
-        AuthOption(
-            auth_type="oauth_anthropic",
-            label="Sign in with Claude (OAuth)",
-            oauth_hint="run `claude login`",
-        ),
         AuthOption(auth_type="api_key", label="API key", env_var="ANTHROPIC_API_KEY"),
     ],
-    # OAuth users have no API key to hit /v1/models, so list from the curated
-    # picklist seed (small, hand-maintained — Anthropic's catalog is short).
+    # API-key users hit /v1/models, but to keep the picker key-free we list from
+    # the curated seed (small, hand-maintained — Anthropic's catalog is short).
     models_source=ModelsSource(
         kind="picklist", picklist_key="anthropic", modality="text"
     ),
@@ -231,17 +228,14 @@ OPENAI = Provider(
     name="OpenAI",
     base_url="https://api.openai.com/v1",
     api_format="openai",
-    # Two ways in: ChatGPT/Codex OAuth OR a plain API key.
+    # API key only. The subscription path is the OPENAI_CODEX provider (the
+    # ChatGPT/Codex backend) — straight OAuth against api.openai.com 401s a
+    # subscription token, so it is NOT offered here.
     auth_options=[
-        AuthOption(
-            auth_type="oauth_openai",
-            label="Sign in with ChatGPT (OAuth)",
-            oauth_hint="run `codex login`",
-        ),
         AuthOption(auth_type="api_key", label="API key", env_var="OPENAI_API_KEY"),
     ],
-    # OAuth users have no API key to hit /v1/models, so list from the curated
-    # picklist seed (a maintained general snapshot, refreshed as OpenAI ships).
+    # Key-free picker: list from the curated picklist seed (a maintained general
+    # snapshot, refreshed as OpenAI ships).
     models_source=ModelsSource(
         kind="picklist", picklist_key="openai", modality="text"
     ),

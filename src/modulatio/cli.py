@@ -224,7 +224,7 @@ def _root(
 
     typer.echo(f"Launching Modulatio TUI on '{code}' (real-mode)...\n")
     from modulatio.tui.app import ModulatioApp, _relaunch_if_restart
-    app_inst = ModulatioApp(project_code=code, stub=False)
+    app_inst = ModulatioApp(project_code=code, stub=False, splash=True)
     app_inst.run()
     # Honor /restart (app.exit(return_code=42)) at the process boundary — this
     # CLI launch path previously swallowed it, so the TUI never came back up.
