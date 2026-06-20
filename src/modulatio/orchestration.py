@@ -2837,7 +2837,9 @@ class Orchestrator:
             # shared-run-file writes under concurrent wave workers.
             audit_write_lock=self._store_lock,
         ):
-            return runner(prompt)
+            # Clay: confine a claude-CLI seat to its workspace + widen grants.
+            with self._seat_context():
+                return runner(prompt)
 
     def _run_agent_call(
         self,
@@ -2897,7 +2899,9 @@ class Orchestrator:
                         audit_path=self._scope_root() / "audit.jsonl",
                         audit_write_lock=self._store_lock,  # #151/e2e Blocker 1
                     ):
-                        return runner(prompt)
+                        # Clay: confine a claude-CLI producer/QC seat.
+                        with self._seat_context():
+                            return runner(prompt)
         return self._run(
             role,
             prompt,
@@ -4858,15 +4862,17 @@ class Orchestrator:
             # unavailable, restart on the next seat fallback (never mid-task). A
             # seat with no fallbacks yields a 1-entry chain → identical behavior.
             chain = self._seat_fallback_chain(agent_id, primary_model, active_chat_runner)
-            return _runners.run_with_model_fallbacks(
-                chain, _run_one,
-                on_fallback=lambda failed, nxt, exc: self._emit_activity(
-                    role=role, phase="model_fallback", task_id=task_id,
-                    agent_id=agent_id,
-                    detail=(f"Model '{failed}' unavailable ({type(exc).__name__}) "
-                            f"— restarting this task on fallback '{nxt}'."),
-                ),
-            )
+            # Clay: confine a claude-CLI chat-loop seat to its workspace + grants.
+            with self._seat_context():
+                return _runners.run_with_model_fallbacks(
+                    chain, _run_one,
+                    on_fallback=lambda failed, nxt, exc: self._emit_activity(
+                        role=role, phase="model_fallback", task_id=task_id,
+                        agent_id=agent_id,
+                        detail=(f"Model '{failed}' unavailable ({type(exc).__name__}) "
+                                f"— restarting this task on fallback '{nxt}'."),
+                    ),
+                )
 
     # ── Leader: the CONVERSE function (the conversational partner) ───────
     #
@@ -7354,6 +7360,19 @@ class Orchestrator:
             )
             self._leader_gate_cache = cached
         return cached
+
+    def _seat_context(self, workspace: "Path | None" = None):
+        """Set the Clay seat context (confined workspace + operator-widen grants)
+        for the enclosed seat-runner call(s), mirroring how the sandbox
+        contextvars are set around a tool call. A Clay-backed seat reads this via
+        ``claude_cli.current_seat_context()`` to run ``claude -p`` confined to the
+        seat's real folder + granted roots; a non-Clay runner ignores it entirely
+        (purely additive). ``workspace`` defaults to the Leader's own per-project
+        workspace — the confined default for every seat path."""
+        from modulatio import claude_cli as _clay
+        ws = workspace if workspace is not None else self._leader_workspace()
+        grants = tuple(str(r) for r in self.leader_gate().granted_roots())
+        return _clay.seat_context(ws, grants)
 
     def _leader_tool_registry(self) -> "dict[str, tools.Tool]":
         """The conversational Leader's SOLO-coding registry: path-bound builtins
