@@ -1466,6 +1466,45 @@ def _build_codex_chat_runner(
     return run
 
 
+def _build_claude_cli_chat_runner(
+    litellm_model: str, model: str,
+) -> "Callable[..., ChatResponse]":
+    """Tool-loop runner for Clay (claude CLI subscription) avatar/coding path.
+
+    Clay runs Claude's own tool-loop internally — Modulatio doesn't translate
+    tools. The runner accepts the chat-runner protocol (messages/tools) and
+    returns a ``ChatResponse`` with the final artifact text as content and an
+    empty tool_calls tuple. The seat context (workspace + widen grants) is
+    read per-call to support future session-resume converse.
+    """
+    # Strip the LiteLLM provider prefix ("anthropic/claude-opus-4-8" →
+    # "claude-opus-4-8") — the claude CLI --model flag wants the bare name.
+    bare_model = litellm_model.split("/", 1)[-1]
+
+    from modulatio import oauth_helpers as _oh
+
+    def run(
+        *, messages: list[dict], tools: list[dict],
+        tool_choice: "dict | str | None" = None,
+    ) -> ChatResponse:
+        claude_bin = _oh.find_claude_binary()
+        if claude_bin is None:
+            raise RuntimeError(
+                "Clay seat: the `claude` CLI is not installed / not on PATH "
+                "(set MODULATIO_CLAUDE_BIN). Run `claude` to sign in."
+            )
+        system = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
+        user = "\n\n".join(m["content"] for m in messages if m.get("role") == "user")
+        ws, add_dirs = claude_cli.current_seat_context()
+        text = claude_cli.run_claude(
+            claude_bin=claude_bin, model=bare_model, prompt=user,
+            system=system or None, workspace=ws, add_dirs=add_dirs,
+        )
+        return ChatResponse(content=text, tool_calls=())
+
+    return run
+
+
 def litellm_chat_runner(
     model: str,
     *,
@@ -1503,6 +1542,10 @@ def litellm_chat_runner(
     # path is interactive-only).
     provider_id_for_alerts = model if model in presets else None
     endpoint = (presets.get(model, {}) or {}).get("endpoint", "chat")
+    if endpoint == "claude_cli":
+        # Clay: the claude CLI runs its own tool-loop; Modulatio hands off the
+        # full task and receives the final artifact text back as ChatResponse.
+        return _build_claude_cli_chat_runner(litellm_model, model)
     if endpoint == "codex":
         # GPT-5.5 via the OpenAI Codex subscription (ChatGPT backend, Responses
         # API with tool-calling). The headers (chatgpt-account-id + originator)
