@@ -4,10 +4,26 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.5] — 2026-06-19
+
+**Subscription seats** — bring your own Claude and GPT-5.5 subscriptions to the
+team, plus per-seat resilience.
 
 ### Added
 
+- **Clay — a Claude avatar seat.** Run any seat through your **Claude Code**
+  subscription. Clay is a model seat backed by `claude -p` (the Claude Code CLI)
+  running headless: assign it as your Leader, QC, or any producer and it works
+  the task with Claude's own hands — read, edit, run — then hands back the result.
+  It reaches Claude through the **official Claude Code harness** (your logged-in
+  subscription), never a metered API key and never `api.anthropic.com`, so it
+  spends your subscription, not per-token billing. Clay is treated like any other
+  agent in the role it's given: confined to its own folder (a working sandbox is
+  required), with the same operator **widen** prompt as the rest of the team when
+  a task needs a real project path. Set it up in **Config → Models**: add the
+  **"Clay — Claude avatar"** provider, install Claude Code and run `claude` to
+  sign in, then pick a model. Purely additive — your existing Anthropic API-key
+  path is untouched.
 - **GPT-5.5 via the OpenAI Codex subscription.** A model on your Codex (ChatGPT)
   OAuth subscription now works as any seat — Leader, QC, or producer, including
   tool use. Modulatio reaches it through the ChatGPT backend's Responses API
@@ -28,6 +44,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   direct-subscription models (Grok via xAI, GPT-5.5 via Codex OAuth) can never be
   given an OpenRouter fallback, enforced in the engine. Request-level errors (a
   bad request) are never masked by fallback.
+- **Quiet hours for seat alerts.** Config → Agents gains a **Quiet hours** window:
+  during the hours you set, a seat's model-fallback notices (and the optional
+  Telegram auth pings) are held back and rolled into a single digest at the end of
+  the window — so an overnight run that hits a transient `429` doesn't buzz you at
+  3am. Off by default; per-project.
+
+### Fixed
+
+- **The boot splash holds long enough to read.** The Feng-Tui boot frame could be
+  skipped in a blink — the Enter that launches `modulatio` leaked into the new
+  screen and dismissed it before the tagline registered. The frame now holds for a
+  readable beat (up to 10 seconds, or any key) with a short opening guard so a
+  stray launch keystroke can't skip it.
+- **Widened-exec sandbox hardening (security).** When the solo Leader is granted
+  exec in a real project folder, a command that *named* a file in that folder
+  (rather than `cd`-ing into it) could, under the global dev/test sandbox bypass,
+  run **unsandboxed** with the parent environment. Widening is now derived from
+  the whole command, and the global bypass never applies to a widened run — it is
+  sandboxed when a sandbox is available and refused when one is not.
 
 ## [0.9.4.2] — 2026-06-18
 
