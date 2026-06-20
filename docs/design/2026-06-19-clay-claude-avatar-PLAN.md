@@ -21,6 +21,26 @@ Code), `modulatio.sandbox` (bwrap), litellm runner factories.
 **Design spec:** `docs/design/2026-06-19-clay-claude-avatar.md`. **Sibling reference:** the Codex seat
 (`codex_responses.py`, the `codex` runner branches, `OPENAI_CODEX` provider) — Clay mirrors its shape.
 
+---
+
+## Execution directives (EVERY subagent reads this before its task) — operator-set
+
+1. **Use the runbook.** Before touching the task: name the operation (a build task is CONSTRUCT — read
+   the existing pattern first, build in dependency order, **verify by RUNNING, not "it compiles"**; if
+   a test reveals a bug it's DEBUG — reproduce, root-cause, confirm *this* symptom is gone on a fresh
+   run). Reflex deck: `/mnt/storage/Fable-5-traces/cowboy-reflexes/cowboy-reflex-deck.md`.
+2. **Don't overcode (YAGNI).** Implement exactly the task's scope — minimal code, no speculative
+   features, no abstractions beyond what the task needs. **Reuse** the existing seams (the Codex
+   sibling, `sandbox.build_sandboxed_argv`, `leader_gate`, the contextvar pattern) rather than inventing
+   new ones. If a task tempts you to add "just in case" surface, don't.
+3. **Python best practices.** Match the surrounding code's idiom: ruff-clean, type hints + docstrings in
+   the house style, focused functions, no bare `except` beyond the tolerant-parse pattern the plan
+   already shows. Run `ruff check` + the task's tests **before** committing.
+4. **TDD + verify observed reality.** Follow red→green→commit per task; never skip the failing-test
+   step. A passing unit test proves the part, not the wiring — where a task crosses a real call path
+   (the runner branches, the orchestrator seat-context), drive it end-to-end. One task at a time, commit
+   after each (sequential — no parallel git in this tree).
+
 **Scope note:** This is **Plan A — foundation**: Clay works as an autonomous seat (task in → artifact
 out) in every role, including the Leader's single-shot reasoning calls and session-resume converse.
 **Plan B (separate)** is the from-scratch MCP server that lets Clay-as-Leader *call Modulatio's own
