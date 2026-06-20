@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
+from modulatio import claude_cli  # noqa: E402 — Clay runner branch (runners.claude_cli monkeypatching)
 
 _log = logging.getLogger("modulatio.runners")
 
@@ -629,6 +630,29 @@ def litellm_runner(
             if pool_base is not None:
                 retry["api_key"] = _pooled_call_key(pool_base, model)
             return retry
+
+        # ── Clay (claude CLI subscription) path ──────────────────────
+        if endpoint == "claude_cli":
+            from modulatio import oauth_helpers as _oh
+            claude_bin = _oh.find_claude_binary()
+            if claude_bin is None:
+                raise RuntimeError(
+                    "Clay seat: the `claude` CLI is not installed / not on PATH "
+                    "(set MODULATIO_CLAUDE_BIN). Run `claude` to sign in."
+                )
+            # NOTE (metering): Clay is a flat-rate subscription seat and the CLI
+            # result carries no litellm usage object — this branch does NOT call
+            # _record_call_usage. Clay seats are intentionally OUTSIDE the
+            # per-token budget meter (same documented stance as the Codex seat).
+            # Strip the LiteLLM provider prefix (e.g. "anthropic/claude-opus-4-8"
+            # → "claude-opus-4-8") — the claude CLI --model flag wants the bare
+            # model name, not the LiteLLM composite id.
+            bare_model = litellm_model.split("/", 1)[-1]
+            ws, add_dirs = claude_cli.current_seat_context()
+            return claude_cli.run_claude(
+                claude_bin=claude_bin, model=bare_model, prompt=body,
+                workspace=ws, add_dirs=add_dirs,
+            )
 
         # ── Codex (ChatGPT-subscription) Responses path ──────────────
         if endpoint == "codex":
