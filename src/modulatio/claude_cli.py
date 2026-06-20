@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -105,9 +106,53 @@ def seat_context(workspace: Path, granted_roots: tuple[str, ...]):
         seat_context_var.reset(token)
 
 
+def run_claude(
+    *,
+    claude_bin: str,
+    model: str,
+    prompt: str,
+    workspace: Path,
+    add_dirs: list[str],
+    system: str | None = None,
+    session_id: str | None = None,
+    resume: str | None = None,
+    timeout: float = 1800.0,
+) -> str:
+    """Spawn ``claude -p`` confined to ``workspace`` (+ granted ``add_dirs``),
+    sandbox-REQUIRED. ~/.claude is bound read-write so the binary can auth and
+    persist its session; ANTHROPIC_API_KEY is scrubbed so it spends the
+    logged-in subscription, not a metered key. Returns the assistant text."""
+    from modulatio import sandbox
+
+    if not sandbox.is_sandbox_available():
+        raise RuntimeError(
+            "Clay refused: a functional bwrap sandbox is required to run the "
+            "Claude Code seat confined to its folder. Install/repair bubblewrap."
+        )
+    argv = build_claude_argv(
+        claude_bin=claude_bin, model=model, prompt=prompt, system=system,
+        add_dirs=add_dirs, session_id=session_id, resume=resume,
+    )
+    claude_home = Path.home() / ".claude"
+    wrapped, env = sandbox.build_sandboxed_argv(
+        argv, workspace,
+        allow_network=True,
+        extra_rw_roots=tuple([claude_home] + [Path(d) for d in add_dirs]),
+    )
+    child_env = claude_env(env)  # scrub ANTHROPIC_API_KEY from the CURATED env
+    child_env.setdefault("HOME", str(Path.home()))
+    child_env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    proc = subprocess.run(
+        wrapped, env=child_env, cwd=str(workspace),
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return text_from_claude_json(proc.stdout)
+
+
 __all__ = [
     "build_claude_argv",
     "claude_env",
+    "run_claude",
     "text_from_claude_json",
     "seat_context_var",
     "current_seat_context",
