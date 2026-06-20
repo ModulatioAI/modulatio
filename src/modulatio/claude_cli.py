@@ -129,19 +129,28 @@ def run_claude(
             "Clay refused: a functional bwrap sandbox is required to run the "
             "Claude Code seat confined to its folder. Install/repair bubblewrap."
         )
+    resolved = Path(claude_bin).resolve()  # follow symlinks → real ELF path
     argv = build_claude_argv(
-        claude_bin=claude_bin, model=model, prompt=prompt, system=system,
+        claude_bin=str(resolved), model=model, prompt=prompt, system=system,
         add_dirs=add_dirs, session_id=session_id, resume=resume,
     )
     claude_home = Path.home() / ".claude"
-    # The claude binary may live under /home (e.g. ~/.local/bin/claude →
-    # ~/.local/share/claude/versions/<N>), which the sandbox masks with
-    # --tmpfs /home.  Bind both the symlink's directory and the resolved ELF
-    # back in read-only so bwrap can find the symlink AND exec the binary.
-    claude_bin_path = Path(claude_bin)
-    extra_ro: list[Path] = [claude_bin_path.resolve()]  # resolved ELF
-    if claude_bin_path.parent.is_relative_to(Path.home()):
-        extra_ro.append(claude_bin_path.parent)  # dir containing the symlink
+    # The claude binary may live under $HOME (e.g. ~/.local/share/claude/versions/<N>),
+    # which the sandbox masks with --tmpfs /home.  We exec the RESOLVED ELF directly
+    # (no symlink path needed inside the sandbox) and bind only what's required.
+    # SECURITY: NEVER bind $HOME itself or any ancestor — that re-exposes the whole
+    # home tree (dotfile secrets) after the /home mask (Wild Bill BLOCK).
+    home = Path.home()
+    extra_ro: list[Path] = []
+    if resolved.is_relative_to(home):
+        bin_dir = resolved.parent
+        if bin_dir == home or bin_dir in home.parents:
+            # Binary sits directly in $HOME or above (degenerate case) — bind
+            # ONLY the single file to avoid re-exposing the home tree.
+            extra_ro.append(resolved)
+        else:
+            # A narrow tool dir, e.g. ~/.local/share/claude/versions/X — safe to bind.
+            extra_ro.append(bin_dir)
     wrapped, env = sandbox.build_sandboxed_argv(
         argv, workspace,
         allow_network=True,
