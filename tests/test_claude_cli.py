@@ -90,3 +90,19 @@ def test_clay_provider_registered_and_reads_as_avatar():
     m = CatalogModel(id="claude-opus-4-8", name="Claude Opus 4.8", provider_id="claude_cli")
     kw = provider_catalog.preset_kwargs(p, m, p.auth_options[0])
     assert kw["endpoint"] == "claude_cli"
+
+
+def test_doctor_clay_check_present_when_binary_found(monkeypatch, capsys):
+    from modulatio import cli, oauth_helpers
+    monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: "/x/claude")
+    cli._clay_doctor_check()
+    out = capsys.readouterr().out.lower()
+    assert "claude" in out
+
+
+def test_doctor_clay_check_warns_when_missing(monkeypatch, capsys):
+    from modulatio import cli, oauth_helpers
+    monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: None)
+    cli._clay_doctor_check()
+    out = capsys.readouterr().out.lower()
+    assert "claude" in out and ("not" in out or "install" in out)

@@ -906,6 +906,19 @@ def _doctor_offer_logs(report: str) -> None:
         typer.echo(result.url)
 
 
+def _clay_doctor_check() -> None:
+    """Clay (Claude avatar) availability — presence + login, reads NO secret."""
+    from modulatio import oauth_helpers
+    claude_bin = oauth_helpers.find_claude_binary()
+    if claude_bin:
+        typer.echo(f"  Clay (Claude Code): found `claude` at {claude_bin}")
+    else:
+        typer.echo(
+            "  Clay (Claude Code): `claude` NOT found — install Claude Code and "
+            "run `claude` to sign in (or set MODULATIO_CLAUDE_BIN)."
+        )
+
+
 def _run_doctor_checks() -> None:
     import time
     from modulatio import auth_alerts, oauth_helpers
@@ -977,6 +990,7 @@ def _run_doctor_checks() -> None:
         typer.echo("  OpenAI Codex: credentials present")
     else:
         typer.echo("  OpenAI Codex: no credentials file (~/.codex/auth.json)")
+    _clay_doctor_check()
 
     # Surface the OAuth attribution caveat when any OAuth-backed model is configured.
     has_oauth_model = any(
