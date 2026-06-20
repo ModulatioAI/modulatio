@@ -54,10 +54,18 @@ async def test_splash_dismisses_on_key():
         app.query_one(TabbedContent)
 
 
-async def test_splash_swallows_early_keystroke():
+async def test_splash_swallows_early_keystroke(monkeypatch):
     # The bug: the Enter that launched `modulatio` can leak into the alt-screen
     # and skip the boot frame at t≈0, so the tagline never registers. A key
     # within the opening dwell must be swallowed, leaving the frame on screen.
+    #
+    # Determinism under load: pin the opening dwell effectively unbounded so the
+    # swallow window covers the whole test regardless of how long mount→press
+    # takes on a busy box. With the real 0.75s window, a loaded full-suite run
+    # can exceed it before the press lands — the dwell timer would then fire and
+    # the key would dismiss, flaking the test (the production guard is unaffected).
+    from modulatio.tui.screens import splash as _splash
+    monkeypatch.setattr(_splash, "_MIN_DWELL_SECONDS", 10_000.0)
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True, splash=True)
     async with app.run_test() as pilot:
         await pilot.pause()
