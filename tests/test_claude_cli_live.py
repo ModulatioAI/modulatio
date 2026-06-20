@@ -19,7 +19,8 @@ def test_live_clay_roundtrip(tmp_path):
     if not sandbox.is_sandbox_available():
         pytest.skip("bwrap not available; Clay is sandbox-required")
     claude_bin = oauth_helpers.find_claude_binary()
-    assert claude_bin, "claude not found"
+    if not claude_bin:
+        pytest.skip("`claude` CLI not installed; live Clay round-trip skipped")
     out = claude_cli.run_claude(
         claude_bin=claude_bin, model="claude-haiku-4-5",
         prompt="Reply with exactly: CLAY_OK", workspace=tmp_path, add_dirs=[],

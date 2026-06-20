@@ -50,9 +50,12 @@ def test_seat_context_confines_clay_single_shot(monkeypatch, tmp_path):
 def test_seat_context_confines_clay_chat(monkeypatch, tmp_path):
     """The chat seat runner (``_build_claude_cli_chat_runner``) threads the
     same seat context into ``run_claude``."""
-    from modulatio import claude_cli, runners
+    from modulatio import claude_cli, oauth_helpers, runners
 
     seen: dict = {}
+    # Mock the binary lookup so the test never depends on `claude` being
+    # installed (it isn't on CI) — the single-shot sibling does the same.
+    monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: "/x/claude")
     monkeypatch.setattr(
         runners.claude_cli, "run_claude", lambda **kw: seen.update(kw) or "ok"
     )
