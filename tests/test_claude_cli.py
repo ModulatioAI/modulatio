@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 import json
-from modulatio import claude_cli, oauth_helpers
+from modulatio import auth_strategies, claude_cli, oauth_helpers
 
 
 def test_build_claude_argv_single_shot():
@@ -59,3 +59,22 @@ def test_find_claude_binary_missing(monkeypatch):
     monkeypatch.delenv("MODULATIO_CLAUDE_BIN", raising=False)
     monkeypatch.setattr(oauth_helpers.shutil, "which", lambda n: None)
     assert oauth_helpers.find_claude_binary() is None
+
+
+def test_claude_cli_strategy_reads_no_secret():
+    strat = auth_strategies.build_strategy("claude_cli", {})
+    assert strat.load_token() is None
+    assert strat.attribution_kwargs() == {}
+
+
+def test_claude_cli_registered():
+    assert "claude_cli" in auth_strategies.registered_auth_types()
+
+
+def test_claude_cli_strategy_is_available(monkeypatch):
+    from modulatio import oauth_helpers
+    strat = auth_strategies.build_strategy("claude_cli", {})
+    monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: "/x/claude")
+    assert strat.is_available() is True
+    monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: None)
+    assert strat.is_available() is False

@@ -316,6 +316,38 @@ class OAuthXaiStrategy:
         )
 
 
+class ClaudeCliStrategy:
+    """Auth for the Clay seat. NOT a token-loader: the ``claude`` binary owns
+    its own subscription auth, so Modulatio reads, stores, and sends NOTHING.
+    A marker strategy that keeps the runner's auth chokepoint uniform."""
+
+    name = "claude_cli"
+
+    def __init__(self, config: dict | None = None) -> None:
+        del config  # unused — the claude binary owns its own auth
+
+    def load_token(self) -> str | None:
+        return None
+
+    def refresh_if_possible(self) -> str | None:
+        return None
+
+    def attribution_kwargs(self) -> dict[str, Any]:
+        return {}
+
+    def is_available(self, extra_env: dict[str, str] | None = None) -> bool:
+        del extra_env
+        from modulatio import oauth_helpers
+        return oauth_helpers.find_claude_binary() is not None
+
+    def fix_hint(self) -> str:
+        return (
+            "The ``claude`` binary was not found. Install Claude Code "
+            "(https://claude.ai/code) and ensure it is on PATH, or set "
+            "``MODULATIO_CLAUDE_BIN`` to its absolute path."
+        )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────
 
 
@@ -325,6 +357,7 @@ _STRATEGY_FACTORIES: dict[str, Callable[[dict | None], AuthStrategy]] = {
     "oauth_anthropic": OAuthAnthropicStrategy,
     "oauth_openai": OAuthOpenAIStrategy,
     "oauth_xai": OAuthXaiStrategy,
+    "claude_cli": ClaudeCliStrategy,
 }
 
 
@@ -373,6 +406,7 @@ def registered_auth_types() -> tuple[str, ...]:
 __all__ = [
     "ApiKeyStrategy",
     "AuthStrategy",
+    "ClaudeCliStrategy",
     "NoneStrategy",
     "OAuthAnthropicStrategy",
     "OAuthOpenAIStrategy",
