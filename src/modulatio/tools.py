@@ -1217,15 +1217,50 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
         # into a real project folder). The workspace path keeps its bypass/soft-
         # fallback below (the Leader's own confined home, lower risk).
         _art_resolved = artifacts_root.resolve()
-        _wd_widened = not (wd == _art_resolved or _art_resolved in wd.parents)
-        if _wd_widened and not _sandbox.is_sandbox_available():
+
+        def _under(p: Path, root: Path) -> bool:
+            return p == root or root in p.parents
+
+        _wd_widened = not _under(wd, _art_resolved)
+        # exec-widen HIGH-3, code-review r1 BLOCK (Wild Bill): widening also
+        # enters via a path-bearing ARGV token — e.g. `python3 /granted/script.py`
+        # with a WORKSPACE cwd. The cwd-only check above misses that, so the
+        # global bypass below would run it UNSANDBOXED with the parent env,
+        # leaking provider keys into a command operating on a real project
+        # folder. Treat the run as widened if ANY accepted argv token resolves
+        # under a granted extra_root rather than the artifacts root — then the
+        # same fail-closed guard applies. (argv already passed the profile
+        # allowlist + _is_safe_file_arg, so a token under an extra_root is an
+        # accepted widened path, not an escape attempt.)
+        _extra_resolved = [Path(r).resolve() for r in extra_roots]
+        _argv_widened = False
+        for _tok in argv:
+            if not _tok or _tok.startswith("-"):
+                continue
+            try:
+                _tp = (Path(_tok) if Path(_tok).is_absolute() else wd / _tok).resolve()
+            except (ValueError, OSError):
+                continue
+            if any(_under(_tp, er) for er in _extra_resolved) and not _under(
+                _tp, _art_resolved
+            ):
+                _argv_widened = True
+                break
+        _widened = _wd_widened or _argv_widened
+        if _widened and not _sandbox.is_sandbox_available():
             raise RuntimeError(
                 "widened exec refused: bwrap sandbox unavailable. Running "
                 "commands in an operator-granted folder requires a functional "
                 "sandbox (no bypass). Install/repair bubblewrap."
             )
-        if _sandbox.is_bypass_requested() or _profile == "off":
-            pass  # explicit opt-out (UNSAFE env or profile=off), run as-is
+        if (_sandbox.is_bypass_requested() or _profile == "off") and not _widened:
+            # Explicit opt-out (UNSAFE env or profile=off), run as-is — but ONLY
+            # for a WORKSPACE run. The global dev/test bypass must NEVER apply to
+            # a widened run (Wild Bill HIGH-3): a widened run reaching here has a
+            # functional sandbox (the raise above caught the no-sandbox case), so
+            # it falls through to the sandboxed branch and is confined, not run
+            # unsandboxed with the parent env.
+            pass
         elif _sandbox.is_sandbox_available():
             run_argv, run_env = _sandbox.build_sandboxed_argv(
                 _payload_argv, artifacts_root, profile=_profile,

@@ -671,6 +671,56 @@ def test_widened_exec_refused_without_functional_sandbox(tmp_path, monkeypatch):
     assert isinstance(out, str)  # ran (soft path preserved for the workspace)
 
 
+def test_widened_exec_via_argv_path_not_bypassable(tmp_path, monkeypatch):
+    """exec-widen HIGH-3, code-review r1 BLOCK (Wild Bill): widening can enter via
+    a path-bearing ARGV token (`python3 /granted/script.py`) with a WORKSPACE cwd.
+    The cwd-only check missed it, so the global bypass ran it UNSANDBOXED with the
+    parent env (provider-key leak). A widened-argv run must REFUSE when no sandbox,
+    and be SANDBOXED — never bypassed — when one is available."""
+    from modulatio import sandbox
+    art = _make_artifacts(tmp_path)
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    script = granted / "leak.py"
+    script.write_text("print(1)\n")
+    rs = tools.make_run_shell(art, extra_roots=(granted,))
+
+    # widened ARGV + workspace cwd + bypass + NO functional sandbox → REFUSE
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    with pytest.raises(RuntimeError, match="widened exec refused"):
+        rs(cmd=f"python3 {script}", profile="full", cwd="")
+    # ...and the same under profile=off
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "off")
+    with pytest.raises(RuntimeError, match="widened exec refused"):
+        rs(cmd=f"python3 {script}", profile="full", cwd="")
+
+    # widened ARGV + sandbox AVAILABLE + bypass → must take the SANDBOXED branch,
+    # NOT the bypass pass-through. A sentinel in build_sandboxed_argv proves the
+    # widened run reached the sandbox builder rather than running unsandboxed.
+    class _ReachedSandbox(Exception):
+        pass
+
+    def _sentinel(*a, **k):
+        raise _ReachedSandbox
+
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "off")
+    monkeypatch.setattr(sandbox, "build_sandboxed_argv", _sentinel)
+    with pytest.raises(_ReachedSandbox):
+        rs(cmd=f"python3 {script}", profile="full", cwd="")
+
+    # control: a WORKSPACE-only run with bypass + no sandbox is unchanged (the
+    # bypass still applies to the Leader's own confined home — not over-refused).
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "default")
+    out = rs(cmd="python3 --version", profile="passive", cwd="")
+    assert isinstance(out, str)  # ran via the workspace soft path, no raise
+
+
 def test_run_shell_cwd_must_exist(tmp_path):
     """Non-existent cwd raises early — clearer error than letting
     subprocess fail with a confusing FileNotFoundError downstream."""
