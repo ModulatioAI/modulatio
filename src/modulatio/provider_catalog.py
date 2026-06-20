@@ -38,7 +38,7 @@ class AuthOption(BaseModel):
     (e.g. OpenAI/Anthropic carry *both* their OAuth method and a plain key)."""
 
     auth_type: Literal[
-        "api_key", "oauth_anthropic", "oauth_openai", "oauth_xai", "none"
+        "api_key", "oauth_anthropic", "oauth_openai", "oauth_xai", "claude_cli", "none"
     ]
     label: str  # "API key", "Sign in with Claude (OAuth)", "No auth (local)"
     env_var: Optional[str] = None  # for api_key: the env var the key lands in
@@ -276,6 +276,31 @@ OPENAI_CODEX = Provider(
           "Separate from the metered OpenAI API.",
 )
 
+CLAUDE_CLI = Provider(
+    id="claude_cli",
+    name="Clay — Claude avatar (Claude Code subscription)",
+    # Reached by spawning the official `claude -p` binary through the harness —
+    # NOT the metered api.anthropic.com and NOT the OAuth token. Additive: the
+    # `anthropic` API-key provider stays intact.
+    base_url="claude-cli",
+    api_format="anthropic",
+    request_endpoint="claude_cli",
+    auth_options=[
+        AuthOption(
+            auth_type="claude_cli",
+            label="Claude Code subscription (run `claude` to sign in)",
+            oauth_hint="install Claude Code, then run `claude`",
+        ),
+    ],
+    models_source=ModelsSource(
+        kind="picklist", picklist_key="claude_cli", modality="text"
+    ),
+    signup_url="https://claude.com/product/claude-code",
+    free_detect="none",
+    notes="Clay is a Claude model running through your Claude Code subscription "
+          "(claude -p). Separate from the metered Anthropic API.",
+)
+
 NVIDIA = Provider(
     id="nvidia",
     name="NVIDIA",
@@ -376,6 +401,7 @@ PROVIDERS: dict[str, Provider] = {
     ANTHROPIC.id: ANTHROPIC,
     OPENAI.id: OPENAI,
     OPENAI_CODEX.id: OPENAI_CODEX,
+    CLAUDE_CLI.id: CLAUDE_CLI,
     NVIDIA.id: NVIDIA,
     GOOGLE.id: GOOGLE,
     OLLAMA_LOCAL.id: OLLAMA_LOCAL,
@@ -757,6 +783,8 @@ __all__ = [
     "XAI",
     "ANTHROPIC",
     "OPENAI",
+    "OPENAI_CODEX",
+    "CLAUDE_CLI",
     "NVIDIA",
     "GOOGLE",
     "OLLAMA_LOCAL",
