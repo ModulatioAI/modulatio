@@ -140,7 +140,7 @@ def run_claude(
     # back in read-only so bwrap can find the symlink AND exec the binary.
     claude_bin_path = Path(claude_bin)
     extra_ro: list[Path] = [claude_bin_path.resolve()]  # resolved ELF
-    if str(claude_bin_path.parent).startswith(str(Path.home())):
+    if claude_bin_path.parent.is_relative_to(Path.home()):
         extra_ro.append(claude_bin_path.parent)  # dir containing the symlink
     wrapped, env = sandbox.build_sandboxed_argv(
         argv, workspace,

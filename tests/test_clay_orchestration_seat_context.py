@@ -103,6 +103,48 @@ def test_orchestrator_enters_seat_context_on_run(tmp_path, monkeypatch):
     assert captured["ws"] == orch._leader_workspace()
 
 
+def test_orchestrator_enters_seat_context_on_run_agent_call(tmp_path, monkeypatch):
+    """The orchestrator's per-agent direct path (``_run_agent_call``) ENTERS
+    ``seat_context`` when an agent with a known model is in ``agent_runners`` —
+    the spy runner sees the contextvar at call time (mirrors the ``_run`` test)."""
+    from modulatio import claude_cli, roster, vault
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    code = "AGCALL"
+    vault.init_project(code, "agent call ctx", "obj")
+    project = Project(
+        code=code, name="agent call ctx", objective="obj", leader_model="stub",
+        wiki_path=str(tmp_path / code.lower()),
+    )
+
+    # Monkeypatch roster.load so the per-agent branch fires without disk I/O.
+    fake_agent = roster.Agent(
+        id="spy-agent", name="Spy", model="spy/model", tier="producer",
+    )
+    monkeypatch.setattr(roster, "load", lambda agent_id, project_code: fake_agent)
+
+    captured: dict = {}
+
+    def _spy_runner(prompt: str) -> str:
+        ws, grants = claude_cli.current_seat_context()
+        captured["ws"] = ws
+        captured["grants"] = grants
+        return "ok"
+
+    orch = Orchestrator(
+        project,
+        {"leader": lambda p: "ok"},
+        agent_runners={"spy/model": _spy_runner},
+    )
+    out = orch._run_agent_call("spy-agent", "leader", "hello")
+
+    assert out == "ok"
+    # The orchestrator set the contextvar to the Leader's confined workspace.
+    assert captured["ws"] == orch._leader_workspace()
+
+
 def test_seat_context_default_is_temp_fallback():
     """With no orchestrator-set context, a Clay seat resolves to a fresh temp
     workspace (never unconfined-by-accident) — proving the orchestrator MUST set

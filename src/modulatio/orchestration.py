@@ -4863,6 +4863,8 @@ class Orchestrator:
             # seat with no fallbacks yields a 1-entry chain → identical behavior.
             chain = self._seat_fallback_chain(agent_id, primary_model, active_chat_runner)
             # Clay: confine a claude-CLI chat-loop seat to its workspace + grants.
+            # Note: the contextvar propagates synchronously through run_with_model_fallbacks;
+            # revisit if that call chain ever becomes async or thread-pooled.
             with self._seat_context():
                 return _runners.run_with_model_fallbacks(
                     chain, _run_one,
@@ -7368,7 +7370,12 @@ class Orchestrator:
         ``claude_cli.current_seat_context()`` to run ``claude -p`` confined to the
         seat's real folder + granted roots; a non-Clay runner ignores it entirely
         (purely additive). ``workspace`` defaults to the Leader's own per-project
-        workspace — the confined default for every seat path."""
+        workspace — the confined default for every seat path.
+
+        ``workspace`` is a future per-producer isolation hook: today every call
+        uses the Leader's workspace default, but the parameter exists so a caller
+        can confine a specific seat to its own sub-folder once per-seat isolation
+        is needed (e.g. parallel producers that must not share a write root)."""
         from modulatio import claude_cli as _clay
         ws = workspace if workspace is not None else self._leader_workspace()
         grants = tuple(str(r) for r in self.leader_gate().granted_roots())
