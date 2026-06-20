@@ -134,10 +134,19 @@ def run_claude(
         add_dirs=add_dirs, session_id=session_id, resume=resume,
     )
     claude_home = Path.home() / ".claude"
+    # The claude binary may live under /home (e.g. ~/.local/bin/claude →
+    # ~/.local/share/claude/versions/<N>), which the sandbox masks with
+    # --tmpfs /home.  Bind both the symlink's directory and the resolved ELF
+    # back in read-only so bwrap can find the symlink AND exec the binary.
+    claude_bin_path = Path(claude_bin)
+    extra_ro: list[Path] = [claude_bin_path.resolve()]  # resolved ELF
+    if str(claude_bin_path.parent).startswith(str(Path.home())):
+        extra_ro.append(claude_bin_path.parent)  # dir containing the symlink
     wrapped, env = sandbox.build_sandboxed_argv(
         argv, workspace,
         allow_network=True,
         extra_rw_roots=tuple([claude_home] + [Path(d) for d in add_dirs]),
+        extra_binds=tuple(extra_ro),
     )
     child_env = claude_env(env)  # scrub ANTHROPIC_API_KEY from the CURATED env
     child_env.setdefault("HOME", str(Path.home()))
