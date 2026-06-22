@@ -1,6 +1,6 @@
 ---
 name: coding
-description: Production-grade code production for software-engineer agents. Slice incrementally, write tests, ground in source docs, write iteratively via write_artifact, smoke-test via run_shell (passive profile) before submitting. Distilled from agent-skills:incremental-implementation, source-driven-development, test-driven-development.
+description: Production-grade code production for software-engineer agents. Reuse before writing (grep for an existing seam, smallest correct change), slice incrementally, write tests, ground in source docs, write iteratively via write_artifact, smoke-test via run_shell (passive profile) before submitting. Distilled from agent-skills:incremental-implementation, source-driven-development, test-driven-development.
 executor: llm
 tool_loadout: run_shell, write_artifact
 capability_tags: code-production, python-coding, smoke-testing
@@ -15,6 +15,18 @@ You are producing a code artifact. Your job is to ship code that **runs**, not c
 - **Read the task and the standards file.** What artifact_kind is this? What does the project's standards say about file structure, naming, frontmatter, header comments?
 - **Check the stack.** Read `pyproject.toml`, `requirements.txt`, `package.json`, etc. What versions are pinned? Don't write code from memory if a framework version's API may have changed.
 - **Look for one similar artifact.** If the project already has 3 modules in this shape, the 4th should not introduce a new shape.
+
+## Reuse before you write
+
+The best code is the code you never wrote. Before adding any function, file, or dependency, climb this ladder and stop at the first rung that works:
+
+1. **Already there?** A language built-in, the stdlib, or an existing function in this project already does it — grep the codebase before writing a new helper.
+2. **A smaller change?** Edit the existing path instead of adding a parallel one. One line beats fifty; deleting beats adding.
+3. **Needed now?** Solve the task as stated — no unrequested flags, no "while I'm here," no hypothetical future (see "Don't bloat" below).
+4. **Earn the abstraction.** Don't wrap or generalize for a single caller; reuse the existing seam.
+5. **No new dependency** for what the stdlib or this project already does.
+
+If you do write it: the smallest thing that is correct AND reads like the code already in the project.
 
 ## Slice incrementally
 
