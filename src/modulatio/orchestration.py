@@ -7443,18 +7443,46 @@ class Orchestrator:
         agent_id: "str | None" = None,
     ) -> "Callable[[str, dict, str], None]":
         """Build the ``(name, args, result)`` tool-call sink for a SINGLE-SHOT
-        Clay seat, so its in-sandbox tool calls surface on the live activity feed
-        (Team TV) the same way the chat-loop path logs them — otherwise a confined
-        producer/QC seat's tool use is invisible (Wild Bill MED). A Clay seat
-        reads it via ``seat_activity_var``; a non-Clay runner ignores it. The
-        chat-loop path builds a richer sink (with a per-task transcript);
-        single-shot dispatches have no per-task transcript, so this emits the
-        live activity event only."""
+        Clay seat. It does BOTH halves of what the chat-loop sink does (Wild Bill
+        R2 MED): it appends a durable owner-only (0600) JSONL **audit** record —
+        task/role/agent/tool/args/result/timestamp — to the run's ``tool_calls/``
+        dir, AND independently emits the live **activity** event (Team TV). The
+        audit write does NOT depend on an activity subscriber: Team TV is
+        liveness, the transcript is the record. A Clay seat reads this via
+        ``seat_activity_var``; a non-Clay runner ignores it."""
+        import re
+
+        slug = re.sub(r"[^A-Za-z0-9._-]", "_", f"{task_id or role}_{agent_id or role}")
+        transcript_path: "Path | None" = self._scope_root() / "tool_calls" / f"seat_{slug}.jsonl"
+        try:
+            transcript_path.parent.mkdir(parents=True, exist_ok=True)
+            transcript_path.touch(mode=0o600, exist_ok=True)
+            transcript_path.chmod(0o600)  # tighten a legacy/umask-loosened file
+        except OSError:  # best-effort — a transcript failure must not abort the seat
+            transcript_path = None
+
         def _sink(name: str, args: dict, result: str) -> None:
+            # Live activity (no-op without a subscriber) …
             self._emit_activity(
                 role=role, phase="tool_call_ended",
                 task_id=task_id, agent_id=agent_id, detail={"tool": name},
             )
+            # … and the durable audit record (independent of any subscriber).
+            if transcript_path is None:
+                return
+            try:
+                with transcript_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "task_id": task_id,
+                        "role": role,
+                        "agent_id": agent_id,
+                        "tool": name,
+                        "args": args,
+                        "result": result,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }) + "\n")
+            except Exception:  # noqa: BLE001 — sidecar failure never aborts the seat
+                pass
         return _sink
 
     def _leader_tool_registry(self) -> "dict[str, tools.Tool]":

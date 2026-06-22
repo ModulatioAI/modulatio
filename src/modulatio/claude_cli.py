@@ -67,6 +67,22 @@ _DEFAULT_SYSTEM = (
 #: "yes in a kickoff, no in the harness").
 _DISALLOWED_TOOLS = ("Workflow", "Task", "Agent", "Bash", "BashOutput", "KillShell")
 
+#: POSITIVE allowlist for confined kickoff seats (Wild Bill R2 HIGH). A denylist
+#: of built-in names is not fail-closed: a confined ``claude -p`` still loads
+#: user/project MCP servers, hooks, and plugins — any of which can execute a
+#: process and re-launch the claude binary, bypassing the denylist. So confined
+#: seats run with ``--safe-mode`` (disables ALL customizations: CLAUDE.md, skills,
+#: plugins, hooks, MCP) AND this ``--allowedTools`` allowlist (default-deny: ONLY
+#: these run, so Bash, the spawners, any configured MCP tool, and any future
+#: built-in are denied by omission). The set is the non-process built-ins a
+#: producer/QC seat needs to make an artifact: read/write/edit, search, and web
+#: lookup (network is already permitted for the seat; none of these spawn a
+#: process). ``_DISALLOWED_TOOLS`` is still passed as an explicit belt to these
+#: suspenders. The harness lane sets NONE of this (full loadout).
+_ALLOWED_CONFINED_TOOLS = (
+    "Read", "Write", "Edit", "Grep", "Glob", "WebFetch", "WebSearch",
+)
+
 #: A tool-activity sink ``(name, args, result) -> None`` — same signature as the
 #: orchestrator's tool-loop logger, so Clay's (otherwise-invisible) in-sandbox
 #: tool calls flow into the SAME per-task tool_calls jsonl + Team TV as a
@@ -85,15 +101,28 @@ def build_claude_argv(
     session_id: str | None = None,
     resume: str | None = None,
     disallowed_tools: tuple[str, ...] = (),
+    allowed_tools: tuple[str, ...] = (),
+    safe_mode: bool = False,
 ) -> list[str]:
     """Build the ``claude -p`` argv. ``resume`` re-attaches a prior session for
-    multi-turn converse; ``session_id`` pins a new one. ``disallowed_tools``
-    strips named Claude Code tools (kickoff seats pass ``_DISALLOWED_TOOLS`` to
-    block sub-agent / workflow spawning; the harness lane passes nothing)."""
+    multi-turn converse; ``session_id`` pins a new one.
+
+    Confinement (kickoff seats; the harness lane passes none of these):
+    ``safe_mode`` adds ``--safe-mode`` to disable ALL customizations (CLAUDE.md,
+    skills, plugins, hooks, MCP servers — i.e. every loaded-customization path
+    that could execute a process). ``allowed_tools`` adds a POSITIVE
+    ``--allowedTools`` allowlist (default-deny: only these built-ins run).
+    ``disallowed_tools`` additionally bans named tools as an explicit belt."""
     argv = [claude_bin, "-p",
             "--model", model,
             "--append-system-prompt", system or _DEFAULT_SYSTEM,
             "--permission-mode", "bypassPermissions"]
+    if safe_mode:
+        argv.append("--safe-mode")
+    if allowed_tools:
+        # Variadic ``--allowedTools <tools...>``: a flag MUST follow so it can't
+        # swallow the trailing prompt — the next flag (or --output-format) does.
+        argv += ["--allowedTools", *allowed_tools]
     if disallowed_tools:
         # Variadic ``--disallowedTools <tools...>``: a flag MUST follow so it
         # can't swallow the trailing prompt — ``--output-format`` does.
@@ -246,6 +275,8 @@ def run_claude(
     session_id: str | None = None,
     resume: str | None = None,
     disallowed_tools: tuple[str, ...] = (),
+    allowed_tools: tuple[str, ...] = (),
+    safe_mode: bool = False,
     timeout: float = 1800.0,
 ) -> str:
     """Spawn ``claude -p`` confined to ``workspace`` (+ granted ``add_dirs``),
@@ -264,6 +295,7 @@ def run_claude(
         claude_bin=str(resolved), model=model, prompt=prompt, system=system,
         add_dirs=add_dirs, session_id=session_id, resume=resume,
         disallowed_tools=disallowed_tools,
+        allowed_tools=allowed_tools, safe_mode=safe_mode,
     )
     claude_home = Path.home() / ".claude"
     # The claude binary may live under $HOME (e.g. ~/.local/share/claude/versions/<N>),

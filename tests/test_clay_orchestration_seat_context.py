@@ -12,6 +12,9 @@ purely additive (the contract is only consumed on the ``claude_cli`` endpoint).
 
 from __future__ import annotations
 
+import json
+import stat
+
 import pytest
 
 
@@ -249,6 +252,60 @@ def test_single_shot_agent_call_threads_activity_sink(tmp_path, monkeypatch):
     assert out == "ok"
     assert any(getattr(e, "phase", None) == "tool_call_ended" for e in events)
     assert claude_cli.seat_activity_var.get() is None
+
+
+def test_single_shot_seat_writes_durable_transcript_without_subscriber(tmp_path, monkeypatch):
+    """Wild Bill R2 MED: the single-shot seat sink must write a durable owner-only
+    JSONL audit record (task/role/agent/tool/args/result/ts) — INDEPENDENT of any
+    activity subscriber. Team TV is liveness; the transcript is the audit, and it
+    must capture args + result, not just the tool name."""
+    from modulatio import claude_cli, vault
+    from modulatio.orchestration import Orchestrator
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    project = _project_for(tmp_path, "AUDITRUN")
+
+    def _spy_runner(prompt: str) -> str:
+        claude_cli.seat_activity_var.get()("Read", {"path": "x.md"}, "file body")
+        return "ok"
+
+    orch = Orchestrator(project, {"leader": _spy_runner})
+    # NO activity_callback installed — the durable write must still happen.
+    orch._run("leader", "hello", task_id="T9", agent_id="leader")
+
+    files = list((orch._scope_root() / "tool_calls").glob("seat_*.jsonl"))
+    assert files, "no durable seat transcript written"
+    rec = json.loads(files[0].read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["tool"] == "Read"
+    assert rec["args"] == {"path": "x.md"}
+    assert rec["result"] == "file body"
+    assert rec["task_id"] == "T9" and rec["role"] == "leader" and rec["agent_id"] == "leader"
+    assert "timestamp" in rec
+    assert stat.S_IMODE(files[0].stat().st_mode) == 0o600  # owner-only
+
+
+def test_single_shot_qc_fixer_seat_writes_durable_transcript(tmp_path, monkeypatch):
+    """Same durable-audit guarantee on the per-agent (producer / QC-fixer) path."""
+    from modulatio import claude_cli, roster, vault
+    from modulatio.orchestration import Orchestrator
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    project = _project_for(tmp_path, "AUDITQC")
+    fake_agent = roster.Agent(id="qc-agent", name="QC", model="qc/model", tier="qc")
+    monkeypatch.setattr(roster, "load", lambda agent_id, project_code: fake_agent)
+
+    def _spy_runner(prompt: str) -> str:
+        claude_cli.seat_activity_var.get()("Edit", {"path": "y.md"}, "patched")
+        return "ok"
+
+    orch = Orchestrator(project, {"leader": lambda p: "ok"},
+                        agent_runners={"qc/model": _spy_runner})
+    orch._run_agent_call("qc-agent", "qc", "hello", task_id="T10")
+
+    files = list((orch._scope_root() / "tool_calls").glob("seat_*.jsonl"))
+    assert files, "no durable QC-fixer seat transcript written"
+    rec = json.loads(files[0].read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["tool"] == "Edit" and rec["result"] == "patched" and rec["role"] == "qc"
 
 
 def test_single_shot_seat_sink_resets_on_exception(tmp_path, monkeypatch):

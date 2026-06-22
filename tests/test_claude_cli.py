@@ -59,6 +59,33 @@ def test_confined_seat_strips_shell_so_it_cannot_re_exec_claude():
     )
 
 
+def test_confined_argv_is_fail_closed_safe_mode_plus_allowlist():
+    """Wild Bill R2 HIGH: a denylist of built-in names is not 'no exec surface' —
+    a confined seat still loads MCP/hooks/plugins (which can exec) and mounts
+    writable ~/.claude. The confined argv must be fail-closed: ``--safe-mode``
+    (no customizations) + a POSITIVE ``--allowedTools`` allowlist of non-process
+    built-ins only, so Bash / the spawners / any configured MCP tool are denied
+    by omission."""
+    argv = claude_cli.build_claude_argv(
+        claude_bin="/usr/bin/claude", model="m", prompt="go",
+        allowed_tools=claude_cli._ALLOWED_CONFINED_TOOLS,
+        safe_mode=True,
+        disallowed_tools=claude_cli._DISALLOWED_TOOLS,
+    )
+    assert "--safe-mode" in argv
+    i = argv.index("--allowedTools")
+    allowed = set(argv[i + 1: i + 1 + len(claude_cli._ALLOWED_CONFINED_TOOLS)])
+    # the allowlist is exactly the non-process built-ins — no shell, no spawners
+    assert allowed == set(claude_cli._ALLOWED_CONFINED_TOOLS)
+    assert not (allowed & {"Bash", "BashOutput", "KillShell", "Task", "Agent", "Workflow"})
+    # variadic must be followed by a flag, never swallow the prompt
+    assert argv[i + 1 + len(claude_cli._ALLOWED_CONFINED_TOOLS)].startswith("-")
+    assert argv[-1] == "go"
+    # the harness lane (no confinement args) gets neither flag
+    plain = claude_cli.build_claude_argv(claude_bin="/usr/bin/claude", model="m", prompt="go")
+    assert "--safe-mode" not in plain and "--allowedTools" not in plain
+
+
 def test_claude_env_scrubs_anthropic_key():
     env = claude_cli.claude_env({"PATH": "/bin", "ANTHROPIC_API_KEY": "sk-leak", "HOME": "/h"})
     assert "ANTHROPIC_API_KEY" not in env

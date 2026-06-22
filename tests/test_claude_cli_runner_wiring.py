@@ -29,6 +29,11 @@ def test_clay_single_shot_runner_returns_text(monkeypatch):
     # KICKOFF seat (producer/QC/plan/reflect): the sub-agent/workflow tools are
     # stripped so Clay can't spawn a background crew and ship a deferral note.
     assert captured["disallowed_tools"] == runners.claude_cli._DISALLOWED_TOOLS
+    # Fail-closed confinement (Wild Bill R2 HIGH): a POSITIVE allowlist of
+    # non-process built-ins + safe-mode (no MCP/hooks/plugins) so a configured
+    # MCP command-tool or hook can't become a process-exec surface.
+    assert captured["allowed_tools"] == runners.claude_cli._ALLOWED_CONFINED_TOOLS
+    assert captured["safe_mode"] is True
 
 
 def test_clay_chat_runner_returns_chatresponse(monkeypatch):
@@ -43,6 +48,9 @@ def test_clay_chat_runner_returns_chatresponse(monkeypatch):
                             {"role": "user", "content": "build the thing"}], tools=[])
     assert resp.content == "ARTIFACT BODY"
     assert resp.tool_calls == ()
-    # HARNESS lane (interactive Leader converse / solo coding): NO tools stripped —
-    # orchestrating + delegating IS the job ("yes in a kickoff, no in the harness").
+    # HARNESS lane (interactive Leader converse / solo coding): NO confinement —
+    # orchestrating + delegating + running code IS the job ("yes in a kickoff, no
+    # in the harness"). No allowlist, no safe-mode, no disallow.
     assert captured.get("disallowed_tools", ()) == ()
+    assert captured.get("allowed_tools", ()) == ()
+    assert captured.get("safe_mode", False) is False
