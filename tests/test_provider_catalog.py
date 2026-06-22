@@ -134,16 +134,16 @@ def test_ollama_cloud_registered_with_public_listing():
 
 
 def test_free_sections_carry_a_truthful_limit_caveat():
-    # free is never presented as unlimited — both providers carry a caveat
+    # free is never presented as unlimited — OpenRouter's free section carries a caveat
     assert "limit" in pc.OPENROUTER.free_note.lower()
-    note = pc.OLLAMA_CLOUD.free_note.lower()
-    assert "limit" in note and "5-hour" in note and "7-day" in note
 
 
-def test_ollama_cloud_models_are_all_free_tier():
+def test_ollama_cloud_models_not_blanket_free():
     models = pc.parse_models(pc.OLLAMA_CLOUD, OLLAMA_PAYLOAD)
     assert {m.id for m in models} == {"deepseek-v4-pro", "gemma4:31b", "qwen3-next:80b"}
-    assert all(m.is_free for m in models)  # free tier (rate-limited)
+    # No per-model price signal in the feed + not every Cloud model is free, so
+    # none are blanket-tagged free (avoids over-claiming a paid model as free).
+    assert not any(m.is_free for m in models)
     # Ollama feeds bare ids with no friendly name → fall back to the id
     assert next(m for m in models if m.id == "gemma4:31b").name == "gemma4:31b"
 
@@ -332,21 +332,21 @@ NVIDIA_PAYLOAD = {"data": [
 ]}
 
 
-def test_nvidia_public_listing_free_tier_rate_limited():
+def test_nvidia_public_listing_not_blanket_free():
     p = pc.get_provider("nvidia")
     assert p is not None
     assert p.base_url == "https://integrate.api.nvidia.com/v1"
     assert p.auth_options[0].env_var == "NVIDIA_API_KEY"
     assert p.models_source.auth_required is False  # listing is public
-    assert p.free_detect == "all"
-    assert "40" in p.free_note  # the 40-RPM caveat is surfaced
+    # Remote billable API, no per-model free/paid signal → not blanket-tagged free.
+    assert p.free_detect == "none"
 
 
-def test_nvidia_models_flagged_free(monkeypatch):
+def test_nvidia_models_not_blanket_free(monkeypatch):
     monkeypatch.setattr(pc, "_http_get_json", lambda url, h, t: NVIDIA_PAYLOAD)
     models = pc.fetch_models(pc.NVIDIA)
     assert len(models) == 3
-    assert all(m.is_free for m in models)
+    assert not any(m.is_free for m in models)
     assert all(m.modality == "text" for m in models)
 
 
@@ -357,7 +357,7 @@ def test_google_gemini_openai_compat_key_gated_free_tier():
     assert p.api_format == "openai"  # Gemini's OpenAI-compat endpoint
     assert p.auth_options[0].env_var == "GEMINI_API_KEY"
     assert p.models_source.auth_required is True  # key needed to list
-    assert p.free_detect == "all"
+    assert p.free_detect == "none"  # no per-model free signal → not blanket-tagged free
     assert p.signup_url
 
 
@@ -370,7 +370,7 @@ def test_google_models_fetched_strips_models_prefix(monkeypatch):
     monkeypatch.setattr(pc, "_http_get_json", lambda u, h, t: payload)
     models = pc.fetch_models(pc.GOOGLE, api_key="x")
     assert {m.id for m in models} == {"gemini-3-flash", "gemini-3-pro"}
-    assert all(m.is_free for m in models)
+    assert not any(m.is_free for m in models)
     # gemini auto-infers caps from the family table
     from modulatio import model_capabilities as mc
     assert mc.infer("gemini-3-pro")[2]

@@ -154,14 +154,12 @@ OLLAMA_CLOUD = Provider(
     ],
     models_source=ModelsSource(kind="api", endpoint="/models", auth_required=False),
     signup_url="https://ollama.com/settings/keys",
-    # Cloud's /models has no pricing; every Cloud model runs on the free tier
-    # (rate-limited, not per-model priced), so all are free-to-use.
-    free_detect="all",
-    free_note=(
-        "Free tier — session + weekly limits metered by GPU-time (varies by "
-        "model size), reset on 5-hour and 7-day cycles."
-    ),
-    notes="Hosted Ollama models, OpenAI-compatible; free tier is rate-limited.",
+    # Cloud's /models carries no per-model pricing or free/paid signal, and not
+    # every Cloud model is free-tier — so we DON'T blanket-tag them free (that
+    # over-claimed paid models as free in the picker). Curate a known-free set
+    # here if the distinction ever needs surfacing.
+    free_detect="none",
+    notes="Hosted Ollama models, OpenAI-compatible; pricing varies by model.",
 )
 
 XAI = Provider(
@@ -373,10 +371,10 @@ NVIDIA = Provider(
         kind="api", endpoint="/models", auth_required=False, modality="text"
     ),
     signup_url="https://build.nvidia.com",
-    # NVIDIA's catalog tier is free across the board, but tightly throttled.
-    free_detect="all",
-    free_note="Free via the NVIDIA API catalog — rate-limited to 40 requests/min.",
-    notes="NVIDIA-hosted open models (OpenAI-compatible). Free catalog tier, 40 RPM.",
+    # Remote billable API with no per-model free/paid signal in /models — don't
+    # blanket-tag free (would over-claim a paid/production model). Curate if needed.
+    free_detect="none",
+    notes="NVIDIA-hosted open models (OpenAI-compatible). API-catalog access; pricing varies.",
 )
 
 GOOGLE = Provider(
@@ -397,14 +395,11 @@ GOOGLE = Provider(
     id_prefix_strip="models/",
     # One list mixes chat / image / video / tts / embedding — classify per id.
     infer_modality_by_id=True,
-    # AI Studio has a real free tier, but quotas vary by model and some models
-    # can require billing — the caveat carries the honesty the feed can't.
-    free_detect="all",
-    free_note=(
-        "Free tier — daily request/token quotas that vary by model (flash most "
-        "generous); some models may require billing."
-    ),
-    notes="Gemini via the OpenAI-compatible endpoint. Free AI Studio tier (quota-limited).",
+    # AI Studio has a free tier, but the feed carries no per-model free/paid
+    # signal and some models require billing — so don't blanket-tag free (it
+    # over-claimed paid models). Curate a known-free set if needed.
+    free_detect="none",
+    notes="Gemini via the OpenAI-compatible endpoint; pricing/quota varies by model.",
 )
 
 _LOCAL_FREE_NOTE = (
