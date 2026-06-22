@@ -527,6 +527,37 @@ def test_strip_preamble_leaves_text_without_frontmatter_alone():
     assert _strip_preamble(raw) == raw
 
 
+def test_strip_scaffolding_drops_leading_meta_commentary():
+    """Haiku-class producers narrate the ACT of producing ("Perfect! Let me
+    create the file.") instead of emitting the artifact (prose bends, engine
+    binds). Strip a leading run of that scaffolding; keep the real body."""
+    from modulatio.orchestration import _strip_scaffolding
+
+    raw = "Perfect! Let me create the file.\n\n# Real Title\n\nThe actual body."
+    assert _strip_scaffolding(raw) == "# Real Title\n\nThe actual body."
+
+
+def test_strip_scaffolding_all_scaffolding_becomes_empty():
+    """An output that is ALL scaffolding strips to empty → the QC build-when-
+    absent backstop then recovers the task (rather than shipping narration)."""
+    from modulatio.orchestration import _strip_scaffolding
+
+    raw = "Sure!\nLet me create the document for you.\nI'll write it now."
+    assert _strip_scaffolding(raw).strip() == ""
+
+
+def test_strip_scaffolding_leaves_real_content_alone():
+    """Conservative: a genuine artifact is untouched, including one that opens
+    with a content sentence that merely RESEMBLES narration ('Here are the
+    findings ... below') — only first-person produce-intent is stripped."""
+    from modulatio.orchestration import _strip_scaffolding
+
+    raw = "# The Research\n\nGPU prices as of 2026..."
+    assert _strip_scaffolding(raw) == raw
+    raw2 = "Here are the findings, grounded in sources below.\n\n- item"
+    assert _strip_scaffolding(raw2) == raw2
+
+
 def test_strip_preamble_leaves_well_formed_response_alone():
     raw = "---\ntitle: Clean\n---\n\nBody."
     assert _strip_preamble(raw) == raw
@@ -7587,11 +7618,11 @@ def test_next_producer_mode_mechanical_empty_notes_revises(tmp_path):
 # ── QC-as-fixer Slice 2: circuit-breaker redo-loop integration ───────────
 
 
-def test_dispatch_abort_settles_graceful_terminal_not_blocked(project: Project):
-    """A DispatchAbort on every attempt must NOT crash to BLOCKED via the
-    generic exception path — it settles a deliberate QC_REJECTED terminal
-    marked verifier_result='dispatch_aborted' (the Slice-2 floor before
-    QC-patch rescue lands in Slice 3)."""
+def test_dispatch_abort_recovers_via_qc_build_not_blocked(project: Project):
+    """A DispatchAbort (no-commit storm) on every attempt no longer dead-ends at a
+    graceful QC_REJECTED: the producer committed nothing patchable, so the QC
+    backstop BUILDS the artifact from the contract and the task COMPLETES (Clif
+    2026-06-22, build-when-absent — the job lands). It must NOT crash to BLOCKED."""
     from modulatio.dispatch_breaker import DispatchAbort
     from modulatio.orchestration import Orchestrator, RunSummary
     from modulatio.types import TaskStatus
@@ -7619,11 +7650,88 @@ def test_dispatch_abort_settles_graceful_terminal_not_blocked(project: Project):
     summary = RunSummary(project=project)
     orch._run_task_with_redo(task, summary)
 
-    assert task.status == TaskStatus.QC_REJECTED
+    assert task.status == TaskStatus.COMPLETED
     assert task.status != TaskStatus.BLOCKED
-    aborted = [t for t in task.transitions if t.verifier_result == "dispatch_aborted"]
-    assert len(aborted) == 1
-    assert any("circuit breaker" in (e or "").lower() for e in summary.errors)
+    assert task.qc_authored_fix is True
+
+
+def test_max_iters_exhaustion_recovers_via_qc_build_not_blocked(project, monkeypatch):
+    """#2b: a producer that exhausts the tool-loop (``max_iters``, raising
+    MaxItersExhausted) used to die BLOCKED with no backstop. Now the same QC
+    backstop catches it — QC builds the artifact from the contract and the task
+    COMPLETES (Clif: the job lands, whatever the failure shape)."""
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.runners import MaxItersExhausted
+    from modulatio.types import TaskStatus
+
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "1")
+    runners = {"leader": _leader_stub, "planner": _planner_stub, "drafter": _drafter_stub,
+               "qc": lambda p: "A COMPLETE, ON-CONTRACT ARTIFACT BODY authored by QC."}
+    orch = Orchestrator(project, runners)
+
+    def _always_max_iters(task, corrective_notes=""):
+        raise MaxItersExhausted(
+            "run_llm_with_tools: max_iters 16 exceeded without final content"
+        )
+
+    orch._producer_execute = _always_max_iters  # type: ignore[assignment]
+    task = _qcfix_task(project_id=project.id)
+    task.max_retries = 2
+    summary = RunSummary(project=project)
+    orch._run_task_with_redo(task, summary)
+
+    assert task.status == TaskStatus.COMPLETED
+    assert task.status != TaskStatus.BLOCKED
+    assert task.qc_authored_fix is True
+
+
+def test_terminal_failure_opens_operator_ticket(project, monkeypatch):
+    """#8: a task that terminates BLOCKED (a genuine crash the backstop can't
+    recover) opens an operator ticket — the failure surfaces in the Tickets tab,
+    not only the logs (Clif 2026-06-22: failures landed in logs but never ticketed)."""
+    from modulatio import store
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import TaskStatus
+
+    runners = {"leader": _leader_stub, "planner": _planner_stub, "drafter": _drafter_stub,
+               "qc": _qc_stub}
+    orch = Orchestrator(project, runners)
+
+    def _crash(task, corrective_notes=""):
+        raise RuntimeError("genuine bug, not recoverable")
+
+    orch._producer_execute = _crash  # type: ignore[assignment]
+    task = _qcfix_task(project_id=project.id)
+    task.max_retries = 1
+    summary = RunSummary(project=project)
+    orch._run_task_with_redo(task, summary)
+
+    assert task.status == TaskStatus.BLOCKED
+    tickets = store.list_tickets(project.code, run_id=project.run_id)
+    assert any(t.affected_task_id == task.id for t in tickets), "terminal failure must open a ticket"
+
+
+def test_non_exhaustion_exception_still_blocks(project, monkeypatch):
+    """#2b guard: a GENUINE runtime crash (not producer-exhaustion) still goes
+    BLOCKED — the backstop only catches recoverable exhaustion, never masks a bug."""
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import TaskStatus
+
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "1")
+    runners = {"leader": _leader_stub, "planner": _planner_stub, "drafter": _drafter_stub,
+               "qc": lambda p: "should not be called"}
+    orch = Orchestrator(project, runners)
+
+    def _crash(task, corrective_notes=""):
+        raise RuntimeError("genuine bug: 'NoneType' object has no attribute 'x'")
+
+    orch._producer_execute = _crash  # type: ignore[assignment]
+    task = _qcfix_task(project_id=project.id)
+    task.max_retries = 2
+    summary = RunSummary(project=project)
+    orch._run_task_with_redo(task, summary)
+
+    assert task.status == TaskStatus.BLOCKED
 
 
 # ── #151-c: wave-boundary reflection (future-task edits only) ────────────
@@ -7741,21 +7849,63 @@ def test_qc_fix_forward_disabled_falls_through(project, monkeypatch):
     assert task.qc_authored_fix is False
 
 
-def test_qc_fix_forward_trivial_draft_falls_through(project, monkeypatch):
-    """Flag ON but nothing salvageable (storm committed ~nothing) → decline,
-    don't pretend to patch an empty file."""
+def test_qc_fix_forward_builds_when_draft_empty(project, monkeypatch):
+    """#2a: an empty/whitespace draft (producer committed nothing patchable) is no
+    longer a dead end — QC BUILDS the artifact from the task contract and the task
+    COMPLETES (Clif: patch if present, BUILD if absent; the job lands either way)."""
     from modulatio.orchestration import RunSummary
+    from modulatio.types import TaskStatus
 
     monkeypatch.setenv("MODULATIO_QC_FIXER", "1")
     orch = _qcfix_orch(project)
     task = _qcfix_task(project_id=project.id)
     draft = orch._resolve_draft_path(task)
     draft.parent.mkdir(parents=True, exist_ok=True)
-    draft.write_text("   \n  ")  # whitespace-only — nothing to salvage
+    draft.write_text("   \n  ")  # whitespace-only — nothing to patch → QC builds
     summary = RunSummary(project=project)
 
     handled = orch._attempt_qc_fix_forward(task, draft, None, summary)
-    assert handled is False
+    assert handled is True
+    assert task.status == TaskStatus.COMPLETED
+    assert task.qc_authored_fix is True
+    assert draft.read_text().strip()  # QC authored a real body
+
+
+def test_qc_fix_forward_builds_when_draft_missing(project, monkeypatch):
+    """#2a: no artifact on disk at all (the producer never wrote one) → QC builds
+    it from scratch rather than dying terminal."""
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import TaskStatus
+
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "1")
+    orch = _qcfix_orch(project)
+    task = _qcfix_task(project_id=project.id)
+    draft = orch._resolve_draft_path(task)  # NOT created
+    summary = RunSummary(project=project)
+
+    handled = orch._attempt_qc_fix_forward(task, draft, None, summary)
+    assert handled is True
+    assert task.status == TaskStatus.COMPLETED
+    assert draft.exists() and draft.read_text().strip()
+
+
+def test_qc_authored_fix_emits_task_completed(project, monkeypatch):
+    """#2c: a QC-authored recovery emits ``task_completed`` so the producer leaves
+    the board + downstream unblocks — not just an info-only qc_authored_fix line."""
+    from modulatio.orchestration import RunSummary
+
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "1")
+    orch = _qcfix_orch(project)
+    events: list = []
+    orch.activity_callback = events.append
+    task = _qcfix_task(project_id=project.id)
+    draft = orch._resolve_draft_path(task)
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("a real but flawed body, long enough to patch")
+    summary = RunSummary(project=project)
+
+    orch._attempt_qc_fix_forward(task, draft, (_rejected_verdict(), "fix it"), summary)
+    assert any(getattr(e, "phase", None) == "task_completed" for e in events)
 
 
 def test_qc_fix_forward_completes_on_qc_patch(project, monkeypatch):

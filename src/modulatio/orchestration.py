@@ -1580,6 +1580,44 @@ def _strip_preamble(text: str) -> str:
     return text[m.start():]
 
 
+#: A leading conversational-scaffolding line a producer narrated instead of just
+#: emitting the artifact. TWO narrow, unambiguous shapes only (conservative — never
+#: strip real content): a bare acknowledgement ("Perfect!", "Sure.", "Got it"), or
+#: a FIRST-PERSON statement of intent to PRODUCE ("Let me create the file", "I'll
+#: write the report"). NOT "Here are the findings…" (content that resembles
+#: narration) — only "let me/I'll/I'm going to/I've + a produce-verb".
+_SCAFFOLD_LINE_RE = re.compile(
+    r"^\s*"
+    # optional leading bare-acknowledgement prefix ("Perfect! ", "Sure, ")
+    r"(?:(?:perfect|sure|certainly|of\s+course|absolutely|got\s+it|okay|ok|alright|great)"
+    r"[\s!.,:—-]*)?"
+    # optional first-person statement of intent to PRODUCE ("Let me create the
+    # file", "I'll write the report") — must reach end of line
+    r"(?:(?:let\s+me|i['’]?ll|i\s+will|i['’]?m\s+going\s+to|i['’]?ve|i\s+have|let['’]?s)\b"
+    r"[^.\n]*\b(?:creat\w*|writ\w*|produc\w*|generat\w*|emit\w*|draft\w*|prepar\w*"
+    r"|put\s+together)\b[^\n]*)?"
+    r"\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_scaffolding(text: str) -> str:
+    """Drop a LEADING run of conversational scaffolding lines ("Perfect! Let me
+    create the file.") a Haiku-class producer narrated instead of emitting the
+    bare artifact — prose bends a model, the engine binds it (the producer prompt
+    already forbids this; weaker models ignore it). Conservative: only the two
+    narrow shapes in ``_SCAFFOLD_LINE_RE``, only from the very top, stopping at the
+    first real-content line. If the whole output was scaffolding, the result is
+    empty → the QC build-when-absent backstop recovers the task."""
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines) and (lines[i].strip() == "" or _SCAFFOLD_LINE_RE.match(lines[i])):
+        i += 1
+    if i == 0:
+        return text
+    return "\n".join(lines[i:]).lstrip("\n")
+
+
 def _extract_json(text: str) -> dict | list:
     r"""Pull the first JSON blob from an LLM response.
 
@@ -4226,7 +4264,7 @@ class Orchestrator:
             response = assembled
         else:
             response = _strip_code_fences(
-                _strip_preamble(_strip_thinking(body_text))
+                _strip_preamble(_strip_scaffolding(_strip_thinking(body_text)))
             )
             # Two prose-stripping passes for code artifacts:
             # 1. ``_extract_code_from_prose`` catches the fenced-block
@@ -4860,9 +4898,13 @@ class Orchestrator:
             # Clay: confine a claude-CLI chat-loop seat to its workspace + grants,
             # threading the same on_tool_call audit sink the metered runner uses so
             # a Clay seat's in-sandbox tool calls hit the transcript + activity feed.
+            # A KICKOFF producer/QC seat (role != "leader") is also tool-confined —
+            # the chat runner reads ``confined`` to apply --tools/--safe-mode/disallow,
+            # the same fail-closed loadout the single-shot path already uses. The
+            # interactive Leader (converse + verify) keeps its full loadout.
             # Note: the contextvar propagates synchronously through run_with_model_fallbacks;
             # revisit if that call chain ever becomes async or thread-pooled.
-            with self._seat_context(on_tool_call=on_tool_call):
+            with self._seat_context(on_tool_call=on_tool_call, confined=role != "leader"):
                 return _runners.run_with_model_fallbacks(
                     chain, _run_one,
                     on_fallback=lambda failed, nxt, exc: self._emit_activity(
@@ -5360,6 +5402,32 @@ class Orchestrator:
                 text = text[:cap] + f"\n\n... [truncated at {cap:,} chars]"
             return f"--- {path} ---\n{text}"
 
+        def list_logs(**_: object) -> str:
+            from modulatio import logstore
+
+            entries = logstore.list_logs()
+            if not entries:
+                return "No diagnostic logs captured."
+            lines = [
+                f"{e.id}  [{e.label}]  {logstore.format_timestamp(e.timestamp)}  "
+                f"{e.summary}{' (sent)' if e.sent else ''}"
+                for e in entries[:30]
+            ]
+            return "\n".join(lines)
+
+        def read_log(log_id: str = "", **_: object) -> str:
+            from modulatio import logstore
+
+            entry = logstore.find_log(log_id)
+            if entry is None:
+                return f"No log found for id {log_id!r}. Use list_logs to see the ids."
+            try:
+                # Logs are redacted at write time (scrub_and_cap), so the file is
+                # safe to read back in full.
+                return entry.path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                return f"Couldn't read log {log_id}: {exc}"
+
         return {
             # NOTE: the Leader has NO ``run_job`` tool — he does NOT start jobs
             # himself (it made every conversational turn spawn a job). A job starts
@@ -5532,6 +5600,29 @@ class Orchestrator:
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
                     "required": ["path"],
+                },
+            ),
+            "list_logs": tools.Tool(
+                name="list_logs",
+                description=(
+                    "List recent diagnostic logs — crashes, handled errors, and "
+                    "doctor reports — so you can see what went wrong on a run when "
+                    "the operator asks. Read-only; pair with read_log."
+                ),
+                call=list_logs,
+            ),
+            "read_log": tools.Tool(
+                name="read_log",
+                description=(
+                    "Read one diagnostic log in full (already redacted of secrets) "
+                    "by its id from list_logs — to triage a crash or error yourself "
+                    "before answering the operator."
+                ),
+                call=read_log,
+                params_schema={
+                    "type": "object",
+                    "properties": {"log_id": {"type": "string"}},
+                    "required": ["log_id"],
                 },
             ),
         }
@@ -7412,6 +7503,7 @@ class Orchestrator:
         self,
         workspace: "Path | None" = None,
         on_tool_call: "Callable[[str, dict, str], None] | None" = None,
+        confined: bool = False,
     ):
         """Set the Clay seat context (confined workspace + operator-widen grants)
         for the enclosed seat-runner call(s), mirroring how the sandbox
@@ -7427,6 +7519,12 @@ class Orchestrator:
         the same transcript + activity feed instead of vanishing. ``None`` (the
         single-shot dispatch paths, which have no sink in scope) is unchanged.
 
+        ``confined`` marks a KICKOFF producer/QC seat (True) vs the interactive
+        Leader (False). A confined Clay chat-runner seat gets the tool restrictions
+        (``--tools``/``--safe-mode``/disallow); the Leader keeps its full loadout.
+        Single-shot kickoff seats confine unconditionally at the runner factory and
+        don't depend on this; the chat-runner path (used by BOTH lanes) does.
+
         ``workspace`` is a future per-producer isolation hook: today every call
         uses the Leader's workspace default, but the parameter exists so a caller
         can confine a specific seat to its own sub-folder once per-seat isolation
@@ -7434,7 +7532,7 @@ class Orchestrator:
         from modulatio import claude_cli as _clay
         ws = workspace if workspace is not None else self._leader_workspace()
         grants = tuple(str(r) for r in self.leader_gate().granted_roots())
-        return _clay.seat_context(ws, grants, on_tool_call=on_tool_call)
+        return _clay.seat_context(ws, grants, on_tool_call=on_tool_call, confined=confined)
 
     def _seat_tool_sink(
         self,
@@ -8375,6 +8473,18 @@ class Orchestrator:
 
         # Retry budget exhausted — settle on terminal state from last failure.
         if last_exc is not None:
+            # Producer EXHAUSTION (max_iters: the tool-loop ran out of iterations
+            # without ever committing a final answer) is recoverable — same shape
+            # as QC-reject exhaustion — so route it to the QC-as-fixer backstop
+            # before settling (Clif 2026-06-22: the job lands, whatever the failure
+            # shape). A GENUINE runtime crash is NOT backstopped — a tier bump or a
+            # QC re-author can't fix a broken runtime, so it still goes BLOCKED for
+            # human resolution.
+            from modulatio import runners as _runners
+            if isinstance(last_exc, _runners.MaxItersExhausted) and self._attempt_qc_fix_forward(
+                t, self._resolve_draft_path(t), None, summary, defect_type="runtime",
+            ):
+                return
             # Slice #9c: exception exhaustion is NOT an escalation path.
             # A tier bump cannot fix a broken runtime; the correct
             # response is still BLOCKED + human resolution.
@@ -8394,6 +8504,7 @@ class Orchestrator:
                 t, f"task {t.id} failed after {t.retry_count} retries: {err}",
                 surface="task execution failure", exc=last_exc,
             )
+            self._ticket_for_failed_task(t, err)  # #8: surface the wedge as a ticket
             return
 
         # QC-as-fixer Slice 2: the FINAL attempt was bound by the circuit
@@ -8479,6 +8590,7 @@ class Orchestrator:
             t, f"task {t.id} QC-rejected: {qc_verdict.check}",
             surface="QC hard-reject", detail=reject_rationale,
         )
+        self._ticket_for_failed_task(t, reject_rationale)  # #8: surface the wedge
         # Surface the final (rejected) draft path so human can inspect.
         # Uses the worker view (staging in a concurrent worker) for the
         # existence check + appends that path; the main-thread merge remaps
@@ -8536,6 +8648,7 @@ class Orchestrator:
             t, f"task {t.id} dispatch aborted by circuit breaker",
             surface="dispatch breaker abort", detail=rationale,
         )
+        self._ticket_for_failed_task(t, rationale)  # #8: surface the wedge
 
     def _capture_error_log(
         self,
@@ -8620,29 +8733,22 @@ class Orchestrator:
         """
         if not _qc_fixer_enabled():
             return False
-        if draft_path is None or not draft_path.exists():
-            return False
-        try:
-            body = draft_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            # A binary/media artifact (zip/mp4/rendered pdf/docx) isn't
-            # text-patchable; UnicodeDecodeError is a ValueError, not OSError.
-            # Fall through to the caller's graceful terminal.
-            return False
-        if not body.strip():
-            # Nothing coherent to patch (e.g. a no-commit storm). The
-            # salvage→re-decompose rung is deferred; fall through to the
-            # caller's graceful terminal.
-            return False
-        if _draft_is_multifile(t, draft_path):
-            # The producer wrote sibling files to separate paths and QC reviewed
-            # the WHOLE staging tree (cross-file). This single-file rescue reads
-            # and patches ONLY the primary at task.output_path, so a defect QC
-            # rejected in a SIBLING file would survive untouched while the task
-            # is stamped COMPLETED via a qc_authored_fix pass-mark — a partial
-            # fix shipped as a clean completion. Refuse it; fall through to the
-            # graceful QC_REJECTED / breaker terminal so the rejection stands.
-            return False
+        # Determine the patchable body, if any. A missing/empty primary is NOT a
+        # dead end anymore — it routes to the BUILD rung (QC authors from scratch)
+        # below (Clif 2026-06-22). Only genuinely-unauthorable shapes still
+        # decline: a binary/media artifact (not text-patchable) and a multi-file
+        # staging set (a single-file rescue reads/writes ONLY the primary, so a
+        # sibling defect would survive while the task stamps COMPLETED — a partial
+        # fix shipped as a clean completion).
+        body: "str | None" = None
+        if draft_path is not None and draft_path.exists():
+            try:
+                body = draft_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return False  # binary/media — not text-authorable
+            if _draft_is_multifile(t, draft_path):
+                return False  # cross-file: single-file patch/build would partial-pass
+        target_path = draft_path if draft_path is not None else self._resolve_draft_path(t)
 
         # Assemble the defects the QC fixer should target. ``last_qc`` is the 2-tuple
         # ``(verdict, notes)``; the real QC ``defect_type`` (Hero code BLOCKER 2) rides
@@ -8659,10 +8765,14 @@ class Orchestrator:
                 f"existing draft coherent, complete, and on-contract."
             )
 
-        # QC authors the patch in place (same task output path).
+        # PATCH the existing body if there is one; otherwise BUILD it from the
+        # contract (Clif: patch if present, build if absent — the job lands).
         try:
-            patched = self._qc_patch_artifact(t, draft_path, defects, body)
-        except Exception as exc:  # noqa: BLE001 — patch failure is non-fatal
+            if body is not None and body.strip():
+                authored = self._qc_patch_artifact(t, target_path, defects, body)
+            else:
+                authored = self._qc_build_artifact(t, target_path, defects)
+        except Exception as exc:  # noqa: BLE001 — author failure is non-fatal
             # Couldn't author a fix → fall through to the normal terminal.
             self._emit_activity(
                 role="qc", phase="qc_fix_failed",
@@ -8680,11 +8790,11 @@ class Orchestrator:
         # never be satisfied → fixes parked forever; bouncing to the Leader
         # risks recreating the same judgment or an unintended loop). The
         # artifact stays flagged ``qc_authored_fix`` for transparency.
-        self._complete_qc_authored_fix(t, draft_path, summary)
+        self._complete_qc_authored_fix(t, target_path, summary)
         # #81 codify-the-win: witness the recovery — the before(body)/defects/after
-        # (patched) triple is the TECHNIQUE the cheap producer lacked. The task is
-        # ALREADY COMPLETED above; this is pure upside capture, so it is GUARDED at
-        # the call site (Nemo r1 #5) — a recovery-logging throw must NEVER reverse a
+        # triple is the TECHNIQUE the cheap producer lacked. The task is ALREADY
+        # COMPLETED above; this is pure upside capture, so it is GUARDED at the call
+        # site (Nemo r1 #5) — a recovery-logging throw must NEVER reverse a
         # completion. record_recovery truncates every field at write time (Nemo #6).
         try:
             from modulatio import recoveries as _recoveries
@@ -8699,8 +8809,8 @@ class Orchestrator:
                     defect_type=defect_type or "",
                     task_id=t.id,
                     defects=defects,
-                    before=body,
-                    after=patched,
+                    before=body or "",
+                    after=authored,
                     qc_rationale=(qc_verdict.check if qc_verdict is not None else defects),
                 )
         except Exception:  # noqa: BLE001 — never fail a completed task on a log write
@@ -8733,37 +8843,62 @@ class Orchestrator:
             body=body,
         )
         raw = self._run_agent_call(t.qc_agent_id, "qc", prompt)
-        patched = _strip_code_fences(_strip_preamble(_strip_thinking(raw)))
+        return self._persist_qc_authored(t, draft_path, raw)
+
+    def _qc_build_artifact(self, t: Task, draft_path: "Path", defects: str) -> str:
+        """QC authors the artifact FROM SCRATCH when the producer committed
+        nothing patchable (empty/absent draft) — the build-when-absent rung of
+        the backstop (Clif 2026-06-22). Same persist + format-integrity as the
+        patch path; differs only in the prompt (build-from-contract, no body)."""
+        domain_standards = standards.load(
+            t.artifact_kind, project_code=self.project.code
+        )
+        domain_standards = _with_operation_card(t, domain_standards)
+        prompt = self._prompt("qc-build", _QC_BUILD_PROMPT).format(
+            task_id=t.id,
+            artifact_kind=t.artifact_kind,
+            task_description=t.description,
+            defects=defects,
+            standards=_format_standards_block(domain_standards),
+        )
+        raw = self._run_agent_call(t.qc_agent_id, "qc", prompt)
+        return self._persist_qc_authored(t, draft_path, raw)
+
+    def _persist_qc_authored(self, t: Task, draft_path: "Path", raw: str) -> str:
+        """Post-process + write a QC-authored artifact (shared by patch + build):
+        strip thinking/preamble/whole-output fences, code-extract for code kinds,
+        refuse empty, re-assert declared-format integrity (engine-binding — a text
+        blob under a binary extension must NOT ship as a clean completion), record
+        the write. Returns the authored text (the 'after' of the #81 triple)."""
+        out = _strip_code_fences(_strip_preamble(_strip_thinking(raw)))
         if _is_code_artifact_kind(t.artifact_kind):
-            # If the patch came back as an (off-contract) concatenated multi-file
-            # body carrying ``=== FILE: ===`` headers, _extract_code_from_prose
-            # would pick only the single largest fenced block and silently drop
-            # the rest, mangling the artifact. Skip prose-extraction for
-            # header-bearing bodies and write them through verbatim.
-            if not _DIFF_FILE_HEADER_RE.search(patched):
-                extracted = _extract_code_from_prose(patched)
+            # A concatenated multi-file body carrying ``=== FILE: ===`` headers
+            # must be written verbatim — _extract_code_from_prose would keep only
+            # the largest fenced block and silently drop the rest.
+            if not _DIFF_FILE_HEADER_RE.search(out):
+                extracted = _extract_code_from_prose(out)
                 if extracted is not None:
-                    patched = extracted
-                patched = _trim_leading_prose_from_code(patched)
-        if not patched.strip():
-            raise ValueError("QC patch produced an empty artifact")
-        draft_path.write_text(patched, encoding="utf-8")
-        # P5 declared-format integrity (HRWT fabrication gate). The QC patch
-        # ALWAYS writes TEXT; on the breaker-abort lane QC-review never ran, so
-        # verify_declared_format never fired on the patched bytes. Writing text
-        # to a declared-binary output_path (e.g. report.pdf) would ship a fake
-        # binary as a clean completion. Re-assert the format invariant here — it
-        # is engine-binding and must not be skippable by the rescue path. A text
-        # blob under a binary extension raises, so the caller falls through to
-        # the graceful QC_REJECTED / breaker terminal instead of completing.
+                    out = extracted
+                out = _trim_leading_prose_from_code(out)
+        if not out.strip():
+            raise ValueError("QC-authored artifact was empty")
+        draft_path.parent.mkdir(parents=True, exist_ok=True)  # build target may not exist yet
+        draft_path.write_text(out, encoding="utf-8")
+        # P5 declared-format integrity (HRWT fabrication gate). QC ALWAYS writes
+        # TEXT; on the build/breaker lane normal QC-review never fired on these
+        # bytes. Writing text to a declared-binary output_path (e.g. report.pdf)
+        # would ship a fake binary as a clean completion. Re-assert the invariant
+        # here — engine-binding, not skippable by the rescue path. A text blob
+        # under a binary extension raises, so the caller falls through to the
+        # graceful terminal instead of completing.
         from modulatio import review_ledger as _review_ledger
         fmt_ok, fmt_reason = _review_ledger.verify_declared_format(draft_path)
         if not fmt_ok:
             raise ValueError(
-                f"QC patch failed declared-format integrity: {fmt_reason}"
+                f"QC-authored artifact failed declared-format integrity: {fmt_reason}"
             )
         self._record_artifact_write(draft_path)  # #151/e2e Blocker 2 staging merge
-        return patched
+        return out
 
     def _complete_qc_authored_fix(
         self,
@@ -8810,6 +8945,48 @@ class Orchestrator:
             role="qc", phase="qc_authored_fix",
             task_id=t.id, agent_id=t.qc_agent_id,
         )
+        # The recovery is a first-class COMPLETION (Clif 2026-06-22): emit
+        # task_completed so the producer leaves the TV board ("N working"
+        # decrements) and downstream deps unblock — the wedge clears. Without
+        # this, a QC-recovered task stayed on the board (only qc_authored_fix,
+        # an info line, fired). agent_id is the task's PRODUCER (the seat being
+        # freed), not the QC that authored the fix.
+        self._emit_activity(
+            role=self.default_producer_role, phase="task_completed",
+            task_id=t.id, agent_id=t.assigned_agent_id,
+        )
+
+    def _ticket_for_failed_task(self, t: Task, reason: str) -> None:
+        """Open an operator ticket when a task terminates FAILED (BLOCKED /
+        QC_REJECTED) so the wedge surfaces in the Tickets tab — not only the error
+        log (Clif 2026-06-22: failures landed in logs but were never ticketed, and
+        the Leader can't read logs either). Environmental defects open their own
+        dedicated ticket; this is the generic terminal-failure path. Best-effort +
+        wave-safe (deferred to the merge phase when isolated)."""
+        def _open():
+            store.create_ticket(
+                project_id=self.project.id,
+                project_code=self.project.code,
+                run_id=self.project.run_id,
+                priority=TicketPriority.CRITICAL,
+                title=f"task {t.id} failed: {reason[:80]}",
+                body=(
+                    f"## What happened\n\nTask **{t.id}** ({t.artifact_kind or '?'}) "
+                    f"could not be completed — it exhausted its attempts and the "
+                    f"QC-as-fixer backstop could not recover it.\n\n"
+                    f"## Reason\n\n{reason}\n\n"
+                    f"## What you can do\n\nReview the task and the run logs "
+                    f"(`modulatio logs`), then re-run or revise the objective. A "
+                    f"recurring failure on the same kind may mean the producer "
+                    f"model is unsuited to it.\n"
+                ),
+                affected_task_id=t.id,
+                actor="orchestrator",
+            )
+        try:
+            self._store_write_deferrable(_open)
+        except Exception:  # noqa: BLE001 — a ticket-write failure must never reverse the settle
+            pass
 
     # ── Environmental defect — task BLOCKED, ticket fired ─────────────
     def _block_for_environmental(
@@ -13984,6 +14161,39 @@ THE LAST REJECTED ARTIFACT (between markers — patch THIS, in place):
 >>>ARTIFACT-END<<<
 
 Emit the corrected artifact now.
+"""
+
+
+# QC-as-fixer build-when-absent (Clif 2026-06-22): the producer committed
+# NOTHING patchable (empty/absent artifact). The task must still land, so as a
+# last resort QC AUTHORS the artifact from scratch against the task contract.
+_QC_BUILD_PROMPT = """\
+You are QC for Modulatio. The producer exhausted its attempts and committed
+NO usable artifact at all. As a LAST-RESORT rescue, you are now AUTHORING the
+artifact yourself from the task contract so a usable result ships instead of a
+dead task.
+
+CRITICAL CONSTRAINTS:
+  - Produce the COMPLETE artifact the task asks for, on-contract and to the
+    domain standards below. There is no prior draft to patch — write it whole.
+  - Output ONLY the artifact — the full file content as it should be saved.
+    No commentary, no preamble, no explanation, no fences around the whole
+    thing (keep any fences that legitimately belong to the artifact itself).
+  - Be honest: ground what you can; mark what you could not verify rather than
+    fabricate. A complete, honestly-hedged artifact beats a dead task.
+
+TASK CONTRACT
+  id: {task_id}
+  artifact kind: {artifact_kind}
+  description: {task_description}
+
+WHY YOU'RE AUTHORING IT (what went wrong with the producer):
+{defects}
+
+DOMAIN STANDARDS (for kind={artifact_kind}):
+{standards}
+
+Emit the complete artifact now.
 """
 
 

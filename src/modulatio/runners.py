@@ -1088,6 +1088,13 @@ def build_tools_schema(loadout: tuple[str, ...], registry: dict) -> list[dict]:
     return out
 
 
+class MaxItersExhausted(RuntimeError):
+    """The tool-loop ran ``max_iters`` iterations without the model committing a
+    final answer — producer EXHAUSTION (same shape as QC-reject exhaustion), not a
+    runtime crash. A distinct type so the orchestrator can route it to the
+    QC-as-fixer backstop (recoverable) instead of settling BLOCKED like a real bug."""
+
+
 #: Returned (by identity) from the tool-loop when ``should_abort`` fires (operator
 #: pressed ESC). First-person so it reads naturally as a Leader turn in the chat,
 #: BUT it is also a public sentinel: callers compare ``reply is INTERRUPTED_REPLY``
@@ -1432,7 +1439,7 @@ def run_llm_with_tools(
                 "content": conv_content + iter_suffix,
             })
 
-    raise RuntimeError(
+    raise MaxItersExhausted(
         f"run_llm_with_tools: max_iters {max_iters} exceeded without final content"
     )
 
@@ -1547,9 +1554,16 @@ def _build_claude_cli_chat_runner(
         system = "\n\n".join(m.get("content") or "" for m in messages if m.get("role") == "system")
         user = "\n\n".join(m.get("content") or "" for m in messages if m.get("role") == "user")
         ws, add_dirs = claude_cli.current_seat_context()
+        # A KICKOFF producer/QC chat-loop seat is fail-closed confined (same as the
+        # single-shot path); the interactive Leader's chat loop is not. The
+        # orchestrator sets the lane via the seat contextvar (default unconfined).
+        confined = claude_cli.current_confined_mode()
         text = claude_cli.run_claude(
             claude_bin=claude_bin, model=bare_model, prompt=user,
             system=system or None, workspace=ws, add_dirs=add_dirs,
+            allowed_tools=claude_cli._ALLOWED_CONFINED_TOOLS if confined else (),
+            safe_mode=confined,
+            disallowed_tools=claude_cli._DISALLOWED_TOOLS if confined else (),
         )
         return ChatResponse(content=text, tool_calls=())
 

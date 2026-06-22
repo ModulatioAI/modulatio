@@ -396,6 +396,36 @@ def test_run_chat_loop_threads_tool_sink_into_seat_context(project_with_run, mon
     assert claude_cli.seat_activity_var.get() is None
 
 
+def test_run_chat_loop_confines_producer_seat_not_leader(project_with_run, monkeypatch):
+    """#1 WIRING: a kickoff producer/QC chat-loop seat runs CONFINED (the seat
+    context carries confined=True, which a Clay chat runner reads to restrict its
+    tools); the converse/verify Leader stays UNCONFINED. Keyed on role != 'leader'.
+    Asserting the contextvar's value INSIDE the runner call is what makes this a
+    wiring test — the unit-on-the-part (argv builder) missed this lane gap."""
+    from modulatio import claude_cli
+    from modulatio import runners as _runners_mod
+    seen: list = []
+
+    def fake_run_llm_with_tools(*, chat_runner, **_):
+        seen.append(claude_cli.current_confined_mode())
+        return "ok"
+
+    monkeypatch.setattr(_runners_mod, "run_llm_with_tools", fake_run_llm_with_tools)
+    orch = _make_orchestrator(project_with_run)
+    orch.chat_runner = lambda *a, **k: None
+    orch.chat_runner_models = {"writer": "m", "leader": "m"}
+
+    orch._run_chat_loop(prompt="x", tool_loadout=("read_tool_result",), role="writer",
+                        agent_id="writer", task_id="T1",
+                        transcript_path=Path("/tmp/_c1.jsonl"), skill_name="t")
+    orch._run_chat_loop(prompt="x", tool_loadout=("read_tool_result",), role="leader",
+                        agent_id="leader", task_id="T2",
+                        transcript_path=Path("/tmp/_c2.jsonl"), skill_name="t")
+
+    assert seen == [True, False], "producer seat must confine, leader must not"
+    assert claude_cli.current_confined_mode() is False  # reset after the wrap
+
+
 def test_run_chat_loop_falls_back_to_default_model(project_with_run, monkeypatch):
     """F11: when no per-agent model is registered, use the
     chat_runner_default_model so the gate still has something to

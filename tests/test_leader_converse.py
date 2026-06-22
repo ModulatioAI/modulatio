@@ -195,6 +195,21 @@ def test_create_job_template_tool_writes_and_lists(project: Project):
     assert "already exists" in again
 
 
+def test_leader_logs_tools_list_and_read(project: Project):
+    """#6c: the Leader can list + read diagnostic logs (already redacted) so he can
+    triage a crash/error when the operator asks — not blind to the LOGS tab."""
+    from modulatio import logstore
+
+    p = logstore.write_error_log("boom in the producer wave", context={"surface": "test"})
+    orch = Orchestrator(project, _runners())
+    tools_d = orch._leader_function_tools()
+    assert "list_logs" in tools_d and "read_log" in tools_d
+    listing = tools_d["list_logs"].call()
+    assert p.stem in listing
+    body = tools_d["read_log"].call(log_id=p.stem)
+    assert "boom in the producer wave" in body
+
+
 def test_create_job_template_captures_cardinality(project: Project):
     """The cardinality-bug fix: the Leader's create_job_template tool now carries
     the output cardinality into the JT, so a multi-unit job is codified as a

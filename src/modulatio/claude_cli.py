@@ -243,6 +243,16 @@ seat_activity_var: contextvars.ContextVar["ToolCallSink | None"] = (
     contextvars.ContextVar("modulatio_clay_activity", default=None)
 )
 
+#: Whether the enclosed Clay seat is a CONFINED kickoff seat (producer/QC/plan)
+#: vs an UNCONFINED interactive Leader (converse/solo/verify). The chat-runner
+#: factory reads this to decide whether to pass the tool restrictions to
+#: ``run_claude``. Default False so a bare CLI / test / unset path is never
+#: confined by accident — only the orchestrator's kickoff dispatch sets it True.
+#: (The single-shot litellm_runner confines unconditionally and ignores this.)
+seat_confined_var: contextvars.ContextVar[bool] = (
+    contextvars.ContextVar("modulatio_clay_confined", default=False)
+)
+
 
 def current_seat_context() -> tuple[Path, list[str]]:
     """Resolve the seat's (workspace, add_dirs) for this call. Workspace falls
@@ -254,21 +264,32 @@ def current_seat_context() -> tuple[Path, list[str]]:
     return ws, list(granted)
 
 
+def current_confined_mode() -> bool:
+    """True when the enclosed Clay seat is a confined kickoff seat (producer/QC),
+    False for the interactive Leader (and any unset path). The chat-runner factory
+    reads this to apply the tool restrictions only to kickoff seats."""
+    return seat_confined_var.get()
+
+
 @contextlib.contextmanager
 def seat_context(
     workspace: Path, granted_roots: tuple[str, ...],
     on_tool_call: "ToolCallSink | None" = None,
+    confined: bool = False,
 ):
-    """Orchestrator-side: set the Clay seat context (workspace + grants, and an
-    optional tool-activity sink) for the enclosed runner call(s), then restore.
-    Mirrors how the orchestrator sets the sandbox contextvars around a tool call."""
+    """Orchestrator-side: set the Clay seat context (workspace + grants, an
+    optional tool-activity sink, and whether the seat is confined) for the
+    enclosed runner call(s), then restore. Mirrors how the orchestrator sets the
+    sandbox contextvars around a tool call."""
     token = seat_context_var.set((workspace, tuple(granted_roots)))
     atoken = seat_activity_var.set(on_tool_call)
+    ctoken = seat_confined_var.set(confined)
     try:
         yield
     finally:
         seat_context_var.reset(token)
         seat_activity_var.reset(atoken)
+        seat_confined_var.reset(ctoken)
 
 
 def run_claude(
