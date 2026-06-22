@@ -659,12 +659,13 @@ def litellm_runner(
             bare_model = litellm_model.split("/", 1)[-1]
             ws, add_dirs = claude_cli.current_seat_context()
             # KICKOFF seat (producer / QC / plan / reflect — single-shot): run
-            # fail-closed. A POSITIVE allowlist (_ALLOWED_CONFINED_TOOLS) + safe
-            # mode (no CLAUDE.md/skills/plugins/hooks/MCP) means the seat can use
-            # ONLY non-process built-ins — so it can neither spawn a crew nor
-            # re-exec claude -p (via Bash OR a configured MCP/hook tool) to dodge
-            # its retry budget. _DISALLOWED_TOOLS is the explicit belt on top. The
-            # HARNESS lane (chat runner) sets none of this — full agentic loadout.
+            # fail-closed. The available built-in SET is restricted to the
+            # non-process tools (_ALLOWED_CONFINED_TOOLS, passed via --tools) and
+            # safe mode drops all customizations (no CLAUDE.md/skills/plugins/
+            # hooks/MCP) — so the seat can neither spawn a crew nor re-exec
+            # claude -p (via Bash OR a configured MCP/hook tool) to dodge its
+            # retry budget. _DISALLOWED_TOOLS is the explicit named belt on top.
+            # The HARNESS lane (chat runner) sets none of this — full loadout.
             return claude_cli.run_claude(
                 claude_bin=claude_bin, model=bare_model, prompt=body,
                 workspace=ws, add_dirs=add_dirs,

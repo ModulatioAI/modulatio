@@ -67,18 +67,19 @@ _DEFAULT_SYSTEM = (
 #: "yes in a kickoff, no in the harness").
 _DISALLOWED_TOOLS = ("Workflow", "Task", "Agent", "Bash", "BashOutput", "KillShell")
 
-#: POSITIVE allowlist for confined kickoff seats (Wild Bill R2 HIGH). A denylist
-#: of built-in names is not fail-closed: a confined ``claude -p`` still loads
-#: user/project MCP servers, hooks, and plugins — any of which can execute a
-#: process and re-launch the claude binary, bypassing the denylist. So confined
-#: seats run with ``--safe-mode`` (disables ALL customizations: CLAUDE.md, skills,
-#: plugins, hooks, MCP) AND this ``--allowedTools`` allowlist (default-deny: ONLY
-#: these run, so Bash, the spawners, any configured MCP tool, and any future
-#: built-in are denied by omission). The set is the non-process built-ins a
+#: Fail-closed available-tool SET for confined kickoff seats (Wild Bill R2/R3
+#: HIGH). A denylist of built-in names is not fail-closed: a confined ``claude
+#: -p`` still loads user/project MCP servers, hooks, and plugins — any of which
+#: can execute a process and re-launch the claude binary. So confined seats run
+#: with ``--safe-mode`` (disables ALL customizations: CLAUDE.md, skills, plugins,
+#: hooks, MCP) AND pass this set through ``--tools`` (which restricts the AVAILABLE
+#: built-in set: ONLY these exist, so Bash, the spawners, and any future built-in
+#: are absent — and that holds under ``bypassPermissions``, unlike the
+#: permission-layer ``--allowedTools``). The set is the non-process built-ins a
 #: producer/QC seat needs to make an artifact: read/write/edit, search, and web
-#: lookup (network is already permitted for the seat; none of these spawn a
-#: process). ``_DISALLOWED_TOOLS`` is still passed as an explicit belt to these
-#: suspenders. The harness lane sets NONE of this (full loadout).
+#: lookup (network is already permitted for the seat; none spawn a process).
+#: ``_DISALLOWED_TOOLS`` (the explicit named ban of Bash + the spawners) is passed
+#: too as defense in depth. The harness lane sets NONE of this.
 _ALLOWED_CONFINED_TOOLS = (
     "Read", "Write", "Edit", "Grep", "Glob", "WebFetch", "WebSearch",
 )
@@ -109,10 +110,11 @@ def build_claude_argv(
 
     Confinement (kickoff seats; the harness lane passes none of these):
     ``safe_mode`` adds ``--safe-mode`` to disable ALL customizations (CLAUDE.md,
-    skills, plugins, hooks, MCP servers — i.e. every loaded-customization path
-    that could execute a process). ``allowed_tools`` adds a POSITIVE
-    ``--allowedTools`` allowlist (default-deny: only these built-ins run).
-    ``disallowed_tools`` additionally bans named tools as an explicit belt."""
+    skills, plugins, hooks, MCP servers — every loaded-customization path that
+    could execute a process). ``allowed_tools`` restricts the AVAILABLE built-in
+    set via ``--tools`` (the fail-closed gate — omitted built-ins don't exist,
+    even under bypassPermissions). ``disallowed_tools`` bans named tools via
+    ``--disallowedTools`` as an explicit belt."""
     argv = [claude_bin, "-p",
             "--model", model,
             "--append-system-prompt", system or _DEFAULT_SYSTEM,
@@ -120,9 +122,14 @@ def build_claude_argv(
     if safe_mode:
         argv.append("--safe-mode")
     if allowed_tools:
-        # Variadic ``--allowedTools <tools...>``: a flag MUST follow so it can't
-        # swallow the trailing prompt — the next flag (or --output-format) does.
-        argv += ["--allowedTools", *allowed_tools]
+        # ``--tools`` is the fail-closed gate: it restricts the AVAILABLE built-in
+        # SET ("Specify the list of available tools from the built-in set"), so an
+        # omitted built-in (Bash, a spawner, …) is simply not present — and that
+        # holds under ``--permission-mode bypassPermissions``. (``--allowedTools``
+        # is only a PERMISSION list, inert under bypassPermissions — Wild Bill R3 —
+        # so it is deliberately NOT emitted; ``--disallowedTools`` is the explicit
+        # named belt.) Variadic: a flag MUST follow so it can't swallow the prompt.
+        argv += ["--tools", *allowed_tools]
     if disallowed_tools:
         # Variadic ``--disallowedTools <tools...>``: a flag MUST follow so it
         # can't swallow the trailing prompt — ``--output-format`` does.
