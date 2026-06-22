@@ -92,13 +92,21 @@ def test_pandoc_install_commands_data_shape():
 # === vault_path_step ===
 
 def test_suggested_paths_no_obsidian(monkeypatch, tmp_path):
-    """When ~/Obsidian/ doesn't exist, fall back to neutral paths."""
+    """When ~/Obsidian/ doesn't exist, fall back to neutral Documents paths.
+
+    The neutral default must live under ~/Documents/Modulatio so it can
+    never collide with a git checkout at ~/modulatio (the dev repo).
+    """
     monkeypatch.setattr(vault_path_step, "Path", type("P", (), {"home": staticmethod(lambda: tmp_path)}))
     # Direct call to the inner detect to assert no-Obsidian path
     monkeypatch.setattr(vault_path_step, "detect_obsidian_root", lambda: None)
     vault, shared = vault_path_step.suggested_paths()
-    assert "modulatio" in vault
-    assert "modulatio" in shared
+    home = str(tmp_path)
+    assert vault == f"{home}/Documents/Modulatio/projects"
+    assert shared == f"{home}/Documents/Modulatio/shared"
+    # Must NOT be a bare ~/modulatio path (would land inside a repo clone).
+    assert vault != f"{home}/modulatio/projects"
+    assert shared != f"{home}/modulatio/shared"
     assert "Obsidian" not in vault
     assert "Obsidian" not in shared
 

@@ -4,7 +4,8 @@
 
 Detects ``~/Obsidian/`` presence and suggests an Obsidian-integrated
 default if the user already uses Obsidian; otherwise neutral
-``~/modulatio/projects/``.
+``~/Documents/Modulatio/projects/`` (kept out of ``~/modulatio`` so it
+can never land inside a repo checkout of the dev tree).
 
 Per locked principle (feedback_modulatio_no_hardcoded_paths.md): no
 hardcoded paths in production code; user override always wins.
@@ -38,8 +39,8 @@ def suggested_paths() -> tuple[str, str]:
             str(obsidian / "Modulatio" / "shared"),
         )
     return (
-        str(Path.home() / "modulatio" / "projects"),
-        str(Path.home() / "modulatio" / "shared"),
+        str(Path.home() / "Documents" / "Modulatio" / "projects"),
+        str(Path.home() / "Documents" / "Modulatio" / "shared"),
     )
 
 
