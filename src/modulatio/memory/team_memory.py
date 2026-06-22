@@ -125,14 +125,20 @@ def _entry_filename(record: MemoryEntry) -> str:
     return f"{ts}__{eid}.md"
 
 
+def _fm_scalar(v: object) -> str:
+    """Collapse CR/LF so a value can't forge an extra frontmatter line on
+    re-parse (mirrors the skills._fm / standards_proposals._fm_safe chokepoint)."""
+    return str(v).replace("\r", " ").replace("\n", " ")
+
+
 def _render(record: MemoryEntry) -> str:
     fm = record.to_frontmatter()
     lines = ["---"]
     for k, v in fm.items():
         if isinstance(v, list):
-            lines.append(f"{k}: [{', '.join(v)}]")
+            lines.append(f"{k}: [{', '.join(_fm_scalar(x) for x in v)}]")
         else:
-            lines.append(f"{k}: {v}")
+            lines.append(f"{k}: {_fm_scalar(v)}")
     lines.append("---")
     lines.append("")
     lines.append("## Body")

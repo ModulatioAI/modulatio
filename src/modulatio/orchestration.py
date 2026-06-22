@@ -1122,6 +1122,21 @@ class _PlanError(Exception):
 _PLAN_HARD_CAP = 6
 
 
+def _plan_work_count(data: list[dict]) -> int:
+    """WORK-task count of a raw plan — total minus fan-in tasks, which are
+    exempt from the per-sub-objective cap.
+
+    A fan-in (synthesis/assembly) task COMBINES the parallel work and depends on
+    >=2 plan tasks; it's the back-end of a fan-out, not extra work. A redundant
+    review/verify task depends on a SINGLE task, so it stays counted as work —
+    verify-padding (the over-decomposition the cap guards against) can't hide
+    behind the exemption. Parallel work tasks (no intra-plan deps) all count, so
+    the cap bounds the BREADTH of the fan-out, which is what we want it to.
+    """
+    fan_in = sum(1 for item in data if len(item.get("depends_on") or []) >= 2)
+    return len(data) - fan_in
+
+
 # ── ENGINE-ENFORCED INVARIANT: no standalone verification goals ────────────
 # The Leader may NOT create a goal whose job is to verify/review/audit other
 # work. Prose guidance bends the LLM but does not bind it — observed live, a
@@ -3334,52 +3349,21 @@ class Orchestrator:
         # collapse: prose steers the planner to use `artifacts`; the engine binds it.
         data = self._bind_wide_artifacts(data)
 
-        # Defense-in-depth on top of the "wait for QC" prompt fix:
-        # cap task count proportional to the goal's actual artifact
-        # output. Plan over-decomposition (4 tasks for a 2-file goal)
-        # surfaced in the NXT end-to-end test — even with the prompt
-        # clarification, the model can still emit spurious review /
-        # verify tasks. The orchestrator gates structurally.
-        artifact_evidence_count = sum(
-            1 for r in goal.evidence_required if r.kind == "artifact"
-        )
-        # Floor of 3 keeps small goals workable (gather → draft, with
-        # some room). Above that, allow N+1 tasks per artifact item.
-        # W5-lite (Tier 2): hard ceiling at ``_PLAN_HARD_CAP`` —
-        # if a sub-objective wants more tasks than that, it is too big
-        # for the Alpha engine and Leader should decompose.
-        evidence_cap = max(3, artifact_evidence_count + 1)
-        plan_cap = min(_PLAN_HARD_CAP, evidence_cap)
-        if len(data) > plan_cap:
-            # F4 audit follow-up: when both checks would fire, prefer
-            # the more-precise diagnostic. Over-decomposition (verify
-            # / review tasks padded onto a low-artifact goal) is the
-            # message the user can act on directly. Hard-cap-only
-            # framing surfaces when the goal really is over-scoped.
-            if len(data) > evidence_cap and evidence_cap < _PLAN_HARD_CAP:
-                raise _PlanError(
-                    f"plan has {len(data)} tasks for a goal with "
-                    f"{artifact_evidence_count} artifact evidence item(s) "
-                    f"(cap: {plan_cap}). Likely cause: emitting separate "
-                    f"review/verify/test tasks. Each production task "
-                    f"gets QC review automatically — wait for QC, do "
-                    f"not create separate verification tasks."
-                    + (
-                        f" (Plan also exceeds the hard cap "
-                        f"of {_PLAN_HARD_CAP} tasks per sub-objective; "
-                        f"if the verify-tasks framing doesn't apply, "
-                        f"decompose into smaller sub-objectives.)"
-                        if len(data) > _PLAN_HARD_CAP else ""
-                    )
-                )
+        # Concurrency-shaped cap (replaces the old evidence-proportional cap).
+        # The canonical shape is a parallel fan-out: N INDEPENDENT work tasks
+        # that run concurrently, plus a synthesis/assembly task that COMBINES
+        # them (fan-in, exempt). See ``_plan_work_count`` — verify-padding (a
+        # single-dep task) still counts, so over-decomposition still busts it.
+        work_count = _plan_work_count(data)
+        if work_count > _PLAN_HARD_CAP:
             raise _PlanError(
-                f"plan has {len(data)} tasks — exceeds the hard "
-                f"cap of {_PLAN_HARD_CAP} tasks per sub-objective. "
-                f"This sub-objective is too large for one phase of "
-                f"execution. Decompose it: split into smaller "
-                f"sub-objectives so each fits inside the cap. "
-                f"(Multi-phase / job-template orchestration is V2.2 "
-                f"work — not available in Alpha.)"
+                f"plan has {work_count} work tasks — exceeds the cap of "
+                f"{_PLAN_HARD_CAP} per sub-objective. Either group the "
+                f"independent areas into FEWER parallel batches (each covers "
+                f"several areas), or decompose the goal into smaller "
+                f"sub-objectives. Do NOT add separate review/verify/test "
+                f"tasks — QC reviews every task automatically: wait for QC, "
+                f"don't create verification tasks."
             )
 
         # Slice #7b: a plan item may declare either a single
@@ -4856,6 +4840,10 @@ class Orchestrator:
                     ),
                     permission_callback=permission_callback,
                     permission_broker=permission_broker,
+                    # Operator ESC interrupt: the tool-loop checks this each
+                    # iteration and bails with a clean note. Same abort_event F8
+                    # uses, so a kickoff's producer/QC tool-loops stop too.
+                    should_abort=self.abort_event.is_set,
                 )
 
             # #8 per-seat fallback: run the WHOLE task on the primary; if it's
@@ -4916,6 +4904,25 @@ class Orchestrator:
             except json.JSONDecodeError:
                 continue
         return list(turns)
+
+    def reset_conversation(self) -> "Path | None":
+        """Archive the Leader conversation thread so the next converse turn starts
+        fresh (the operator's ``/new``). The durable history is renamed aside with
+        the next free ``archived-<n>`` suffix — never deleted. Returns the archive
+        path, or None when there was no thread yet. Serialized on the converse lock
+        so it can't race a turn mid-write."""
+        with self._converse_lock:
+            path = self._conversation_path()
+            if not path.exists():
+                return None
+            n = 1
+            while True:
+                dest = path.with_name(f"leader_conversation.archived-{n}.jsonl")
+                if not dest.exists():
+                    break
+                n += 1
+            path.rename(dest)
+            return dest
 
     def _append_conversation(self, role: str, content: str) -> None:
         # SEC-03 (security audit, Nemo): the Leader↔operator log is durable and
@@ -5616,6 +5623,9 @@ class Orchestrator:
         stub mode) returns a plain acknowledgement so the UI flow still works.
         """
         attachments = attachments or []
+        # A new operator turn starts fresh: clear any abort flag left set by a
+        # prior ESC interrupt, so it stops THIS turn's work only — never the next.
+        self.abort_event.clear()
         # §2 Task 1 — autonomy mode at the converse boundary. A leading mode
         # command sets the session mode (persists on the Orchestrator) and is
         # STRIPPED so the Leader sees the task, not the command. A BARE command is
@@ -8071,6 +8081,7 @@ class Orchestrator:
         rescue_defect_type: str | None = None  # #81: last QC defect class for the witness
         last_exc: Exception | None = None
         last_breaker_abort: Exception | None = None  # QC-as-fixer Slice 2
+        prev_reject_checksum: str | None = None  # no-progress breaker (see below)
 
         self._emit_activity(
             role=self.default_producer_role,
@@ -8197,6 +8208,24 @@ class Orchestrator:
                 t.producer_mode = _next_producer_mode(
                     t, defect_type, qc_notes, draft_path
                 )
+                # No-progress breaker: this rejected attempt reproduced the EXACT
+                # bytes of the prior rejected attempt — despite carrying fresh QC
+                # corrective notes — so the producer is stuck against the same
+                # wall. Stop burning the budget on identical redos and break NOW
+                # into the escalation + QC-authored-fix rescue (a higher tier or
+                # QC's own patch is the way forward, not another identical pass).
+                # Mirrors the goal-level ``stalled`` fingerprint breaker at the
+                # task grain; ``last_qc`` is already set, so the escalation path
+                # below settles correctly.
+                if checksum and checksum == prev_reject_checksum:
+                    self._emit_activity(
+                        role=self.default_producer_role,
+                        phase="redo_no_progress",
+                        task_id=t.id,
+                        agent_id=t.assigned_agent_id,
+                    )
+                    break
+                prev_reject_checksum = checksum
 
             except _dispatch_breaker_module.DispatchAbort as abort:
                 # QC-as-fixer Slice 2: the circuit breaker bound a runaway
@@ -10663,6 +10692,13 @@ class Orchestrator:
         config drift) must be distinguishable from "nothing recurred," or the
         Alfred loop dies silently across runs and nobody knows."""
         if not self._codification_enabled():
+            return
+        # task #84: never codify from an operator-aborted run. A killed run's
+        # QC fails reflect an interrupted (often half-produced / flailing) state,
+        # not a real recurring weakness to learn from — codifying from it can
+        # bake a regression into the skill library.
+        if self.abort_event.is_set():
+            self._codification_skipped("run_aborted")
             return
         # task #84: never codify from an operator-aborted run. A killed run's
         # QC fails / recoveries reflect an interrupted (often half-produced / flailing)

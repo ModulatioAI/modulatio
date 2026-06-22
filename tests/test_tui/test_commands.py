@@ -33,6 +33,29 @@ def test_dispatch_strips_leading_whitespace():
     assert result.ok is True
 
 
+# === opencode-parity harness commands ===
+
+def test_models_opens_config_models():
+    result = cmd_mod.dispatch("/models")
+    assert result.ok is True and result.side_effect == "open_models"
+
+
+def test_new_archives_and_resets():
+    result = cmd_mod.dispatch("/new")
+    assert result.ok is True and result.side_effect == "leader_new_conversation"
+
+
+def test_editor_opens_external_editor():
+    result = cmd_mod.dispatch("/editor")
+    assert result.ok is True and result.side_effect == "open_editor"
+
+
+def test_compact_is_a_friendly_deferred():
+    result = cmd_mod.dispatch("/compact")
+    assert result.handled is True and result.ok is False
+    assert "roadmap" in result.output.lower()
+
+
 # === Specific commands ===
 
 def test_help_lists_all_handler_commands():

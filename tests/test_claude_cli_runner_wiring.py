@@ -26,15 +26,23 @@ def test_clay_single_shot_runner_returns_text(monkeypatch):
     assert out == "DECOMPOSED"
     assert captured["model"] == "claude-opus-4-8"
     assert captured["prompt"].endswith("break this down")
+    # KICKOFF seat (producer/QC/plan/reflect): the sub-agent/workflow tools are
+    # stripped so Clay can't spawn a background crew and ship a deferral note.
+    assert captured["disallowed_tools"] == runners.claude_cli._DISALLOWED_TOOLS
 
 
 def test_clay_chat_runner_returns_chatresponse(monkeypatch):
     monkeypatch.setattr(model_presets, "load_presets", lambda: {"clay": dict(_CLAY_PRESET)})
     monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: "/x/claude")
-    monkeypatch.setattr(runners.claude_cli, "run_claude", lambda **kw: "ARTIFACT BODY")
+    captured = {}
+    monkeypatch.setattr(runners.claude_cli, "run_claude",
+                        lambda **kw: (captured.update(kw) or "ARTIFACT BODY"))
 
     runner = runners.litellm_chat_runner("clay")
     resp = runner(messages=[{"role": "system", "content": "sys"},
                             {"role": "user", "content": "build the thing"}], tools=[])
     assert resp.content == "ARTIFACT BODY"
     assert resp.tool_calls == ()
+    # HARNESS lane (interactive Leader converse / solo coding): NO tools stripped —
+    # orchestrating + delegating IS the job ("yes in a kickoff, no in the harness").
+    assert captured.get("disallowed_tools", ()) == ()

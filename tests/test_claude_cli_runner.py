@@ -49,7 +49,11 @@ def test_run_claude_sandboxes_and_scrubs(tmp_path, monkeypatch):
     def fake_run(argv, env=None, **kw):
         captured["env"] = env
         import types
-        return types.SimpleNamespace(stdout='{"result":"Hello","is_error":false}', returncode=0)
+        # stream-json output: the final result arrives in a `result` event.
+        return types.SimpleNamespace(
+            stdout='{"type":"result","subtype":"success","result":"Hello"}',
+            returncode=0,
+        )
 
     monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
     monkeypatch.setattr(sandbox, "build_sandboxed_argv", fake_build)
@@ -65,3 +69,39 @@ def test_run_claude_sandboxes_and_scrubs(tmp_path, monkeypatch):
     assert str(Path.home() / ".claude") in rw
     assert captured["kw"]["allow_network"] is True
     assert "ANTHROPIC_API_KEY" not in captured["env"]
+
+
+def test_run_claude_streams_tools_to_seat_activity_sink(tmp_path, monkeypatch):
+    """WIRING: run_claude parses the stream-json output and feeds each tool call
+    to the sink the orchestrator sets via seat_context — so Clay's in-sandbox
+    activity reaches the SAME logger as a litellm producer's (not just the part:
+    this drives the real run_claude -> parse -> sink path)."""
+    from modulatio import sandbox
+
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    monkeypatch.setattr(
+        sandbox, "build_sandboxed_argv",
+        lambda argv, root, **kw: (list(argv), {"PATH": "/bin", "HOME": str(Path.home())}),
+    )
+    stream = "\n".join([
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1",'
+        '"name":"WebFetch","input":{"url":"http://x"}}]}}',
+        '{"type":"user","message":{"content":[{"type":"tool_result",'
+        '"tool_use_id":"t1","content":"page text"}]}}',
+        '{"type":"result","result":"done"}',
+    ])
+    import types
+    monkeypatch.setattr(
+        claude_cli.subprocess, "run",
+        lambda *a, **k: types.SimpleNamespace(stdout=stream, returncode=0),
+    )
+
+    seen = []
+    with claude_cli.seat_context(tmp_path, (), on_tool_call=lambda n, a, r: seen.append((n, a, r))):
+        out = claude_cli.run_claude(
+            claude_bin="/x/claude", model="m", prompt="hi",
+            workspace=tmp_path, add_dirs=[],
+        )
+
+    assert out == "done"
+    assert seen == [("WebFetch", {"url": "http://x"}, "page text")]

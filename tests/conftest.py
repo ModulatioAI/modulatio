@@ -58,12 +58,25 @@ def _isolate_modulatio_config(tmp_path, monkeypatch):
     from modulatio import (
         config,
         preferences,
+        provider_keys,
         setup_state,
         model_presets,
         telegram_notify,
+        vault,
     )
 
     cfg = tmp_path / "_mod_config"
+    # The vault + cache fall back to the XDG bases ($XDG_DATA_HOME/modulatio,
+    # $XDG_CACHE_HOME/modulatio) — NOT under CONFIG_DIR — so isolating CONFIG_DIR
+    # alone left tests creating projects/vectors in the LIVE ~/.local/share +
+    # ~/.cache (test-fixture projects "phi"/"qct" appeared in a real install's
+    # vault). Point the XDG bases at tmp and rebind vault.VAULT_ROOT (frozen at
+    # import) so every default-vault write lands in the per-test sandbox.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "_xdg_data"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "_xdg_cache"))
+    monkeypatch.setattr(
+        vault, "VAULT_ROOT", tmp_path / "_xdg_data" / "modulatio" / "projects"
+    )
     monkeypatch.setattr(config, "CONFIG_DIR", cfg)
     monkeypatch.setattr(config, "DEFAULTS_FILE", cfg / "defaults.json")
     monkeypatch.setattr(config, "TEAM_TEMPLATE_FILE", cfg / "team_template.json")
@@ -72,6 +85,20 @@ def _isolate_modulatio_config(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_state, "SETUP_STATE_FILE", cfg / "setup-state.json")
     monkeypatch.setattr(model_presets, "PRESETS_FILE", cfg / "model_presets.json")
     monkeypatch.setattr(telegram_notify, "CONFIG_FILE", cfg / "telegram-config.json")
+    monkeypatch.setattr(provider_keys, "LABELS_FILE", cfg / "key_labels.json")
+    monkeypatch.setattr(provider_keys, "PINS_FILE", cfg / "key_pins.json")
+    # The crash/log store has its OWN hardcoded ~/.config/modulatio/crashes
+    # (``_crash._DEFAULT_DIR``), NOT derived from CONFIG_DIR — so the CONFIG_DIR
+    # redirect alone left crash/error/doctor logs leaking into the live config
+    # (test-fixture crashes appeared in a real install's dir). ``crash_dir()``
+    # honors ``MODULATIO_CRASH_DIR`` at call time, so isolate via the env var.
+    monkeypatch.setenv("MODULATIO_CRASH_DIR", str(cfg / "crashes"))
+    # Finished-product delivery also defaults OUTSIDE the config tree — to the
+    # real ``~/Documents/Modulatio`` (``delivery.delivery_root()`` honors
+    # ``MODULATIO_DELIVERY_DIR`` at call time). Delivery tests set it per-test,
+    # but isolate it here too so a future ``deliver_products=True`` path can never
+    # write a finished product into the developer's real Documents folder.
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(cfg / "delivered"))
     # Drop any cached defaults loaded from the real config before the redirect.
     config.reload()
     yield

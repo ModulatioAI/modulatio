@@ -244,6 +244,71 @@ OPENAI = Provider(
     notes="GPT models (text). ChatGPT/Codex OAuth or API key. No free tier.",
 )
 
+# Codex (GPT-5.5) reasoning-effort choices, highest→lowest. The ChatGPT backend
+# defaults to very high effort, which causes heavy reasoning-token bloat (slow,
+# over-long runs) — MEDIUM is the recommended default. Stored on a preset as
+# ``default_params={"reasoning": {"effort": <choice>}}``; the runner falls back
+# to MEDIUM when a preset carries no choice.
+CODEX_REASONING_EFFORTS: tuple[str, ...] = ("xhigh", "high", "medium", "low")
+CODEX_DEFAULT_EFFORT = "medium"
+
+
+def codex_reasoning_params(effort: str) -> dict:
+    """The ``default_params`` payload that pins a Codex preset's reasoning effort."""
+    return {"reasoning": {"effort": effort}}
+
+
+OPENAI_CODEX = Provider(
+    id="openai_codex",
+    name="OpenAI Codex (subscription)",
+    # The ChatGPT/Codex backend (Responses API) — NOT the metered api.openai.com,
+    # which has no subscription quota. ``request_endpoint="codex"`` routes presets
+    # to the Codex Responses tool-loop with the chatgpt-account-id header.
+    base_url="https://chatgpt.com/backend-api/codex",
+    api_format="openai",
+    request_endpoint="codex",
+    # Subscription access is OAuth-only (sign in via `codex login`).
+    auth_options=[
+        AuthOption(
+            auth_type="oauth_openai",
+            label="Sign in with ChatGPT (OAuth)",
+            oauth_hint="run `codex login`",
+        ),
+    ],
+    models_source=ModelsSource(
+        kind="picklist", picklist_key="openai_codex", modality="text"
+    ),
+    signup_url="https://chatgpt.com/codex",
+    free_detect="none",
+    notes="GPT-5.5 via the ChatGPT/Codex subscription (OAuth, ChatGPT backend). "
+          "Separate from the metered OpenAI API.",
+)
+
+CLAUDE_CLI = Provider(
+    id="claude_cli",
+    name="Clay — Claude avatar (Claude Code subscription)",
+    # Reached by spawning the official `claude -p` binary through the harness —
+    # NOT the metered api.anthropic.com and NOT the OAuth token. Additive: the
+    # `anthropic` API-key provider stays intact.
+    base_url="claude-cli",
+    api_format="anthropic",
+    request_endpoint="claude_cli",
+    auth_options=[
+        AuthOption(
+            auth_type="claude_cli",
+            label="Claude Code subscription (run `claude` to sign in)",
+            oauth_hint="install Claude Code, then run `claude`",
+        ),
+    ],
+    models_source=ModelsSource(
+        kind="picklist", picklist_key="claude_cli", modality="text"
+    ),
+    signup_url="https://claude.com/product/claude-code",
+    free_detect="none",
+    notes="Clay is a Claude model running through your Claude Code subscription "
+          "(claude -p). Separate from the metered Anthropic API.",
+)
+
 OPENAI_CODEX = Provider(
     id="openai_codex",
     name="OpenAI Codex (subscription)",

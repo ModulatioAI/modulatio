@@ -47,6 +47,29 @@ def test_seat_context_confines_clay_single_shot(monkeypatch, tmp_path):
     assert "/granted" in seen["add_dirs"]
 
 
+def test_clay_single_shot_omits_no_think_prefix(monkeypatch, tmp_path):
+    """Clay (claude_cli) must NOT get the ``/no_think`` prefix — the Claude CLI
+    reads a leading ``/`` as a slash command, returning 'Unknown command:
+    /no_think' and breaking every single-shot Clay call (planner/QC/reflect)."""
+    from modulatio import claude_cli, model_presets, oauth_helpers, runners
+
+    monkeypatch.setattr(model_presets, "load_presets", lambda: {"clay": _clay_preset()})
+    monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: "/x/claude")
+    seen: dict = {}
+    monkeypatch.setattr(
+        runners.claude_cli, "run_claude", lambda **kw: seen.update(kw) or "ok"
+    )
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    with claude_cli.seat_context(ws, ()):
+        # disable_thinking defaults True — the prompt must still pass through clean.
+        runners.litellm_runner("clay")("decompose this goal")
+
+    assert seen["prompt"] == "decompose this goal"
+    assert not seen["prompt"].startswith("/no_think")
+
+
 def test_seat_context_confines_clay_chat(monkeypatch, tmp_path):
     """The chat seat runner (``_build_claude_cli_chat_runner``) threads the
     same seat context into ``run_claude``."""

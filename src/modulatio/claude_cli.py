@@ -19,8 +19,49 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Callable, Iterable
 
-_DEFAULT_SYSTEM = "You are a helpful assistant."
+#: Default seat binding. A Clay seat is a ONE-SHOT subprocess: there is no
+#: background, no one is watching a progress feed. Without this, weaker models
+#: (esp. haiku) treat the task like an interactive Claude Code session — they
+#: spawn a sub-agent / "deep-research workflow", return "watch /workflows", and
+#: ship a deferral note instead of the deliverable (QC then rejects it forever).
+#: Prose bends; the real bar is the --disallowedTools guard below — this is belt
+#: to the engine's suspenders. Overridden when the caller passes its own system.
+_DEFAULT_SYSTEM = (
+    "You are a Modulatio seat doing one-shot work. Complete the assigned task and "
+    "produce the result in THIS turn — fetch what you need and write the "
+    "deliverable directly. Your final message IS the deliverable; it is saved and "
+    "used verbatim. You may delegate to a helper sub-agent or two if a subtask "
+    "genuinely needs it, but do NOT launch a background workflow or defer work to "
+    "a background process, and never tell anyone to 'watch progress' — there is no "
+    "background here and no one is watching. Produce the complete result now."
+)
+
+#: The ONE Claude Code tool stripped from CONFINED KICKOFF seats (producer / QC /
+#: plan / reflect — the single-shot path) by passing this as ``disallowed_tools``:
+#: ``Workflow``, Claude Code's UNBOUNDED background orchestrator. The bug that
+#: prompted this was a Clay-haiku producer firing off a background "deep-research
+#: workflow" and shipping "watch /workflows" instead of the artifact — spawning an
+#: invisible, unkillable crew that gave it effectively INFINITE retries BELOW
+#: Modulatio's retry counter. ``Workflow`` returns immediately (async/background),
+#: so it is the deferral + runaway mechanism; removing it makes that failure
+#: impossible, not just discouraged ("engine binds, prose only bends").
+#: We DELIBERATELY KEEP ``Task`` / ``Agent`` (the SYNCHRONOUS sub-agent spawners)
+#: — Clif: "any LLM should be able to spawn 1 or 2 agents if it needs to." Those
+#: block until the helper returns and fold its work into THIS turn, so there is no
+#: background to defer to and the result stays bounded by the single call.
+#: DELIBERATELY NOT applied to the interactive HARNESS lane (Leader converse /
+#: solo coding, the chat runner): there, orchestrating IS the job, so the Leader
+#: keeps its full agentic loadout (Clif: "yes in a kickoff, no in the harness").
+_DISALLOWED_TOOLS = ("Workflow",)
+
+#: A tool-activity sink ``(name, args, result) -> None`` — same signature as the
+#: orchestrator's tool-loop logger, so Clay's (otherwise-invisible) in-sandbox
+#: tool calls flow into the SAME per-task tool_calls jsonl + Team TV as a
+#: codex/litellm producer's. Unset (bare CLI / single-shot planner) → no sink,
+#: tools just aren't logged. Set by the orchestrator alongside ``seat_context``.
+ToolCallSink = Callable[[str, dict, str], None]
 
 
 def build_claude_argv(
@@ -32,14 +73,25 @@ def build_claude_argv(
     add_dirs: list[str] | None = None,
     session_id: str | None = None,
     resume: str | None = None,
+    disallowed_tools: tuple[str, ...] = (),
 ) -> list[str]:
     """Build the ``claude -p`` argv. ``resume`` re-attaches a prior session for
-    multi-turn converse; ``session_id`` pins a new one."""
+    multi-turn converse; ``session_id`` pins a new one. ``disallowed_tools``
+    strips named Claude Code tools (kickoff seats pass ``_DISALLOWED_TOOLS`` to
+    block sub-agent / workflow spawning; the harness lane passes nothing)."""
     argv = [claude_bin, "-p",
             "--model", model,
             "--append-system-prompt", system or _DEFAULT_SYSTEM,
-            "--permission-mode", "bypassPermissions",
-            "--output-format", "json"]
+            "--permission-mode", "bypassPermissions"]
+    if disallowed_tools:
+        # Variadic ``--disallowedTools <tools...>``: a flag MUST follow so it
+        # can't swallow the trailing prompt — ``--output-format`` does.
+        argv += ["--disallowedTools", *disallowed_tools]
+    # stream-json (requires --verbose in -p mode) emits every event — tool_use /
+    # tool_result / text — so Clay's in-sandbox tool calls become observable;
+    # ``parse_claude_stream`` extracts them + the final result. (``--output-format
+    # json`` returns only the result, why Clay's activity used to be invisible.)
+    argv += ["--output-format", "stream-json", "--verbose"]
     for d in (add_dirs or []):
         argv += ["--add-dir", d]
     if resume:
@@ -70,6 +122,60 @@ def text_from_claude_json(raw: str) -> str:
     return str(data.get("result") or "")
 
 
+def _tool_result_text(content) -> str:
+    """Flatten a Claude ``tool_result`` content (a string, or a list of
+    ``{type:text, text:...}`` blocks) to plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return ""
+
+
+def parse_claude_stream(
+    lines: Iterable[str], on_tool_call: "ToolCallSink | None" = None
+) -> str:
+    """Parse a ``claude -p --output-format stream-json`` event stream.
+
+    Calls ``on_tool_call(name, args, result)`` once per completed tool use
+    (pairing each ``tool_use`` with its later ``tool_result`` by id) and returns
+    the final assistant ``result`` text. Pure + malformed-tolerant — a bad line
+    is skipped, never crashes the seat.
+    """
+    pending: dict[str, dict] = {}  # tool_use_id -> {name, input}
+    result = ""
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            ev = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(ev, dict):
+            continue
+        etype = ev.get("type")
+        if etype in ("assistant", "user"):
+            for block in ((ev.get("message") or {}).get("content") or []):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    pending[block.get("id")] = {
+                        "name": block.get("name") or "?",
+                        "input": block.get("input") or {},
+                    }
+                elif block.get("type") == "tool_result":
+                    rec = pending.pop(block.get("tool_use_id"), None)
+                    if rec is not None and on_tool_call is not None:
+                        on_tool_call(
+                            rec["name"], rec["input"],
+                            _tool_result_text(block.get("content")),
+                        )
+        elif etype == "result":
+            result = str(ev.get("result") or "")
+    return result
+
+
 # ── Seat context (orchestrator → runner) ──────────────────────────────────
 # The standalone runner factories get only a preset key — no project/workspace/
 # grant context. The orchestrator threads the seat's confined workspace + the
@@ -81,6 +187,13 @@ def text_from_claude_json(raw: str) -> str:
 #: (workspace_root | None, granted_roots) — None workspace → temp fallback.
 seat_context_var: contextvars.ContextVar[tuple[Path | None, tuple[str, ...]]] = (
     contextvars.ContextVar("modulatio_clay_seat", default=(None, ()))
+)
+
+#: Tool-activity sink for the enclosed Clay call (None → don't log tools). Set by
+#: the orchestrator together with ``seat_context`` so Clay's in-sandbox tool
+#: calls reach the same per-task log as a litellm producer's.
+seat_activity_var: contextvars.ContextVar["ToolCallSink | None"] = (
+    contextvars.ContextVar("modulatio_clay_activity", default=None)
 )
 
 
@@ -95,15 +208,20 @@ def current_seat_context() -> tuple[Path, list[str]]:
 
 
 @contextlib.contextmanager
-def seat_context(workspace: Path, granted_roots: tuple[str, ...]):
-    """Orchestrator-side: set the Clay seat context for the enclosed runner
-    call(s), then restore. Mirrors how the orchestrator sets the sandbox
-    contextvars around a tool call."""
+def seat_context(
+    workspace: Path, granted_roots: tuple[str, ...],
+    on_tool_call: "ToolCallSink | None" = None,
+):
+    """Orchestrator-side: set the Clay seat context (workspace + grants, and an
+    optional tool-activity sink) for the enclosed runner call(s), then restore.
+    Mirrors how the orchestrator sets the sandbox contextvars around a tool call."""
     token = seat_context_var.set((workspace, tuple(granted_roots)))
+    atoken = seat_activity_var.set(on_tool_call)
     try:
         yield
     finally:
         seat_context_var.reset(token)
+        seat_activity_var.reset(atoken)
 
 
 def run_claude(
@@ -116,6 +234,7 @@ def run_claude(
     system: str | None = None,
     session_id: str | None = None,
     resume: str | None = None,
+    disallowed_tools: tuple[str, ...] = (),
     timeout: float = 1800.0,
 ) -> str:
     """Spawn ``claude -p`` confined to ``workspace`` (+ granted ``add_dirs``),
@@ -133,6 +252,7 @@ def run_claude(
     argv = build_claude_argv(
         claude_bin=str(resolved), model=model, prompt=prompt, system=system,
         add_dirs=add_dirs, session_id=session_id, resume=resume,
+        disallowed_tools=disallowed_tools,
     )
     claude_home = Path.home() / ".claude"
     # The claude binary may live under $HOME (e.g. ~/.local/share/claude/versions/<N>),
@@ -164,7 +284,11 @@ def run_claude(
         wrapped, env=child_env, cwd=str(workspace),
         capture_output=True, text=True, timeout=timeout,
     )
-    return text_from_claude_json(proc.stdout)
+    # stream-json output: parse the event stream, emitting Clay's in-sandbox tool
+    # calls to the orchestrator-set activity sink, and return the final result.
+    return parse_claude_stream(
+        proc.stdout.splitlines(), on_tool_call=seat_activity_var.get()
+    )
 
 
 __all__ = [
@@ -172,7 +296,9 @@ __all__ = [
     "claude_env",
     "run_claude",
     "text_from_claude_json",
+    "parse_claude_stream",
     "seat_context_var",
+    "seat_activity_var",
     "current_seat_context",
     "seat_context",
 ]

@@ -20,29 +20,26 @@ Evidence required:
 
 {inbox_notes}
 
-Scope discipline: task count tracks goal complexity. Single-artifact
-goal (list, report, analysis doc, code file) decomposes into 1-2
-production tasks: gather, draft. Do NOT add infrastructure tasks (db
-setup, ingestion, schema versioning, dual-source verification) unless
-goal explicitly asks to BUILD that infra as deliverable. Prefer
-smallest plan; team adds follow-ons later if artifact reveals gap.
+Scope discipline: task count tracks goal complexity. A SIMPLE single-artifact
+goal (one list/report/analysis doc/code file) decomposes into 1-2 production
+tasks: gather, draft. But if that one artifact spans MULTIPLE independent
+research areas (most briefs), FAN the gather into parallel batches + a synthesis,
+not one serial gather (see SWEEP). Do NOT add infrastructure tasks (db setup,
+ingestion, schema versioning, dual-source verification) unless goal explicitly
+asks to BUILD that infra as deliverable. Prefer the smallest plan that keeps the
+team CONCURRENT; team adds follow-ons later if the artifact reveals a gap.
 
-SWEEP work — bound it at PLAN time, WITHIN the task cap. When the goal
-is "do X for EACH of N items" (survey/catalog/gather/compare across a
-set), don't pile all N into one vague task — but don't fan to
-one-task-per-item either: that busts the per-sub-objective task cap (a
-research goal with no per-item artifact evidence caps low, ~3 tasks).
-Web fetches are size-bounded, so ONE research task can cover a small
-handful of items. So GROUP items into a FEW bounded tasks that fit the
-cap (each surveys a batch); a separate draft/synthesis sub-objective
-combines their artifacts. Signals: "all/each/every/top N",
-"survey/compare across", an enumerable list. More items than fit the cap
-→ cover a bounded BATCH now, name the rest as a deferred PHASE. Items
-not named yet ("the current SOTA in X") → a cheap SCOUT task enumerates
-them first, then the batch tasks build on it. Never one task that both
-discovers AND deep-dives the whole set. (Grouping is for size-bounded
-GATHER work — for independent GENERATIVE deliverables, fan wide instead;
-see PARALLEL DELIVERABLES.)
+SWEEP / GATHER (research, survey, "X for EACH of N items"): FAN the independent
+areas into a FEW PARALLEL batch tasks (each a handful of related areas) the team
+researches CONCURRENTLY, then a SYNTHESIS sub-objective (`depends_on` the
+batches) combines them. The synthesis is EXEMPT from the task cap, so N batches
++ 1 synthesis is allowed — prefer this fan-out over ONE serial research task
+(one producer, no concurrency). Don't fan one-task-per-item either (web fetches
+are size-bounded — each batch covers a handful; one-per-item busts the cap AND
+duplicates sourcing). Signals: "all/each/every/top N", an enumerable list of
+areas. Unnamed set ("SOTA in X") → a cheap SCOUT enumerates first, then the
+batches build on it. More areas than fit → a bounded BATCH SET now, the rest a
+deferred PHASE. (The GATHER cousin of PARALLEL DELIVERABLES.)
 
 PARALLEL DELIVERABLES — when the goal yields N INDEPENDENT, substantial
 GENERATIVE deliverables (N stories, chapters, sections, profiles, per-item

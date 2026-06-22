@@ -27,6 +27,7 @@ from modulatio import provider_catalog as pc
 from modulatio import provider_keys
 from modulatio.tui.widgets.auth_step import AuthStep
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
+from modulatio.tui.widgets.effort_picker import EffortPicker
 from modulatio.tui.widgets.model_picker import ModelPicker
 from modulatio.tui.widgets.provider_picker import ProviderPicker
 
@@ -55,6 +56,7 @@ class ConfigScreen(Vertical):
         self._env_var: str | None = None
         self._base_url: str | None = None
         self._pool: bool = False
+        self._pending_model_id: str | None = None  # codex: held during effort pick
         # Pin-manager state (the optional model-context lever)
         self._km_model: str | None = None
         self._km_base: str | None = None
@@ -214,9 +216,23 @@ class ConfigScreen(Vertical):
     async def on_model_picker_model_chosen(
         self, event: ModelPicker.ModelChosen
     ) -> None:
+        # Codex (GPT-5.5) seats get a reasoning-effort pick before registering —
+        # the backend's default very-high effort bloats reasoning tokens.
+        provider = pc.get_provider(self._provider_id or "")
+        if provider is not None and provider.request_endpoint == "codex":
+            self._pending_model_id = event.model_id
+            await self._swap(EffortPicker(id="cfg-ep"))
+            return
         key = self.register(event.model_id)
         await self.show_list(
             f"Added '{key}'." if key else "Could not add the model.")
+
+    async def on_effort_picker_effort_chosen(
+        self, event: EffortPicker.EffortChosen
+    ) -> None:
+        key = self.register(self._pending_model_id or "", effort=event.effort)
+        await self.show_list(
+            f"Added '{key}' ({event.effort})." if key else "Could not add the model.")
 
     # ── key plumbing shared by both managers ────────────────────────────
 
@@ -421,7 +437,7 @@ class ConfigScreen(Vertical):
 
     # ── register → the existing model_presets backend ───────────────────
 
-    def register(self, model_id: str) -> str | None:
+    def register(self, model_id: str, effort: str | None = None) -> str | None:
         provider = pc.get_provider(self._provider_id or "")
         if provider is None or self._auth_type is None:
             return None
@@ -435,6 +451,8 @@ class ConfigScreen(Vertical):
         kwargs = pc.preset_kwargs(provider, model, auth, pool=self._pool)
         if self._base_url:  # custom endpoint override
             kwargs["base_url"] = self._base_url
+        if effort:  # codex reasoning-effort pick
+            kwargs["default_params"] = pc.codex_reasoning_params(effort)
         key = kwargs.pop("key")
         try:
             model_presets.add_preset(key, **kwargs)

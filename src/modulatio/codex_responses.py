@@ -20,7 +20,18 @@ can reuse it. Recipe validated live 2026-06-19 (see the reference engram).
 from __future__ import annotations
 
 import json
+import warnings
 from typing import Any
+
+# litellm serializes the Codex Responses usage object into a model whose shape
+# the ChatGPT backend doesn't quite match, emitting a noisy pydantic serializer
+# UserWarning to stderr on every codex turn. Codex is a flat-rate subscription
+# (we don't record its usage), so the warning is pure terminal clutter for the
+# user. Silence just that one message, module-level (thread-safe, unlike
+# catch_warnings()) and narrowly scoped so real warnings elsewhere still surface.
+warnings.filterwarnings(
+    "ignore", message="Pydantic serializer warnings", category=UserWarning
+)
 
 _DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
 

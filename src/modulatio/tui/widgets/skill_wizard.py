@@ -13,6 +13,7 @@ file directly — adding UI for them is its own slice when concrete.
 """
 from __future__ import annotations
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Label, Select, Static, TextArea
@@ -152,14 +153,14 @@ class SkillWizard(Vertical):
                 project_code=project_code,
             )
         except FileExistsError as exc:
-            status.update(f"[red]Skill already exists: {exc}[/red]")
+            status.update(f"[red]Skill already exists: {escape(str(exc))}[/red]")
             return None
         except Exception as exc:
-            status.update(f"[red]Failed to create skill: {exc}[/red]")
+            status.update(f"[red]Failed to create skill: {escape(str(exc))}[/red]")
             return None
 
         self.last_created = created
-        status.update(f"[green]Created {created.name}[/green]")
+        status.update(f"[green]Created {escape(created.name)}[/green]")
         return created
 
 

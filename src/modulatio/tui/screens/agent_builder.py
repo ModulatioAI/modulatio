@@ -342,10 +342,14 @@ class AgentBuilderScreen(Vertical):
             await self._show_fallbacks(self._target_agent, f"Added fallback '{preset}'.")
             return
         if self._flow == "change" and self._target_agent:
-            roster.add_model(
-                project_code=self.project_code,
-                agent_id=self._target_agent, model=preset,
-            )
+            try:
+                roster.add_model(
+                    project_code=self.project_code,
+                    agent_id=self._target_agent, model=preset,
+                )
+            except Exception as exc:  # noqa: BLE001 — surface via status, never crash the screen
+                await self.show_list(f"Couldn't assign '{preset}': {exc}")
+                return
             await self.show_list(f"Assigned '{preset}' to {self._target_agent}.")
         elif self._flow == "add":
             await self._add_agent(preset)

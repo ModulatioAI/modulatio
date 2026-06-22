@@ -10,7 +10,7 @@ truncated-rationale signature → r2 cleared). **Hero (code) r1 BLOCK** (2 block
 signature component; + moderate + 2 minors) **→ all folded; r2 fold-confirm pending Clif relay.**
 Post-Hero `defect_type` threading rippled into the escalation helper → reworked to keep
 `last_qc` a 2-tuple (regression caught by the FULL suite, not the targeted one). **Full suite
-3118 passed, ruff clean.** **✅ MERGED to local main `034563f` (--no-ff) 2026-06-12** — suite 3118 green ON MAIN, ruff clean. NEEDS PUBLIC PUSH LATER (held local, Gate-2 = Clif). Janitor sibling (decay + win-effect validation) deferred.
+3118 passed, ruff clean.** → merge (= Clif). Held local on `arc/codify-the-win`.
 
 > **Hero remediation (2026-06-12).** SIGN-WITH-RESERVATIONS — three design-level holes, all the
 > "does the right thing and forgets to say so / claims a safety it hasn't mechanized" shape; the

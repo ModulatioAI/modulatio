@@ -98,7 +98,15 @@ class BugReportModal(ModalScreen[None]):
 
     @work(thread=True, exclusive=True)
     def _submit_worker(self, title: str, body: str) -> None:
-        result = bug_report.submit_issue(title, body)
+        # Guard so a raise can't strand the modal on "Filing…" and re-raise as
+        # WorkerFailed on app exit (mirror send_log_modal's Nemo M2 belt).
+        try:
+            result = bug_report.submit_issue(title, body)
+        except Exception as exc:  # noqa: BLE001 — surface, never strand
+            result = bug_report.BugReportResult(
+                submitted=False, url="",
+                detail=f"Couldn't file issue: {type(exc).__name__}: {exc}",
+            )
         self.app.call_from_thread(self._show_result, result)
 
     def _show_result(self, result: "bug_report.BugReportResult") -> None:

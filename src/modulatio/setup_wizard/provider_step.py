@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from modulatio import model_presets, oauth_helpers, theme
+from modulatio import model_presets, oauth_helpers, provider_catalog as pc, theme
 from modulatio.setup_wizard import steps
 
 
@@ -316,15 +316,23 @@ def _quick_add_openai_oauth() -> str | None:
         model_raw = pick
     if model_raw in (steps.BACK, steps.QUIT) or not isinstance(model_raw, str):
         return None
+    effort = steps.pick_option(
+        "Reasoning effort (medium recommended — xhigh causes token bloat)",
+        [(e, e) for e in pc.CODEX_REASONING_EFFORTS],
+        default_index=pc.CODEX_REASONING_EFFORTS.index(pc.CODEX_DEFAULT_EFFORT),
+    )
+    if effort in (steps.BACK, steps.QUIT) or not isinstance(effort, str):
+        return None
     key = _next_unique_key(f"codex_{model_raw.replace('.', '_').replace('-', '_')}")
     model_presets.add_preset(
         key,
-        label=f"{model_raw} (OpenAI Codex subscription)",
+        label=f"{model_raw} (OpenAI Codex subscription, {effort})",
         base_url="https://chatgpt.com/backend-api/codex",
         api_format="openai",
         auth_type="oauth_openai",
         auth_config={},
         endpoint="codex",
+        default_params=pc.codex_reasoning_params(effort),
         model=model_raw,
     )
     theme.success(f"Registered '{key}' → Codex subscription running {model_raw}.")
@@ -543,7 +551,7 @@ def _status_badge(key: str, staged_keys: dict[str, str] | None = None) -> str:
         return theme.color("[ready]", "success")
     p = model_presets.get_preset(key) or {}
     auth_type = p.get("auth_type", "")
-    if auth_type == "oauth_anthropic":
+    if auth_type in ("oauth_anthropic", "claude_cli"):
         return theme.color("[no Claude creds]", "warning")
     if auth_type == "oauth_openai":
         return theme.color("[no Codex creds]", "warning")
@@ -615,7 +623,7 @@ def run(state: dict) -> Any:
 
     while True:
         theme.clear_screen()
-        theme.step_header(3, 7, "Configure Models")
+        theme.step_header(4, 9, "Configure Models")
         print(theme.color("  Add the models your agents will use.", "muted"))
         print(theme.color("  Each entry holds endpoint + auth + model id — all self-contained.", "muted"))
         print()

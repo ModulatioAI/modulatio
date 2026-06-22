@@ -202,6 +202,33 @@ def _handle_bug(args: list[str]) -> CommandResult:
     )
 
 
+def _handle_models(args: list[str]) -> CommandResult:
+    """`/models` — open the model configurator (CONFIG → MODELS) to switch/add."""
+    return CommandResult(output="Opening models…", side_effect="open_models")
+
+
+def _handle_new(args: list[str]) -> CommandResult:
+    """`/new` — start a fresh Leader conversation; the current thread is archived
+    aside (never deleted)."""
+    return CommandResult(output="", side_effect="leader_new_conversation")
+
+
+def _handle_editor(args: list[str]) -> CommandResult:
+    """`/editor` — compose the next message in $EDITOR, then drop it back in the
+    chat box for review before sending."""
+    return CommandResult(output="", side_effect="open_editor")
+
+
+def _handle_compact_deferred(args: list[str]) -> CommandResult:
+    """`/compact` — summarizing the conversation thread to reclaim context needs a
+    dedicated pipeline; on the roadmap, not yet wired. ``/new`` is the interim."""
+    return CommandResult(
+        output="/compact (summarize the conversation to reclaim context) is on the "
+               "roadmap — not wired yet. For now, /new starts a fresh thread.",
+        ok=False,
+    )
+
+
 def _handle_daemon_deferred(args: list[str]) -> CommandResult:
     return CommandResult(
         output="/daemon requires slice 8 (daemon module). Not yet implemented.",
@@ -330,6 +357,35 @@ COMMANDS: tuple[Command, ...] = (
         description="Open the bug-report form (files a GitHub issue).",
         category="Help",
         handler=_handle_bug,
+    ),
+    # opencode-parity harness commands (where a Modulatio backend exists).
+    Command(
+        shortcut="/models",
+        name="Switch model",
+        description="Open the model configurator (CONFIG → MODELS).",
+        category="System",
+        handler=_handle_models,
+    ),
+    Command(
+        shortcut="/new",
+        name="New conversation",
+        description="Archive the current Leader thread and start fresh.",
+        category="Prompt",
+        handler=_handle_new,
+    ),
+    Command(
+        shortcut="/editor",
+        name="Compose in $EDITOR",
+        description="Edit the next message in $EDITOR, then send it back.",
+        category="Prompt",
+        handler=_handle_editor,
+    ),
+    Command(
+        shortcut="/compact",
+        name="Compact conversation (roadmap)",
+        description="Summarize the thread to reclaim context — not yet wired.",
+        category="Deferred",
+        handler=_handle_compact_deferred,
     ),
     Command(
         shortcut="/work",

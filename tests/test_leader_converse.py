@@ -51,6 +51,21 @@ def test_converse_offline_acknowledges_and_persists(project: Project):
     assert orch._conversation_path().exists()
 
 
+def test_reset_conversation_archives_thread_for_a_fresh_start(project: Project):
+    """`/new`: reset_conversation renames the thread aside (never deletes) so the
+    next turn starts clean, and returns None when there's nothing to archive."""
+    orch = Orchestrator(project, _runners())
+    assert orch.reset_conversation() is None  # no thread yet
+
+    orch.converse("remember this")
+    assert orch._conversation_path().exists()
+
+    archived = orch.reset_conversation()
+    assert archived is not None and archived.exists()  # history preserved aside
+    assert not orch._conversation_path().exists()      # live thread cleared
+    assert orch._load_conversation() == []             # next turn starts fresh
+
+
 def test_converse_thread_accumulates_across_turns(project: Project):
     orch = Orchestrator(project, _runners())
     orch.converse("first message")

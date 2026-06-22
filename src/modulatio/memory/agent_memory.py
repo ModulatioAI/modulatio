@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from modulatio.vault import project_dir
+from modulatio.vault import project_dir, validate_registry_name
 
 
 # Tunables (carried from v1.3.1; keep conservative — small per-agent state).
@@ -42,7 +42,10 @@ SEMANTIC_MAX_ENTRIES = 50
 # === Path helpers ===
 
 def _agent_dir(agent_id: str, project_code: str) -> Path:
-    d = project_dir(project_code) / "memory" / agent_id
+    # H1 invariant (mirror skills/standards/job-templates): agent_id becomes a
+    # path component, so a separator / '..' / leading dot must never escape the
+    # project's memory/ root. Fail-closed — the persistence layer binds it.
+    d = project_dir(project_code) / "memory" / validate_registry_name(agent_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
 

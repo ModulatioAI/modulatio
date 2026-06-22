@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from modulatio import standards
 from modulatio.vault import project_dir, validate_registry_name
 
 
@@ -219,6 +220,18 @@ def approve(proposal_id: str, project_code: str) -> Path:
     # separator / '..' / leading dot, so a malicious or injected domain is
     # refused (fail-closed) rather than steering an arbitrary write.
     safe_domain = validate_registry_name(proposal.domain)
+    # Writer/reader contract: standards.load_with_metadata only reads a domain
+    # matching standards._DOMAIN_RE (lowercase, <=32). validate_registry_name is
+    # looser (mixed-case, <=64), so a free-form artifact_kind like "Code" or a
+    # 40-char kind passes here but writes a file the reader can NEVER load — a
+    # silently-orphaned rule (approval "succeeds", proposal deleted, rule lost).
+    # Refuse loudly instead of writing an unreadable standards file.
+    if not standards._DOMAIN_RE.match(safe_domain):
+        raise ValueError(
+            f"proposal domain {safe_domain!r} is not loadable by standards "
+            "(needs lowercase [a-z0-9_-], <=32 chars) — refusing to write an "
+            "unreadable rule"
+        )
     domain_file = _standards_dir(project_code) / f"{safe_domain}.md"
     _append_to_team_section(domain_file, proposal.title, proposal.rule_body)
     # One-shot disposition — remove the proposal file.

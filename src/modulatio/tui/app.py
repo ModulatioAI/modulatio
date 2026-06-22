@@ -298,6 +298,11 @@ class ModulatioApp(App):
         # STOP the running job — the operator's kill-switch (Fix C). Cooperative:
         # the run halts at the next safe point, finishing the current step.
         ("f8", "stop_job", "STOP"),
+        # ESC interrupts the Leader mid-thought in the code harness — stops his
+        # in-flight converse/solo-coding tool-loop at the next step. A pushed
+        # modal (e.g. the permission prompt) captures ESC first, so this only
+        # fires on the main screen. No-op when the Leader isn't working.
+        ("escape", "interrupt_leader", "INTERRUPT"),
         # Select text in a TV stream (drag), then Ctrl+C to copy it to the OS
         # clipboard; Ctrl+V pastes the OS clipboard into the focused text field.
         # (Quit is Alt+Q / Ctrl+Q.)
@@ -887,6 +892,7 @@ class ModulatioApp(App):
             if team_status is not None:
                 team_status.set_done()
 
+
     def _handle_slash_command(self, text: str) -> None:
         """Route a `/cmd args` input to the commands.py dispatcher and apply
         any side-effect (clear, switch_tab, etc.). Slice 5."""
@@ -971,6 +977,20 @@ class ModulatioApp(App):
                 except Exception:
                     pass
             return
+        if side_effect == "open_models":
+            # /models — jump to CONFIG and flip its inner tab to MODELS.
+            try:
+                self.query_one("#app-tabs", TabbedContent).active = "tab-config"
+                self.query_one("#config-flip", TabbedContent).active = "config-models"
+            except Exception:
+                pass
+            return
+        if side_effect == "leader_new_conversation":
+            self._leader_new_conversation()
+            return
+        if side_effect == "open_editor":
+            self._compose_in_editor()
+            return
         if side_effect == "restart_tui":
             self.exit(return_code=42)
             return
@@ -1044,6 +1064,59 @@ class ModulatioApp(App):
                 )
 
         self.push_screen(LeaderApprovalModal(request, warning=warning), on_dismiss)
+
+    # ── Leader permission widen (/work, /rp) ────────────────────────────
+
+
+    def _leader_new_conversation(self) -> None:
+        """`/new` — archive the Leader thread + clear the LEADER chat TV so the
+        next message starts a fresh conversation. Safe when no thread or
+        orchestrator exists yet (just clears the view)."""
+        orch = self._conversation_orchestrator()
+        archived = orch.reset_conversation() if orch is not None else None
+        try:
+            self.query_one("#stream-leader", StreamView).clear()
+        except Exception:
+            pass
+        self._set_response(
+            f"Fresh conversation — prior thread archived to {archived.name}."
+            if archived is not None else "Fresh conversation."
+        )
+
+    def _compose_in_editor(self) -> None:
+        """`/editor` — compose the next chat message in $EDITOR. Suspends the TUI,
+        opens the editor seeded with the current chat-box text, reads it back in.
+        Any failure (no editor, write/read error) surfaces as a status, never a
+        crash."""
+        import os
+        import shlex
+        import subprocess
+        import tempfile
+
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
+        try:
+            inp = self.query_one("#prompt-input")
+        except Exception:
+            return
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".md", delete=False, encoding="utf-8"
+            ) as tf:
+                tf.write(getattr(inp, "text", "") or "")
+                tmp = tf.name
+            with self.suspend():
+                subprocess.run([*shlex.split(editor), tmp], check=False)
+            with open(tmp, encoding="utf-8") as fh:
+                inp.text = fh.read().rstrip("\n")
+        except Exception as exc:  # noqa: BLE001 — editor failure must not crash the TUI
+            self._set_response(f"Editor failed: {exc}")
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     def _record_activity(self, event: ActivityEvent) -> None:
         """Thread-safe activity bridge. Called by the Orchestrator; may
@@ -1308,6 +1381,27 @@ class ModulatioApp(App):
             "The Mod Squad floor is cleared; the Leader will report what landed."
         )
 
+    def _converse_worker_live(self) -> bool:
+        """True if a converse/solo-coding turn is in flight on its worker."""
+        return any(
+            getattr(w, "group", None) == "converse"
+            and w.state in (WorkerState.PENDING, WorkerState.RUNNING)
+            for w in self.workers
+        )
+
+    def action_interrupt_leader(self) -> None:
+        """ESC → interrupt the Leader's in-flight converse / solo-coding turn.
+        Signals the converse orchestrator's abort_event; the tool-loop reads it
+        at the next step boundary and returns a clean note. No-op when the Leader
+        isn't working (so a stray ESC can't hurt). A pushed modal handles its own
+        ESC first, so this never steals the permission prompt's deny key."""
+        orch = getattr(self, "_conv_orch", None)
+        if orch is None or not self._converse_worker_live():
+            return
+        # Signal the tool-loop; it bails at the next step and the converse-done
+        # path renders the "(Stopped …)" reply + settles the lane on its own.
+        orch.abort_event.set()  # thread-safe; the tool-loop reads it
+
     def _clear_team_tv(self) -> None:
         """Clear the TEAM (Mod Squad) TV transcript + its status line. The LEADER
         chat lane is left intact. Best-effort (TUI may be mid-teardown)."""
@@ -1455,6 +1549,7 @@ class ModulatioApp(App):
         # Re-evaluate which footer keys show: the CONSOLE-only keys hide on
         # other tabs (see check_action).
         self.refresh_bindings()
+
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         """Hide the CONSOLE-only keys (LEADER/TEAM flip, COMPOSE, KICK OFF, STOP)

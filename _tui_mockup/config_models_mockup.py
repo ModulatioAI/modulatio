@@ -771,7 +771,7 @@ class ConfigModelsMockup(App):
         if tid == "prov-table" and self.view == "providers":
             self._enter_auth(PROVIDERS[event.cursor_row])
         elif tid == "model-table" and self.view == "models":
-            self._register_model(event.cursor_row)
+            self._register(event.cursor_row)
 
     def on_option_list_option_highlighted(self, event) -> None:
         if event.option_list.id == "auth-opts" and self.view == "auth":
@@ -801,7 +801,7 @@ class ConfigModelsMockup(App):
         if iid == "auth-key" and self.view == "auth":
             self._enter_models()
         elif iid == "model-search" and self.view == "models":
-            self._register_model(self.query_one("#model-table", DataTable).cursor_row or 0)
+            self._register(self.query_one("#model-table", DataTable).cursor_row or 0)
         elif iid in ("kd-newkey", "kd-label") and self.view == "keydetail":
             self._add_key()
 

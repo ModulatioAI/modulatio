@@ -580,7 +580,16 @@ def litellm_runner(
         from litellm.exceptions import AuthenticationError, RateLimitError
         from modulatio import context_budget as _ctx_budget
 
-        body = f"/no_think\n\n{prompt}" if disable_thinking else prompt
+        # ``/no_think`` disables the inner monologue on reasoning-toggle models
+        # (Qwen-class) that honor it in the prompt. NEVER prepend it for Clay
+        # (claude_cli): the Claude CLI reads a leading ``/`` as a slash command,
+        # so ``/no_think`` comes back as "Unknown command: /no_think" and every
+        # single-shot Clay call (planner, decompose, QC, reflect) returns garbage.
+        body = (
+            f"/no_think\n\n{prompt}"
+            if disable_thinking and endpoint != "claude_cli"
+            else prompt
+        )
 
         #  Layer 2 preflight on the single-
         # shot path. Before this fix, ``check_and_compress`` only ran
@@ -649,9 +658,16 @@ def litellm_runner(
             # model name, not the LiteLLM composite id.
             bare_model = litellm_model.split("/", 1)[-1]
             ws, add_dirs = claude_cli.current_seat_context()
+            # KICKOFF seat (producer / QC / plan / reflect — single-shot): strip
+            # the UNBOUNDED background Workflow tool so Clay can't fire off an
+            # invisible crew + ship "I launched a workflow, watch /workflows"
+            # instead of the artifact. Synchronous Task/Agent spawns stay allowed
+            # (Clif: 1-2 helper agents are fine). The HARNESS lane (chat runner)
+            # keeps its full agentic loadout.
             return claude_cli.run_claude(
                 claude_bin=claude_bin, model=bare_model, prompt=body,
                 workspace=ws, add_dirs=add_dirs,
+                disallowed_tools=claude_cli._DISALLOWED_TOOLS,
             )
 
         # ── Codex (ChatGPT-subscription) Responses path ──────────────
@@ -671,7 +687,7 @@ def litellm_runner(
             def _codex_call(kw: dict) -> str:
                 stream = responses(
                     model=litellm_model, instructions=instructions, input=inp,
-                    store=False, stream=True, **kw,
+                    store=False, stream=True, **_with_codex_reasoning(kw),
                 )
                 return _cr.chat_response_from_codex_stream(stream).content or ""
 
@@ -1068,6 +1084,11 @@ def build_tools_schema(loadout: tuple[str, ...], registry: dict) -> list[dict]:
     return out
 
 
+#: Returned by the tool-loop when ``should_abort`` fires (operator pressed ESC).
+#: First-person so it reads naturally as a Leader turn in the chat.
+_INTERRUPTED_REPLY = "(Stopped — I halted what I was doing at your interrupt. What next?)"
+
+
 def run_llm_with_tools(
     *,
     chat_runner: Callable[..., ChatResponse],
@@ -1081,6 +1102,7 @@ def run_llm_with_tools(
     permission_callback: Callable[[str, dict], bool] | None = None,
     permission_broker: "object | None" = None,
     metered_authorizer: Callable[[str, dict], "tuple[bool, str]"] | None = None,
+    should_abort: Callable[[], bool] | None = None,
 ) -> str:
     """Run a function-calling loop. Returns the model's final text.
 
@@ -1177,6 +1199,12 @@ def run_llm_with_tools(
     metered_result_cache: dict[tuple[str, str], str] = {}
 
     for iteration in range(max_iters):
+        # Operator interrupt (ESC in the TUI): the orchestrator's abort_event is
+        # checked at the top of every iteration, so a churning tool-loop stops at
+        # the next step boundary and returns a clean note. Cooperative, not a hard
+        # kill — a single long in-flight tool/model call still finishes first.
+        if should_abort is not None and should_abort():
+            return _INTERRUPTED_REPLY
         # Slice 90: pre-flight context-budget check. Compresses
         # in-band; raises RecoverableContextError when even compression
         # can't fit. No-op when no ContextBudgetConfig is bound or when
@@ -1399,6 +1427,19 @@ def run_llm_with_tools(
     )
 
 
+# GPT-5.5 (Codex) defaults to very high reasoning effort on the ChatGPT backend,
+# which produces massive reasoning-token bloat — slow, over-long runs (e.g. a
+# producer over-researching a task). Default Codex seats to MEDIUM; a preset can
+# override per-model via default_params {"reasoning": {"effort": "..."}}.
+_CODEX_DEFAULT_REASONING = {"effort": "medium"}
+
+
+def _with_codex_reasoning(kw: dict) -> dict:
+    """Return ``kw`` with the default Codex reasoning effort applied — unless the
+    caller/preset already set ``reasoning`` (then theirs wins)."""
+    return {"reasoning": _CODEX_DEFAULT_REASONING, **kw}
+
+
 def _codex_tool_choice(tc: "dict | str | None") -> "dict | str | None":
     """Translate a chat-completions ``tool_choice`` to the Responses shape.
     Strings (``auto``/``none``/``required``) pass through; a forced
@@ -1444,7 +1485,7 @@ def _build_codex_chat_runner(
                 ck["tool_choice"] = _codex_tool_choice(tool_choice)
             stream = _responses(
                 model=litellm_model, instructions=instructions, input=inp,
-                store=False, stream=True, **ck,
+                store=False, stream=True, **_with_codex_reasoning(ck),
             )
             return _cr.chat_response_from_codex_stream(stream)
 
@@ -1493,8 +1534,8 @@ def _build_claude_cli_chat_runner(
                 "Clay seat: the `claude` CLI is not installed / not on PATH "
                 "(set MODULATIO_CLAUDE_BIN). Run `claude` to sign in."
             )
-        system = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
-        user = "\n\n".join(m["content"] for m in messages if m.get("role") == "user")
+        system = "\n\n".join(m.get("content") or "" for m in messages if m.get("role") == "system")
+        user = "\n\n".join(m.get("content") or "" for m in messages if m.get("role") == "user")
         ws, add_dirs = claude_cli.current_seat_context()
         text = claude_cli.run_claude(
             claude_bin=claude_bin, model=bare_model, prompt=user,

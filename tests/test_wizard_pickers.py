@@ -79,6 +79,9 @@ def test_default_env_var_for_unknown_host_derives_from_hostname():
 # ─── Subscription quick-adds register the RIGHT endpoint (the 0.9.5.1 bug) ───
 
 
+# ─── Subscription quick-adds register the RIGHT endpoint (the 0.9.5.1 bug) ───
+
+
 def test_clay_quick_add_registers_claude_cli_not_metered_anthropic(tmp_path, monkeypatch):
     """The Anthropic quick-add registers Clay (``claude_cli`` → the `claude -p`
     subscription), NEVER ``oauth_anthropic`` at api.anthropic.com — that combo

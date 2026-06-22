@@ -1502,6 +1502,203 @@ def setup() -> None:
         raise typer.Exit(code=1)
 
 
+@app.command()
+def uninstall(
+    remove_settings: bool = typer.Option(
+        False, "--remove-settings",
+        help="Also remove ~/.config/modulatio (settings + secret config).",
+    ),
+    remove_projects: bool = typer.Option(
+        False, "--remove-projects",
+        help="Also remove the project folder / vault (your work + secret .env).",
+    ),
+    remove_deliverables: bool = typer.Option(
+        False, "--remove-deliverables",
+        help="Also remove rendered deliverables (~/Documents/Modulatio).",
+    ),
+    remove_pandoc: bool = typer.Option(
+        False, "--remove-pandoc",
+        help="Also remove pandoc (a system package needs sudo).",
+    ),
+    remove_package: bool = typer.Option(
+        True, "--remove-package/--keep-package",
+        help="Run pipx/pip uninstall of the modulatio package itself.",
+    ),
+    pristine: bool = typer.Option(
+        False, "--pristine",
+        help="Reset to a never-installed state: remove EVERYTHING (settings, "
+             "vault, deliverables, pandoc, package) + clear the pip build cache. "
+             "Sensitive tiers are still confirmed unless --yes.",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Non-interactive: take the flags as given, skip prompts + confirm.",
+    ),
+) -> None:
+    """Uninstall Modulatio and return the system toward a clean state.
+
+    Always: stop the daemon (kill its pid) and remove the rebuildable install
+    footprint — the vector cache + the embedded-model cache. Optionally (your
+    call): your settings, your project folder, your deliverables, and pandoc.
+    Anything holding your work or secrets is backed up to a tarball in your home
+    dir before removal. ``--pristine`` removes everything for a clean re-test.
+    Never touched: export backups and other tools' credentials.
+    """
+    import time
+
+    from modulatio import uninstall as un
+
+    if pristine:
+        remove_settings = remove_projects = remove_deliverables = remove_pandoc = True
+
+    if not yes:
+        remove_settings = typer.confirm(
+            "Remove your SETTINGS (~/.config/modulatio: models, keys, telegram)?",
+            default=remove_settings,
+        )
+        vault_prompt = "Remove your PROJECT FOLDER / vault (your work + secret .env)?"
+        if un.vault_is_custom():
+            vault_prompt = (
+                f"⚠ Your vault is a CUSTOM folder (e.g. an Obsidian vault): "
+                f"{un.config.get_vault_root()}\n  Remove it — your real work?"
+            )
+        remove_projects = typer.confirm(vault_prompt, default=remove_projects)
+        remove_deliverables = typer.confirm(
+            "Remove your DELIVERABLES (~/Documents/Modulatio)?",
+            default=remove_deliverables,
+        )
+        _pandoc = un.detect_pandoc()
+        if _pandoc.present:
+            remove_pandoc = typer.confirm(
+                f"Remove pandoc ({_pandoc.method}: {_pandoc.location})?",
+                default=remove_pandoc,
+            )
+
+    plan = un.build_plan(
+        remove_settings=remove_settings, remove_projects=remove_projects,
+        remove_deliverables=remove_deliverables,
+    )
+
+    if remove_projects and not un.vault_is_modulatio_owned():
+        typer.echo(
+            f"\n⚠ Vault {un.config.get_vault_root()} looks like YOUR folder "
+            "(not created by Modulatio) — NOT deleting it. Remove it by hand if "
+            "you mean to. (Modulatio's own data is still cleared.)"
+        )
+
+    typer.echo("\nWill REMOVE:")
+    for t in plan:
+        typer.echo(f"  - {t.label}: {t.path}"
+                   + ("  (backed up first)" if t.user_data else ""))
+    if remove_pandoc:
+        typer.echo("  - pandoc")
+    if remove_package:
+        typer.echo("  - the modulatio package (pipx/pip)")
+    typer.echo("Will PRESERVE:")
+    _plan_paths = {t.path for t in plan}
+    for t in un.preserved_targets():
+        if t.path not in _plan_paths:  # don't list a path that's also being removed
+            typer.echo(f"  - {t.label}: {t.path}")
+
+    if not yes and not typer.confirm("\nProceed?", default=False):
+        typer.echo("Aborted — nothing removed.")
+        raise typer.Exit(code=1)
+
+    typer.echo(un.stop_daemon())
+
+    backup = None
+    if any(t.user_data for t in plan):
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = un.backup_plan(
+            plan, Path.home() / f"modulatio-uninstall-backup-{stamp}.tar.gz"
+        )
+        if backup:
+            typer.echo(f"Backed up your data -> {backup}")
+
+    for t in plan:
+        ok, detail = un.remove_target(t)
+        typer.echo(f"  {'removed' if ok else 'FAILED'}: {t.path} ({detail})")
+
+    if remove_pandoc:
+        _remove_pandoc_cli(un.detect_pandoc())
+    if remove_package:
+        _remove_package_cli()
+    if pristine:
+        _clear_pip_cache_cli()
+
+    typer.echo("\nModulatio uninstalled. "
+               + (f"Your data backup: {backup}" if backup else "No user data removed."))
+
+
+def _clear_pip_cache_cli() -> None:
+    """Drop any cached modulatio wheel so the next local build is fresh — the
+    version-pinned wheel cache otherwise serves stale code on a same-version
+    reinstall (the iterate-from-source footgun)."""
+    import subprocess
+    from shutil import which
+    pip = which("pip") or which("pip3")
+    if not pip:
+        return
+    subprocess.run([pip, "cache", "remove", "modulatio*"], capture_output=True)
+    typer.echo("  cleared pip wheel cache for modulatio (fresh rebuild next install)")
+
+
+def _remove_pandoc_cli(info) -> None:
+    import subprocess
+    if not info.present:
+        typer.echo("  pandoc: not found")
+        return
+    if info.method == "binary":
+        try:
+            Path(info.location).unlink()
+            typer.echo(f"  removed pandoc binary: {info.location}")
+        except OSError as e:
+            typer.echo(f"  FAILED to remove pandoc binary: {e}")
+        return
+    cmd = {
+        "apt": ["sudo", "apt-get", "remove", "-y", "pandoc"],
+        "dnf": ["sudo", "dnf", "remove", "-y", "pandoc"],
+        "brew": ["brew", "uninstall", "pandoc"],
+    }.get(info.method)
+    if not cmd:
+        typer.echo(f"  pandoc: unknown install '{info.method}' — remove it manually")
+        return
+    typer.echo(f"  removing pandoc via: {' '.join(cmd)}")
+    subprocess.run(cmd, check=False)
+
+
+def _remove_package_cli() -> None:
+    import subprocess
+    from shutil import which
+    if which("pipx"):
+        r = subprocess.run(["pipx", "uninstall", "modulatio"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            typer.echo("  removed package via pipx")
+            return
+    pip = which("pip") or which("pip3")
+    if pip:
+        r = subprocess.run([pip, "uninstall", "-y", "modulatio"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            typer.echo("  removed package via pip")
+            return
+    typer.echo("  package: could not auto-remove — run "
+               "`pipx uninstall modulatio` or `pip uninstall modulatio`")
+
+
+@app.command()
+def repair() -> None:
+    """Repair a broken install — reset bad settings to defaults, clear configs,
+    remove broken presets/agents, recreate a missing vault/project, and stop the
+    daemon so a clean relaunch picks up the repairs.
+
+    Same flow as the Repair option in `modulatio setup`.
+    """
+    from modulatio import repair as _repair
+    _repair.run_repair()
+
+
 # === modulatio export / import (slice 8 backup/restore) ===
 
 @app.command()

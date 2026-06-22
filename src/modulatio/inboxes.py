@@ -1352,22 +1352,16 @@ def _candidate_terminal_ids(
     # doesn't resurrect already-acted candidates.
     if audit_path is None or not audit_path.exists():
         return terminal
-    with audit_path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if row.get("actor") != "inbox":
-                continue
-            event = row.get("event")
-            if event in ("propose_accept", "propose_reject", "propose_abandoned"):
-                cid = row.get("candidate_id")
-                if cid:
-                    terminal.add(cid)
+    # Route through _load_jsonl (same as the state-file path above) so a
+    # non-UTF-8 byte in the audit log is tolerated, not raised out of dispatch.
+    for row in _load_jsonl(audit_path):
+        if row.get("actor") != "inbox":
+            continue
+        event = row.get("event")
+        if event in ("propose_accept", "propose_reject", "propose_abandoned"):
+            cid = row.get("candidate_id")
+            if cid:
+                terminal.add(cid)
     return terminal
 
 

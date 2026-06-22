@@ -228,13 +228,36 @@ def _auto_launch_tui(state: dict) -> None:
 def run_setup() -> bool:
     """Drive the wizard. Returns True on successful completion, False on quit/abort.
 
-    Safe to re-invoke — existing state pre-populates each step.
+    Safe to re-invoke — existing state pre-populates each step. When a previous
+    install is detected, opens with an Install-or-Repair choice; Repair routes to
+    the shared repair flow instead of the wizard.
     """
     theme.enter_dark_screen()
     try:
+        if _existing_config():
+            from modulatio.setup_wizard import steps
+            choice = steps.pick_option(
+                "Existing Modulatio config detected — Install or Repair?",
+                [("Install / reconfigure (run the setup wizard)", "install"),
+                 ("Repair (fix a broken install)", "repair")],
+                default_index=0,
+            )
+            if choice in (steps.BACK, steps.QUIT):
+                return False
+            if choice == "repair":
+                from modulatio import repair
+                repair.run_repair()
+                return True
         return _run_setup_body()
     finally:
         theme.exit_dark_screen()
+
+
+def _existing_config() -> bool:
+    """True if Modulatio has been set up before — gate for the Install/Repair
+    fork (a truly fresh install skips straight to the wizard)."""
+    from modulatio import setup_state
+    return config.defaults_exist() or setup_state.setup_completed()
 
 
 def _presets_snapshot() -> dict:

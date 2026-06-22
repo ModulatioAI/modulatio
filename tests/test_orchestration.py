@@ -120,24 +120,6 @@ def _qc_stub(prompt: str) -> str:
     return f"```json\n{json.dumps(verdict)}\n```"
 
 
-def test_leader_tool_registry_rebinds_to_leader_workspace(project: Project):
-    """Piece A part 2: the conversational Leader's solo-coding hands are rebound
-    to a stable per-project ``leader_workspace`` — NOT the run-artifacts scratch,
-    NOT the producers' tree — so the sandbox root structurally bars him from a
-    kickoff's deliverable."""
-    orch = Orchestrator(project, {"leader": _leader_stub})
-    reg = orch._leader_tool_registry()
-    for name in ("read_file", "edit_file", "run_shell", "write_artifact"):
-        assert name in reg, f"{name} missing from the Leader's solo registry"
-    workspace = vault.project_dir(project.code) / "leader_workspace"
-    assert workspace.exists()
-    (workspace / "note.txt").write_text("hello\n", encoding="utf-8")
-    reg["edit_file"].call(path="note.txt", old="hello", new="world")
-    assert (workspace / "note.txt").read_text(encoding="utf-8") == "world\n"
-    with pytest.raises(ValueError):
-        reg["read_file"].call(path="../escape.txt")  # confinement holds
-
-
 def test_autonomy_status_reads_live_substrate(project: Project, monkeypatch):
     """§2.5: the orch's two-row status reflects the live mode + sandbox — /yolo
     with the sandbox down still shows UNAVAILABLE (mode can't hide the substrate)."""
@@ -150,30 +132,6 @@ def test_autonomy_status_reads_live_substrate(project: Project, monkeypatch):
     orch._session_mode = RunMode.YOLO
     access, sb = orch._autonomy_status()
     assert "auto-grant" in access.lower() and "unavailable" in sb.lower()
-
-
-def test_consume_mode_command_parses_strips_and_sets_mode(project: Project):
-    """§2 Task 1: a leading mode command sets the session mode + is stripped so the
-    Leader sees the task; a bare command sets the mode with empty remainder; an
-    ordinary message leaves the mode unchanged."""
-    from modulatio.permissions import RunMode
-    orch = Orchestrator(project, {"leader": _leader_stub})
-    assert orch._session_mode is RunMode.DEFAULT          # default
-
-    matched, stripped = orch._consume_mode_command("/goal build a site")
-    assert matched is True and stripped == "build a site"  # command stripped
-    assert orch._session_mode is RunMode.GOAL
-
-    matched, stripped = orch._consume_mode_command("/yolo")
-    assert matched is True and stripped == ""              # bare command
-    assert orch._session_mode is RunMode.YOLO
-
-    matched, stripped = orch._consume_mode_command("hello there")
-    assert matched is False and stripped == "hello there"  # not a command
-    assert orch._session_mode is RunMode.YOLO              # unchanged
-
-    orch._consume_mode_command("/default")
-    assert orch._session_mode is RunMode.DEFAULT           # reset
 
 
 def test_build_permission_broker_yolo_auto_grants(project: Project, monkeypatch):
@@ -237,6 +195,30 @@ def test_converse_threads_broker_when_mode_active(project: Project, monkeypatch)
     orch._session_mode = RunMode.DEFAULT
     orch.converse("do a thing")
     assert captured.get("permission_broker") is None           # legacy: no broker
+
+
+def test_consume_mode_command_parses_strips_and_sets_mode(project: Project):
+    """§2 Task 1: a leading mode command sets the session mode + is stripped so the
+    Leader sees the task; a bare command sets the mode with empty remainder; an
+    ordinary message leaves the mode unchanged."""
+    from modulatio.permissions import RunMode
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    assert orch._session_mode is RunMode.DEFAULT          # default
+
+    matched, stripped = orch._consume_mode_command("/goal build a site")
+    assert matched is True and stripped == "build a site"  # command stripped
+    assert orch._session_mode is RunMode.GOAL
+
+    matched, stripped = orch._consume_mode_command("/yolo")
+    assert matched is True and stripped == ""              # bare command
+    assert orch._session_mode is RunMode.YOLO
+
+    matched, stripped = orch._consume_mode_command("hello there")
+    assert matched is False and stripped == "hello there"  # not a command
+    assert orch._session_mode is RunMode.YOLO              # unchanged
+
+    orch._consume_mode_command("/default")
+    assert orch._session_mode is RunMode.DEFAULT           # reset
 
 
 def test_converse_bare_mode_command_returns_ack(project: Project):
@@ -308,16 +290,6 @@ def test_solo_leader_can_jit_load_coding_skill(project: Project):
     assert "coding" in skills.list_skills(project_code=project.code)
 
 
-def test_leader_registry_does_not_disturb_run_registry(project: Project):
-    """Re-rooting the Leader's solo hands must NOT mutate ``self.tool_registry``
-    (the run path's registry) — the rebound builtins live only in the returned
-    registry, so producers/runs are unaffected."""
-    orch = Orchestrator(project, {"leader": _leader_stub})
-    orch._leader_tool_registry()
-    assert "edit_file" not in orch.tool_registry
-    assert "run_shell" not in orch.tool_registry
-
-
 def test_leader_registry_honors_gate_granted_root(project: Project, tmp_path):
     """End-to-end: a store grant flows through the gate into the Leader's
     registry as an extra_root, so a deliberately-widened folder becomes
@@ -358,6 +330,34 @@ def test_leader_registry_threads_exec_grant_into_run_shell(project: Project, tmp
     import pytest as _pytest
     with _pytest.raises(RuntimeError, match="widened exec refused"):
         reg["run_shell"].call(cmd="cat x.py", profile="full", cwd=str(granted))
+
+
+def test_leader_tool_registry_rebinds_to_leader_workspace(project: Project):
+    """Piece A part 2: the conversational Leader's solo-coding hands are rebound
+    to a stable per-project ``leader_workspace`` — NOT the run-artifacts scratch,
+    NOT the producers' tree — so the sandbox root structurally bars him from a
+    kickoff's deliverable."""
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    reg = orch._leader_tool_registry()
+    for name in ("read_file", "edit_file", "run_shell", "write_artifact"):
+        assert name in reg, f"{name} missing from the Leader's solo registry"
+    workspace = vault.project_dir(project.code) / "leader_workspace"
+    assert workspace.exists()
+    (workspace / "note.txt").write_text("hello\n", encoding="utf-8")
+    reg["edit_file"].call(path="note.txt", old="hello", new="world")
+    assert (workspace / "note.txt").read_text(encoding="utf-8") == "world\n"
+    with pytest.raises(ValueError):
+        reg["read_file"].call(path="../escape.txt")  # confinement holds
+
+
+def test_leader_registry_does_not_disturb_run_registry(project: Project):
+    """Re-rooting the Leader's solo hands must NOT mutate ``self.tool_registry``
+    (the run path's registry) — the rebound builtins live only in the returned
+    registry, so producers/runs are unaffected."""
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    orch._leader_tool_registry()
+    assert "edit_file" not in orch.tool_registry
+    assert "run_shell" not in orch.tool_registry
 
 
 def test_leader_gate_refuses_widen_over_run_tree(project: Project):
@@ -4218,6 +4218,16 @@ def test_redo_loop_exhausts_max_retries_when_qc_always_rejects(project: Project,
             '"notes": "fix something"}\n```'
         )
 
+    # The producer makes real CHANGES each attempt (distinct bytes) — a realistic
+    # temp>0 producer that keeps trying but never satisfies QC. This exercises the
+    # genuine budget-EXHAUSTION path; a byte-identical stub would (correctly) trip
+    # the no-progress breaker after 2 attempts instead.
+    draft_n = {"n": 0}
+
+    def _drafter_varies(prompt: str) -> str:
+        draft_n["n"] += 1
+        return _drafter_stub(prompt) + f"\n\nRevision {draft_n['n']}.\n"
+
     def _coordinator_one_task(prompt: str) -> str:
         tasks = [{
             "description": "Produce artifact 1",
@@ -4229,7 +4239,7 @@ def test_redo_loop_exhausts_max_retries_when_qc_always_rejects(project: Project,
     runners = {
         "leader": _leader_stub,
         "planner": _coordinator_one_task,
-        "drafter": _drafter_stub,
+        "drafter": _drafter_varies,
         "qc": _qc_always_reject,
     }
     orch = Orchestrator(project, runners)
@@ -4977,9 +4987,12 @@ def test_escalation_falls_back_to_same_agent_when_no_higher_tier(
     def _flaky_producer(prompt: str) -> str:
         calls["n"] += 1
         # max_retries=3 → 4 normal attempts (0..3) all fail; call #5
-        # is the same-agent last-ditch, which succeeds.
+        # is the same-agent last-ditch, which succeeds. Each weak attempt
+        # emits DISTINCT bytes (a unique marker) so the no-progress breaker —
+        # which only fires on byte-identical consecutive rejects — doesn't
+        # short-circuit before the last-ditch attempt.
         if calls["n"] <= 4:
-            return _weak_producer_stub(prompt)
+            return _weak_producer_stub(prompt) + f"\n\n<!-- rev {calls['n']} -->\n"
         return _strong_producer_stub(prompt)
 
     runners = {
@@ -6470,12 +6483,11 @@ def test_leader_verify_tool_loadout_skill_helper_returns_none_for_empty_loadout(
 def test_coordinator_overdecomposition_rejected_for_single_artifact_goal(
     project: Project, tmp_path, monkeypatch
 ):
-    """NXT end-to-end test surfaced a 4-task plan for a 2-file goal.
-    Today's prompt fix is the primary guard; this is the structural
-    backstop. When ``len(plan) > max(3, artifact_evidence_count + 1)``,
-    the orchestrator rejects the plan via the existing ``_PlanError``
-    path: opens a CRITICAL ticket, marks the goal as having no
-    dispatched tasks, and the human sees the gap."""
+    """Over-decomposition is rejected structurally. Under the concurrency cap,
+    the boundary is WORK tasks > ``_PLAN_HARD_CAP`` (6) — 7 independent work
+    tasks (no fan-in to exempt) trips it: opens a CRITICAL ticket, marks the
+    goal as having no dispatched tasks, and the human sees the gap. (Parallel
+    fan-outs at or under the cap are allowed — see the fan-out test.)"""
     drafter_calls = {"n": 0}
 
     def _drafter_counting(prompt: str) -> str:
@@ -6483,14 +6495,14 @@ def test_coordinator_overdecomposition_rejected_for_single_artifact_goal(
         return _drafter_stub(prompt)
 
     def _coord_overdecompose(prompt: str) -> str:
-        # 5 tasks for a goal whose evidence is 1 artifact (cap = 3).
+        # 7 independent work tasks (no fan-in) > the cap of 6 → rejected.
         tasks = [
             {
                 "description": f"spurious task {i}",
                 "artifact_kind": "code",
                 "evidence_required": [{"kind": "artifact", "description": "f"}],
             }
-            for i in range(5)
+            for i in range(7)
         ]
         return f"```json\n{json.dumps(tasks)}\n```"
 
@@ -6518,9 +6530,8 @@ def test_coordinator_overdecomposition_rejected_for_single_artifact_goal(
 
 
 def test_plan_tasks_within_cap_passes(project: Project):
-    """Sanity: a plan whose task count is at-or-under the cap goes
-    through without rejection. 1 artifact evidence → cap of 3 tasks
-    → 1, 2, or 3-task plans all valid."""
+    """Sanity: a plan whose WORK-task count is at-or-under the cap (6) goes
+    through without rejection. A 3-task plan is well inside it."""
     runners = {
         "leader": _leader_stub,
         "planner": _planner_stub,  # emits 3 tasks (drafter default)
@@ -6529,34 +6540,29 @@ def test_plan_tasks_within_cap_passes(project: Project):
     }
     orch = Orchestrator(project, runners)
     summary = orch.kickoff("anything")
-    # Default coord stub emits 3 tasks for a 1-evidence goal — the cap
-    # is max(3, 1+1) = 3, so this is at the boundary (allowed).
-    assert len(summary.tasks) == 3
+    assert len(summary.tasks) == 3  # 3 work tasks <= cap 6 → allowed
 
 
-def test_coordinator_cap_scales_with_multi_artifact_evidence(
-    project: Project,
-):
-    """A goal that legitimately needs many artifacts must allow many
-    tasks — up to the W5-lite hard cap of 6 tasks per
-    sub-objective. Beyond that, the gate trips and Leader is expected
-    to decompose. Validate via the count formula directly."""
+def test_plan_work_count_exempts_fan_in_not_verify():
+    """The concurrency cap counts WORK tasks: a fan-in (synthesis/assembly,
+    depends on >=2 plan tasks) is exempt, but a single-dep review/verify task
+    still counts — so a wide fan-out is allowed while verify-padding can't hide
+    behind a dependency."""
+    from modulatio.orchestration import _PLAN_HARD_CAP, _plan_work_count
 
-    from modulatio.orchestration import _PLAN_HARD_CAP
+    assert _PLAN_HARD_CAP == 6  # Alpha pin
 
-    assert _PLAN_HARD_CAP == 6, (
-        "Alpha pin: hard cap is 6 tasks per sub-objective"
-    )
-    # 1 artifact → cap 3
-    # 2 artifacts → cap 3
-    # 3 artifacts → cap 4
-    # 5 artifacts → cap 6           (boundary)
-    # 10 artifacts → cap 6 (clamped — over-scoped, Leader decomposes)
-    for n_artifacts, expected_cap in [(1, 3), (2, 3), (3, 4), (5, 6), (10, 6)]:
-        cap = min(_PLAN_HARD_CAP, max(3, n_artifacts + 1))
-        assert cap == expected_cap, (
-            f"cap formula off for {n_artifacts} artifacts: got {cap}"
-        )
+    # 5 independent work tasks + 1 fan-in synthesis → 5 work (fan-in exempt).
+    fanout = [{"description": f"t{i}"} for i in range(5)]
+    fanout.append({"description": "synth", "depends_on": [0, 1, 2, 3, 4]})
+    assert _plan_work_count(fanout) == 5
+
+    # A single-dep verify task is NOT a fan-in — it still counts as work.
+    padded = [{"description": "work"}, {"description": "verify", "depends_on": [0]}]
+    assert _plan_work_count(padded) == 2
+
+    # No deps at all → every task is work.
+    assert _plan_work_count([{"description": "a"}, {"description": "b"}]) == 2
 
 
 def test_plan_tasks_overdecomp_diagnostic_wins_when_both_apply(
@@ -6661,6 +6667,45 @@ def test_plan_tasks_hard_cap_rejects_over_scoped_sub_objective(
     assert "6" in body_text or "hard cap" in body_text, (
         f"expected hard-cap reference in ticket; body: {body_text!r}"
     )
+
+
+def test_plan_tasks_allows_parallel_fanout_with_synthesis(
+    project: Project, monkeypatch
+):
+    """Concurrency: N independent WORK tasks PLUS a fan-in synthesis (depends on
+    >=2 of them) is ALLOWED — the synthesis is exempt from the cap, so a wide
+    research fan-out isn't blocked the way the old evidence-cap (~3 for research)
+    blocked it. 5 parallel work + 1 synthesis = work_count 5 <= cap 6 → accepted."""
+    def _coord_fanout(prompt: str) -> str:
+        tasks = [
+            {
+                "description": f"research area {i}",
+                "artifact_kind": "research",
+                "evidence_required": [{"kind": "artifact", "description": "brief"}],
+            }
+            for i in range(5)
+        ]
+        tasks.append({
+            "description": "synthesize the brief from the area research",
+            "artifact_kind": "report",
+            "evidence_required": [{"kind": "artifact", "description": "report"}],
+            "depends_on": [0, 1, 2, 3, 4],  # fan-in — exempt from the cap
+        })
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    runners = {
+        "leader": _leader_stub,
+        "planner": _coord_fanout,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    orch = Orchestrator(project, runners)
+    orch.kickoff("anything")
+
+    # 6 tasks created (5 parallel + 1 synthesis) — NOT rejected by the cap.
+    assert len(store.list_tasks(PROJECT_CODE)) == 6
+    over_cap = [t for t in store.list_tickets(PROJECT_CODE) if "exceeds the cap" in t.body]
+    assert not over_cap, f"parallel fan-out wrongly capped: {[t.body for t in over_cap]}"
 
 
 # ── Environmental defect type (Slice C #13) ──────────────────────────────
@@ -8397,6 +8442,9 @@ def test_leader_verify_prompt_carries_the_md_satisfies_render_rule():
     body = orchestration._LEADER_VERIFY_PROMPT.lower()
     assert ".md" in body and "render" in body
     assert "satisfies" in body
+
+
+# ── #73: family-aware render-path normalization ──────────────────────────────
 
 
 # ── #73: family-aware render-path normalization ──────────────────────────────
