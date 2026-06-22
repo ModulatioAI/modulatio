@@ -659,10 +659,10 @@ def litellm_runner(
             bare_model = litellm_model.split("/", 1)[-1]
             ws, add_dirs = claude_cli.current_seat_context()
             # KICKOFF seat (producer / QC / plan / reflect — single-shot): strip
-            # the UNBOUNDED background Workflow tool so Clay can't fire off an
-            # invisible crew + ship "I launched a workflow, watch /workflows"
-            # instead of the artifact. Synchronous Task/Agent spawns stay allowed
-            # (Clif: 1-2 helper agents are fine). The HARNESS lane (chat runner)
+            # the subagent-spawning tools (Workflow, Task, Agent) so a confined
+            # seat can't fire off an invisible crew to dodge its retry budget —
+            # the CLI exposes no max-N knob, so the only bound that binds is zero.
+            # See claude_cli._DISALLOWED_TOOLS. The HARNESS lane (chat runner)
             # keeps its full agentic loadout.
             return claude_cli.run_claude(
                 claude_bin=claude_bin, model=bare_model, prompt=body,

@@ -125,11 +125,18 @@ clear_pip_cache() {
 # 'customer-modulatio-notes' is the USER's folder and is never auto-deleted.
 vault_owned() {
   local resolved; resolved="$(readlink -f "$1" 2>/dev/null || echo "$1")"
-  local IFS='/' part
+  local IFS='/' part rc=1
+  # set -f for the split: the unquoted $resolved must word-split on '/' WITHOUT
+  # pathname-expanding a component that contains a glob char (e.g. '*' or '[').
+  # Restore globbing after; readlink -f already resolved the real path.
+  set -f
   for part in $resolved; do
-    [ "$(printf '%s' "$part" | tr 'A-Z' 'a-z')" = "modulatio" ] && return 0
+    if [ "$(printf '%s' "$part" | tr 'A-Z' 'a-z')" = "modulatio" ]; then
+      rc=0; break
+    fi
   done
-  return 1
+  set +f
+  return "$rc"
 }
 
 # confirm <prompt> <default 0|1> -> echoes 0 or 1. Honors the pre-set default

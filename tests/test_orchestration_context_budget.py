@@ -353,6 +353,49 @@ def test_run_chat_loop_threads_model_to_run_llm_with_tools(project_with_run, mon
     assert captured["summarizer_factory"] is sentinel_factory
 
 
+def test_run_chat_loop_threads_tool_sink_into_seat_context(project_with_run, monkeypatch):
+    """R2 wiring: ``_run_chat_loop`` enters the Clay seat context with the SAME
+    ``on_tool_call`` audit sink it hands ``run_llm_with_tools`` — so a Clay seat's
+    in-sandbox tool calls (which read ``seat_activity_var``) land in the same
+    transcript + activity feed instead of a None black hole. Asserting equality
+    of the two references is what makes this a wiring test, not a part test."""
+    from modulatio import claude_cli
+    captured: dict = {}
+
+    def fake_run_llm_with_tools(*, chat_runner, prompt, tool_loadout,
+                                tool_registry, max_iters=16,
+                                on_tool_call=None, model=None, **_):
+        # We are INSIDE the `with self._seat_context(on_tool_call=...)` block,
+        # so the contextvar must already hold the very sink passed to us here.
+        captured["sink_in_context"] = claude_cli.seat_activity_var.get()
+        captured["sink_arg"] = on_tool_call
+        return "ok"
+
+    from modulatio import runners as _runners_mod
+    monkeypatch.setattr(_runners_mod, "run_llm_with_tools", fake_run_llm_with_tools)
+
+    orch = _make_orchestrator(project_with_run)
+    orch.chat_runner = lambda *a, **k: None
+    orch.chat_runner_models = {"writer": "gpt-4o-mini"}
+
+    orch._run_chat_loop(
+        prompt="hi",
+        tool_loadout=("read_tool_result",),
+        role="writer",
+        agent_id="writer",
+        task_id="T1",
+        transcript_path=Path("/tmp/_r2_transcript.jsonl"),
+        skill_name="test",
+    )
+    assert callable(captured["sink_arg"]), "an audit sink was passed to the runner"
+    assert captured["sink_in_context"] is captured["sink_arg"], (
+        "R2 regression: the seat context did not receive the tool-call sink, so a "
+        "Clay seat's tool events would vanish"
+    )
+    # And it is cleared once the seat context exits.
+    assert claude_cli.seat_activity_var.get() is None
+
+
 def test_run_chat_loop_falls_back_to_default_model(project_with_run, monkeypatch):
     """F11: when no per-agent model is registered, use the
     chat_runner_default_model so the gate still has something to

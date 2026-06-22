@@ -80,8 +80,9 @@ def test_workers_reinvocation_preserves_context_budget(monkeypatch):
 # LOW :431 — structural-pair + producer-floor invariant
 # ---------------------------------------------------------------------------
 
-def test_run_rejects_malformed_triad(monkeypatch):
-    """A degenerate triad (two leaders, no qc) is now caught by the guard."""
+def test_run_rejects_leaderless_triad(monkeypatch):
+    """The Leader is the one required role (#13) — a roster with no Leader is
+    caught by the guard (QC + producers are optional, the Leader is not)."""
     errors: list[str] = []
     monkeypatch.setattr(agent_step.theme, "step_header", lambda *a, **k: None)
     monkeypatch.setattr(agent_step.theme, "error", lambda msg: errors.append(msg))
@@ -91,11 +92,8 @@ def test_run_rejects_malformed_triad(monkeypatch):
         return "configured"
 
     def _provision_triad(state, dm):
-        # Bug-shaped output: two leaders, no QC — the old sum-check would pass.
-        state["triad_agents"] = [
-            {"id": "leader", "tier": "leader", "model": "m"},
-            {"id": "leader2", "tier": "leader", "model": "m"},
-        ]
+        # Bug-shaped output: a QC but no Leader — the one required role is missing.
+        state["triad_agents"] = [{"id": "qc", "tier": "qc", "model": "m"}]
         return "configured"
 
     monkeypatch.setattr(agent_step, "_provision_workers", _provision_workers)
@@ -103,7 +101,7 @@ def test_run_rejects_malformed_triad(monkeypatch):
 
     out = agent_step.run({})
     assert out is steps.BACK
-    assert errors, "a malformed structural pair must surface an error"
+    assert errors, "a Leaderless roster must surface an error"
 
 
 def test_run_accepts_valid_team(monkeypatch):

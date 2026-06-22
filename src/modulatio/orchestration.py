@@ -4850,10 +4850,12 @@ class Orchestrator:
             # unavailable, restart on the next seat fallback (never mid-task). A
             # seat with no fallbacks yields a 1-entry chain → identical behavior.
             chain = self._seat_fallback_chain(agent_id, primary_model, active_chat_runner)
-            # Clay: confine a claude-CLI chat-loop seat to its workspace + grants.
+            # Clay: confine a claude-CLI chat-loop seat to its workspace + grants,
+            # threading the same on_tool_call audit sink the metered runner uses so
+            # a Clay seat's in-sandbox tool calls hit the transcript + activity feed.
             # Note: the contextvar propagates synchronously through run_with_model_fallbacks;
             # revisit if that call chain ever becomes async or thread-pooled.
-            with self._seat_context():
+            with self._seat_context(on_tool_call=on_tool_call):
                 return _runners.run_with_model_fallbacks(
                     chain, _run_one,
                     on_fallback=lambda failed, nxt, exc: self._emit_activity(
@@ -7373,7 +7375,11 @@ class Orchestrator:
             self._leader_gate_cache = cached
         return cached
 
-    def _seat_context(self, workspace: "Path | None" = None):
+    def _seat_context(
+        self,
+        workspace: "Path | None" = None,
+        on_tool_call: "Callable[[str, dict, str], None] | None" = None,
+    ):
         """Set the Clay seat context (confined workspace + operator-widen grants)
         for the enclosed seat-runner call(s), mirroring how the sandbox
         contextvars are set around a tool call. A Clay-backed seat reads this via
@@ -7382,6 +7388,12 @@ class Orchestrator:
         (purely additive). ``workspace`` defaults to the Leader's own per-project
         workspace — the confined default for every seat path.
 
+        ``on_tool_call`` is the same per-dispatch audit sink the metered tool-loop
+        passes to ``run_llm_with_tools``: threading it here lets a Clay seat's
+        in-sandbox tool calls (parsed from the ``claude -p`` event stream) land in
+        the same transcript + activity feed instead of vanishing. ``None`` (the
+        single-shot dispatch paths, which have no sink in scope) is unchanged.
+
         ``workspace`` is a future per-producer isolation hook: today every call
         uses the Leader's workspace default, but the parameter exists so a caller
         can confine a specific seat to its own sub-folder once per-seat isolation
@@ -7389,7 +7401,7 @@ class Orchestrator:
         from modulatio import claude_cli as _clay
         ws = workspace if workspace is not None else self._leader_workspace()
         grants = tuple(str(r) for r in self.leader_gate().granted_roots())
-        return _clay.seat_context(ws, grants)
+        return _clay.seat_context(ws, grants, on_tool_call=on_tool_call)
 
     def _leader_tool_registry(self) -> "dict[str, tools.Tool]":
         """The conversational Leader's SOLO-coding registry: path-bound builtins
@@ -10694,16 +10706,9 @@ class Orchestrator:
         if not self._codification_enabled():
             return
         # task #84: never codify from an operator-aborted run. A killed run's
-        # QC fails reflect an interrupted (often half-produced / flailing) state,
-        # not a real recurring weakness to learn from — codifying from it can
-        # bake a regression into the skill library.
-        if self.abort_event.is_set():
-            self._codification_skipped("run_aborted")
-            return
-        # task #84: never codify from an operator-aborted run. A killed run's
-        # QC fails / recoveries reflect an interrupted (often half-produced / flailing)
-        # state, not a real recurring weakness to learn from — codifying from it can
-        # bake a regression into the skill library.
+        # QC fails / recoveries reflect an interrupted (often half-produced /
+        # flailing) state, not a real recurring weakness to learn from —
+        # codifying from it can bake a regression into the skill library.
         if self.abort_event.is_set():
             self._codification_skipped("run_aborted")
             return

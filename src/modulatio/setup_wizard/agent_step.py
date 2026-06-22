@@ -21,7 +21,7 @@ from modulatio import model_presets, templates as templates_pkg, theme
 from modulatio.setup_wizard import steps
 
 
-MIN_AGENTS = 3  # structural roles (Leader + QC) + 1 producer/skill-holder
+MIN_AGENTS = 1  # the Leader is the one required role; QC + producers optional (#13)
 MAX_AGENTS = 10
 
 # Position of this (agents) step in the wizard's step machine, for the
@@ -488,22 +488,15 @@ def run(state: dict) -> Any:
     if result in (steps.BACK, steps.QUIT):
         return result
 
-    # Structural-pair + producer-floor invariant. `_provision_triad` always
-    # emits exactly the Leader+QC pair and `_provision_workers` enforces >=1
-    # producer, so a bare `total < MIN_AGENTS` sum-check was unreachable. Assert
-    # the actual structural shape instead: the deliberative pair must be present
-    # (one leader + one qc) and at least one producer — so a future change to
-    # either provisioner that breaks the cardinality is caught here rather than
-    # shipping a malformed roster.
+    # The Leader is the one required role (#13); QC and producers are optional.
+    # Assert the Leader is present so a future provisioner change that drops it
+    # is caught here rather than shipping a Leaderless roster.
     triad = state["triad_agents"]
-    workers = state["worker_agents"]
     tiers = {a.get("tier") for a in triad}
-    if tiers != {"leader", "qc"} or len(triad) != 2 or not workers:
-        total = len(triad) + len(workers)
+    if "leader" not in tiers:
         theme.error(
-            f"A team needs Leader + QC + at least one skill-holder "
-            f"({MIN_AGENTS} minimum). Got {total} ({sorted(tiers)} + "
-            f"{len(workers)} producer(s)). Restarting team formation."
+            "A team needs a Leader (the one required role). "
+            "Restarting team formation."
         )
         return steps.BACK
 

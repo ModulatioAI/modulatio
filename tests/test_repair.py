@@ -18,9 +18,12 @@ def repair_env(tmp_path, monkeypatch):
                            setup_state, telegram_notify)
 
     cfg = tmp_path / ".config" / "modulatio"
-    vault = tmp_path / "vault"
+    # A Modulatio-OWNED vault (path carries a 'modulatio' component) — the clear
+    # only removes the vault when Modulatio owns it; an unowned custom folder is
+    # spared (see test_clear_plan_spares_unowned_vault).
+    vault = tmp_path / "modulatio" / "projects"
     cfg.mkdir(parents=True)
-    vault.mkdir()
+    vault.mkdir(parents=True)
 
     files = {
         (config, "DEFAULTS_FILE"): cfg / "defaults.json",
@@ -64,6 +67,21 @@ def test_clear_plan_gates_agents_secrets_projects(repair_env):
     sensitive = [t for t in plan if t.path.name in
                  {"team_template.json", "telegram-config.json", "key_labels.json"}]
     assert all(t.user_data for t in sensitive)
+
+
+def test_clear_plan_spares_unowned_vault(repair_env, monkeypatch):
+    """A custom vault Modulatio does NOT own (the user's own notes folder) is
+    never added to the clear plan, even with projects=True."""
+    from modulatio import config
+
+    unowned = repair_env["home"] / "MyObsidianNotes"
+    unowned.mkdir()
+    monkeypatch.setattr(config, "get_vault_root", lambda: unowned)
+
+    plan = repair.clear_plan(projects=True)
+    assert unowned not in {t.path for t in plan}
+    # base settings still clear — only the unowned vault is spared
+    assert any(t.path.name == "defaults.json" for t in plan)
 
 
 def test_clear_plan_wipe_all_equals_all_flags(repair_env):

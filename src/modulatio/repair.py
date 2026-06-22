@@ -167,8 +167,12 @@ def clear_plan(*, agents: bool = False, secrets: bool = False,
                                      user_data=True)
                     for p in _secret_files() if p.exists()]
     if projects:
+        # Only clear the vault when Modulatio OWNS it (same guard as the
+        # uninstaller's build_plan): an unowned custom folder is the user's own
+        # notes (e.g. their Obsidian vault) and must never be auto-deleted, even
+        # when they opt into clearing project folders.
         vr = config.get_vault_root()
-        if vr.exists():
+        if vr.exists() and uninstall.vault_is_modulatio_owned():
             targets.append(uninstall.Target("project folder (vault)", vr,
                                             "projects", user_data=True))
     return targets
