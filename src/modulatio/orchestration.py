@@ -2852,8 +2852,12 @@ class Orchestrator:
             # shared-run-file writes under concurrent wave workers.
             audit_write_lock=self._store_lock,
         ):
-            # Clay: confine a claude-CLI seat to its workspace + widen grants.
-            with self._seat_context():
+            # Clay: confine a claude-CLI seat to its workspace + widen grants,
+            # threading the single-shot tool-call sink so the seat's in-sandbox
+            # tool calls reach the activity feed (Wild Bill MED).
+            with self._seat_context(
+                on_tool_call=self._seat_tool_sink(role, task_id, agent_id)
+            ):
                 return runner(prompt)
 
     def _run_agent_call(
@@ -2914,8 +2918,11 @@ class Orchestrator:
                         audit_path=self._scope_root() / "audit.jsonl",
                         audit_write_lock=self._store_lock,  # #151/e2e Blocker 1
                     ):
-                        # Clay: confine a claude-CLI producer/QC seat.
-                        with self._seat_context():
+                        # Clay: confine a claude-CLI producer/QC seat, threading
+                        # the single-shot tool-call sink (Wild Bill MED).
+                        with self._seat_context(
+                            on_tool_call=self._seat_tool_sink(role, task_id, agent_id)
+                        ):
                             return runner(prompt)
         return self._run(
             role,
@@ -4926,23 +4933,35 @@ class Orchestrator:
             path.rename(dest)
             return dest
 
-    def _append_conversation(self, role: str, content: str) -> None:
+    def _append_conversation(
+        self, role: str, content: str, *, interrupted: bool = False
+    ) -> None:
         # SEC-03 (security audit, Nemo): the Leader↔operator log is durable and
         # was written world-default-mode + verbatim. Create it 0600 (owner-only,
         # like the tool-call transcripts) and sweep token-shaped secrets from the
         # content so a pasted/echoed key doesn't persist in the clear.
+        #
+        # ``interrupted`` marks a turn the operator cut short (ESC) as a
+        # first-class outcome (Jenny F1): the prose reads like a normal Leader
+        # reply, so without this flag a downstream reader (undo, goal-evidence
+        # filter, a TUI affordance) would have to string-match the sentinel.
+        # Opt-in metadata — the field is written only when True, so ordinary
+        # turns stay byte-for-byte as before.
         from modulatio.oauth_refresh import _redact_secrets
 
         path = self._conversation_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         existed = path.exists()
+        record = {
+            "role": role,
+            "content": _redact_secrets(content),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        if interrupted:
+            record["interrupted"] = True
         fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "role": role,
-                "content": _redact_secrets(content),
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }) + "\n")
+            f.write(json.dumps(record) + "\n")
         if existed:  # tighten a legacy file created before this guard
             try:
                 os.chmod(path, 0o600)
@@ -5627,6 +5646,13 @@ class Orchestrator:
         attachments = attachments or []
         # A new operator turn starts fresh: clear any abort flag left set by a
         # prior ESC interrupt, so it stops THIS turn's work only — never the next.
+        # FUTURE (concurrency): this Event is SHARED with a converse-driven
+        # run_job (a kickoff wave reads the same flag). If the operator starts a
+        # new converse turn while such a job is still in flight, this clear() can
+        # un-abort an ESC meant for that job. Today the converse + its run_job are
+        # serialized through the worker, so the interleaving is not reachable in
+        # the normal flow; before they can truly overlap, give the kickoff lane
+        # its OWN abort Event (or drop this clear() and reset per-turn elsewhere).
         self.abort_event.clear()
         # §2 Task 1 — autonomy mode at the converse boundary. A leading mode
         # command sets the session mode (persists on the Orchestrator) and is
@@ -5749,6 +5775,13 @@ class Orchestrator:
                 )
                 raise
 
+            # An operator ESC returns the interrupt sentinel BY IDENTITY — record
+            # the turn as a first-class interrupt (Jenny F1) so a future reader
+            # can distinguish it from a real reply without string-matching the
+            # prose. Compare before the None-coalesce below (which preserves the
+            # sentinel's identity for a non-None reply anyway).
+            from modulatio import runners as _runners
+            interrupted = reply is _runners.INTERRUPTED_REPLY
             # Defensive: never persist None (a misbehaving runner path) — keep the
             # log a clean string thread.
             reply = reply if reply is not None else ""
@@ -5759,7 +5792,7 @@ class Orchestrator:
             # second failure is swallowed (the reply is still returned to the
             # caller in memory).
             try:
-                self._append_conversation("leader", reply)
+                self._append_conversation("leader", reply, interrupted=interrupted)
             except Exception:  # noqa: BLE001 — never let log-write failure lose the turn
                 try:
                     self._append_conversation(
@@ -7402,6 +7435,27 @@ class Orchestrator:
         ws = workspace if workspace is not None else self._leader_workspace()
         grants = tuple(str(r) for r in self.leader_gate().granted_roots())
         return _clay.seat_context(ws, grants, on_tool_call=on_tool_call)
+
+    def _seat_tool_sink(
+        self,
+        role: str,
+        task_id: "str | None" = None,
+        agent_id: "str | None" = None,
+    ) -> "Callable[[str, dict, str], None]":
+        """Build the ``(name, args, result)`` tool-call sink for a SINGLE-SHOT
+        Clay seat, so its in-sandbox tool calls surface on the live activity feed
+        (Team TV) the same way the chat-loop path logs them — otherwise a confined
+        producer/QC seat's tool use is invisible (Wild Bill MED). A Clay seat
+        reads it via ``seat_activity_var``; a non-Clay runner ignores it. The
+        chat-loop path builds a richer sink (with a per-task transcript);
+        single-shot dispatches have no per-task transcript, so this emits the
+        live activity event only."""
+        def _sink(name: str, args: dict, result: str) -> None:
+            self._emit_activity(
+                role=role, phase="tool_call_ended",
+                task_id=task_id, agent_id=agent_id, detail={"tool": name},
+            )
+        return _sink
 
     def _leader_tool_registry(self) -> "dict[str, tools.Tool]":
         """The conversational Leader's SOLO-coding registry: path-bound builtins

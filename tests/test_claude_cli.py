@@ -45,6 +45,20 @@ def test_build_claude_argv_disallows_background_workflow_and_subagent_spawners()
     assert argv[-1] == "go"
 
 
+def test_confined_seat_strips_shell_so_it_cannot_re_exec_claude():
+    """Wild Bill HIGH: stripping only Workflow/Task/Agent left ``Bash`` available,
+    and a confined seat (``--permission-mode bypassPermissions``) could use Bash to
+    re-exec the claude binary WITHOUT ``--disallowedTools`` — the nested process
+    regains the spawners, defeating the zero-sub-agent bound. Removing the shell
+    tools (Bash + its background-shell management) leaves no process-exec surface,
+    so there is no way to launch a nested claude at all."""
+    disallowed = set(claude_cli._DISALLOWED_TOOLS)
+    assert {"Bash", "BashOutput", "KillShell"} <= disallowed, (
+        "a confined kickoff seat must have no shell/exec tool — otherwise it can "
+        "re-exec claude -p and recover Workflow/Task/Agent"
+    )
+
+
 def test_claude_env_scrubs_anthropic_key():
     env = claude_cli.claude_env({"PATH": "/bin", "ANTHROPIC_API_KEY": "sk-leak", "HOME": "/h"})
     assert "ANTHROPIC_API_KEY" not in env

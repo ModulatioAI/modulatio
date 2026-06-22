@@ -10,6 +10,7 @@ finishes first; the interrupt lands at the next step boundary.
 """
 from __future__ import annotations
 
+import json
 import threading
 import types
 from pathlib import Path
@@ -32,7 +33,7 @@ def test_run_llm_with_tools_aborts_before_first_model_call():
         chat_runner=runner, prompt="x", tool_loadout=(), tool_registry={},
         max_iters=5, should_abort=lambda: True,
     )
-    assert out == runners._INTERRUPTED_REPLY
+    assert out == runners.INTERRUPTED_REPLY
     assert len(runner.calls) == 0  # bailed before ever calling the model
 
 
@@ -54,7 +55,7 @@ def test_run_llm_with_tools_aborts_after_a_tool_step():
         chat_runner=runner, prompt="x", tool_loadout=("echo",), tool_registry=registry,
         max_iters=5, should_abort=lambda: flag["abort"],
     )
-    assert out == runners._INTERRUPTED_REPLY
+    assert out == runners.INTERRUPTED_REPLY
     assert len(runner.calls) == 1  # only the first model call ran; bailed before the 2nd
 
 
@@ -103,8 +104,36 @@ def test_converse_bails_when_abort_event_set_mid_loop(project: Project):
         chat_runner_models={"leader": "mock-model"},
     )
     reply = orch.converse("do a long multi-step thing")
-    assert reply == runners._INTERRUPTED_REPLY
+    assert reply == runners.INTERRUPTED_REPLY
     assert calls["n"] == 1  # bailed before a second model call
+
+
+def test_interrupted_turn_is_marked_in_durable_thread(project: Project):
+    """Jenny F1 WIRING: an interrupted turn must be DISTINGUISHABLE from a real
+    Leader reply in the durable jsonl. converse identity-compares the public
+    sentinel and writes ``interrupted: true`` on that turn, so a future reader
+    (an undo, a goal-evidence filter, a TUI 'interrupted' affordance) isn't left
+    string-matching the prose."""
+    def mock_leader(*, messages, tools, tool_choice=None):
+        orch.abort_event.set()  # ESC during the model turn
+        return ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c1", name="team_status", args={}),
+        ))
+
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": mock_leader},
+        chat_runner_models={"leader": "mock-model"},
+    )
+    reply = orch.converse("do a long multi-step thing")
+    assert reply is runners.INTERRUPTED_REPLY  # identity, not string-equality
+
+    turns = [json.loads(ln) for ln in
+             orch._conversation_path().read_text(encoding="utf-8").splitlines() if ln.strip()]
+    leader_turns = [t for t in turns if t["role"] == "leader"]
+    assert leader_turns and leader_turns[-1].get("interrupted") is True
+    # ordinary (non-interrupted) turns carry no flag — the field is opt-in metadata
+    assert all(not t.get("interrupted") for t in turns if t["role"] != "leader")
 
 
 def test_converse_clears_stale_abort_on_a_new_turn(project: Project):

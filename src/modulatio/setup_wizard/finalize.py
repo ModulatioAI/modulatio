@@ -24,7 +24,8 @@ from modulatio.setup_wizard import steps
 
 def _derive_default_models(structural: list[dict], workers: list[dict]) -> dict[str, str]:
     """Map agent picks to role-default models for the kickoff CLI's flag
-    defaults. Skills-first (#143): the structural roles are Leader + QC.
+    defaults. Skills-first (#143): the structural roles are the Leader (always)
+    and an optional QC — this maps whichever are present.
     The task-planning utility call (``planner``) uses the Leader's model —
     planning is the Leader's job now that the Coordinator role is gone.
     ``producer`` falls to the first worker. (Research is a capability a

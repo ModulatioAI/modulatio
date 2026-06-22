@@ -367,7 +367,8 @@ def _caps_from_model(model_key: str | None) -> tuple[list[str], str | None, str 
 # Skills-first: the fallback roster has NO standalone planner agent —
 # that prior role was removed engine-side, and task planning is the
 # Leader's job (the planner runner uses the Leader's model). Structural
-# roles are Leader + QC; the producer is a skill-holder. (Research is a
+# roles are the Leader (required) and an optional QC; the producer is a
+# skill-holder. (Research is a
 # capability the producer composes — its rigorous-sourcing + web-search skills
 # already cover the research/web-search caps — not a separate role; Brick A.)
 _DEFAULT_ROSTER_TEMPLATE: tuple[tuple[str, tuple[str, ...], str, str], ...] = (

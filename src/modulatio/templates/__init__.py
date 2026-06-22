@@ -12,12 +12,13 @@ standards. Two locations, searched in order:
    override.
 
 Skills-first (#143):
-- Structural-role templates (`leader`, `qc`) are mandatory. Exactly one of
-  each per install. (The legacy `coordinator` triad template was removed —
+- The **Leader** is the one required structural role — exactly one per install.
+  **QC** (`qc`) is structural too (the verifier) but OPTIONAL: a solo-Leader
+  setup can skip it. (The legacy `coordinator` triad template was removed —
   planning is the Leader's job.)
 - Worker templates (`writer`, `coder`, `analyst`, `researcher`,
   `editor`, `marketer`, `qa-engineer`) are optional skill-holders.
-- Min 3 agents (Leader + QC + 1 skill-holder), max 10.
+- A team is 1–10 agents: the Leader alone, optionally a QC, plus any producers.
 """
 
 from __future__ import annotations
@@ -47,17 +48,19 @@ class Template:
     default_capability_tags: tuple[str, ...]
     default_model_tier: str
     cost_class: str
-    mandatory: bool  # True for triad, False for workers
+    mandatory: bool  # True = structural template (Leader/QC); False = worker.
+                     # "structural", NOT "must be in every roster" — QC is
+                     # skippable in setup (#13); only the Leader is required.
     description: str
     identity: str  # the body — used as Agent.identity
     source_path: Path | None = None
 
 
-# Skills-first: the only mandatory structural roles are Leader (the one
-# deliberative seat) and QC (the verifier). Planning is the Leader's
-# job — a prior standalone "coordinator" role was removed engine-side,
-# so it is no longer part of the mandatory set. Everything else is a
-# producer (skill-holder) the team routes work to.
+# Skills-first: the structural roles are Leader (the one REQUIRED deliberative
+# seat) and QC (the verifier — structural but OPTIONAL since #13; a solo-Leader
+# setup skips it). Planning is the Leader's job — a prior standalone
+# "coordinator" role was removed engine-side. Everything else is a producer
+# (skill-holder) the team routes work to.
 _TRIAD_TIERS = ("leader", "qc")
 _WORKER_TEMPLATES = ("writer", "coder", "analyst", "researcher", "editor", "marketer", "qa-engineer")
 _TRIAD_TEMPLATES = ("leader", "qc")
@@ -172,7 +175,7 @@ def list_template_ids(**kwargs) -> list[str]:
 
 
 def triad_templates() -> dict[str, Template]:
-    """Return {tier: template} for the three mandatory triad slots.
+    """Return {tier: template} for the structural slots (Leader, QC).
 
     Picks the first template per tier in load order. If multiple shared
     overrides exist for the same tier, the one earliest by template id wins.

@@ -32,29 +32,40 @@ _DEFAULT_SYSTEM = (
     "You are a Modulatio seat doing one-shot work. Complete the assigned task and "
     "produce the result in THIS turn — fetch what you need and write the "
     "deliverable directly. Your final message IS the deliverable; it is saved and "
-    "used verbatim. You may delegate to a helper sub-agent or two if a subtask "
-    "genuinely needs it, but do NOT launch a background workflow or defer work to "
-    "a background process, and never tell anyone to 'watch progress' — there is no "
-    "background here and no one is watching. Produce the complete result now."
+    "used verbatim. Do this YOURSELF: do NOT delegate to a sub-agent, do NOT "
+    "launch a background workflow or defer work to a background process, and never "
+    "tell anyone to 'watch progress' — there is no background here and no one is "
+    "watching. Produce the complete result now."
 )
 
 #: Claude Code tools stripped from CONFINED KICKOFF seats (producer / QC / plan /
-#: reflect — the single-shot path) by passing this as ``disallowed_tools``:
-#: ``Workflow`` (Claude Code's UNBOUNDED background orchestrator) plus the
-#: sub-agent spawners ``Task`` / ``Agent``. The failure mode is the same for all
-#: three: a confined seat that can spawn its own helpers gets effectively INFINITE
-#: retries BELOW Modulatio's retry counter, on the subscription's (unmetered) token
-#: budget. ``Workflow`` does it async ("ship 'watch /workflows' instead of the
-#: artifact"); ``Task`` / ``Agent`` do it synchronously — but synchronous is NOT
-#: bounded: a producer can call ``Task`` in a LOOP, folding N hidden attempts into
-#: one seat invocation. The claude CLI has no "max N sub-agents" knob, so the only
-#: bound that actually binds is zero — the confined seat produces its OWN artifact;
-#: the orchestrator owns the swarm. Removing the tools makes the dodge impossible,
-#: not just discouraged ("engine binds, prose only bends"). DELIBERATELY NOT applied
-#: to the interactive HARNESS lane (Leader converse / solo coding, the chat runner):
-#: there, orchestrating IS the job, so the Leader keeps its full agentic loadout
-#: (Clif: "yes in a kickoff, no in the harness").
-_DISALLOWED_TOOLS = ("Workflow", "Task", "Agent")
+#: reflect — the single-shot path) by passing this as ``disallowed_tools``.
+#:
+#: Two classes, both removed because the seat runs ``--permission-mode
+#: bypassPermissions`` (no prompt to fall back on):
+#:
+#: 1. Sub-agent spawners — ``Workflow`` (Claude Code's UNBOUNDED background
+#:    orchestrator) + ``Task`` / ``Agent``. A confined seat that can spawn its own
+#:    helpers gets effectively INFINITE retries BELOW Modulatio's retry counter, on
+#:    the subscription's (unmetered) budget. ``Workflow`` does it async; ``Task`` /
+#:    ``Agent`` synchronously — but synchronous is NOT bounded: a producer can loop
+#:    ``Task``, folding N hidden attempts into one seat call. The CLI has no
+#:    "max N sub-agents" knob, so the only bound that binds is zero.
+#: 2. The shell — ``Bash`` + its background-shell management (``BashOutput`` /
+#:    ``KillShell``). Leaving the shell in defeated class 1 by another route
+#:    (Wild Bill HIGH): a seat could use Bash to locate the running claude binary
+#:    (e.g. ``/proc/$PPID/exe``) and re-exec ``claude -p`` WITHOUT
+#:    ``--disallowedTools`` — the nested process regains Workflow/Task/Agent.
+#:    Removing every process-exec tool leaves no surface to launch a nested CLI at
+#:    all. A confined seat produces its OWN artifact (Read/Write/Edit/Grep/Glob);
+#:    running builds/tests is the harness lane's job, not a confined producer's.
+#:
+#: Removing the tools makes the dodge impossible, not just discouraged ("engine
+#: binds, prose only bends"). DELIBERATELY NOT applied to the interactive HARNESS
+#: lane (Leader converse / solo coding, the chat runner): there, orchestrating AND
+#: running code IS the job, so the Leader keeps its full agentic loadout (Clif:
+#: "yes in a kickoff, no in the harness").
+_DISALLOWED_TOOLS = ("Workflow", "Task", "Agent", "Bash", "BashOutput", "KillShell")
 
 #: A tool-activity sink ``(name, args, result) -> None`` — same signature as the
 #: orchestrator's tool-loop logger, so Clay's (otherwise-invisible) in-sandbox

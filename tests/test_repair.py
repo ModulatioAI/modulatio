@@ -84,6 +84,28 @@ def test_clear_plan_spares_unowned_vault(repair_env, monkeypatch):
     assert any(t.path.name == "defaults.json" for t in plan)
 
 
+def test_clear_plan_routes_through_validated_plan(repair_env, monkeypatch):
+    """Jenny F3: clear_plan must return a plan validated by the SAME assert_safe
+    gate build_plan uses — so it delegates to uninstall.validated_plan, giving
+    its hand-built Targets the same plan-time guarantee (not only the delete-time
+    re-check in remove_target)."""
+    from modulatio import uninstall
+
+    called: dict = {}
+    real = uninstall.validated_plan
+
+    def spy(candidates):
+        called["n"] = len(candidates)
+        return real(candidates)
+
+    monkeypatch.setattr(uninstall, "validated_plan", spy)
+    plan = repair.clear_plan(agents=True, secrets=True, projects=True)
+    assert "n" in called, "clear_plan did not route through validated_plan"
+    # and every returned Target is catastrophic-path-safe
+    for t in plan:
+        uninstall.assert_safe(t.path)  # must not raise
+
+
 def test_clear_plan_wipe_all_equals_all_flags(repair_env):
     assert {t.path for t in repair.clear_plan(wipe_all=True)} == {
         t.path for t in repair.clear_plan(agents=True, secrets=True, projects=True)

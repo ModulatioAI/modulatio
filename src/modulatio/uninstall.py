@@ -174,7 +174,17 @@ def vault_is_modulatio_owned() -> bool:
     a ``modulatio`` component (the XDG default ``…/modulatio/projects`` and the
     wizard's ``~/Obsidian/Modulatio/projects`` both qualify). A custom vault
     WITHOUT that marker is the user's own folder (their notes); the uninstaller
-    must NEVER auto-delete it, even under ``--pristine --yes``."""
+    must NEVER auto-delete it, even under ``--pristine --yes``.
+
+    FUTURE: this is a CREATOR-NAME heuristic, not a true ownership record — it
+    holds because the wizard is the only thing that makes these folders today, so
+    the ``modulatio`` component is present iff we created it. It has one sharp
+    edge: a user who literally names their own notes folder ``modulatio`` would be
+    treated as engine-owned. Before the uninstaller is ever used as the substrate
+    for an AUTOMATED reset (CI teardown, a ``--ci`` flag), replace the heuristic
+    with an explicit ownership marker the wizard writes at vault-create time (a
+    ``.modulatio-owned`` stamp / a setup_state entry) — a real ownership record,
+    not a path-name guess. Interactive use is safe today (the operator confirms)."""
     try:
         vault = config.get_vault_root().resolve()
     except OSError:
@@ -233,6 +243,16 @@ def build_plan(
     if remove_deliverables:
         candidates.append(deliverables_target())
 
+    return validated_plan(candidates)
+
+
+def validated_plan(candidates: list[Target]) -> list[Target]:
+    """Keep the candidates that exist AND pass ``assert_safe`` (catastrophic-path
+    guard — raises loud on a bad one). The single plan-validation site shared by
+    ``build_plan`` and ``repair.clear_plan`` so every returned plan carries the
+    same invariant: a caller may delete any Target in it without re-checking
+    (Jenny F3 — repair's hand-built plan now has the same guarantee build_plan's
+    does, not just the delete-time re-check in ``remove_target``)."""
     plan: list[Target] = []
     for t in candidates:
         if not t.path.exists():

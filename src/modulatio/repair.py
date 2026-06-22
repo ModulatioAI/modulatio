@@ -175,7 +175,10 @@ def clear_plan(*, agents: bool = False, secrets: bool = False,
         if vr.exists() and uninstall.vault_is_modulatio_owned():
             targets.append(uninstall.Target("project folder (vault)", vr,
                                             "projects", user_data=True))
-    return targets
+    # Validate the hand-built plan through the SAME assert_safe gate build_plan
+    # uses, so every Target returned is catastrophic-path-safe at plan time —
+    # not only re-checked at delete time (Jenny F3).
+    return uninstall.validated_plan(targets)
 
 
 def execute_clear(plan: list) -> tuple[Path | None, list[str]]:

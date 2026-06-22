@@ -13,9 +13,9 @@ Wizard step order (8 steps; step 5 added 2026-04-30 for budget caps):
     3. models — combined endpoint + auth + model-id step. Quick-add rows
        for detected OAuth credentials + local services. Each entry is
        fully self-contained.
-    4. agent provisioning (mandatory triad + workers loop, 4-10 agents).
-       Each agent gets one model prompt; per-role default-models dict is
-       derived from these picks at finalize, not asked separately.
+    4. agent provisioning (Leader required; QC + producers optional, 1-10
+       agents). Each agent gets one model prompt; per-role default-models dict
+       is derived from these picks at finalize, not asked separately.
     5. budget defaults (optional) — y/N gate, then three numeric prompts
        for wall-clock / token / cost caps. Each axis independently None
        (unbounded) or set. New plans inherit at draft time.

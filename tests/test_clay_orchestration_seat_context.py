@@ -12,6 +12,8 @@ purely additive (the contract is only consumed on the ``claude_cli`` endpoint).
 
 from __future__ import annotations
 
+import pytest
+
 
 def _clay_preset() -> dict:
     return {
@@ -180,3 +182,90 @@ def test_seat_context_default_is_temp_fallback():
     ws, grants = claude_cli.current_seat_context()
     assert ws.exists()
     assert grants == []
+
+
+def _project_for(tmp_path, code):
+    from modulatio import vault
+    from modulatio.types import Project
+
+    vault.init_project(code, code, "obj")
+    return Project(code=code, name=code, objective="obj", leader_model="stub",
+                   wiki_path=str(tmp_path / code.lower()))
+
+
+def test_single_shot_run_threads_activity_sink(tmp_path, monkeypatch):
+    """Wild Bill MED: the single-shot ``_run`` path must thread a tool-call sink
+    into the seat context so a Clay seat's in-sandbox tool calls reach the
+    activity feed (Team TV) — not only the chat-loop path. Before the fix
+    ``_seat_context()`` was entered with no sink, so ``seat_activity_var`` was
+    None and producer/QC tool use was invisible."""
+    from modulatio import claude_cli, vault
+    from modulatio.orchestration import Orchestrator
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    project = _project_for(tmp_path, "SINKRUN")
+    events: list = []
+
+    def _spy_runner(prompt: str) -> str:
+        sink = claude_cli.seat_activity_var.get()
+        assert sink is not None, "single-shot seat context must carry a tool-call sink"
+        sink("Read", {"path": "x"}, "ok")  # simulate run_claude emitting a parsed call
+        return "ok"
+
+    orch = Orchestrator(project, {"leader": _spy_runner})
+    orch.activity_callback = events.append
+    out = orch._run("leader", "hello", task_id="T1")
+
+    assert out == "ok"
+    assert any(getattr(e, "phase", None) == "tool_call_ended" for e in events), (
+        "the single-shot seat's tool call did not reach the activity feed"
+    )
+    assert claude_cli.seat_activity_var.get() is None  # reset after the call
+
+
+def test_single_shot_agent_call_threads_activity_sink(tmp_path, monkeypatch):
+    """Wild Bill MED, per-agent path: ``_run_agent_call`` (producer / QC-fixer
+    direct dispatch) must thread the same sink."""
+    from modulatio import claude_cli, roster, vault
+    from modulatio.orchestration import Orchestrator
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    project = _project_for(tmp_path, "SINKAGENT")
+    fake_agent = roster.Agent(id="spy-agent", name="Spy", model="spy/model", tier="qc")
+    monkeypatch.setattr(roster, "load", lambda agent_id, project_code: fake_agent)
+    events: list = []
+
+    def _spy_runner(prompt: str) -> str:
+        sink = claude_cli.seat_activity_var.get()
+        assert sink is not None, "per-agent seat context must carry a tool-call sink"
+        sink("Edit", {"path": "y"}, "ok")
+        return "ok"
+
+    orch = Orchestrator(project, {"leader": lambda p: "ok"},
+                        agent_runners={"spy/model": _spy_runner})
+    orch.activity_callback = events.append
+    out = orch._run_agent_call("spy-agent", "qc", "hello", task_id="T2")
+
+    assert out == "ok"
+    assert any(getattr(e, "phase", None) == "tool_call_ended" for e in events)
+    assert claude_cli.seat_activity_var.get() is None
+
+
+def test_single_shot_seat_sink_resets_on_exception(tmp_path, monkeypatch):
+    """The seat activity sink must be cleared even if the runner raises, so a
+    later non-Clay call can't inherit a stale sink (Wild Bill: reset on success
+    AND exception)."""
+    from modulatio import claude_cli, vault
+    from modulatio.orchestration import Orchestrator
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    project = _project_for(tmp_path, "SINKBOOM")
+
+    def _boom(prompt: str) -> str:
+        assert claude_cli.seat_activity_var.get() is not None
+        raise RuntimeError("boom")
+
+    orch = Orchestrator(project, {"leader": _boom})
+    with pytest.raises(RuntimeError, match="boom"):
+        orch._run("leader", "hello", task_id="T3")
+    assert claude_cli.seat_activity_var.get() is None  # reset despite the raise

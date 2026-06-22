@@ -195,15 +195,16 @@ def _build_agent_from_template(template_id: str, model: str) -> dict:
 
 
 def _provision_triad(state: dict, default_models: dict[str, str]) -> Any:
-    """Walk the mandatory structural roles: Leader → QC.
+    """Walk the structural roles: Leader (required) → QC (optional, #13).
 
     Skills-first (#143): these are the only two structural roles. The
-    Leader is the one deliberative seat (it also drives task planning);
-    QC is the verifier. Everything else is a producer/skill-holder,
-    provisioned in the skills step. (A prior standalone planner role
-    was removed engine-side; planning is the Leader's job.) The state
-    key stays ``triad_agents`` for back-compat with finalize; it now
-    holds the [leader, qc] pair.
+    Leader is the one REQUIRED deliberative seat (it also drives task
+    planning); QC is the verifier and is optional — a solo-Leader setup
+    skips it. Everything else is a producer/skill-holder, provisioned in
+    the skills step. (A prior standalone planner role was removed
+    engine-side; planning is the Leader's job.) The state key stays
+    ``triad_agents`` for back-compat with finalize; it now holds the
+    Leader plus the QC if one was added.
     """
     structural: list[dict] = state.get("triad_agents", [])
     by_tier = {a["tier"]: a for a in structural}
@@ -475,9 +476,10 @@ def _maybe_customize_context_budgets(state: dict) -> None:
 def run(state: dict) -> Any:
     """Execute team formation. Skills-first (#143, Lovecraft review): the
     PRIMARY act is choosing what the team can do — provision the producers
-    (skill-holders) FIRST, then bind the two structural roles (Leader + QC).
-    Mutates state with ``worker_agents`` (skill-holders) and ``triad_agents``
-    (the Leader+QC pair; key kept for finalize back-compat)."""
+    (skill-holders) FIRST, then bind the structural roles (the required Leader
+    and an optional QC, #13). Mutates state with ``worker_agents``
+    (skill-holders) and ``triad_agents`` (the Leader plus the QC if added;
+    key kept for finalize back-compat)."""
     default_models = state.get("default_models", {})
 
     result = _provision_workers(state, default_models)

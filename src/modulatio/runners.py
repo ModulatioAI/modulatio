@@ -659,11 +659,12 @@ def litellm_runner(
             bare_model = litellm_model.split("/", 1)[-1]
             ws, add_dirs = claude_cli.current_seat_context()
             # KICKOFF seat (producer / QC / plan / reflect — single-shot): strip
-            # the subagent-spawning tools (Workflow, Task, Agent) so a confined
-            # seat can't fire off an invisible crew to dodge its retry budget —
-            # the CLI exposes no max-N knob, so the only bound that binds is zero.
-            # See claude_cli._DISALLOWED_TOOLS. The HARNESS lane (chat runner)
-            # keeps its full agentic loadout.
+            # the sub-agent spawners (Workflow, Task, Agent) AND the shell (Bash,
+            # BashOutput, KillShell) so a confined seat can neither fire off an
+            # invisible crew to dodge its retry budget nor re-exec claude -p to
+            # recover those tools — the only bound that binds is zero. See
+            # claude_cli._DISALLOWED_TOOLS. The HARNESS lane (chat runner) keeps
+            # its full agentic loadout.
             return claude_cli.run_claude(
                 claude_bin=claude_bin, model=bare_model, prompt=body,
                 workspace=ws, add_dirs=add_dirs,
@@ -1084,9 +1085,15 @@ def build_tools_schema(loadout: tuple[str, ...], registry: dict) -> list[dict]:
     return out
 
 
-#: Returned by the tool-loop when ``should_abort`` fires (operator pressed ESC).
-#: First-person so it reads naturally as a Leader turn in the chat.
-_INTERRUPTED_REPLY = "(Stopped — I halted what I was doing at your interrupt. What next?)"
+#: Returned (by identity) from the tool-loop when ``should_abort`` fires (operator
+#: pressed ESC). First-person so it reads naturally as a Leader turn in the chat,
+#: BUT it is also a public sentinel: callers compare ``reply is INTERRUPTED_REPLY``
+#: (identity, not string-equality) to record the turn as a first-class *interrupt*
+#: in the durable thread (``interrupted: true``), so the prose-that-reads-like-a-
+#: reply never has to be string-matched to tell an abort from a real answer.
+INTERRUPTED_REPLY = "(Stopped — I halted what I was doing at your interrupt. What next?)"
+#: Back-compat alias (the sentinel was private through 0.9.5).
+_INTERRUPTED_REPLY = INTERRUPTED_REPLY
 
 
 def run_llm_with_tools(
@@ -1204,7 +1211,7 @@ def run_llm_with_tools(
         # the next step boundary and returns a clean note. Cooperative, not a hard
         # kill — a single long in-flight tool/model call still finishes first.
         if should_abort is not None and should_abort():
-            return _INTERRUPTED_REPLY
+            return INTERRUPTED_REPLY
         # Slice 90: pre-flight context-budget check. Compresses
         # in-band; raises RecoverableContextError when even compression
         # can't fit. No-op when no ContextBudgetConfig is bound or when
