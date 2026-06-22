@@ -11,7 +11,68 @@ allow-list silently dropped the actually-emitted ``research`` role, any custom
 
 from __future__ import annotations
 
-from modulatio.tui.widgets.stream_view import is_leader_role, is_team_role
+from datetime import datetime, timezone
+
+import pytest
+
+from modulatio import config, setup_state, vault
+from modulatio.tui.app import ModulatioApp
+from modulatio.tui.widgets.stream_view import (
+    StreamView,
+    is_leader_role,
+    is_team_role,
+)
+from modulatio.types import ActivityEvent
+
+
+def _event(agent_id: str, task_id: str, phase: str) -> ActivityEvent:
+    return ActivityEvent(
+        agent_id=agent_id,
+        role="drafter",
+        phase=phase,
+        task_id=task_id,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+
+@pytest.fixture
+def _isolate(tmp_path, monkeypatch):
+    cfg_dir = tmp_path / "config"
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg_dir)
+    monkeypatch.setattr(config, "DEFAULTS_FILE", cfg_dir / "defaults.json")
+    monkeypatch.setattr(setup_state, "SETUP_STATE_FILE", cfg_dir / "setup-state.json")
+    config.save_defaults({"vault_root": str(tmp_path / "vault")})
+    config.reload()
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    yield
+
+
+@pytest.mark.asyncio
+async def test_concurrent_settled_lines_keep_own_agent_task_pairing(_isolate):
+    """Two producers running in parallel must never cross agent↔task in the
+    rendered feed: each ``wrapped up a task`` line carries its OWN event's
+    agent and task id, not another in-flight task's."""
+    app = ModulatioApp(project_code="STRMX", stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        tv = app.query_one("#stream-team", StreamView)
+        # Two producers dispatched on two different tasks, then settle in the
+        # opposite order — the concurrent-cross scenario.
+        tv.add_event(_event("nemotron", "modulatio1-T-002", "task_dispatched"))
+        tv.add_event(_event("jimmy", "modulatio1-T-001", "task_dispatched"))
+        tv.add_event(_event("nemotron", "modulatio1-T-002", "task_settled"))
+        tv.add_event(_event("jimmy", "modulatio1-T-001", "task_settled"))
+        await pilot.pause()
+
+        settled = [m for m in tv.messages if "wrapped up a task" in m]
+        assert len(settled) == 2, settled
+        nemo_line = next(m for m in settled if "Nemotron" in m)
+        jimmy_line = next(m for m in settled if "Jimmy" in m)
+        # nemotron was on T-002, jimmy on T-001 — no cross.
+        assert "modulatio1-T-002" in nemo_line, nemo_line
+        assert "modulatio1-T-001" not in nemo_line, nemo_line
+        assert "modulatio1-T-001" in jimmy_line, jimmy_line
+        assert "modulatio1-T-002" not in jimmy_line, jimmy_line
 
 
 def test_leader_role_covers_leader_star_and_planner():
