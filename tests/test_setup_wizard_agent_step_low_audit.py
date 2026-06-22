@@ -51,6 +51,7 @@ def test_back_on_qc_steps_back_to_leader_not_exit(monkeypatch):
     monkeypatch.setattr(agent_step, "_pick_template_for_tier", _pick_template)
     monkeypatch.setattr(agent_step, "_pick_model", _pick_model)
     monkeypatch.setattr(agent_step, "_build_agent_from_template", _fake_build)
+    monkeypatch.setattr(steps, "confirm_yn", lambda *a, **k: True)  # add the optional QC
 
     state: dict = {}
     out = agent_step._provision_triad(state, {})
@@ -91,6 +92,7 @@ def test_back_on_qc_model_steps_back_to_leader(monkeypatch):
     monkeypatch.setattr(agent_step, "_pick_template_for_tier", _pick_template)
     monkeypatch.setattr(agent_step, "_pick_model", _pick_model)
     monkeypatch.setattr(agent_step, "_build_agent_from_template", _fake_build)
+    monkeypatch.setattr(steps, "confirm_yn", lambda *a, **k: True)  # add the optional QC
 
     state: dict = {}
     out = agent_step._provision_triad(state, {})
@@ -107,6 +109,20 @@ def test_quit_on_qc_bubbles_out(monkeypatch):
     monkeypatch.setattr(agent_step, "_pick_template_for_tier", _pick_template)
     monkeypatch.setattr(agent_step, "_pick_model", lambda *a, **k: "m")
     monkeypatch.setattr(agent_step, "_build_agent_from_template", _fake_build)
+    monkeypatch.setattr(steps, "confirm_yn", lambda *a, **k: True)  # add the optional QC
 
     out = agent_step._provision_triad({}, {})
     assert out is steps.QUIT
+
+
+def test_skip_qc_yields_leader_only_triad(monkeypatch):
+    """#13: declining the optional-QC gate finishes with a Leader-only structural
+    roster — the Leader is the one required role; QC is optional."""
+    monkeypatch.setattr(agent_step, "_pick_template_for_tier", lambda tier, current=None: tier)
+    monkeypatch.setattr(agent_step, "_pick_model", lambda role, dm, **kw: f"model-{role}")
+    monkeypatch.setattr(agent_step, "_build_agent_from_template", _fake_build)
+    monkeypatch.setattr(steps, "confirm_yn", lambda *a, **k: False)  # skip QC
+    state: dict = {}
+    out = agent_step._provision_triad(state, {})
+    assert out == "configured"
+    assert [a["tier"] for a in state["triad_agents"]] == ["leader"]  # QC omitted

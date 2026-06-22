@@ -151,8 +151,8 @@ def confirm(state: dict) -> Any:
     print(f"    Providers:     {', '.join(_derive_providers(state)) or '(none)'}")
     print(f"    Models:        {len(state.get('configured_models', []))} curated")
     print(f"    API keys:      {len(state.get('staged_api_keys', {}))} staged")
-    # ``triad_agents`` holds the structural roles — Leader + QC only
-    # (skills-first; a prior standalone planner role has been removed).
+    # ``triad_agents`` holds the structural roles — the Leader (always) and an
+    # optional QC (skills-first; a prior standalone planner role has been removed).
     structural = state.get("triad_agents", [])
     workers = state.get("worker_agents", [])
     derived = _derive_default_models(structural, workers)
@@ -160,7 +160,7 @@ def confirm(state: dict) -> Any:
         print("    Default models (derived from the team):")
         for role, model in derived.items():
             print(f"      {role:12s}  {theme.color(model, 'accent')}")
-    print(f"    Structural:    {len(structural)} (Leader + QC: {', '.join(a.get('tier', '?') for a in structural)})")
+    print(f"    Structural:    {len(structural)} ({', '.join(a.get('tier', '?') for a in structural) or 'none'})")
     # Producers are model endpoints (skills are checked out from the shared
     # library per task — Agent.skills is always empty here), so identify each
     # by its model, falling back to capability tags or name. The old line read

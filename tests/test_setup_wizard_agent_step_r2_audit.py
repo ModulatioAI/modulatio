@@ -85,7 +85,8 @@ def test_worker_prefill_absent_passes_no_default(monkeypatch):
         return "m"
 
     monkeypatch.setattr(agent_step, "_pick_model", _pick_model)
-    monkeypatch.setattr(agent_step.steps, "confirm_yn", lambda *a, **k: False)
+    _answers = iter([True, False])  # add producers? yes ; add another? no
+    monkeypatch.setattr(agent_step.steps, "confirm_yn", lambda *a, **k: next(_answers))
 
     state: dict = {}
     out = agent_step._provision_workers(state, {})
@@ -122,6 +123,7 @@ def test_back_before_any_producer_bubbles_out(monkeypatch):
     """Behavior-preservation: BACK before adding any producer still bubbles up."""
     _stub_build_producer(monkeypatch)
     monkeypatch.setattr(agent_step, "_pick_model", lambda *a, **k: steps.BACK)
+    monkeypatch.setattr(agent_step.steps, "confirm_yn", lambda *a, **k: True)  # add producers? yes
 
     out = agent_step._provision_workers({}, {})
     assert out is steps.BACK

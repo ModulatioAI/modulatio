@@ -9,7 +9,8 @@ model to power them; skills sharing a model collapse into one producer
 - Structural roles: Leader (plans + decides) and QC (verifier). A prior
   standalone planner role was removed engine-side; planning is now the
   Leader's job.
-- Floor: Leader + QC + at least one skill-holder = 3; soft cap 10.
+- Floor: the Leader is the one REQUIRED role; QC and producers are optional —
+  recommended for a /kickoff swarm, skippable for a solo-Leader setup. Soft cap 10.
 """
 
 from __future__ import annotations
@@ -216,9 +217,23 @@ def _provision_triad(state: dict, default_models: dict[str, str]) -> Any:
     i = 0
     while i < len(tiers):
         tier = tiers[i]
+        # QC is OPTIONAL — the Leader is the one required role (#13). Offer to skip
+        # it: recommended for a /kickoff swarm, omittable for a solo-Leader setup.
+        # On a reconfigure a saved QC is already in ``by_tier`` (re-confirm it
+        # rather than re-asking). The Leader (i=0) is always walked.
+        if tier == "qc" and tier not in by_tier:
+            theme.clear_screen()
+            theme.step_header(_STEP_NUMBER, _STEP_TOTAL, "Structural role — Quality Control (optional)")
+            if not steps.confirm_yn(
+                "Add a QC verifier? Recommended — QC checks every producer's "
+                "output. A solo-Leader setup can skip it and add it later via "
+                "`modulatio setup`.", default=True,
+            ):
+                break  # no QC — the structural roster is Leader-only
         theme.clear_screen()
         label = "Leader (plans + decides)" if tier == "leader" else "Quality Control (verifier)"
-        theme.step_header(_STEP_NUMBER, _STEP_TOTAL, f"Structural role — {label} (mandatory)")
+        requirement = "required" if tier == "leader" else "optional"
+        theme.step_header(_STEP_NUMBER, _STEP_TOTAL, f"Structural role — {label} ({requirement})")
 
         current_template = by_tier.get(tier, {}).get("template_origin")
         template_id = _pick_template_for_tier(tier, current=current_template)
@@ -261,7 +276,9 @@ def _provision_triad(state: dict, default_models: dict[str, str]) -> Any:
         by_tier[tier] = built
         i += 1
 
-    state["triad_agents"] = [by_tier["leader"], by_tier["qc"]]
+    state["triad_agents"] = [by_tier["leader"]] + (
+        [by_tier["qc"]] if "qc" in by_tier else []
+    )
     return "configured"
 
 
@@ -273,11 +290,9 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
     across the pool. Adds up to ``MAX_AGENTS - 2`` (Leader + QC) producers.
     Sets ``state['worker_agents']``."""
     staged_keys = state.get("staged_api_keys")
-    # Leader + QC are ALWAYS provisioned (exactly 2 seats) by the triad step,
-    # regardless of what a partial/corrupt re-invocation pre-fill loaded into
-    # ``triad_agents``. Reserve those 2 as a constant so a saved triad with a
-    # missing/extra/unknown-tier entry can't widen ``max_producers`` and let
-    # the final team exceed MAX_AGENTS.
+    # The Leader is always provisioned; QC is optional (#13). Reserve 2 seats
+    # (Leader + a possible QC) as a constant so a saved triad with a missing /
+    # extra / unknown-tier entry can't widen ``max_producers`` past MAX_AGENTS.
     max_producers = max(1, MAX_AGENTS - 2)
 
     # Re-invocation edit/keep: seed the producer picker defaults from the saved
@@ -296,6 +311,18 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
         "producer can run any task and work spreads across the pool.", "muted",
     ))
     print()
+
+    # Producers are OPTIONAL — the Leader is the one required role (#13). A
+    # solo-Leader / coding setup can skip them; a /kickoff swarm needs at least
+    # one (the engine opens a ROSTER_GAP ticket if a kickoff finds no cover). On
+    # a reconfigure (saved pool present) skip the gate and re-confirm the pool.
+    if not prior_models and not steps.confirm_yn(
+        "Add producers now? They run the tasks in a /kickoff swarm. "
+        "Skip for a solo-Leader setup — add them later via `modulatio setup`.",
+        default=True,
+    ):
+        state["worker_agents"] = []
+        return "configured"
 
     producers: list[dict] = []
     while len(producers) < max_producers:
@@ -335,10 +362,6 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
             continue
         if not steps.confirm_yn("Add another producer to the pool?", default=False):
             break
-
-    if not producers:
-        theme.error("A team needs at least one producer.")
-        return steps.BACK
 
     state["worker_agents"] = producers
     return "configured"

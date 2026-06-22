@@ -53,6 +53,7 @@ def test_back_at_leader_model_picker_returns_to_template_not_bubble(monkeypatch)
     monkeypatch.setattr(agent_step, "_pick_template_for_tier", _pick_template)
     monkeypatch.setattr(agent_step, "_pick_model", _pick_model)
     monkeypatch.setattr(agent_step, "_build_agent_from_template", _fake_build_template)
+    monkeypatch.setattr(steps, "confirm_yn", lambda *a, **k: True)  # add the optional QC
 
     state = {}
     out = agent_step._provision_triad(state, {})

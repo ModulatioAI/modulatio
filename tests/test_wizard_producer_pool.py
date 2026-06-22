@@ -45,7 +45,7 @@ def test_provision_workers_adds_producers_no_skills(monkeypatch, stub_producer):
     'add another?' = yes then no."""
     models = iter(["m1", "m2"])
     monkeypatch.setattr(agent_step, "_pick_model", lambda *a, **k: next(models))
-    answers = iter([True, False])  # add another? yes ; then no → stop
+    answers = iter([True, True, False])  # add producers? yes ; another? yes ; then no
     monkeypatch.setattr(steps, "confirm_yn", lambda *a, **k: next(answers))
 
     state = {"triad_agents": list(_TRIAD)}
@@ -74,6 +74,7 @@ def test_provision_workers_respects_cap(monkeypatch, stub_producer):
 def test_provision_workers_back_on_first_bails(monkeypatch, stub_producer):
     """BACK at the very first model picker propagates out of provisioning."""
     monkeypatch.setattr(agent_step, "_pick_model", lambda *a, **k: steps.BACK)
+    monkeypatch.setattr(steps, "confirm_yn", lambda *a, **k: True)  # add producers? yes
     state = {"triad_agents": list(_TRIAD)}
     out = agent_step._provision_workers(state, {})
     assert out is steps.BACK
@@ -147,3 +148,17 @@ def test_producer_caps_explicit_preset_tag_wins(monkeypatch):
     tier, cost, caps = agent_step._producer_caps_for_model("anything")
     assert tier == "tactical"
     assert caps == ["my-cap"]
+
+
+def test_provision_workers_skip_gate_yields_no_producers(monkeypatch, stub_producer):
+    """#13: declining the 'add producers?' gate finishes with an EMPTY pool — a
+    solo-Leader setup is valid, no producer is required. The model picker is
+    never reached."""
+    picks: list = []
+    monkeypatch.setattr(agent_step, "_pick_model", lambda *a, **k: picks.append(1))
+    monkeypatch.setattr(steps, "confirm_yn", lambda *a, **k: False)  # don't add producers
+    state = {"triad_agents": list(_TRIAD)}
+    out = agent_step._provision_workers(state, {})
+    assert out == "configured"
+    assert state["worker_agents"] == []
+    assert picks == []  # never entered the producer loop
