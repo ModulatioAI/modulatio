@@ -18,6 +18,7 @@ import contextvars
 import json
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -292,6 +293,48 @@ def seat_context(
         seat_confined_var.reset(ctoken)
 
 
+class ClaudeUnavailable(RuntimeError):
+    """A ``claude -p`` call returned a PROVIDER error (529 overload, 5xx, rate
+    limit, auth) instead of a completion — the seat's MODEL is unavailable.
+    ``run_claude`` raises this (after its own bounded wait-retries on a transient
+    overload) so the orchestrator's model-fallback chain engages (restart the task
+    on the next model), rather than the error text being returned as a 'completion'
+    and crashing a downstream parser. ``runners._fallback_error_types`` includes
+    it, so it advances to a fallback the same way a litellm RateLimitError does."""
+
+
+#: Bounded wait-retries for a TRANSIENT Clay provider error (529/overload/5xx) —
+#: the "wait state": hold for the blip to clear before falling back. Kept short so
+#: a sustained outage falls back promptly rather than hanging the seat.
+_CLAUDE_RETRY_BACKOFF_S = (2.0, 5.0, 10.0)
+
+
+def _claude_error_reason(returncode: int, result: str) -> "str | None":
+    """A short error reason if the ``claude -p`` call FAILED (provider error), else
+    None. The CLI surfaces an API failure as a leading ``API Error:`` line in its
+    result and/or a non-zero exit — either is a failed call, not a completion."""
+    head = result.lstrip()
+    if head.startswith("API Error"):
+        return head.splitlines()[0][:200]
+    if returncode != 0:
+        first = head.splitlines()[0][:160] if head else "(no output)"
+        return f"claude -p exited {returncode}: {first}"
+    return None
+
+
+def _claude_error_retriable(reason: str) -> bool:
+    """A TRANSIENT provider error (overload / 5xx / rate-limit / timeout) is worth
+    waiting + retrying; a 4xx (bad request / unrecoverable) is not — waiting won't
+    help, so fall back immediately."""
+    r = reason.lower()
+    return any(
+        s in r for s in (
+            "529", "overload", "503", "502", "500", "504", "rate limit",
+            "rate_limit", "timeout", "timed out", "temporarily", "unavailable",
+        )
+    )
+
+
 def run_claude(
     *,
     claude_bin: str,
@@ -351,15 +394,30 @@ def run_claude(
     child_env = claude_env(env)  # scrub ANTHROPIC_API_KEY from the CURATED env
     child_env.setdefault("HOME", str(Path.home()))
     child_env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
-    proc = subprocess.run(
-        wrapped, env=child_env, cwd=str(workspace),
-        capture_output=True, text=True, timeout=timeout,
-    )
-    # stream-json output: parse the event stream, emitting Clay's in-sandbox tool
-    # calls to the orchestrator-set activity sink, and return the final result.
-    return parse_claude_stream(
-        proc.stdout.splitlines(), on_tool_call=seat_activity_var.get()
-    )
+    last_reason = ""
+    for attempt in range(len(_CLAUDE_RETRY_BACKOFF_S) + 1):
+        proc = subprocess.run(
+            wrapped, env=child_env, cwd=str(workspace),
+            capture_output=True, text=True, timeout=timeout,
+        )
+        # stream-json output: parse the event stream, emitting Clay's in-sandbox
+        # tool calls to the orchestrator-set activity sink.
+        result = parse_claude_stream(
+            proc.stdout.splitlines(), on_tool_call=seat_activity_var.get()
+        )
+        reason = _claude_error_reason(proc.returncode, result)
+        if reason is None:
+            return result
+        last_reason = reason
+        # Wait state: hold a moment for a TRANSIENT overload to clear, then retry
+        # the same model. A non-transient (4xx) error falls straight through.
+        if attempt < len(_CLAUDE_RETRY_BACKOFF_S) and _claude_error_retriable(reason):
+            time.sleep(_CLAUDE_RETRY_BACKOFF_S[attempt])
+            continue
+        break
+    # Out of retries (or non-retriable): the seat's MODEL is unavailable. Raise so
+    # the orchestrator's model-fallback chain restarts the task on the next model.
+    raise ClaudeUnavailable(last_reason)
 
 
 __all__ = [

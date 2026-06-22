@@ -7711,6 +7711,61 @@ def test_terminal_failure_opens_operator_ticket(project, monkeypatch):
     assert any(t.affected_task_id == task.id for t in tickets), "terminal failure must open a ticket"
 
 
+def test_provider_unavailable_producer_recovers_via_qc_build(project, monkeypatch):
+    """#4.5 + #2: a producer whose model is unavailable (ClaudeUnavailable, after its
+    wait-retries + fallback) routes to the QC-as-fixer backstop — QC builds and the
+    task COMPLETES, instead of wedging."""
+    from modulatio.claude_cli import ClaudeUnavailable
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import TaskStatus
+
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "1")
+    runners = {"leader": _leader_stub, "planner": _planner_stub, "drafter": _drafter_stub,
+               "qc": lambda p: "A COMPLETE, ON-CONTRACT ARTIFACT authored by QC."}
+    orch = Orchestrator(project, runners)
+
+    def _unavail(task, corrective_notes=""):
+        raise ClaudeUnavailable("API Error: 529 Overloaded")
+
+    orch._producer_execute = _unavail  # type: ignore[assignment]
+    task = _qcfix_task(project_id=project.id)
+    task.max_retries = 1
+    summary = RunSummary(project=project)
+    orch._run_task_with_redo(task, summary)
+
+    assert task.status == TaskStatus.COMPLETED
+    assert task.qc_authored_fix is True
+
+
+def test_kickoff_provider_unavailable_fails_loudly(project, monkeypatch):
+    """#4.5: when the Leader's primary model is unavailable on a /kickoff (Clay 529
+    through its retries), the kickoff FAILS LOUDLY with an actionable message telling
+    the operator to change the Leader's primary model — never a traceback, and never a
+    silent fall-over (Clif 2026-06-22: the single-shot Leader path has no fallback, so
+    the right outcome is a clear, loud 'change your Leader's primary model')."""
+    from modulatio import store
+    from modulatio.claude_cli import ClaudeUnavailable
+    from modulatio.orchestration import RunSummary
+
+    orch = _qcfix_orch(project)
+
+    def _boom(*a, **k):
+        raise ClaudeUnavailable("API Error: 529 Overloaded")
+
+    monkeypatch.setattr(orch, "_kickoff_inner", _boom)
+    summary = orch.kickoff("research the thing")
+
+    assert isinstance(summary, RunSummary)
+    # Loud + actionable: names the Leader's primary model + tells them to change it.
+    loud = " ".join(summary.errors).lower()
+    assert "primary" in loud and "leader" in loud and "change" in loud
+    tickets = store.list_tickets(project.code, run_id=project.run_id)
+    assert any(
+        "change" in t.body.lower() and "primary" in t.body.lower() and "leader" in t.body.lower()
+        for t in tickets
+    )
+
+
 def test_non_exhaustion_exception_still_blocks(project, monkeypatch):
     """#2b guard: a GENUINE runtime crash (not producer-exhaustion) still goes
     BLOCKED — the backstop only catches recoverable exhaustion, never masks a bug."""

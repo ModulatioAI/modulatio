@@ -8473,15 +8473,18 @@ class Orchestrator:
 
         # Retry budget exhausted — settle on terminal state from last failure.
         if last_exc is not None:
-            # Producer EXHAUSTION (max_iters: the tool-loop ran out of iterations
-            # without ever committing a final answer) is recoverable — same shape
-            # as QC-reject exhaustion — so route it to the QC-as-fixer backstop
-            # before settling (Clif 2026-06-22: the job lands, whatever the failure
-            # shape). A GENUINE runtime crash is NOT backstopped — a tier bump or a
-            # QC re-author can't fix a broken runtime, so it still goes BLOCKED for
-            # human resolution.
+            # Producer EXHAUSTION is recoverable — same shape as QC-reject
+            # exhaustion — so route it to the QC-as-fixer backstop before settling
+            # (Clif 2026-06-22: the job lands, whatever the failure shape). Two
+            # cases: max_iters (the tool-loop never committed a final answer) and a
+            # Clay provider failure that survived its own wait-retries + the model-
+            # fallback chain (the producer's model is unavailable). A GENUINE
+            # runtime crash is NOT backstopped — a tier bump or QC re-author can't
+            # fix a broken runtime, so it still goes BLOCKED for human resolution.
+            from modulatio import claude_cli as _clay
             from modulatio import runners as _runners
-            if isinstance(last_exc, _runners.MaxItersExhausted) and self._attempt_qc_fix_forward(
+            recoverable_exhaustion = (_runners.MaxItersExhausted, _clay.ClaudeUnavailable)
+            if isinstance(last_exc, recoverable_exhaustion) and self._attempt_qc_fix_forward(
                 t, self._resolve_draft_path(t), None, summary, defect_type="runtime",
             ):
                 return
@@ -12279,6 +12282,7 @@ class Orchestrator:
         # (background kickoff + converse on another thread) never says "done"
         # mid-run. try/finally so the flag always clears, even on error.
         self._kickoff_active = True
+        from modulatio import claude_cli as _claude_cli
         try:
             with self._with_working_memory_configs():
                 return self._kickoff_inner(
@@ -12290,8 +12294,56 @@ class Orchestrator:
                     ask_operator=ask_operator,
                     on_refused=on_refused,
                 )
+        except _claude_cli.ClaudeUnavailable as exc:
+            # The Leader's primary model was unavailable through its wait-retries —
+            # a leader-decision call (decompose/verify) on the single-shot path has
+            # no fallback to fall over to, so it surfaces here. FAIL LOUDLY: a
+            # CRITICAL ticket + an actionable "change your Leader's primary model"
+            # message, never a traceback to the operator (Clif 2026-06-22).
+            return self._fail_kickoff_provider_unavailable(exc)
         finally:
             self._kickoff_active = False
+
+    def _fail_kickoff_provider_unavailable(self, exc: Exception) -> RunSummary:
+        """FAIL LOUDLY when the Leader's primary model is unavailable on a /kickoff.
+
+        The single-shot Leader path (decompose/verify) has no fallback to fall over
+        to, so the run can't start. Rather than fail silently, surface a clear,
+        actionable message + a CRITICAL ticket telling the operator to change the
+        Leader's primary model (Clif 2026-06-22) — never a traceback."""
+        from modulatio import logstore
+
+        loud = ("The Leader's primary model is unavailable and has no fallback to take "
+                "over. Change the Leader's primary model, then re-run.")
+        summary = RunSummary(project=self.project)
+        summary.errors.append(f"{loud} ({exc})")
+        try:
+            logstore.write_error_log(
+                f"kickoff aborted — Leader primary model unavailable: {exc}",
+                context={"surface": "kickoff", "project": self.project.code},
+            )
+        except Exception:  # noqa: BLE001 — logging must not mask the loud return
+            pass
+        try:
+            store.create_ticket(
+                project_id=self.project.id,
+                project_code=self.project.code,
+                run_id=self.project.run_id,
+                priority=TicketPriority.CRITICAL,
+                title="kickoff could not start: change the Leader's primary model",
+                body=(
+                    f"## What happened\n\n{loud}\n\nThe run could not start: the "
+                    f"Leader's primary model was unavailable (a provider error: "
+                    f"{exc}) through its wait-retries, and the single-shot Leader "
+                    f"path has no fallback to take over.\n\n## What to do\n\nChange "
+                    f"the Leader's primary model to one that is available (a local "
+                    f"model or another provider), then re-run.\n"
+                ),
+                actor="orchestrator",
+            )
+        except Exception:  # noqa: BLE001 — a ticket-write failure must not crash the abort
+            pass
+        return summary
 
     @contextmanager
     def _with_working_memory_configs(self):

@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
+
 from modulatio import claude_cli
 
 
@@ -69,6 +72,40 @@ def test_run_claude_sandboxes_and_scrubs(tmp_path, monkeypatch):
     assert str(Path.home() / ".claude") in rw
     assert captured["kw"]["allow_network"] is True
     assert "ANTHROPIC_API_KEY" not in captured["env"]
+
+
+def test_run_claude_raises_unavailable_on_api_error(tmp_path, monkeypatch):
+    """A ``claude -p`` provider error (529 overload) RAISES ClaudeUnavailable so the
+    model-fallback chain engages — it is NOT returned as a 'completion' that a
+    downstream JSON parse then crashes on. On a transient overload it waits +
+    retries (the wait state) before giving up."""
+    import types
+
+    from modulatio import sandbox
+
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    monkeypatch.setattr(
+        sandbox, "build_sandboxed_argv",
+        lambda argv, root, **kw: (list(argv), {"PATH": "/bin", "HOME": str(Path.home())}),
+    )
+    calls = {"n": 0}
+
+    def fake_run(*a, **k):
+        calls["n"] += 1
+        return types.SimpleNamespace(
+            stdout='{"type":"result","subtype":"error","is_error":true,'
+                   '"result":"API Error: 529 Overloaded. Server-side, try again."}',
+            returncode=1,
+        )
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    slept: list = []
+    monkeypatch.setattr(claude_cli.time, "sleep", slept.append)  # don't actually wait
+
+    with pytest.raises(claude_cli.ClaudeUnavailable):
+        claude_cli.run_claude(claude_bin="/x/claude", model="m", prompt="hi",
+                              workspace=tmp_path, add_dirs=[])
+    assert calls["n"] > 1 and slept  # it waited + retried the transient overload
 
 
 def test_run_claude_streams_tools_to_seat_activity_sink(tmp_path, monkeypatch):

@@ -474,6 +474,8 @@ def _fallback_error_types() -> tuple[type[BaseException], ...]:
         ServiceUnavailableError,
         Timeout,
     )
+    from modulatio.claude_cli import ClaudeUnavailable
+
     return (
         RateLimitError,
         AuthenticationError,
@@ -481,6 +483,9 @@ def _fallback_error_types() -> tuple[type[BaseException], ...]:
         ServiceUnavailableError,
         InternalServerError,
         APIConnectionError,
+        # A Clay (`claude -p`) seat's provider error (529/overload/5xx/auth) —
+        # same "model unavailable" class, so it advances to a fallback model too.
+        ClaudeUnavailable,
     )
 
 
