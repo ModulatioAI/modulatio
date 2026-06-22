@@ -4,6 +4,72 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6.0] — 2026-06-22
+
+Lifecycle tooling, a more conversational Leader, and a leaner team — plus
+fail-closed confinement for subscription seats.
+
+### Added
+
+- **Uninstall Modulatio cleanly — `modulatio uninstall`.** Remove the install
+  with tiered, clearly-named choices: settings, project folders (your vault),
+  finished deliverables, and pandoc. A `--pristine` flag does a full
+  never-installed reset; `--keep-package` leaves the pip package in place. Every
+  removal of your own data is **backed up first**, and a standalone `uninstall.sh`
+  can clean up even when the package itself is too broken to import. **A vault
+  Modulatio didn't create — your own notes folder — is never auto-deleted**, even
+  under `--pristine`; it's reported and left for you to remove by hand.
+- **Fix a broken install — `modulatio repair`.** Repair broken model presets and
+  agents, recreate a missing vault or default project, and clear configuration in
+  tiers (plain settings always; agents, secrets, and project folders each gated
+  behind their own confirmation, backed up first). Setup now opens with an
+  **Install / Repair** choice when it detects an existing configuration.
+- **Reasoning-effort control for GPT-5.5 / Codex seats.** Choose the reasoning
+  effort — `xhigh`, `high`, `medium`, or `low` (medium recommended; xhigh burns
+  reasoning tokens) — in both the setup wizard and the TUI model picker.
+- **Talk to the Leader with commands.** `/models` opens the model picker, `/new`
+  archives the current conversation aside (kept, never deleted) and starts fresh,
+  and `/editor` composes a message in your `$EDITOR`. `/compact` is on the roadmap
+  and points you at `/new` for now.
+- **Interrupt the Leader with ESC.** Stop the Leader mid-thought in the
+  conversational / solo-coding lane. It's cooperative — a single in-flight call
+  finishes first and the interrupt lands at the next step — and the stopped turn
+  is recorded as a first-class interrupt in the conversation log.
+
+### Changed
+
+- **The Leader is the only required role.** Team formation now treats **QC and
+  producers as optional**: stand up a solo Leader, add a QC verifier if you want
+  one, and add producers as needed (1–10 agents) instead of a forced minimum
+  team.
+- **Concurrency-shaped task planning.** The Leader fans independent areas into a
+  few parallel batch tasks plus a synthesis task (exempt from the task cap),
+  preferring a bounded fan-out over a long serial chain.
+- **Coding skill leads with reuse-first.** The bundled coding skill now opens with
+  a minimalism ladder — look for an existing seam and make the smallest correct
+  change before writing new code.
+
+### Fixed
+
+- **Free-tier tags are honest.** Providers that can't actually verify a free tier
+  (Ollama Cloud, NVIDIA, Google) no longer blanket-label every model "free." Only
+  providers where it's verifiable — OpenRouter's zero-priced models, local
+  servers — carry the tag.
+- **Subscription-seat tool activity is recorded.** A Clay producer or QC seat's
+  in-sandbox tool calls now reach both the live activity feed and a durable,
+  owner-only audit transcript, the same as the metered seats.
+
+### Security
+
+- **Fail-closed confinement for Clay kickoff seats.** A producer / QC / planning
+  seat run through your Claude Code subscription (`claude -p`) is now restricted
+  to a fixed set of non-process built-in tools, runs with customizations disabled
+  (no project/user `CLAUDE.md`, skills, plugins, hooks, or MCP servers), and
+  explicitly bars the shell and the sub-agent spawners. A confined seat can no
+  longer spawn a hidden crew or re-launch the CLI to work around its retry budget.
+  The interactive Leader (converse / solo-coding) lane is unaffected and keeps its
+  full tool loadout.
+
 ## [0.9.5.1] — 2026-06-20
 
 Fresh-install fixes for the 0.9.5 subscription-seats release.
