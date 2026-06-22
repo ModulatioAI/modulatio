@@ -38,23 +38,23 @@ _DEFAULT_SYSTEM = (
     "background here and no one is watching. Produce the complete result now."
 )
 
-#: The ONE Claude Code tool stripped from CONFINED KICKOFF seats (producer / QC /
-#: plan / reflect — the single-shot path) by passing this as ``disallowed_tools``:
-#: ``Workflow``, Claude Code's UNBOUNDED background orchestrator. The bug that
-#: prompted this was a Clay-haiku producer firing off a background "deep-research
-#: workflow" and shipping "watch /workflows" instead of the artifact — spawning an
-#: invisible, unkillable crew that gave it effectively INFINITE retries BELOW
-#: Modulatio's retry counter. ``Workflow`` returns immediately (async/background),
-#: so it is the deferral + runaway mechanism; removing it makes that failure
-#: impossible, not just discouraged ("engine binds, prose only bends").
-#: We DELIBERATELY KEEP ``Task`` / ``Agent`` (the SYNCHRONOUS sub-agent spawners)
-#: — Clif: "any LLM should be able to spawn 1 or 2 agents if it needs to." Those
-#: block until the helper returns and fold its work into THIS turn, so there is no
-#: background to defer to and the result stays bounded by the single call.
-#: DELIBERATELY NOT applied to the interactive HARNESS lane (Leader converse /
-#: solo coding, the chat runner): there, orchestrating IS the job, so the Leader
-#: keeps its full agentic loadout (Clif: "yes in a kickoff, no in the harness").
-_DISALLOWED_TOOLS = ("Workflow",)
+#: Claude Code tools stripped from CONFINED KICKOFF seats (producer / QC / plan /
+#: reflect — the single-shot path) by passing this as ``disallowed_tools``:
+#: ``Workflow`` (Claude Code's UNBOUNDED background orchestrator) plus the
+#: sub-agent spawners ``Task`` / ``Agent``. The failure mode is the same for all
+#: three: a confined seat that can spawn its own helpers gets effectively INFINITE
+#: retries BELOW Modulatio's retry counter, on the subscription's (unmetered) token
+#: budget. ``Workflow`` does it async ("ship 'watch /workflows' instead of the
+#: artifact"); ``Task`` / ``Agent`` do it synchronously — but synchronous is NOT
+#: bounded: a producer can call ``Task`` in a LOOP, folding N hidden attempts into
+#: one seat invocation. The claude CLI has no "max N sub-agents" knob, so the only
+#: bound that actually binds is zero — the confined seat produces its OWN artifact;
+#: the orchestrator owns the swarm. Removing the tools makes the dodge impossible,
+#: not just discouraged ("engine binds, prose only bends"). DELIBERATELY NOT applied
+#: to the interactive HARNESS lane (Leader converse / solo coding, the chat runner):
+#: there, orchestrating IS the job, so the Leader keeps its full agentic loadout
+#: (Clif: "yes in a kickoff, no in the harness").
+_DISALLOWED_TOOLS = ("Workflow", "Task", "Agent")
 
 #: A tool-activity sink ``(name, args, result) -> None`` — same signature as the
 #: orchestrator's tool-loop logger, so Clay's (otherwise-invisible) in-sandbox

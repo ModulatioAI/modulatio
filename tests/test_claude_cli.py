@@ -24,12 +24,14 @@ def test_build_claude_argv_single_shot():
     assert "--disallowedTools" not in argv
 
 
-def test_build_claude_argv_disallows_background_workflow_but_keeps_subagents():
+def test_build_claude_argv_disallows_background_workflow_and_subagent_spawners():
     """KICKOFF guard: a confined seat strips Claude Code's UNBOUNDED background
-    ``Workflow`` orchestrator (the 'launched a workflow, watch /workflows'
-    deferral) but KEEPS the synchronous ``Task``/``Agent`` spawners — Clif: an
-    LLM may spawn 1-2 helper agents if it needs to, it just can't fire off an
-    invisible background crew."""
+    ``Workflow`` orchestrator AND the ``Task``/``Agent`` sub-agent spawners. The
+    claude CLI has no max-N-subagents knob, so a producer could loop ``Task`` to
+    fold N hidden attempts into one seat call — dodging Modulatio's retry counter
+    on the (unmetered) subscription budget. A confined seat produces its OWN
+    artifact; the orchestrator owns the swarm. (The harness lane keeps the full
+    loadout — see the default-no-strip test above.)"""
     argv = claude_cli.build_claude_argv(
         claude_bin="/usr/bin/claude", model="m", prompt="go",
         disallowed_tools=claude_cli._DISALLOWED_TOOLS,
@@ -37,7 +39,7 @@ def test_build_claude_argv_disallows_background_workflow_but_keeps_subagents():
     i = argv.index("--disallowedTools")
     disallowed = argv[i + 1 : i + 1 + len(claude_cli._DISALLOWED_TOOLS)]
     assert "Workflow" in disallowed
-    assert "Task" not in disallowed and "Agent" not in disallowed
+    assert "Task" in disallowed and "Agent" in disallowed
     # the variadic must be followed by another flag, never swallow the prompt
     assert argv[i + 1 + len(claude_cli._DISALLOWED_TOOLS)].startswith("-")
     assert argv[-1] == "go"
