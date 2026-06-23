@@ -1293,11 +1293,6 @@ def _token_floor(task: "Task") -> int | None:
     return band[0] if band else None
 
 
-#: Slice #9c sentinels for ``_run_escalation_attempt`` return values.
-#: The helper already wrote the terminal StateTransition + status, so
-#: the caller just needs to early-return without duplicating settlement.
-_ESCALATION_COMPLETED = object()
-_ESCALATION_EXCEPTION = object()
 
 
 def _parse_redecompose_specs(resp: "str | None") -> "list[dict]":
@@ -6997,178 +6992,6 @@ class Orchestrator:
         return verdict, notes, defect_type
 
     # ── Per-task redo loop (slice #3) ────────────────────────────────────
-    def _run_escalation_attempt(
-        self,
-        t: Task,
-        summary: RunSummary,
-        last_qc: tuple[AssertionEvidence, str],
-    ) -> object:
-        """Slice #9c: run ONE final producer+QC cycle after the regular
-        retry budget has been exhausted on QC rejects.
-
-        Preference: pick a strictly-higher-tier agent from the roster
-        (true escalation, different mind). Fallback: retry once with
-        the current agent (last-ditch — flaky QC sometimes resolves).
-        Caller decides: escalation helper returns the sentinels
-        :data:`_ESCALATION_COMPLETED` / :data:`_ESCALATION_EXCEPTION`
-        for terminal outcomes, or a fresh
-        ``(qc_verdict, qc_notes, defect_type)`` tuple when QC still rejects
-        (caller settles QC_REJECTED and threads ``defect_type`` to the
-        QC-authored fixer / recovery witness).
-
-        The producer+QC cycle reuses the same dispatch path as the
-        normal redo loop — skill-floor callable, per-agent runner
-        pool, producer_mode toggle — so escalation isn't a second
-        code path that can drift from the first.
-        """
-        qc_verdict, qc_notes = last_qc
-        corrective_notes = qc_notes or qc_verdict.check
-
-        # Escalation respects the same #9b skill + domain floors as
-        # first-pick dispatch (shared instance-cached lookups —
-        # self._skill_floor_for / self._domain_floor_for).
-
-        # Look up the current producer's tier so escalation filter can
-        # find "strictly higher." No agent on the task → no escalation
-        # possible; treat as same-agent last-ditch with the role-keyed
-        # runner. (Happens only when dispatch fell back to hardcoded
-        # role routing, which already means no per-agent model.)
-        current_tier: str | None = None
-        if t.assigned_agent_id:
-            current_agent = roster.load(t.assigned_agent_id, self.project.code)
-            if current_agent is not None:
-                current_tier = current_agent.model_tier
-
-        project_roster = roster.list_agents(self.project.code)
-        escalation_pick = dispatch.select_escalation_agent(
-            task=t,
-            current_agent_id=t.assigned_agent_id,
-            current_model_tier=current_tier,
-            agents=project_roster,
-            skill_floor_for=self._skill_floor_for,
-            domain_floor_for=self._domain_floor_for,
-        )
-        # Slice #9d: Comptroller gates the spend. Denial converts a
-        # would-be escalation into the same-agent last-ditch path
-        # AND emits a BLOCKER ticket with refresh_at so the human
-        # sees the tier-bump was skipped for budget reasons.
-        if escalation_pick is not None:
-            authorization = comptroller.authorize_escalation(
-                project_code=self.project.code,
-                cost_class=escalation_pick.cost_class,
-                agent_id=escalation_pick.id,
-            )
-            if not authorization.allowed:
-                self._open_budget_ticket(
-                    task=t,
-                    denied_pick=escalation_pick,
-                    authorization=authorization,
-                    summary=summary,
-                )
-                escalation_pick = None  # fall through to same-agent last-ditch
-
-        if escalation_pick is not None:
-            prior_agent_id = t.assigned_agent_id
-            t.assigned_agent_id = escalation_pick.id
-            rationale = (
-                f"escalation: tier {current_tier or 'unknown'} → "
-                f"{escalation_pick.model_tier or 'unknown'} "
-                f"({prior_agent_id or 'fallback'} → {escalation_pick.id}); "
-                f"attempt {t.max_retries + 1} after QC-reject exhaustion"
-            )
-        else:
-            rationale = (
-                f"escalation: no higher-tier candidate for "
-                f"{t.assigned_agent_id or 'fallback'}; same-agent "
-                f"last-ditch retry (attempt {t.max_retries + 1})"
-            )
-
-        t.retry_count = t.max_retries + 1
-        t.transitions.append(
-            StateTransition(
-                from_state=t.status.value,
-                to_state=TaskStatus.DISPATCHED.value,
-                actor="planner",
-                rationale=rationale,
-            )
-        )
-        t.status = TaskStatus.DISPATCHED
-        # Carry the QC defect type forward — if last defect was
-        # mechanical, escalation still tries EDIT mode first. Otherwise
-        # generate. Caller has already set producer_mode from prior QC.
-
-        try:
-            draft_path, checksum, token_count = self._producer_execute(
-                t, corrective_notes=corrective_notes
-            )
-            producer_id = t.assigned_agent_id or self.default_producer_role
-            artifact = ArtifactEvidence(
-                producer=producer_id,
-                primary=True,
-                location=str(draft_path),
-                checksum=checksum,
-            )
-            metric = MetricEvidence(
-                producer=producer_id,
-                primary=True,
-                name="token_count",
-                value=float(token_count),
-                target="see domain standards",
-                source=f"token count of {draft_path.name}",
-            )
-            t.evidence_provided.extend([artifact.id, metric.id])
-
-            qc_verdict_new, qc_notes_new, defect_new = self._qc_review(
-                t, draft_path, checksum
-            )
-            t.evidence_provided.append(qc_verdict_new.id)
-
-            if qc_verdict_new.passed:
-                # Part A / review-ledger (#85/#86): content-addressed pass-mark.
-                t.qc_passed_checksum = checksum
-                # Step 0 M4 (audit): QC verdict
-                # outcomes credit "qc"; only plan emission /
-                # (re-)dispatch decisions credit "planner".
-                t.transitions.append(
-                    StateTransition(
-                        from_state=t.status.value,
-                        to_state=TaskStatus.COMPLETED.value,
-                        actor="qc",
-                        evidence_ids=[artifact.id, metric.id, qc_verdict_new.id],
-                        verifier_result="qc_passed",
-                        rationale=f"QC passed on escalation attempt: {qc_verdict_new.check}",
-                    )
-                )
-                t.status = TaskStatus.COMPLETED
-                if draft_path not in summary.drafts:
-                    summary.drafts.append(draft_path)
-                return _ESCALATION_COMPLETED
-
-            # Escalation attempt QC-failed. Return the fresh verdict AND its
-            # defect class (re-sweep R4 #3) so the caller settles QC_REJECTED —
-            # and runs the QC-authored fixer / recovery witness — using THIS
-            # attempt's context, not the pre-escalation ``rescue_defect_type``
-            # (last set inside the retry loop from a different QC verdict).
-            return (qc_verdict_new, qc_notes_new, defect_new)
-
-        except Exception as exc:
-            err = f"{type(exc).__name__}: {exc}"
-            # Step 0 M4: runtime exception is an orchestrator outcome.
-            t.transitions.append(
-                StateTransition(
-                    from_state=t.status.value,
-                    to_state=TaskStatus.BLOCKED.value,
-                    actor="orchestrator",
-                    rationale=(
-                        f"escalation attempt raised {err} after "
-                        f"{t.max_retries} QC-reject retries"
-                    ),
-                )
-            )
-            t.status = TaskStatus.BLOCKED
-            summary.errors.append(f"{t.id}: escalation {err}")
-            return _ESCALATION_EXCEPTION
-
     def _store_write_deferrable(self, fn: "Callable[[], None]") -> None:
         """Run a shared-store write now, or buffer it for the main-thread
         merge when an isolated worker is active (Nemo impl-sweep B3 — full
@@ -9445,9 +9268,8 @@ class Orchestrator:
 
         Ticket semantics (user-defined): MINOR = work continues watch;
         CRITICAL = might need intervention, continuing for now; BLOCKER
-        = stop, human required. The remaining live BLOCKER path is the
-        Comptroller escalation-budget deny (``_open_budget_ticket``),
-        which DOES carry refresh_at + auto-resume.
+        = stop, human required. (The Comptroller escalation-budget-deny
+        BLOCKER path was retired with the producer-escalation removal.)
         """
         self._emit_activity(
             role="leader",

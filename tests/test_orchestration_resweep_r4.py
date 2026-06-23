@@ -27,7 +27,7 @@ from modulatio.orchestration import (
     TaskExecutionResult,
     _format_kickoff_attachments,
 )
-from modulatio.types import AssertionEvidence, Project, Task, TaskStatus
+from modulatio.types import Project, Task, TaskStatus
 
 
 PROJECT_CODE = "R4O"
@@ -157,56 +157,6 @@ def test_kickoff_attachment_fence_survives_inner_backticks():
     enclosed = after_open[:close_idx]
     assert "malicious instruction posing as prompt" in enclosed
     assert "```\nmalicious" in enclosed  # the inner fence sits INSIDE, not breaking out
-
-
-# ── Finding 3: escalation defect_type threads to the QC-fixer witness ────────
-
-
-def test_escalation_returns_its_own_defect_type(project, monkeypatch):
-    """When the escalation attempt's QC rejects, the helper must return the
-    escalation attempt's OWN defect class (3-tuple), so the QC-authored-fix
-    recovery witness records it — not the stale pre-escalation defect."""
-    orch = _orch(project)
-    task = _task(
-        project_id=project.id,
-        status=TaskStatus.QC_REJECTED,
-        assigned_agent_id=None,  # no roster → same-agent last-ditch, no comptroller
-        max_retries=2,
-    )
-
-    draft = Path(vault.project_dir(project.code)) / "draft.md"
-    draft.parent.mkdir(parents=True, exist_ok=True)
-    draft.write_text("draft body", encoding="utf-8")
-
-    monkeypatch.setattr(
-        orch, "_producer_execute",
-        lambda t, corrective_notes="": (draft, "sha256:abc", 5),
-    )
-
-    rejecting = AssertionEvidence(
-        producer="qc", primary=False, check="still wrong", passed=False
-    )
-    # The escalation attempt's QC returns a DISTINCT defect class from the
-    # pre-escalation one threaded in via last_qc.
-    monkeypatch.setattr(
-        orch, "_qc_review",
-        lambda t, p, c: (rejecting, "fix the structure", "substantive"),
-    )
-
-    pre_escalation_qc = (
-        AssertionEvidence(
-            producer="qc", primary=False, check="earlier defect", passed=False
-        ),
-        "earlier notes",
-    )
-    outcome = orch._run_escalation_attempt(task, RunSummary(project=project), pre_escalation_qc)
-
-    # 3-tuple (verdict, notes, defect_type), carrying the escalation attempt's
-    # own defect class.
-    assert isinstance(outcome, tuple)
-    assert len(outcome) == 3
-    assert outcome[0] is rejecting
-    assert outcome[2] == "substantive"
 
 
 # ── Finding 4: wave merge can't claim another task's primary slot ────────────

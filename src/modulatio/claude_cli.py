@@ -304,9 +304,11 @@ class ClaudeUnavailable(RuntimeError):
 
 
 #: Bounded wait-retries for a TRANSIENT Clay provider error (529/overload/5xx) —
-#: the "wait state": hold for the blip to clear before falling back. Kept short so
-#: a sustained outage falls back promptly rather than hanging the seat.
-_CLAUDE_RETRY_BACKOFF_S = (2.0, 5.0, 10.0)
+#: the "wait state": hold for the blip to clear before falling back. The wait is
+#: SYNCHRONOUS and per-seat (worst case 1+3+8 = 12s), so a concurrent wave holds one
+#: worker per seat for that long on a cluster-wide outage before raising → fallback.
+#: Kept to ~12s so a sustained outage falls back promptly rather than stalling the wave.
+_CLAUDE_RETRY_BACKOFF_S = (1.0, 3.0, 8.0)
 
 
 def _claude_error_reason(returncode: int, result: str) -> "str | None":
