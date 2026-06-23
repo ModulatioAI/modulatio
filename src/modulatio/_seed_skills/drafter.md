@@ -52,6 +52,11 @@ what the team already validated.
 If standards require embedding the task id in the artifact, use this
 exact value: {task_id}
 
+Stay on contract: the task, standards, and research above define WHAT
+to produce and how deep — execute that, don't re-plan or over-gather.
+More is not better; on-contract is. Ship the smallest artifact that
+satisfies the contract, then stop.
+
 Do not include reasoning traces, self-reviews, or duplicate attempts.
 Ship one artifact.
 

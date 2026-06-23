@@ -81,9 +81,12 @@ def test_execute_under_post_terse_threshold() -> None:
     slot (~260 chars). The skill-library arc added the {objective}
     north-star block (~190 chars — load-bearing contract: it lets a
     producer resolve a reference the task left implicit, e.g. "the three
-    topics", instead of stalling). New target: under 2,750."""
+    topics", instead of stalling). #13 added the on-contract discipline
+    (~250 chars — load-bearing: keeps a producer from re-planning /
+    over-gathering, the prose-bend complement to engine thinking-off).
+    New target: under 2,900."""
     n = len(orchestration._DRAFTER_EXECUTE_PROMPT)
-    assert n < 2750, f"_DRAFTER_EXECUTE_PROMPT is {n} chars (was 2,221)"
+    assert n < 2900, f"_DRAFTER_EXECUTE_PROMPT is {n} chars (was 2,221)"
     assert n > 1500, f"too small ({n}) — likely dropped contract content"
 
 
