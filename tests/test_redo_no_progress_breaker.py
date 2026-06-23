@@ -61,7 +61,7 @@ def test_identical_rejected_output_breaks_early_into_rescue(project_with_run, mo
     orch = _orch(project_with_run)
     task = _make_task()
     summary = RunSummary(project=project_with_run)
-    calls = {"producer": 0, "escalation": 0}
+    calls = {"producer": 0, "qc_fix": 0}
 
     def fake_producer(self, t, corrective_notes=""):
         calls["producer"] += 1
@@ -70,14 +70,13 @@ def test_identical_rejected_output_breaks_early_into_rescue(project_with_run, mo
     def fake_qc(self, task, draft_path, checksum):
         return _reject()
 
-    def fake_escalation(self, t, summary, last_qc):
-        calls["escalation"] += 1
-        return _reject(check="still missing", notes="still missing")
+    def fake_qc_fix(self, *a, **k):
+        calls["qc_fix"] += 1
+        return False  # decline → caller settles QC_REJECTED
 
     monkeypatch.setattr(Orchestrator, "_producer_execute", fake_producer)
     monkeypatch.setattr(Orchestrator, "_qc_review", fake_qc)
-    monkeypatch.setattr(Orchestrator, "_run_escalation_attempt", fake_escalation)
-    monkeypatch.setattr(Orchestrator, "_attempt_qc_fix_forward", lambda self, *a, **k: False)
+    monkeypatch.setattr(Orchestrator, "_attempt_qc_fix_forward", fake_qc_fix)
 
     orch._run_task_with_redo(task, summary)
 
@@ -87,8 +86,8 @@ def test_identical_rejected_output_breaks_early_into_rescue(project_with_run, mo
         f"identical rejected output must break early; got {calls['producer']} "
         "producer attempts (expected 2)"
     )
-    # The break still routes into the rescue chain (escalation ran once).
-    assert calls["escalation"] == 1
+    # #18: the break routes straight into the QC-as-fixer rescue (escalation removed).
+    assert calls["qc_fix"] >= 1
     assert task.status == TaskStatus.QC_REJECTED
 
 
@@ -106,8 +105,6 @@ def test_changing_output_runs_full_budget(project_with_run, monkeypatch):
 
     monkeypatch.setattr(Orchestrator, "_producer_execute", fake_producer)
     monkeypatch.setattr(Orchestrator, "_qc_review", lambda self, t, dp, cs: _reject())
-    monkeypatch.setattr(Orchestrator, "_run_escalation_attempt",
-                        lambda self, t, s, lq: _reject())
     monkeypatch.setattr(Orchestrator, "_attempt_qc_fix_forward", lambda self, *a, **k: False)
 
     orch._run_task_with_redo(task, summary)

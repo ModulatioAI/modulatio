@@ -1537,8 +1537,11 @@ def test_leader_disappointed_exhaust_budget_ships_with_recommendation_no_ticket(
     blockers = [t for t in store.list_tickets(PROJECT_CODE)
                 if t.priority is TicketPriority.BLOCKER]
     assert blockers == []
-    # The unresolved gap surfaces as a recommendation instead.
-    assert any(goals[0].id == r["goal_id"] and "could not fully satisfy" in r["concern"]
+    # The unresolved gap surfaces as a recommendation instead. #18: with the task
+    # producer budget tied to the task, the redo rounds exhaust it and QC authors the
+    # best fix it can — the reservation now reflects that (fix-in-place, not endless
+    # fresh producer passes).
+    assert any(goals[0].id == r["goal_id"] and "QC authored" in r["concern"]
                for r in summary.recommendations)
 
 
@@ -2762,7 +2765,9 @@ def test_leader_verify_disappointed_auto_redo_then_ships(project: Project):
     blockers = [t for t in store.list_tickets(PROJECT_CODE)
                 if t.priority is TicketPriority.BLOCKER]
     assert blockers == []
-    assert any("could not fully satisfy" in r["concern"] for r in summary.recommendations)
+    # #18: redo rounds exhaust the task's lifetime producer budget → QC authors the
+    # best fix; the reservation reflects that rather than endless fresh passes.
+    assert any("QC authored" in r["concern"] for r in summary.recommendations)
 
 
 def test_leader_verify_writes_report_to_vault_reports_dir(project: Project):
@@ -4230,13 +4235,11 @@ def test_corrective_notes_injected_into_drafter_prompt_on_retry(project: Project
 def test_redo_loop_exhausts_max_retries_when_qc_always_rejects(project: Project, monkeypatch):
     """QC never passes → task lands QC_REJECTED terminal.
 
-    Default max_retries = 3 → 1 initial attempt + 3 retries in the regular
-    redo loop. Slice #9c adds one final escalation cycle before terminal
-    settlement: when no strictly-higher-tier agent exists (this test
-    uses hardcoded-role fallback with no roster), the escalation is a
-    same-agent last-ditch retry. Total drafter/QC calls = 5
-    (initial + 3 retries + 1 last-ditch). Summary.errors still records
-    one terminal verdict per task.
+    max_retries = 3 → 1 initial attempt + 3 retries = 4 producer/QC calls (the
+    task's LIFETIME budget, max_retries + 1). #18 removed the old Slice #9c
+    escalation last-ditch cycle: on exhaustion the task goes straight to the forced
+    QC-as-fixer (disabled here via MODULATIO_QC_FIXER=0, so it settles QC_REJECTED).
+    Summary.errors records one terminal verdict per task.
     """
     monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the exhaustion→reject terminal
     qc_calls = {"n": 0}
@@ -4279,11 +4282,11 @@ def test_redo_loop_exhausts_max_retries_when_qc_always_rejects(project: Project,
     tasks = store.list_tasks(PROJECT_CODE)
     t = tasks[0]
     assert t.status == TaskStatus.QC_REJECTED
-    # retry_count reflects the escalation cycle — max_retries + 1
-    # indicates the last-ditch attempt ran.
-    assert t.retry_count == t.max_retries + 1 == 4
-    # 5 QC calls: initial + 3 retries + 1 last-ditch escalation.
-    assert qc_calls["n"] == 5
+    # #18: the loop runs exactly the lifetime budget (max_retries + 1 attempts),
+    # then the forced QC-as-fixer (off) declines → terminal. No escalation cycle.
+    assert t.retry_count == t.max_retries == 3
+    # 4 QC calls: initial + 3 retries (no last-ditch escalation).
+    assert qc_calls["n"] == 4
     # Exactly one terminal error for the task, not one per rejected attempt.
     assert len(summary.errors) == 1
     assert t.id in summary.errors[0]
@@ -4872,13 +4875,14 @@ def _coord_emits_producer_task(prompt: str) -> str:
     return f"```json\n{json.dumps(tasks)}\n```"
 
 
-def test_escalation_runs_higher_tier_agent_after_qc_exhaustion(
+def test_no_escalation_qc_fixes_on_exhaustion(
     project: Project, tmp_path, monkeypatch
 ):
-    """Slice #9c: when a producer exhausts max_retries on QC rejects,
-    the orchestrator tries ONE more cycle with a strictly-higher-tier
-    agent from the roster. If that escalated agent passes QC → task
-    COMPLETED with the escalated agent recorded on the task."""
+    """#18: a producer that exhausts its LIFETIME budget on QC rejects does NOT
+    escalate to a higher-tier agent (the removed Slice #9c). The task stays on its
+    original agent and the forced QC-as-fixer authors the artifact → COMPLETED. A
+    strictly-higher-tier agent EXISTS in the roster but must NOT be handed the task —
+    the producer budget belongs to the TASK; recovery is QC-fix, not a new producer."""
     _seed_producer_skill(tmp_path, monkeypatch)
     from modulatio import roster as roster_mod
 
@@ -4925,15 +4929,11 @@ def test_escalation_runs_higher_tier_agent_after_qc_exhaustion(
     tasks = store.list_tasks(PROJECT_CODE)
     assert len(tasks) == 1
     t = tasks[0]
-    assert t.status == TaskStatus.COMPLETED
-    # Task ended up on the escalated agent.
-    assert t.assigned_agent_id == "producer-reasoning"
-    # Transition trail mentions the escalation so the human can audit.
-    escalation_transitions = [
-        tr for tr in t.transitions
-        if "escalat" in tr.rationale.lower()
-    ]
-    assert len(escalation_transitions) >= 1
+    assert t.status == TaskStatus.COMPLETED          # rescued, not wedged
+    assert t.qc_authored_fix is True                 # via QC-as-fixer, not escalation
+    # NOT reassigned to the higher tier — no new producer was handed the task.
+    assert t.assigned_agent_id == "producer-generalist"
+    assert not [tr for tr in t.transitions if "escalat" in tr.rationale.lower()]
 
 
 def test_escalation_still_fails_qc_terminates_rejected(
@@ -4986,384 +4986,6 @@ def test_escalation_still_fails_qc_terminates_rejected(
     tasks = store.list_tasks(PROJECT_CODE)
     assert len(tasks) == 1
     assert tasks[0].status == TaskStatus.QC_REJECTED
-
-
-def test_escalation_falls_back_to_same_agent_when_no_higher_tier(
-    project: Project, tmp_path, monkeypatch
-):
-    """When no strictly-higher-tier candidate exists in the roster, the
-    orchestrator runs one LAST attempt with the current agent instead
-    of terminating immediately. Last-ditch same-agent retry gives
-    transient/flaky QC one more chance. If it passes → COMPLETED."""
-    _seed_producer_skill(tmp_path, monkeypatch)
-    from modulatio import roster as roster_mod
-
-    # Only one agent in the roster — no escalation candidate.
-    roster_mod.save(
-        roster_mod.Agent(
-            id="producer-only",
-            name="Only",
-            identity="x",
-            skills=["producer"],
-            model="flaky-model",
-            model_tier="generalist",
-        ),
-        project_code=PROJECT_CODE,
-    )
-
-    # Producer emits WEAK for the first N calls, STRONG on the
-    # last-ditch attempt (simulating QC flakiness resolving on retry).
-    calls = {"n": 0}
-
-    def _flaky_producer(prompt: str) -> str:
-        calls["n"] += 1
-        # max_retries=3 → 4 normal attempts (0..3) all fail; call #5
-        # is the same-agent last-ditch, which succeeds. Each weak attempt
-        # emits DISTINCT bytes (a unique marker) so the no-progress breaker —
-        # which only fires on byte-identical consecutive rejects — doesn't
-        # short-circuit before the last-ditch attempt.
-        if calls["n"] <= 4:
-            return _weak_producer_stub(prompt) + f"\n\n<!-- rev {calls['n']} -->\n"
-        return _strong_producer_stub(prompt)
-
-    runners = {
-        "leader": _leader_stub,
-        "planner": _coord_emits_producer_task,
-        "drafter": _drafter_stub,
-        "qc": _marker_based_qc_stub,
-    }
-    agent_runners = {"flaky-model": _flaky_producer}
-    orch = Orchestrator(project, runners, agent_runners=agent_runners)
-    orch.kickoff("anything")
-
-    tasks = store.list_tasks(PROJECT_CODE)
-    assert len(tasks) == 1
-    assert tasks[0].status == TaskStatus.COMPLETED
-    # Agent unchanged — same-agent last-ditch, not escalation.
-    assert tasks[0].assigned_agent_id == "producer-only"
-    # Producer ran exactly 5 times: 4 in regular redo, 1 last-ditch.
-    assert calls["n"] == 5
-    # Transition trail notes same-agent last-ditch explicitly, not a
-    # tier escalation, so the audit distinguishes them.
-    last_ditch = [
-        tr for tr in tasks[0].transitions
-        if "last-ditch" in tr.rationale.lower()
-        or "same-agent" in tr.rationale.lower()
-    ]
-    assert len(last_ditch) >= 1
-
-
-def test_escalation_denied_by_budget_falls_back_to_same_agent_last_ditch(
-    project: Project, tmp_path, monkeypatch
-):
-    """Slice #9d: when the Comptroller denies the escalation (daily
-    budget exhausted for that cost class), the orchestrator opens a
-    BLOCKER ticket with refresh_at and falls back to running the
-    same-agent last-ditch attempt. Budget denial does NOT terminate
-    QC_REJECTED immediately — the same-agent retry still gets to fire
-    (flaky QC recovery) at zero additional tier cost."""
-    _seed_producer_skill(tmp_path, monkeypatch)
-    from modulatio import roster as roster_mod
-    from modulatio.types import TicketPriority
-    from modulatio.vault import project_dir
-
-    # Write a Comptroller config that forbids any premium-cloud
-    # escalation today.
-    (project_dir(PROJECT_CODE) / "comptroller.md").write_text(
-        "---\npremium_cloud_escalations_per_day: 0\n---\n"
-    )
-
-    # Weak producer (paid-cloud, generalist) — dispatched first.
-    roster_mod.save(
-        roster_mod.Agent(
-            id="producer-generalist",
-            name="Generalist",
-            identity="x",
-            skills=["producer"],
-            model="weak-model",
-            model_tier="generalist",
-            cost_class="paid-cloud",
-        ),
-        project_code=PROJECT_CODE,
-    )
-    # Premium-cloud higher-tier candidate that Comptroller will veto.
-    roster_mod.save(
-        roster_mod.Agent(
-            id="producer-premium",
-            name="Premium",
-            identity="x",
-            skills=["producer"],
-            model="strong-model",
-            model_tier="reasoning-heavy",
-            cost_class="premium-cloud",
-        ),
-        project_code=PROJECT_CODE,
-    )
-
-    # Same-agent last-ditch succeeds (flaky QC recovered on fresh call).
-    calls = {"n": 0}
-
-    def _flaky_weak(prompt: str) -> str:
-        calls["n"] += 1
-        if calls["n"] <= 4:
-            return _weak_producer_stub(prompt)
-        return _strong_producer_stub(prompt)
-
-    strong_calls = {"n": 0}
-
-    def _strong_tracker(prompt: str) -> str:
-        strong_calls["n"] += 1
-        return _strong_producer_stub(prompt)
-
-    runners = {
-        "leader": _leader_stub,
-        "planner": _coord_emits_producer_task,
-        "drafter": _drafter_stub,
-        "qc": _marker_based_qc_stub,
-    }
-    agent_runners = {
-        "weak-model": _flaky_weak,
-        "strong-model": _strong_tracker,
-    }
-    orch = Orchestrator(project, runners, agent_runners=agent_runners)
-    orch.kickoff("anything")
-
-    tasks = store.list_tasks(PROJECT_CODE)
-    assert len(tasks) == 1
-    t = tasks[0]
-    # Same-agent last-ditch passed → COMPLETED, agent unchanged.
-    assert t.status == TaskStatus.COMPLETED
-    assert t.assigned_agent_id == "producer-generalist"
-    # Premium producer never fired — Comptroller vetoed.
-    assert strong_calls["n"] == 0
-    # BLOCKER ticket opened for the budget denial, carrying refresh_at.
-    tickets = store.list_tickets(PROJECT_CODE)
-    budget_tickets = [
-        ticket for ticket in tickets
-        if ticket.priority is TicketPriority.BLOCKER
-        and "budget" in ticket.title.lower()
-    ]
-    assert len(budget_tickets) == 1
-    bt = budget_tickets[0]
-    assert bt.refresh_at is not None
-    assert "premium-cloud" in bt.body
-
-
-def test_escalation_allowed_by_budget_runs_escalation_and_ledger_records(
-    project: Project, tmp_path, monkeypatch
-):
-    """Slice #9d: when budget permits, escalation runs exactly as
-    #9c — higher-tier agent takes over, passes QC, task completes.
-    Comptroller ledger records the authorized escalation so future
-    kickoffs in the same UTC day see the spend."""
-    _seed_producer_skill(tmp_path, monkeypatch)
-    from modulatio import roster as roster_mod
-    from modulatio.vault import project_dir
-
-    # Generous budget — allows one premium-cloud escalation.
-    (project_dir(PROJECT_CODE) / "comptroller.md").write_text(
-        "---\npremium_cloud_escalations_per_day: 5\n---\n"
-    )
-
-    roster_mod.save(
-        roster_mod.Agent(
-            id="producer-generalist",
-            name="Generalist",
-            identity="x",
-            skills=["producer"],
-            model="weak-model",
-            model_tier="generalist",
-            cost_class="paid-cloud",
-        ),
-        project_code=PROJECT_CODE,
-    )
-    roster_mod.save(
-        roster_mod.Agent(
-            id="producer-premium",
-            name="Premium",
-            identity="x",
-            skills=["producer"],
-            model="strong-model",
-            model_tier="reasoning-heavy",
-            cost_class="premium-cloud",
-        ),
-        project_code=PROJECT_CODE,
-    )
-
-    runners = {
-        "leader": _leader_stub,
-        "planner": _coord_emits_producer_task,
-        "drafter": _drafter_stub,
-        "qc": _marker_based_qc_stub,
-    }
-    agent_runners = {
-        "weak-model": _weak_producer_stub,
-        "strong-model": _strong_producer_stub,
-    }
-    orch = Orchestrator(project, runners, agent_runners=agent_runners)
-    orch.kickoff("anything")
-
-    tasks = store.list_tasks(PROJECT_CODE)
-    assert tasks[0].status == TaskStatus.COMPLETED
-    assert tasks[0].assigned_agent_id == "producer-premium"
-    # Ledger recorded the premium-cloud authorization.
-    ledger = project_dir(PROJECT_CODE) / "comptroller-ledger.md"
-    assert ledger.exists()
-    content = ledger.read_text()
-    assert "premium-cloud" in content
-    assert "producer-premium" in content
-
-
-def test_tool_executor_skill_runs_tool_and_skips_llm(
-    project: Project, tmp_path, monkeypatch
-):
-    """Slice #9e: a skill declaring ``executor: tool`` runs its
-    declared tool from the registry and uses the return value as the
-    artifact body. The LLM drafter runner is NOT invoked. QC still
-    runs — same verification path as any other producer output.
-    Business-harness level: applies to any tool call of any business
-    domain."""
-    from modulatio import roster as roster_mod
-    from modulatio import skills as skills_mod
-    from modulatio import tools as tools_mod
-
-    shared_skills = tmp_path / "shared_skills"
-    shared_skills.mkdir()
-    (shared_skills / "url-fetcher.md").write_text(
-        "---\n"
-        "name: url-fetcher\n"
-        "executor: tool\n"
-        "tool_loadout: fetch_resource\n"
-        "---\n\n(tool-only skill — no LLM prompt)\n"
-    )
-    monkeypatch.setattr(skills_mod, "_SKILLS_ROOT", shared_skills)
-
-    roster_mod.save(
-        roster_mod.Agent(
-            id="fetcher-agent",
-            name="Fetcher",
-            identity="x",
-            skills=["url-fetcher"],
-            model="tool-agent-model",
-            model_tier="tool-using",
-        ),
-        project_code=PROJECT_CODE,
-    )
-
-    tool_calls = {"args": None, "count": 0}
-
-    def _stub_fetch(url: str = "", **kw) -> str:
-        tool_calls["args"] = {"url": url, **kw}
-        tool_calls["count"] += 1
-        return f"FETCHED:{url}\nContent body from tool."
-
-    tool_registry = {
-        "fetch_resource": tools_mod.Tool(
-            name="fetch_resource",
-            description="Stub tool for testing",
-            call=_stub_fetch,
-        )
-    }
-
-    drafter_calls = {"n": 0}
-
-    def _drafter_counting(prompt: str) -> str:
-        drafter_calls["n"] += 1
-        return _drafter_stub(prompt)
-
-    def _coord(prompt: str) -> str:
-        tasks = [{
-            "description": "Fetch an external resource",
-            "artifact_kind": "text",
-            "required_skills": ["url-fetcher"],
-            "tool_args": {"url": "http://example.test/api/v1/data"},
-            "evidence_required": [{"kind": "artifact", "description": "file"}],
-        }]
-        return f"```json\n{json.dumps(tasks)}\n```"
-
-    runners = {
-        "leader": _leader_stub,
-        "planner": _coord,
-        "drafter": _drafter_counting,
-        "qc": _qc_stub,
-    }
-    orch = Orchestrator(project, runners, tool_registry=tool_registry)
-    orch.kickoff("anything")
-
-    tasks = store.list_tasks(PROJECT_CODE)
-    assert len(tasks) == 1
-    assert tasks[0].status == TaskStatus.COMPLETED
-    # Tool called exactly once with the task's tool_args.
-    assert tool_calls["count"] == 1
-    assert tool_calls["args"] == {"url": "http://example.test/api/v1/data"}
-    # LLM drafter was NOT invoked — tool path bypasses it.
-    assert drafter_calls["n"] == 0
-    # Artifact body carries the tool's return value.
-    from modulatio.vault import project_dir
-    artifact_path = (
-        project_dir(PROJECT_CODE) / "artifacts" / "drafts"
-        / f"{tasks[0].id.lower()}.md"
-    )
-    assert artifact_path.exists()
-    assert "FETCHED:http://example.test/api/v1/data" in artifact_path.read_text()
-
-
-def test_tool_executor_unregistered_tool_blocks_task(
-    project: Project, tmp_path, monkeypatch
-):
-    """Slice #9e: a tool-executor skill whose declared tool isn't in
-    the orchestrator's registry raises at producer time and lands the
-    task BLOCKED (redo loop treats unregistered-tool as an ordinary
-    exception exhaustion path). Business-harness level — the fix is
-    to wire the tool in the CLI, not to retry with a different tier."""
-    from modulatio import roster as roster_mod
-    from modulatio import skills as skills_mod
-
-    shared_skills = tmp_path / "shared_skills"
-    shared_skills.mkdir()
-    (shared_skills / "exotic-tool-skill.md").write_text(
-        "---\n"
-        "name: exotic-tool-skill\n"
-        "executor: tool\n"
-        "tool_loadout: not_registered_here\n"
-        "---\n\n(tool-only)\n"
-    )
-    monkeypatch.setattr(skills_mod, "_SKILLS_ROOT", shared_skills)
-
-    roster_mod.save(
-        roster_mod.Agent(
-            id="exotic-agent",
-            name="Exotic",
-            identity="x",
-            skills=["exotic-tool-skill"],
-            model="tool-agent-model",
-            model_tier="tool-using",
-        ),
-        project_code=PROJECT_CODE,
-    )
-
-    def _coord(prompt: str) -> str:
-        tasks = [{
-            "description": "Run an unregistered tool",
-            "artifact_kind": "text",
-            "required_skills": ["exotic-tool-skill"],
-            "evidence_required": [{"kind": "artifact", "description": "file"}],
-        }]
-        return f"```json\n{json.dumps(tasks)}\n```"
-
-    runners = {
-        "leader": _leader_stub,
-        "planner": _coord,
-        "drafter": _drafter_stub,
-        "qc": _qc_stub,
-    }
-    # Empty registry — the skill's declared tool isn't available.
-    orch = Orchestrator(project, runners, tool_registry={})
-    orch.kickoff("anything")
-
-    tasks = store.list_tasks(PROJECT_CODE)
-    assert len(tasks) == 1
-    assert tasks[0].status == TaskStatus.BLOCKED
 
 
 def test_escalation_not_triggered_on_exception_exhaustion(
@@ -7683,6 +7305,50 @@ def test_max_iters_exhaustion_recovers_via_qc_build_not_blocked(project, monkeyp
     assert task.status == TaskStatus.COMPLETED
     assert task.status != TaskStatus.BLOCKED
     assert task.qc_authored_fix is True
+
+
+def test_producer_budget_is_lifetime_not_reset_on_reentry(project, monkeypatch):
+    """#18 keystone: a task's producer budget is LIFETIME. Re-entering
+    _run_task_with_redo (the goal-redo / declined-ticket / re-dispatch path) must NOT
+    grant a fresh producer budget — once the task has spent its attempts, re-entry runs
+    ZERO new producer attempts and routes to the QC-as-fixer floor instead of churning a
+    new model through a fresh budget. Closes the counter-reset hole that let a producer
+    skirt QC-as-fixer indefinitely (cindy/T-005, 186 calls, live 2026-06-22)."""
+    from modulatio.orchestration import Orchestrator, RunSummary
+
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the budget mechanics
+    calls = {"n": 0}
+
+    def _counting_reject(task, corrective_notes=""):
+        # Stands in for _producer_execute, so it honors its contract: bump the task's
+        # lifetime counter (the real method does this at its single seam) and write a
+        # real-but-rejectable draft each attempt (distinct bytes dodge the no-progress
+        # breaker). Count every producer run.
+        calls["n"] += 1
+        task.lifetime_attempts += 1
+        path = orch._resolve_draft_path(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"draft revision {calls['n']}, never satisfies QC")
+        return path, f"sum{calls['n']}", 10
+
+    def _qc_always_reject(prompt: str) -> str:
+        return '```json\n{"check":"never passes","passed":false,"notes":"fix"}\n```'
+
+    runners = {"leader": _leader_stub, "planner": _planner_stub, "drafter": _drafter_stub,
+               "qc": _qc_always_reject}
+    orch = Orchestrator(project, runners)
+    orch._producer_execute = _counting_reject  # type: ignore[assignment]
+
+    task = _qcfix_task(project_id=project.id)
+    task.max_retries = 1  # lifetime budget = max_retries + 1 = 2 producer attempts
+
+    orch._run_task_with_redo(task, RunSummary(project=project))
+    first = calls["n"]
+    orch._run_task_with_redo(task, RunSummary(project=project))  # re-entry (goal-redo)
+    second = calls["n"]
+
+    assert first == task.max_retries + 1   # first pass honors the lifetime budget (no escalation extra)
+    assert second == first                 # re-entry grants NO fresh producer budget
 
 
 def test_terminal_failure_opens_operator_ticket(project, monkeypatch):
@@ -11259,3 +10925,4 @@ def test_ready_wave_holds_on_failed_or_pending_cross_goal_dep():
     assert [t.id for t in w] == ["G2-T1"]
     # back-compat: no status map → absent dep treated as satisfied
     assert [t.id for t in _ready_wave([consumer()])] == ["G2-T1"]
+

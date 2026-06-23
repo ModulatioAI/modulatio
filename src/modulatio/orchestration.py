@@ -3950,6 +3950,12 @@ class Orchestrator:
         # they naturally bump the counter. Persist-before-increment
         # guarantees monotonicity across crash-resume.
         self._increment_turn_persisted()
+        # #18 keystone: this is the SINGLE producer-run seam (every caller — the redo
+        # loop, escalation, and every re-entry path — flows through here), so the
+        # task's LIFETIME attempt counter increments here exactly once per attempt.
+        # It never resets, which ties the producer budget to the task: a model can't
+        # earn a fresh budget by re-entering the loop and so can't skirt QC-as-fixer.
+        task.lifetime_attempts += 1
         # (c12): sweep abandoned candidates on every producer
         # turn so the 3-turn rule holds when Leader-iterate is off.
         self._sweep_abandoned_candidates()
@@ -8282,13 +8288,21 @@ class Orchestrator:
             agent_id=t.assigned_agent_id,
         )
 
-        # A task always gets at least ONE attempt: a misconfigured non-positive
-        # ``max_retries`` (operator/JT-settable, no lower bound on the field)
-        # would otherwise make ``range`` empty, skip the loop body entirely, and
-        # leave ``last_qc`` None — which then crashes the escalation unpack with a
-        # TypeError instead of producing a real verdict. Clamp the budget to >= 0.
+        # A task always gets at least ONE attempt on first entry: a misconfigured
+        # non-positive ``max_retries`` (operator/JT-settable, no lower bound) is
+        # clamped to >= 0, and a fresh task has ``lifetime_attempts == 0`` so
+        # ``remaining`` is at least 1.
+        #
+        # #18 keystone: bound this pass by the task's REMAINING LIFETIME budget, not a
+        # fresh ``max_retries``. ``lifetime_attempts`` accumulates across every
+        # producer run (this loop, and every re-entry — goal-redo, declined-ticket
+        # re-dispatch, escalation reassignment), so re-entry continues from where the
+        # task left off. Once the lifetime budget is spent, ``remaining`` is 0, the
+        # loop runs zero producer attempts, and control falls through to the forced
+        # QC-as-fixer below — the model cannot earn a fresh budget to skirt it.
         retry_budget = max(t.max_retries, 0)
-        for attempt in range(retry_budget + 1):
+        remaining = max(0, (retry_budget + 1) - t.lifetime_attempts)
+        for attempt in range(remaining):
             # Fix C hardening (Nemo BLOCK): the operator stopped the run — do not
             # launch another producer/QC attempt on an already-started task. The
             # in-flight call (if any) finishes; we bail before the NEXT one.
@@ -8528,47 +8542,40 @@ class Orchestrator:
             self._settle_breaker_aborted(t, last_breaker_abort, summary)
             return
 
-        # ── Slice #9c: one-shot escalation on QC-reject exhaustion ────────
+        # ── #18 keystone: producer budget spent → FORCED QC-as-fixer ──────
         #
-        # Before settling QC_REJECTED, try one more cycle. If a
-        # strictly-higher-tier agent exists in the roster that covers
-        # the task's skills + effective capabilities, escalate to it.
-        # Otherwise, run one last-ditch attempt with the current agent
-        # (a tier bump is the preferred escalation; same-agent retry
-        # is the fallback — flaky QC sometimes resolves on a fresh
-        # call). If this final attempt passes QC → COMPLETED.
-        # Otherwise settle QC_REJECTED / BLOCKED as before.
-        # Fix C hardening (Nemo BLOCK): if the operator stopped the run while the
-        # final attempt was in flight, the loop exits here — do NOT escalate (a
-        # higher-tier producer call) or run the QC-authored fixer (more model
-        # work). Leave the task on its last state; the run halts.
+        # The task's LIFETIME producer budget is exhausted (the loop ran its remaining
+        # attempts, or zero on a budget-spent re-entry). QC-as-fixer is now the FORCED
+        # terminal recovery — NOT a one-shot escalation to a higher-tier producer.
+        # Escalation (the old Slice #9c) granted a FRESH budget, so a model could skirt
+        # this floor forever by being reassigned/re-dispatched; and on its own
+        # max_iters it settled BLOCKED, bypassing this very fixer (#17). QC now fixes
+        # the last rejected draft in place, or builds from the contract when nothing's
+        # salvageable. The producer budget belongs to the TASK, not the model.
+        # Fix C hardening (Nemo BLOCK): if the operator stopped the run, do NOT run the
+        # fixer (more model work) — leave the task on its last state; the run halts.
         if self.abort_event.is_set():
             self._record_abort(summary)
             return
-        escalation_outcome = self._run_escalation_attempt(
-            t, summary, last_qc  # type: ignore[arg-type]
-        )
-        if escalation_outcome is _ESCALATION_COMPLETED:
-            return
-        if escalation_outcome is _ESCALATION_EXCEPTION:
-            # Exception on the escalation cycle → BLOCKED. The helper
-            # has already written the transition + summary line.
-            return
-        # Fall through to QC_REJECTED settlement using the verdict from the
-        # escalation attempt (re-sweep R4 #3: the helper now also returns the
-        # escalation attempt's OWN defect class, so the QC-fixer / witness see
-        # this attempt's defect, not the stale loop-scoped rescue_defect_type).
-        qc_verdict, qc_notes, escalation_defect_type = escalation_outcome  # type: ignore[misc]
-
-        # QC-as-fixer Slice 3: producer exhausted retries AND escalation.
-        # Before settling a dead QC_REJECTED, try a QC-authored rescue of
-        # the last rejected artifact (flag-gated; falls through when off or
-        # nothing salvageable).
         if self._attempt_qc_fix_forward(
-            t, self._resolve_draft_path(t), (qc_verdict, qc_notes), summary,
-            defect_type=escalation_defect_type,
+            t, self._resolve_draft_path(t), last_qc, summary,
+            defect_type=rescue_defect_type,
         ):
             return
+
+        # QC-as-fixer declined (opt-out via MODULATIO_QC_FIXER=0, or nothing
+        # salvageable) → settle QC_REJECTED with the loop's last verdict. A
+        # budget-spent re-entry ran no producer attempt (last_qc is None), so
+        # synthesize an exhaustion verdict so the terminal + ticket still carry a reason.
+        if last_qc is not None:
+            qc_verdict, qc_notes = last_qc
+        else:
+            from types import SimpleNamespace as _SNS
+            qc_verdict = _SNS(
+                check="producer attempt budget exhausted (QC-as-fixer unavailable)",
+                id=None,
+            )
+            qc_notes = ""
 
         reject_rationale = f"QC rejected after {t.retry_count} retries: {qc_verdict.check}"
         if qc_notes:
@@ -8579,7 +8586,8 @@ class Orchestrator:
                 from_state=t.status.value,
                 to_state=TaskStatus.QC_REJECTED.value,
                 actor="qc",
-                evidence_ids=[qc_verdict.id],
+                # A synthetic budget-exhaustion verdict carries no evidence id.
+                evidence_ids=[qc_verdict.id] if qc_verdict.id else [],
                 verifier_result="qc_failed",
                 rationale=reject_rationale,
             )

@@ -281,6 +281,15 @@ class Task(BaseModel):
     transitions: list[StateTransition] = Field(default_factory=list)
     retry_count: int = 0
     max_retries: int = 3
+    #: #18 keystone: LIFETIME producer-attempt counter — monotonic, incremented on
+    #: every ``_producer_execute`` regardless of which model holds the task or which
+    #: path re-entered the redo loop (goal-redo, declined-ticket re-dispatch,
+    #: escalation reassignment). Unlike ``retry_count`` (a per-pass display index that
+    #: resets on re-entry), this NEVER resets — it ties the producer budget to the
+    #: TASK so a model can't skirt the QC-as-fixer floor by earning a fresh budget on
+    #: re-entry. ``_run_task_with_redo`` bounds its remaining attempts by
+    #: ``(max_retries + 1) - lifetime_attempts``; when spent, QC-as-fixer is forced.
+    lifetime_attempts: int = 0
     #: Recursion guard for overflow→decompose (2026-05-30). A task that
     #: overflowed its context budget is split into smaller children, each
     #: ``decompose_depth = parent + 1``. Past a small cap the engine stops
