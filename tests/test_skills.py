@@ -411,6 +411,38 @@ def test_load_falls_back_to_seed_when_shared_empty(tmp_path, monkeypatch):
     assert "run_shell" in sk.prompt_template
 
 
+def test_coding_skill_carries_the_three_part_discipline_in_order(tmp_path, monkeypatch):
+    """The code-production skill is the full three-part working
+    discipline, in strict order: (1) the cognitive runbook — name the
+    operation, commit the right bar, verify by observed reality; then
+    (2) the reuse-first / smallest-change ladder; then (3) the craft
+    (tests, don't-bloat, house idiom). A producer that only knows the
+    ladder and the craft writes tidy code to the wrong bar; the runbook
+    is what makes it the *right* work. The three must appear, and the
+    runbook must lead — it's how you think before you reach for either
+    of the others."""
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", tmp_path / "empty-shared")
+    body = skills.load_with_metadata("coding").prompt_template
+    low = body.lower()
+
+    # (1) cognitive runbook — the think-first layer
+    assert "name the operation" in low
+    assert "the bar" in low
+    assert "observed reality" in low
+    # (2) reuse-first ladder
+    assert "reuse before you write" in low
+    # (3) craft
+    assert "tests are proof" in low
+
+    # strict order: runbook leads, then the ladder, then the craft.
+    runbook_at = low.index("name the operation")
+    ladder_at = low.index("reuse before you write")
+    craft_at = low.index("tests are proof")
+    assert runbook_at < ladder_at < craft_at, (
+        "the cognitive runbook must lead, before the reuse ladder and the craft"
+    )
+
+
 def test_load_user_shared_overrides_seed(tmp_path, monkeypatch):
     """Override semantics: when the user has authored their own
     `coding.md` in the shared dir, that wins over the seed. Lets the
