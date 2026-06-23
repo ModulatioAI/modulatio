@@ -6,8 +6,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.9.6.0] — 2026-06-22
 
-Lifecycle tooling, a more conversational Leader, and a leaner team — plus
-fail-closed confinement for subscription seats.
+Lifecycle tooling, a more conversational Leader, and a leaner team — plus a
+quality backstop that always finishes the job and fail-closed confinement for
+subscription seats.
 
 ### Added
 
@@ -58,6 +59,31 @@ fail-closed confinement for subscription seats.
 - **Subscription-seat tool activity is recorded.** A Clay producer or QC seat's
   in-sandbox tool calls now reach both the live activity feed and a durable,
   owner-only audit transcript, the same as the metered seats.
+- **Setup's default project location won't collide with a source checkout.** The
+  suggested vault now defaults under `~/Documents/Modulatio`, so a fresh install
+  doesn't drop your projects inside a Modulatio code folder.
+- **The Team view keeps each producer paired with its own task.** Under
+  concurrent producers, the activity lanes no longer cross agent and task labels.
+
+### Reliability
+
+- **The team always finishes the job.** A producer's attempts are now budgeted
+  *per task* — across every retry, hand-off, and re-run — so a model can't get
+  stuck looping forever or quietly work around the quality gate. When the budget
+  is spent, QC steps in and finishes the work itself: it patches the existing
+  draft, or writes the artifact from the task's brief when there's nothing to
+  patch. Either way the task completes and the run moves on — no wedged jobs.
+- **A clear message when the Leader's model is unavailable.** If the model you
+  picked for the Leader is down when you start a job (an overloaded provider, for
+  example), Modulatio now tells you plainly to switch the Leader's primary model
+  and try again, instead of failing with a stack trace.
+- **See that QC checked the work.** Each QC review now appears in the activity
+  feed against the task it reviewed, so you can tell at a glance that a producer's
+  output was verified — not only that the producer "wrapped up."
+- **Producers stay on contract.** The producer brief now directs each model to do
+  exactly what the task asks and stop — no re-planning, no over-gathering, no
+  padding — which keeps reasoning-heavy models from drifting off the brief and
+  inflating the work.
 
 ### Security
 
