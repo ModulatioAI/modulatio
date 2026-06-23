@@ -8332,7 +8332,8 @@ class Orchestrator:
             from modulatio import runners as _runners
             recoverable_exhaustion = (_runners.MaxItersExhausted, _clay.ClaudeUnavailable)
             if isinstance(last_exc, recoverable_exhaustion) and self._attempt_qc_fix_forward(
-                t, self._resolve_draft_path(t), None, summary, defect_type="runtime",
+                t, self._resolve_draft_path(t), None, summary,
+                last_error=last_exc, defect_type="runtime",
             ):
                 return
             # Slice #9c: exception exhaustion is NOT an escalation path.
@@ -8410,7 +8411,13 @@ class Orchestrator:
             )
             qc_notes = ""
 
-        reject_rationale = f"QC rejected after {t.retry_count} retries: {qc_verdict.check}"
+        # On a budget-spent re-entry (last_qc is None) the loop ran zero attempts this
+        # pass, so "after N retries" would read "after 0 retries" — misleading (Nemo M1).
+        reject_rationale = (
+            f"QC rejected after {t.retry_count} retries: {qc_verdict.check}"
+            if last_qc is not None
+            else f"QC rejected: {qc_verdict.check}"
+        )
         if qc_notes:
             reject_rationale += f" | notes: {qc_notes}"
         # Step 0 M4: QC verdict outcome → actor="qc".
@@ -8564,6 +8571,7 @@ class Orchestrator:
         summary: RunSummary,
         *,
         breaker_abort: Exception | None = None,
+        last_error: Exception | None = None,
         defect_type: "str | None" = None,
     ) -> bool:
         """Try a QC-authored rescue. Returns True when it reached a terminal
@@ -8603,7 +8611,15 @@ class Orchestrator:
             defects = (qc_notes or "").strip() or qc_verdict.check
         else:
             qc_verdict, qc_notes = None, ""
-            reason = getattr(breaker_abort, "summary", "") or "no committable result"
+            # Give the QC fixer the REAL reason the producer couldn't converge so its
+            # build/patch prompt isn't blind (Nemo H2): the breaker summary, else the
+            # exhaustion exception ("max_iters 16 exceeded", "API Error: 529 …"), else
+            # a generic fallback.
+            reason = (
+                getattr(breaker_abort, "summary", "")
+                or (f"{type(last_error).__name__}: {last_error}" if last_error else "")
+                or "no committable result"
+            )
             defects = (
                 f"The producer could not converge ({reason}). Make the "
                 f"existing draft coherent, complete, and on-contract."

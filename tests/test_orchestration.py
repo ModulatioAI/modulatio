@@ -7307,6 +7307,21 @@ def test_max_iters_exhaustion_recovers_via_qc_build_not_blocked(project, monkeyp
     assert task.qc_authored_fix is True
 
 
+def test_producer_execute_increments_lifetime_attempts_exactly_once(project):
+    """#18 seam guard (Nemo H1): the REAL _producer_execute bumps the task's lifetime
+    counter exactly once per call — the increment the redo-loop budget depends on. The
+    budget test below stubs the producer (and bumps the counter in the stub), so it
+    proves the loop arithmetic but not the seam; this drives the real method so a
+    refactor that moves or drops the increment can't pass silently."""
+    orch = _qcfix_orch(project)
+    task = _qcfix_task(project_id=project.id, artifact_kind="text")
+    assert task.lifetime_attempts == 0
+    orch._producer_execute(task)
+    assert task.lifetime_attempts == 1
+    orch._producer_execute(task)
+    assert task.lifetime_attempts == 2  # exactly once per call — not dropped, not doubled
+
+
 def test_producer_budget_is_lifetime_not_reset_on_reentry(project, monkeypatch):
     """#18 keystone: a task's producer budget is LIFETIME. Re-entering
     _run_task_with_redo (the goal-redo / declined-ticket / re-dispatch path) must NOT
