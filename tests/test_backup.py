@@ -428,3 +428,71 @@ def test_delete_project_refuses_symlinked_vault_child(tmp_path, monkeypatch):
     leaked = list(bdir.glob("*.modulatio")) if bdir.exists() else []
     assert leaked == []
     assert outside.exists()  # the outside tree is untouched
+
+
+def test_export_backup_skips_symlinked_project_root(tmp_path, monkeypatch):
+    """A symlinked PROJECT ROOT must not be walked: project.resolve() would
+    become the outside target and every file under it would pass the in-tree
+    check. Direct export with an explicit code (bypasses _is_project_dir)
+    must capture nothing from the outside tree."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "index.md").write_text("x", encoding="utf-8")
+    (outside / "comptroller.md").write_text("x", encoding="utf-8")
+    (outside / "secret.txt").write_text("ROOT_SYMLINK_SECRET", encoding="utf-8")
+    vault.VAULT_ROOT.mkdir(parents=True, exist_ok=True)
+    (vault.VAULT_ROOT / "evil").symlink_to(outside, target_is_directory=True)
+
+    out = tmp_path / "b.modulatio"
+    backup.export_backup(out, project_codes=["evil"])
+    data = json.loads(out.read_text())
+    assert data["vaults"].get("evil", {}).get("files", {}) == {}
+    assert "ROOT_SYMLINK_SECRET" not in json.dumps(data)
+
+
+def test_delete_project_toctou_root_swap_does_not_leak(tmp_path, monkeypatch):
+    """If the project dir is swapped to a symlink AFTER delete's guards pass
+    and just before export runs, the backup must still not capture the outside
+    target — the walker refuses a symlinked root."""
+    bdir = _backup_dir(tmp_path, monkeypatch)
+    root = vault.init_project("alpha", "Alpha", "x")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("RACE_SECRET", encoding="utf-8")
+
+    import shutil as _sh
+    real_export = backup.export_backup
+
+    def swap_then_export(*args, **kwargs):
+        _sh.rmtree(root)
+        root.symlink_to(outside, target_is_directory=True)
+        return real_export(*args, **kwargs)
+
+    monkeypatch.setattr(backup, "export_backup", swap_then_export)
+    with pytest.raises(OSError):
+        backup.delete_project("alpha")  # rmtree on the swapped-in symlink raises
+    leaked = [
+        f for f in (bdir.glob("*.modulatio") if bdir.exists() else [])
+        if "RACE_SECRET" in f.read_text()
+    ]
+    assert leaked == []
+
+
+def test_export_backup_allows_symlinked_vault_root(tmp_path, monkeypatch):
+    """A symlinked VAULT ROOT with a real project dir under it is legitimate
+    (e.g. the vault path itself is a symlink) — it must still back up
+    normally. Only the project dir ITSELF being a symlink is refused."""
+    real_vault = tmp_path / "real_vault"
+    real_vault.mkdir()
+    link_vault = tmp_path / "link_vault"
+    link_vault.symlink_to(real_vault, target_is_directory=True)
+    monkeypatch.setattr(vault, "VAULT_ROOT", link_vault)
+    config.save_defaults({"vault_root": str(link_vault)})
+    config.reload()
+    vault.init_project("alpha", "Alpha", "x")  # real dir under the symlinked root
+    (vault.project_dir("alpha") / "notes.md").write_text("REAL_CONTENT", encoding="utf-8")
+
+    out = tmp_path / "b.modulatio"
+    backup.export_backup(out, project_codes=["alpha"])
+    files = json.loads(out.read_text())["vaults"]["alpha"]["files"]
+    assert "notes.md" in files and "REAL_CONTENT" in json.dumps(files)

@@ -136,6 +136,15 @@ def _walk_vault(vault_root: Path, code: str) -> tuple[dict[str, str], list[str]]
         project = vault_root / code.lower()
     if not project.exists():
         return {}, []
+    # A symlinked project ROOT would make ``project.resolve()`` the outside
+    # target, so every file under it would pass the in-tree check below and
+    # leak into the backup — including via a direct ``project_codes=[...]``
+    # export (which bypasses the list/delete guards) and a delete TOCTOU swap.
+    # Refuse to walk a symlinked root. (A symlinked VAULT ROOT with a real
+    # project dir is fine — only the project dir itself being a symlink is the
+    # hazard, which ``is_symlink`` on the final component detects.)
+    if project.is_symlink():
+        return {}, []
     files: dict[str, str] = {}
     skipped: list[str] = []
     project_real = project.resolve()
