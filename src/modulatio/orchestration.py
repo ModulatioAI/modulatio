@@ -6606,6 +6606,14 @@ class Orchestrator:
         - ``None`` — verdict passed, or legacy QC that didn't classify
           (the orchestrator defaults absent classification to substantive).
         """
+        # #14 observability: surface that QC TOUCHED this task. Without it the
+        # operator sees the producer "wrap up" but no sign QC reviewed it ("did it
+        # even get checked?", Clif live 2026-06-22) — and the later qc_authored rescue
+        # is the only QC trace. One emit at the top covers every review path.
+        self._emit_activity(
+            role="qc", phase="qc_review",
+            task_id=task.id, agent_id=task.qc_agent_id,
+        )
         # P5 (universal fabrication gate): a deliverable that DECLARES a binary
         # format (by its output extension) must carry that format's magic bytes.
         # This runs FIRST — before the LLM judgment AND before the review-ledger
@@ -6860,7 +6868,9 @@ class Orchestrator:
                         pass_env=qc_tool_skill.pass_env,
                     )
                 else:
-                    response = self._run_agent_call(task.qc_agent_id, "qc", prompt)
+                    response = self._run_agent_call(
+                        task.qc_agent_id, "qc", prompt, task_id=task.id,
+                    )
                 data = _extract_json(response)
                 break
             except ValueError as exc:
@@ -8853,7 +8863,7 @@ class Orchestrator:
             standards=_format_standards_block(domain_standards),
             body=body,
         )
-        raw = self._run_agent_call(t.qc_agent_id, "qc", prompt)
+        raw = self._run_agent_call(t.qc_agent_id, "qc", prompt, task_id=t.id)
         return self._persist_qc_authored(t, draft_path, raw)
 
     def _qc_build_artifact(self, t: Task, draft_path: "Path", defects: str) -> str:
@@ -8872,7 +8882,7 @@ class Orchestrator:
             defects=defects,
             standards=_format_standards_block(domain_standards),
         )
-        raw = self._run_agent_call(t.qc_agent_id, "qc", prompt)
+        raw = self._run_agent_call(t.qc_agent_id, "qc", prompt, task_id=t.id)
         return self._persist_qc_authored(t, draft_path, raw)
 
     def _persist_qc_authored(self, t: Task, draft_path: "Path", raw: str) -> str:

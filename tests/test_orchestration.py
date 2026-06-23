@@ -7351,6 +7351,37 @@ def test_producer_budget_is_lifetime_not_reset_on_reentry(project, monkeypatch):
     assert second == first                 # re-entry grants NO fresh producer budget
 
 
+def test_qc_review_emits_per_task_activity(project, monkeypatch):
+    """#14: QC reviewing a task emits a per-task activity (role=qc, phase=qc_review,
+    task_id) so the operator can SEE that QC touched the task — not just the
+    qc_authored rescue. Closes the 'did it even get checked?' gap (Clif live
+    2026-06-22: QC budget rows carried task_id=None and the review was invisible)."""
+    from modulatio.orchestration import Orchestrator
+
+    runners = {"leader": _leader_stub, "planner": _planner_stub, "drafter": _drafter_stub,
+               "qc": lambda p: '```json\n{"check":"ok","passed":true,"notes":""}\n```'}
+    orch = Orchestrator(project, runners)
+    events = []
+    orig = orch._emit_activity
+
+    def spy(**kw):
+        events.append(kw)
+        return orig(**kw)
+
+    monkeypatch.setattr(orch, "_emit_activity", spy)
+
+    task = _qcfix_task(project_id=project.id)
+    draft = orch._resolve_draft_path(task)
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("a real draft body for QC to review")
+    orch._qc_review(task, draft, "csum")
+
+    qc_events = [e for e in events if e.get("phase") == "qc_review"]
+    assert qc_events, "QC review emitted no per-task activity"
+    assert qc_events[0]["task_id"] == task.id
+    assert qc_events[0]["role"] == "qc"
+
+
 def test_terminal_failure_opens_operator_ticket(project, monkeypatch):
     """#8: a task that terminates BLOCKED (a genuine crash the backstop can't
     recover) opens an operator ticket — the failure surfaces in the Tickets tab,
