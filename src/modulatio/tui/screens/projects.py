@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """PROJECTS config tab — browse, switch, and delete projects (roadmap #7).
 
+Lives under CONFIG (beside MODELS/AGENTS) because switching projects is a form
+of workspace configuration — and nesting there reuses the existing CONFIG
+chrome instead of adding a top-level tab.
+
 A thin presentation layer over pure logic (``vault.list_projects`` /
 ``app.switch_project`` / ``backup.delete_project``) so a future web UI can
 reuse the same functions. Switching is idle-only (the app refuses it under a
