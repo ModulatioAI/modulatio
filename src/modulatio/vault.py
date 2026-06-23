@@ -161,8 +161,12 @@ def _is_project_dir(path: Path) -> bool:
     alone is not enough — a stray folder (repo clone, Obsidian note dir) with
     a valid-looking name must never count as a project, so it can't surface in
     a switch/delete list or be removed by ``delete_project``.
+
+    Rejects a symlinked vault child outright: a symlink to an outside dir
+    carrying planted markers would otherwise surface as a deletable project
+    and let a backup capture the outside tree.
     """
-    if not path.is_dir():
+    if path.is_symlink() or not path.is_dir():
         return False
     try:
         validate_project_code(path.name)
@@ -176,6 +180,10 @@ def list_projects() -> list[str]:
     vault child that passes ``_is_project_dir`` (valid code + seed markers),
     so unrelated folders are skipped. Empty when the vault root doesn't exist
     yet (fresh install). Single source for the CLI / TUI / daemon project list.
+
+    Reads the cached module-level ``VAULT_ROOT`` (same as ``project_dir``);
+    a caller that reconfigures the vault root at runtime must ``reload()``
+    first or this enumerates the old root.
     """
     if not VAULT_ROOT.exists():
         return []

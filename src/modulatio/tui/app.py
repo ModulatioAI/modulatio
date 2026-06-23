@@ -1273,6 +1273,11 @@ class ModulatioApp(App):
         nothing live to rebuild when idle; the next kickoff picks up the code.
         Other data screens re-read ``self.app.project_code`` on their next
         ``on_show``.
+
+        Web-UI note (keep-a-path): the pure-logic core a non-TUI surface would
+        reuse is the idle+validity check (``not _any_job_in_flight()`` and
+        ``code in vault.list_projects()``) plus ``config.set_default_project_code``;
+        the memo invalidation + view refresh below are TUI-only.
         """
         code = (code or "").strip().lower()
         if self._any_job_in_flight():

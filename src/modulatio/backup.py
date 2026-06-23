@@ -91,22 +91,29 @@ def _modulatio_version() -> str:
 _PROJECT_MARKERS = ("index.md", "comptroller.md", "dashboard.md", "capacity.md")
 
 
-def _is_project_dir(d: Path) -> bool:
-    """True when ``d`` looks like a Modulatio project vault (has at least
-    one of the seed-file markers). Excludes ancillary dirs like
-    ``heartbeat-output/`` or test artifacts left under vault_root."""
+def _looks_like_project(d: Path) -> bool:
+    """Loose predicate for the 'back up everything' scan: ``d`` looks
+    project-shaped if it has ANY seed-file marker. Deliberately MORE generous
+    than the strict ``vault._is_project_dir`` (valid code + BOTH index.md AND
+    comptroller.md) used for switch/delete — a partial or corrupted project
+    should still be backed up even though it won't show in the switch list or
+    be deletable. Excludes ancillary dirs like ``heartbeat-output/``."""
     if not d.is_dir():
         return False
     return any((d / marker).exists() for marker in _PROJECT_MARKERS)
 
 
 def _discover_project_codes(vault_root: Path) -> list[str]:
-    """Return the names of every project-shaped directory under vault_root."""
+    """Return the names of every project-shaped directory under vault_root.
+
+    Uses the loose ``_looks_like_project`` (back up generously); the switch/
+    delete path uses the strict ``vault._is_project_dir`` instead.
+    """
     if not vault_root.exists():
         return []
     return sorted(
         p.name for p in vault_root.iterdir()
-        if not p.name.startswith(".") and _is_project_dir(p)
+        if not p.name.startswith(".") and _looks_like_project(p)
     )
 
 
@@ -131,10 +138,20 @@ def _walk_vault(vault_root: Path, code: str) -> tuple[dict[str, str], list[str]]
         return {}, []
     files: dict[str, str] = {}
     skipped: list[str] = []
+    project_real = project.resolve()
     for f in project.rglob("*"):
         if not f.is_file():
             continue
         rel = str(f.relative_to(project))
+        # Symlink-closed: never read THROUGH a symlink out of the project tree
+        # (a symlinked file, or a file under a symlinked subdir, would leak the
+        # outside target's contents into a share-safe backup). Recorded in
+        # ``skipped`` so the lossiness stays visible.
+        try:
+            f.resolve().relative_to(project_real)
+        except ValueError:
+            skipped.append(rel)
+            continue
         # re-sweep (F1): scope the cache-dir skip to the PROJECT tree, not
         # the absolute path. f.parts includes every ancestor up to "/", so
         # a vault root mounted under a dir named .cache/_proposals/lance.db
@@ -279,9 +296,9 @@ def export_backup(
 def delete_project(code: str) -> Path:
     """Remove a project's folder, backing it up first.
 
-    Refuses anything that isn't a real project (``vault._is_project_dir`` —
-    valid code + seed markers), so a stray folder or a path outside the vault
-    can never be removed. Writes a share-safe ``.modulatio`` snapshot of the
+    Refuses anything the public ``vault.list_projects`` doesn't list (valid
+    code + seed markers, no symlinks), so a stray folder or a path outside the
+    vault can never be removed. Writes a share-safe ``.modulatio`` snapshot of the
     project to the backup dir BEFORE deleting — bundling backup+remove in one
     function makes the backup un-skippable. Then drops the folder. If the
     deleted code was the recorded default, repoints the default at a remaining
@@ -291,8 +308,18 @@ def delete_project(code: str) -> Path:
     from modulatio import preferences, vault
 
     target = vault.project_dir(code)  # validates + lowercases the code
-    if not vault._is_project_dir(target):
+    # Guard via the public enumerator, not vault's private predicate: a real
+    # project is one that lists. list_projects excludes symlinked children, so
+    # this also blocks a symlinked vault child.
+    if target.name not in vault.list_projects():
         raise ValueError(f"not a Modulatio project: {code!r}")
+    # Defense-in-depth on a destructive op: the real target must be a
+    # directory directly under the real vault root — never a
+    # symlink or a path escaping the vault, even if one were swapped in after
+    # the marker check.
+    resolved = target.resolve()
+    if not resolved.is_dir() or resolved.parent != vault.VAULT_ROOT.resolve():
+        raise ValueError(f"refusing to delete a path outside the vault: {code!r}")
     code = target.name  # canonical lowercased form
 
     backup_path = (

@@ -389,3 +389,42 @@ def test_delete_project_repoints_default(tmp_path, monkeypatch):
     backup.delete_project("alpha")
 
     assert config.get_default_project_code() == "beta"
+
+
+# === symlink hardening ===
+
+
+def test_export_backup_is_symlink_closed(tmp_path, monkeypatch):
+    """The vault walker must not read THROUGH a symlink out of the project
+    tree — a symlinked file pointing outside would otherwise leak that file's
+    contents into a (share-safe by default) backup."""
+    root = vault.init_project("alpha", "Alpha", "x")
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("OUTSIDE_SECRET", encoding="utf-8")
+    (root / "linked.txt").symlink_to(outside)
+
+    out = tmp_path / "b.modulatio"
+    backup.export_backup(out)
+    files = json.loads(out.read_text())["vaults"]["alpha"]["files"]
+    assert "linked.txt" not in files
+    assert "OUTSIDE_SECRET" not in json.dumps(files)
+
+
+def test_delete_project_refuses_symlinked_vault_child(tmp_path, monkeypatch):
+    """A symlinked vault child (outside dir with planted markers) is refused
+    BEFORE any backup is written — no leak of the outside target."""
+    bdir = _backup_dir(tmp_path, monkeypatch)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "index.md").write_text("x", encoding="utf-8")
+    (outside / "comptroller.md").write_text("x", encoding="utf-8")
+    (outside / "secret.txt").write_text("DO_NOT_BACKUP", encoding="utf-8")
+    vault.VAULT_ROOT.mkdir(parents=True, exist_ok=True)
+    (vault.VAULT_ROOT / "evil").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError):
+        backup.delete_project("evil")
+    # no backup file written at all → nothing leaked
+    leaked = list(bdir.glob("*.modulatio")) if bdir.exists() else []
+    assert leaked == []
+    assert outside.exists()  # the outside tree is untouched

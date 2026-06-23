@@ -216,6 +216,22 @@ def test_list_projects_empty_when_root_missing(isolated_vault):
     assert vault.list_projects() == []
 
 
+def test_is_project_dir_rejects_symlinked_vault_child(isolated_vault, tmp_path):
+    """A vault child that is a SYMLINK to an outside dir carrying planted
+    markers is NOT a project — it must not surface in
+    list_projects, so delete can never reach an outside tree through it."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "index.md").write_text("x", encoding="utf-8")
+    (outside / "comptroller.md").write_text("x", encoding="utf-8")
+    vault.VAULT_ROOT.mkdir(parents=True, exist_ok=True)
+    link = vault.VAULT_ROOT / "evil"
+    link.symlink_to(outside, target_is_directory=True)
+
+    assert not vault._is_project_dir(link)
+    assert "evil" not in vault.list_projects()
+
+
 # === validate_project_code (SEC-004 trust-boundary regex) ===
 
 class TestValidateProjectCode:
