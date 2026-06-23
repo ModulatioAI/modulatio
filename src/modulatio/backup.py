@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -273,6 +274,39 @@ def export_backup(
         # world-readable window.
         config.write_secret_file(out, payload)
     return out
+
+
+def delete_project(code: str) -> Path:
+    """Remove a project's folder, backing it up first.
+
+    Refuses anything that isn't a real project (``vault._is_project_dir`` —
+    valid code + seed markers), so a stray folder or a path outside the vault
+    can never be removed. Writes a share-safe ``.modulatio`` snapshot of the
+    project to the backup dir BEFORE deleting — bundling backup+remove in one
+    function makes the backup un-skippable. Then drops the folder. If the
+    deleted code was the recorded default, repoints the default at a remaining
+    project (or clears it) so the next launch doesn't recreate an empty ghost.
+    Returns the backup path.
+    """
+    from modulatio import preferences, vault
+
+    target = vault.project_dir(code)  # validates + lowercases the code
+    if not vault._is_project_dir(target):
+        raise ValueError(f"not a Modulatio project: {code!r}")
+    code = target.name  # canonical lowercased form
+
+    backup_path = (
+        Path(preferences.get_backup_dir())
+        / f"{code}-before-delete-{vault.generate_run_id()}.modulatio"
+    )
+    export_backup(backup_path, project_codes=[code])
+
+    shutil.rmtree(target)
+
+    if config.get_default_project_code() == code:
+        remaining = vault.list_projects()
+        config.set_default_project_code(remaining[0] if remaining else "")
+    return backup_path
 
 
 # === Import ===

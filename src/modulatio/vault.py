@@ -154,6 +154,34 @@ def project_dir(code: str) -> Path:
     return VAULT_ROOT / validate_project_code(code.lower())
 
 
+def _is_project_dir(path: Path) -> bool:
+    """True only if ``path`` is a real Modulatio project: a directory whose
+    name is a valid code AND that carries the seed markers ``init_project``
+    stamps (``index.md`` + the distinctive ``comptroller.md``). Name-matching
+    alone is not enough — a stray folder (repo clone, Obsidian note dir) with
+    a valid-looking name must never count as a project, so it can't surface in
+    a switch/delete list or be removed by ``delete_project``.
+    """
+    if not path.is_dir():
+        return False
+    try:
+        validate_project_code(path.name)
+    except ValueError:
+        return False
+    return (path / "index.md").exists() and (path / "comptroller.md").exists()
+
+
+def list_projects() -> list[str]:
+    """Every real project code under ``VAULT_ROOT``, sorted. A project is a
+    vault child that passes ``_is_project_dir`` (valid code + seed markers),
+    so unrelated folders are skipped. Empty when the vault root doesn't exist
+    yet (fresh install). Single source for the CLI / TUI / daemon project list.
+    """
+    if not VAULT_ROOT.exists():
+        return []
+    return sorted(c.name for c in VAULT_ROOT.iterdir() if _is_project_dir(c))
+
+
 def runs_dir(code: str) -> Path:
     """The parent directory holding every kickoff's run folder.
 

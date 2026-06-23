@@ -181,6 +181,41 @@ def test_project_subdirs_and_run_subdirs_partition_subdirs(isolated_vault):
     assert p | r == set(vault.SUBDIRS)
 
 
+# === list_projects + _is_project_dir (marker-aware enumeration) ===
+
+
+def test_is_project_dir_requires_seed_markers(isolated_vault):
+    """A vault child is a project only if its name is a valid code AND it
+    carries the Modulatio seed markers (index.md + comptroller.md). Drop a
+    marker and it stops counting — the guard that keeps a stray folder out
+    of a switch/delete list."""
+    root = vault.init_project("gamma", "Gamma", "z")
+    assert vault._is_project_dir(root)
+    (root / "comptroller.md").unlink()
+    assert not vault._is_project_dir(root)
+
+
+def test_list_projects_excludes_unmarked_stray_dirs(isolated_vault):
+    """list_projects returns only real projects, sorted. A stray dir with a
+    valid-looking name but no seed markers (a repo clone, an Obsidian note
+    folder) is excluded, so it can never surface as a deletable project —
+    and an invalid-cased name is excluded too."""
+    vault.init_project("alpha", "Alpha", "x")
+    vault.init_project("beta_1", "Beta", "y")
+    stray = vault.VAULT_ROOT / "notes"  # valid code shape, but not a project
+    stray.mkdir(parents=True)
+    (stray / "readme.md").write_text("not a project", encoding="utf-8")
+    (vault.VAULT_ROOT / "Repo").mkdir()  # invalid (uppercase) name
+
+    assert vault.list_projects() == ["alpha", "beta_1"]
+
+
+def test_list_projects_empty_when_root_missing(isolated_vault):
+    """No vault root yet → empty list, not an error (fresh install)."""
+    assert not vault.VAULT_ROOT.exists()
+    assert vault.list_projects() == []
+
+
 # === validate_project_code (SEC-004 trust-boundary regex) ===
 
 class TestValidateProjectCode:

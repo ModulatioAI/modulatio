@@ -337,3 +337,55 @@ def test_export_excludes_dotfile_dirs_and_round_trips(tmp_path):
     assert summary["vault_files_written"] >= 2
     assert (new_vault / "STA" / "index.md").exists()
     assert not (new_vault / "STA" / ".obsidian").exists()
+
+
+# === delete_project (backup-first, marker-guarded removal) ===
+
+
+def _backup_dir(tmp_path, monkeypatch):
+    """Point the backup dir at a tmp location and return it."""
+    d = tmp_path / "backups"
+    monkeypatch.setattr(preferences, "get_backup_dir", lambda: str(d))
+    return d
+
+
+def test_delete_project_backs_up_then_removes(tmp_path, monkeypatch):
+    """A real project is backed up to a .modulatio file BEFORE its folder
+    is removed — the backup is un-skippable (one function owns both)."""
+    bdir = _backup_dir(tmp_path, monkeypatch)
+    root = vault.init_project("alpha", "Alpha", "do work")
+    assert root.exists()
+
+    backup_path = backup.delete_project("alpha")
+
+    assert not root.exists(), "project folder should be gone"
+    assert backup_path.exists() and backup_path.parent == bdir
+    data = json.loads(backup_path.read_text())
+    assert "alpha" in data["vaults"]
+    assert "index.md" in data["vaults"]["alpha"]["files"]
+
+
+def test_delete_project_refuses_non_project(tmp_path, monkeypatch):
+    """A stray folder with a valid-looking name but no seed markers is NOT a
+    project — delete_project refuses (raises) and never removes it."""
+    _backup_dir(tmp_path, monkeypatch)
+    stray = vault.VAULT_ROOT / "notes"
+    stray.mkdir(parents=True)
+    (stray / "readme.md").write_text("not a project", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        backup.delete_project("notes")
+    assert stray.exists(), "a non-project must never be removed"
+
+
+def test_delete_project_repoints_default(tmp_path, monkeypatch):
+    """Deleting the recorded default repoints it at a remaining project so
+    the next launch doesn't recreate an empty ghost of the deleted code."""
+    _backup_dir(tmp_path, monkeypatch)
+    vault.init_project("alpha", "Alpha", "x")
+    vault.init_project("beta", "Beta", "y")
+    config.set_default_project_code("alpha")
+
+    backup.delete_project("alpha")
+
+    assert config.get_default_project_code() == "beta"

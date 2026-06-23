@@ -1834,30 +1834,6 @@ def _make_default_kickoff(
     return _do
 
 
-def _list_project_codes() -> list[str]:
-    """Enumerate every project code under the configured vault root.
-
-    Used by ``tick`` to scan for approved plans across all projects on
-    every daemon iteration. Codes are validated with the canonical
-    regex; anything else (stray dirs, hidden files) is silently
-    skipped so a malformed entry can't break the daemon.
-    """
-    from modulatio import config, vault as _vault
-    root = config.get_vault_root()
-    if not root.exists():
-        return []
-    out: list[str] = []
-    for child in sorted(root.iterdir()):
-        if not child.is_dir():
-            continue
-        try:
-            _vault.validate_project_code(child.name)
-        except ValueError:
-            continue
-        out.append(child.name)
-    return out
-
-
 def find_approved_plans(
     project_codes: list[str] | None = None,
 ) -> list[tuple[str, "plans.PlanRecord"]]:
@@ -1870,7 +1846,7 @@ def find_approved_plans(
     only plans the user has authorized for execution.
     """
     if project_codes is None:
-        project_codes = _list_project_codes()
+        project_codes = vault.list_projects()
     out: list[tuple[str, "plans.PlanRecord"]] = []
     for code in project_codes:
         try:

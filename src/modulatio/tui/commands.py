@@ -207,6 +207,12 @@ def _handle_models(args: list[str]) -> CommandResult:
     return CommandResult(output="Opening models…", side_effect="open_models")
 
 
+def _handle_project(args: list[str]) -> CommandResult:
+    """`/project` — open the PROJECTS tab (CONFIG → PROJECTS) to browse, switch,
+    or delete projects."""
+    return CommandResult(output="Opening projects…", side_effect="open_projects")
+
+
 def _handle_new(args: list[str]) -> CommandResult:
     """`/new` — start a fresh Leader conversation; the current thread is archived
     aside (never deleted)."""
@@ -365,6 +371,13 @@ COMMANDS: tuple[Command, ...] = (
         description="Open the model configurator (CONFIG → MODELS).",
         category="System",
         handler=_handle_models,
+    ),
+    Command(
+        shortcut="/project",
+        name="Switch project",
+        description="Open the PROJECTS tab (CONFIG → PROJECTS) to browse, switch, delete.",
+        category="System",
+        handler=_handle_project,
     ),
     Command(
         shortcut="/new",

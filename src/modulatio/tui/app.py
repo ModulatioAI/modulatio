@@ -40,6 +40,7 @@ from modulatio.tui.screens.artifacts import build_artifacts_panel
 from modulatio.tui.screens.configuration import ConfigScreen
 from modulatio.tui.screens.cron import build_cron_panel
 from modulatio.tui.screens.memory import build_memory_panel
+from modulatio.tui.screens.projects import ProjectsScreen
 from modulatio.tui.screens.prompt import build_prompt_panel
 from modulatio.tui.screens.skills import build_skills_panel
 from modulatio.tui.screens.jt_library import build_jt_library_panel
@@ -360,6 +361,8 @@ class ModulatioApp(App):
                         yield ConfigScreen(id="config-models-screen")
                     with TabPane("AGENTS", id="config-agents"):
                         yield AgentBuilderScreen(id="config-agents-screen")
+                    with TabPane("PROJECTS", id="config-projects"):
+                        yield ProjectsScreen(id="config-projects-screen")
             with TabPane("JT LIBRARY", id="tab-jt-library"):
                 yield build_jt_library_panel()
             with TabPane("TICKETS", id="tab-tickets"):
@@ -985,6 +988,14 @@ class ModulatioApp(App):
             except Exception:
                 pass
             return
+        if side_effect == "open_projects":
+            # /project — jump to CONFIG and flip its inner tab to PROJECTS.
+            try:
+                self.query_one("#app-tabs", TabbedContent).active = "tab-config"
+                self.query_one("#config-flip", TabbedContent).active = "config-projects"
+            except Exception:
+                pass
+            return
         if side_effect == "leader_new_conversation":
             self._leader_new_conversation()
             return
@@ -1250,6 +1261,45 @@ class ModulatioApp(App):
             except Exception:
                 pass
         return self._project
+
+    def switch_project(self, code: str) -> bool:
+        """Switch the active project in place — idle only. Refuses while a job
+        is in flight (rebinding the session under a running team is the one
+        real hazard). Returns True on a successful switch.
+
+        The rebind: repoint ``project_code``, drop the memoized ``Project`` so
+        the next ``_ensure_project`` rebuilds, persist the default, refresh the
+        header + the memory tab. Runners/orchestrators are built per-kickoff —
+        nothing live to rebuild when idle; the next kickoff picks up the code.
+        Other data screens re-read ``self.app.project_code`` on their next
+        ``on_show``.
+        """
+        code = (code or "").strip().lower()
+        if self._any_job_in_flight():
+            self.notify(
+                "Can't switch projects while a job is running — stop or finish it first.",
+                severity="warning",
+            )
+            return False
+        if code == self.project_code:
+            return False
+        if code not in vault.list_projects():
+            self.notify(f"Unknown project: {code!r}", severity="error")
+            return False
+
+        from modulatio import config
+
+        self.project_code = code
+        self._project = None  # force _ensure_project to rebuild for the new code
+        config.set_default_project_code(code)
+        self.sub_title = self._feng_subtitle()
+        try:
+            from modulatio.tui.screens.memory import MemoryScreen
+            self.query_one(MemoryScreen).set_project(code)
+        except Exception:
+            pass
+        self.notify(f"Switched to project '{code}'.")
+        return True
 
     def on_mount(self) -> None:
         """First-launch detection (slice 5). If the wizard has never run,

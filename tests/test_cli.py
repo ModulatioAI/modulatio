@@ -293,3 +293,54 @@ def test_doctor_flags_recorded_project_with_missing_folder(capsys, tmp_path):
 
     out = capsys.readouterr().out
     assert "default project 'gone' recorded but its folder is missing" in out
+
+
+def _isolate_cli(tmp_path, monkeypatch):
+    """Redirect config + vault into tmp so CLI project commands are sandboxed."""
+    from modulatio import config, vault
+    cfg = tmp_path / "config-isolation"
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg)
+    monkeypatch.setattr(config, "DEFAULTS_FILE", cfg / "defaults.json")
+    config.reload()
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+
+
+def test_project_use_sets_default_and_rejects_unknown(tmp_path, monkeypatch):
+    """`project use <code>` repoints the recorded default to a real project;
+    an unknown code errors (non-zero) and leaves the default untouched."""
+    from typer.testing import CliRunner
+
+    from modulatio import config, vault
+
+    _isolate_cli(tmp_path, monkeypatch)
+    vault.init_project("alpha", "Alpha", "x")
+    vault.init_project("beta", "Beta", "y")
+    config.set_default_project_code("beta")
+    runner = CliRunner()
+
+    ok = runner.invoke(cli.app, ["project", "use", "alpha"])
+    assert ok.exit_code == 0, ok.output
+    assert config.get_default_project_code() == "alpha"
+
+    bad = runner.invoke(cli.app, ["project", "use", "nope"])
+    assert bad.exit_code != 0
+    assert config.get_default_project_code() == "alpha"  # unchanged
+
+
+def test_project_list_marks_current_default(tmp_path, monkeypatch):
+    """`project list` shows every real project and marks the current default."""
+    from typer.testing import CliRunner
+
+    from modulatio import config, vault
+
+    _isolate_cli(tmp_path, monkeypatch)
+    vault.init_project("alpha", "Alpha", "x")
+    vault.init_project("beta", "Beta", "y")
+    config.set_default_project_code("beta")
+
+    result = CliRunner().invoke(cli.app, ["project", "list"])
+    assert result.exit_code == 0, result.output
+    assert "alpha" in result.output and "beta" in result.output
+    # the current default is flagged with a marker on its line
+    beta_line = next(ln for ln in result.output.splitlines() if "beta" in ln)
+    assert "*" in beta_line

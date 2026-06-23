@@ -1977,6 +1977,37 @@ def project_clean(
     typer.echo(f"Deleted {len(to_delete)} run(s).")
 
 
+@project_app.command("list")
+def project_list() -> None:
+    """List every project, marking the current default with ``*``."""
+    from modulatio import config
+
+    projects = vault.list_projects()
+    if not projects:
+        typer.echo("(no projects yet)")
+        return
+    current = config.get_default_project_code()
+    for code in projects:
+        marker = "*" if code == current else " "
+        typer.echo(f"{marker} {code}")
+
+
+@project_app.command("use")
+def project_use(
+    code: str = typer.Argument(..., help="Project code to switch to"),
+) -> None:
+    """Switch the default project — the one bare ``modulatio`` / the TUI
+    launches on. Errors if the project doesn't exist."""
+    from modulatio import config
+
+    code = code.strip().lower()
+    if code not in vault.list_projects():
+        typer.echo(f"Unknown project: {code!r}. Run `modulatio project list`.", err=True)
+        raise typer.Exit(code=2)
+    config.set_default_project_code(code)
+    typer.echo(f"Default project is now '{code}'.")
+
+
 def main() -> None:
     from modulatio._crash import run_with_crash_handler
 
