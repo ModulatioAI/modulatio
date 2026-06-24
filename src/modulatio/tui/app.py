@@ -39,6 +39,7 @@ from modulatio.tui.screens.agent_builder import AgentBuilderScreen
 from modulatio.tui.screens.artifacts import build_artifacts_panel
 from modulatio.tui.screens.configuration import ConfigScreen
 from modulatio.tui.screens.cron import build_cron_panel
+from modulatio.tui.screens.docs import build_docs_panel
 from modulatio.tui.screens.jobs import build_jobs_panel
 from modulatio.tui.screens.memory import build_memory_panel
 from modulatio.tui.screens.projects import ProjectsScreen
@@ -390,6 +391,8 @@ class ModulatioApp(App):
                 yield build_cron_panel()
             with TabPane("LOGS", id="tab-logs"):
                 yield build_logs_panel()
+            with TabPane("DOCS", id="tab-docs"):
+                yield build_docs_panel()
             for tab_id, label, coming_in in _PLACEHOLDER_TABS:
                 with TabPane(label.upper(), id=tab_id):
                     yield Label(f"{label} — coming in {coming_in}")
