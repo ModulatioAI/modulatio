@@ -39,6 +39,7 @@ from modulatio.tui.screens.agent_builder import AgentBuilderScreen
 from modulatio.tui.screens.artifacts import build_artifacts_panel
 from modulatio.tui.screens.configuration import ConfigScreen
 from modulatio.tui.screens.cron import build_cron_panel
+from modulatio.tui.screens.jobs import build_jobs_panel
 from modulatio.tui.screens.memory import build_memory_panel
 from modulatio.tui.screens.projects import ProjectsScreen
 from modulatio.tui.screens.prompt import build_prompt_panel
@@ -383,6 +384,8 @@ class ModulatioApp(App):
                 yield build_skills_panel()
             with TabPane("MEMORY", id="tab-memory"):
                 yield build_memory_panel()
+            with TabPane("JOBS", id="tab-jobs"):
+                yield build_jobs_panel()
             with TabPane("CRON", id="tab-cron"):
                 yield build_cron_panel()
             with TabPane("LOGS", id="tab-logs"):
