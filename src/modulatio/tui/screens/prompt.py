@@ -98,18 +98,15 @@ class PromptScreen(Vertical):
     }
     PromptScreen #team-rail .rail-head { color: $secondary; text-style: bold; }
     PromptScreen #team-rail .rail-dim { color: $text-muted; }
-    /* The round-bordered composer (LEADER only) + the affordance row beneath. */
+    /* The composer (LEADER only) + the affordance line beneath. No box border —
+       the only frame is the screen's outer border; the composer itself is
+       borderless (set App-tier in app.py) so there's no double line. */
     PromptScreen #input-box {
         height: 7;
         margin-top: 1;
-        padding: 0 1;
-        border: round $frame-dim;
     }
     PromptScreen #prompt-input {
         height: 1fr;
-        background: #000000;
-        border: none;
-        padding: 0;
     }
     /* The single dim affordance line under the box (the mockup's
        #input-affordance) — also surfaces staged attachments + attach errors. */

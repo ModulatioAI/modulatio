@@ -269,6 +269,13 @@ class ModulatioApp(App):
     TextArea:focus {
         border: round $primary;
     }
+    /* The Console composer is borderless — the only frame is the screen's outer
+       border (no box, no text border). App-tier + ID + !important to beat the
+       global TextArea border rules above. Pure-black fill. */
+    #prompt-input {
+        border: none !important;
+        background: #000000;
+    }
 
     /* ── Tabs: active = phosphor amber ── */
     Tabs {
