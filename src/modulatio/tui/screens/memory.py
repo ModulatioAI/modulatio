@@ -25,11 +25,12 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, DataTable, Markdown, Select, Static
+from textual.widgets import Button, DataTable, Input, Markdown, Select, Static
 
 from modulatio import roster, vault
 from modulatio.memory import agent_memory, team_memory
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
+from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.text_entry_modal import TextEntryModal
 
@@ -88,6 +89,7 @@ class MemoryScreen(Vertical):
         super().__init__(**kwargs)
         self._project_code: str = ""
         self._focused_agent: str | None = None  # None = team-only view
+        self._query: str = ""
         # row key → (layer, agent_id|"", entry_id) so an action knows the
         # selected entry's layer + owner; plus its rendered detail card.
         self._rows: dict[str, tuple[str, str, str]] = {}
@@ -128,12 +130,14 @@ class MemoryScreen(Vertical):
         with MasterDetail():
             with Vertical(id="md-list"):
                 yield Static("", id="memory-stats")
+                yield ControlsRow(
+                    counts=True, search=True, search_placeholder="/ search memory…")
                 table = DataTable(id="memory-table", cursor_type="row")
                 table.add_columns("Layer", "When", "Kind", "Content")
                 yield table
                 yield Static(
-                    "↑↓ move · a add · e edit · d delete · x export — team "
-                    "entries are QC-curated (edits go via propose→approve)",
+                    "↑↓ move · type to search · a add · e edit · d delete · x "
+                    "export — team entries are QC-curated (edits propose→approve)",
                     id="memory-affordance",
                     classes="affordance",
                 )
@@ -191,7 +195,11 @@ class MemoryScreen(Vertical):
         when: str, kind: str, content: str, detail_md: str,
     ) -> None:
         """Append one entry to the unified table + record its (layer, owner, id)
-        and rendered detail card, keyed by a stable row key."""
+        and rendered detail card, keyed by a stable row key. Client-side search
+        skips rows whose layer/kind/content don't match the query."""
+        q = self._query.lower()
+        if q and q not in f"{layer} {kind} {content}".lower():
+            return
         key = f"{layer}:{agent_id}:{entry_id}"
         glyph = self._LAYER_GLYPH.get(layer, "·")
         table.add_row(
@@ -251,13 +259,28 @@ class MemoryScreen(Vertical):
                 _format_team_entry(entry),
             )
         counts.append(f"{len(team_entries)} team")
+        self._set_counts(len(self._rows))
 
         if not self._rows:
-            stats_widget.update(_empty_hint(self._project_code, bool(agent)))
+            stats_widget.update(
+                "No entries match the search." if self._query
+                else _empty_hint(self._project_code, bool(agent)))
         else:
             stats_widget.update("  ·  ".join(counts))
             first = next(iter(self._rows))
             self._render_detail(first)
+
+    def _set_counts(self, shown: int) -> None:
+        try:
+            label = f"{shown} entries" + (" (filtered)" if self._query else "")
+            self.query_one(ControlsRow).set_counts(label)
+        except Exception:
+            pass
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "controls-search":
+            self._query = event.value.strip()
+            self._refresh_views()
 
     # ── detail card ─────────────────────────────────────────────────────
 

@@ -243,3 +243,30 @@ async def test_editing_a_team_entry_creates_a_proposal_not_a_mutation():
         assert bodies == ["original team fact"]
         proposals = tm.list_proposals(PROJECT_CODE)
         assert any(p.body == "revised team fact" for p in proposals)
+
+
+@pytest.mark.asyncio
+async def test_memory_has_controls_row_and_search_filters(monkeypatch):
+    """MEMORY carries the shared ControlsRow (counts + search) like every other
+    list screen (Lovecraft cadre finding), and search filters the unified list."""
+    from textual.widgets import DataTable, Static, TabbedContent
+
+    from modulatio.tui.widgets.controls_row import ControlsRow
+
+    vault.init_project(PROJECT_CODE, "x", "o")
+    agent_memory.add_semantic("writer-a", "ozempic dosing note", project_code=PROJECT_CODE)
+    agent_memory.add_semantic("writer-a", "unrelated build fact", project_code=PROJECT_CODE)
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        app.query_one(TabbedContent).active = "tab-memory"
+        await pilot.pause()
+        screen = app.query_one("MemoryScreen")
+        screen.focus_agent("writer-a")
+        await pilot.pause()
+        assert screen.query_one(ControlsRow)  # the shared strip is present
+        screen._query = "ozempic"
+        screen._refresh_views()
+        await pilot.pause()
+        assert screen.query_one("#memory-table", DataTable).row_count == 1
+        counts = str(screen.query_one("#controls-counts", Static).render())
+        assert "filtered" in counts
