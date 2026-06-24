@@ -127,6 +127,10 @@ class PromptScreen(Vertical):
         #: across messages until `/end` fires the job. The ONLY way a job starts —
         #: the Leader never self-kickoffs (jobs come from the operator's brackets).
         self._kickoff_capture: list[str] | None = None
+        #: Absolute paths of temp PNGs WE generated from a pasted clipboard image
+        #: (paste-to-attach). Tracked so they're swept on exit — a copied file
+        #: PATH the operator pastes is their own file and is never tracked/removed.
+        self._owned_paste_temps: set[str] = set()
 
     @property
     def chatbox_attachments(self) -> list[Attachment]:
@@ -186,6 +190,17 @@ class PromptScreen(Vertical):
         # tab-activated handler when the CONSOLE tab becomes active — see
         # `_focus_composer`. Doing it there (a sync event handler) instead of a
         # mount-time deferred callback keeps test-harness teardown clean.
+
+    def on_unmount(self) -> None:
+        # Sweep any paste-generated temp PNGs we still own (the ones a sent
+        # message/job rode survive through the consuming worker, then get
+        # cleaned here on exit — no orphaned temp files outlive the session).
+        for path in self._owned_paste_temps:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._owned_paste_temps.clear()
 
     def _focus_composer(self) -> None:
         """Land focus in the composer so it's ready to type. Called when the
@@ -284,7 +299,14 @@ class PromptScreen(Vertical):
         if img is not None:
             before = len(self._chatbox_attachments)
             self.attach_chat(img, kind="image")
-            return len(self._chatbox_attachments) > before
+            if len(self._chatbox_attachments) > before:
+                # WE own this temp PNG — track it for the on-exit sweep.
+                self._owned_paste_temps.add(str(img))
+                return True
+            # The attach was rejected (e.g. over the size cap); the temp PNG we
+            # just generated is now orphaned — remove it rather than leak it.
+            img.unlink(missing_ok=True)
+            return False
         text = (clipboard.paste() or "").strip()
         if text and "\n" not in text and len(text) < 4096:
             p = Path(text).expanduser()

@@ -228,6 +228,58 @@ async def test_composer_focused_after_splash_dismiss(project_with_roster):
         assert app.query_one("#prompt-input", ChatInput).has_focus
 
 
+async def test_pasted_image_temp_is_tracked_and_swept_on_exit(
+    project_with_roster, tmp_path, monkeypatch
+):
+    """A paste-generated temp image is tracked as PromptScreen-owned and unlinked
+    when the app exits — no orphaned temp PNG accumulates across a session."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    img = tmp_path / "modulatio-paste-shot.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr("modulatio.clipboard.paste_image", lambda: img)
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt-input", ChatInput).focus()
+        await pilot.pause()
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        assert str(img) in screen._owned_paste_temps
+        assert img.exists()
+    # the app has unmounted — the owned temp is swept
+    assert not img.exists()
+
+
+async def test_failed_image_attach_removes_its_temp(
+    project_with_roster, tmp_path, monkeypatch
+):
+    """If staging a pasted image fails (over the size cap), its just-created temp
+    is removed immediately rather than orphaned, and it is NOT tracked."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    monkeypatch.setenv("MODULATIO_MAX_ATTACHMENT_BYTES", "4")
+    img = tmp_path / "modulatio-paste-big.png"
+    img.write_bytes(b"0123456789")   # 10 bytes > 4-byte cap → attach fails
+    monkeypatch.setattr("modulatio.clipboard.paste_image", lambda: img)
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt-input", ChatInput).focus()
+        await pilot.pause()
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        assert screen.chatbox_attachments == []        # not staged
+        assert str(img) not in screen._owned_paste_temps
+        assert not img.exists()                          # temp removed now
+
+
 async def test_no_agent_chat_panes_remain(project_with_roster):
     """The retired per-agent chat grid is gone — no AgentPanePanel mounts."""
     from modulatio.tui.app import ModulatioApp
