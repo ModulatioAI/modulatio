@@ -45,21 +45,26 @@ def _agent_dir(agent_id: str, project_code: str) -> Path:
     # H1 invariant (mirror skills/standards/job-templates): agent_id becomes a
     # path component, so a separator / '..' / leading dot must never escape the
     # project's memory/ root. Fail-closed — the persistence layer binds it.
-    base = project_dir(project_code) / "memory"
+    proj = project_dir(project_code)
+    base = proj / "memory"
     d = base / validate_registry_name(agent_id)
-    # The name is validated, but a pre-planted SYMLINK at the agent dir (or a
-    # symlinked memory/ root) would still be followed by mkdir(exist_ok=True)
-    # and the subsequent writes — an escape. Refuse a symlinked dir and
-    # bounds-check the resolved path stays under memory/ (mirror vault.run_dir's
-    # belt-and-suspenders) so reads/writes never leave the project.
+    # The name is validated, but a pre-planted SYMLINK at the agent dir OR at the
+    # memory/ root would still be followed by mkdir(exist_ok=True) + the writes —
+    # an escape. Refuse a symlinked memory/ root and a symlinked agent dir, and
+    # bounds-check against the REAL project root (NOT base.resolve(), which a
+    # symlinked memory/ would bless to its own outside target). Mirror
+    # vault.run_dir's belt-and-suspenders so reads/writes never leave the project.
+    if base.is_symlink():
+        raise ValueError(
+            "project memory root is a symlink — refusing to follow it")
     if d.is_symlink():
         raise ValueError(
             f"agent memory dir {agent_id!r} is a symlink — refusing to follow it")
     try:
-        d.resolve(strict=False).relative_to(base.resolve(strict=False))
+        d.resolve(strict=False).relative_to(proj.resolve(strict=False))
     except ValueError as exc:
         raise ValueError(
-            f"agent memory dir {agent_id!r} escapes the project memory root"
+            f"agent memory dir {agent_id!r} escapes the project root"
         ) from exc
     d.mkdir(parents=True, exist_ok=True)
     return d

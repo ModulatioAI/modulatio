@@ -277,3 +277,20 @@ def test_symlinked_agent_dir_is_refused_on_delete(tmp_path):
         agent_memory.delete_entry("agenty", "victim", project_code=PROJECT_CODE,
                                   layer="semantic")
     assert json.loads((outside / "semantic.json").read_text())  # still there
+
+
+def test_symlinked_memory_root_is_refused(tmp_path):
+    """A symlinked project memory/ ROOT must not be followed — the earlier fix
+    anchored the bounds-check on memory/ itself, so a symlinked root blessed its
+    own target (Wild Bill close-out residual, 2026-06-24)."""
+    import pytest
+
+    from modulatio import vault
+    root = vault.project_dir(PROJECT_CODE)
+    root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_root"
+    outside.mkdir()
+    (root / "memory").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(Exception):
+        agent_memory.add_semantic("agentx", "ROOTWRITE", project_code=PROJECT_CODE)
+    assert not list(outside.rglob("*"))  # nothing written outside
