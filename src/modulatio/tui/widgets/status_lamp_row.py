@@ -55,6 +55,11 @@ class StatusLampRow(Horizontal):
         self._blink_timer: Timer | None = None
         self._blink_phase: bool = False
         self._attention: set[str] = set()
+        # The squad lamp shows two values from separate updates — hold them so a
+        # partial update (e.g. mods only) renders from state, not by parsing the
+        # other value back out of the rendered string.
+        self._mods: int = 0
+        self._qc: int = 0
 
     def compose(self) -> ComposeResult:
         yield Static("● leader", id="lamp-leader", classes="lamp")
@@ -79,9 +84,11 @@ class StatusLampRow(Horizontal):
         if leader is not None:
             self._set("#lamp-leader", "● leader" if leader else "○ leader idle")
         if mods is not None or qc is not None:
-            m = mods if mods is not None else self._squad_count("mods")
-            q = qc if qc is not None else self._squad_count("qc")
-            self._set("#lamp-squad", f"◇ {m} mods · {q} qc")
+            if mods is not None:
+                self._mods = mods
+            if qc is not None:
+                self._qc = qc
+            self._set("#lamp-squad", f"◇ {self._mods} mods · {self._qc} qc")
         if tickets is not None:
             self._set("#lamp-tickets", f"⚑ {tickets} tickets")
         if tokens is not None:
@@ -148,17 +155,6 @@ class StatusLampRow(Horizontal):
         self._set("#lamp-elapsed", f"◷ {secs // 60:02d}:{secs % 60:02d}")
 
     # ── internals ────────────────────────────────────────────────────────
-    def _squad_count(self, which: str) -> int:
-        """Read the current count back from the squad lamp (so a one-field
-        update doesn't clobber the other)."""
-        try:
-            text = str(self.query_one("#lamp-squad", Static).render())
-            parts = text.replace("◇", "").split("·")
-            idx = 0 if which == "mods" else 1
-            return int(parts[idx].strip().split()[0])
-        except Exception:
-            return 0
-
     def _set(self, selector: str, text: str) -> None:
         try:
             self.query_one(selector, Static).update(text)

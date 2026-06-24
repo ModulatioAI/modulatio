@@ -102,3 +102,23 @@ async def test_clear_attention_disarms_when_none_left():
         assert row._blink_timer is None              # all clear → disarmed
         assert not app.query_one("#lamp-leader", Static).has_class("-lit")
         assert not app.query_one("#lamp-tickets", Static).has_class("-lit")
+
+
+async def test_partial_squad_update_keeps_the_other_value_from_state():
+    """A mods-only update must not clobber qc (and vice-versa) — the widget
+    renders the squad lamp from held fields, not by parsing its own render
+    (Jenny cadre finding, 2026-06-24)."""
+    app = _Host()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        row = app.query_one(StatusLampRow)
+        row.set_lamps(mods=3, qc=2)
+        await pilot.pause()
+        row.set_lamps(mods=5)  # qc left None — must stay 2
+        await pilot.pause()
+        text = str(app.query_one("#lamp-squad", Static).render())
+        assert "5 mods" in text and "2 qc" in text
+        row.set_lamps(qc=4)  # mods left None — must stay 5
+        await pilot.pause()
+        text = str(app.query_one("#lamp-squad", Static).render())
+        assert "5 mods" in text and "4 qc" in text
