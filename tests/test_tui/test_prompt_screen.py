@@ -191,6 +191,20 @@ async def test_ctrl_c_copies_through_os_clipboard(project_with_roster, monkeypat
         assert copied.get("t") == "copy me out"
 
 
+async def test_composer_focused_on_load(project_with_roster):
+    """The CONSOLE composer takes focus on load — ready to type immediately
+    (blinking cursor in the box), no click needed."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        inp = app.query_one("#prompt-input", ChatInput)
+        assert inp.has_focus
+
+
 async def test_no_agent_chat_panes_remain(project_with_roster):
     """The retired per-agent chat grid is gone — no AgentPanePanel mounts."""
     from modulatio.tui.app import ModulatioApp
