@@ -99,3 +99,30 @@ def test_paste_image_none_when_no_backend(monkeypatch):
     """No image tool on PATH → None, never a crash."""
     monkeypatch.setattr(clipboard.shutil, "which", lambda n: None)
     assert clipboard.paste_image() is None
+
+
+def test_paste_image_no_temp_leak_on_write_failure(monkeypatch, tmp_path):
+    """If writing the temp PNG fails (e.g. ENOSPC), paste_image returns None and
+    leaves NO orphaned temp file behind."""
+    monkeypatch.setattr(clipboard.shutil, "which",
+                        lambda n: "/usr/bin/xclip" if n == "xclip" else None)
+
+    class _R:
+        def __init__(self, rc, out):
+            self.returncode = rc
+            self.stdout = out
+
+    monkeypatch.setattr(clipboard.subprocess, "run",
+                        lambda cmd, **kw: _R(0, "image/png\n") if "TARGETS" in cmd
+                        else _R(0, b"\x89PNG\r\n\x1a\n"))
+    # Route mkstemp into an empty tmp dir so we can assert it's left clean.
+    real_mkstemp = clipboard.tempfile.mkstemp
+    monkeypatch.setattr(clipboard.tempfile, "mkstemp",
+                        lambda **kw: real_mkstemp(dir=tmp_path, **kw))
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(clipboard.os, "fdopen", boom)
+
+    assert clipboard.paste_image() is None
+    assert list(tmp_path.iterdir()) == []   # no orphaned temp file

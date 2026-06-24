@@ -98,11 +98,16 @@ def paste_image() -> Path | None:
     data = _read_image_bytes()
     if not data:
         return None
+    name: str | None = None
     try:
         fd, name = tempfile.mkstemp(prefix="modulatio-paste-", suffix=".png")
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
     except OSError:
+        # A write failure (ENOSPC/EIO/…) leaves the mkstemp file orphaned —
+        # remove it so a failed paste never litters a temp file.
+        if name is not None:
+            Path(name).unlink(missing_ok=True)
         return None
     return Path(name)
 

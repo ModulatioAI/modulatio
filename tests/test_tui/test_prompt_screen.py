@@ -205,6 +205,29 @@ async def test_composer_focused_on_load(project_with_roster):
         assert inp.has_focus
 
 
+async def test_composer_focused_after_splash_dismiss(project_with_roster):
+    """On a real launch the boot splash holds focus; when it dismisses, focus
+    lands back in the console composer (ready to type) — driven explicitly by
+    the splash dismiss callback, not Textual's undocumented fallback."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.splash import SplashScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True, splash=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, SplashScreen)
+        # open the dwell gate, then dismiss like a keypress
+        for s in app.screen_stack:
+            if isinstance(s, SplashScreen):
+                s._dismissable = True
+        await pilot.press("space")
+        await pilot.pause()
+        await pilot.pause()
+        assert not isinstance(app.screen, SplashScreen)
+        assert app.query_one("#prompt-input", ChatInput).has_focus
+
+
 async def test_no_agent_chat_panes_remain(project_with_roster):
     """The retired per-agent chat grid is gone — no AgentPanePanel mounts."""
     from modulatio.tui.app import ModulatioApp
