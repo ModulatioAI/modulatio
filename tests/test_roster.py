@@ -628,3 +628,34 @@ def test_save_rejects_model_copy_id_bypass(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         roster.save(escaped, "cp")
     assert list(tmp_path.glob("**/copy_escape.md")) == []
+
+
+def test_remove_agent_rejects_traversal_id(tmp_path, monkeypatch):
+    """remove_agent unlinks <project>/agents/<id>.md; a traversal id must be
+    refused — it must never delete a file outside the project."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    vault.init_project("rmprobe", "Rm", "x")
+    victim = tmp_path / "victim.md"
+    victim.write_text("keep", encoding="utf-8")
+    with pytest.raises(ValueError):
+        roster.remove_agent(project_code="rmprobe", agent_id="../../../victim")
+    assert victim.exists()  # untouched
+
+
+def test_remove_agent_blocks_planted_frontmatter_traversal(tmp_path, monkeypatch):
+    """A planted agents/*.md whose frontmatter id is a traversal string is
+    parsed by list_agents; feeding that id back to remove_agent must NOT delete
+    outside the project."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    root = vault.init_project("planted", "P", "x")
+    victim = tmp_path / "victim.md"
+    victim.write_text("keep", encoding="utf-8")
+    (root / "agents" / "display.md").write_text(
+        "---\nid: ../../../victim\nname: planted\ntier: producer\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    bad_id = roster.list_agents("planted")[0].id
+    assert bad_id == "../../../victim"
+    with pytest.raises(ValueError):
+        roster.remove_agent(project_code="planted", agent_id=bad_id)
+    assert victim.exists()

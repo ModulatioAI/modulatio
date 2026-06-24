@@ -515,6 +515,7 @@ def clear_model(
 def remove_agent(*, project_code: str, agent_id: str) -> bool:
     """Delete an agent from the roster. Returns True if removed, False if it
     didn't exist. Backs the configurator's agent builder (drop a producer)."""
+    validate_registry_name(agent_id)  # raw id → unlink path; block traversal deletes
     path = project_dir(project_code) / "agents" / f"{agent_id}.md"
     if not path.exists():
         return False
