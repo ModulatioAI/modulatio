@@ -51,7 +51,7 @@ class PromptScreen(Vertical):
     #: The dim affordance line under the composer (shown when nothing is staged).
     _AFFORDANCE = (
         "⏎ send   ·   /kickoff <objective> /end run a job   ·   "
-        "📎 paste to attach   ·   F4 flip"
+        "📎 paste to attach   ·   F4 Leader/Team view"
     )
 
     DEFAULT_CSS = """
