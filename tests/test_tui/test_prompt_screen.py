@@ -1065,3 +1065,25 @@ async def test_f8_clears_team_tv_but_not_leader_chat(project_with_roster):
         assert list(team.query(".stream-line")) == []
         # …leader chat untouched
         assert leader.messages
+
+
+async def test_tickets_lamp_clears_on_opening_tickets_tab(project_with_roster):
+    """Opening the TICKETS tab clears the tickets attention blink (you've gone
+    to read them) — symmetry with the leader lamp (Nemo cadre seam)."""
+    from textual.widgets import TabbedContent
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.status_lamp_row import StatusLampRow
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        row = app.query_one(StatusLampRow)
+        app.action_flip_stream()  # TEAM, so the ticket blink isn't auto-cleared
+        await pilot.pause()
+        app._record_activity_impl(_ev("leader", "ticket_opened"))
+        await pilot.pause()
+        assert "tickets" in row._attention
+        app.query_one("#app-tabs", TabbedContent).active = "tab-tickets"
+        await pilot.pause()
+        assert "tickets" not in row._attention

@@ -1628,12 +1628,16 @@ class ModulatioApp(App):
     def on_tabbed_content_tab_activated(
         self, event: TabbedContent.TabActivated,
     ) -> None:
-        """When the operator views the LEADER stream they've seen the Leader's
-        messages → clear the attention lamps."""
-        if event.tabbed_content.active == "stream-leader-pane":
-            lamps = self._status_lamps()
-            if lamps is not None:
+        """Clear the attention lamps the operator has now gone to read: flipping
+        to the LEADER stream clears the leader lamp (and all), and opening the
+        TICKETS tab clears the tickets lamp (symmetry — cadre seam)."""
+        active = event.tabbed_content.active
+        lamps = self._status_lamps()
+        if lamps is not None:
+            if active == "stream-leader-pane":
                 lamps.clear_attention()
+            elif active == "tab-tickets":
+                lamps.clear_attention("tickets")
         # Re-evaluate which footer keys show: the CONSOLE-only keys hide on
         # other tabs (see check_action).
         self.refresh_bindings()
