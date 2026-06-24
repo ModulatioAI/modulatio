@@ -1633,6 +1633,15 @@ class ModulatioApp(App):
         lamps = self._status_lamps()
         if lamps is not None and active == "tab-tickets":
             lamps.clear_attention("tickets")
+        # Console activated → land focus in the composer so it's ready to type
+        # (on load and whenever you return to CONSOLE). Sync handler = clean
+        # teardown; only fires for tab-prompt so it never clobbers another tab.
+        if active == "tab-prompt":
+            try:
+                from modulatio.tui.screens.prompt import PromptScreen
+                self.query_one(PromptScreen)._focus_composer()
+            except Exception:
+                pass
         # Re-evaluate which footer keys show: the CONSOLE-only keys hide on
         # other tabs (see check_action).
         self.refresh_bindings()

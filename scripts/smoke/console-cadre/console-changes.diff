@@ -1,0 +1,915 @@
+diff --git a/src/modulatio/clipboard.py b/src/modulatio/clipboard.py
+index d42f833..9dd76a8 100644
+--- a/src/modulatio/clipboard.py
++++ b/src/modulatio/clipboard.py
+@@ -14,7 +14,11 @@ when no backend resolves (e.g. Linux pre-setup), so callers can fall back to OSC
+ """
+ from __future__ import annotations
+ 
++import os
+ import shutil
++import subprocess
++import tempfile
++from pathlib import Path
+ 
+ #: Linux clipboard backends pyperclip can drive (used for detection / the
+ #: doctor + wizard hints). macOS/Windows have a native backend.
+@@ -43,6 +47,66 @@ def paste() -> str | None:
+         return None
+ 
+ 
++def _read_image_bytes() -> bytes | None:
++    """Pull raw image bytes off the OS clipboard via the platform tool
++    (``wl-paste`` / ``xclip`` / ``pngpaste``), or None if there's no image or
++    no tool. Never raises — a missing backend or empty clipboard is just None."""
++    # Wayland — wl-paste lists the offered MIME types.
++    if shutil.which("wl-paste"):
++        try:
++            types = subprocess.run(
++                ["wl-paste", "--list-types"],
++                capture_output=True, text=True, timeout=2)
++            if "image/png" in (types.stdout or ""):
++                out = subprocess.run(
++                    ["wl-paste", "--type", "image/png"],
++                    capture_output=True, timeout=2)
++                if out.returncode == 0 and out.stdout:
++                    return out.stdout
++        except (OSError, subprocess.SubprocessError):
++            pass
++    # X11 — xclip lists targets, then hands over the PNG selection.
++    if shutil.which("xclip"):
++        try:
++            targets = subprocess.run(
++                ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
++                capture_output=True, text=True, timeout=2)
++            if "image/png" in (targets.stdout or ""):
++                out = subprocess.run(
++                    ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
++                    capture_output=True, timeout=2)
++                if out.returncode == 0 and out.stdout:
++                    return out.stdout
++        except (OSError, subprocess.SubprocessError):
++            pass
++    # macOS — pngpaste writes the clipboard image to stdout.
++    if shutil.which("pngpaste"):
++        try:
++            out = subprocess.run(
++                ["pngpaste", "-"], capture_output=True, timeout=2)
++            if out.returncode == 0 and out.stdout:
++                return out.stdout
++        except (OSError, subprocess.SubprocessError):
++            pass
++    return None
++
++
++def paste_image() -> Path | None:
++    """If the OS clipboard holds an image, write it to a temp PNG and return the
++    path — else None. Powers Ctrl+V paste-to-attach in the Console composer
++    (a screenshot or copied image becomes a chat attachment). Never raises."""
++    data = _read_image_bytes()
++    if not data:
++        return None
++    try:
++        fd, name = tempfile.mkstemp(prefix="modulatio-paste-", suffix=".png")
++        with os.fdopen(fd, "wb") as fh:
++            fh.write(data)
++    except OSError:
++        return None
++    return Path(name)
++
++
+ def detect_backend() -> str | None:
+     """The Linux clipboard backend on PATH (``xclip`` / ``wl-copy`` / …), or
+     None. On macOS/Windows pyperclip has a native backend — see
+@@ -62,4 +126,6 @@ def is_backend_installed() -> bool:
+     return detect_backend() is not None
+ 
+ 
+-__all__ = ["copy", "paste", "detect_backend", "is_backend_installed"]
++__all__ = [
++    "copy", "paste", "paste_image", "detect_backend", "is_backend_installed",
++]
+diff --git a/src/modulatio/tui/app.py b/src/modulatio/tui/app.py
+index 62e3648..c686bea 100644
+--- a/src/modulatio/tui/app.py
++++ b/src/modulatio/tui/app.py
+@@ -269,6 +269,13 @@ class ModulatioApp(App):
+     TextArea:focus {
+         border: round $primary;
+     }
++    /* The Console composer is borderless — the only frame is the screen's outer
++       border (no box, no text border). App-tier + ID + !important to beat the
++       global TextArea border rules above. Pure-black fill. */
++    #prompt-input {
++        border: none !important;
++        background: #000000;
++    }
+ 
+     /* ── Tabs: active = phosphor amber ── */
+     Tabs {
+@@ -1228,11 +1235,10 @@ class ModulatioApp(App):
+         self.last_summary_text = text
+ 
+     def _show_team_floor(self) -> None:
+-        """Flip the console flip to the TEAM factory floor."""
++        """Flip the console to the TEAM factory floor."""
++        from modulatio.tui.screens.prompt import PromptScreen
+         try:
+-            self.query_one("#console-streams", TabbedContent).active = (
+-                "stream-team-pane"
+-            )
++            self.query_one(PromptScreen).show_team()
+         except Exception:
+             pass
+ 
+@@ -1365,6 +1371,13 @@ class ModulatioApp(App):
+             i = -1
+         self.theme = names[(i + 1) % len(names)]
+         self.sub_title = self._feng_subtitle()
++        # The console header + flip indicator carry explicit (rich) accent
++        # colours, so re-render them to the new variant.
++        from modulatio.tui.screens.prompt import PromptScreen
++        try:
++            self.query_one(PromptScreen)._render_view()
++        except Exception:
++            pass
+         # Remember it so the next launch reopens on this variant.
+         try:
+             from modulatio import preferences
+@@ -1493,10 +1506,24 @@ class ModulatioApp(App):
+     def action_paste(self) -> None:
+         """Ctrl+V → paste the OS clipboard into the focused text field. Reads via
+         pyperclip (xclip/wl-paste/native), the reliable path — a focused
+-        Input/TextArea's native Ctrl+V only sees Textual's internal clipboard."""
++        Input/TextArea's native Ctrl+V only sees Textual's internal clipboard.
++
++        In the Console composer a pasted image (or copied file path) becomes a
++        chat attachment instead of text — paste-to-attach, the mockup's
++        replacement for the old attach buttons."""
+         from textual.widgets import Input, TextArea
+ 
+         from modulatio import clipboard as _clip
++
++        widget = self.focused
++        if getattr(widget, "id", "") == "prompt-input":
++            from modulatio.tui.screens.prompt import PromptScreen
++            try:
++                screen = self.query_one(PromptScreen)
++            except Exception:
++                screen = None
++            if screen is not None and screen.try_paste_attachment():
++                return
+         text = _clip.paste()
+         if not text:
+             try:
+@@ -1506,7 +1533,6 @@ class ModulatioApp(App):
+             except Exception:
+                 pass
+             return
+-        widget = self.focused
+         if isinstance(widget, TextArea):
+             widget.insert(text)
+         elif isinstance(widget, Input):
+@@ -1521,12 +1547,11 @@ class ModulatioApp(App):
+             return ""
+ 
+     def action_focus_jobdrop(self) -> None:
+-        """F3 → jump to the CONSOLE/LEADER chatbox so you can type a message."""
++        """F3 → jump to the CONSOLE/LEADER composer so you can type a message."""
++        from modulatio.tui.screens.prompt import PromptScreen
+         try:
+             self.query_one("#app-tabs", TabbedContent).active = "tab-prompt"
+-            self.query_one("#console-streams", TabbedContent).active = (
+-                "stream-leader-pane"
+-            )
++            self.query_one(PromptScreen).show_leader()
+             self.query_one("#prompt-input", ChatInput).focus()
+         except Exception:
+             pass
+@@ -1600,16 +1625,14 @@ class ModulatioApp(App):
+     def on_tabbed_content_tab_activated(
+         self, event: TabbedContent.TabActivated,
+     ) -> None:
+-        """Clear the attention lamps the operator has now gone to read: flipping
+-        to the LEADER stream clears the leader lamp (and all), and opening the
+-        TICKETS tab clears the tickets lamp (symmetry — cadre seam)."""
++        """Opening the TICKETS tab clears the tickets attention lamp (the
++        operator has gone to read them). The LEADER-flip attention-clear lives
++        in PromptScreen._render_view now (the console flip is no longer a
++        TabbedContent)."""
+         active = event.tabbed_content.active
+         lamps = self._status_lamps()
+-        if lamps is not None:
+-            if active == "stream-leader-pane":
+-                lamps.clear_attention()
+-            elif active == "tab-tickets":
+-                lamps.clear_attention("tickets")
++        if lamps is not None and active == "tab-tickets":
++            lamps.clear_attention("tickets")
+         # Re-evaluate which footer keys show: the CONSOLE-only keys hide on
+         # other tabs (see check_action).
+         self.refresh_bindings()
+diff --git a/src/modulatio/tui/command_palette.py b/src/modulatio/tui/command_palette.py
+index abb91bf..cb3125c 100644
+--- a/src/modulatio/tui/command_palette.py
++++ b/src/modulatio/tui/command_palette.py
+@@ -75,7 +75,7 @@ class ModulatioCommands(Provider):
+             from textual.widgets import TabbedContent
+             try:
+                 # Scope to the top-level tab container: the composed tree
+-                # holds several TabbedContent widgets (#console-streams,
++                # holds several TabbedContent widgets (#app-tabs,
+                 # #config-flip), so a bare query_one(TabbedContent) raises
+                 # TooManyMatches and silently no-ops. Mirror app.py's
+                 # switch_tab side-effect, which targets #app-tabs.
+diff --git a/src/modulatio/tui/screens/prompt.py b/src/modulatio/tui/screens/prompt.py
+index f7eac7d..ae6101d 100644
+--- a/src/modulatio/tui/screens/prompt.py
++++ b/src/modulatio/tui/screens/prompt.py
+@@ -3,12 +3,13 @@
+ """Console tab — the LEADER / TEAM streams, with talk on LEADER, work on TEAM.
+ 
+ The conversation-first overhaul, split by function:
+-  - **LEADER** tab — the Leader's stream (the "TV", big) on top, and the
+-    **chatbox** below it (roomy text entry; a calm action row of attachment
+-    chips + the send hint). This is where you *talk* to the Leader: your
++  - **LEADER** tab — the Leader's stream (the "TV", big, borderless) on top, and
++    the **chatbox** below it (a roomy round-bordered text entry with one dim
++    affordance line beneath). This is where you *talk* to the Leader: your
+     messages, his replies, his verdicts. Enter sends a message. To launch a job
+-    from here, bracket it: ``/kickoff <objective> /end`` (any docs/images you've
+-    attached ride with it).
++    from here, bracket it: ``/kickoff <objective> /end``. Attachments are
++    paste-to-attach: Ctrl+V a screenshot/image or a copied file path and it
++    rides with the next message (no buttons — matches the design).
+   - **MOD SQUAD** tab — the factory floor: two columns, the **run-telemetry
+     rail** on the left (producer roster + run progress) and the workers' stream
+     (the focal "TV") on the right. Pure watch-the-work — no input here.
+@@ -28,82 +29,98 @@ import re
+ from pathlib import Path
+ 
+ from rich.markup import escape
++from rich.text import Text
+ from textual.app import ComposeResult
+-from textual.containers import Horizontal, Vertical
+-from textual.widgets import Button, Static, TabbedContent, TabPane
++from textual.containers import Container, Horizontal, Vertical
++from textual.widgets import Static
+ 
+ from modulatio.attachments import Attachment, AttachmentKind, build_attachment
++from modulatio.tui.feng_theme import theme_tiers
+ from modulatio.tui.widgets.chat_input import ChatInput
+ from modulatio.tui.widgets.status_lamp_row import StatusLampRow
+ from modulatio.tui.widgets.stream_status import StreamStatus
+ from modulatio.tui.widgets.stream_view import StreamView
+ 
++#: Suffixes treated as image attachments when a pasted file path is staged.
++_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
++
+ 
+ class PromptScreen(Vertical):
+     """Console tab — status lamps + LEADER (TV+chat) / TEAM (full TV) flip."""
+ 
++    #: The dim affordance line under the composer (shown when nothing is staged).
++    _AFFORDANCE = (
++        "⏎ send   ·   /kickoff <objective> /end run a job   ·   "
++        "📎 paste to attach   ·   F4 Leader/Team view"
++    )
++
+     DEFAULT_CSS = """
++    /* The console matches console_mockup.py: a single framed screen with a
++       brand header, the lamp row, a flip INDICATOR (not tabs), a persistent
++       body that swaps LEADER (full-width stream) ↔ MOD SQUAD (rail + stream),
++       a status line, and a round-bordered composer with the affordance below. */
+     PromptScreen {
+-        padding: 1;
+-    }
+-    /* The flip fills the screen under the lamps. */
+-    PromptScreen #console-streams {
+-        height: 1fr;
+-    }
+-    /* LEADER tab: the TV takes the bulk, chatbox is compact below it. */
+-    PromptScreen .leader-tv {
+-        height: 1fr;
+-        border: round $frame-dim;
++        padding: 0 1;
++        border: round $frame-dim;   /* the single outer frame, hugging the tab */
+     }
+-    PromptScreen #chatbox {
+-        height: auto;
++    /* Brand header — MODULATIO · project · feng-tui variant. */
++    PromptScreen #console-header {
++        height: 1;
+         margin-top: 1;
+         padding: 0 1;
+-        border: round $frame;
+-    }
+-    /* Roomy text entry — the one bright doorway; comfortable to compose. */
+-    PromptScreen #prompt-input {
+-        height: 6;
+-    }
+-    /* A calm action row under the input: attachment chips left, send hint
+-       right. No SEND button — Enter sends (the input is the focal element). */
+-    PromptScreen #chatbox-actions {
+-        height: 3;
+-    }
+-    PromptScreen #chatbox-actions Button {
+-        min-width: 5;
+-        margin-right: 1;
+-    }
+-    PromptScreen #prompt-response {
+-        height: 1fr;
+-        color: $text-muted;
+-        content-align: right middle;
++        color: $primary;
+     }
+-    PromptScreen #chatbox-attachments-list {
+-        height: auto;
+-        max-height: 1;
++    PromptScreen #status-lamps { padding: 0 1; }
++    /* The LEADER ╶╴ mod squad flip indicator, set off above the body. */
++    PromptScreen #flip-tab {
++        height: 1;
++        margin: 1 0;
++        padding: 0 1;
+         color: $text-muted;
+     }
+-    /* TEAM tab: two columns — the run-telemetry rail (left) + the floor TV. */
+-    PromptScreen #team-body {
++    /* The body holds both views; only the active one is shown (the inactive
++       lane stays mounted so its stream keeps receiving events). */
++    PromptScreen #console-body { height: 1fr; }
++    PromptScreen #leader-view { height: 1fr; }
++    PromptScreen #team-view { height: 1fr; }
++    /* The focal stream is borderless (the mockup's #center-tv): bright text on
++       black, a little breathing room, no box — the only box is the composer. */
++    PromptScreen .tv {
++        width: 1fr;
+         height: 1fr;
++        padding: 0 1;
+     }
++    /* MOD SQUAD: the run-telemetry rail left, the floor TV right. */
+     PromptScreen #team-rail {
+         width: 24;
+         border-right: solid $frame-dim;
+-        padding: 0 1;
++        padding: 1 1;
+     }
+     PromptScreen #team-rail .rail-head { color: $secondary; text-style: bold; }
+     PromptScreen #team-rail .rail-dim { color: $text-muted; }
+-    PromptScreen .team-tv {
+-        width: 1fr;
++    /* The composer (LEADER only) + the affordance line beneath. No box border —
++       the only frame is the screen's outer border; the composer itself is
++       borderless (set App-tier in app.py) so there's no double line. */
++    PromptScreen #input-box {
++        height: 7;
++        margin-top: 1;
++    }
++    PromptScreen #prompt-input {
+         height: 1fr;
+-        border: round $frame-dim;
++    }
++    /* The single dim affordance line under the box (the mockup's
++       #input-affordance) — also surfaces staged attachments + attach errors. */
++    PromptScreen #prompt-response {
++        height: 1;
++        padding: 0 1;
++        color: $text-muted;
++        text-style: dim;
+     }
+     """
+ 
+     def __init__(self, *args, **kwargs) -> None:
+         super().__init__(*args, **kwargs)
++        self._view: str = "leader"  # active flip side: 'leader' | 'team'
+         self._chatbox_attachments: list[Attachment] = []
+         #: Job-objective capture between `/kickoff` and `/end`. None = not
+         #: capturing (plain text is conversation); a list = accumulating the brief
+@@ -119,57 +136,43 @@ class PromptScreen(Vertical):
+         return list(self._chatbox_attachments)
+ 
+     def compose(self) -> ComposeResult:
+-        # ── Status lamps (visible from both tabs) ──
++        # Brand header (MODULATIO · project · feng-tui variant) — rendered live.
++        yield Static("", id="console-header")
++        # The telemetry lamp row, visible on both views.
+         yield StatusLampRow(id="status-lamps")
+-        # ── The LEADER / TEAM flip ──
+-        with TabbedContent(initial="stream-leader-pane", id="console-streams"):
+-            with TabPane("LEADER", id="stream-leader-pane"):
+-                # TV on top (big) …
+-                yield StreamView(
+-                    lane="leader", id="stream-leader",
+-                    classes="leader-tv",
+-                )
+-                # … a live status line (what the Leader is doing) …
++        # The flip INDICATOR (F4) — `LEADER ╶╴ mod squad`, active side bright.
++        yield Static("", id="flip-tab")
++        # The body holds BOTH views; only the active one is shown so the
++        # inactive lane's StreamView keeps receiving its events.
++        with Container(id="console-body"):
++            # LEADER — pure conversation: the Leader's stream, full width.
++            with Vertical(id="leader-view"):
++                yield StreamView(lane="leader", id="stream-leader", classes="tv")
+                 yield StreamStatus(lane="leader", id="stream-leader-status")
+-                # … the chatbox below: pure conversation. Enter SENDS a message
+-                # to the Leader; to launch a job, bracket it
+-                # `/kickoff <objective> /end`.
+-                with Vertical(id="chatbox"):
+-                    yield ChatInput("", id="prompt-input", soft_wrap=True)
+-                    # A calm action row: attachment chips on the left (secondary
+-                    # chrome), the send + kickoff knowledge as an affordance on
+-                    # the right. Enter sends — no SEND button competes with the
+-                    # input for the eye.
+-                    with Horizontal(id="chatbox-actions"):
+-                        yield Button("📎 doc", id="chat-attach-doc-btn")
+-                        yield Button("🖼 image", id="chat-attach-image-btn")
+-                        yield Static("", id="chatbox-attachments-list")
+-                        yield Static(
+-                            "⏎ send  ·  /kickoff <objective> /end to run a job",
+-                            id="prompt-response",
+-                        )
+-            with TabPane("MOD SQUAD", id="stream-team-pane"):
+-                # The factory floor — two columns: the run-telemetry rail (left)
+-                # + the workers' TV (the focal stream). No input here: jobs are
+-                # launched from the LEADER chat (`/kickoff … /end`); this page is
+-                # pure watch-the-work.
+-                with Horizontal(id="team-body"):
+-                    with Vertical(id="team-rail"):
+-                        yield Static("RUN TELEMETRY", classes="rail-head")
+-                        # Progress + spend aren't on the activity stream yet
+-                        # (the v1.0 live-telemetry rail) — shown dim with — so
+-                        # the layout is complete and fills in when wired.
+-                        yield Static("goal  ▱▱▱▱ —", classes="rail-dim", id="rail-goal")
+-                        yield Static("tasks ▱▱▱▱ —", classes="rail-dim", id="rail-tasks")
+-                        yield Static("qc    ▱▱▱▱ —", classes="rail-dim", id="rail-qc")
+-                        yield Static("")
+-                        yield Static("⛁ — tok · $ —", classes="rail-dim", id="rail-spend")
+-                        yield Static("")
+-                        yield Static("─ producers ─", classes="rail-head")
+-                        yield Static("(idle)", classes="rail-dim", id="rail-producers")
+-                    with Vertical(id="team-tv-col"):
+-                        yield StreamView(lane="team", id="stream-team", classes="team-tv")
+-                        yield StreamStatus(lane="team", id="stream-team-status")
++            # MOD SQUAD — the factory floor: the run-telemetry rail + the
++            # workers' stream. Hidden until you flip (F4).
++            with Horizontal(id="team-view"):
++                with Vertical(id="team-rail"):
++                    yield Static("RUN TELEMETRY", classes="rail-head")
++                    # Progress + spend aren't on the activity stream yet (the
++                    # v1.0 live-telemetry rail) — shown dim with — until wired.
++                    yield Static("goal  ▱▱▱▱ —", classes="rail-dim", id="rail-goal")
++                    yield Static("tasks ▱▱▱▱ —", classes="rail-dim", id="rail-tasks")
++                    yield Static("qc    ▱▱▱▱ —", classes="rail-dim", id="rail-qc")
++                    yield Static("")
++                    yield Static("⛁ — tok · $ —", classes="rail-dim", id="rail-spend")
++                    yield Static("")
++                    yield Static("─ producers ─", classes="rail-head")
++                    yield Static("(idle)", classes="rail-dim", id="rail-producers")
++                with Vertical(id="team-tv-col"):
++                    yield StreamView(lane="team", id="stream-team", classes="tv")
++                    yield StreamStatus(lane="team", id="stream-team-status")
++        # The composer — LEADER only (conversation; MOD SQUAD is watch-only).
++        # A clean round box holds just the input; one dim affordance line sits
++        # beneath it (matching the mockup — no attach buttons; paste-to-attach).
++        with Vertical(id="input-box"):
++            yield ChatInput("", id="prompt-input", soft_wrap=True)
++        yield Static(self._AFFORDANCE, id="prompt-response")
+ 
+     def on_mount(self) -> None:
+         # Wire the agent-name resolver from the app so streams show agents
+@@ -178,24 +181,123 @@ class PromptScreen(Vertical):
+         if resolver is not None:
+             for stream in self.query(StreamView):
+                 stream._name_resolver = resolver
++        self._render_view()
++        # Land focus in the composer so the console is ready to type the moment
++        # it loads — no click needed, a blinking cursor sits in the box.
++        # After-refresh so the TabbedContent's own initial focus doesn't steal
++        # it; if the boot splash is up, focus restores here when it dismisses.
++        self.call_after_refresh(self._focus_composer)
++
++    def _focus_composer(self) -> None:
++        try:
++            self.query_one("#prompt-input", ChatInput).focus()
++        except Exception:
++            pass
++
++    @property
++    def view(self) -> str:
++        """The active flip side: 'leader' or 'team'."""
++        return self._view
++
++    def show_leader(self) -> None:
++        self._view = "leader"
++        self._render_view()
++
++    def show_team(self) -> None:
++        self._view = "team"
++        self._render_view()
+ 
+     def flip_stream(self) -> None:
+-        """Toggle the LEADER/TEAM stream tabs (bound to a key in app.py)."""
++        """Toggle LEADER ↔ MOD SQUAD (F4). On returning to LEADER the operator
++        has seen the Leader's messages, so the attention lamps rest."""
++        self._view = "team" if self._view == "leader" else "leader"
++        self._render_view()
++
++    def _render_view(self) -> None:
++        """Show the active view, hide the other (the input box rides LEADER),
++        and refresh the header + flip indicator + the leader attention lamps."""
++        leader = self._view == "leader"
++        for vid, on in (("#leader-view", leader), ("#team-view", not leader)):
++            try:
++                self.query_one(vid).display = on
++            except Exception:
++                pass
++        # The composer belongs to the conversation — only on LEADER.
++        for cid in ("#input-box", "#prompt-response"):
++            try:
++                self.query_one(cid).display = leader
++            except Exception:
++                pass
++        self._render_header()
++        self._render_flip_tab()
++        if leader:
++            lamps = getattr(self.app, "_status_lamps", lambda: None)()
++            if lamps is not None:
++                lamps.clear_attention()
++
++    def _render_header(self) -> None:
++        code = getattr(self.app, "project_code", "") or "—"
++        theme = str(getattr(self.app, "theme", "") or "")
++        variant = theme.replace("feng-", "") if theme.startswith("feng-") else theme
++        suffix = f"   feng-tui · {variant}" if variant else ""
+         try:
+-            tabbed = self.query_one("#console-streams", TabbedContent)
++            self.query_one("#console-header", Static).update(
++                f"MODULATIO   {escape(code)} · console{suffix}")
+         except Exception:
+-            return
+-        tabbed.active = (
+-            "stream-team-pane"
+-            if tabbed.active == "stream-leader-pane"
+-            else "stream-leader-pane"
+-        )
++            pass
++
++    def _render_flip_tab(self) -> None:
++        try:
++            accent, dim, _b, _e = theme_tiers(self.app)
++        except Exception:
++            accent, dim = "white", "grey50"
++        t = Text()
++        if self._view == "leader":
++            t.append("LEADER", style=f"bold {accent}")
++            t.append("  ╶╴  ", style=dim)
++            t.append("mod squad", style=dim)
++        else:
++            t.append("leader", style=dim)
++            t.append("  ╶╴  ", style=dim)
++            t.append("MOD SQUAD", style=f"bold {accent}")
++        try:
++            self.query_one("#flip-tab", Static).update(t)
++        except Exception:
++            pass
+ 
+     # ── Chatbox attachments (docs + images for the Leader conversation) ──
+ 
++    def try_paste_attachment(self) -> bool:
++        """Ctrl+V paste-to-attach (replacing the old attach buttons): if the OS
++        clipboard holds an image, or a path to a real file, stage it as a chat
++        attachment and return True so the caller skips the text paste. Otherwise
++        False (the caller pastes the clipboard text as usual)."""
++        from modulatio import clipboard
++
++        img = clipboard.paste_image()
++        if img is not None:
++            before = len(self._chatbox_attachments)
++            self.attach_chat(img, kind="image")
++            return len(self._chatbox_attachments) > before
++        text = (clipboard.paste() or "").strip()
++        if text and "\n" not in text and len(text) < 4096:
++            p = Path(text).expanduser()
++            try:
++                is_file = p.is_file()
++            except OSError:
++                is_file = False
++            if is_file:
++                kind: AttachmentKind = (
++                    "image" if p.suffix.lower() in _IMAGE_SUFFIXES else "document"
++                )
++                before = len(self._chatbox_attachments)
++                self.attach_chat(p, kind=kind)
++                return len(self._chatbox_attachments) > before
++        return False
++
+     def attach_chat(self, path: Path, *, kind: AttachmentKind) -> None:
+         """Stage an attachment for the next chat message to the Leader. Public
+-        so the 📎/🖼 buttons (via modal callback) and tests can drive it."""
++        so paste-to-attach (``try_paste_attachment``) and tests can drive it."""
+         try:
+             att = build_attachment(path, kind=kind)
+         # re-sweep: also catch ValueError (size cap) / OSError so an oversized
+@@ -213,12 +315,14 @@ class PromptScreen(Vertical):
+         self._refresh_chatbox_attachment_list()
+ 
+     def _refresh_chatbox_attachment_list(self) -> None:
++        """Render the affordance line: the staged attachments when any are
++        pending, otherwise the default send/kickoff/paste hint."""
+         try:
+-            widget = self.query_one("#chatbox-attachments-list", Static)
++            widget = self.query_one("#prompt-response", Static)
+         except Exception:
+             return
+         if not self._chatbox_attachments:
+-            widget.update("")
++            widget.update(self._AFFORDANCE)
+             return
+         names = [
+             # re-sweep: att.name is operator-chosen Path.name; escape so a
+@@ -226,16 +330,7 @@ class PromptScreen(Vertical):
+             f"📎 {escape(att.name)}" if att.kind == "document" else f"🖼  {escape(att.name)}"
+             for att in self._chatbox_attachments
+         ]
+-        widget.update(f"[dim]attached:[/] {'  '.join(names)}")
+-
+-    def _open_chat_attach_modal(self, kind: AttachmentKind) -> None:
+-        from modulatio.tui.widgets.attach_modal import AttachPathModal
+-
+-        def _on_dismiss(path: Path | None) -> None:
+-            if path is not None:
+-                self.attach_chat(path, kind=kind)
+-
+-        self.app.push_screen(AttachPathModal(kind=kind), _on_dismiss)
++        widget.update(f"[dim]attached:[/] {'  '.join(names)}   ·   ⏎ send")
+ 
+     # ── Conversation: Enter / SEND posts a message to the Leader ────────
+ 
+@@ -362,13 +457,6 @@ class PromptScreen(Vertical):
+         if handler is not None:
+             handler(text, attachments)
+ 
+-    def on_button_pressed(self, event: Button.Pressed) -> None:
+-        # Enter sends (no SEND button); the action row is the two attach chips.
+-        if event.button.id == "chat-attach-doc-btn":
+-            self._open_chat_attach_modal("document")
+-        elif event.button.id == "chat-attach-image-btn":
+-            self._open_chat_attach_modal("image")
+-
+     # ── the MOD SQUAD run-telemetry rail ────────────────────────────────
+ 
+     def update_team_rail(self, producers: list[str], *, running: bool) -> None:
+diff --git a/tests/test_clipboard.py b/tests/test_clipboard.py
+index 470a4a1..789e4ed 100644
+--- a/tests/test_clipboard.py
++++ b/tests/test_clipboard.py
+@@ -56,3 +56,46 @@ def test_is_backend_installed_native_platforms(monkeypatch):
+     monkeypatch.setattr(clipboard.shutil, "which",
+                         lambda n: "/x" if n == "wl-copy" else None)
+     assert clipboard.is_backend_installed() is True   # Linux w/ wl-copy
++
++
++def test_paste_image_reads_xclip_when_image_present(monkeypatch):
++    """paste_image() grabs raw image bytes off the clipboard via xclip (when an
++    image/png target is offered) and writes them to a temp PNG it returns."""
++    monkeypatch.setattr(clipboard.shutil, "which",
++                        lambda n: "/usr/bin/xclip" if n == "xclip" else None)
++    png = b"\x89PNG\r\n\x1a\n-fake-bytes"
++
++    class _R:
++        def __init__(self, returncode, stdout):
++            self.returncode = returncode
++            self.stdout = stdout
++
++    def fake_run(cmd, **kw):
++        if "TARGETS" in cmd:
++            return _R(0, "TIMESTAMP\nimage/png\nUTF8_STRING\n")
++        return _R(0, png)
++
++    monkeypatch.setattr(clipboard.subprocess, "run", fake_run)
++    p = clipboard.paste_image()
++    assert p is not None and p.is_file()
++    assert p.read_bytes() == png
++    p.unlink()
++
++
++def test_paste_image_none_when_no_image_target(monkeypatch):
++    """No image target on the clipboard → None (don't grab text as an image)."""
++    monkeypatch.setattr(clipboard.shutil, "which",
++                        lambda n: "/usr/bin/xclip" if n == "xclip" else None)
++
++    class _R:
++        returncode = 0
++        stdout = "UTF8_STRING\nTEXT\nTARGETS\n"
++
++    monkeypatch.setattr(clipboard.subprocess, "run", lambda cmd, **kw: _R())
++    assert clipboard.paste_image() is None
++
++
++def test_paste_image_none_when_no_backend(monkeypatch):
++    """No image tool on PATH → None, never a crash."""
++    monkeypatch.setattr(clipboard.shutil, "which", lambda n: None)
++    assert clipboard.paste_image() is None
+diff --git a/tests/test_tui/test_prompt_screen.py b/tests/test_tui/test_prompt_screen.py
+index b96e014..ec4bc8c 100644
+--- a/tests/test_tui/test_prompt_screen.py
++++ b/tests/test_tui/test_prompt_screen.py
+@@ -83,9 +83,9 @@ async def test_chatbox_attachments_stage_and_clear_on_send(
+     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+     async with app.run_test() as pilot:
+         await pilot.pause()
+-        # the attach buttons exist on the chatbox
+-        assert app.query("#chat-attach-doc-btn")
+-        assert app.query("#chat-attach-image-btn")
++        # no attach buttons (mockup-clean) — attaching is paste-to-attach
++        assert not app.query("#chat-attach-doc-btn")
++        assert not app.query("#chat-attach-image-btn")
+ 
+         screen = app.query_one(PromptScreen)
+         screen.attach_chat(doc, kind="document")
+@@ -106,6 +106,8 @@ async def test_ctrl_v_pastes_os_clipboard_into_focused_field(
+     from modulatio.tui.widgets.chat_input import ChatInput
+ 
+     monkeypatch.setattr("modulatio.clipboard.paste", lambda: "FROM-OS-CLIPBOARD")
++    # plain text (not an image, not a file path) → inserted, not attached
++    monkeypatch.setattr("modulatio.clipboard.paste_image", lambda: None)
+     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+     async with app.run_test() as pilot:
+         await pilot.pause()
+@@ -117,6 +119,60 @@ async def test_ctrl_v_pastes_os_clipboard_into_focused_field(
+         assert "FROM-OS-CLIPBOARD" in inp.text
+ 
+ 
++async def test_ctrl_v_image_on_clipboard_attaches_not_text(
++    project_with_roster, tmp_path, monkeypatch
++):
++    """Ctrl+V with an image on the OS clipboard stages it as a chat attachment
++    (paste-to-attach, replacing the old attach buttons) — the text box stays
++    empty rather than getting a pasted blob."""
++    from modulatio.tui.app import ModulatioApp
++    from modulatio.tui.screens.prompt import PromptScreen
++    from modulatio.tui.widgets.chat_input import ChatInput
++
++    img = tmp_path / "shot.png"
++    img.write_bytes(b"\x89PNG\r\n\x1a\n")
++    monkeypatch.setattr("modulatio.clipboard.paste_image", lambda: img)
++    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
++    async with app.run_test() as pilot:
++        await pilot.pause()
++        inp = app.query_one("#prompt-input", ChatInput)
++        inp.focus()
++        await pilot.pause()
++        await pilot.press("ctrl+v")
++        await pilot.pause()
++        screen = app.query_one(PromptScreen)
++        assert len(screen.chatbox_attachments) == 1
++        assert screen.chatbox_attachments[0].kind == "image"
++        assert inp.text == ""   # attached, not inserted
++
++
++async def test_ctrl_v_file_path_on_clipboard_attaches(
++    project_with_roster, tmp_path, monkeypatch
++):
++    """Ctrl+V with a real file PATH on the clipboard attaches that file instead
++    of pasting the path as text."""
++    from modulatio.tui.app import ModulatioApp
++    from modulatio.tui.screens.prompt import PromptScreen
++    from modulatio.tui.widgets.chat_input import ChatInput
++
++    doc = tmp_path / "brief.md"
++    doc.write_text("hello", encoding="utf-8")
++    monkeypatch.setattr("modulatio.clipboard.paste_image", lambda: None)
++    monkeypatch.setattr("modulatio.clipboard.paste", lambda: str(doc))
++    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
++    async with app.run_test() as pilot:
++        await pilot.pause()
++        inp = app.query_one("#prompt-input", ChatInput)
++        inp.focus()
++        await pilot.pause()
++        await pilot.press("ctrl+v")
++        await pilot.pause()
++        screen = app.query_one(PromptScreen)
++        assert len(screen.chatbox_attachments) == 1
++        assert screen.chatbox_attachments[0].kind == "document"
++        assert inp.text == ""
++
++
+ async def test_ctrl_c_copies_through_os_clipboard(project_with_roster, monkeypatch):
+     """Ctrl+C routes the copied text through the OS clipboard helper."""
+     from modulatio.tui.app import ModulatioApp
+@@ -135,6 +191,20 @@ async def test_ctrl_c_copies_through_os_clipboard(project_with_roster, monkeypat
+         assert copied.get("t") == "copy me out"
+ 
+ 
++async def test_composer_focused_on_load(project_with_roster):
++    """The CONSOLE composer takes focus on load — ready to type immediately
++    (blinking cursor in the box), no click needed."""
++    from modulatio.tui.app import ModulatioApp
++    from modulatio.tui.widgets.chat_input import ChatInput
++
++    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
++    async with app.run_test() as pilot:
++        await pilot.pause()
++        await pilot.pause()
++        inp = app.query_one("#prompt-input", ChatInput)
++        assert inp.has_focus
++
++
+ async def test_no_agent_chat_panes_remain(project_with_roster):
+     """The retired per-agent chat grid is gone — no AgentPanePanel mounts."""
+     from modulatio.tui.app import ModulatioApp
+@@ -363,19 +433,25 @@ async def test_f8_stop_job_signals_abort_on_running_orch(project_with_roster):
+ 
+ 
+ async def test_flip_stream_toggles_lanes(project_with_roster):
+-    """F2 / flip_stream toggles the active LEADER↔TEAM tab."""
+-    from textual.widgets import TabbedContent
+-
++    """F4 / flip_stream toggles the active view LEADER↔MOD SQUAD — the body
++    swaps and the LEADER-only composer hides on the floor."""
+     from modulatio.tui.app import ModulatioApp
++    from modulatio.tui.screens.prompt import PromptScreen
+ 
+     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+     async with app.run_test() as pilot:
+         await pilot.pause()
+-        inner = app.query_one("#console-streams", TabbedContent)
+-        assert inner.active == "stream-leader-pane"
++        screen = app.query_one(PromptScreen)
++        assert screen.view == "leader"
++        assert screen.query_one("#leader-view").display
++        assert not screen.query_one("#team-view").display
++        assert screen.query_one("#input-box").display      # composer on LEADER
+         app.action_flip_stream()
+         await pilot.pause()
+-        assert inner.active == "stream-team-pane"
++        assert screen.view == "team"
++        assert screen.query_one("#team-view").display
++        assert not screen.query_one("#leader-view").display
++        assert not screen.query_one("#input-box").display  # hidden on the floor
+ 
+ 
+ # ─── Agents shown by user-given name, never raw id ──────────────────────────
+@@ -418,21 +494,28 @@ async def test_console_shape_leader_chat_and_team_rail(project_with_roster):
+     async with app.run_test() as pilot:
+         await pilot.pause()
+         screen = app.query_one(PromptScreen)
+-        leader_pane = screen.query_one("#stream-leader-pane")
+-        team_pane = screen.query_one("#stream-team-pane")
+-        # LEADER: chat composer + the two attach chips; no SEND button
+-        assert leader_pane.query("#prompt-input")
+-        assert leader_pane.query("#chat-attach-doc-btn")
+-        assert leader_pane.query("#chat-attach-image-btn")
++        leader_view = screen.query_one("#leader-view")
++        team_view = screen.query_one("#team-view")
++        # mockup chrome: brand header + flip indicator
++        assert screen.query("#console-header")
++        assert screen.query("#flip-tab")
++        # LEADER: the full-width stream; the composer + a single affordance line
++        # live below the body (not inside the view); no SEND button, no attach
++        # buttons (mockup-clean — attaching is paste-to-attach)
++        assert leader_view.query("#stream-leader")
++        assert screen.query("#prompt-input")
++        assert screen.query("#prompt-response")   # the affordance / attach line
++        assert not screen.query("#chat-attach-doc-btn")
++        assert not screen.query("#chat-attach-image-btn")
+         assert not screen.query("#chat-send")
++        assert not screen.query("#chatbox-actions")
+         # the kickoff box is gone entirely
+         assert not screen.query("#kickoff-box")
+         assert not screen.query("#kickoff-objective")
+-        # MOD SQUAD: the telemetry rail + the floor TV, and no composer
+-        assert team_pane.query("#team-rail")
+-        assert team_pane.query("#rail-producers")
+-        assert team_pane.query("#stream-team")
+-        assert not team_pane.query("#prompt-input")
++        # MOD SQUAD: the telemetry rail + the floor TV
++        assert team_view.query("#team-rail")
++        assert team_view.query("#rail-producers")
++        assert team_view.query("#stream-team")
+ 
+ 
+ async def test_kickoff_job_rides_the_chatbox_attachments(
+@@ -566,8 +649,6 @@ async def test_send_posts_message_and_does_not_kickoff(project_with_roster):
+ async def test_oneshot_kickoff_end_launches_a_job(project_with_roster):
+     """A `/kickoff <objective> /end` message launches a job (the only way a job
+     starts) and flips the view to the TEAM floor."""
+-    from textual.widgets import TabbedContent
+-
+     from modulatio.tui.app import ModulatioApp
+     from modulatio.tui.screens.prompt import PromptScreen
+     from modulatio.tui.widgets.chat_input import ChatInput
+@@ -582,10 +663,7 @@ async def test_oneshot_kickoff_end_launches_a_job(project_with_roster):
+         screen._send_message()
+         await pilot.pause()
+         assert app.last_summary_text.startswith(("Running", "Completed"))
+-        assert (
+-            app.query_one("#console-streams", TabbedContent).active
+-            == "stream-team-pane"
+-        )
++        assert screen.view == "team"   # launching flips to the floor
+ 
+ 
+ async def test_bare_kickoff_starts_capture_not_a_job(project_with_roster):

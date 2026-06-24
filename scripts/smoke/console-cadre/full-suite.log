@@ -1,0 +1,1958 @@
+........................................................................ [  1%]
+........................................................................ [  2%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 11%]
+........................................................................ [ 13%]
+........................................................................ [ 14%]
+........................................................................ [ 16%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+........................................................................ [ 20%]
+........................................................................ [ 22%]
+........................................................................ [ 23%]
+........................................................................ [ 25%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 32%]
+........................................................................ [ 34%]
+........................................................................ [ 35%]
+........................................................................ [ 37%]
+........................................................................ [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 41%]
+........................................................................ [ 43%]
+........................................................................ [ 44%]
+........................................................................ [ 46%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+........................................................................ [ 50%]
+........................................................................ [ 52%]
+........................................................................ [ 53%]
+........................................................................ [ 54%]
+........................................................................ [ 56%]
+...............................................xxx..xx.xxxxxx........... [ 57%]
+........................................................................ [ 59%]
+........................................................................ [ 60%]
+........................................................................ [ 62%]
+..........................s............................................. [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 66%]
+........................................................................ [ 68%]
+........................................................................ [ 69%]
+........................................................................ [ 71%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+........................................................................ [ 78%]
+........................................................................ [ 80%]
+........................................................................ [ 81%]
+........................................................................ [ 83%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 87%]
+........................................................................ [ 89%]
+........................................................................ [ 90%]
+........................................................................ [ 92%]
+...........................F............................................ [ 93%]
+........................................................................ [ 95%]
+...............F.F...................................................... [ 96%]
+........................................................................ [ 98%]
+........................................................................ [ 99%]
+....................                                                     [100%]
+=================================== FAILURES ===================================
+________________ test_memory_tab_focus_agent_via_slash_command _________________
+
+    @pytest.mark.asyncio
+    async def test_memory_tab_focus_agent_via_slash_command():
+        """`/memory writer-a` should switch to memory tab + focus the agent."""
+        agent_memory.add_episodic(
+            "writer-a", "noted: project x ships Friday",
+            project_code=PROJECT_CODE,
+        )
+        app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+        async with app.run_test(size=(200, 60)) as pilot:
+            from textual.widgets import TabbedContent
+            # Direct handler invocation — exercises the slash-command routing
+            # without relying on click-event timing.
+            app._handle_slash_command("/memory writer-a")
+            await pilot.pause()
+            tabbed = app.query_one(TabbedContent)
+>           assert tabbed.active == "tab-memory"
+E           AssertionError: assert 'tab-prompt' == 'tab-memory'
+E             
+E             - tab-memory
+E             + tab-prompt
+
+tests/test_tui/test_memory_tab.py:84: AssertionError
+______________ test_switch_tab_cron_routes_code_to_focus_project _______________
+
+    @pytest.mark.asyncio
+    async def test_switch_tab_cron_routes_code_to_focus_project():
+        """``/cron STA`` → side-effect ``switch_tab:cron:STA`` must forward the
+        project code to the cron screen instead of dropping it. app.py routes the
+        code to ``CronScreen.focus_project`` (sibling of ``MemoryScreen.focus_agent``).
+        Spy on the REAL method (save/restore — never ``del`` it, that would strip the
+        method off the class for the rest of the session)."""
+        cron.add(name="a", schedule="weekly mon 09:00", project_code="STA", objective="x")
+    
+        app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+        async with app.run_test(size=(200, 60)) as pilot:
+            from textual.widgets import TabbedContent
+    
+            from modulatio.tui.screens.cron import CronScreen
+    
+            captured: list[str] = []
+            original = CronScreen.focus_project
+    
+            def _spy(self, code):
+                captured.append(code)
+                return original(self, code)
+    
+            CronScreen.focus_project = _spy  # type: ignore[assignment]
+            try:
+                app._apply_side_effect("switch_tab:cron:STA")
+                # focus_project is invoked via call_after_refresh — pump the loop.
+                for _ in range(6):
+                    await pilot.pause()
+            finally:
+                CronScreen.focus_project = original  # type: ignore[assignment]
+    
+>           assert app.query_one("#app-tabs", TabbedContent).active == "tab-cron"
+E           AssertionError: assert 'tab-prompt' == 'tab-cron'
+E             
+E             - tab-cron
+E             + tab-prompt
+
+/mnt/storage/modulatio-recovery/REBUILT/modulatio/tests/test_tui/test_tui_app_low_audit.py:70: AssertionError
+___________ test_switch_tab_cron_without_focus_method_does_not_crash ___________
+
+    @pytest.mark.asyncio
+    async def test_switch_tab_cron_without_focus_method_does_not_crash():
+        """When the cron screen has no ``focus_project`` yet, ``/cron STA`` must
+        still switch tabs cleanly (no crash, code routing is a best-effort no-op)."""
+        cron.add(name="a", schedule="weekly mon 09:00", project_code="STA", objective="x")
+    
+        app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+        async with app.run_test(size=(200, 60)) as pilot:
+            from textual.widgets import TabbedContent
+    
+            app._apply_side_effect("switch_tab:cron:STA")
+            await pilot.pause()
+            await pilot.pause()
+    
+>           assert app.query_one("#app-tabs", TabbedContent).active == "tab-cron"
+E           AssertionError: assert 'tab-prompt' == 'tab-cron'
+E             
+E             - tab-cron
+E             + tab-prompt
+
+/mnt/storage/modulatio-recovery/REBUILT/modulatio/tests/test_tui/test_tui_app_low_audit.py:108: AssertionError
+=============================== warnings summary ===============================
+tests/test_codex_runner.py::test_live_codex_tool_call_roundtrip
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/pydantic/main.py:475: UserWarning: Pydantic serializer warnings:
+    PydanticSerializationUnexpectedValue(Expected `ResponseAPIUsage` - serialized value may not be as expected [field_name='usage', input_value={'completion_tokens': 18,..., 'video_tokens': None}}, input_type=dict])
+    return self.__pydantic_serializer__.to_python(
+
+tests/test_daemon_resweep.py::test_child_main_exits_1_when_log_open_fails
+tests/test_daemon_resweep.py::test_child_main_exits_1_when_pid_write_fails
+  /mnt/storage/modulatio-recovery/REBUILT/modulatio/tests/test_daemon_resweep.py:40: DeprecationWarning: This process (pid=3008103) is multi-threaded, use of fork() may lead to deadlocks in the child.
+    pid = os.fork()
+
+tests/test_tui/test_artifacts.py::test_clicking_export_button_reveals_panel
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc7214d300>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc717c4f80> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_artifacts.py::test_export_confirm_calls_export_artifact_with_selected_args
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc30303790>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc305c6400> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_artifacts.py::test_export_confirm_calls_export_artifact_with_selected_args
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc7110b4c0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc305c4e40> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_artifacts.py::test_export_defaults_prose_txt_to_docx
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc5531fa60>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc54cb2600> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_artifacts.py::test_export_defaults_prose_txt_to_docx
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc5531d7b0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc31532b00> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_artifacts.py::test_artifacts_tab_hides_tool_calls_transcript
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc70843010>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc55254a00> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_artifacts.py::test_artifacts_tab_hides_tool_calls_transcript
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc70841120>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc711544c0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_artifacts.py::test_artifacts_tab_drafts_md_still_visible
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc5531e5c0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc32018640> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_artifacts.py::test_artifacts_tab_drafts_md_still_visible
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc5531ed40>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc3038b140> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_feng_foundation.py::test_theme_cycle_reresolves_accent_live
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc318b6f20>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc71478480> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_feng_foundation.py::test_theme_cycle_reresolves_accent_live
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc712957b0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc71478840> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_feng_foundation.py::test_header_surfaces_active_variant
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc3194cf40>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc70b20300> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_feng_foundation.py::test_header_surfaces_active_variant
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc1304df30>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc70b20080> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_feng_foundation.py::test_header_surfaces_active_variant
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc328d9d50>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc70b20ac0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_jobs.py::test_jobs_search_filters_runs
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc5531cc70>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc11e42bc0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_jobs.py::test_jobs_search_filters_runs
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc5531f2e0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc7147d640> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_jobs.py::test_jobs_delete_removes_the_run
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc54f99300>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc317eeec0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_jobs.py::test_jobs_delete_removes_the_run
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc54f98f40>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc317ecf40> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_logs.py::test_delete_confirms_then_removes_error_but_refuses_run_log
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc319b9d50>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc11bb5dc0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_logs.py::test_delete_confirms_then_removes_error_but_refuses_run_log
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc315fa7a0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc11bb4080> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_logs.py::test_delete_confirms_then_removes_error_but_refuses_run_log
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc315fb970>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc11bb7e00> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_logs.py::test_delete_cancel_keeps_the_log
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc323cc5e0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc31c180c0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_logs.py::test_delete_cancel_keeps_the_log
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc323ccd60>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc31c1afc0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_logs.py::test_delete_cancel_keeps_the_log
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc54ed9b70>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc3190b440> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_chatbox_attachments_stage_and_clear_on_send
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc31d3a6b0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc30355540> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_chatbox_attachments_stage_and_clear_on_send
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc31d3a2f0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc323e28c0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_ctrl_v_pastes_os_clipboard_into_focused_field
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc305597b0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc12f756c0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_ctrl_v_pastes_os_clipboard_into_focused_field
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc305593f0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc12f76a00> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_composer_focused_on_load
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc304cd120>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc31ff6100> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_composer_focused_on_load
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc304cc040>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc55078c40> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_composer_focused_on_load
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc304ccf40>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc5507b200> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_events_split_into_leader_and_team_lanes
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc11ace110>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc55243380> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_events_split_into_leader_and_team_lanes
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc71108220>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc55243700> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_events_split_into_leader_and_team_lanes
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc121574c0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc55240500> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_team_stream_surfaces_parallel_producers
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc324a27a0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc70d69a40> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_team_stream_surfaces_parallel_producers
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc324a1f30>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc70d6a940> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_prompt_screen.py::test_team_stream_surfaces_parallel_producers
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc712c0130>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc70d6bb00> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tickets.py::test_tickets_search_filters_rows_and_marks_filtered
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc727b53f0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc70ae17c0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tickets.py::test_tickets_search_filters_rows_and_marks_filtered
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc712c18a0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc70ae3c40> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tickets.py::test_preview_pane_updates_on_cursor_move
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc710494e0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc134e6b80> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tickets.py::test_preview_pane_updates_on_cursor_move
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc307d2890>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc12e060c0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tui_app_r2_audit.py::test_kickoff_starts_tick_when_none_running
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc712c2020>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc317161c0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tui_app_r2_audit.py::test_kickoff_starts_tick_when_none_running
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc130df4c0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc716245c0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tui_app_r2_audit.py::test_agent_name_rebuilds_after_invalidation
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc92e572e0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc716b9a00> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tui_app_r2_audit.py::test_agent_name_rebuilds_after_invalidation
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc54efd300>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc32121200> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tui_app_r2_audit.py::test_agent_name_rebuilds_after_invalidation
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc11f73d30>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc30355140> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tui_app_resweep.py::test_kickoff_error_does_not_settle_team_spinner_while_other_job_in_flight
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc130df100>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc30418f00> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tui_app_resweep.py::test_kickoff_error_does_not_settle_team_spinner_while_other_job_in_flight
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc130dd5d0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc30419e40> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tui_screens_memory_r2_audit.py::test_memory_tab_renders_team_entry_with_bracket_markup
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc134bd300>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc13dc9540> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tui_screens_memory_r2_audit.py::test_memory_tab_renders_team_entry_with_bracket_markup
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc552975b0>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc71798380> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/test_tui/test_tui_screens_memory_r2_audit.py::test_memory_tab_renders_team_entry_with_bracket_markup
+  /home/cknox/modulatio/.venv/lib/python3.12/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <coroutine object MessagePump._process_messages at 0x7cfc130dcc70>
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 571, in _process_messages
+      await self._process_messages_loop()
+  GeneratorExit
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 627, in _context
+      yield
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 582, in _process_messages
+      await self._message_loop_exit()
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/widget.py", line 4526, in _message_loop_exit
+      assert isinstance(parent, DOMNode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AssertionError
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 565, in _process_messages
+      with self._context():
+    File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+      self.gen.throw(value)
+    File "/home/cknox/modulatio/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 629, in _context
+      active_message_pump.reset(reset_token)
+  ValueError: <Token var=<ContextVar name='active_message_pump' at 0x7cfc9b7e7a60> at 0x7cfc717994c0> was created in a different Context
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_tui/test_memory_tab.py::test_memory_tab_focus_agent_via_slash_command
+FAILED tests/test_tui/test_tui_app_low_audit.py::test_switch_tab_cron_routes_code_to_focus_project
+FAILED tests/test_tui/test_tui_app_low_audit.py::test_switch_tab_cron_without_focus_method_does_not_crash
+3 failed, 4829 passed, 1 skipped, 11 xfailed, 54 warnings in 776.29s (0:12:56)

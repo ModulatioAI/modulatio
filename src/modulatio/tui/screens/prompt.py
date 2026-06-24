@@ -182,14 +182,20 @@ class PromptScreen(Vertical):
             for stream in self.query(StreamView):
                 stream._name_resolver = resolver
         self._render_view()
-        # Land focus in the composer so the console is ready to type the moment
-        # it loads — no click needed, a blinking cursor sits in the box.
-        # After-refresh so the TabbedContent's own initial focus doesn't steal
-        # it; if the boot splash is up, focus restores here when it dismisses.
-        self.call_after_refresh(self._focus_composer)
+        # Focus-on-load (ready to type, no click) is driven from app.py's
+        # tab-activated handler when the CONSOLE tab becomes active — see
+        # `_focus_composer`. Doing it there (a sync event handler) instead of a
+        # mount-time deferred callback keeps test-harness teardown clean.
 
     def _focus_composer(self) -> None:
+        """Land focus in the composer so it's ready to type. Called when the
+        CONSOLE tab activates (on load + on return). Guarded: only focus when
+        the console is the active tab, so revealing the focused composer never
+        yanks another tab back to the console."""
+        from textual.widgets import TabbedContent
         try:
+            if self.app.query_one("#app-tabs", TabbedContent).active != "tab-prompt":
+                return
             self.query_one("#prompt-input", ChatInput).focus()
         except Exception:
             pass
