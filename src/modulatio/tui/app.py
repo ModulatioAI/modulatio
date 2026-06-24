@@ -1499,10 +1499,24 @@ class ModulatioApp(App):
     def action_paste(self) -> None:
         """Ctrl+V → paste the OS clipboard into the focused text field. Reads via
         pyperclip (xclip/wl-paste/native), the reliable path — a focused
-        Input/TextArea's native Ctrl+V only sees Textual's internal clipboard."""
+        Input/TextArea's native Ctrl+V only sees Textual's internal clipboard.
+
+        In the Console composer a pasted image (or copied file path) becomes a
+        chat attachment instead of text — paste-to-attach, the mockup's
+        replacement for the old attach buttons."""
         from textual.widgets import Input, TextArea
 
         from modulatio import clipboard as _clip
+
+        widget = self.focused
+        if getattr(widget, "id", "") == "prompt-input":
+            from modulatio.tui.screens.prompt import PromptScreen
+            try:
+                screen = self.query_one(PromptScreen)
+            except Exception:
+                screen = None
+            if screen is not None and screen.try_paste_attachment():
+                return
         text = _clip.paste()
         if not text:
             try:
@@ -1512,7 +1526,6 @@ class ModulatioApp(App):
             except Exception:
                 pass
             return
-        widget = self.focused
         if isinstance(widget, TextArea):
             widget.insert(text)
         elif isinstance(widget, Input):
