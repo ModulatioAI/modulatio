@@ -18,7 +18,6 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import (
-    Button,
     Footer,
     Header,
     Label,
@@ -301,13 +300,12 @@ class ModulatioApp(App):
         # Conversation-first keymap. The old F1–F9 per-agent chat-focus
         # bindings are retired (we no longer chat with producers/QC — the
         # Leader works with them on the operator's behalf) and recycled:
-        # F2 cycles the Feng-Tui variant (amber/green/cyan); LEADER/TEAM flip
-        # moved to F4 (F3 is COMPOSE).
+        # F2 cycles the Feng-Tui variant (amber/green/cyan); F3 jumps to the
+        # composer; F4 flips LEADER/TEAM. Jobs launch from the LEADER chat
+        # (`/kickoff … /end`) — there's no kickoff box, so no F5 KICK OFF.
         ("f2", "cycle_theme", "THEME"),
         ("f3", "focus_jobdrop", "COMPOSE"),
         ("f4", "flip_stream", "LEADER/TEAM"),
-        # KICK OFF is the deliberate, separated job-launch — never Enter.
-        ("f5", "kickoff", "KICK OFF"),
         # STOP the running job — the operator's kill-switch (Fix C). Cooperative:
         # the run halts at the next safe point, finishing the current step.
         ("f8", "stop_job", "STOP"),
@@ -400,18 +398,6 @@ class ModulatioApp(App):
 
     # ── Kickoff flow ────────────────────────────────────────────────────
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "prompt-kickoff":
-            self._run_kickoff(self._kickoff_objective_text())
-
-    def _kickoff_objective_text(self) -> str:
-        """Read the objective from the KICK OFF box on the TEAM floor."""
-        from textual.widgets import TextArea
-        try:
-            return self.query_one("#kickoff-objective", TextArea).text.strip()
-        except NoMatches:
-            return ""
-
     def _run_kickoff(self, objective: str) -> None:
         """Launch a job — the Leader's orchestrate function. ``objective`` comes
         from the TEAM KICK OFF box (button / F5) or from a `/kickoff` message on
@@ -453,14 +439,6 @@ class ModulatioApp(App):
         # Flip to the factory floor so the launch and the work are on one tab.
         self._show_team_floor()
 
-        # Disable the Kick off button so a second click can't double-fire
-        # while the worker is running.
-        try:
-            btn = self.query_one("#prompt-kickoff", Button)
-            btn.disabled = True
-        except NoMatches:
-            pass
-
         # Track elapsed time so the status line shows progress instead of
         # staying frozen. ``set_interval`` repaints once per second from the
         # main thread.
@@ -474,24 +452,15 @@ class ModulatioApp(App):
         self._set_lane_status("stream-team-status", "modulating")
         self._kickoff_tick = self.set_interval(1.0, self._update_kickoff_progress)
 
-        # Snapshot any kickoff-bar attachments + clear so the next run
-        # starts clean. Snapshot is shipped to the worker; clearing
-        # happens here on the main thread so the UI reflects it before
-        # the worker even starts.
+        # A /kickoff … /end job rides whatever's staged on the LEADER chatbox.
+        # Snapshot + clear on the main thread so the next run starts clean.
         from modulatio.tui.screens.prompt import PromptScreen
         try:
             screen = self.query_one(PromptScreen)
-            attachments = screen.kickoff_attachments
-            screen.clear_kickoff_attachments()
+            attachments = screen.chatbox_attachments
+            screen.clear_chatbox_attachments()
         except Exception:
             attachments = []
-
-        # Clear the objective box so the next job starts from a clean slate.
-        try:
-            from textual.widgets import TextArea
-            self.query_one("#kickoff-objective", TextArea).text = ""
-        except Exception:
-            pass
 
         # Mark a kickoff in flight on the MAIN thread, before the worker is
         # scheduled. There's a startup window between here and the worker
@@ -619,12 +588,6 @@ class ModulatioApp(App):
                 delattr(self, attr)
         # The kickoff worker is done — clear the in-flight startup guard.
         self._kickoff_pending = False
-        # Re-enable the Kick off button.
-        try:
-            btn = self.query_one("#prompt-kickoff", Button)
-            btn.disabled = False
-        except NoMatches:
-            pass
         # Settle the team floor's status line — that's where the work ran. A run
         # that returned but delivered nothing / left blocked work is NOT a clean
         # ✓done; show it as an error state so the floor doesn't read "success".
@@ -1215,10 +1178,12 @@ class ModulatioApp(App):
             if leader_status is not None:
                 leader_status.set_idle()
             # Run finished — rest the telemetry lamps (the leader/ticket
-            # attention blink persists until the operator reads it on LEADER).
+            # attention blink persists until the operator reads it on LEADER) +
+            # the floor rail's roster.
             lamps = self._status_lamps()
             if lamps is not None:
                 lamps.set_lamps(running=False, mods=0, qc=0)
+            self._update_team_rail([], running=False)
         # Live status lines: the leader-lane phase drives the LEADER status;
         # team-lane phases the TEAM status, named by the worker. §5: when more
         # than one producer is in flight, surface the parallel count so the
@@ -1237,10 +1202,12 @@ class ModulatioApp(App):
                 "stream-team-status", event.phase, actor,
                 working=len(names) or 1, working_names=names,
             )
-            # Mirror the producer concurrency onto the telemetry lamp row.
+            # Mirror the producer concurrency onto the telemetry lamp row + the
+            # MOD SQUAD floor rail's producer roster.
             lamps = self._status_lamps()
             if lamps is not None:
                 lamps.set_lamps(running=True, mods=len(names))
+            self._update_team_rail(names, running=True)
         # A logged ticket is a problem the Leader will relay — blink the
         # tickets lamp so the operator notices even from the factory floor.
         if event.phase == "ticket_opened":
@@ -1251,12 +1218,11 @@ class ModulatioApp(App):
         self.query_one("#prompt-response", Static).update(escape(text))
 
     def _set_kickoff_status(self, text: str) -> None:
-        """Update the KICK OFF box's status line on the TEAM floor."""
+        """Record the run's status text. There's no on-screen kickoff box now —
+        the LEADER stream carries the launch + verdict and the lamps show the
+        running state — so this just keeps last_summary_text (the banner / test
+        source of truth)."""
         self.last_summary_text = text
-        try:
-            self.query_one("#kickoff-response", Static).update(escape(text))
-        except NoMatches:
-            pass
 
     def _show_team_floor(self) -> None:
         """Flip the console flip to the TEAM factory floor."""
@@ -1408,11 +1374,6 @@ class ModulatioApp(App):
         operator can see which one is live (e.g. ``feng-tui · amber``)."""
         variant = (self.theme or "feng-amber").replace("feng-", "")
         return f":: PROJECT {self.project_code.upper()} :: feng-tui · {variant}"
-
-    def action_kickoff(self) -> None:
-        """F5 → deliberately launch the job in the TEAM KICK OFF box. Enter
-        never does this; only F5 or the KICK OFF button reaches here."""
-        self._run_kickoff(self._kickoff_objective_text())
 
     def _active_job_orchestrators(self) -> list:
         """Every Orchestrator with a job running right now — a converse-driven
@@ -1592,6 +1553,14 @@ class ModulatioApp(App):
         except Exception:
             return None
 
+    def _update_team_rail(self, producers: "list[str]", *, running: bool) -> None:
+        """Push the live producer roster onto the MOD SQUAD floor rail."""
+        from modulatio.tui.screens.prompt import PromptScreen
+        try:
+            self.query_one(PromptScreen).update_team_rail(producers, running=running)
+        except Exception:
+            pass
+
     def _signal_msg(self) -> None:
         """The Leader has something for you — blink the leader lamp until the
         operator flips to LEADER and reads it."""
@@ -1644,10 +1613,10 @@ class ModulatioApp(App):
 
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        """Hide the CONSOLE-only keys (LEADER/TEAM flip, COMPOSE, KICK OFF, STOP)
-        from the footer when another top-level tab is active — they only apply on
-        the Console. Returning None hides + disables; True is the default."""
-        console_only = {"flip_stream", "focus_jobdrop", "kickoff", "stop_job"}
+        """Hide the CONSOLE-only keys (LEADER/TEAM flip, COMPOSE, STOP) from the
+        footer when another top-level tab is active — they only apply on the
+        Console. Returning None hides + disables; True is the default."""
+        console_only = {"flip_stream", "focus_jobdrop", "stop_job"}
         if action in console_only:
             try:
                 if self.query_one("#app-tabs", TabbedContent).active != "tab-prompt":

@@ -4,23 +4,23 @@
 
 The conversation-first overhaul, split by function:
   - **LEADER** tab — the Leader's stream (the "TV", big) on top, and the
-    **chatbox** below it (roomy text entry, compact chrome). This is where you
-    *talk* to the Leader: your messages, his replies, his verdicts. Enter
-    sends a message. To launch a job from here, prefix it: ``/kickoff <obj>``.
-  - **MOD SQUAD** tab — the factory floor: the workers' stream (big) on top,
-    and a **KICK OFF box** below it (objective + optional docs/images + the KICK
-    OFF button). This is where you *command the Mod Squad* directly — drop a job
-    and watch it run on the same tab. No conversation here; you don't chat with
-    producers.
+    **chatbox** below it (roomy text entry; a calm action row of attachment
+    chips + the send hint). This is where you *talk* to the Leader: your
+    messages, his replies, his verdicts. Enter sends a message. To launch a job
+    from here, bracket it: ``/kickoff <objective> /end`` (any docs/images you've
+    attached ride with it).
+  - **MOD SQUAD** tab — the factory floor: two columns, the **run-telemetry
+    rail** on the left (producer roster + run progress) and the workers' stream
+    (the focal "TV") on the right. Pure watch-the-work — no input here.
   - A **StatusLampRow** sits above the flip — the run's telemetry lamps
     (leader · mods·qc · running · tickets · tokens · elapsed). The leader and
     tickets lamps BLINK for attention ("talk to me" / "we have a problem")
     while you're on the factory floor, and rest once you flip to LEADER.
 
-KICK OFF lives on the TEAM floor (where you watch the work), never beside SEND
-— so a job launch is impossible to fat-finger mid-conversation. The Leader can
-also run a job himself from the chat (``/kickoff`` → his orchestrate function);
-either way the Mod Squad streams into MOD SQUAD and he reports back on LEADER.
+There is NO kickoff box: a job is launched only from the LEADER chat's
+``/kickoff … /end`` brackets — impossible to fat-finger, and conversation-first.
+Either way the Mod Squad streams into MOD SQUAD and the Leader reports back on
+LEADER.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from pathlib import Path
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Static, TabbedContent, TabPane, TextArea
+from textual.widgets import Button, Static, TabbedContent, TabPane
 
 from modulatio.attachments import Attachment, AttachmentKind, build_attachment
 from modulatio.tui.widgets.chat_input import ChatInput
@@ -61,69 +61,49 @@ class PromptScreen(Vertical):
         padding: 0 1;
         border: round $frame;
     }
-    /* Roomy text entry — comfortable to compose without scrolling. */
+    /* Roomy text entry — the one bright doorway; comfortable to compose. */
     PromptScreen #prompt-input {
         height: 6;
     }
-    PromptScreen #chatbox-buttons {
+    /* A calm action row under the input: attachment chips left, send hint
+       right. No SEND button — Enter sends (the input is the focal element). */
+    PromptScreen #chatbox-actions {
         height: 3;
     }
-    PromptScreen #chatbox-buttons Button {
+    PromptScreen #chatbox-actions Button {
+        min-width: 5;
         margin-right: 1;
     }
     PromptScreen #prompt-response {
-        height: 1;
+        height: 1fr;
         color: $text-muted;
+        content-align: right middle;
     }
     PromptScreen #chatbox-attachments-list {
         height: auto;
         max-height: 1;
         color: $text-muted;
     }
-    /* TEAM tab: the factory-floor TV on top, the KICK OFF box compact below. */
+    /* TEAM tab: two columns — the run-telemetry rail (left) + the floor TV. */
+    PromptScreen #team-body {
+        height: 1fr;
+    }
+    PromptScreen #team-rail {
+        width: 24;
+        border-right: solid $frame-dim;
+        padding: 0 1;
+    }
+    PromptScreen #team-rail .rail-head { color: $secondary; text-style: bold; }
+    PromptScreen #team-rail .rail-dim { color: $text-muted; }
     PromptScreen .team-tv {
+        width: 1fr;
         height: 1fr;
         border: round $frame-dim;
-    }
-    /* The job-drop lives on the floor, framed in beacon-orange. */
-    PromptScreen #kickoff-box {
-        height: auto;
-        margin-top: 1;
-        padding: 0 1;
-        border: round $accent;
-    }
-    PromptScreen #kickoff-objective {
-        height: 4;
-    }
-    PromptScreen #kickoff-box-buttons {
-        height: 3;
-    }
-    PromptScreen #kickoff-box-buttons Button {
-        margin-right: 1;
-    }
-    /* KICK OFF wears the beacon-orange of a deliberate, heavy action. */
-    PromptScreen #prompt-kickoff {
-        border: round $accent;
-        color: $accent;
-    }
-    /* Compact icon buttons for attachments — minimal chrome. */
-    PromptScreen #kickoff-attach-doc-btn,
-    PromptScreen #kickoff-attach-image-btn {
-        min-width: 5;
-    }
-    PromptScreen #kickoff-attachments-list {
-        height: auto;
-        max-height: 1;
-    }
-    PromptScreen #kickoff-response {
-        height: 1;
-        color: $text-muted;
     }
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._kickoff_attachments: list[Attachment] = []
         self._chatbox_attachments: list[Attachment] = []
         #: Job-objective capture between `/kickoff` and `/end`. None = not
         #: capturing (plain text is conversation); a list = accumulating the brief
@@ -133,23 +113,10 @@ class PromptScreen(Vertical):
 
     @property
     def chatbox_attachments(self) -> list[Attachment]:
-        """Pending attachments for the next chat message — read by
-        ``_send_message`` and passed to the Leader's ``converse``."""
+        """Pending attachments for the next chat message to the Leader (and the
+        ones a ``/kickoff … /end`` job rides). Read by ``_send_message`` +
+        app.py's ``_run_kickoff``."""
         return list(self._chatbox_attachments)
-
-    @property
-    def kickoff_attachments(self) -> list[Attachment]:
-        """Pending attachments for the next kickoff. Read by app.py's
-        ``_run_kickoff`` and passed to ``Orchestrator.kickoff``."""
-        return list(self._kickoff_attachments)
-
-    @property
-    def kickoff_attachments_summary(self) -> str:
-        """Plain-text rendering of the staged kickoff attachments.
-        Public for tests + the on-screen attached-files row."""
-        if not self._kickoff_attachments:
-            return ""
-        return "  ".join(att.name for att in self._kickoff_attachments)
 
     def compose(self) -> ComposeResult:
         # ── Status lamps (visible from both tabs) ──
@@ -164,44 +131,45 @@ class PromptScreen(Vertical):
                 )
                 # … a live status line (what the Leader is doing) …
                 yield StreamStatus(lane="leader", id="stream-leader-status")
-                # … the chatbox below: pure conversation. Enter SENDS a
-                # message to the Leader. To launch a job from here, prefix
-                # it — `/kickoff <objective>`. There is NO kick-off button
-                # on this tab; that lives on the TEAM floor.
+                # … the chatbox below: pure conversation. Enter SENDS a message
+                # to the Leader; to launch a job, bracket it
+                # `/kickoff <objective> /end`.
                 with Vertical(id="chatbox"):
                     yield ChatInput("", id="prompt-input", soft_wrap=True)
-                    with Horizontal(id="chatbox-buttons"):
-                        yield Button("SEND", id="chat-send", variant="primary")
-                        yield Button("📎", id="chat-attach-doc-btn")
-                        yield Button("🖼", id="chat-attach-image-btn")
-                    yield Static("", id="chatbox-attachments-list")
-                    yield Static(
-                        "Enter sends a message  ·  "
-                        "type /kickoff <objective> to run a job",
-                        id="prompt-response",
-                    )
+                    # A calm action row: attachment chips on the left (secondary
+                    # chrome), the send + kickoff knowledge as an affordance on
+                    # the right. Enter sends — no SEND button competes with the
+                    # input for the eye.
+                    with Horizontal(id="chatbox-actions"):
+                        yield Button("📎 doc", id="chat-attach-doc-btn")
+                        yield Button("🖼 image", id="chat-attach-image-btn")
+                        yield Static("", id="chatbox-attachments-list")
+                        yield Static(
+                            "⏎ send  ·  /kickoff <objective> /end to run a job",
+                            id="prompt-response",
+                        )
             with TabPane("MOD SQUAD", id="stream-team-pane"):
-                # The factory floor — the workers' TV (big) on top …
-                yield StreamView(
-                    lane="team", id="stream-team",
-                    classes="team-tv",
-                )
-                yield StreamStatus(lane="team", id="stream-team-status")
-                # … and the KICK OFF box below: drop a job (objective +
-                # optional docs/images) and launch it right here, where you
-                # watch it run. F5 or the KICK OFF button fires — never Enter.
-                with Vertical(id="kickoff-box"):
-                    yield TextArea("", id="kickoff-objective", soft_wrap=True)
-                    with Horizontal(id="kickoff-box-buttons"):
-                        yield Button("F5 ▸ KICK OFF", id="prompt-kickoff")
-                        yield Button("📎", id="kickoff-attach-doc-btn")
-                        yield Button("🖼", id="kickoff-attach-image-btn")
-                    yield Static("", id="kickoff-attachments-list")
-                    yield Static(
-                        "type an objective, then F5 / KICK OFF — "
-                        "the Mod Squad runs it here",
-                        id="kickoff-response",
-                    )
+                # The factory floor — two columns: the run-telemetry rail (left)
+                # + the workers' TV (the focal stream). No input here: jobs are
+                # launched from the LEADER chat (`/kickoff … /end`); this page is
+                # pure watch-the-work.
+                with Horizontal(id="team-body"):
+                    with Vertical(id="team-rail"):
+                        yield Static("RUN TELEMETRY", classes="rail-head")
+                        # Progress + spend aren't on the activity stream yet
+                        # (the v1.0 live-telemetry rail) — shown dim with — so
+                        # the layout is complete and fills in when wired.
+                        yield Static("goal  ▱▱▱▱ —", classes="rail-dim", id="rail-goal")
+                        yield Static("tasks ▱▱▱▱ —", classes="rail-dim", id="rail-tasks")
+                        yield Static("qc    ▱▱▱▱ —", classes="rail-dim", id="rail-qc")
+                        yield Static("")
+                        yield Static("⛁ — tok · $ —", classes="rail-dim", id="rail-spend")
+                        yield Static("")
+                        yield Static("─ producers ─", classes="rail-head")
+                        yield Static("(idle)", classes="rail-dim", id="rail-producers")
+                    with Vertical(id="team-tv-col"):
+                        yield StreamView(lane="team", id="stream-team", classes="team-tv")
+                        yield StreamStatus(lane="team", id="stream-team-status")
 
     def on_mount(self) -> None:
         # Wire the agent-name resolver from the app so streams show agents
@@ -222,31 +190,6 @@ class PromptScreen(Vertical):
             if tabbed.active == "stream-leader-pane"
             else "stream-leader-pane"
         )
-
-    # ── Kickoff-bar attachments ─────────────────────────────────────────
-
-    def attach_kickoff(self, path: Path, *, kind: AttachmentKind) -> None:
-        """Add an attachment for the next kickoff. Public so the
-        Attach-Doc/Image buttons (via modal callback) AND tests can drive
-        it without modal interaction."""
-        try:
-            att = build_attachment(path, kind=kind)
-        # re-sweep: build_attachment also raises ValueError (size cap) and
-        # OSError (IsADirectoryError/permission) — catch them so an oversized
-        # or unreadable attachment surfaces as a status, not a TUI crash.
-        except (FileNotFoundError, UnicodeDecodeError, ValueError, OSError) as exc:
-            self.query_one("#prompt-response", Static).update(
-                f"[bold red]Attach failed:[/] {escape(str(exc))}"
-            )
-            return
-        self._kickoff_attachments.append(att)
-        self._refresh_kickoff_attachment_list()
-
-    def clear_kickoff_attachments(self) -> None:
-        """Drop all pending kickoff attachments — called by app.py after a
-        kickoff fires so the next run starts clean."""
-        self._kickoff_attachments.clear()
-        self._refresh_kickoff_attachment_list()
 
     # ── Chatbox attachments (docs + images for the Leader conversation) ──
 
@@ -403,40 +346,27 @@ class PromptScreen(Vertical):
             handler(text, attachments)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "chat-send":
-            self._send_message()
-        elif event.button.id == "chat-attach-doc-btn":
+        # Enter sends (no SEND button); the action row is the two attach chips.
+        if event.button.id == "chat-attach-doc-btn":
             self._open_chat_attach_modal("document")
         elif event.button.id == "chat-attach-image-btn":
             self._open_chat_attach_modal("image")
-        elif event.button.id == "kickoff-attach-doc-btn":
-            self._open_kickoff_attach_modal("document")
-        elif event.button.id == "kickoff-attach-image-btn":
-            self._open_kickoff_attach_modal("image")
 
-    def _open_kickoff_attach_modal(self, kind: AttachmentKind) -> None:
-        from modulatio.tui.widgets.attach_modal import AttachPathModal
+    # ── the MOD SQUAD run-telemetry rail ────────────────────────────────
 
-        def _on_dismiss(path: Path | None) -> None:
-            if path is not None:
-                self.attach_kickoff(path, kind=kind)
-
-        self.app.push_screen(AttachPathModal(kind=kind), _on_dismiss)
-
-    def _refresh_kickoff_attachment_list(self) -> None:
+    def update_team_rail(self, producers: list[str], *, running: bool) -> None:
+        """Refresh the floor rail's producer roster from the live activity feed
+        (the only rail data on the stream today; progress/spend stay dim until
+        the v1.0 telemetry rail wires them)."""
         try:
-            widget = self.query_one("#kickoff-attachments-list", Static)
+            roster_line = self.query_one("#rail-producers", Static)
         except Exception:
             return
-        if not self._kickoff_attachments:
-            widget.update("")
-            return
-        names = [
-            # re-sweep: escape operator-chosen filename — see _refresh_chatbox.
-            f"📎 {escape(att.name)}" if att.kind == "document" else f"🖼  {escape(att.name)}"
-            for att in self._kickoff_attachments
-        ]
-        widget.update(f"[dim]attached for kickoff:[/] {'  '.join(names)}")
+        if producers:
+            roster_line.update(
+                "\n".join(f"◆ {escape(name)}" for name in producers))
+        else:
+            roster_line.update("· idle" if not running else "· starting…")
 
 
 def build_prompt_panel() -> PromptScreen:

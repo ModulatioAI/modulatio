@@ -6,7 +6,7 @@ file must NOT crash the TUI.
 size cap, and ``OSError`` (e.g. ``IsADirectoryError`` / permission) on an
 unreadable path. The three TUI attach call sites previously caught only
 ``(FileNotFoundError, UnicodeDecodeError)``, so an oversized attachment let
-the ``ValueError`` propagate out of ``attach_kickoff`` / ``attach_chat`` and
+the ``ValueError`` propagate out of ``attach_chat`` / ``attach_chat`` and
 took down the screen. The fix broadens both ``except`` clauses to also catch
 ``ValueError`` and ``OSError`` and surfaces the message via the same escaped
 status update used for the missing-file case.
@@ -42,7 +42,7 @@ async def test_oversized_kickoff_attachment_does_not_crash(
     project_with_roster, tmp_path, monkeypatch
 ):
     """An oversized kickoff attachment surfaces a status message instead of
-    raising ValueError out of attach_kickoff and crashing the screen."""
+    raising ValueError out of attach_chat and crashing the screen."""
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.screens.prompt import PromptScreen
 
@@ -56,9 +56,9 @@ async def test_oversized_kickoff_attachment_does_not_crash(
         await pilot.pause()
         screen = app.query_one(PromptScreen)
         # Without the fix this raises ValueError and the test errors out.
-        screen.attach_kickoff(big, kind="document")
+        screen.attach_chat(big, kind="document")
         await pilot.pause()
-        assert screen.kickoff_attachments == []  # nothing staged
+        assert screen.chatbox_attachments == []  # nothing staged
         from textual.widgets import Static
         status = screen.query_one("#prompt-response", Static)
         assert "Attach failed" in str(status.render())
@@ -102,24 +102,20 @@ async def test_directory_attachment_does_not_crash(
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.query_one(PromptScreen)
-        screen.attach_kickoff(a_dir, kind="document")
+        screen.attach_chat(a_dir, kind="document")
         await pilot.pause()
-        assert screen.kickoff_attachments == []
+        assert screen.chatbox_attachments == []
         from textual.widgets import Static
         status = screen.query_one("#prompt-response", Static)
         assert "Attach failed" in str(status.render())
 
 
-def test_both_call_sites_catch_value_and_os_errors():
-    """Belt-and-suspenders source guard: both attach methods broaden the
-    except to ValueError + OSError (so the size cap / unreadable cases are
-    handled), not just the original FileNotFoundError/UnicodeDecodeError."""
+def test_attach_chat_catches_value_and_os_errors():
+    """Belt-and-suspenders source guard: the attach method broadens the except
+    to ValueError + OSError (so the size cap / unreadable cases are handled),
+    not just the original FileNotFoundError/UnicodeDecodeError."""
     from modulatio.tui.screens import prompt
 
-    for method in (
-        prompt.PromptScreen.attach_kickoff,
-        prompt.PromptScreen.attach_chat,
-    ):
-        src = inspect.getsource(method)
-        assert "ValueError" in src, f"{method.__name__} must catch ValueError"
-        assert "OSError" in src, f"{method.__name__} must catch OSError"
+    src = inspect.getsource(prompt.PromptScreen.attach_chat)
+    assert "ValueError" in src
+    assert "OSError" in src
