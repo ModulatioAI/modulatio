@@ -3,12 +3,13 @@
 """Console tab — the LEADER / TEAM streams, with talk on LEADER, work on TEAM.
 
 The conversation-first overhaul, split by function:
-  - **LEADER** tab — the Leader's stream (the "TV", big) on top, and the
-    **chatbox** below it (roomy text entry; a calm action row of attachment
-    chips + the send hint). This is where you *talk* to the Leader: your
+  - **LEADER** tab — the Leader's stream (the "TV", big, borderless) on top, and
+    the **chatbox** below it (a roomy round-bordered text entry with one dim
+    affordance line beneath). This is where you *talk* to the Leader: your
     messages, his replies, his verdicts. Enter sends a message. To launch a job
-    from here, bracket it: ``/kickoff <objective> /end`` (any docs/images you've
-    attached ride with it).
+    from here, bracket it: ``/kickoff <objective> /end``. Attachments are
+    paste-to-attach: Ctrl+V a screenshot/image or a copied file path and it
+    rides with the next message (no buttons — matches the design).
   - **MOD SQUAD** tab — the factory floor: two columns, the **run-telemetry
     rail** on the left (producer roster + run progress) and the workers' stream
     (the focal "TV") on the right. Pure watch-the-work — no input here.
@@ -31,7 +32,7 @@ from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
-from textual.widgets import Button, Static
+from textual.widgets import Static
 
 from modulatio.attachments import Attachment, AttachmentKind, build_attachment
 from modulatio.tui.feng_theme import theme_tiers
@@ -40,9 +41,18 @@ from modulatio.tui.widgets.status_lamp_row import StatusLampRow
 from modulatio.tui.widgets.stream_status import StreamStatus
 from modulatio.tui.widgets.stream_view import StreamView
 
+#: Suffixes treated as image attachments when a pasted file path is staged.
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
 
 class PromptScreen(Vertical):
     """Console tab — status lamps + LEADER (TV+chat) / TEAM (full TV) flip."""
+
+    #: The dim affordance line under the composer (shown when nothing is staged).
+    _AFFORDANCE = (
+        "⏎ send   ·   /kickoff <objective> /end run a job   ·   "
+        "📎 paste to attach   ·   F4 flip"
+    )
 
     DEFAULT_CSS = """
     /* The console matches console_mockup.py: a single framed screen with a
@@ -73,10 +83,12 @@ class PromptScreen(Vertical):
     PromptScreen #console-body { height: 1fr; }
     PromptScreen #leader-view { height: 1fr; }
     PromptScreen #team-view { height: 1fr; }
+    /* The focal stream is borderless (the mockup's #center-tv): bright text on
+       black, a little breathing room, no box — the only box is the composer. */
     PromptScreen .tv {
         width: 1fr;
         height: 1fr;
-        border: round $frame-dim;
+        padding: 0 1;
     }
     /* MOD SQUAD: the run-telemetry rail left, the floor TV right. */
     PromptScreen #team-rail {
@@ -99,21 +111,13 @@ class PromptScreen(Vertical):
         border: none;
         padding: 0;
     }
-    PromptScreen #chatbox-actions { height: 1; padding: 0 1; }
-    PromptScreen #chatbox-actions Button {
-        min-width: 5;
-        margin-right: 1;
-        height: 1;
-        border: none;
-    }
+    /* The single dim affordance line under the box (the mockup's
+       #input-affordance) — also surfaces staged attachments + attach errors. */
     PromptScreen #prompt-response {
-        width: 1fr;
+        height: 1;
+        padding: 0 1;
         color: $text-muted;
-        content-align: right middle;
-    }
-    PromptScreen #chatbox-attachments-list {
-        width: auto;
-        color: $text-muted;
+        text-style: dim;
     }
     """
 
@@ -167,18 +171,11 @@ class PromptScreen(Vertical):
                     yield StreamView(lane="team", id="stream-team", classes="tv")
                     yield StreamStatus(lane="team", id="stream-team-status")
         # The composer — LEADER only (conversation; MOD SQUAD is watch-only).
-        # A clean round box holds just the input; the action row (attach chips +
-        # the send / kickoff affordance) sits beneath it.
+        # A clean round box holds just the input; one dim affordance line sits
+        # beneath it (matching the mockup — no attach buttons; paste-to-attach).
         with Vertical(id="input-box"):
             yield ChatInput("", id="prompt-input", soft_wrap=True)
-        with Horizontal(id="chatbox-actions"):
-            yield Button("📎 doc", id="chat-attach-doc-btn")
-            yield Button("🖼 image", id="chat-attach-image-btn")
-            yield Static("", id="chatbox-attachments-list")
-            yield Static(
-                "⏎ send  ·  /kickoff <objective> /end to run a job",
-                id="prompt-response",
-            )
+        yield Static(self._AFFORDANCE, id="prompt-response")
 
     def on_mount(self) -> None:
         # Wire the agent-name resolver from the app so streams show agents
@@ -218,7 +215,7 @@ class PromptScreen(Vertical):
             except Exception:
                 pass
         # The composer belongs to the conversation — only on LEADER.
-        for cid in ("#input-box", "#chatbox-actions"):
+        for cid in ("#input-box", "#prompt-response"):
             try:
                 self.query_one(cid).display = leader
             except Exception:
@@ -262,9 +259,37 @@ class PromptScreen(Vertical):
 
     # ── Chatbox attachments (docs + images for the Leader conversation) ──
 
+    def try_paste_attachment(self) -> bool:
+        """Ctrl+V paste-to-attach (replacing the old attach buttons): if the OS
+        clipboard holds an image, or a path to a real file, stage it as a chat
+        attachment and return True so the caller skips the text paste. Otherwise
+        False (the caller pastes the clipboard text as usual)."""
+        from modulatio import clipboard
+
+        img = clipboard.paste_image()
+        if img is not None:
+            before = len(self._chatbox_attachments)
+            self.attach_chat(img, kind="image")
+            return len(self._chatbox_attachments) > before
+        text = (clipboard.paste() or "").strip()
+        if text and "\n" not in text and len(text) < 4096:
+            p = Path(text).expanduser()
+            try:
+                is_file = p.is_file()
+            except OSError:
+                is_file = False
+            if is_file:
+                kind: AttachmentKind = (
+                    "image" if p.suffix.lower() in _IMAGE_SUFFIXES else "document"
+                )
+                before = len(self._chatbox_attachments)
+                self.attach_chat(p, kind=kind)
+                return len(self._chatbox_attachments) > before
+        return False
+
     def attach_chat(self, path: Path, *, kind: AttachmentKind) -> None:
         """Stage an attachment for the next chat message to the Leader. Public
-        so the 📎/🖼 buttons (via modal callback) and tests can drive it."""
+        so paste-to-attach (``try_paste_attachment``) and tests can drive it."""
         try:
             att = build_attachment(path, kind=kind)
         # re-sweep: also catch ValueError (size cap) / OSError so an oversized
@@ -282,12 +307,14 @@ class PromptScreen(Vertical):
         self._refresh_chatbox_attachment_list()
 
     def _refresh_chatbox_attachment_list(self) -> None:
+        """Render the affordance line: the staged attachments when any are
+        pending, otherwise the default send/kickoff/paste hint."""
         try:
-            widget = self.query_one("#chatbox-attachments-list", Static)
+            widget = self.query_one("#prompt-response", Static)
         except Exception:
             return
         if not self._chatbox_attachments:
-            widget.update("")
+            widget.update(self._AFFORDANCE)
             return
         names = [
             # re-sweep: att.name is operator-chosen Path.name; escape so a
@@ -295,16 +322,7 @@ class PromptScreen(Vertical):
             f"📎 {escape(att.name)}" if att.kind == "document" else f"🖼  {escape(att.name)}"
             for att in self._chatbox_attachments
         ]
-        widget.update(f"[dim]attached:[/] {'  '.join(names)}")
-
-    def _open_chat_attach_modal(self, kind: AttachmentKind) -> None:
-        from modulatio.tui.widgets.attach_modal import AttachPathModal
-
-        def _on_dismiss(path: Path | None) -> None:
-            if path is not None:
-                self.attach_chat(path, kind=kind)
-
-        self.app.push_screen(AttachPathModal(kind=kind), _on_dismiss)
+        widget.update(f"[dim]attached:[/] {'  '.join(names)}   ·   ⏎ send")
 
     # ── Conversation: Enter / SEND posts a message to the Leader ────────
 
@@ -430,13 +448,6 @@ class PromptScreen(Vertical):
         handler = getattr(self.app, "_operator_message", None)
         if handler is not None:
             handler(text, attachments)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        # Enter sends (no SEND button); the action row is the two attach chips.
-        if event.button.id == "chat-attach-doc-btn":
-            self._open_chat_attach_modal("document")
-        elif event.button.id == "chat-attach-image-btn":
-            self._open_chat_attach_modal("image")
 
     # ── the MOD SQUAD run-telemetry rail ────────────────────────────────
 

@@ -83,9 +83,9 @@ async def test_chatbox_attachments_stage_and_clear_on_send(
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        # the attach buttons exist on the chatbox
-        assert app.query("#chat-attach-doc-btn")
-        assert app.query("#chat-attach-image-btn")
+        # no attach buttons (mockup-clean) — attaching is paste-to-attach
+        assert not app.query("#chat-attach-doc-btn")
+        assert not app.query("#chat-attach-image-btn")
 
         screen = app.query_one(PromptScreen)
         screen.attach_chat(doc, kind="document")
@@ -106,6 +106,8 @@ async def test_ctrl_v_pastes_os_clipboard_into_focused_field(
     from modulatio.tui.widgets.chat_input import ChatInput
 
     monkeypatch.setattr("modulatio.clipboard.paste", lambda: "FROM-OS-CLIPBOARD")
+    # plain text (not an image, not a file path) → inserted, not attached
+    monkeypatch.setattr("modulatio.clipboard.paste_image", lambda: None)
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -115,6 +117,60 @@ async def test_ctrl_v_pastes_os_clipboard_into_focused_field(
         await pilot.press("ctrl+v")   # priority binding beats native paste
         await pilot.pause()
         assert "FROM-OS-CLIPBOARD" in inp.text
+
+
+async def test_ctrl_v_image_on_clipboard_attaches_not_text(
+    project_with_roster, tmp_path, monkeypatch
+):
+    """Ctrl+V with an image on the OS clipboard stages it as a chat attachment
+    (paste-to-attach, replacing the old attach buttons) — the text box stays
+    empty rather than getting a pasted blob."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    img = tmp_path / "shot.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr("modulatio.clipboard.paste_image", lambda: img)
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.query_one("#prompt-input", ChatInput)
+        inp.focus()
+        await pilot.pause()
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        assert len(screen.chatbox_attachments) == 1
+        assert screen.chatbox_attachments[0].kind == "image"
+        assert inp.text == ""   # attached, not inserted
+
+
+async def test_ctrl_v_file_path_on_clipboard_attaches(
+    project_with_roster, tmp_path, monkeypatch
+):
+    """Ctrl+V with a real file PATH on the clipboard attaches that file instead
+    of pasting the path as text."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    doc = tmp_path / "brief.md"
+    doc.write_text("hello", encoding="utf-8")
+    monkeypatch.setattr("modulatio.clipboard.paste_image", lambda: None)
+    monkeypatch.setattr("modulatio.clipboard.paste", lambda: str(doc))
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.query_one("#prompt-input", ChatInput)
+        inp.focus()
+        await pilot.pause()
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        assert len(screen.chatbox_attachments) == 1
+        assert screen.chatbox_attachments[0].kind == "document"
+        assert inp.text == ""
 
 
 async def test_ctrl_c_copies_through_os_clipboard(project_with_roster, monkeypatch):
@@ -429,13 +485,16 @@ async def test_console_shape_leader_chat_and_team_rail(project_with_roster):
         # mockup chrome: brand header + flip indicator
         assert screen.query("#console-header")
         assert screen.query("#flip-tab")
-        # LEADER: the full-width stream; the composer + attach chips live below
-        # the body (not inside the view); no SEND button
+        # LEADER: the full-width stream; the composer + a single affordance line
+        # live below the body (not inside the view); no SEND button, no attach
+        # buttons (mockup-clean — attaching is paste-to-attach)
         assert leader_view.query("#stream-leader")
         assert screen.query("#prompt-input")
-        assert screen.query("#chat-attach-doc-btn")
-        assert screen.query("#chat-attach-image-btn")
+        assert screen.query("#prompt-response")   # the affordance / attach line
+        assert not screen.query("#chat-attach-doc-btn")
+        assert not screen.query("#chat-attach-image-btn")
         assert not screen.query("#chat-send")
+        assert not screen.query("#chatbox-actions")
         # the kickoff box is gone entirely
         assert not screen.query("#kickoff-box")
         assert not screen.query("#kickoff-objective")
