@@ -362,6 +362,56 @@ def promote_candidates(agent_id: str, *, project_code: str) -> list[MemoryEntry]
     return candidates
 
 
+def _layer_path(agent_id: str, layer: str, project_code: str) -> Path:
+    """Resolve the JSON path for a layer ('episodic' | 'semantic'). Raises
+    ValueError for any other layer (the team layer is QC-curated and is never
+    mutated through this private-memory module)."""
+    if layer == "episodic":
+        return _episodic_path(agent_id, project_code)
+    if layer == "semantic":
+        return _semantic_path(agent_id, project_code)
+    raise ValueError(
+        f"unknown memory layer {layer!r} (expected 'episodic' or 'semantic')")
+
+
+def delete_entry(
+    agent_id: str, entry_id: str, *, project_code: str, layer: str,
+) -> bool:
+    """Delete one episodic/semantic entry by id. Returns True if it existed.
+
+    The agent_id is path-validated by ``_layer_path`` (via ``_agent_dir``), so a
+    traversal id fails closed. Mirrors ``decay_episodic``'s load-mutate-save
+    under the per-file lock."""
+    path = _layer_path(agent_id, layer, project_code)
+    with _file_lock(path):
+        entries = _load_json(path)
+        kept = [e for e in entries if e.get("id") != entry_id]
+        if len(kept) == len(entries):
+            return False
+        _save_json(path, kept)
+    return True
+
+
+def update_entry(
+    agent_id: str, entry_id: str, *, project_code: str, layer: str, content: str,
+) -> Optional[MemoryEntry]:
+    """Edit one episodic/semantic entry's content in place (same id). Returns the
+    updated entry, or None if no entry matched."""
+    path = _layer_path(agent_id, layer, project_code)
+    with _file_lock(path):
+        entries = _load_json(path)
+        found = None
+        for e in entries:
+            if e.get("id") == entry_id:
+                e["content"] = content
+                found = e
+                break
+        if found is None:
+            return None
+        _save_json(path, entries)
+    return MemoryEntry.from_dict(found)
+
+
 def stats(agent_id: str, *, project_code: str) -> dict:
     """Memory stats for an agent."""
     episodic = _load_json(_episodic_path(agent_id, project_code))
@@ -382,6 +432,8 @@ __all__ = [
     "add_semantic",
     "get_semantic",
     "search",
+    "delete_entry",
+    "update_entry",
     "decay_episodic",
     "promote_candidates",
     "stats",

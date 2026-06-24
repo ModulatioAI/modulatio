@@ -148,3 +148,59 @@ def test_stats_reports_counts():
     assert s["episodic_total"] == 2
     assert s["episodic_active"] == 2
     assert s["semantic_total"] == 1
+
+
+# === delete / update by id (Feng-Tui MEMORY overhaul, Group C) ===============
+
+
+def test_delete_entry_removes_episodic_by_id():
+    a = agent_memory.add_episodic("alice", "first", project_code=PROJECT_CODE)
+    agent_memory.add_episodic("alice", "second", project_code=PROJECT_CODE)
+    assert agent_memory.delete_entry(
+        "alice", a.id, project_code=PROJECT_CODE, layer="episodic")
+    remaining = agent_memory.get_episodic("alice", project_code=PROJECT_CODE)
+    assert [e.content for e in remaining] == ["second"]
+
+
+def test_delete_entry_removes_semantic_by_id():
+    s = agent_memory.add_semantic("alice", "a durable fact", project_code=PROJECT_CODE)
+    assert agent_memory.delete_entry(
+        "alice", s.id, project_code=PROJECT_CODE, layer="semantic")
+    assert agent_memory.get_semantic("alice", project_code=PROJECT_CODE) == []
+
+
+def test_delete_entry_unknown_id_returns_false():
+    agent_memory.add_episodic("alice", "x", project_code=PROJECT_CODE)
+    assert not agent_memory.delete_entry(
+        "alice", "no-such-id", project_code=PROJECT_CODE, layer="episodic")
+
+
+def test_delete_entry_rejects_unknown_layer():
+    a = agent_memory.add_episodic("alice", "x", project_code=PROJECT_CODE)
+    with pytest.raises(ValueError):
+        agent_memory.delete_entry(
+            "alice", a.id, project_code=PROJECT_CODE, layer="bogus")
+
+
+def test_update_entry_edits_content_in_place():
+    a = agent_memory.add_episodic("alice", "typo herre", project_code=PROJECT_CODE)
+    updated = agent_memory.update_entry(
+        "alice", a.id, project_code=PROJECT_CODE, layer="episodic",
+        content="typo here")
+    assert updated is not None and updated.content == "typo here"
+    assert updated.id == a.id  # same entry, edited in place
+    loaded = agent_memory.get_episodic("alice", project_code=PROJECT_CODE)
+    assert loaded[0].content == "typo here"
+
+
+def test_update_entry_unknown_id_returns_none():
+    agent_memory.add_episodic("alice", "x", project_code=PROJECT_CODE)
+    assert agent_memory.update_entry(
+        "alice", "no-such-id", project_code=PROJECT_CODE, layer="episodic",
+        content="y") is None
+
+
+def test_path_traversal_agent_id_is_refused_on_delete():
+    with pytest.raises(Exception):
+        agent_memory.delete_entry(
+            "../escape", "id", project_code=PROJECT_CODE, layer="episodic")
