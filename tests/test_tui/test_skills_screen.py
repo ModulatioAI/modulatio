@@ -250,3 +250,65 @@ async def test_cancel_hides_wizard(tui_vault_with_skills):
         await pilot.click("#skill-wiz-cancel-btn")
         await pilot.pause()
         assert app.query_one("#skill-wizard-panel").has_class("hidden")
+
+
+# ─── Controls row + affordance (Feng-Tui overhaul) ──────────────────────────
+
+
+async def test_skills_has_controls_row_with_counts_and_search(tui_vault_with_skills):
+    """The list yields a ControlsRow (counts + search) atop the table; counts
+    reports the visible skill total."""
+    from textual.widgets import Static, TabbedContent
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.skills import SkillsScreen
+    from modulatio.tui.widgets.controls_row import ControlsRow
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-skills"
+        await pilot.pause()
+        row = app.query_one(SkillsScreen).query_one(ControlsRow)
+        assert row.query("#controls-counts")
+        assert row.query("#controls-search")
+        counts = str(row.query_one("#controls-counts", Static).render())
+        assert "2 skills" in counts
+
+
+async def test_skills_search_filters_rows(tui_vault_with_skills):
+    """Typing a query filters the table to matching rows (name/description/tags)
+    and flags the counts as filtered."""
+    from textual.widgets import DataTable, Static, TabbedContent
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.skills import SkillsScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-skills"
+        await pilot.pause()
+        screen = app.query_one(SkillsScreen)
+        screen._query = "local"  # matches only the project-local skill
+        screen._refresh()
+        await pilot.pause()
+        assert screen.query_one("#skills-table", DataTable).row_count == 1
+        counts = str(screen.query_one("#controls-counts", Static).render())
+        assert "filtered" in counts
+
+
+async def test_skills_affordance_present(tui_vault_with_skills):
+    """The list carries an affordance line that names searching + adding."""
+    from textual.widgets import Static, TabbedContent
+
+    from modulatio.tui.app import ModulatioApp
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-skills"
+        await pilot.pause()
+        text = str(app.query_one("#skills-affordance", Static).render())
+        assert "search" in text.lower()
+        assert "add" in text.lower()

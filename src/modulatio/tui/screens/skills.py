@@ -14,9 +14,10 @@ from __future__ import annotations
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, DataTable, Label, Markdown
+from textual.widgets import Button, DataTable, Input, Markdown, Static
 
 from modulatio import skills
+from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.skill_wizard import SkillWizard
 from modulatio.vault import project_dir
@@ -31,11 +32,17 @@ class SkillsScreen(Vertical):
     SkillsScreen #skills-actions { height: 3; }
     """
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._query: str = ""
+
     def compose(self) -> ComposeResult:
         # Master-detail: the pool on the left, the selected skill on the right.
         with MasterDetail():
             with Vertical(id="md-list"):
-                yield Label("Skills registry — a just-in-time floating pool")
+                yield ControlsRow(
+                    counts=True, search=True, search_placeholder="/ search skills…"
+                )
                 table = DataTable(id="skills-table", cursor_type="row")
                 table.add_columns(
                     "Name", "Description", "Capability Tags", "Project-Local?")
@@ -43,6 +50,14 @@ class SkillsScreen(Vertical):
                 with Horizontal(id="skills-actions"):
                     yield Button("Add skill", id="skills-add-btn", variant="primary")
                 yield SkillWizard(id="skill-wizard-panel", classes="hidden")
+                # Affordance last so it never pushes the (tall) wizard panel
+                # off-screen when it expands.
+                yield Static(
+                    "↑↓ move · type to search · Add skill — a JIT pool, "
+                    "not bound to agents",
+                    id="skills-affordance",
+                    classes="affordance",
+                )
             with VerticalScroll(id="md-detail"):
                 yield Markdown("_Select a skill to view it._", id="skill-detail-md")
 
@@ -57,16 +72,22 @@ class SkillsScreen(Vertical):
         table.clear()
         code = self.app.project_code  # type: ignore[attr-defined]
         project_skills_dir = project_dir(code) / "skills"
+        q = self._query.lower()
         for name in skills.list_skills(code):
             s = skills.load_with_metadata(name, project_code=code)
+            tags = ", ".join(s.capability_tags)
+            # Client-side search: match name / description / tags.
+            if q and q not in f"{s.name} {s.description or ''} {tags}".lower():
+                continue
             is_local = (project_skills_dir / f"{name}.md").exists()
             table.add_row(
                 escape(s.name),
                 escape(s.description[:60] if s.description else ""),
-                escape(", ".join(s.capability_tags)),
+                escape(tags),
                 "yes" if is_local else "no",
                 key=s.name,
             )
+        self._set_counts(table.row_count)
         if table.row_count > 0:
             first = list(table.rows.keys())[0].value
             if first:
@@ -75,6 +96,18 @@ class SkillsScreen(Vertical):
             self._set_detail(
                 "_No skills yet._  Author one with **Add skill**, or ask the "
                 "Leader to create one in the LEADER tab.")
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "controls-search":
+            self._query = event.value.strip()
+            self._refresh()
+
+    def _set_counts(self, shown: int) -> None:
+        try:
+            label = f"{shown} skills" + (" (filtered)" if self._query else "")
+            self.query_one(ControlsRow).set_counts(label)
+        except Exception:
+            pass
 
     # ── Detail pane ─────────────────────────────────────────────────────────
 
