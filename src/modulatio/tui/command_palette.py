@@ -75,7 +75,7 @@ class ModulatioCommands(Provider):
             from textual.widgets import TabbedContent
             try:
                 # Scope to the top-level tab container: the composed tree
-                # holds several TabbedContent widgets (#console-streams,
+                # holds several TabbedContent widgets (#app-tabs,
                 # #config-flip), so a bare query_one(TabbedContent) raises
                 # TooManyMatches and silently no-ops. Mirror app.py's
                 # switch_tab side-effect, which targets #app-tabs.

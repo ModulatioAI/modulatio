@@ -363,19 +363,25 @@ async def test_f8_stop_job_signals_abort_on_running_orch(project_with_roster):
 
 
 async def test_flip_stream_toggles_lanes(project_with_roster):
-    """F2 / flip_stream toggles the active LEADER↔TEAM tab."""
-    from textual.widgets import TabbedContent
-
+    """F4 / flip_stream toggles the active view LEADER↔MOD SQUAD — the body
+    swaps and the LEADER-only composer hides on the floor."""
     from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        inner = app.query_one("#console-streams", TabbedContent)
-        assert inner.active == "stream-leader-pane"
+        screen = app.query_one(PromptScreen)
+        assert screen.view == "leader"
+        assert screen.query_one("#leader-view").display
+        assert not screen.query_one("#team-view").display
+        assert screen.query_one("#input-box").display      # composer on LEADER
         app.action_flip_stream()
         await pilot.pause()
-        assert inner.active == "stream-team-pane"
+        assert screen.view == "team"
+        assert screen.query_one("#team-view").display
+        assert not screen.query_one("#leader-view").display
+        assert not screen.query_one("#input-box").display  # hidden on the floor
 
 
 # ─── Agents shown by user-given name, never raw id ──────────────────────────
@@ -418,21 +424,25 @@ async def test_console_shape_leader_chat_and_team_rail(project_with_roster):
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.query_one(PromptScreen)
-        leader_pane = screen.query_one("#stream-leader-pane")
-        team_pane = screen.query_one("#stream-team-pane")
-        # LEADER: chat composer + the two attach chips; no SEND button
-        assert leader_pane.query("#prompt-input")
-        assert leader_pane.query("#chat-attach-doc-btn")
-        assert leader_pane.query("#chat-attach-image-btn")
+        leader_view = screen.query_one("#leader-view")
+        team_view = screen.query_one("#team-view")
+        # mockup chrome: brand header + flip indicator
+        assert screen.query("#console-header")
+        assert screen.query("#flip-tab")
+        # LEADER: the full-width stream; the composer + attach chips live below
+        # the body (not inside the view); no SEND button
+        assert leader_view.query("#stream-leader")
+        assert screen.query("#prompt-input")
+        assert screen.query("#chat-attach-doc-btn")
+        assert screen.query("#chat-attach-image-btn")
         assert not screen.query("#chat-send")
         # the kickoff box is gone entirely
         assert not screen.query("#kickoff-box")
         assert not screen.query("#kickoff-objective")
-        # MOD SQUAD: the telemetry rail + the floor TV, and no composer
-        assert team_pane.query("#team-rail")
-        assert team_pane.query("#rail-producers")
-        assert team_pane.query("#stream-team")
-        assert not team_pane.query("#prompt-input")
+        # MOD SQUAD: the telemetry rail + the floor TV
+        assert team_view.query("#team-rail")
+        assert team_view.query("#rail-producers")
+        assert team_view.query("#stream-team")
 
 
 async def test_kickoff_job_rides_the_chatbox_attachments(
@@ -566,8 +576,6 @@ async def test_send_posts_message_and_does_not_kickoff(project_with_roster):
 async def test_oneshot_kickoff_end_launches_a_job(project_with_roster):
     """A `/kickoff <objective> /end` message launches a job (the only way a job
     starts) and flips the view to the TEAM floor."""
-    from textual.widgets import TabbedContent
-
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.screens.prompt import PromptScreen
     from modulatio.tui.widgets.chat_input import ChatInput
@@ -582,10 +590,7 @@ async def test_oneshot_kickoff_end_launches_a_job(project_with_roster):
         screen._send_message()
         await pilot.pause()
         assert app.last_summary_text.startswith(("Running", "Completed"))
-        assert (
-            app.query_one("#console-streams", TabbedContent).active
-            == "stream-team-pane"
-        )
+        assert screen.view == "team"   # launching flips to the floor
 
 
 async def test_bare_kickoff_starts_capture_not_a_job(project_with_roster):
