@@ -24,10 +24,11 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Input, Static
 
 from modulatio import logstore
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
+from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.send_log_modal import SendLogModal
 
@@ -58,13 +59,23 @@ class LogsScreen(Vertical):
         super().__init__(*args, **kwargs)
         self._by_id: dict[str, logstore.LogEntry] = {}
         self._selected_id: str | None = None
+        self._query: str = ""
 
     def compose(self) -> ComposeResult:
         with MasterDetail():
             with Vertical(id="md-list"):
+                yield ControlsRow(
+                    counts=True, search=True, search_placeholder="/ search logs…"
+                )
                 table = DataTable(id="logs-table", cursor_type="row")
                 table.add_columns("Kind", "When", "Summary", "Sent")
                 yield table
+                yield Static(
+                    "↑↓ move · type to search · s send to the team · "
+                    "d delete · r refresh",
+                    id="logs-affordance",
+                    classes="affordance",
+                )
             with VerticalScroll(id="md-detail"):
                 yield Static("Select a log to preview.", id="log-preview-text")
 
@@ -79,7 +90,12 @@ class LogsScreen(Vertical):
         table = self.query_one("#logs-table", DataTable)
         table.clear()
         self._by_id = {}
+        q = self._query.lower()
+        unsent = 0
         for e in logstore.list_logs():
+            # Client-side search: match the visible row text (label / summary).
+            if q and q not in f"{e.label} {e.summary}".lower():
+                continue
             self._by_id[e.id] = e
             glyph = _KIND_GLYPH.get(e.kind, "·")
             table.add_row(
@@ -87,6 +103,9 @@ class LogsScreen(Vertical):
                 _fmt_ts(e.timestamp), e.summary[:60],
                 Text("sent ✓") if e.sent else Text("—"), key=e.id,
             )
+            if not e.sent:
+                unsent += 1
+        self._set_counts(table.row_count, unsent)
         if table.row_count > 0:
             first = list(table.rows.keys())[0].value
             if first:
@@ -100,6 +119,20 @@ class LogsScreen(Vertical):
 
     def action_refresh(self) -> None:
         self.refresh_logs()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "controls-search":
+            self._query = event.value.strip()
+            self.refresh_logs()
+
+    def _set_counts(self, shown: int, unsent: int) -> None:
+        try:
+            label = f"{shown} logs · {unsent} unsent" + (
+                " (filtered)" if self._query else ""
+            )
+            self.query_one(ControlsRow).set_counts(label)
+        except Exception:
+            pass
 
     def action_send(self) -> None:
         entry = self._by_id.get(self._selected_id or "")
