@@ -305,6 +305,10 @@ def export_backup(
 def delete_project(code: str) -> Path:
     """Remove a project's folder, backing it up first.
 
+    Create-side sibling: ``roster.create_project``. Project lifecycle is split
+    by bundled side-effect — folder in ``vault.init_project``, create+seed in
+    ``roster.create_project``, backup+remove here.
+
     Refuses anything the public ``vault.list_projects`` doesn't list (valid
     code + seed markers, no symlinks), so a stray folder or a path outside the
     vault can never be removed. Writes a share-safe ``.modulatio`` snapshot of the

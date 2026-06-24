@@ -145,7 +145,7 @@ class ProjectsScreen(Vertical):
         self.app.push_screen(NewProjectModal(), self._on_new_project)
 
     def _on_new_project(self, result: tuple[str, str] | None) -> None:
-        if not result:
+        if result is None:
             return
         code, objective = result
         try:
@@ -155,6 +155,11 @@ class ProjectsScreen(Vertical):
             return
         except ValueError as exc:
             self.notify(f"Invalid folder name: {exc}", severity="error")
+            return
+        except Exception as exc:  # noqa: BLE001 — surface any failure, never strand the screen
+            self.notify(
+                f"Couldn't create '{code}': {type(exc).__name__}: {exc}", severity="error"
+            )
             return
         self.notify(f"Created project '{code}'.", severity="information")
         self._refresh()

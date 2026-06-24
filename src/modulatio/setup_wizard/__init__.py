@@ -205,17 +205,10 @@ def _auto_launch_tui(state: dict) -> None:
     objective = state.get("first_project_objective", "")
     from modulatio import roster, vault
 
-    vault.init_project(code, code, objective, exist_ok=True)
-    defaults_models = config.get_default_models()
-    roster.seed_default_roster(
-        code,
-        leader_model=defaults_models.get("leader"),
-        # accepted-but-unused (no coordinator agent); planner-with-legacy
-        # fallback so a future reader doesn't suspect a stale-key leak.
-        coordinator_model=defaults_models.get("planner") or defaults_models.get("coordinator"),
-        producer_model=defaults_models.get("producer") or defaults_models.get("specialist"),
-        qc_model=defaults_models.get("qc"),
-    )
+    # Same init+seed-with-defaults pair as the PROJECTS-tab [New] button —
+    # routed through the one helper. exist_ok=True: the wizard is idempotent
+    # on a pre-existing first project (the modal path refuses-on-existing).
+    roster.create_project(code, objective, exist_ok=True)
     theme.success(f"Initialized project '{code}' at {vault.project_dir(code)}")
     print()
     theme.info("Launching Modulatio TUI...")

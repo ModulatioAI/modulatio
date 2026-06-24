@@ -176,3 +176,43 @@ async def test_new_action_drives_modal_to_create(isolated):
         await pilot.pause()
         assert "wired" in vault.list_projects()
         assert "via the modal" in (vault.project_dir("wired") / "index.md").read_text()
+
+
+async def test_new_project_unexpected_error_is_caught(isolated, monkeypatch):
+    """An unexpected create failure (OSError / permission / malformed config)
+    is caught and notified, never crashes the screen with a raw traceback."""
+    from modulatio import roster
+    from modulatio.tui.screens.projects import ProjectsScreen
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(roster, "create_project", boom)
+    app = ModulatioApp(project_code="alpha", stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(ProjectsScreen)
+        screen._on_new_project(("newp", ""))  # must not raise
+        await pilot.pause()
+        assert "newp" not in vault.list_projects()
+
+
+async def test_n_keybinding_opens_new_modal(isolated):
+    """The 'n' key (binding wiring) on the focused projects table opens the
+    New modal — the wiring test only covers the button path."""
+    from textual.widgets import DataTable
+    from textual.widgets import TabbedContent
+
+    from modulatio.tui.screens.projects import NewProjectModal, ProjectsScreen
+
+    app = ModulatioApp(project_code="alpha", stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#app-tabs", TabbedContent).active = "tab-config"
+        app.query_one("#config-flip", TabbedContent).active = "config-projects"
+        await pilot.pause()
+        app.query_one(ProjectsScreen).query_one("#projects-table", DataTable).focus()
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause()
+        assert isinstance(app.screen, NewProjectModal)

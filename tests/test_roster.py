@@ -558,3 +558,73 @@ def test_create_project_rejects_invalid_code(tmp_path, monkeypatch):
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
     with pytest.raises(ValueError):
         roster.create_project("../etc")
+
+
+def test_create_project_rolls_back_on_seed_failure(tmp_path, monkeypatch):
+    """If seeding fails after the folder is made, the half-made project is
+    rolled back — never stranded in list_projects with no team (which would
+    block a retry with FileExistsError)."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+
+    def boom(*a, **k):
+        raise OSError("seed failed")
+
+    monkeypatch.setattr(roster, "seed_default_roster", boom)
+    with pytest.raises(OSError):
+        roster.create_project("halfmade")
+    assert "halfmade" not in vault.list_projects()
+    assert not vault.project_dir("halfmade").exists()
+    # and a retry ACTUALLY succeeds now (no stranded folder blocking it)
+    monkeypatch.setattr(roster, "seed_default_roster", lambda *a, **k: [])
+    roster.create_project("halfmade")
+    assert "halfmade" in vault.list_projects()
+
+
+def test_create_project_rejects_traversal_agent_id_in_template(tmp_path, monkeypatch):
+    """A team_template agent id with path traversal must NOT write a file
+    outside the project's agents/ dir during create seeding — the create path
+    turns config into a write primitive otherwise."""
+    from pydantic import ValidationError
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    config.save_team_template([
+        {"id": "../../../outside_probe", "name": "outside", "identity": "x"},
+    ])
+    config.reload()
+    with pytest.raises((ValueError, ValidationError)):
+        roster.create_project("probe", "objective")
+    # nothing written outside the project anywhere under tmp_path
+    assert list(tmp_path.glob("**/outside_probe.md")) == []
+
+
+def test_create_project_exist_ok_reuses_without_rollback(tmp_path, monkeypatch):
+    """exist_ok=True reuses an existing folder (idempotent seed). If seeding
+    then fails, a PRE-EXISTING project must NOT be rolled back — only a
+    net-new folder this call created is."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    # pre-existing project with real content
+    root = vault.init_project("keep", "Keep", "x")
+    (root / "index.md").write_text("PRECIOUS", encoding="utf-8")
+
+    def boom(*a, **k):
+        raise OSError("seed failed")
+
+    monkeypatch.setattr(roster, "seed_default_roster", boom)
+    with pytest.raises(OSError):
+        roster.create_project("keep", exist_ok=True)
+    # the pre-existing folder + its content survive (no rollback)
+    assert root.exists()
+    assert "PRECIOUS" in (root / "index.md").read_text()
+
+
+def test_save_rejects_model_copy_id_bypass(tmp_path, monkeypatch):
+    """model_copy bypasses the Agent.id field validator; save() must still
+    refuse a traversal id at the filesystem-write boundary, no matter how the
+    Agent instance was produced."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("cp", "Cp", "x")
+    agent = roster.Agent(id="safe", name="safe")
+    escaped = agent.model_copy(update={"id": "../../../copy_escape"})
+    with pytest.raises(ValueError):
+        roster.save(escaped, "cp")
+    assert list(tmp_path.glob("**/copy_escape.md")) == []

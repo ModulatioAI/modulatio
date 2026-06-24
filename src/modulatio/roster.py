@@ -28,7 +28,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
 
 from modulatio import config
-from modulatio.vault import project_dir
+from modulatio.vault import project_dir, validate_registry_name
 
 _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
@@ -234,6 +234,7 @@ def load(agent_id: str, project_code: str) -> Agent | None:
     else ``None``. Missing agent is not an error at the loader level —
     the caller (Leader skill-gap detection in slice #6b) decides what
     to do with absence."""
+    validate_registry_name(agent_id)  # raw id → path; block traversal reads
     path = project_dir(project_code) / "agents" / f"{agent_id}.md"
     if not path.exists():
         return None
@@ -258,6 +259,11 @@ def save(agent: Agent, project_code: str) -> Path:
 
     Creates ``<project>/agents/`` if needed. Returns the written path.
     """
+    # The write boundary: agent.id becomes the file stem. Validate here so a
+    # traversal id can't escape the agents dir no matter how the Agent was
+    # produced — including model_copy(update={"id": ...}), which bypasses the
+    # field validators.
+    validate_registry_name(agent.id)
     root = project_dir(project_code) / "agents"
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{agent.id}.md"
@@ -407,6 +413,7 @@ def add_agent(
     Idempotency: raises ``FileExistsError`` if an agent with ``agent_id``
     already lives under the project. Wizards validate before calling.
     """
+    validate_registry_name(agent_id)  # raw id → path; block traversal before the stat
     agents_dir = project_dir(project_code) / "agents"
     target = agents_dir / f"{agent_id}.md"
     if target.exists():
@@ -559,27 +566,44 @@ def seed_default_roster(
     )
 
 
-def create_project(code: str, objective: str = "") -> Path:
-    """Create a new project folder AND seed it with the install team, so a
-    fresh project is immediately ready to work in — the same
-    ``init_project`` + ``seed_default_roster`` pair the setup wizard and
-    ``modulatio kickoff`` use (when a team template exists its per-agent
-    picks win; the model kwargs below only feed the no-template fallback).
-    The display name is the code. Raises ``ValueError`` on an invalid code
-    and ``FileExistsError`` if the project already exists. Returns the
-    project dir.
+def create_project(code: str, objective: str = "", *, exist_ok: bool = False) -> Path:
+    """Create a project folder AND seed it with the install team, so a fresh
+    project is immediately ready to work in — bundling ``init_project`` +
+    ``seed_default_roster`` (when a team template exists its per-agent picks
+    win; the model kwargs below only feed the no-template fallback). The
+    setup wizard and the PROJECTS-tab [New] button both route through here;
+    the CLI ``kickoff``/stub paths pass caller-supplied models and stay
+    separate. Sibling lifecycle ops live where their bundled side-effect
+    demands: ``vault.init_project`` (folder), ``backup.delete_project``
+    (backup + remove).
+
+    The display name is the code. Raises ``ValueError`` on an invalid code,
+    and ``FileExistsError`` if the project exists and ``exist_ok`` is False;
+    ``exist_ok=True`` reuses an existing folder (idempotent seed). If seeding
+    fails after a NET-NEW folder is created, it's rolled back so a half-made
+    project can't strand in ``list_projects`` — a pre-existing folder reused
+    under ``exist_ok`` is never rolled back. Returns the project dir.
     """
+    import shutil
+
     from modulatio import vault
 
-    root = vault.init_project(code, code, objective, exist_ok=False)
-    models = config.get_default_models()
-    seed_default_roster(
-        code,
-        leader_model=models.get("leader"),
-        coordinator_model=models.get("planner") or models.get("coordinator"),
-        producer_model=models.get("producer") or models.get("specialist"),
-        qc_model=models.get("qc"),
-    )
+    pre_existed = vault.project_dir(code).exists()  # also validates the code
+    root = vault.init_project(code, code, objective, exist_ok=exist_ok)
+    seeded = False
+    try:
+        models = config.get_default_models()
+        seed_default_roster(
+            code,
+            leader_model=models.get("leader"),
+            coordinator_model=models.get("planner") or models.get("coordinator"),
+            producer_model=models.get("producer") or models.get("specialist"),
+            qc_model=models.get("qc"),
+        )
+        seeded = True
+    finally:
+        if not seeded and not pre_existed:
+            shutil.rmtree(root, ignore_errors=True)
     return root
 
 
@@ -648,6 +672,9 @@ def _seed_from_team_template(
         agent_id = entry.get("id")
         if not agent_id:
             continue
+        # Untrusted template id becomes a path below — validate before any
+        # stat/read/write so a traversal id can't escape the agents dir.
+        validate_registry_name(agent_id)
         target = agents_dir / f"{agent_id}.md"
         if target.exists():
             written.append(_parse_file(target))
