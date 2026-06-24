@@ -2,7 +2,7 @@
 """Regression: the Attach-failed status Static in prompt.py must not raise
 MarkupError on unescaped exception text (preship, prompt.py:234).
 
-``attach_kickoff`` / ``attach_chat`` render a failure message into the
+``attach_chat`` / ``attach_chat`` render a failure message into the
 ``#prompt-response`` Static with markup enabled. A ``FileNotFoundError`` /
 ``UnicodeDecodeError`` carries the offending path, which may contain ``[..]``
 bracket sequences (a user-chosen filename). Interpolating that raw into the
@@ -52,16 +52,13 @@ def test_attach_failed_message_with_bracket_exception_does_not_crash():
 
 
 def test_prompt_screen_source_escapes_attach_failed_status():
-    """Belt-and-suspenders: both attach paths in the screen module escape the
-    dynamic exception text before updating the markup-enabled Static."""
+    """Belt-and-suspenders: the chat attach path escapes the dynamic exception
+    text before updating the markup-enabled Static."""
     import inspect
 
     from modulatio.tui.screens import prompt
 
-    kickoff = inspect.getsource(prompt.PromptScreen.attach_kickoff)
     chat = inspect.getsource(prompt.PromptScreen.attach_chat)
-    assert "escape(str(exc))" in kickoff
     assert "escape(str(exc))" in chat
-    # the raw, unescaped interpolation must be gone from both
-    assert "Attach failed:[/] {exc}" not in kickoff
+    # the raw, unescaped interpolation must be gone
     assert "Attach failed:[/] {exc}" not in chat

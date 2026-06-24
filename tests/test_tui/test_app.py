@@ -115,36 +115,28 @@ async def test_other_tabs_render_placeholders_without_crashing(tui_vault):
 # ─── Prompt tab: input + kickoff produce a completion ───────────────────────
 
 
-async def test_prompt_tab_has_input_and_kickoff_button(tui_vault):
-    """Input widget + kickoff button are the core Prompt-tab affordances."""
-    from textual.widgets import Button
-
+async def test_prompt_tab_has_chat_input(tui_vault):
+    """The chat composer is the core Console affordance (jobs launch from it via
+    /kickoff … /end; there is no separate kickoff button)."""
     from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.chat_input import ChatInput
 
     app = ModulatioApp(project_code="TST", stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        from textual.widgets import TextArea
-        assert app.query_one("#prompt-input", TextArea) is not None
-        assert app.query_one("#prompt-kickoff", Button) is not None
+        assert app.query_one("#prompt-input", ChatInput) is not None
+        assert not app.query("#prompt-kickoff")  # the kickoff button is gone
 
 
 async def test_stub_kickoff_updates_response_text(tui_vault):
-    """Happy path: type objective → click kickoff → app's
+    """Happy path: launch a job (the /kickoff path → _run_kickoff) → app's
     ``last_summary_text`` reflects the stub run result."""
-    from textual.widgets import TabbedContent, TextArea
-
     from modulatio.tui.app import ModulatioApp
 
     app = ModulatioApp(project_code="TST", stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        # KICK OFF lives on the TEAM floor now — flip there, drop the objective.
-        app.query_one("#console-streams", TabbedContent).active = "stream-team-pane"
-        await pilot.pause()
-        inp = app.query_one("#kickoff-objective", TextArea)
-        inp.text = "Write a stub note on memory gardens"
-        await pilot.click("#prompt-kickoff")
+        app._run_kickoff("Write a stub note on memory gardens")
         kickoff_workers = [w for w in app.workers if w.group == "kickoff"]
         await app.workers.wait_for_complete(kickoff_workers)
         await pilot.pause()
@@ -189,19 +181,14 @@ async def test_refresh_all_tabs_invokes_panel_on_show(tui_vault):
 
 
 async def test_empty_objective_does_not_run_kickoff(tui_vault):
-    """Empty input shouldn't silently kick off a no-op run — surface
-    a nudge to the user instead."""
-    from textual.widgets import TabbedContent
-
+    """An empty objective shouldn't silently kick off a no-op run — surface
+    a nudge instead."""
     from modulatio.tui.app import ModulatioApp
 
     app = ModulatioApp(project_code="TST", stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.query_one("#console-streams", TabbedContent).active = "stream-team-pane"
-        await pilot.pause()
-        # Objective box left blank.
-        await pilot.click("#prompt-kickoff")
+        app._run_kickoff("")   # empty objective
         await pilot.pause()
 
     # No kickoff fired.

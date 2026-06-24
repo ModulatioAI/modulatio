@@ -1,12 +1,12 @@
-"""Tests for the Console tab — job-drop bar + LEADER/TEAM streams.
+"""Tests for the Console tab — LEADER chat + MOD SQUAD floor.
 
-The conversation-first overhaul retired the per-agent chat grid (we no
-longer chat with producers/QC). What remains on this screen:
-  - the kickoff bar (job-drop): ``#prompt-input`` / ``#prompt-kickoff``
-    + the attachment surface (preserved ids so app.py's handler works);
+The conversation-first overhaul retired the per-agent chat grid. What remains:
+  - LEADER: the Leader's stream + a chatbox (``#prompt-input`` + attach chips,
+    no SEND button). Jobs launch from here via ``/kickoff … /end``.
+  - MOD SQUAD: the run-telemetry rail (``#team-rail``) + the floor TV — no
+    input (the kickoff box was removed).
   - two ``StreamView`` lanes — LEADER (leader/planner) and TEAM
-    (drafter/qc/researcher) — fed from the shared activity feed, showing
-    agents by their user-given name.
+    (drafter/qc/researcher) — fed from the shared activity feed.
 """
 from __future__ import annotations
 
@@ -404,144 +404,13 @@ async def test_agent_name_resolves_user_given_name(project_with_roster):
 # ─── Kickoff bar (job-drop) — preserved ─────────────────────────────────────
 
 
-async def test_kickoff_attach_adds_document_to_screen_list(
-    project_with_roster, tmp_path,
-):
-    """The kickoff bar's attach surface stages a document for the run."""
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.screens.prompt import PromptScreen
-
-    spec = tmp_path / "spec.md"
-    spec.write_text("Spec content.")
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        screen = app.query_one(PromptScreen)
-        screen.attach_kickoff(spec, kind="document")
-        await pilot.pause()
-        assert len(screen.kickoff_attachments) == 1
-        assert screen.kickoff_attachments[0].name == "spec.md"
+# ─── Console shape: LEADER chat (no kickoff box) + MOD SQUAD rail ────────────
 
 
-async def test_kickoff_attach_doc_button_pushes_modal(project_with_roster):
-    """Clicking the kickoff bar's 'Attach Doc' button pushes an
-    AttachPathModal with kind='document'."""
-    from textual.widgets import Button
-
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.attach_modal import AttachPathModal
-
-    pushed: list = []
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        original_push = app.push_screen
-        def fake_push(screen, callback=None):
-            pushed.append(screen)
-            return None
-        app.push_screen = fake_push  # type: ignore[method-assign]
-        try:
-            btn = app.query_one("#kickoff-attach-doc-btn", Button)
-            btn.action_press()
-            await pilot.pause()
-        finally:
-            app.push_screen = original_push  # type: ignore[method-assign]
-
-    assert len(pushed) == 1
-    assert isinstance(pushed[0], AttachPathModal)
-    assert pushed[0]._kind == "document"
-
-
-async def test_kickoff_attach_image_button_pushes_modal(project_with_roster):
-    """Symmetric: 'Attach Image' button pushes a modal scoped to image."""
-    from textual.widgets import Button
-
-    from modulatio.tui.app import ModulatioApp
-
-    pushed: list = []
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        original_push = app.push_screen
-        def fake_push(screen, callback=None):
-            pushed.append(screen)
-            return None
-        app.push_screen = fake_push  # type: ignore[method-assign]
-        try:
-            btn = app.query_one("#kickoff-attach-image-btn", Button)
-            btn.action_press()
-            await pilot.pause()
-        finally:
-            app.push_screen = original_push  # type: ignore[method-assign]
-
-    assert len(pushed) == 1
-    assert pushed[0]._kind == "image"
-
-
-async def test_kickoff_attach_failure_writes_error(
-    project_with_roster, tmp_path,
-):
-    """A missing path doesn't crash the screen; the kickoff list stays empty."""
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.screens.prompt import PromptScreen
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        screen = app.query_one(PromptScreen)
-        screen.attach_kickoff(tmp_path / "missing.md", kind="document")
-        await pilot.pause()
-        assert screen.kickoff_attachments == []
-
-
-async def test_kickoff_attachment_panel_displays_filenames(
-    project_with_roster, tmp_path,
-):
-    """When attachments are pending, the kickoff bar shows their filenames."""
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.screens.prompt import PromptScreen
-
-    spec = tmp_path / "spec.md"
-    spec.write_text("x")
-    img = tmp_path / "wireframe.png"
-    img.write_bytes(b"\x89PNG\r\n\x1a\n")
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        screen = app.query_one(PromptScreen)
-        screen.attach_kickoff(spec, kind="document")
-        screen.attach_kickoff(img, kind="image")
-        await pilot.pause()
-
-        summary = screen.kickoff_attachments_summary
-        assert "spec.md" in summary
-        assert "wireframe.png" in summary
-
-
-async def test_kickoff_input_and_button_still_present(project_with_roster):
-    """app.py's kickoff flow queries #prompt-input + #prompt-kickoff —
-    the Console must keep these ids at the top so the existing
-    on_button_pressed handler doesn't break."""
-    from textual.widgets import Button, TextArea
-
-    from modulatio.tui.app import ModulatioApp
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.query_one("#prompt-input", TextArea)
-        app.query_one("#prompt-kickoff", Button)
-
-
-# ─── Reshape: chatbox lives on LEADER, factory floor is chatbox-free ─────────
-
-
-async def test_chat_on_leader_kickoff_on_team(project_with_roster):
-    """Split by function: the conversation chatbox (#prompt-input) lives in the
-    LEADER pane; the KICK OFF box (#kickoff-objective) lives in the TEAM pane.
-    Neither bleeds into the other tab."""
+async def test_console_shape_leader_chat_and_team_rail(project_with_roster):
+    """LEADER = conversation (chat input + attach chips, no SEND button, no
+    kickoff box); MOD SQUAD = the run-telemetry rail + the floor TV, no input.
+    Jobs launch from the LEADER chat (`/kickoff … /end`)."""
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.screens.prompt import PromptScreen
 
@@ -551,12 +420,48 @@ async def test_chat_on_leader_kickoff_on_team(project_with_roster):
         screen = app.query_one(PromptScreen)
         leader_pane = screen.query_one("#stream-leader-pane")
         team_pane = screen.query_one("#stream-team-pane")
-        # the conversation box is on LEADER, never on the floor
+        # LEADER: chat composer + the two attach chips; no SEND button
         assert leader_pane.query("#prompt-input")
+        assert leader_pane.query("#chat-attach-doc-btn")
+        assert leader_pane.query("#chat-attach-image-btn")
+        assert not screen.query("#chat-send")
+        # the kickoff box is gone entirely
+        assert not screen.query("#kickoff-box")
+        assert not screen.query("#kickoff-objective")
+        # MOD SQUAD: the telemetry rail + the floor TV, and no composer
+        assert team_pane.query("#team-rail")
+        assert team_pane.query("#rail-producers")
+        assert team_pane.query("#stream-team")
         assert not team_pane.query("#prompt-input")
-        # the job-drop is on TEAM, never beside the chat
-        assert team_pane.query("#kickoff-objective")
-        assert not leader_pane.query("#kickoff-objective")
+
+
+async def test_kickoff_job_rides_the_chatbox_attachments(
+    project_with_roster, tmp_path, monkeypatch,
+):
+    """A /kickoff … /end job carries whatever's staged on the LEADER chatbox —
+    _run_kickoff snapshots + clears the chat attachments."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("the brief")
+    captured: dict = {}
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        screen.attach_chat(spec, kind="document")
+        assert len(screen.chatbox_attachments) == 1
+        # capture what _run_kickoff ships, without launching a real worker
+        monkeypatch.setattr(
+            app, "_kickoff_worker",
+            lambda project, runners, objective, mode, attachments:
+                captured.update(objective=objective, attachments=attachments))
+        app._run_kickoff("write the haiku")
+        await pilot.pause()
+        assert captured["objective"] == "write the haiku"
+        assert [a.name for a in captured["attachments"]] == ["spec.md"]
+        assert screen.chatbox_attachments == []  # cleared for the next run
 
 
 # ─── Indicator bulbs ────────────────────────────────────────────────────────
@@ -832,42 +737,6 @@ async def test_copied_snippet_pastes_into_the_chatbox(project_with_roster):
         assert inp.text == "quote me on this"
 
 
-async def test_f5_action_launches_kickoff(project_with_roster):
-    """F5 (action_kickoff) deliberately launches a job from the TEAM KICK OFF
-    box text — reads #kickoff-objective regardless of the active tab."""
-    from textual.widgets import TextArea
-
-    from modulatio.tui.app import ModulatioApp
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.query_one("#kickoff-objective", TextArea).text = "Write a haiku."
-        app.action_kickoff()
-        await pilot.pause()
-        assert app.last_summary_text.startswith(("Running", "Completed"))
-
-
-async def test_kickoff_separated_from_send_by_tab(project_with_roster):
-    """SEND lives on the LEADER chatbox; KICK OFF lives on the TEAM floor —
-    different tabs entirely, so a job launch can't be fat-fingered beside send."""
-    from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.screens.prompt import PromptScreen
-
-    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        screen = app.query_one(PromptScreen)
-        leader_pane = screen.query_one("#stream-leader-pane")
-        team_pane = screen.query_one("#stream-team-pane")
-        # SEND on LEADER, not on the floor
-        assert leader_pane.query("#chat-send")
-        assert not team_pane.query("#chat-send")
-        # KICK OFF on TEAM, not beside the chat
-        assert team_pane.query("#prompt-kickoff")
-        assert not leader_pane.query("#prompt-kickoff")
-
-
 # ─── Live status lines + quit safety ────────────────────────────────────────
 
 
@@ -1087,3 +956,55 @@ async def test_tickets_lamp_clears_on_opening_tickets_tab(project_with_roster):
         app.query_one("#app-tabs", TabbedContent).active = "tab-tickets"
         await pilot.pause()
         assert "tickets" not in row._attention
+
+
+# ─── Transactional launch + trailing /end (Wild Bill cadre BLOCK, 2026-06-24) ─
+
+
+async def test_rejected_launch_keeps_capture_and_reports_in_chat(project_with_roster):
+    """A /kickoff … /end that _run_kickoff REFUSES (e.g. a job already running)
+    must not falsely claim 'On it' + lose the captured brief: the capture is
+    kept (so /end can retry) and the refusal is surfaced in the LEADER stream."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        inp = screen.query_one("#prompt-input", ChatInput)
+        app._kickoff_tick = object()  # pretend a job is already running
+        inp.text = "/kickoff second job /end"
+        screen._send_message()
+        await pilot.pause()
+        # the captured brief survives (job not lost) for a retry after F8
+        assert screen._kickoff_capture == ["second job"]
+        # the refusal shows in the conversation, not just last_summary_text
+        leader = app.query_one("#stream-leader").last_leader_text
+        assert "already running" in leader or "couldn't launch" in leader.lower()
+
+
+async def test_trailing_end_in_multi_message_capture_launches(
+    project_with_roster, monkeypatch,
+):
+    """A trailing `/end` on the last captured line launches the job with the
+    sentinel stripped — same parse as the one-shot path."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    launched: list = []
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "_run_kickoff",
+                            lambda obj: launched.append(obj) or True)
+        screen = app.query_one(PromptScreen)
+        inp = screen.query_one("#prompt-input", ChatInput)
+        for line in ("/kickoff", "first line", "final line /end"):
+            inp.text = line
+            screen._send_message()
+            await pilot.pause()
+        assert screen._kickoff_capture is None       # launched, capture closed
+        assert launched == ["first line\nfinal line"]  # /end stripped, no literal
