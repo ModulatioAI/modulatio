@@ -45,7 +45,22 @@ def _agent_dir(agent_id: str, project_code: str) -> Path:
     # H1 invariant (mirror skills/standards/job-templates): agent_id becomes a
     # path component, so a separator / '..' / leading dot must never escape the
     # project's memory/ root. Fail-closed — the persistence layer binds it.
-    d = project_dir(project_code) / "memory" / validate_registry_name(agent_id)
+    base = project_dir(project_code) / "memory"
+    d = base / validate_registry_name(agent_id)
+    # The name is validated, but a pre-planted SYMLINK at the agent dir (or a
+    # symlinked memory/ root) would still be followed by mkdir(exist_ok=True)
+    # and the subsequent writes — an escape. Refuse a symlinked dir and
+    # bounds-check the resolved path stays under memory/ (mirror vault.run_dir's
+    # belt-and-suspenders) so reads/writes never leave the project.
+    if d.is_symlink():
+        raise ValueError(
+            f"agent memory dir {agent_id!r} is a symlink — refusing to follow it")
+    try:
+        d.resolve(strict=False).relative_to(base.resolve(strict=False))
+    except ValueError as exc:
+        raise ValueError(
+            f"agent memory dir {agent_id!r} escapes the project memory root"
+        ) from exc
     d.mkdir(parents=True, exist_ok=True)
     return d
 

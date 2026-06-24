@@ -231,3 +231,49 @@ def test_export_markdown_does_not_bump_access_count():
     # (unlike get_episodic, which bumps access_count on read).
     raw = json.loads(_episodic_path("alice", PROJECT_CODE).read_text())
     assert raw[0]["access_count"] == 0
+
+
+# === symlink-escape refusal (Wild Bill cadre BLOCK, 2026-06-24) =============
+
+
+def _seed_outside(outside):
+    import json
+    outside.mkdir()
+    (outside / "semantic.json").write_text(json.dumps([{
+        "id": "victim", "content": "outside", "type": "finding",
+        "source": "promotion", "when": "now", "confidence": "high",
+        "scope": "project", "state": "active"}]))
+
+
+def test_symlinked_agent_dir_is_refused_on_update(tmp_path):
+    import pytest
+
+    from modulatio import vault
+    root = vault.project_dir(PROJECT_CODE)
+    outside = tmp_path / "outside_mem"
+    _seed_outside(outside)
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    (root / "memory" / "agentx").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(Exception):
+        agent_memory.update_entry("agentx", "victim", project_code=PROJECT_CODE,
+                                  layer="semantic", content="CHANGED")
+    import json
+    # the outside file is untouched — the symlink was never followed
+    assert json.loads((outside / "semantic.json").read_text())[0]["content"] == "outside"
+
+
+def test_symlinked_agent_dir_is_refused_on_delete(tmp_path):
+    import json
+
+    import pytest
+
+    from modulatio import vault
+    root = vault.project_dir(PROJECT_CODE)
+    outside = tmp_path / "outside_mem2"
+    _seed_outside(outside)
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    (root / "memory" / "agenty").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(Exception):
+        agent_memory.delete_entry("agenty", "victim", project_code=PROJECT_CODE,
+                                  layer="semantic")
+    assert json.loads((outside / "semantic.json").read_text())  # still there
