@@ -494,3 +494,51 @@ def test_rigorous_sourcing_skill_ships_for_producers():
     assert "http_get" in body              # fetch real sources
     assert "References" in body            # cite with a resolvable locator
     assert "fabricat" in body.lower()      # never fabricate
+
+
+# === delete_skill (Feng-Tui SKILLS overhaul) ================================
+
+
+def test_delete_skill_removes_a_shared_skill(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", tmp_path / "shared")
+    monkeypatch.setattr(skills, "_SEED_SKILLS_ROOT", tmp_path / "no-seed")
+    skills.create_skill(name="drafter", description="d", prompt_template="body")
+    assert "drafter" in skills.list_skills()
+    assert skills.delete_skill("drafter") is True
+    assert "drafter" not in skills.list_skills()
+
+
+def test_delete_skill_removes_a_project_skill(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", tmp_path / "shared")
+    monkeypatch.setattr(skills, "_SEED_SKILLS_ROOT", tmp_path / "no-seed")
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
+    vault.init_project("STA", "x", "obj")
+    skills.create_skill(name="local", description="d", prompt_template="b",
+                        project_code="STA")
+    assert skills.delete_skill("local", project_code="STA") is True
+    assert not (vault.project_dir("STA") / "skills" / "local.md").exists()
+
+
+def test_delete_skill_unknown_returns_false(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", tmp_path / "shared")
+    monkeypatch.setattr(skills, "_SEED_SKILLS_ROOT", tmp_path / "no-seed")
+    assert skills.delete_skill("ghost") is False
+
+
+def test_delete_skill_does_not_touch_seed_skills(tmp_path, monkeypatch):
+    """A bundled seed skill has no writable copy → delete is a no-op (False),
+    and the seed file survives."""
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "coding.md").write_text("---\nname: coding\n---\nseed body\n")
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", tmp_path / "shared")
+    monkeypatch.setattr(skills, "_SEED_SKILLS_ROOT", seed)
+    assert skills.delete_skill("coding") is False
+    assert (seed / "coding.md").exists()
+
+
+def test_delete_skill_rejects_path_traversal(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", tmp_path / "shared")
+    import pytest
+    with pytest.raises(Exception):
+        skills.delete_skill("../escape")

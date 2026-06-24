@@ -451,6 +451,29 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
     return path
 
 
+def delete_skill(name: str, project_code: str | None = None) -> bool:
+    """Delete a user/project skill by name. Returns True if a writable copy
+    existed and was removed, False otherwise.
+
+    Only touches the writable roots (shared ``_skills_root()`` or the project's
+    ``skills/`` dir) — bundled SEED skills live in ``_SEED_SKILLS_ROOT`` and are
+    never deletable here, so a codification can be removed but the seed it
+    derives from survives. The name is path-validated (no traversal) and a
+    symlinked skill file is refused rather than followed."""
+    validate_registry_name(name)  # H1: no path-traversal delete
+    if project_code is not None:
+        root = project_dir(project_code) / "skills"
+    else:
+        root = _skills_root()
+    path = root / f"{name}.md"
+    if path.is_symlink():
+        raise ValueError(f"skill {name!r} is a symlink — refusing to delete")
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+
+
 def create_skill(
     *,
     name: str,
@@ -510,4 +533,7 @@ def create_skill(
     return skill
 
 
-__all__ = ["Skill", "create_skill", "list_skills", "load", "load_with_metadata", "save"]
+__all__ = [
+    "Skill", "create_skill", "delete_skill", "list_skills", "load",
+    "load_with_metadata", "save",
+]
