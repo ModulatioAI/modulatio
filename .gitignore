@@ -1,7 +1,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.venv/
+# Any virtualenv-named dir (.venv, .venv-check, …) — never commit an env.
+.venv*/
 .env
 .env.*
 !.env.example
@@ -33,3 +34,7 @@ scripts/smoke/*/run.log
 
 # internal reviewer-session logs (hermes/lovecraft stdout) — never published
 scripts/smoke/security-audit/
+
+# stray Modulatio project vaults created in the repo dir during local testing
+newtest4/
+/New Test/

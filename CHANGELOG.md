@@ -4,6 +4,53 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8.0] — 2026-06-24
+
+The Feng-Tui interface, finished. The phosphor *theme* shipped in v0.9.3, but the
+*layouts* never did — the screens were the old composition wearing the new
+colours. This release implements the full layout overhaul across every screen,
+rebuilds the CONSOLE into a two-column command floor, and replaces the attach
+buttons with paste-to-attach. No engine changes; this is the interface catching
+up to the design.
+
+### Added
+
+- **The full Feng-Tui layout overhaul.** Every screen ported to its signed
+  layout: the list tabs (TICKETS, LOGS, JT LIBRARY, SKILLS, ARTIFACTS) share a
+  **controls row** with live `/ search`, counts, and per-pane affordance hints;
+  CONFIG·MODELS, CONFIG·AGENTS, and PROJECTS are **configurators** (a persistent
+  registry on the left, the add/edit steps swapping into a companion pane);
+  MEMORY is one **unified layered list** (episodic / semantic / team) with
+  add / edit / delete and Markdown export. Two net-new screens: **JOBS** (a
+  run-folder browser) and **DOCS** (an offline documentation reader).
+- **CONSOLE — a two-column command floor.** The MOD SQUAD view puts a
+  **run-telemetry rail** (the producer roster, live) beside the workers' stream;
+  the LEADER view is a full-width conversation with the Leader. Flip between them
+  with **F4**. A single app-level **status-lamp row** carries the run's state
+  (leader · mods · qc · running · tickets), and the leader/tickets lamps **blink
+  for attention** while you're watching the floor.
+- **Paste-to-attach.** In the CONSOLE composer, **Ctrl+V** a screenshot/image or
+  a copied file path and it rides with your next message — the keyboard-native
+  replacement for the old attach buttons. Pasted text still pastes as text.
+- **Composer ready on load.** The CONSOLE composer takes focus when it opens, so
+  you can type immediately — no click first.
+
+### Changed
+
+- **Jobs launch from the chat.** A job starts only from the LEADER chat by
+  bracketing it — `/kickoff <objective> /end` — instead of a separate kickoff
+  box. The launch is transactional: it commits only when accepted, and keeps
+  your brief (with the reason) if it's refused.
+- **TUI over SSH** — confirmed: `modulatio-tui` is a standard terminal app with
+  no local-display dependency, so it runs over an SSH login. (OS-clipboard and
+  external file/URL openers degrade gracefully when there's no local display.)
+
+### Fixed
+
+- **Switching projects refreshes the agent roster.** Agents are per-project;
+  after switching projects, revisiting the AGENTS tab now rebuilds from the new
+  project's roster instead of showing the previous one's.
+
 ## [0.9.7.0] — 2026-06-23
 
 Project management — switch between projects, create new ones, and delete old
