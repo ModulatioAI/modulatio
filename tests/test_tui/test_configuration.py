@@ -101,6 +101,46 @@ async def test_full_flow_provider_auth_model_registers(tmp_path, monkeypatch):
         assert any(p["model"] == "llama3.3:8b" for p in presets.values())
 
 
+async def test_registry_list_stays_mounted_during_the_add_flow(tmp_path, monkeypatch):
+    """Configurator archetype: the registry list (the doorway) persists while
+    the add flow runs in the companion — the old _swap() wiped the whole body,
+    so the model list vanished mid-flow. It must NOT vanish now."""
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "p.json")
+    app = _Host()
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        await pilot.click("#cfg-add")
+        await pilot.pause()
+        assert app.query("#cfg-pp")       # the flow opened in the companion
+        assert app.query("#cfg-models")   # …and the registry list is STILL there
+        await screen.on_provider_picker_provider_chosen(
+            ProviderPicker.ProviderChosen("openrouter"))
+        await pilot.pause()
+        assert app.query("#cfg-auth")
+        assert app.query("#cfg-models")   # still mounted a step deeper
+
+
+async def test_cancel_resets_accumulated_flow_state(tmp_path, monkeypatch):
+    """Jenny F3: cancelling a half-entered add flow clears every accumulated
+    wizard input, so it can't leak into the next flow."""
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "p.json")
+    app = _Host()
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        await pilot.click("#cfg-add")
+        await pilot.pause()
+        await screen.on_provider_picker_provider_chosen(
+            ProviderPicker.ProviderChosen("openrouter"))
+        await pilot.pause()
+        assert screen._provider_id == "openrouter"  # state accumulated
+        await pilot.click("#cfg-cancel")
+        await pilot.pause()
+        assert screen._provider_id is None           # …and wiped on cancel
+        assert screen._auth_type is None
+
+
 async def test_cancel_returns_to_the_list_mid_flow(tmp_path, monkeypatch):
     """Cancel at any add-model step bails back to the model list."""
     monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "p.json")

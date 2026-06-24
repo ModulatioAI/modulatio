@@ -27,6 +27,7 @@ from modulatio import provider_catalog as pc
 from modulatio import provider_keys
 from modulatio.tui.widgets.auth_step import AuthStep
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
+from modulatio.tui.widgets.configurator import Configurator
 from modulatio.tui.widgets.effort_picker import EffortPicker
 from modulatio.tui.widgets.model_picker import ModelPicker
 from modulatio.tui.widgets.provider_picker import ProviderPicker
@@ -39,13 +40,16 @@ class ConfigScreen(Vertical):
     ConfigScreen { padding: 1; }
     ConfigScreen .cfg-title { text-style: bold; color: $primary; }
     ConfigScreen .cfg-section { text-style: bold; color: $secondary; height: auto; }
-    ConfigScreen #cfg-body { height: 1fr; }
+    ConfigScreen Configurator { height: 1fr; }
     ConfigScreen #cfg-models { height: 2fr; border: round $frame-dim; }
     ConfigScreen #cfg-provlist, ConfigScreen #cfg-provkeylist,
     ConfigScreen #cfg-pinlist {
         height: 1fr; border: round $frame-dim;
     }
-    ConfigScreen #cfg-status { color: $text-muted; height: auto; }
+    ConfigScreen #cfg-status, ConfigScreen #cfg-list-status {
+        color: $text-muted; height: auto;
+    }
+    ConfigScreen #cfg-rest { color: $text-muted; }
     ConfigScreen Button { margin: 1 0; }
     """
 
@@ -68,52 +72,74 @@ class ConfigScreen(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static("CONFIGURATION · Models", classes="cfg-title")
-        yield Vertical(id="cfg-body")
+        with Configurator():
+            yield Vertical(id="cfg-list")
+            yield Vertical(id="cfg-companion")
 
     async def on_mount(self) -> None:
         await self.show_list()
 
-    def _body(self) -> Vertical:
-        return self.query_one("#cfg-body", Vertical)
+    def _list(self) -> Vertical:
+        return self.query_one("#cfg-list", Vertical)
+
+    def _reset_flow_state(self) -> None:
+        """Drop every accumulated wizard input (Jenny F3) so a cancelled flow
+        never leaks half-entered provider/auth/model state into the next one."""
+        self._provider_id = self._auth_type = None
+        self._env_var = self._base_url = None
+        self._pool = False
+        self._pending_model_id = None
+        self._km_model = self._km_base = self._km_selected_key = None
+        self._prov_id = self._prov_base = self._prov_selected_key = None
+
+    async def _rest_companion(self) -> None:
+        """Return the companion pane to its resting hint (no flow active) and
+        clear the flow state — the registry list stays mounted (Configurator)."""
+        self._reset_flow_state()
+        await self.query_one(Configurator).swap_companion(
+            Static(
+                "Add a model, Pin key, or pick a provider to manage its keys.",
+                id="cfg-rest",
+            )
+        )
 
     async def _swap(self, widget) -> None:
-        """Swap the body to a flow step, with a Cancel that bails back to the
-        list. Async (await the removal before mounting) so the shared
-        ``cfg-cancel`` id never collides across consecutive steps — the same
-        DuplicateIds guard the AGENTS side uses."""
-        body = self._body()
-        await body.remove_children()
-        await body.mount(widget, Button("Cancel", id="cfg-cancel"))
+        """Swap the COMPANION pane to a flow step (the registry list persists),
+        with a Cancel that rests the companion."""
+        await self.query_one(Configurator).swap_companion(
+            widget, Button("Cancel", id="cfg-cancel"),
+        )
 
-    # ── the list ────────────────────────────────────────────────────────
+    # ── the list (the persistent registry — the doorway) ─────────────────
 
     async def show_list(self, message: str = "") -> None:
-        # async swap: await the removal before mounting so a returning view's
-        # widgets (e.g. #cfg-status) can't collide with the list's — the same
-        # DuplicateIds guard the rest of the configurator uses.
-        body = self._body()
-        await body.remove_children()
+        # Rebuild the persistent left registry and rest the companion. Async
+        # (await the removal before mounting) so a returning view's widgets
+        # can't collide with the list's — the DuplicateIds guard.
+        lst = self._list()
+        await lst.remove_children()
         table = DataTable(id="cfg-models", cursor_type="row")
         table.add_columns("Key", "Model", "Auth", "Status")
         self._fill_table(table)
-        body.mount(table)
-        body.mount(Horizontal(
+        await lst.mount(table)
+        await lst.mount(Horizontal(
             Button("+ Add model", id="cfg-add", variant="primary"),
             Button("Pin key", id="cfg-pinkey"),
             Button("Remove", id="cfg-remove", variant="warning"),
             id="cfg-buttons",
         ))
-        body.mount(Static(message, id="cfg-status"))
+        await lst.mount(Static(message, id="cfg-list-status"))
         # ── Providers & keys: a standalone key manager (no model needed) ──
-        body.mount(Static("PROVIDERS & KEYS — select a provider to manage its "
-                          "keys", classes="cfg-section"))
+        await lst.mount(Static("PROVIDERS & KEYS — select a provider to manage "
+                               "its keys", classes="cfg-section"))
         provlist = OptionList(id="cfg-provlist")
         for prov in self._api_key_providers():
             base = self._provider_base(prov)
             n = len([s for s in provider_keys.list_keys(base) if s["is_set"]])
             provlist.add_option(Option(
                 f"{prov.name:20}  {n} key(s)", id=prov.id))
-        body.mount(provlist)
+        await lst.mount(provlist)
+        await self._rest_companion()
 
     def _fill_table(self, table: DataTable) -> None:
         """(Re)populate the preset rows — row key = the preset key."""
@@ -151,8 +177,16 @@ class ConfigScreen(Vertical):
             return None
 
     def _set_status(self, text: str) -> None:
+        """Status into the COMPANION pane (the flow/manager messages)."""
         try:
             self.query_one("#cfg-status", Static).update(text)
+        except Exception:
+            pass
+
+    def _set_list_status(self, text: str) -> None:
+        """Status into the persistent LIST pane (registry-level messages)."""
+        try:
+            self.query_one("#cfg-list-status", Static).update(text)
         except Exception:
             pass
 
@@ -160,16 +194,15 @@ class ConfigScreen(Vertical):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cfg-add":
-            self._provider_id = self._auth_type = None
-            self._env_var = self._base_url = None
+            self._reset_flow_state()
             await self._swap(ProviderPicker(id="cfg-pp"))
         elif event.button.id == "cfg-cancel":
-            # bail out of the add flow / keys manager → back to the list
-            await self.show_list("Cancelled.")
+            # bail out of the add flow / keys manager → rest the companion
+            await self._rest_companion()
         elif event.button.id == "cfg-remove":
             key = self._selected_preset_key()
             if not key:
-                self._set_status("Select a model row first, then Remove.")
+                self._set_list_status("Select a model row first, then Remove.")
                 return
             # Guard the delete (cadre 2026-06-16 — standardise destructive ops).
             self.app.push_screen(
@@ -179,7 +212,7 @@ class ConfigScreen(Vertical):
         elif event.button.id == "cfg-pinkey":
             key = self._selected_preset_key()
             if not key:
-                self._set_status("Select a model row first, then Pin key.")
+                self._set_list_status("Select a model row first, then Pin key.")
                 return
             await self._show_pin_manager(key)
         elif event.button.id == "cfg-pin":
@@ -286,10 +319,9 @@ class ConfigScreen(Vertical):
         self._km_model = model_key
         self._km_selected_key = None
         base = self._base_env_var_for(model_key)
-        body = self._body()
-        await body.remove_children()
+        cfg = self.query_one(Configurator)
         if base is None:
-            await body.mount(
+            await cfg.swap_companion(
                 Static(f"'{model_key}' doesn't use API keys — nothing to pin."),
                 Button("Back", id="cfg-cancel"),
             )
@@ -306,7 +338,7 @@ class ConfigScreen(Vertical):
             f"{base} in PROVIDERS & KEYS."
             if slots else
             f"{base} has no keys yet — add one in PROVIDERS & KEYS first.")
-        await body.mount(
+        await cfg.swap_companion(
             Static(intro),
             keylist,
             Horizontal(
@@ -349,10 +381,8 @@ class ConfigScreen(Vertical):
     async def _show_provider_keys(self, provider_id: str, message: str = "") -> None:
         prov = pc.get_provider(provider_id)
         base = self._provider_base(prov) if prov else None
-        body = self._body()
-        await body.remove_children()
         if prov is None or base is None:
-            await self.show_list()
+            await self._rest_companion()
             return
         self._prov_id = provider_id
         self._prov_base = base
@@ -360,7 +390,7 @@ class ConfigScreen(Vertical):
         keylist = OptionList(id="cfg-provkeylist")
         for slot in provider_keys.list_keys(base):
             keylist.add_option(Option(self._key_row_label(slot), id=slot["env_var"]))
-        await body.mount(
+        await self.query_one(Configurator).swap_companion(
             Static(f"Keys · {prov.name}  ({base}) — labels only, never the value:"),
             keylist,
             Input(password=True, placeholder="paste a NEW key", id="cfg-newkey"),
@@ -393,7 +423,7 @@ class ConfigScreen(Vertical):
         model_presets.remove_preset(key)
         provider_keys.unpin_model(key)  # its keys rejoin the pool
         self._refresh_table()
-        self._set_status(f"Removed '{key}'.")
+        self._set_list_status(f"Removed '{key}'.")
 
     async def _remove_provider_key(self) -> None:
         if not self._prov_selected_key or not self._prov_id:
