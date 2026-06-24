@@ -398,29 +398,31 @@ class ModulatioApp(App):
 
     # ── Kickoff flow ────────────────────────────────────────────────────
 
-    def _run_kickoff(self, objective: str) -> None:
-        """Launch a job — the Leader's orchestrate function. ``objective`` comes
-        from the TEAM KICK OFF box (button / F5) or from a `/kickoff` message on
-        the LEADER chat. The producer team streams into the TEAM floor; the
-        Leader reports the verdict back on the LEADER tab."""
+    def _run_kickoff(self, objective: str) -> bool:
+        """Launch a job from a `/kickoff … /end` brief on the LEADER chat — the
+        Leader's orchestrate function. Returns True if the job was accepted +
+        launched, False on a refusal (empty / already-running / no-models) so
+        the caller can keep the captured brief and surface the reason. The
+        producer team streams into the TEAM floor; the Leader reports the
+        verdict back on the LEADER tab."""
         objective = (objective or "").strip()
         if not objective:
             self._set_kickoff_status(
-                "(type a job objective first, then KICK OFF / F5)"
+                "(no objective — type `/kickoff <objective> /end` on the LEADER chat)"
             )
-            return
+            return False
 
-        # Guard against a double launch (e.g. two fast F5 presses — the button
-        # is disabled below, but F5 reaches here directly and bypasses that).
-        # ``_kickoff_tick`` is live for exactly a kickoff's duration (set just
-        # below, torn down in ``_on_kickoff_done``); if it already exists a run
-        # is in flight, so re-launching would overwrite the timer handle and
-        # leak the prior ``set_interval`` (it would tick forever, unstoppable).
+        # Guard against a double launch (a converse-driven run_job and a chat
+        # `/kickoff` can race). ``_kickoff_tick`` is live for exactly a kickoff's
+        # duration (set just below, torn down in ``_on_kickoff_done``); if it
+        # already exists a run is in flight, so re-launching would overwrite the
+        # timer handle and leak the prior ``set_interval`` (it would tick
+        # forever, unstoppable).
         if getattr(self, "_kickoff_tick", None) is not None:
             self._set_kickoff_status(
                 "(a job is already running — F8 to stop it first)"
             )
-            return
+            return False
 
         project = self._ensure_project()
         if self.stub:
@@ -433,7 +435,7 @@ class ModulatioApp(App):
                     "(no models configured — run `modulatio setup` or "
                     "`modulatio models add` to register models, then retry)"
                 )
-                return
+                return False
             mode = "real"
 
         # Flip to the factory floor so the launch and the work are on one tab.
@@ -476,6 +478,7 @@ class ModulatioApp(App):
         # safely update widgets from the worker). Completion is handled by
         # ``on_worker_state_changed``.
         self._kickoff_worker(project, runners, objective, mode, attachments)
+        return True  # accepted + launched (the caller commits its own state)
 
     @work(thread=True, exclusive=True, group="kickoff")
     def _kickoff_worker(

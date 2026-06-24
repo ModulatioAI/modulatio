@@ -956,3 +956,55 @@ async def test_tickets_lamp_clears_on_opening_tickets_tab(project_with_roster):
         app.query_one("#app-tabs", TabbedContent).active = "tab-tickets"
         await pilot.pause()
         assert "tickets" not in row._attention
+
+
+# ─── Transactional launch + trailing /end (Wild Bill cadre BLOCK, 2026-06-24) ─
+
+
+async def test_rejected_launch_keeps_capture_and_reports_in_chat(project_with_roster):
+    """A /kickoff … /end that _run_kickoff REFUSES (e.g. a job already running)
+    must not falsely claim 'On it' + lose the captured brief: the capture is
+    kept (so /end can retry) and the refusal is surfaced in the LEADER stream."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        inp = screen.query_one("#prompt-input", ChatInput)
+        app._kickoff_tick = object()  # pretend a job is already running
+        inp.text = "/kickoff second job /end"
+        screen._send_message()
+        await pilot.pause()
+        # the captured brief survives (job not lost) for a retry after F8
+        assert screen._kickoff_capture == ["second job"]
+        # the refusal shows in the conversation, not just last_summary_text
+        leader = app.query_one("#stream-leader").last_leader_text
+        assert "already running" in leader or "couldn't launch" in leader.lower()
+
+
+async def test_trailing_end_in_multi_message_capture_launches(
+    project_with_roster, monkeypatch,
+):
+    """A trailing `/end` on the last captured line launches the job with the
+    sentinel stripped — same parse as the one-shot path."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    launched: list = []
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "_run_kickoff",
+                            lambda obj: launched.append(obj) or True)
+        screen = app.query_one(PromptScreen)
+        inp = screen.query_one("#prompt-input", ChatInput)
+        for line in ("/kickoff", "first line", "final line /end"):
+            inp.text = line
+            screen._send_message()
+            await pilot.pause()
+        assert screen._kickoff_capture is None       # launched, capture closed
+        assert launched == ["first line\nfinal line"]  # /end stripped, no literal

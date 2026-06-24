@@ -8,8 +8,9 @@ A ``TextArea`` subclass where:
   - **Shift+Enter** / **Ctrl+J** insert a newline (compose a multi-line
     message), where the terminal distinguishes them.
 
-Launching a job is a deliberate, separate action (F5 / the KICK OFF button),
-wired in app.py — never Enter.
+Launching a job is a deliberate, bracketed action — type
+``/kickoff <objective> /end`` in this composer; a plain Enter only ever sends a
+message to the Leader, never a job run.
 """
 from __future__ import annotations
 

@@ -252,21 +252,31 @@ class PromptScreen(Vertical):
 
     def _launch_captured_job(self, leader_tv: "StreamView") -> None:
         """Fire the operator-bracketed job with the captured `/kickoff…/end`
-        objective, then reset capture. This is the ONLY path that starts a job."""
+        objective. This is the ONLY path that starts a job. Transactional: only
+        clear the capture + confirm "On it" once the app ACCEPTS the launch; on
+        a refusal (a job already running, no models) keep the captured brief so
+        `/end` can retry, and surface the reason in the chat rather than
+        silently dropping the job."""
         objective = "\n".join(s for s in (self._kickoff_capture or []) if s).strip()
-        self._kickoff_capture = None
         if not objective:
+            self._kickoff_capture = None
             leader_tv.add_leader_message(
                 "(no objective captured — `/kickoff <brief>` then `/end`.)"
             )
             return
-        leader_tv.add_leader_message(
-            "On it — running that job. Watch the TEAM floor; "
-            "I'll report back here when it's done."
-        )
         runner = getattr(self.app, "_run_kickoff", None)
-        if runner is not None:
-            runner(objective)
+        accepted = bool(runner(objective)) if runner is not None else False
+        if accepted:
+            self._kickoff_capture = None
+            leader_tv.add_leader_message(
+                "On it — running that job. Watch the TEAM floor; "
+                "I'll report back here when it's done."
+            )
+        else:
+            reason = getattr(self.app, "last_summary_text", "") or "couldn't launch the job."
+            leader_tv.add_leader_message(
+                f"(couldn't launch — {reason}  Fix it, then `/end` again, or `/cancel`.)"
+            )
 
     def _send_message(self) -> None:
         """Route the chatbox text. A JOB is ONLY the text between ``/kickoff`` and
@@ -285,9 +295,6 @@ class PromptScreen(Vertical):
         # ── Already capturing a job brief (between /kickoff and /end) ──
         if self._kickoff_capture is not None:
             leader_tv.add_operator_message(text)
-            if self._is_cmd(text, "/end"):
-                self._launch_captured_job(leader_tv)
-                return
             if self._is_cmd(text, "/cancel"):
                 self._kickoff_capture = None
                 leader_tv.add_leader_message("(job cancelled — back to conversation.)")
@@ -298,6 +305,16 @@ class PromptScreen(Vertical):
                 leader_tv.add_leader_message(
                     "(restarted — keep adding the brief, then `/end` to launch.)"
                 )
+                return
+            # A trailing (or sole) /end on this line launches the brief — same
+            # parse as the one-shot path, so "final line /end" works mid-capture
+            # instead of capturing the literal sentinel.
+            end_m = re.search(r"(?:^|\s)/end\s*$", text, re.IGNORECASE)
+            if end_m is not None:
+                prefix = text[:end_m.start()].strip()
+                if prefix:
+                    self._kickoff_capture.append(prefix)
+                self._launch_captured_job(leader_tv)
                 return
             self._kickoff_capture.append(text)  # accumulate this line of the brief
             return

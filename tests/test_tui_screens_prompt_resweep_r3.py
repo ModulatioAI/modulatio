@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Re-sweep R3 regression: the attachment-list Statics in prompt.py must not
-raise MarkupError on an unescaped, operator-chosen filename.
+"""Re-sweep R3 regression: the chatbox attachment-list Static in prompt.py must
+not raise MarkupError on an unescaped, operator-chosen filename.
 
-``_refresh_chatbox_attachment_list`` and ``_refresh_kickoff_attachment_list``
-interpolate ``att.name`` (which is ``Path.name`` — fully operator-controlled;
-they pick the file) into a Rich-markup string and call ``Static.update``. A
-filename containing a markup closing-tag sequence like ``notes[/].md`` parses
-as markup and raises ``rich.errors.MarkupError`` at update time, crashing the
-TUI. The fix escapes ``att.name`` in both refresh paths.
+``_refresh_chatbox_attachment_list`` interpolates ``att.name`` (which is
+``Path.name`` — fully operator-controlled; they pick the file) into a
+Rich-markup string and calls ``Static.update``. A filename containing a markup
+closing-tag sequence like ``notes[/].md`` parses as markup and raises
+``rich.errors.MarkupError`` at update time, crashing the TUI. The fix escapes
+``att.name`` in the refresh path. (The kickoff attachment list was retired with
+the kickoff box — attachments now stage on the chatbox only.)
 """
 from __future__ import annotations
 
@@ -45,19 +46,14 @@ def test_unescaped_attachment_name_raises_markup_error():
 
 def test_escaped_attachment_name_renders_cleanly():
     """The fix: escaping ``att.name`` renders the literal filename instead of
-    raising, for both the chatbox and kickoff label prefixes."""
+    raising, for the chatbox label prefix."""
     chat = _status_text(f"[dim]attached:[/] 📎 {escape(_HOSTILE_NAME)}")
     assert _HOSTILE_NAME in chat
 
-    kickoff = _status_text(
-        f"[dim]attached for kickoff:[/] 🖼  {escape(_HOSTILE_NAME)}"
-    )
-    assert _HOSTILE_NAME in kickoff
 
-
-def test_refresh_methods_escape_attachment_name_in_source():
-    """Belt-and-suspenders: both refresh methods escape ``att.name`` before
-    building the markup string, and the raw interpolation is gone."""
+def test_refresh_method_escapes_attachment_name_in_source():
+    """Belt-and-suspenders: the chatbox refresh method escapes ``att.name``
+    before building the markup string, and the raw interpolation is gone."""
     import inspect
 
     from modulatio.tui.screens import prompt
@@ -65,11 +61,6 @@ def test_refresh_methods_escape_attachment_name_in_source():
     chatbox = inspect.getsource(
         prompt.PromptScreen._refresh_chatbox_attachment_list
     )
-    kickoff = inspect.getsource(
-        prompt.PromptScreen._refresh_kickoff_attachment_list
-    )
     assert "escape(att.name)" in chatbox
-    assert "escape(att.name)" in kickoff
-    # the raw, unescaped interpolation must be gone from both
+    # the raw, unescaped interpolation must be gone
     assert "{att.name}" not in chatbox
-    assert "{att.name}" not in kickoff
