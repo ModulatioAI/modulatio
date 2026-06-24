@@ -527,3 +527,34 @@ def test_seed_from_team_template_skips_entries_without_id(project_vault):
         qc_model=None, researcher_model=None,
     )
     assert {a.id for a in written} == {"leader", "writer"}
+
+
+# === create_project (folder + team in one, for the PROJECTS tab) ===
+
+
+def test_create_project_makes_folder_and_seeds_roster(tmp_path, monkeypatch):
+    """create_project bundles folder creation + team seeding so a new project
+    is immediately listed (marker-complete) and team-ready."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    config.save_defaults({"default_models": {"leader": "stub", "producer": "stub", "qc": "stub"}})
+    config.reload()
+
+    root = roster.create_project("freshproj", "write a thing")
+
+    assert root == vault.project_dir("freshproj")
+    assert "freshproj" in vault.list_projects()      # seed markers present
+    assert roster.list_agents("freshproj")           # install team seeded
+    assert "write a thing" in (root / "index.md").read_text()
+
+
+def test_create_project_rejects_duplicate(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    roster.create_project("dup")
+    with pytest.raises(FileExistsError):
+        roster.create_project("dup")
+
+
+def test_create_project_rejects_invalid_code(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    with pytest.raises(ValueError):
+        roster.create_project("../etc")

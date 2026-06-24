@@ -559,6 +559,30 @@ def seed_default_roster(
     )
 
 
+def create_project(code: str, objective: str = "") -> Path:
+    """Create a new project folder AND seed it with the install team, so a
+    fresh project is immediately ready to work in — the same
+    ``init_project`` + ``seed_default_roster`` pair the setup wizard and
+    ``modulatio kickoff`` use (when a team template exists its per-agent
+    picks win; the model kwargs below only feed the no-template fallback).
+    The display name is the code. Raises ``ValueError`` on an invalid code
+    and ``FileExistsError`` if the project already exists. Returns the
+    project dir.
+    """
+    from modulatio import vault
+
+    root = vault.init_project(code, code, objective, exist_ok=False)
+    models = config.get_default_models()
+    seed_default_roster(
+        code,
+        leader_model=models.get("leader"),
+        coordinator_model=models.get("planner") or models.get("coordinator"),
+        producer_model=models.get("producer") or models.get("specialist"),
+        qc_model=models.get("qc"),
+    )
+    return root
+
+
 def _seed_from_default_template(
     project_code: str,
     *,

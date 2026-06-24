@@ -20,10 +20,66 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Label
+from textual.screen import ModalScreen
+from textual.widgets import Button, DataTable, Input, Label, Static
 
-from modulatio import backup, config, vault
+from modulatio import backup, config, roster, vault
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
+
+
+class NewProjectModal(ModalScreen):
+    """Name a new project — the folder name is its code — plus an optional
+    objective. Dismisses ``(code, objective)`` on Create, ``None`` on Cancel."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    DEFAULT_CSS = """
+    NewProjectModal { align: center middle; }
+    NewProjectModal #newproj-modal {
+        width: 64; max-width: 90%; height: auto; padding: 1 2;
+        border: round $frame; background: $surface;
+    }
+    NewProjectModal .newproj-title { text-style: bold; color: $primary; }
+    NewProjectModal Input { margin: 1 0; }
+    NewProjectModal #newproj-status { color: $text-muted; height: auto; }
+    NewProjectModal #newproj-buttons { height: 3; margin-top: 1; }
+    NewProjectModal #newproj-buttons Button { margin-right: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="newproj-modal"):
+            yield Static("New project", classes="newproj-title")
+            yield Input(
+                placeholder="folder name — lowercase letters/digits/_ (e.g. my_book)",
+                id="newproj-code",
+            )
+            yield Input(placeholder="objective (optional)", id="newproj-objective")
+            yield Static("", id="newproj-status")
+            with Horizontal(id="newproj-buttons"):
+                yield Button("Create", id="newproj-create", variant="primary")
+                yield Button("Cancel", id="newproj-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#newproj-code", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "newproj-cancel":
+            self.dismiss(None)
+        elif event.button.id == "newproj-create":
+            self._submit()
+
+    def _submit(self) -> None:
+        code = self.query_one("#newproj-code", Input).value.strip().lower()
+        objective = self.query_one("#newproj-objective", Input).value.strip()
+        if not code:
+            self.query_one("#newproj-status", Static).update(
+                "[bold red]A folder name is required.[/]"
+            )
+            return
+        self.dismiss((code, objective))
 
 
 class ProjectsScreen(Vertical):
@@ -46,6 +102,7 @@ class ProjectsScreen(Vertical):
     """
 
     BINDINGS = [
+        Binding("n", "new", "New", show=True),
         Binding("s", "switch", "Switch", show=True),
         Binding("x", "delete", "Delete", show=True),
         Binding("f", "refresh", "Refresh", show=True),
@@ -53,7 +110,12 @@ class ProjectsScreen(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="projects-controls"):
-            yield Button("Switch to", id="projects-switch", variant="primary")
+            # One amber doorway on a create/manage surface: New is the primary
+            # CTA. Switch is a neutral secondary action; Delete is the red
+            # caution, rightmost in the weak/skimmed zone where a destructive
+            # op belongs.
+            yield Button("New", id="projects-new", variant="primary")
+            yield Button("Switch to", id="projects-switch")
             yield Button("Delete", id="projects-delete", variant="error")
         yield Label("Switching is disabled while a job is running. Delete backs up first.")
         table = DataTable(id="projects-table", cursor_type="row")
@@ -67,7 +129,9 @@ class ProjectsScreen(Vertical):
         self._refresh()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "projects-switch":
+        if event.button.id == "projects-new":
+            self.action_new()
+        elif event.button.id == "projects-switch":
             self.action_switch()
         elif event.button.id == "projects-delete":
             self.action_delete()
@@ -75,6 +139,24 @@ class ProjectsScreen(Vertical):
     # ── Actions ─────────────────────────────────────────────────────────
 
     def action_refresh(self) -> None:
+        self._refresh()
+
+    def action_new(self) -> None:
+        self.app.push_screen(NewProjectModal(), self._on_new_project)
+
+    def _on_new_project(self, result: tuple[str, str] | None) -> None:
+        if not result:
+            return
+        code, objective = result
+        try:
+            roster.create_project(code, objective)
+        except FileExistsError:
+            self.notify(f"Project '{code}' already exists.", severity="error")
+            return
+        except ValueError as exc:
+            self.notify(f"Invalid folder name: {exc}", severity="error")
+            return
+        self.notify(f"Created project '{code}'.", severity="information")
         self._refresh()
 
     def action_switch(self) -> None:

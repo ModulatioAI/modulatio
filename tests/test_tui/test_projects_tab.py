@@ -117,3 +117,62 @@ async def test_delete_refused_while_job_in_flight(isolated, monkeypatch):
         await pilot.pause()
         assert len(app.screen_stack) == stack_before  # refused before the modal
         assert vault.project_dir("beta").exists()
+
+
+async def test_new_project_via_screen_creates_and_lists(isolated):
+    """The [New] flow creates a marker-complete, team-seeded project that
+    immediately appears in the list."""
+    from modulatio import config, roster
+    from modulatio.tui.screens.projects import ProjectsScreen
+
+    config.save_defaults({"default_models": {"leader": "stub", "producer": "stub", "qc": "stub"}})
+    config.reload()
+    app = ModulatioApp(project_code="alpha", stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(ProjectsScreen)
+        assert screen.query_one("#projects-new")  # the New button exists
+        screen._on_new_project(("freshproj", "do work"))
+        await pilot.pause()
+        assert "freshproj" in vault.list_projects()
+        assert roster.list_agents("freshproj")  # team seeded
+
+
+async def test_new_project_duplicate_refused(isolated):
+    """Creating a project whose folder already exists is refused — no crash,
+    no change to the list."""
+    from modulatio.tui.screens.projects import ProjectsScreen
+
+    app = ModulatioApp(project_code="alpha", stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(ProjectsScreen)
+        screen._on_new_project(("alpha", ""))  # already exists
+        await pilot.pause()
+        assert sorted(vault.list_projects()) == ["alpha", "beta"]
+
+
+async def test_new_action_drives_modal_to_create(isolated):
+    """Wiring: action_new opens the modal, and the modal's (code, objective)
+    dismissal flows into _on_new_project → create_project. Proves the tuple
+    contract between the modal and the handler, not just each part alone."""
+    from modulatio import config
+    from modulatio.tui.screens.projects import NewProjectModal, ProjectsScreen
+    from textual.widgets import Input
+
+    config.save_defaults({"default_models": {"leader": "stub", "producer": "stub", "qc": "stub"}})
+    config.reload()
+    app = ModulatioApp(project_code="alpha", stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(ProjectsScreen)
+        screen.action_new()
+        await pilot.pause()
+        modal = app.screen  # the pushed modal is a separate screen on the stack
+        assert isinstance(modal, NewProjectModal)
+        modal.query_one("#newproj-code", Input).value = "wired"
+        modal.query_one("#newproj-objective", Input).value = "via the modal"
+        modal._submit()  # → dismiss((code, objective)) → _on_new_project → create
+        await pilot.pause()
+        assert "wired" in vault.list_projects()
+        assert "via the modal" in (vault.project_dir("wired") / "index.md").read_text()
