@@ -204,3 +204,30 @@ def test_path_traversal_agent_id_is_refused_on_delete():
     with pytest.raises(Exception):
         agent_memory.delete_entry(
             "../escape", "id", project_code=PROJECT_CODE, layer="episodic")
+
+
+# === markdown export (Feng-Tui MEMORY overhaul) =============================
+
+
+def test_export_markdown_includes_both_layers_and_content():
+    agent_memory.add_episodic("alice", "saw a flaky test", project_code=PROJECT_CODE)
+    agent_memory.add_semantic("alice", "the build is reproducible", project_code=PROJECT_CODE)
+    md = agent_memory.export_markdown("alice", project_code=PROJECT_CODE)
+    assert "# " in md and "alice" in md           # a heading naming the agent
+    assert "Episodic" in md and "Semantic" in md   # both layer sections
+    assert "saw a flaky test" in md
+    assert "the build is reproducible" in md
+
+
+def test_export_markdown_does_not_bump_access_count():
+    import json
+
+    from modulatio.memory.agent_memory import _episodic_path
+
+    agent_memory.add_episodic("alice", "x", project_code=PROJECT_CODE)
+    agent_memory.export_markdown("alice", project_code=PROJECT_CODE)
+    agent_memory.export_markdown("alice", project_code=PROJECT_CODE)
+    # export is a read-only dump — the on-disk access bookkeeping is untouched
+    # (unlike get_episodic, which bumps access_count on read).
+    raw = json.loads(_episodic_path("alice", PROJECT_CODE).read_text())
+    assert raw[0]["access_count"] == 0

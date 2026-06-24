@@ -412,6 +412,29 @@ def update_entry(
     return MemoryEntry.from_dict(found)
 
 
+def export_markdown(agent_id: str, *, project_code: str) -> str:
+    """Render an agent's episodic + semantic memory as markdown (Clif's
+    exportable-memory decision). Read-only: reads the raw JSON directly so it
+    never bumps access bookkeeping the way ``get_episodic`` does."""
+    def _section(title: str, path: Path) -> list[str]:
+        rows = [MemoryEntry.from_dict(e) for e in _load_json(path)]
+        out = [f"## {title}", ""]
+        if not rows:
+            out += ["_(none)_", ""]
+            return out
+        for e in rows:
+            stamp = (e.when or "")[:19]
+            meta = " · ".join(p for p in (e.type, e.confidence, e.state) if p)
+            out.append(f"- **{stamp}** ({meta}) {e.content}")
+        out.append("")
+        return out
+
+    lines = [f"# Memory · {agent_id}", ""]
+    lines += _section("Episodic", _episodic_path(agent_id, project_code))
+    lines += _section("Semantic", _semantic_path(agent_id, project_code))
+    return "\n".join(lines)
+
+
 def stats(agent_id: str, *, project_code: str) -> dict:
     """Memory stats for an agent."""
     episodic = _load_json(_episodic_path(agent_id, project_code))
@@ -434,6 +457,7 @@ __all__ = [
     "search",
     "delete_entry",
     "update_entry",
+    "export_markdown",
     "decay_episodic",
     "promote_candidates",
     "stats",
