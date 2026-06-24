@@ -213,3 +213,41 @@ def test_daemon_dispatch_callback_accepts_jt_kwargs():
     # the point is the signature accepts the kwargs without a TypeError.
     result = cb("PHI", "Write something", jt_id=None, jt_params=None)
     assert "goals=" in result
+
+
+# ── JT Library → schedule-as-cron helper (Feng-Tui overhaul, Group B) ────────
+
+
+def test_schedule_template_as_cron_ok():
+    """The JT-Library helper schedules a no-required-param template, storing the
+    jt_id binding so the daemon runs the template headless on the schedule."""
+    from modulatio.tui.screens.jt_library import schedule_template_as_cron
+
+    _make_jt("daily-essay", required=())
+    ok, msg = schedule_template_as_cron("daily-essay", "daily 09:00", "PHI")
+    assert ok is True
+    jobs = [j for j in cron.list_jobs() if j.get("jt_id") == "daily-essay"]
+    assert len(jobs) == 1
+    assert jobs[0]["schedule"] == "daily 09:00"
+
+
+def test_schedule_template_as_cron_missing_param_surfaces_error():
+    """A template with an unfilled required param can't be scheduled from the
+    one-field TUI flow — the helper surfaces a clear error and adds NO job
+    (point the operator at the CLI / Leader for parameterised schedules)."""
+    from modulatio.tui.screens.jt_library import schedule_template_as_cron
+
+    _make_jt("brief", required=("topic",))
+    ok, msg = schedule_template_as_cron("brief", "daily 09:00", "PHI")
+    assert ok is False
+    assert "topic" in msg or "missing" in msg.lower()
+    assert not [j for j in cron.list_jobs() if j.get("jt_id") == "brief"]
+
+
+def test_schedule_template_as_cron_bad_schedule_surfaces_error():
+    """An unparseable schedule string is surfaced, not raised."""
+    from modulatio.tui.screens.jt_library import schedule_template_as_cron
+
+    _make_jt("daily-essay", required=())
+    ok, msg = schedule_template_as_cron("daily-essay", "not a schedule", "PHI")
+    assert ok is False

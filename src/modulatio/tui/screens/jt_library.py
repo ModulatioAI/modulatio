@@ -29,9 +29,32 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import DataTable, Input, Markdown, Static
 
-from modulatio import job_template_library
+from modulatio import cron, job_template_library
 from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
+from modulatio.tui.widgets.schedule_modal import ScheduleModal
+
+
+def schedule_template_as_cron(
+    name: str, schedule: str, project_code: str
+) -> tuple[bool, str]:
+    """Schedule a Job Template as a recurring cron job from the TUI, using the
+    template's own parameter defaults. Returns ``(ok, message)`` — the cron
+    layer validates the template + schedule at add-time (operator present), so
+    a template with an unfilled required param (or a bad schedule string) is
+    surfaced here rather than raised, pointing the operator at the CLI / Leader
+    for a parameterised schedule."""
+    try:
+        cron.add(
+            name=f"{name} (scheduled)",
+            schedule=schedule,
+            project_code=project_code,
+            objective=f"Run job template: {name}",
+            jt_id=name,
+        )
+    except ValueError as exc:
+        return False, f"Couldn't schedule '{name}': {exc}"
+    return True, f"Scheduled '{name}' — {schedule}."
 
 
 class JTLibraryScreen(Vertical):
@@ -39,6 +62,7 @@ class JTLibraryScreen(Vertical):
 
     BINDINGS = [
         Binding("r", "refresh", "Refresh", show=True),
+        Binding("s", "schedule", "Schedule as cron", show=True),
     ]
 
     # The split + full-height divider live in MasterDetail now.
@@ -51,6 +75,7 @@ class JTLibraryScreen(Vertical):
         super().__init__(*args, **kwargs)
         self.detail_source: str = ""
         self._query: str = ""
+        self._selected_name: str | None = None
 
     def compose(self) -> ComposeResult:
         with MasterDetail():
@@ -63,8 +88,8 @@ class JTLibraryScreen(Vertical):
                 table.add_columns("Template", "Description", "Capabilities")
                 yield table
                 yield Static(
-                    "↑↓ move · type to search · read-only — templates are "
-                    "codified by the Leader",
+                    "↑↓ move · type to search · s schedule as cron — "
+                    "templates are codified by the Leader",
                     id="jt-affordance",
                     classes="affordance",
                 )
@@ -143,7 +168,22 @@ class JTLibraryScreen(Vertical):
     def action_refresh(self) -> None:
         self.refresh_templates()
 
+    def action_schedule(self) -> None:
+        """`s` — schedule the highlighted template as a recurring cron job."""
+        name = self._selected_name
+        if not name:
+            return
+        self.app.push_screen(
+            ScheduleModal(name),
+            lambda sched: self._do_schedule(name, sched) if sched else None,
+        )
+
+    def _do_schedule(self, name: str, schedule: str) -> None:
+        ok, msg = schedule_template_as_cron(name, schedule, self.project_code)
+        self.app.notify(msg, severity="information" if ok else "error")
+
     def _render_detail(self, name: str) -> None:
+        self._selected_name = name
         try:
             jt = job_template_library.checkout(name, self.project_code)
         except Exception:
