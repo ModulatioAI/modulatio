@@ -173,6 +173,15 @@ class ModulatioApp(App):
         background: $background;
     }
 
+    /* ── Shared chrome: the dim affordance line (Feng-Tui), one rule for
+       every screen's `.affordance` Static — keystrokes/scent, not a focal. ── */
+    .affordance {
+        height: auto;
+        padding: 0 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+
     /* ── Header / Footer (the always-visible chrome) ── */
     Header {
         background: $surface;
