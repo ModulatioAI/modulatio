@@ -39,6 +39,8 @@ from modulatio.tui.screens.agent_builder import AgentBuilderScreen
 from modulatio.tui.screens.artifacts import build_artifacts_panel
 from modulatio.tui.screens.configuration import ConfigScreen
 from modulatio.tui.screens.cron import build_cron_panel
+from modulatio.tui.screens.docs import build_docs_panel
+from modulatio.tui.screens.jobs import build_jobs_panel
 from modulatio.tui.screens.memory import build_memory_panel
 from modulatio.tui.screens.projects import ProjectsScreen
 from modulatio.tui.screens.prompt import build_prompt_panel
@@ -48,6 +50,7 @@ from modulatio.tui.screens.logs import build_logs_panel
 from modulatio.tui.screens.tickets import build_tickets_panel
 from modulatio.tui.widgets.activity_log import ActivityLog
 from modulatio.tui.widgets.chat_input import ChatInput
+from modulatio.tui.widgets.status_lamp_row import StatusLampRow
 from modulatio.tui.widgets.stream_status import StreamStatus
 from modulatio.tui.widgets.stream_view import (
     StreamView,
@@ -171,6 +174,15 @@ class ModulatioApp(App):
     /* ── Base app + screen background ── */
     Screen {
         background: $background;
+    }
+
+    /* ── Shared chrome: the dim affordance line (Feng-Tui), one rule for
+       every screen's `.affordance` Static — keystrokes/scent, not a focal. ── */
+    .affordance {
+        height: auto;
+        padding: 0 1;
+        margin-top: 1;
+        color: $text-muted;
     }
 
     /* ── Header / Footer (the always-visible chrome) ── */
@@ -373,10 +385,14 @@ class ModulatioApp(App):
                 yield build_skills_panel()
             with TabPane("MEMORY", id="tab-memory"):
                 yield build_memory_panel()
+            with TabPane("JOBS", id="tab-jobs"):
+                yield build_jobs_panel()
             with TabPane("CRON", id="tab-cron"):
                 yield build_cron_panel()
             with TabPane("LOGS", id="tab-logs"):
                 yield build_logs_panel()
+            with TabPane("DOCS", id="tab-docs"):
+                yield build_docs_panel()
             for tab_id, label, coming_in in _PLACEHOLDER_TABS:
                 with TabPane(label.upper(), id=tab_id):
                     yield Label(f"{label} — coming in {coming_in}")
@@ -1167,6 +1183,11 @@ class ModulatioApp(App):
         # rename) is picked up instead of resolving to a stale/empty name.
         if event.phase == "kickoff_started":
             self._agent_name_cache = None
+            # A fresh run: clean telemetry board — running on, no tickets/mods yet.
+            self._run_ticket_count = 0
+            lamps = self._status_lamps()
+            if lamps is not None:
+                lamps.set_lamps(running=True, mods=0, qc=0, tickets=0)
         # Fix: when a run ENDS — normal completion OR an F8 stop, both via the
         # engine's role="orchestrator" kickoff_ended — reset the TEAM spinner to
         # 'done'. Without this it sticks on the last producer phase and the Mod
@@ -1193,6 +1214,11 @@ class ModulatioApp(App):
             leader_status = self._lane_status("stream-leader-status")
             if leader_status is not None:
                 leader_status.set_idle()
+            # Run finished — rest the telemetry lamps (the leader/ticket
+            # attention blink persists until the operator reads it on LEADER).
+            lamps = self._status_lamps()
+            if lamps is not None:
+                lamps.set_lamps(running=False, mods=0, qc=0)
         # Live status lines: the leader-lane phase drives the LEADER status;
         # team-lane phases the TEAM status, named by the worker. §5: when more
         # than one producer is in flight, surface the parallel count so the
@@ -1211,8 +1237,12 @@ class ModulatioApp(App):
                 "stream-team-status", event.phase, actor,
                 working=len(names) or 1, working_names=names,
             )
-        # A logged ticket is a problem the Leader will relay — light the
-        # orange lamp so the operator notices even from the factory floor.
+            # Mirror the producer concurrency onto the telemetry lamp row.
+            lamps = self._status_lamps()
+            if lamps is not None:
+                lamps.set_lamps(running=True, mods=len(names))
+        # A logged ticket is a problem the Leader will relay — blink the
+        # tickets lamp so the operator notices even from the factory floor.
         if event.phase == "ticket_opened":
             self._signal_problem()
 
@@ -1556,24 +1586,27 @@ class ModulatioApp(App):
 
     # ── Attention lamps (the Leader getting the operator's eye) ──────────
 
-    def _indicator_panel(self):
-        from modulatio.tui.widgets.indicator_panel import IndicatorPanel
+    def _status_lamps(self):
         try:
-            return self.query_one(IndicatorPanel)
+            return self.query_one(StatusLampRow)
         except Exception:
             return None
 
     def _signal_msg(self) -> None:
-        """Amber lamp — the Leader has something for you."""
-        panel = self._indicator_panel()
-        if panel is not None:
-            panel.signal_msg()
+        """The Leader has something for you — blink the leader lamp until the
+        operator flips to LEADER and reads it."""
+        lamps = self._status_lamps()
+        if lamps is not None:
+            lamps.request_attention("leader")
 
     def _signal_problem(self) -> None:
-        """Orange lamp — a problem was logged."""
-        panel = self._indicator_panel()
-        if panel is not None:
-            panel.signal_problem()
+        """A problem was logged — bump this run's ticket count and blink the
+        tickets lamp."""
+        self._run_ticket_count = getattr(self, "_run_ticket_count", 0) + 1
+        lamps = self._status_lamps()
+        if lamps is not None:
+            lamps.set_lamps(tickets=self._run_ticket_count)
+            lamps.request_attention("tickets")
 
     def _set_lane_status(
         self, status_id: str, phase: str, actor: str | None = None,
@@ -1595,12 +1628,16 @@ class ModulatioApp(App):
     def on_tabbed_content_tab_activated(
         self, event: TabbedContent.TabActivated,
     ) -> None:
-        """When the operator views the LEADER stream they've seen the Leader's
-        messages → clear the attention lamps."""
-        if event.tabbed_content.active == "stream-leader-pane":
-            panel = self._indicator_panel()
-            if panel is not None:
-                panel.clear_all()
+        """Clear the attention lamps the operator has now gone to read: flipping
+        to the LEADER stream clears the leader lamp (and all), and opening the
+        TICKETS tab clears the tickets lamp (symmetry — cadre seam)."""
+        active = event.tabbed_content.active
+        lamps = self._status_lamps()
+        if lamps is not None:
+            if active == "stream-leader-pane":
+                lamps.clear_attention()
+            elif active == "tab-tickets":
+                lamps.clear_attention("tickets")
         # Re-evaluate which footer keys show: the CONSOLE-only keys hide on
         # other tabs (see check_action).
         self.refresh_bindings()

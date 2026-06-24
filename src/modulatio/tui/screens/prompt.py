@@ -12,9 +12,10 @@ The conversation-first overhaul, split by function:
     OFF button). This is where you *command the Mod Squad* directly — drop a job
     and watch it run on the same tab. No conversation here; you don't chat with
     producers.
-  - A two-lamp **IndicatorPanel** sits above the flip so the Leader can catch
-    your eye (amber = "talk to me"; orange = "we have a problem") while you're
-    on the factory floor.
+  - A **StatusLampRow** sits above the flip — the run's telemetry lamps
+    (leader · mods·qc · running · tickets · tokens · elapsed). The leader and
+    tickets lamps BLINK for attention ("talk to me" / "we have a problem")
+    while you're on the factory floor, and rest once you flip to LEADER.
 
 KICK OFF lives on the TEAM floor (where you watch the work), never beside SEND
 — so a job launch is impossible to fat-finger mid-conversation. The Leader can
@@ -33,7 +34,7 @@ from textual.widgets import Button, Static, TabbedContent, TabPane, TextArea
 
 from modulatio.attachments import Attachment, AttachmentKind, build_attachment
 from modulatio.tui.widgets.chat_input import ChatInput
-from modulatio.tui.widgets.indicator_panel import IndicatorPanel
+from modulatio.tui.widgets.status_lamp_row import StatusLampRow
 from modulatio.tui.widgets.stream_status import StreamStatus
 from modulatio.tui.widgets.stream_view import StreamView
 
@@ -152,7 +153,7 @@ class PromptScreen(Vertical):
 
     def compose(self) -> ComposeResult:
         # ── Status lamps (visible from both tabs) ──
-        yield IndicatorPanel(id="indicators")
+        yield StatusLampRow(id="status-lamps")
         # ── The LEADER / TEAM flip ──
         with TabbedContent(initial="stream-leader-pane", id="console-streams"):
             with TabPane("LEADER", id="stream-leader-pane"):

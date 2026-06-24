@@ -363,3 +363,40 @@ def test_run_dir_resolved_bounds_check(isolated_vault):
     (runs / "evil").symlink_to(outside)
     with pytest.raises(ValueError, match="resolves outside"):
         vault.run_dir("TST", "evil")
+
+
+# === delete_run — guarded single-run delete (Feng-Tui JOBS tab) =============
+
+
+def test_delete_run_removes_the_whole_run_folder(isolated_vault):
+    vault.init_project("STA", "x", "obj")
+    rid = "20260101T010101Z-aaa111"
+    vault.init_run("STA", rid, "do a thing")
+    assert vault.run_dir("STA", rid).exists()
+    assert vault.delete_run("STA", rid) is True
+    assert not vault.run_dir("STA", rid).exists()
+    assert rid not in vault.list_runs("STA")
+
+
+def test_delete_run_missing_run_returns_false(isolated_vault):
+    vault.init_project("STA", "x", "obj")
+    assert vault.delete_run("STA", "20260101T010101Z-nope11") is False
+
+
+def test_delete_run_validates_run_id(isolated_vault):
+    vault.init_project("STA", "x", "obj")
+    with pytest.raises(Exception):
+        vault.delete_run("STA", "../escape")
+
+
+def test_delete_run_refuses_a_symlinked_run(isolated_vault, tmp_path):
+    vault.init_project("STA", "x", "obj")
+    outside = tmp_path / "outside_target"
+    outside.mkdir()
+    rid = "20260101T010101Z-bbb222"
+    link = vault.runs_dir("STA") / rid
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside)
+    with pytest.raises(Exception):
+        vault.delete_run("STA", rid)
+    assert outside.exists()  # the symlink target is never followed/deleted

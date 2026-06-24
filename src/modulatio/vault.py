@@ -13,6 +13,7 @@ Tests can monkeypatch ``vault.VAULT_ROOT`` directly to redirect.
 from __future__ import annotations
 
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -365,6 +366,33 @@ def latest_run(code: str) -> str | None:
     """
     runs = list_runs(code)
     return runs[-1] if runs else None
+
+
+def delete_run(code: str, run_id: str) -> bool:
+    """Permanently delete one run's folder ``<project>/runs/<run_id>/``.
+
+    The filesystem-safe primitive behind the JOBS tab's "delete job". Run
+    output is ephemeral, so there is NO backup — the caller (UI) is responsible
+    for confirming with the operator and for refusing to delete a run that is
+    still in flight (that live state lives in the app, not the vault).
+
+    Guards (fail closed): ``run_dir`` validates the run_id and bounds-checks the
+    resolved path against the runs folder (symlink escape). On top of that this
+    refuses a run path that IS a symlink (never follow it), and refuses a
+    non-directory. Returns ``False`` when the run simply doesn't exist (nothing
+    to delete), ``True`` after removal.
+    """
+    target = run_dir(code, run_id)  # validates run_id + bounds-checks escape
+    if target.is_symlink():
+        raise ValueError(
+            f"run {run_id!r} for project {code!r} is a symlink — refusing to delete")
+    if not target.exists():
+        return False
+    if not target.is_dir():
+        raise ValueError(
+            f"run path for {run_id!r} (project {code!r}) is not a directory")
+    shutil.rmtree(target)  # ephemeral run output — no backup
+    return True
 
 
 def init_project(code: str, name: str, objective: str, *, exist_ok: bool = False) -> Path:

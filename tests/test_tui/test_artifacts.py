@@ -674,3 +674,64 @@ async def test_artifacts_tab_adopts_master_detail(tui_vault_with_artifacts):
         assert detail.styles.border_left[0] is not None       # full-height divider
         assert app.query_one("#artifacts-list", ListView) is not None
         assert screen.query_one("#artifact-preview") is not None
+
+
+# ─── Controls row + affordance (Feng-Tui overhaul) ──────────────────────────
+
+
+async def test_artifacts_has_controls_row_with_counts(tui_vault_with_artifacts):
+    """The list yields a ControlsRow (counts + search); counts reports the
+    visible artifact total."""
+    from textual.widgets import Static, TabbedContent
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.artifacts import ArtifactsScreen
+    from modulatio.tui.widgets.controls_row import ControlsRow
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        row = app.query_one(ArtifactsScreen).query_one(ControlsRow)
+        assert row.query("#controls-counts")
+        assert row.query("#controls-search")
+        counts = str(row.query_one("#controls-counts", Static).render())
+        assert "3 artifacts" in counts
+
+
+async def test_artifacts_search_filters_list(tui_vault_with_artifacts):
+    """Typing a query filters the list to matching paths and flags filtered."""
+    from textual.widgets import ListView, Static, TabbedContent
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.artifacts import ArtifactsScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        screen = app.query_one(ArtifactsScreen)
+        screen._query = "ozempic"  # matches only the research note
+        screen._load_files()
+        await pilot.pause()
+        assert len(screen.query_one("#artifacts-list", ListView).children) == 1
+        counts = str(screen.query_one("#controls-counts", Static).render())
+        assert "filtered" in counts
+
+
+async def test_artifacts_affordance_present(tui_vault_with_artifacts):
+    """The list carries an affordance line that names searching + export."""
+    from textual.widgets import Static, TabbedContent
+
+    from modulatio.tui.app import ModulatioApp
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        text = str(app.query_one("#artifacts-affordance", Static).render())
+        assert "search" in text.lower()
+        assert "export" in text.lower()

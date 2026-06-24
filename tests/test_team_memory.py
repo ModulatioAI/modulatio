@@ -346,3 +346,34 @@ def test_recall_concurrent_semantic_path_is_thread_safe():
     assert len(counts) == n
     # All threads see the same fully-built index — identical hit count.
     assert len(set(counts)) == 1, f"inconsistent results across threads: {set(counts)}"
+
+
+# === symlink-escape refusal (Wild Bill cadre BLOCK, 2026-06-24) =============
+
+
+def test_symlinked_proposals_dir_is_refused(tmp_path):
+    """A pre-planted team-memory/_proposals symlink must not let propose()
+    write the proposal JSON outside the project."""
+    root = vault.project_dir(PROJECT_CODE)
+    root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_props"
+    outside.mkdir()
+    (root / "team-memory").mkdir(parents=True, exist_ok=True)
+    (root / "team-memory" / "_proposals").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(Exception):
+        team_memory.propose(proposer_id="operator", body="escape?",
+                            project_code=PROJECT_CODE)
+    assert not list(outside.glob("*.json"))  # nothing written outside
+
+
+def test_symlinked_team_dir_is_refused_on_write(tmp_path):
+    """A symlinked team-memory dir must not let write() escape the project."""
+    root = vault.project_dir(PROJECT_CODE)
+    root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_team"
+    outside.mkdir()
+    (root / "team-memory").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(Exception):
+        team_memory.write(writer_id="qc-1", writer_tier="qc", body="escape?",
+                         project_code=PROJECT_CODE, artifact_kind="report")
+    assert not list(outside.glob("*.md"))

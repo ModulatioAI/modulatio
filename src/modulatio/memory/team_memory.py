@@ -111,8 +111,28 @@ class MemoryEntry:
 
 # ── File layout ───────────────────────────────────────────────────────────
 
+def _guard_dir(path: Path, base: Path) -> Path:
+    """Refuse a pre-planted symlink at ``path`` (never follow it) and bounds-check
+    the resolved path stays under ``base`` — mirror ``vault.run_dir``'s guard so a
+    team-memory read/write can't escape the project via a planted symlink."""
+    if path.is_symlink():
+        raise ValueError(
+            f"team-memory path {path.name!r} is a symlink — refusing to follow it")
+    try:
+        path.resolve(strict=False).relative_to(base.resolve(strict=False))
+    except ValueError as exc:
+        raise ValueError(f"team-memory path escapes the project: {path}") from exc
+    return path
+
+
 def _team_dir(project_code: str) -> Path:
-    return project_dir(project_code) / "team-memory"
+    base = project_dir(project_code)
+    return _guard_dir(base / "team-memory", base)
+
+
+def _proposals_dir(project_code: str) -> Path:
+    td = _team_dir(project_code)
+    return _guard_dir(td / "_proposals", td)
 
 
 def _filename_slug(s: str) -> str:
@@ -301,7 +321,7 @@ def propose(
         capability_tags=tuple(capability_tags),
         rationale=rationale,
     )
-    dir_ = _team_dir(project_code) / "_proposals"
+    dir_ = _proposals_dir(project_code)
     dir_.mkdir(parents=True, exist_ok=True)
     path = dir_ / f"{_filename_slug(proposal.timestamp)}__{proposal.proposal_id}.json"
     path.write_text(json.dumps({
@@ -319,7 +339,7 @@ def propose(
 
 def list_proposals(project_code: str) -> list[Proposal]:
     """Return all pending proposals."""
-    dir_ = _team_dir(project_code) / "_proposals"
+    dir_ = _proposals_dir(project_code)
     if not dir_.exists():
         return []
     out: list[Proposal] = []
@@ -378,7 +398,7 @@ def approve_proposal(
         raise PermissionDenied(
             f"Approve denied for tier '{approver_tier}'. Only {sorted(_WRITE_AUTHORIZED_TIERS)} can approve."
         )
-    dir_ = _team_dir(project_code) / "_proposals"
+    dir_ = _proposals_dir(project_code)
     path = _find_proposal_path(dir_, proposal_id)
     if path is None:
         raise KeyError(f"Proposal {proposal_id} not found in {dir_}.")
@@ -399,7 +419,7 @@ def approve_proposal(
 
 def reject_proposal(proposal_id: str, *, project_code: str) -> bool:
     """QC or Leader rejects a proposal — file is removed without write."""
-    dir_ = _team_dir(project_code) / "_proposals"
+    dir_ = _proposals_dir(project_code)
     path = _find_proposal_path(dir_, proposal_id)
     if path is None:
         return False

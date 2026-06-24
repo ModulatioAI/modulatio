@@ -13,11 +13,12 @@ from rich.markup import escape
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Label, Select
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, DataTable, Select, Static
 
 from modulatio import cron
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
+from modulatio.tui.widgets.master_detail import MasterDetail
 
 
 _ALL = "__all__"
@@ -40,7 +41,7 @@ class CronScreen(Vertical):
         width: 28;
         margin-right: 2;
     }
-    CronScreen DataTable {
+    CronScreen #cron-table {
         height: 1fr;
         border: round $frame-dim;   /* theme-aware (was solid $panel) */
     }
@@ -68,13 +69,24 @@ class CronScreen(Vertical):
             )
             yield Button("Refresh", id="cron-refresh", variant="primary")
 
-        yield Label(
-            "Add jobs via CLI: `modulatio cron add --name X --schedule \"daily 09:00\" "
-            "--code STA --objective '...'`"
-        )
-        table = DataTable(id="cron-table", cursor_type="row")
-        table.add_columns("ID", "Name", "Project", "Schedule", "Enabled", "Next run", "Last status")
-        yield table
+        with MasterDetail():
+            with Vertical(id="md-list"):
+                table = DataTable(id="cron-table", cursor_type="row")
+                table.add_columns(
+                    "ID", "Name", "Project", "Schedule", "Enabled",
+                    "Next run", "Last status",
+                )
+                yield table
+                yield Static(
+                    "↑↓ move · e enable · d disable · r run now · x remove · "
+                    "f refresh — add jobs via `modulatio cron add …` or the Leader",
+                    id="cron-affordance",
+                    classes="affordance",
+                )
+            with VerticalScroll(id="md-detail"):
+                yield Static(
+                    "(select a job to see what it runs)", id="cron-detail"
+                )
 
     def focus_project(self, project_code: str) -> None:
         """Programmatic project filter from the ``/cron <code>`` command
@@ -209,6 +221,69 @@ class CronScreen(Vertical):
                 escape(last),
                 key=j.get("id"),
             )
+        if table.row_count > 0:
+            first = list(table.rows.keys())[0].value
+            if first:
+                self._render_detail(first)
+        else:
+            self._set_detail("(no scheduled jobs)")
+
+    # ── Detail pane ─────────────────────────────────────────────────────────
+
+    def on_data_table_row_highlighted(
+        self, event: DataTable.RowHighlighted
+    ) -> None:
+        if event.row_key is not None and event.row_key.value:
+            self._render_detail(event.row_key.value)
+
+    def _render_detail(self, job_id: str) -> None:
+        job = cron.get(job_id)
+        self._set_detail(
+            _format_cron_detail(job) if job else "(job not found)"
+        )
+
+    def _set_detail(self, text: str) -> None:
+        try:
+            # escape so a job's own ``[...]`` can't be read as console markup.
+            self.query_one("#cron-detail", Static).update(escape(text))
+        except Exception:
+            pass  # detail pane not yet mounted; next refresh renders it
+
+
+def _format_cron_detail(job: dict) -> str:
+    """Render a cron job as a plain-text detail card — what it runs (a bound
+    Job Template + params, or a raw objective), plus schedule / run state."""
+    lines: list[str] = [job.get("name", "?"), ""]
+    jt_id = job.get("jt_id")
+    if jt_id:
+        lines.append(f"runs JT    {jt_id}")
+    else:
+        lines += ["objective", job.get("objective", "") or "—"]
+    lines.append("─" * 30)
+    lines.append(f"id         {job.get('id', '?')}")
+    lines.append(f"project    {job.get('project_code', '?')}")
+    lines.append("enabled    " + ("● on" if job.get("enabled") else "○ off"))
+    lines.append(f"schedule   {job.get('schedule', '?')}")
+    nxt = (job.get("next_run") or "")[:19]
+    lines.append("next run   " + (nxt if job.get("enabled") else "— (disabled)"))
+    status = job.get("last_status") or "never"
+    when = (job.get("last_run") or "")[:19]
+    glyph = _STATUS_GLYPH.get(status, "·")
+    lines.append(f"last       {glyph} {status}" + (f"  ·  {when}" if when else ""))
+    if job.get("on_refused"):
+        lines.append(f"on refused {job['on_refused']}")
+
+    params = job.get("jt_params") or {}
+    if jt_id and params:
+        lines += ["", "parameters"]
+        for k, v in params.items():
+            lines.append(f"  {k}  {v}")
+
+    lines += [
+        "",
+        "e enable · d disable · r run now · x remove",
+    ]
+    return "\n".join(lines)
 
 
 def build_cron_panel() -> CronScreen:

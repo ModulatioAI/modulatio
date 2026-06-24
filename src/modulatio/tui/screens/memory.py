@@ -20,13 +20,19 @@ always shown (read available to all roster members).
 
 from __future__ import annotations
 
+from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Label, Select, Static
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, DataTable, Input, Markdown, Select, Static
 
-from modulatio import roster
+from modulatio import roster, vault
 from modulatio.memory import agent_memory, team_memory
+from modulatio.tui.widgets.confirm_modal import ConfirmModal
+from modulatio.tui.widgets.controls_row import ControlsRow
+from modulatio.tui.widgets.master_detail import MasterDetail
+from modulatio.tui.widgets.text_entry_modal import TextEntryModal
 
 
 _TEAM_ONLY = "__team_only__"
@@ -49,6 +55,14 @@ def _cell(value: object) -> Text:
 class MemoryScreen(Vertical):
     """Memory tab content."""
 
+    BINDINGS = [
+        Binding("r", "refresh", "Refresh", show=True),
+        Binding("a", "add", "Add", show=True),
+        Binding("e", "edit", "Edit", show=True),
+        Binding("d", "delete", "Delete", show=True),
+        Binding("x", "export", "Export md", show=True),
+    ]
+
     DEFAULT_CSS = """
     MemoryScreen {
         padding: 1;
@@ -60,26 +74,27 @@ class MemoryScreen(Vertical):
         width: 30;
         margin-right: 2;
     }
-    MemoryScreen > #memory-stats {
-        height: 4;
+    MemoryScreen #memory-stats {
+        height: auto;
         padding: 0 1;
-        background: $surface;
-        margin-bottom: 1;
+        color: $text-muted;
     }
-    MemoryScreen > Label {
-        margin-top: 1;
-    }
-    MemoryScreen DataTable {
-        height: 10;
-        margin-bottom: 1;
-        border: solid $panel;
-    }
+    MemoryScreen #memory-table { height: 1fr; }
     """
+
+    #: Glyph per memory LAYER — paired with the WORD (Feng-Tui §10).
+    _LAYER_GLYPH = {"episodic": "◷", "semantic": "◆", "team": "⚑"}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._project_code: str = ""
         self._focused_agent: str | None = None  # None = team-only view
+        self._query: str = ""
+        # row key → (layer, agent_id|"", entry_id) so an action knows the
+        # selected entry's layer + owner; plus its rendered detail card.
+        self._rows: dict[str, tuple[str, str, str]] = {}
+        self._detail: dict[str, str] = {}
+        self._raw: dict[str, str] = {}  # row key → raw content (for edit prefill)
 
     def set_project(self, project_code: str) -> None:
         self._project_code = project_code
@@ -112,22 +127,22 @@ class MemoryScreen(Vertical):
             )
             yield Button("Refresh", id="memory-refresh", variant="primary")
 
-        yield Static("Per-agent stats: select an agent above.", id="memory-stats")
-
-        yield Label("Episodic memory (per-agent)")
-        episodic = DataTable(id="memory-episodic-table", cursor_type="row")
-        episodic.add_columns("Timestamp", "Type", "Source", "Content")
-        yield episodic
-
-        yield Label("Semantic memory (per-agent, long-term)")
-        semantic = DataTable(id="memory-semantic-table", cursor_type="row")
-        semantic.add_columns("Timestamp", "Type", "Confidence", "Content")
-        yield semantic
-
-        yield Label("Team memory (QC-validated pool, RW for QC + Leader)")
-        team = DataTable(id="memory-team-table", cursor_type="row")
-        team.add_columns("Timestamp", "Writer", "Kind", "Body")
-        yield team
+        with MasterDetail():
+            with Vertical(id="md-list"):
+                yield Static("", id="memory-stats")
+                yield ControlsRow(
+                    counts=True, search=True, search_placeholder="/ search memory…")
+                table = DataTable(id="memory-table", cursor_type="row")
+                table.add_columns("Layer", "When", "Kind", "Content")
+                yield table
+                yield Static(
+                    "↑↓ move · type to search · a add · e edit · d delete · x "
+                    "export — team entries are QC-curated (edits propose→approve)",
+                    id="memory-affordance",
+                    classes="affordance",
+                )
+            with VerticalScroll(id="md-detail"):
+                yield Markdown("_Select an entry to view it._", id="memory-detail-md")
 
     def on_mount(self) -> None:
         self._populate_agent_picker()
@@ -175,101 +190,290 @@ class MemoryScreen(Vertical):
             sel.value = _TEAM_ONLY
             self._focused_agent = None
 
+    def _add_row(
+        self, table: DataTable, layer: str, agent_id: str, entry_id: str,
+        when: str, kind: str, content: str, detail_md: str,
+    ) -> None:
+        """Append one entry to the unified table + record its (layer, owner, id)
+        and rendered detail card, keyed by a stable row key. Client-side search
+        skips rows whose layer/kind/content don't match the query."""
+        q = self._query.lower()
+        if q and q not in f"{layer} {kind} {content}".lower():
+            return
+        key = f"{layer}:{agent_id}:{entry_id}"
+        glyph = self._LAYER_GLYPH.get(layer, "·")
+        table.add_row(
+            _cell(f"{glyph} {layer}"), _cell((when or "")[:19]),
+            _cell(kind), _cell((content or "").replace("\n", " ")[:80]), key=key,
+        )
+        self._rows[key] = (layer, agent_id, entry_id)
+        self._detail[key] = detail_md
+        self._raw[key] = content or ""
+
     def _refresh_views(self) -> None:
         try:
             stats_widget = self.query_one("#memory-stats", Static)
-            episodic = self.query_one("#memory-episodic-table", DataTable)
-            semantic = self.query_one("#memory-semantic-table", DataTable)
-            team = self.query_one("#memory-team-table", DataTable)
+            table = self.query_one("#memory-table", DataTable)
         except Exception:
-            return  # Not mounted yet
-
-        episodic.clear()
-        semantic.clear()
-        team.clear()
-
+            return  # not mounted yet
+        table.clear()
+        self._rows = {}
+        self._detail = {}
+        self._raw = {}
         if not self._project_code:
             stats_widget.update("(no project context yet — kick off a goal first)")
             return
 
-        # Per-agent panes
-        if self._focused_agent:
+        agent = self._focused_agent
+        counts: list[str] = []
+        if agent:
             try:
-                stats = agent_memory.stats(self._focused_agent, project_code=self._project_code)
+                stats = agent_memory.stats(agent, project_code=self._project_code)
             except Exception:
                 stats = {}
-            stats_widget.update(
-                f"Agent: {self._focused_agent}  |  "
-                f"episodic active/total: {stats.get('episodic_active', 0)}/{stats.get('episodic_total', 0)}  |  "
-                f"stale: {stats.get('episodic_stale', 0)}  |  "
-                f"semantic active/total: {stats.get('semantic_active', 0)}/{stats.get('semantic_total', 0)}"
-            )
-            try:
-                episodic_entries = agent_memory.get_episodic(
-                    self._focused_agent, project_code=self._project_code, limit=30,
-                )
-            except Exception:
-                episodic_entries = []
-            for e in episodic_entries:
-                episodic.add_row(
-                    _cell(e.when[:19]),
-                    _cell(e.type),
-                    _cell(e.source),
-                    _cell((e.content or "")[:80]),
-                )
-            try:
-                semantic_entries = agent_memory.get_semantic(
-                    self._focused_agent, project_code=self._project_code, limit=30,
-                )
-            except Exception:
-                semantic_entries = []
-            for e in semantic_entries:
-                semantic.add_row(
-                    _cell(e.when[:19]),
-                    _cell(e.type),
-                    _cell(e.confidence),
-                    _cell((e.content or "")[:80]),
-                )
-        else:
-            stats_widget.update("(select an agent above to inspect per-agent memory)")
+            counts.append(
+                f"agent {agent}: {stats.get('episodic_active', 0)} episodic · "
+                f"{stats.get('semantic_active', 0)} semantic")
+            for layer, getter, kind_of in (
+                ("episodic", agent_memory.get_episodic, lambda e: e.type),
+                ("semantic", agent_memory.get_semantic, lambda e: e.confidence),
+            ):
+                try:
+                    entries = getter(agent, project_code=self._project_code, limit=50)
+                except Exception:
+                    entries = []
+                for e in entries:
+                    self._add_row(
+                        table, layer, agent, e.id, e.when, kind_of(e), e.content,
+                        _format_agent_entry(layer, agent, e),
+                    )
 
-        # Team memory pane (always shown — RO for all)
         try:
             team_entries = team_memory.list_entries(self._project_code)
         except Exception:
             team_entries = []
         for entry in team_entries[-50:]:
-            writer = entry.writer_id
-            if entry.proposed_by and entry.proposed_by != entry.writer_id:
-                writer = f"{entry.proposed_by} → {entry.writer_id}"
-            team.add_row(
-                _cell(entry.timestamp[:19]),
-                _cell(writer),
-                _cell(entry.artifact_kind or "?"),
-                _cell((entry.body or "")[:80]),
+            self._add_row(
+                table, "team", "", entry.entry_id, entry.timestamp,
+                entry.artifact_kind or "?", entry.body,
+                _format_team_entry(entry),
             )
+        counts.append(f"{len(team_entries)} team")
+        self._set_counts(len(self._rows))
 
-        # Empty-state guidance (team-only view) — an empty screen shouldn't read
-        # as broken. Memory PERSISTS AT THE PROJECT LEVEL (not per run), so it
-        # accrues across jobs.
-        if not self._focused_agent and not team_entries:
-            try:
-                roster_has_agents = bool(roster.list_agents(self._project_code))
-            except Exception:
-                roster_has_agents = False
-            if not roster_has_agents:
-                stats_widget.update(
-                    "No memory yet for this project. Memory persists at the PROJECT "
-                    "level (not per run): agents accrue episodic + semantic memory as "
-                    "they work, and QC promotes validated findings into the shared team "
-                    "pool. Run a job (or add agents) to populate it."
-                )
-            else:
-                stats_widget.update(
-                    "No team memory yet — select an agent above for its per-agent "
-                    "memory, or run a job so QC can promote findings into the shared "
-                    "pool. (Memory persists per project, across runs.)"
-                )
+        if not self._rows:
+            stats_widget.update(
+                "No entries match the search." if self._query
+                else _empty_hint(self._project_code, bool(agent)))
+        else:
+            stats_widget.update("  ·  ".join(counts))
+            first = next(iter(self._rows))
+            self._render_detail(first)
+
+    def _set_counts(self, shown: int) -> None:
+        try:
+            label = f"{shown} entries" + (" (filtered)" if self._query else "")
+            self.query_one(ControlsRow).set_counts(label)
+        except Exception:
+            pass
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "controls-search":
+            self._query = event.value.strip()
+            self._refresh_views()
+
+    # ── detail card ─────────────────────────────────────────────────────
+
+    def on_data_table_row_highlighted(
+        self, event: DataTable.RowHighlighted
+    ) -> None:
+        if event.row_key is not None and event.row_key.value:
+            self._render_detail(event.row_key.value)
+
+    def _render_detail(self, key: str) -> None:
+        try:
+            self.query_one("#memory-detail-md", Markdown).update(
+                self._detail.get(key, "_Select an entry to view it._"))
+        except Exception:
+            pass
+
+    def _selected_key(self) -> str | None:
+        try:
+            table = self.query_one("#memory-table", DataTable)
+            if table.row_count == 0:
+                return None
+            return table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        except Exception:
+            return None
+
+    # ── actions ─────────────────────────────────────────────────────────
+
+    def action_refresh(self) -> None:
+        self._populate_agent_picker()
+        self._refresh_views()
+
+    def action_add(self) -> None:
+        """`a` — add a durable (semantic) note to the focused agent's memory."""
+        agent = self._focused_agent
+        if not agent:
+            self.app.notify(
+                "Select an agent to add a memory to (team memory is QC-curated).",
+                severity="warning")
+            return
+        self.app.push_screen(
+            TextEntryModal(
+                title=f"Add a semantic memory for '{agent}'",
+                hint="A durable, operator-authored fact for this agent."),
+            lambda text: self._do_add(agent, text) if text else None,
+        )
+
+    def _do_add(self, agent: str, content: str) -> None:
+        try:
+            agent_memory.add_semantic(agent, content, project_code=self._project_code)
+        except Exception as exc:  # noqa: BLE001 — surface, never crash the screen
+            self.app.notify(f"Couldn't add: {exc}", severity="error")
+            return
+        self.app.notify(f"Added a semantic memory for '{agent}'.")
+        self._refresh_views()
+
+    def action_edit(self) -> None:
+        """`e` — edit the selected entry. Agent layers edit in place; a team
+        entry is QC-curated, so an edit becomes a propose→approve revision."""
+        key = self._selected_key()
+        if not key or key not in self._rows:
+            return
+        layer, agent_id, entry_id = self._rows[key]
+        initial = self._raw.get(key, "")
+        if layer == "team":
+            self.app.push_screen(
+                TextEntryModal(
+                    title="Propose a revision to this team memory",
+                    initial=initial,
+                    hint="Team memory is QC-curated — your edit is proposed for "
+                         "QC approval, not applied directly."),
+                lambda text: self._do_propose_revision(text) if text else None,
+            )
+            return
+        self.app.push_screen(
+            TextEntryModal(
+                title=f"Edit this {layer} memory of '{agent_id}'",
+                initial=initial),
+            lambda text: self._do_edit(layer, agent_id, entry_id, text)
+            if text else None,
+        )
+
+    def _do_edit(self, layer: str, agent_id: str, entry_id: str, content: str) -> None:
+        try:
+            updated = agent_memory.update_entry(
+                agent_id, entry_id, project_code=self._project_code,
+                layer=layer, content=content)
+        except Exception as exc:  # noqa: BLE001
+            self.app.notify(f"Couldn't edit: {exc}", severity="error")
+            return
+        self.app.notify("Edited." if updated else "Entry not found.")
+        self._refresh_views()
+
+    def _do_propose_revision(self, body: str) -> None:
+        try:
+            team_memory.propose(
+                proposer_id="operator", body=body,
+                project_code=self._project_code,
+                rationale="Operator-proposed revision from the MEMORY tab.")
+        except Exception as exc:  # noqa: BLE001
+            self.app.notify(f"Couldn't propose: {exc}", severity="error")
+            return
+        self.app.notify("Proposed a revision — QC will review it before it lands.")
+
+    def action_delete(self) -> None:
+        key = self._selected_key()
+        if not key or key not in self._rows:
+            return
+        layer, agent_id, entry_id = self._rows[key]
+        if layer == "team":
+            self.app.notify(
+                "Team memory is QC-curated — it's revised through the "
+                "propose→approve flow, not deleted here.", severity="warning")
+            return
+        self.app.push_screen(
+            ConfirmModal(f"Delete this {layer} memory of '{agent_id}'?"),
+            lambda ok: self._do_delete(layer, agent_id, entry_id) if ok else None,
+        )
+
+    def _do_delete(self, layer: str, agent_id: str, entry_id: str) -> None:
+        try:
+            deleted = agent_memory.delete_entry(
+                agent_id, entry_id, project_code=self._project_code, layer=layer)
+        except Exception as exc:  # noqa: BLE001 — surface, never crash the screen
+            self.app.notify(f"Couldn't delete: {exc}", severity="error")
+            return
+        if deleted:
+            self.app.notify(f"Deleted a {layer} memory of '{agent_id}'.")
+        self._refresh_views()
+
+    def action_export(self) -> None:
+        if not self._focused_agent:
+            self.app.notify(
+                "Select an agent to export its memory as markdown.",
+                severity="warning")
+            return
+        try:
+            md = agent_memory.export_markdown(
+                self._focused_agent, project_code=self._project_code)
+            dest = (vault.project_dir(self._project_code)
+                    / f"memory-{self._focused_agent}.md")
+            dest.write_text(md, encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            self.app.notify(f"Export failed: {exc}", severity="error")
+            return
+        self.app.notify(f"Exported to {dest}")
+
+
+def _format_agent_entry(layer: str, agent_id: str, e) -> str:
+    """Markdown detail card for an agent (episodic/semantic) entry."""
+    meta = "  ·  ".join(p for p in (
+        f"**layer** {layer}", f"**type** {e.type}",
+        f"**confidence** {e.confidence}", f"**state** {e.state}") if p)
+    lines = [
+        f"# {agent_id} · {layer}", "", meta, "",
+        f"_{escape((e.when or '')[:19])}_", "", "---", "",
+        escape(e.content or "_(empty)_"),
+    ]
+    if e.tags:
+        lines += ["", "**tags:** " + ", ".join(escape(t) for t in e.tags)]
+    return "\n".join(lines)
+
+
+def _format_team_entry(entry) -> str:
+    """Markdown detail card for a team-pool entry."""
+    writer = entry.writer_id
+    if entry.proposed_by and entry.proposed_by != entry.writer_id:
+        writer = f"{entry.proposed_by} → {entry.writer_id}"
+    lines = [
+        f"# team · {escape(entry.artifact_kind or '?')}", "",
+        f"**writer** {escape(writer)}", "",
+        f"_{escape((entry.timestamp or '')[:19])}_", "", "---", "",
+        escape(entry.body or "_(empty)_"), "",
+        "_QC-curated — revise via the propose→approve flow._",
+    ]
+    return "\n".join(lines)
+
+
+def _empty_hint(project_code: str, has_agent: bool) -> str:
+    if has_agent:
+        return ("No memory for this agent yet — it accrues episodic + semantic "
+                "memory as it works (memory persists per project, across runs).")
+    try:
+        roster_has_agents = bool(roster.list_agents(project_code))
+    except Exception:
+        roster_has_agents = False
+    if not roster_has_agents:
+        return ("No memory yet for this project. Memory persists at the PROJECT "
+                "level (not per run): agents accrue episodic + semantic memory as "
+                "they work, and QC promotes validated findings into the shared "
+                "team pool. Run a job (or add agents) to populate it.")
+    return ("No team memory yet — select an agent above for its per-agent "
+            "memory, or run a job so QC can promote findings into the shared "
+            "pool. (Memory persists per project, across runs.)")
 
 
 def build_memory_panel() -> MemoryScreen:

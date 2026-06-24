@@ -36,6 +36,7 @@ from textual.widgets.option_list import Option
 
 from modulatio import model_presets, roster
 from modulatio import provider_catalog as pc
+from modulatio.tui.widgets.configurator import Configurator
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
 
 
@@ -86,11 +87,14 @@ class AgentBuilderScreen(Vertical):
     DEFAULT_CSS = """
     AgentBuilderScreen { padding: 1; }
     AgentBuilderScreen .cfg-title { text-style: bold; color: $primary; }
-    AgentBuilderScreen #agt-body { height: 1fr; }
+    AgentBuilderScreen Configurator { height: 1fr; }
     AgentBuilderScreen #agt-table, AgentBuilderScreen #agt-presets {
         height: 1fr; border: round $frame-dim;
     }
-    AgentBuilderScreen #agt-status { color: $text-muted; height: auto; }
+    AgentBuilderScreen #agt-status, AgentBuilderScreen #agt-list-status {
+        color: $text-muted; height: auto;
+    }
+    AgentBuilderScreen #agt-rest { color: $text-muted; }
     AgentBuilderScreen #agt-buttons { height: 3; }
     AgentBuilderScreen #agt-buttons Button { margin-right: 1; }
     AgentBuilderScreen Input { margin: 1 0; }
@@ -104,7 +108,12 @@ class AgentBuilderScreen(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static("CONFIGURATION · Agents", classes="cfg-title")
-        yield Vertical(id="agt-body")
+        # The Configurator contract fixes the child ids to #cfg-list /
+        # #cfg-companion; self-scoped queries keep this screen's panes distinct
+        # from the MODELS screen's when both tabs are mounted.
+        with Configurator():
+            yield Vertical(id="cfg-list")
+            yield Vertical(id="cfg-companion")
 
     async def on_mount(self) -> None:
         await self.show_list()
@@ -113,8 +122,31 @@ class AgentBuilderScreen(Vertical):
     def project_code(self) -> str:
         return self.app.project_code  # type: ignore[attr-defined]
 
-    def _body(self) -> Vertical:
-        return self.query_one("#agt-body", Vertical)
+    def _list(self) -> Vertical:
+        return self.query_one("#cfg-list", Vertical)
+
+    def _reset_flow_state(self) -> None:
+        """Drop the in-flight flow markers so a cancelled flow can't leak into
+        the next one (the configurator's right pane is a state machine)."""
+        self._flow = self._target_agent = self._pending_remove = None
+
+    async def _rest_companion(self) -> None:
+        """Return the companion to its resting hint + clear flow state; the
+        persistent roster list stays mounted."""
+        self._reset_flow_state()
+        await self.query_one(Configurator).swap_companion(
+            Static(
+                "Pick an agent, then Change model / Fallbacks / Remove — "
+                "or + Agent to add one.",
+                id="agt-rest",
+            )
+        )
+
+    def _set_list_status(self, text: str) -> None:
+        try:
+            self.query_one("#agt-list-status", Static).update(text)
+        except Exception:
+            pass
 
     def _preset_keys(self) -> list[str]:
         return sorted(model_presets.load_presets().keys())
@@ -128,9 +160,10 @@ class AgentBuilderScreen(Vertical):
     # ── the roster list ─────────────────────────────────────────────────
 
     async def show_list(self, message: str = "") -> None:
-        self._flow = self._target_agent = self._pending_remove = None
-        body = self._body()
-        await body.remove_children()
+        # Rebuild the persistent roster list (the doorway) and rest the
+        # companion. A flow's completion message lands on the list status.
+        lst = self._list()
+        await lst.remove_children()
         table = DataTable(id="agt-table", cursor_type="row")
         table.add_columns("Role", "Name", "Model", "Status")
         for a in roster.list_agents(self.project_code):
@@ -147,7 +180,8 @@ class AgentBuilderScreen(Vertical):
             Button("Remove", id="agt-remove", variant="warning"),
             id="agt-buttons",
         )
-        await body.mount(table, buttons, Static(message, id="agt-status"))
+        await lst.mount(table, buttons, Static(message, id="agt-list-status"))
+        await self._rest_companion()
 
     def _selected_agent_id(self) -> str | None:
         table = self.query_one("#agt-table", DataTable)
@@ -163,9 +197,7 @@ class AgentBuilderScreen(Vertical):
 
     async def _show_change_model(self, agent_id: str) -> None:
         self._flow, self._target_agent = "change", agent_id
-        body = self._body()
-        await body.remove_children()
-        await body.mount(
+        await self.query_one(Configurator).swap_companion(
             Static(f"Assign a model to '{agent_id}' — pick a preset:"),
             self._preset_list(),
             Button("Cancel", id="agt-cancel"),
@@ -201,8 +233,6 @@ class AgentBuilderScreen(Vertical):
         self._flow, self._target_agent = "fallbacks", agent_id
         agent = roster.load(agent_id, self.project_code)
         chain = list(agent.fallbacks) if agent else []
-        body = self._body()
-        await body.remove_children()
         header = (
             f"Fallback models for '{escape(agent_id)}' "
             f"(model: {escape((agent.model if agent else None) or '—')}) — "
@@ -220,7 +250,8 @@ class AgentBuilderScreen(Vertical):
             Button("Done", id="agt-cancel"),
             id="agt-fb-buttons",
         )
-        await body.mount(Static(header), table, buttons, Static(message, id="agt-status"))
+        await self.query_one(Configurator).swap_companion(
+            Static(header), table, buttons, Static(message, id="agt-status"))
 
     async def _show_fallback_picker(self) -> None:
         """Pick a model to append to the chain (excludes self, in-chain, and
@@ -246,9 +277,7 @@ class AgentBuilderScreen(Vertical):
                 f"{_method_label(p.get('auth_type'))})",
                 id=key,
             ))
-        body = self._body()
-        await body.remove_children()
-        await body.mount(
+        await self.query_one(Configurator).swap_companion(
             Static(f"Add a fallback for '{escape(self._target_agent)}' — pick a model:"),
             ol, Button("Cancel", id="agt-cancel"),
         )
@@ -282,9 +311,7 @@ class AgentBuilderScreen(Vertical):
 
     async def _show_add_agent(self) -> None:
         self._flow = "add"
-        body = self._body()
-        await body.remove_children()
-        await body.mount(
+        await self.query_one(Configurator).swap_companion(
             Static("New agent:"),
             Input(placeholder="name, e.g. Marlow", id="agt-newname"),
             Static("role:"),
@@ -324,11 +351,11 @@ class AgentBuilderScreen(Vertical):
             await self._remove_selected()
         elif bid == "agt-cancel":
             # Cancel from the fallback PICKER returns to the chain view; from any
-            # other flow it returns to the roster list.
+            # other flow it rests the companion (the roster list persists).
             if self._flow == "fallbacks_pick" and self._target_agent:
                 await self._show_fallbacks(self._target_agent)
             else:
-                await self.show_list()
+                await self._rest_companion()
 
     async def on_option_list_option_selected(
         self, event: OptionList.OptionSelected

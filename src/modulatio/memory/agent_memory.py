@@ -45,7 +45,27 @@ def _agent_dir(agent_id: str, project_code: str) -> Path:
     # H1 invariant (mirror skills/standards/job-templates): agent_id becomes a
     # path component, so a separator / '..' / leading dot must never escape the
     # project's memory/ root. Fail-closed — the persistence layer binds it.
-    d = project_dir(project_code) / "memory" / validate_registry_name(agent_id)
+    proj = project_dir(project_code)
+    base = proj / "memory"
+    d = base / validate_registry_name(agent_id)
+    # The name is validated, but a pre-planted SYMLINK at the agent dir OR at the
+    # memory/ root would still be followed by mkdir(exist_ok=True) + the writes —
+    # an escape. Refuse a symlinked memory/ root and a symlinked agent dir, and
+    # bounds-check against the REAL project root (NOT base.resolve(), which a
+    # symlinked memory/ would bless to its own outside target). Mirror
+    # vault.run_dir's belt-and-suspenders so reads/writes never leave the project.
+    if base.is_symlink():
+        raise ValueError(
+            "project memory root is a symlink — refusing to follow it")
+    if d.is_symlink():
+        raise ValueError(
+            f"agent memory dir {agent_id!r} is a symlink — refusing to follow it")
+    try:
+        d.resolve(strict=False).relative_to(proj.resolve(strict=False))
+    except ValueError as exc:
+        raise ValueError(
+            f"agent memory dir {agent_id!r} escapes the project root"
+        ) from exc
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -362,6 +382,79 @@ def promote_candidates(agent_id: str, *, project_code: str) -> list[MemoryEntry]
     return candidates
 
 
+def _layer_path(agent_id: str, layer: str, project_code: str) -> Path:
+    """Resolve the JSON path for a layer ('episodic' | 'semantic'). Raises
+    ValueError for any other layer (the team layer is QC-curated and is never
+    mutated through this private-memory module)."""
+    if layer == "episodic":
+        return _episodic_path(agent_id, project_code)
+    if layer == "semantic":
+        return _semantic_path(agent_id, project_code)
+    raise ValueError(
+        f"unknown memory layer {layer!r} (expected 'episodic' or 'semantic')")
+
+
+def delete_entry(
+    agent_id: str, entry_id: str, *, project_code: str, layer: str,
+) -> bool:
+    """Delete one episodic/semantic entry by id. Returns True if it existed.
+
+    The agent_id is path-validated by ``_layer_path`` (via ``_agent_dir``), so a
+    traversal id fails closed. Mirrors ``decay_episodic``'s load-mutate-save
+    under the per-file lock."""
+    path = _layer_path(agent_id, layer, project_code)
+    with _file_lock(path):
+        entries = _load_json(path)
+        kept = [e for e in entries if e.get("id") != entry_id]
+        if len(kept) == len(entries):
+            return False
+        _save_json(path, kept)
+    return True
+
+
+def update_entry(
+    agent_id: str, entry_id: str, *, project_code: str, layer: str, content: str,
+) -> Optional[MemoryEntry]:
+    """Edit one episodic/semantic entry's content in place (same id). Returns the
+    updated entry, or None if no entry matched."""
+    path = _layer_path(agent_id, layer, project_code)
+    with _file_lock(path):
+        entries = _load_json(path)
+        found = None
+        for e in entries:
+            if e.get("id") == entry_id:
+                e["content"] = content
+                found = e
+                break
+        if found is None:
+            return None
+        _save_json(path, entries)
+    return MemoryEntry.from_dict(found)
+
+
+def export_markdown(agent_id: str, *, project_code: str) -> str:
+    """Render an agent's episodic + semantic memory as markdown (Clif's
+    exportable-memory decision). Read-only: reads the raw JSON directly so it
+    never bumps access bookkeeping the way ``get_episodic`` does."""
+    def _section(title: str, path: Path) -> list[str]:
+        rows = [MemoryEntry.from_dict(e) for e in _load_json(path)]
+        out = [f"## {title}", ""]
+        if not rows:
+            out += ["_(none)_", ""]
+            return out
+        for e in rows:
+            stamp = (e.when or "")[:19]
+            meta = " · ".join(p for p in (e.type, e.confidence, e.state) if p)
+            out.append(f"- **{stamp}** ({meta}) {e.content}")
+        out.append("")
+        return out
+
+    lines = [f"# Memory · {agent_id}", ""]
+    lines += _section("Episodic", _episodic_path(agent_id, project_code))
+    lines += _section("Semantic", _semantic_path(agent_id, project_code))
+    return "\n".join(lines)
+
+
 def stats(agent_id: str, *, project_code: str) -> dict:
     """Memory stats for an agent."""
     episodic = _load_json(_episodic_path(agent_id, project_code))
@@ -382,6 +475,9 @@ __all__ = [
     "add_semantic",
     "get_semantic",
     "search",
+    "delete_entry",
+    "update_entry",
+    "export_markdown",
     "decay_episodic",
     "promote_candidates",
     "stats",

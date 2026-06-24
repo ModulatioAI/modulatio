@@ -18,9 +18,10 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Button, Label, ListItem, ListView, Static
+from textual.widgets import Button, Input, Label, ListItem, ListView, Static
 
 from modulatio import families, vault
+from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.export_dialog import ExportDialog
 from modulatio.tui.widgets.file_picker import FolderPickerModal
 from modulatio.tui.widgets.master_detail import MasterDetail
@@ -108,13 +109,27 @@ class ArtifactsScreen(Vertical):
     ArtifactsScreen #artifact-preview { height: 1fr; padding: 0 1; }
     """
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._query: str = ""
+
     def compose(self) -> ComposeResult:
         with MasterDetail():
             with Vertical(id="md-list"):
-                yield Label("Artifacts")
+                yield ControlsRow(
+                    counts=True, search=True,
+                    search_placeholder="/ search artifacts…",
+                )
                 yield ListView(id="artifacts-list")
                 yield Button("Export…", id="artifacts-export-btn", variant="primary")
                 yield ExportDialog(id="artifacts-export-panel", classes="hidden")
+                # Affordance last so the export panel never pushes it (and the
+                # export button) off-screen when it expands.
+                yield Static(
+                    "↑↓ move · type to search · Export… to render & save",
+                    id="artifacts-affordance",
+                    classes="affordance",
+                )
             with VerticalScroll(id="md-detail"):
                 yield Static("(select an artifact to preview)", id="artifact-preview")
 
@@ -143,6 +158,7 @@ class ArtifactsScreen(Vertical):
         self._paths: list[Path] = []
         code = self.app.project_code  # type: ignore[attr-defined]
         root = self._scope_root(code)
+        q = self._query.lower()
         for rel in _ARTIFACT_DIRS:
             d = root / rel
             if not d.exists():
@@ -153,14 +169,34 @@ class ArtifactsScreen(Vertical):
             for p in sorted(d.rglob("*")):
                 if not _is_artifact_file(p):
                     continue
+                rel_path = p.relative_to(d)
+                display = f"{rel}/{rel_path}"
+                # Client-side search: match the displayed path.
+                if q and q not in display.lower():
+                    continue
+                # _paths and the listview rows stay index-aligned so the
+                # preview lookup (by ListView.index) keeps pointing at the
+                # right file after a filter.
                 self._paths.append(p)
                 # Display the path as <rel>/<rest> so the user sees
                 # which artifact subdir AND any nested folders, prefixed with a
                 # family glyph (glyph + name, §10).
-                rel_path = p.relative_to(d)
                 glyph = _FAMILY_GLYPH.get(
                     families.infer_artifact_family_from_path(p), "·")
-                listview.append(ListItem(Label(f"{glyph} {rel}/{rel_path}")))
+                listview.append(ListItem(Label(f"{glyph} {display}")))
+        self._set_counts(len(self._paths))
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "controls-search":
+            self._query = event.value.strip()
+            self._load_files()
+
+    def _set_counts(self, shown: int) -> None:
+        try:
+            label = f"{shown} artifacts" + (" (filtered)" if self._query else "")
+            self.query_one(ControlsRow).set_counts(label)
+        except Exception:
+            pass
 
     # ── Selection preview ───────────────────────────────────────────────
 

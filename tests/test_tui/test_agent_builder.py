@@ -52,6 +52,25 @@ async def test_lists_the_roster(project):
         assert app.query_one("#agt-table", DataTable).row_count == 3
 
 
+async def test_roster_stays_mounted_during_a_flow_and_cancel_resets(project):
+    """Configurator archetype: the roster (the doorway) persists while a flow
+    runs in the companion; cancel rests the companion + clears flow state."""
+    app = _Host(project)
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(AgentBuilderScreen)
+        await screen._show_add_agent()
+        await pilot.pause()
+        assert app.query("#agt-newname")    # the add flow is in the companion
+        assert app.query("#agt-table")      # …and the roster is STILL mounted
+        assert screen._flow == "add"
+        await pilot.click("#agt-cancel")
+        await pilot.pause()
+        assert app.query("#agt-table")      # roster persists
+        assert not app.query("#agt-newname")  # companion rested
+        assert screen._flow is None           # flow state cleared
+
+
 async def test_roster_table_survives_bracketed_agent_name(project):
     # Regression (0.9.0 pre-ship): a name with invalid Rich-markup (a bare
     # closing tag) must not crash the roster DataTable with MarkupError. Without

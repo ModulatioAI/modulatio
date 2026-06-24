@@ -148,6 +148,64 @@ async def test_tickets_tab_shows_pre_seeded_tickets(project_with_tickets):
         assert table.row_count == 2
 
 
+# ─── Controls row + affordance (Feng-Tui overhaul) ──────────────────────────
+
+
+async def test_tickets_has_controls_row_with_counts_and_search(project_with_tickets):
+    """The list yields a ControlsRow (counts + search) atop the table, and the
+    counts cell reports the visible ticket total."""
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.tickets import TicketsScreen
+    from modulatio.tui.widgets.controls_row import ControlsRow
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Scope to the TICKETS screen — sibling tabs also carry a ControlsRow.
+        row = app.query_one(TicketsScreen).query_one(ControlsRow)
+        assert row.query("#controls-counts")
+        assert row.query("#controls-search")
+        counts = str(row.query_one("#controls-counts", Static).render())
+        assert "2 tickets" in counts
+
+
+async def test_tickets_search_filters_rows_and_marks_filtered(project_with_tickets):
+    """Typing a query into the search box filters the table to matching rows
+    and flags the counts as filtered — read-only client-side narrowing."""
+    from textual.widgets import DataTable, Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.tickets import TicketsScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(TicketsScreen)
+        screen._query = "sign-off"  # matches only the MINOR "ready for sign-off"
+        screen.refresh_tickets()
+        await pilot.pause()
+        assert screen.query_one("#tickets-table", DataTable).row_count == 1
+        counts = str(screen.query_one("#controls-counts", Static).render())
+        assert "filtered" in counts
+
+
+async def test_tickets_affordance_reads_read_only(project_with_tickets):
+    """The detail affordance states the screen is read-only and points
+    resolution to the LEADER tab (E1)."""
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        text = str(app.query_one("#tickets-affordance", Static).render())
+        assert "read-only" in text
+        assert "LEADER" in text
+
+
 # ─── Decision banners are display-only now (decisions are made in the LEADER
 #     tab via conversational approval; this screen just renders the audit) ────
 

@@ -129,3 +129,50 @@ async def test_send_modal_survives_a_submit_exception(tui_logs, monkeypatch):
         status = modal.query_one("#send-status", Static).render()
         assert "Couldn't file issue" in str(status)              # surfaced, not stranded
         assert modal.query_one("#send-submit", Button).disabled is False  # retry enabled
+
+
+# ─── Controls row + affordance (Feng-Tui overhaul) ──────────────────────────
+
+
+async def test_logs_has_controls_row_with_counts_and_search(tui_logs):
+    """The list yields a ControlsRow (counts + search) atop the table, and the
+    counts cell reports the visible log total."""
+    from modulatio.tui.widgets.controls_row import ControlsRow
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        app.query_one(TabbedContent).active = "tab-logs"
+        await pilot.pause()
+        # Scope to the LOGS screen — TICKETS also carries a ControlsRow.
+        row = app.query_one(LogsScreen).query_one(ControlsRow)
+        assert row.query("#controls-counts")
+        assert row.query("#controls-search")
+        counts = str(row.query_one("#controls-counts", Static).render())
+        assert "2 logs" in counts
+
+
+async def test_logs_search_filters_rows_and_marks_filtered(tui_logs):
+    """Typing a query filters the table to matching rows and flags the counts
+    as filtered."""
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        app.query_one(TabbedContent).active = "tab-logs"
+        await pilot.pause()
+        screen = app.query_one(LogsScreen)
+        screen._query = "producer"  # matches only the error log's summary
+        screen.refresh_logs()
+        await pilot.pause()
+        assert screen.query_one("#logs-table", DataTable).row_count == 1
+        counts = str(screen.query_one("#controls-counts", Static).render())
+        assert "filtered" in counts
+
+
+async def test_logs_affordance_names_send_and_delete(tui_logs):
+    """The detail affordance names the send + delete keys (s · d)."""
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        app.query_one(TabbedContent).active = "tab-logs"
+        await pilot.pause()
+        text = str(app.query_one("#logs-affordance", Static).render())
+        assert "s " in text and "send" in text.lower()
+        assert "d " in text and "delete" in text.lower()

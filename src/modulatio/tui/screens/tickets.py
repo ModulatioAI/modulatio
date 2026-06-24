@@ -28,9 +28,10 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import DataTable, Markdown
+from textual.widgets import DataTable, Input, Markdown, Static
 
 from modulatio import store, vault
+from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.ticket_row import ticket_row
 from modulatio.types import Ticket
@@ -57,15 +58,25 @@ class TicketsScreen(Vertical):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.preview_source: str = ""
+        self._query: str = ""
 
     def compose(self) -> ComposeResult:
         with MasterDetail():
             with Vertical(id="md-list"):
+                yield ControlsRow(
+                    counts=True, search=True, search_placeholder="/ search tickets…"
+                )
                 table = DataTable(id="tickets-table", cursor_type="row")
                 table.add_columns(
                     "ID", "Priority", "Status", "Title", "Approval", "Created"
                 )
                 yield table
+                yield Static(
+                    "↑↓ move · type to search · read-only — issues are resolved "
+                    "in the LEADER tab",
+                    id="tickets-affordance",
+                    classes="affordance",
+                )
             with VerticalScroll(id="md-detail"):
                 yield Markdown(
                     "_Select a ticket to preview._",
@@ -93,8 +104,13 @@ class TicketsScreen(Vertical):
         table.clear()
         code = self.app.project_code  # type: ignore[attr-defined]
         run_id = self._scope_run_id(code)
+        q = self._query.lower()
+        shown = 0
         for t in store.list_tickets(code, run_id=run_id):
             row = ticket_row(t)
+            # Client-side search: match the visible row text (id / title / …).
+            if q and q not in " ".join(str(c) for c in row).lower():
+                continue
             # escape raw (operator-authored) string cells.
             cells = [escape(c) if isinstance(c, str) else c for c in row]
             # Priority / Status read as glyph + WORD (Feng-Tui §10).
@@ -104,6 +120,8 @@ class TicketsScreen(Vertical):
             # parse on operator-authored decider names).
             cells[4] = Text(row[4]) if row[4] else ""
             table.add_row(*cells, key=t.id)
+            shown += 1
+        self._set_counts(shown)
         if table.row_count > 0:
             first_id = list(table.rows.keys())[0].value
             if first_id:
@@ -113,6 +131,18 @@ class TicketsScreen(Vertical):
 
     def action_refresh(self) -> None:
         self.refresh_tickets()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "controls-search":
+            self._query = event.value.strip()
+            self.refresh_tickets()
+
+    def _set_counts(self, shown: int) -> None:
+        try:
+            label = f"⚑ {shown} tickets" + (" (filtered)" if self._query else "")
+            self.query_one(ControlsRow).set_counts(label)
+        except Exception:
+            pass
 
     # ── Preview pane ────────────────────────────────────────────────────
 

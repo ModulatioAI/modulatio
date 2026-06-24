@@ -148,3 +148,149 @@ def test_stats_reports_counts():
     assert s["episodic_total"] == 2
     assert s["episodic_active"] == 2
     assert s["semantic_total"] == 1
+
+
+# === delete / update by id (Feng-Tui MEMORY overhaul, Group C) ===============
+
+
+def test_delete_entry_removes_episodic_by_id():
+    a = agent_memory.add_episodic("alice", "first", project_code=PROJECT_CODE)
+    agent_memory.add_episodic("alice", "second", project_code=PROJECT_CODE)
+    assert agent_memory.delete_entry(
+        "alice", a.id, project_code=PROJECT_CODE, layer="episodic")
+    remaining = agent_memory.get_episodic("alice", project_code=PROJECT_CODE)
+    assert [e.content for e in remaining] == ["second"]
+
+
+def test_delete_entry_removes_semantic_by_id():
+    s = agent_memory.add_semantic("alice", "a durable fact", project_code=PROJECT_CODE)
+    assert agent_memory.delete_entry(
+        "alice", s.id, project_code=PROJECT_CODE, layer="semantic")
+    assert agent_memory.get_semantic("alice", project_code=PROJECT_CODE) == []
+
+
+def test_delete_entry_unknown_id_returns_false():
+    agent_memory.add_episodic("alice", "x", project_code=PROJECT_CODE)
+    assert not agent_memory.delete_entry(
+        "alice", "no-such-id", project_code=PROJECT_CODE, layer="episodic")
+
+
+def test_delete_entry_rejects_unknown_layer():
+    a = agent_memory.add_episodic("alice", "x", project_code=PROJECT_CODE)
+    with pytest.raises(ValueError):
+        agent_memory.delete_entry(
+            "alice", a.id, project_code=PROJECT_CODE, layer="bogus")
+
+
+def test_update_entry_edits_content_in_place():
+    a = agent_memory.add_episodic("alice", "typo herre", project_code=PROJECT_CODE)
+    updated = agent_memory.update_entry(
+        "alice", a.id, project_code=PROJECT_CODE, layer="episodic",
+        content="typo here")
+    assert updated is not None and updated.content == "typo here"
+    assert updated.id == a.id  # same entry, edited in place
+    loaded = agent_memory.get_episodic("alice", project_code=PROJECT_CODE)
+    assert loaded[0].content == "typo here"
+
+
+def test_update_entry_unknown_id_returns_none():
+    agent_memory.add_episodic("alice", "x", project_code=PROJECT_CODE)
+    assert agent_memory.update_entry(
+        "alice", "no-such-id", project_code=PROJECT_CODE, layer="episodic",
+        content="y") is None
+
+
+def test_path_traversal_agent_id_is_refused_on_delete():
+    with pytest.raises(Exception):
+        agent_memory.delete_entry(
+            "../escape", "id", project_code=PROJECT_CODE, layer="episodic")
+
+
+# === markdown export (Feng-Tui MEMORY overhaul) =============================
+
+
+def test_export_markdown_includes_both_layers_and_content():
+    agent_memory.add_episodic("alice", "saw a flaky test", project_code=PROJECT_CODE)
+    agent_memory.add_semantic("alice", "the build is reproducible", project_code=PROJECT_CODE)
+    md = agent_memory.export_markdown("alice", project_code=PROJECT_CODE)
+    assert "# " in md and "alice" in md           # a heading naming the agent
+    assert "Episodic" in md and "Semantic" in md   # both layer sections
+    assert "saw a flaky test" in md
+    assert "the build is reproducible" in md
+
+
+def test_export_markdown_does_not_bump_access_count():
+    import json
+
+    from modulatio.memory.agent_memory import _episodic_path
+
+    agent_memory.add_episodic("alice", "x", project_code=PROJECT_CODE)
+    agent_memory.export_markdown("alice", project_code=PROJECT_CODE)
+    agent_memory.export_markdown("alice", project_code=PROJECT_CODE)
+    # export is a read-only dump — the on-disk access bookkeeping is untouched
+    # (unlike get_episodic, which bumps access_count on read).
+    raw = json.loads(_episodic_path("alice", PROJECT_CODE).read_text())
+    assert raw[0]["access_count"] == 0
+
+
+# === symlink-escape refusal (Wild Bill cadre BLOCK, 2026-06-24) =============
+
+
+def _seed_outside(outside):
+    import json
+    outside.mkdir()
+    (outside / "semantic.json").write_text(json.dumps([{
+        "id": "victim", "content": "outside", "type": "finding",
+        "source": "promotion", "when": "now", "confidence": "high",
+        "scope": "project", "state": "active"}]))
+
+
+def test_symlinked_agent_dir_is_refused_on_update(tmp_path):
+    import pytest
+
+    from modulatio import vault
+    root = vault.project_dir(PROJECT_CODE)
+    outside = tmp_path / "outside_mem"
+    _seed_outside(outside)
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    (root / "memory" / "agentx").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(Exception):
+        agent_memory.update_entry("agentx", "victim", project_code=PROJECT_CODE,
+                                  layer="semantic", content="CHANGED")
+    import json
+    # the outside file is untouched — the symlink was never followed
+    assert json.loads((outside / "semantic.json").read_text())[0]["content"] == "outside"
+
+
+def test_symlinked_agent_dir_is_refused_on_delete(tmp_path):
+    import json
+
+    import pytest
+
+    from modulatio import vault
+    root = vault.project_dir(PROJECT_CODE)
+    outside = tmp_path / "outside_mem2"
+    _seed_outside(outside)
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    (root / "memory" / "agenty").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(Exception):
+        agent_memory.delete_entry("agenty", "victim", project_code=PROJECT_CODE,
+                                  layer="semantic")
+    assert json.loads((outside / "semantic.json").read_text())  # still there
+
+
+def test_symlinked_memory_root_is_refused(tmp_path):
+    """A symlinked project memory/ ROOT must not be followed — the earlier fix
+    anchored the bounds-check on memory/ itself, so a symlinked root blessed its
+    own target (Wild Bill close-out residual, 2026-06-24)."""
+    import pytest
+
+    from modulatio import vault
+    root = vault.project_dir(PROJECT_CODE)
+    root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_root"
+    outside.mkdir()
+    (root / "memory").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(Exception):
+        agent_memory.add_semantic("agentx", "ROOTWRITE", project_code=PROJECT_CODE)
+    assert not list(outside.rglob("*"))  # nothing written outside

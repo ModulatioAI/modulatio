@@ -152,12 +152,12 @@ async def test_new_project_duplicate_refused(isolated):
         assert sorted(vault.list_projects()) == ["alpha", "beta"]
 
 
-async def test_new_action_drives_modal_to_create(isolated):
-    """Wiring: action_new opens the modal, and the modal's (code, objective)
-    dismissal flows into _on_new_project → create_project. Proves the tuple
-    contract between the modal and the handler, not just each part alone."""
+async def test_new_action_swaps_companion_form_and_creates(isolated):
+    """Wiring: action_new swaps the create form into the companion (the registry
+    list stays mounted), and submitting it flows code/objective into
+    _on_new_project → create_project."""
     from modulatio import config
-    from modulatio.tui.screens.projects import NewProjectModal, ProjectsScreen
+    from modulatio.tui.screens.projects import ProjectsScreen
     from textual.widgets import Input
 
     config.save_defaults({"default_models": {"leader": "stub", "producer": "stub", "qc": "stub"}})
@@ -168,14 +168,16 @@ async def test_new_action_drives_modal_to_create(isolated):
         screen = app.query_one(ProjectsScreen)
         screen.action_new()
         await pilot.pause()
-        modal = app.screen  # the pushed modal is a separate screen on the stack
-        assert isinstance(modal, NewProjectModal)
-        modal.query_one("#newproj-code", Input).value = "wired"
-        modal.query_one("#newproj-objective", Input).value = "via the modal"
-        modal._submit()  # → dismiss((code, objective)) → _on_new_project → create
+        # the form is in the companion, not a separate modal; the list persists
+        assert screen._flow == "new"
+        assert screen.query_one("#projects-table")  # registry still mounted
+        screen.query_one("#newproj-code", Input).value = "wired"
+        screen.query_one("#newproj-objective", Input).value = "via the form"
+        screen._submit_new()  # → _on_new_project → create
         await pilot.pause()
         assert "wired" in vault.list_projects()
-        assert "via the modal" in (vault.project_dir("wired") / "index.md").read_text()
+        assert "via the form" in (vault.project_dir("wired") / "index.md").read_text()
+        assert screen._flow is None  # back to the detail companion
 
 
 async def test_new_project_unexpected_error_is_caught(isolated, monkeypatch):
@@ -197,13 +199,12 @@ async def test_new_project_unexpected_error_is_caught(isolated, monkeypatch):
         assert "newp" not in vault.list_projects()
 
 
-async def test_n_keybinding_opens_new_modal(isolated):
-    """The 'n' key (binding wiring) on the focused projects table opens the
-    New modal — the wiring test only covers the button path."""
-    from textual.widgets import DataTable
-    from textual.widgets import TabbedContent
+async def test_n_keybinding_opens_new_form(isolated):
+    """The 'n' key (binding wiring) on the focused projects table swaps the
+    create form into the companion — the wiring test only covers the button."""
+    from textual.widgets import DataTable, Input, TabbedContent
 
-    from modulatio.tui.screens.projects import NewProjectModal, ProjectsScreen
+    from modulatio.tui.screens.projects import ProjectsScreen
 
     app = ModulatioApp(project_code="alpha", stub=True)
     async with app.run_test() as pilot:
@@ -211,8 +212,10 @@ async def test_n_keybinding_opens_new_modal(isolated):
         app.query_one("#app-tabs", TabbedContent).active = "tab-config"
         app.query_one("#config-flip", TabbedContent).active = "config-projects"
         await pilot.pause()
-        app.query_one(ProjectsScreen).query_one("#projects-table", DataTable).focus()
+        screen = app.query_one(ProjectsScreen)
+        screen.query_one("#projects-table", DataTable).focus()
         await pilot.pause()
         await pilot.press("n")
         await pilot.pause()
-        assert isinstance(app.screen, NewProjectModal)
+        assert screen._flow == "new"
+        assert screen.query_one("#newproj-code", Input)  # the form is up
