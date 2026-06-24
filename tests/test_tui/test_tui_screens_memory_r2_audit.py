@@ -76,12 +76,12 @@ async def test_memory_tab_renders_team_entry_with_bracket_markup():
         await pilot.pause()
         from textual.widgets._data_table import default_cell_formatter
 
-        team = app.query_one("#memory-team-table", DataTable)
-        assert team.row_count == 1
+        table = app.query_one("#memory-table", DataTable)
+        assert table.row_count == 1
         # Force a render pass over the cells — this is where from_markup would
         # have crashed for a raw str cell.
-        for row in range(team.row_count):
-            for cell in team.get_row_at(row):
+        for row in range(table.row_count):
+            for cell in table.get_row_at(row):
                 default_cell_formatter(cell)
 
 
@@ -105,9 +105,9 @@ async def test_memory_tab_renders_agent_episodic_semantic_with_bracket_markup():
         screen.focus_agent("writer-a")
         await pilot.pause()
 
-        for table_id in ("#memory-episodic-table", "#memory-semantic-table"):
-            table = app.query_one(table_id, DataTable)
-            assert table.row_count >= 1
-            for row in range(table.row_count):
-                for cell in table.get_row_at(row):
-                    default_cell_formatter(cell)
+        # Unified list holds the agent's episodic + semantic rows (+ any team).
+        table = app.query_one("#memory-table", DataTable)
+        assert table.row_count >= 2
+        for row in range(table.row_count):
+            for cell in table.get_row_at(row):
+                default_cell_formatter(cell)

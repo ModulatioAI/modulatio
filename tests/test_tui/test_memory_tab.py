@@ -59,8 +59,11 @@ async def test_memory_tab_team_only_default_shows_team_entries():
         tabbed = app.query_one(TabbedContent)
         tabbed.active = "tab-memory"
         await pilot.pause()
-        team = app.query_one("#memory-team-table", DataTable)
-        assert team.row_count == 1
+        # Unified list: team entries appear as a LAYER=team row.
+        table = app.query_one("#memory-table", DataTable)
+        assert table.row_count == 1
+        layer_cell = str(table.get_row_at(0)[0])
+        assert "team" in layer_cell
 
 
 @pytest.mark.asyncio
@@ -102,3 +105,84 @@ async def test_first_launch_banner_absent_when_setup_completed(tmp_path):
         await pilot.pause()
         # Either empty or a non-banner string
         assert "First-launch" not in app.last_summary_text
+
+
+# ─── Unified list + detail + delete (Feng-Tui MEMORY overhaul) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_unified_list_tags_each_entry_with_its_layer():
+    """Episodic, semantic, and team entries share ONE table, each tagged with
+    its LAYER (glyph + word)."""
+    from textual.widgets import DataTable, TabbedContent
+
+    agent_memory.add_episodic("writer-a", "an episode", project_code=PROJECT_CODE)
+    agent_memory.add_semantic("writer-a", "a durable fact", project_code=PROJECT_CODE)
+    team_memory.write(writer_id="qc-1", writer_tier="qc", body="team note",
+                      project_code=PROJECT_CODE, artifact_kind="report")
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        app.query_one(TabbedContent).active = "tab-memory"
+        await pilot.pause()
+        screen = app.query_one("MemoryScreen")
+        screen.focus_agent("writer-a")
+        await pilot.pause()
+        table = app.query_one("#memory-table", DataTable)
+        layers = {str(table.get_row_at(i)[0]).split()[-1]
+                  for i in range(table.row_count)}
+        assert {"episodic", "semantic", "team"} <= layers
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_an_agent_entry():
+    """Deleting an agent entry removes it from its layer."""
+    from textual.widgets import TabbedContent
+
+    e = agent_memory.add_episodic("writer-a", "to be deleted", project_code=PROJECT_CODE)
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        app.query_one(TabbedContent).active = "tab-memory"
+        await pilot.pause()
+        screen = app.query_one("MemoryScreen")
+        screen.focus_agent("writer-a")
+        await pilot.pause()
+        screen._do_delete("episodic", "writer-a", e.id)
+        await pilot.pause()
+        assert agent_memory.get_episodic("writer-a", project_code=PROJECT_CODE) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_refuses_team_entries():
+    """Team entries are QC-curated — action_delete on a team row is a no-op."""
+    from textual.widgets import DataTable, TabbedContent
+
+    team_memory.write(writer_id="qc-1", writer_tier="qc", body="team stays",
+                      project_code=PROJECT_CODE, artifact_kind="report")
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        app.query_one(TabbedContent).active = "tab-memory"
+        await pilot.pause()
+        screen = app.query_one("MemoryScreen")
+        app.query_one("#memory-table", DataTable).move_cursor(row=0)  # team row
+        screen.action_delete()
+        await pilot.pause()
+        assert team_memory.list_entries(PROJECT_CODE)  # untouched
+
+
+@pytest.mark.asyncio
+async def test_export_writes_markdown_for_the_focused_agent():
+    from textual.widgets import TabbedContent
+
+    agent_memory.add_semantic("writer-a", "exported fact", project_code=PROJECT_CODE)
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        app.query_one(TabbedContent).active = "tab-memory"
+        await pilot.pause()
+        screen = app.query_one("MemoryScreen")
+        screen.focus_agent("writer-a")
+        await pilot.pause()
+        screen.action_export()
+        await pilot.pause()
+        dest = vault.project_dir(PROJECT_CODE) / "memory-writer-a.md"
+        assert dest.exists()
+        assert "exported fact" in dest.read_text()
