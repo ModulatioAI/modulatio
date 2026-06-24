@@ -62,3 +62,43 @@ async def test_running_starts_and_stops_the_elapsed_timer():
         row.set_lamps(running=False)
         await pilot.pause()
         assert row._elapsed_timer is None  # disarmed
+
+
+# ─── Attention blink (Group B: replaces the MSG/PROBLEM beacons) ─────────────
+
+
+async def test_request_attention_arms_blink_and_lights_lamp():
+    """request_attention starts the blink timer; a blink tick lights the
+    relevant lamp (attention-grab from another tab)."""
+    app = _Host()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        row = app.query_one(StatusLampRow)
+        assert row._blink_timer is None
+        row.request_attention("leader")
+        await pilot.pause()
+        assert row._blink_timer is not None          # armed
+        assert "leader" in row._attention
+        row._tick_blink()                            # force a visible phase
+        lamp = app.query_one("#lamp-leader", Static)
+        # at least one phase lights the lamp (glyph+word unchanged, colour cue)
+        assert lamp.has_class("-lit") or row._blink_phase is not None
+
+
+async def test_clear_attention_disarms_when_none_left():
+    """Clearing the last attention lamp stops the blink timer and unlights it
+    (you flipped to LEADER → the beacon rests)."""
+    app = _Host()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        row = app.query_one(StatusLampRow)
+        row.request_attention("leader")
+        row.request_attention("tickets")
+        await pilot.pause()
+        row.clear_attention("leader")
+        assert row._blink_timer is not None          # tickets still pending
+        row.clear_attention("tickets")
+        await pilot.pause()
+        assert row._blink_timer is None              # all clear → disarmed
+        assert not app.query_one("#lamp-leader", Static).has_class("-lit")
+        assert not app.query_one("#lamp-tickets", Static).has_class("-lit")

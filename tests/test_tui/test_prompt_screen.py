@@ -562,56 +562,62 @@ async def test_chat_on_leader_kickoff_on_team(project_with_roster):
 # ─── Indicator bulbs ────────────────────────────────────────────────────────
 
 
-async def test_indicator_panel_has_two_bulbs(project_with_roster):
+async def test_console_has_status_lamp_row(project_with_roster):
     from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.indicator_panel import Bulb, IndicatorPanel
+    from modulatio.tui.widgets.status_lamp_row import StatusLampRow
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert app.query(IndicatorPanel)
-        ids = sorted(b.id for b in app.query(Bulb))
-        assert ids == ["bulb-msg", "bulb-problem"]
-        # idle on first paint
-        assert not app.query_one("#bulb-msg", Bulb).is_lit
-        assert not app.query_one("#bulb-problem", Bulb).is_lit
+        row = app.query_one(StatusLampRow)
+        # the lamps are present
+        ids = sorted(s.id for s in row.query(".lamp"))
+        assert ids == [
+            "lamp-elapsed", "lamp-leader", "lamp-run",
+            "lamp-squad", "lamp-tickets", "lamp-tokens",
+        ]
+        # idle on first paint — nothing demanding attention
+        assert row._attention == set()
 
 
-async def test_ticket_lights_problem_bulb_then_clears_on_leader(
+async def test_ticket_blinks_tickets_lamp_then_clears_on_leader(
     project_with_roster,
 ):
-    """A ticket_opened event lights the orange lamp; viewing the LEADER tab
-    clears it."""
+    """A ticket_opened event blinks the tickets lamp (+ bumps the count);
+    viewing the LEADER tab rests it."""
     from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.indicator_panel import Bulb
+    from modulatio.tui.widgets.status_lamp_row import StatusLampRow
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
+        row = app.query_one(StatusLampRow)
         app.action_flip_stream()  # go to TEAM so it isn't auto-cleared
         await pilot.pause()
         app._record_activity_impl(
             _ev("leader", "ticket_opened"),
         )
         await pilot.pause()
-        assert app.query_one("#bulb-problem", Bulb).is_lit
+        assert "tickets" in row._attention
+        assert "1 tickets" in str(app.query_one("#lamp-tickets").render())
         app.action_flip_stream()  # back to LEADER
         await pilot.pause()
-        assert not app.query_one("#bulb-problem", Bulb).is_lit
+        assert "tickets" not in row._attention
 
 
-async def test_signal_msg_lights_amber_bulb(project_with_roster):
+async def test_signal_msg_blinks_leader_lamp(project_with_roster):
     from modulatio.tui.app import ModulatioApp
-    from modulatio.tui.widgets.indicator_panel import Bulb
+    from modulatio.tui.widgets.status_lamp_row import StatusLampRow
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
+        row = app.query_one(StatusLampRow)
         app.action_flip_stream()  # TEAM
         await pilot.pause()
         app._signal_msg()
         await pilot.pause()
-        assert app.query_one("#bulb-msg", Bulb).is_lit
+        assert "leader" in row._attention
 
 
 # ─── Conversation vs kickoff: Enter sends, F5 launches ──────────────────────

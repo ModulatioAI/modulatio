@@ -37,12 +37,24 @@ class StatusLampRow(Horizontal):
         width: auto;
         margin-right: 2;
     }
+    /* A lamp demanding attention pulses bright (amber/warning) on the blink's
+       lit phase — glyph+word stay; only the colour cue changes. */
+    StatusLampRow > .lamp.-lit {
+        color: $warning;
+        text-style: bold;
+    }
     """
+
+    #: Lamp name → selector for the lamps that can blink for attention.
+    _ATTENTION_LAMPS = {"leader": "#lamp-leader", "tickets": "#lamp-tickets"}
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._elapsed_timer: Timer | None = None
         self._elapsed_started: float | None = None
+        self._blink_timer: Timer | None = None
+        self._blink_phase: bool = False
+        self._attention: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Static("● leader", id="lamp-leader", classes="lamp")
@@ -77,6 +89,44 @@ class StatusLampRow(Horizontal):
         if running is not None:
             self._set("#lamp-run", "▸ running" if running else "· idle")
             self._arm_elapsed() if running else self._disarm_elapsed()
+
+    # ── attention blink (replaces the old MSG/PROBLEM beacons) ────────────
+    def request_attention(self, lamp: str) -> None:
+        """Make ``lamp`` ('leader' or 'tickets') blink for attention — the
+        Leader wants you, or a ticket opened, while you're watching another
+        tab. Idempotent; clears via :meth:`clear_attention`."""
+        if lamp not in self._ATTENTION_LAMPS:
+            return
+        self._attention.add(lamp)
+        if self._blink_timer is None:
+            self._blink_phase = True
+            self._blink_timer = self.set_interval(0.5, self._tick_blink)
+
+    def clear_attention(self, lamp: str | None = None) -> None:
+        """Stop blinking ``lamp`` (or all lamps when None) — e.g. the operator
+        flipped to LEADER and read it. Disarms the timer once nothing's left."""
+        if lamp is None:
+            self._attention.clear()
+        else:
+            self._attention.discard(lamp)
+        # Unlight any lamp no longer demanding attention.
+        for name, selector in self._ATTENTION_LAMPS.items():
+            if name not in self._attention:
+                self._lit(selector, False)
+        if not self._attention and self._blink_timer is not None:
+            self._blink_timer.stop()
+            self._blink_timer = None
+
+    def _tick_blink(self) -> None:
+        self._blink_phase = not self._blink_phase
+        for name in self._attention:
+            self._lit(self._ATTENTION_LAMPS[name], self._blink_phase)
+
+    def _lit(self, selector: str, on: bool) -> None:
+        try:
+            self.query_one(selector, Static).set_class(on, "-lit")
+        except Exception:
+            pass
 
     # ── elapsed clock (TUI-only render concern, owned by the widget) ──────
     def _arm_elapsed(self) -> None:

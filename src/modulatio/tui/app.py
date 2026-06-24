@@ -48,6 +48,7 @@ from modulatio.tui.screens.logs import build_logs_panel
 from modulatio.tui.screens.tickets import build_tickets_panel
 from modulatio.tui.widgets.activity_log import ActivityLog
 from modulatio.tui.widgets.chat_input import ChatInput
+from modulatio.tui.widgets.status_lamp_row import StatusLampRow
 from modulatio.tui.widgets.stream_status import StreamStatus
 from modulatio.tui.widgets.stream_view import (
     StreamView,
@@ -1176,6 +1177,11 @@ class ModulatioApp(App):
         # rename) is picked up instead of resolving to a stale/empty name.
         if event.phase == "kickoff_started":
             self._agent_name_cache = None
+            # A fresh run: clean telemetry board — running on, no tickets/mods yet.
+            self._run_ticket_count = 0
+            lamps = self._status_lamps()
+            if lamps is not None:
+                lamps.set_lamps(running=True, mods=0, qc=0, tickets=0)
         # Fix: when a run ENDS — normal completion OR an F8 stop, both via the
         # engine's role="orchestrator" kickoff_ended — reset the TEAM spinner to
         # 'done'. Without this it sticks on the last producer phase and the Mod
@@ -1202,6 +1208,11 @@ class ModulatioApp(App):
             leader_status = self._lane_status("stream-leader-status")
             if leader_status is not None:
                 leader_status.set_idle()
+            # Run finished — rest the telemetry lamps (the leader/ticket
+            # attention blink persists until the operator reads it on LEADER).
+            lamps = self._status_lamps()
+            if lamps is not None:
+                lamps.set_lamps(running=False, mods=0, qc=0)
         # Live status lines: the leader-lane phase drives the LEADER status;
         # team-lane phases the TEAM status, named by the worker. §5: when more
         # than one producer is in flight, surface the parallel count so the
@@ -1220,8 +1231,12 @@ class ModulatioApp(App):
                 "stream-team-status", event.phase, actor,
                 working=len(names) or 1, working_names=names,
             )
-        # A logged ticket is a problem the Leader will relay — light the
-        # orange lamp so the operator notices even from the factory floor.
+            # Mirror the producer concurrency onto the telemetry lamp row.
+            lamps = self._status_lamps()
+            if lamps is not None:
+                lamps.set_lamps(running=True, mods=len(names))
+        # A logged ticket is a problem the Leader will relay — blink the
+        # tickets lamp so the operator notices even from the factory floor.
         if event.phase == "ticket_opened":
             self._signal_problem()
 
@@ -1565,24 +1580,27 @@ class ModulatioApp(App):
 
     # ── Attention lamps (the Leader getting the operator's eye) ──────────
 
-    def _indicator_panel(self):
-        from modulatio.tui.widgets.indicator_panel import IndicatorPanel
+    def _status_lamps(self):
         try:
-            return self.query_one(IndicatorPanel)
+            return self.query_one(StatusLampRow)
         except Exception:
             return None
 
     def _signal_msg(self) -> None:
-        """Amber lamp — the Leader has something for you."""
-        panel = self._indicator_panel()
-        if panel is not None:
-            panel.signal_msg()
+        """The Leader has something for you — blink the leader lamp until the
+        operator flips to LEADER and reads it."""
+        lamps = self._status_lamps()
+        if lamps is not None:
+            lamps.request_attention("leader")
 
     def _signal_problem(self) -> None:
-        """Orange lamp — a problem was logged."""
-        panel = self._indicator_panel()
-        if panel is not None:
-            panel.signal_problem()
+        """A problem was logged — bump this run's ticket count and blink the
+        tickets lamp."""
+        self._run_ticket_count = getattr(self, "_run_ticket_count", 0) + 1
+        lamps = self._status_lamps()
+        if lamps is not None:
+            lamps.set_lamps(tickets=self._run_ticket_count)
+            lamps.request_attention("tickets")
 
     def _set_lane_status(
         self, status_id: str, phase: str, actor: str | None = None,
@@ -1607,9 +1625,9 @@ class ModulatioApp(App):
         """When the operator views the LEADER stream they've seen the Leader's
         messages → clear the attention lamps."""
         if event.tabbed_content.active == "stream-leader-pane":
-            panel = self._indicator_panel()
-            if panel is not None:
-                panel.clear_all()
+            lamps = self._status_lamps()
+            if lamps is not None:
+                lamps.clear_attention()
         # Re-evaluate which footer keys show: the CONSOLE-only keys hide on
         # other tabs (see check_action).
         self.refresh_bindings()
