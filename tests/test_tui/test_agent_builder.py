@@ -176,3 +176,24 @@ async def test_remove_and_readd_the_leader(project):
         assert leader is not None
         assert leader.tier == "leader"
         assert leader.name == "NewBoss"
+
+
+async def test_on_show_refreshes_roster_after_project_switch(project, tmp_path):
+    """Revisiting the AGENTS tab after a project switch must rebuild from the
+    NEW project's roster (agents are per-project) — the refresh-on-show contract
+    that app.switch_project relies on. Without on_show the table stays stale."""
+    # a second project with a different-sized roster
+    vault.init_project("BPR", "second project", "obj")
+    roster.add_agent(project_code="BPR", agent_id="solo", name="Solo",
+                     identity="x", skills=[], model=None, tier="producer")
+
+    app = _Host(project)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one("#ab", AgentBuilderScreen)
+        assert screen.query_one("#agt-table", DataTable).row_count == 3  # project A
+
+        app.project_code = "BPR"          # switch_project repoints this
+        await screen.on_show()            # the tab is revealed again
+        await pilot.pause()
+        assert screen.query_one("#agt-table", DataTable).row_count == 1  # project B

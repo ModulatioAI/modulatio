@@ -118,6 +118,13 @@ class AgentBuilderScreen(Vertical):
     async def on_mount(self) -> None:
         await self.show_list()
 
+    async def on_show(self) -> None:
+        # Rebuild from the live project on every reveal: agents are per-project,
+        # so a project switch must re-list the roster. switch_project refreshes
+        # only the header + memory tab and leaves the rest to this on-show
+        # refresh contract (see app.switch_project's docstring).
+        await self.show_list()
+
     @property
     def project_code(self) -> str:
         return self.app.project_code  # type: ignore[attr-defined]
