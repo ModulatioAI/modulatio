@@ -28,11 +28,13 @@ import re
 from pathlib import Path
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Static, TabbedContent, TabPane
+from textual.containers import Container, Horizontal, Vertical
+from textual.widgets import Button, Static
 
 from modulatio.attachments import Attachment, AttachmentKind, build_attachment
+from modulatio.tui.feng_theme import theme_tiers
 from modulatio.tui.widgets.chat_input import ChatInput
 from modulatio.tui.widgets.status_lamp_row import StatusLampRow
 from modulatio.tui.widgets.stream_status import StreamStatus
@@ -43,67 +45,81 @@ class PromptScreen(Vertical):
     """Console tab — status lamps + LEADER (TV+chat) / TEAM (full TV) flip."""
 
     DEFAULT_CSS = """
+    /* The console matches console_mockup.py: a single framed screen with a
+       brand header, the lamp row, a flip INDICATOR (not tabs), a persistent
+       body that swaps LEADER (full-width stream) ↔ MOD SQUAD (rail + stream),
+       a status line, and a round-bordered composer with the affordance below. */
     PromptScreen {
-        padding: 1;
+        padding: 0 1;
+        border: round $frame-dim;   /* the single outer frame, hugging the tab */
     }
-    /* The flip fills the screen under the lamps. */
-    PromptScreen #console-streams {
-        height: 1fr;
+    /* Brand header — MODULATIO · project · feng-tui variant. */
+    PromptScreen #console-header {
+        height: 1;
+        margin-top: 1;
+        padding: 0 1;
+        color: $primary;
     }
-    /* LEADER tab: the TV takes the bulk, chatbox is compact below it. */
-    PromptScreen .leader-tv {
+    PromptScreen #status-lamps { padding: 0 1; }
+    /* The LEADER ╶╴ mod squad flip indicator, set off above the body. */
+    PromptScreen #flip-tab {
+        height: 1;
+        margin: 1 0;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    /* The body holds both views; only the active one is shown (the inactive
+       lane stays mounted so its stream keeps receiving events). */
+    PromptScreen #console-body { height: 1fr; }
+    PromptScreen #leader-view { height: 1fr; }
+    PromptScreen #team-view { height: 1fr; }
+    PromptScreen .tv {
+        width: 1fr;
         height: 1fr;
         border: round $frame-dim;
     }
-    PromptScreen #chatbox {
-        height: auto;
+    /* MOD SQUAD: the run-telemetry rail left, the floor TV right. */
+    PromptScreen #team-rail {
+        width: 24;
+        border-right: solid $frame-dim;
+        padding: 1 1;
+    }
+    PromptScreen #team-rail .rail-head { color: $secondary; text-style: bold; }
+    PromptScreen #team-rail .rail-dim { color: $text-muted; }
+    /* The round-bordered composer (LEADER only) + the affordance row beneath. */
+    PromptScreen #input-box {
+        height: 7;
         margin-top: 1;
         padding: 0 1;
-        border: round $frame;
+        border: round $frame-dim;
     }
-    /* Roomy text entry — the one bright doorway; comfortable to compose. */
     PromptScreen #prompt-input {
-        height: 6;
+        height: 1fr;
+        background: #000000;
+        border: none;
+        padding: 0;
     }
-    /* A calm action row under the input: attachment chips left, send hint
-       right. No SEND button — Enter sends (the input is the focal element). */
-    PromptScreen #chatbox-actions {
-        height: 3;
-    }
+    PromptScreen #chatbox-actions { height: 1; padding: 0 1; }
     PromptScreen #chatbox-actions Button {
         min-width: 5;
         margin-right: 1;
+        height: 1;
+        border: none;
     }
     PromptScreen #prompt-response {
-        height: 1fr;
+        width: 1fr;
         color: $text-muted;
         content-align: right middle;
     }
     PromptScreen #chatbox-attachments-list {
-        height: auto;
-        max-height: 1;
+        width: auto;
         color: $text-muted;
-    }
-    /* TEAM tab: two columns — the run-telemetry rail (left) + the floor TV. */
-    PromptScreen #team-body {
-        height: 1fr;
-    }
-    PromptScreen #team-rail {
-        width: 24;
-        border-right: solid $frame-dim;
-        padding: 0 1;
-    }
-    PromptScreen #team-rail .rail-head { color: $secondary; text-style: bold; }
-    PromptScreen #team-rail .rail-dim { color: $text-muted; }
-    PromptScreen .team-tv {
-        width: 1fr;
-        height: 1fr;
-        border: round $frame-dim;
     }
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._view: str = "leader"  # active flip side: 'leader' | 'team'
         self._chatbox_attachments: list[Attachment] = []
         #: Job-objective capture between `/kickoff` and `/end`. None = not
         #: capturing (plain text is conversation); a list = accumulating the brief
@@ -119,57 +135,50 @@ class PromptScreen(Vertical):
         return list(self._chatbox_attachments)
 
     def compose(self) -> ComposeResult:
-        # ── Status lamps (visible from both tabs) ──
+        # Brand header (MODULATIO · project · feng-tui variant) — rendered live.
+        yield Static("", id="console-header")
+        # The telemetry lamp row, visible on both views.
         yield StatusLampRow(id="status-lamps")
-        # ── The LEADER / TEAM flip ──
-        with TabbedContent(initial="stream-leader-pane", id="console-streams"):
-            with TabPane("LEADER", id="stream-leader-pane"):
-                # TV on top (big) …
-                yield StreamView(
-                    lane="leader", id="stream-leader",
-                    classes="leader-tv",
-                )
-                # … a live status line (what the Leader is doing) …
+        # The flip INDICATOR (F4) — `LEADER ╶╴ mod squad`, active side bright.
+        yield Static("", id="flip-tab")
+        # The body holds BOTH views; only the active one is shown so the
+        # inactive lane's StreamView keeps receiving its events.
+        with Container(id="console-body"):
+            # LEADER — pure conversation: the Leader's stream, full width.
+            with Vertical(id="leader-view"):
+                yield StreamView(lane="leader", id="stream-leader", classes="tv")
                 yield StreamStatus(lane="leader", id="stream-leader-status")
-                # … the chatbox below: pure conversation. Enter SENDS a message
-                # to the Leader; to launch a job, bracket it
-                # `/kickoff <objective> /end`.
-                with Vertical(id="chatbox"):
-                    yield ChatInput("", id="prompt-input", soft_wrap=True)
-                    # A calm action row: attachment chips on the left (secondary
-                    # chrome), the send + kickoff knowledge as an affordance on
-                    # the right. Enter sends — no SEND button competes with the
-                    # input for the eye.
-                    with Horizontal(id="chatbox-actions"):
-                        yield Button("📎 doc", id="chat-attach-doc-btn")
-                        yield Button("🖼 image", id="chat-attach-image-btn")
-                        yield Static("", id="chatbox-attachments-list")
-                        yield Static(
-                            "⏎ send  ·  /kickoff <objective> /end to run a job",
-                            id="prompt-response",
-                        )
-            with TabPane("MOD SQUAD", id="stream-team-pane"):
-                # The factory floor — two columns: the run-telemetry rail (left)
-                # + the workers' TV (the focal stream). No input here: jobs are
-                # launched from the LEADER chat (`/kickoff … /end`); this page is
-                # pure watch-the-work.
-                with Horizontal(id="team-body"):
-                    with Vertical(id="team-rail"):
-                        yield Static("RUN TELEMETRY", classes="rail-head")
-                        # Progress + spend aren't on the activity stream yet
-                        # (the v1.0 live-telemetry rail) — shown dim with — so
-                        # the layout is complete and fills in when wired.
-                        yield Static("goal  ▱▱▱▱ —", classes="rail-dim", id="rail-goal")
-                        yield Static("tasks ▱▱▱▱ —", classes="rail-dim", id="rail-tasks")
-                        yield Static("qc    ▱▱▱▱ —", classes="rail-dim", id="rail-qc")
-                        yield Static("")
-                        yield Static("⛁ — tok · $ —", classes="rail-dim", id="rail-spend")
-                        yield Static("")
-                        yield Static("─ producers ─", classes="rail-head")
-                        yield Static("(idle)", classes="rail-dim", id="rail-producers")
-                    with Vertical(id="team-tv-col"):
-                        yield StreamView(lane="team", id="stream-team", classes="team-tv")
-                        yield StreamStatus(lane="team", id="stream-team-status")
+            # MOD SQUAD — the factory floor: the run-telemetry rail + the
+            # workers' stream. Hidden until you flip (F4).
+            with Horizontal(id="team-view"):
+                with Vertical(id="team-rail"):
+                    yield Static("RUN TELEMETRY", classes="rail-head")
+                    # Progress + spend aren't on the activity stream yet (the
+                    # v1.0 live-telemetry rail) — shown dim with — until wired.
+                    yield Static("goal  ▱▱▱▱ —", classes="rail-dim", id="rail-goal")
+                    yield Static("tasks ▱▱▱▱ —", classes="rail-dim", id="rail-tasks")
+                    yield Static("qc    ▱▱▱▱ —", classes="rail-dim", id="rail-qc")
+                    yield Static("")
+                    yield Static("⛁ — tok · $ —", classes="rail-dim", id="rail-spend")
+                    yield Static("")
+                    yield Static("─ producers ─", classes="rail-head")
+                    yield Static("(idle)", classes="rail-dim", id="rail-producers")
+                with Vertical(id="team-tv-col"):
+                    yield StreamView(lane="team", id="stream-team", classes="tv")
+                    yield StreamStatus(lane="team", id="stream-team-status")
+        # The composer — LEADER only (conversation; MOD SQUAD is watch-only).
+        # A clean round box holds just the input; the action row (attach chips +
+        # the send / kickoff affordance) sits beneath it.
+        with Vertical(id="input-box"):
+            yield ChatInput("", id="prompt-input", soft_wrap=True)
+        with Horizontal(id="chatbox-actions"):
+            yield Button("📎 doc", id="chat-attach-doc-btn")
+            yield Button("🖼 image", id="chat-attach-image-btn")
+            yield Static("", id="chatbox-attachments-list")
+            yield Static(
+                "⏎ send  ·  /kickoff <objective> /end to run a job",
+                id="prompt-response",
+            )
 
     def on_mount(self) -> None:
         # Wire the agent-name resolver from the app so streams show agents
@@ -178,18 +187,78 @@ class PromptScreen(Vertical):
         if resolver is not None:
             for stream in self.query(StreamView):
                 stream._name_resolver = resolver
+        self._render_view()
+
+    @property
+    def view(self) -> str:
+        """The active flip side: 'leader' or 'team'."""
+        return self._view
+
+    def show_leader(self) -> None:
+        self._view = "leader"
+        self._render_view()
+
+    def show_team(self) -> None:
+        self._view = "team"
+        self._render_view()
 
     def flip_stream(self) -> None:
-        """Toggle the LEADER/TEAM stream tabs (bound to a key in app.py)."""
+        """Toggle LEADER ↔ MOD SQUAD (F4). On returning to LEADER the operator
+        has seen the Leader's messages, so the attention lamps rest."""
+        self._view = "team" if self._view == "leader" else "leader"
+        self._render_view()
+
+    def _render_view(self) -> None:
+        """Show the active view, hide the other (the input box rides LEADER),
+        and refresh the header + flip indicator + the leader attention lamps."""
+        leader = self._view == "leader"
+        for vid, on in (("#leader-view", leader), ("#team-view", not leader)):
+            try:
+                self.query_one(vid).display = on
+            except Exception:
+                pass
+        # The composer belongs to the conversation — only on LEADER.
+        for cid in ("#input-box", "#chatbox-actions"):
+            try:
+                self.query_one(cid).display = leader
+            except Exception:
+                pass
+        self._render_header()
+        self._render_flip_tab()
+        if leader:
+            lamps = getattr(self.app, "_status_lamps", lambda: None)()
+            if lamps is not None:
+                lamps.clear_attention()
+
+    def _render_header(self) -> None:
+        code = getattr(self.app, "project_code", "") or "—"
+        theme = str(getattr(self.app, "theme", "") or "")
+        variant = theme.replace("feng-", "") if theme.startswith("feng-") else theme
+        suffix = f"   feng-tui · {variant}" if variant else ""
         try:
-            tabbed = self.query_one("#console-streams", TabbedContent)
+            self.query_one("#console-header", Static).update(
+                f"MODULATIO   {escape(code)} · console{suffix}")
         except Exception:
-            return
-        tabbed.active = (
-            "stream-team-pane"
-            if tabbed.active == "stream-leader-pane"
-            else "stream-leader-pane"
-        )
+            pass
+
+    def _render_flip_tab(self) -> None:
+        try:
+            accent, dim, _b, _e = theme_tiers(self.app)
+        except Exception:
+            accent, dim = "white", "grey50"
+        t = Text()
+        if self._view == "leader":
+            t.append("LEADER", style=f"bold {accent}")
+            t.append("  ╶╴  ", style=dim)
+            t.append("mod squad", style=dim)
+        else:
+            t.append("leader", style=dim)
+            t.append("  ╶╴  ", style=dim)
+            t.append("MOD SQUAD", style=f"bold {accent}")
+        try:
+            self.query_one("#flip-tab", Static).update(t)
+        except Exception:
+            pass
 
     # ── Chatbox attachments (docs + images for the Leader conversation) ──
 

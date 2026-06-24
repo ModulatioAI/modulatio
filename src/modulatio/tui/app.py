@@ -1228,11 +1228,10 @@ class ModulatioApp(App):
         self.last_summary_text = text
 
     def _show_team_floor(self) -> None:
-        """Flip the console flip to the TEAM factory floor."""
+        """Flip the console to the TEAM factory floor."""
+        from modulatio.tui.screens.prompt import PromptScreen
         try:
-            self.query_one("#console-streams", TabbedContent).active = (
-                "stream-team-pane"
-            )
+            self.query_one(PromptScreen).show_team()
         except Exception:
             pass
 
@@ -1365,6 +1364,13 @@ class ModulatioApp(App):
             i = -1
         self.theme = names[(i + 1) % len(names)]
         self.sub_title = self._feng_subtitle()
+        # The console header + flip indicator carry explicit (rich) accent
+        # colours, so re-render them to the new variant.
+        from modulatio.tui.screens.prompt import PromptScreen
+        try:
+            self.query_one(PromptScreen)._render_view()
+        except Exception:
+            pass
         # Remember it so the next launch reopens on this variant.
         try:
             from modulatio import preferences
@@ -1521,12 +1527,11 @@ class ModulatioApp(App):
             return ""
 
     def action_focus_jobdrop(self) -> None:
-        """F3 → jump to the CONSOLE/LEADER chatbox so you can type a message."""
+        """F3 → jump to the CONSOLE/LEADER composer so you can type a message."""
+        from modulatio.tui.screens.prompt import PromptScreen
         try:
             self.query_one("#app-tabs", TabbedContent).active = "tab-prompt"
-            self.query_one("#console-streams", TabbedContent).active = (
-                "stream-leader-pane"
-            )
+            self.query_one(PromptScreen).show_leader()
             self.query_one("#prompt-input", ChatInput).focus()
         except Exception:
             pass
@@ -1600,16 +1605,14 @@ class ModulatioApp(App):
     def on_tabbed_content_tab_activated(
         self, event: TabbedContent.TabActivated,
     ) -> None:
-        """Clear the attention lamps the operator has now gone to read: flipping
-        to the LEADER stream clears the leader lamp (and all), and opening the
-        TICKETS tab clears the tickets lamp (symmetry — cadre seam)."""
+        """Opening the TICKETS tab clears the tickets attention lamp (the
+        operator has gone to read them). The LEADER-flip attention-clear lives
+        in PromptScreen._render_view now (the console flip is no longer a
+        TabbedContent)."""
         active = event.tabbed_content.active
         lamps = self._status_lamps()
-        if lamps is not None:
-            if active == "stream-leader-pane":
-                lamps.clear_attention()
-            elif active == "tab-tickets":
-                lamps.clear_attention("tickets")
+        if lamps is not None and active == "tab-tickets":
+            lamps.clear_attention("tickets")
         # Re-evaluate which footer keys show: the CONSOLE-only keys hide on
         # other tabs (see check_action).
         self.refresh_bindings()
