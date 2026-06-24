@@ -13,10 +13,12 @@ from __future__ import annotations
 
 from rich.markup import escape
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, DataTable, Input, Markdown, Static
 
 from modulatio import skills
+from modulatio.tui.widgets.confirm_modal import ConfirmModal
 from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.skill_wizard import SkillWizard
@@ -25,6 +27,10 @@ from modulatio.vault import project_dir
 
 class SkillsScreen(Vertical):
     """Skills tab content — the JIT skill pool + an author flow."""
+
+    BINDINGS = [
+        Binding("d", "delete", "Delete", show=True),
+    ]
 
     DEFAULT_CSS = """
     SkillsScreen { padding: 1; }
@@ -53,8 +59,8 @@ class SkillsScreen(Vertical):
                 # Affordance last so it never pushes the (tall) wizard panel
                 # off-screen when it expands.
                 yield Static(
-                    "↑↓ move · type to search · Add skill — a JIT pool, "
-                    "not bound to agents",
+                    "↑↓ move · type to search · d delete · Add skill — a JIT "
+                    "pool, not bound to agents",
                     id="skills-affordance",
                     classes="affordance",
                 )
@@ -108,6 +114,44 @@ class SkillsScreen(Vertical):
             self.query_one(ControlsRow).set_counts(label)
         except Exception:
             pass
+
+    # ── Delete ──────────────────────────────────────────────────────────────
+
+    def _selected_skill(self) -> str | None:
+        try:
+            table = self.query_one("#skills-table", DataTable)
+            if table.row_count == 0:
+                return None
+            return table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        except Exception:
+            return None
+
+    def action_delete(self) -> None:
+        name = self._selected_skill()
+        if not name:
+            return
+        code = self.app.project_code  # type: ignore[attr-defined]
+        is_local = (project_dir(code) / "skills" / f"{name}.md").exists()
+        scope = "project-local" if is_local else "shared"
+        self.app.push_screen(
+            ConfirmModal(
+                f"Delete the {scope} skill '{name}'?"
+                + ("" if is_local else "\n\n(A bundled seed skill can't be "
+                   "deleted — only your shared/codified copy.)")),
+            lambda ok: self._do_delete(name, is_local) if ok else None,
+        )
+
+    def _do_delete(self, name: str, is_local: bool) -> None:
+        code = self.app.project_code  # type: ignore[attr-defined]
+        try:
+            deleted = skills.delete_skill(name, project_code=code if is_local else None)
+        except Exception as exc:  # noqa: BLE001 — surface, never crash the screen
+            self.app.notify(f"Couldn't delete: {exc}", severity="error")
+            return
+        self.app.notify(
+            f"Deleted skill '{name}'." if deleted
+            else f"'{name}' has no deletable copy (bundled seed).")
+        self._refresh()
 
     # ── Detail pane ─────────────────────────────────────────────────────────
 

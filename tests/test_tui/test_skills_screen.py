@@ -312,3 +312,25 @@ async def test_skills_affordance_present(tui_vault_with_skills):
         text = str(app.query_one("#skills-affordance", Static).render())
         assert "search" in text.lower()
         assert "add" in text.lower()
+
+
+# ─── Delete wiring (Feng-Tui SKILLS overhaul) ───────────────────────────────
+
+
+async def test_d_delete_removes_a_skill(tui_vault_with_skills):
+    from textual.widgets import TabbedContent
+
+    from modulatio import skills as skills_mod
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.skills import SkillsScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-skills"
+        await pilot.pause()
+        screen = app.query_one(SkillsScreen)
+        # the fixture's shared skill is "drafter"
+        screen._do_delete("drafter", is_local=False)
+        await pilot.pause()
+        assert "drafter" not in skills_mod.list_skills(PROJECT_CODE)
