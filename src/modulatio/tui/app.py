@@ -1331,7 +1331,11 @@ class ModulatioApp(App):
         # (which never pass splash=True) reach the tab surface unblocked.
         if self.splash:
             from modulatio.tui.screens.splash import SplashScreen
-            self.push_screen(SplashScreen())
+            # The splash holds focus while up; on dismiss, land focus back in
+            # the console composer so it's ready to type (the on-load path the
+            # tab-activated handler covers when there's no splash).
+            self.push_screen(
+                SplashScreen(), lambda _result: self._focus_console_composer())
         if not setup_state.setup_completed():
             self._set_response(
                 "First-launch detected — Modulatio has no saved setup state.\n"
@@ -1622,6 +1626,16 @@ class ModulatioApp(App):
         except Exception:
             return None
 
+    def _focus_console_composer(self) -> None:
+        """Land focus in the CONSOLE composer (ready to type). Shared by the
+        tab-activated handler (on load / return to CONSOLE) and the splash
+        dismiss. PromptScreen._focus_composer self-guards to the active tab."""
+        try:
+            from modulatio.tui.screens.prompt import PromptScreen
+            self.query_one(PromptScreen)._focus_composer()
+        except Exception:
+            pass
+
     def on_tabbed_content_tab_activated(
         self, event: TabbedContent.TabActivated,
     ) -> None:
@@ -1637,11 +1651,7 @@ class ModulatioApp(App):
         # (on load and whenever you return to CONSOLE). Sync handler = clean
         # teardown; only fires for tab-prompt so it never clobbers another tab.
         if active == "tab-prompt":
-            try:
-                from modulatio.tui.screens.prompt import PromptScreen
-                self.query_one(PromptScreen)._focus_composer()
-            except Exception:
-                pass
+            self._focus_console_composer()
         # Re-evaluate which footer keys show: the CONSOLE-only keys hide on
         # other tabs (see check_action).
         self.refresh_bindings()
