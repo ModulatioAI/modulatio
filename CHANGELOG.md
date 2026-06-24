@@ -4,6 +4,49 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7.0] — 2026-06-23
+
+Project management — switch between projects, create new ones, and delete old
+ones from the CLI and a new PROJECTS tab, without editing config or
+reinstalling. The team carries install-wide; each project keeps its own work.
+Plus path-safety hardening across backups and the agent roster.
+
+### Added
+
+- **Switch projects.** `modulatio project list` shows every project (the
+  current one marked); `modulatio project use <code>` switches the active one.
+  In the TUI, a new **PROJECTS** tab (under CONFIG, or `/project`) browses the
+  list and **switches** with a button — a live, in-place switch that re-binds
+  the header and every data view to the new project. The team is install-level,
+  so switching never changes your agents or models, only the work you're
+  looking at. Switching is **disabled while a job is running**.
+- **Create a project from the TUI.** The PROJECTS tab's **New** button names a
+  project (its folder) + an optional objective and creates the folder **and
+  seeds your install team into it** — the same init+seed the wizard and
+  `kickoff` do, now one click. A half-made project (seed fails after the folder
+  is created) is rolled back rather than stranded.
+- **Delete a project — backed up first.** The PROJECTS tab's **Delete** button
+  removes a project after a confirmation, **backing it up first** to a shareable
+  `.modulatio` file. Guarded: you can't delete the active project (switch away
+  first) or delete while a job runs, and only a real Modulatio project — never a
+  stray folder in your vault — can be removed.
+
+### Changed
+
+- The setup wizard's first-project init+seed routes through the shared
+  `create_project` helper (one path for "make a project ready to work in").
+
+### Security
+
+- **Symlink-safe backups.** A backup no longer follows symlinks out of a
+  project's tree, so a snapshot can't pull in outside-the-project files; a
+  vault child that is itself a symlink is never treated as a project (so it
+  can't be listed, switched to, or deleted).
+- **Agent-id path validation.** Every place an agent id becomes a file path —
+  saving, adding, removing, and seeding agents — validates the id, so a
+  malformed roster entry or team-template id can't read, write, or delete
+  outside the project's `agents/` directory.
+
 ## [0.9.6.0] — 2026-06-22
 
 Lifecycle tooling, a more conversational Leader, and a leaner team — plus a
