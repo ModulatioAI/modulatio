@@ -27,9 +27,10 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import DataTable, Input, Markdown
+from textual.widgets import DataTable, Input, Markdown, Static
 
 from modulatio import job_template_library
+from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
 
 
@@ -43,21 +44,30 @@ class JTLibraryScreen(Vertical):
     # The split + full-height divider live in MasterDetail now.
     DEFAULT_CSS = """
     JTLibraryScreen { padding: 1; }
-    JTLibraryScreen #jt-search { margin-bottom: 1; }
     JTLibraryScreen #jt-table { height: 1fr; }
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.detail_source: str = ""
+        self._query: str = ""
 
     def compose(self) -> ComposeResult:
-        yield Input(placeholder="search templates…", id="jt-search")
         with MasterDetail():
             with Vertical(id="md-list"):
+                yield ControlsRow(
+                    counts=True, search=True,
+                    search_placeholder="/ search templates…",
+                )
                 table = DataTable(id="jt-table", cursor_type="row")
                 table.add_columns("Template", "Description", "Capabilities")
                 yield table
+                yield Static(
+                    "↑↓ move · type to search · read-only — templates are "
+                    "codified by the Leader",
+                    id="jt-affordance",
+                    classes="affordance",
+                )
             with VerticalScroll(id="md-detail"):
                 yield Markdown(
                     "_Select a template to view its parameters, output "
@@ -77,13 +87,13 @@ class JTLibraryScreen(Vertical):
     def project_code(self) -> str:
         return self.app.project_code  # type: ignore[attr-defined]
 
-    def refresh_templates(self, query: str = "") -> None:
+    def refresh_templates(self) -> None:
         try:
             table = self.query_one("#jt-table", DataTable)
         except Exception:
             return
         table.clear()
-        q = query.strip()
+        q = self._query.strip()
         entries = (
             job_template_library.search_job_templates(q, self.project_code)
             if q
@@ -97,6 +107,7 @@ class JTLibraryScreen(Vertical):
                 escape(caps),
                 key=e.name,
             )
+        self._set_counts(table.row_count)
         if table.row_count > 0:
             first = list(table.rows.keys())[0].value
             if first:
@@ -109,8 +120,16 @@ class JTLibraryScreen(Vertical):
             )
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "jt-search":
-            self.refresh_templates(event.value)
+        if event.input.id == "controls-search":
+            self._query = event.value.strip()
+            self.refresh_templates()
+
+    def _set_counts(self, shown: int) -> None:
+        try:
+            label = f"{shown} templates" + (" (filtered)" if self._query else "")
+            self.query_one(ControlsRow).set_counts(label)
+        except Exception:
+            pass
 
     def on_data_table_row_highlighted(
         self, event: DataTable.RowHighlighted

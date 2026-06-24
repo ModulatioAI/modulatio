@@ -61,11 +61,29 @@ async def test_search_filters(lib):
     app = _Host()
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.query_one("#jt-search", Input).value = "competitor"
+        app.query_one("#controls-search", Input).value = "competitor"
         await pilot.pause()
         table = app.query_one("#jt-table", DataTable)
         names = {table.get_row_at(i)[0] for i in range(table.row_count)}
         assert names == {"weekly-brief"}  # only the competitor brief matches
+
+
+async def test_controls_row_counts_and_affordance(lib):
+    """The list carries the shared ControlsRow (counts + search) and a
+    read-only affordance line pointing at the Leader."""
+    from textual.widgets import Static
+
+    from modulatio.tui.widgets.controls_row import ControlsRow
+
+    _save("daily-essay", "A daily philosophy essay", ("long-form-writing",))
+    _save("weekly-brief", "Weekly competitor brief", ("web-research",))
+    app = _Host()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        row = app.query_one(ControlsRow)
+        assert "2 templates" in str(row.query_one("#controls-counts", Static).render())
+        afford = str(app.query_one("#jt-affordance", Static).render())
+        assert "read-only" in afford and "Leader" in afford
 
 
 async def test_detail_renders_on_select(lib):

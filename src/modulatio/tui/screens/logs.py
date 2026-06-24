@@ -120,7 +120,7 @@ class LogsScreen(Vertical):
     def action_refresh(self) -> None:
         self.refresh_logs()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "controls-search":
             self._query = event.value.strip()
             self.refresh_logs()

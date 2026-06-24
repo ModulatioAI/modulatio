@@ -154,17 +154,20 @@ async def test_tickets_tab_shows_pre_seeded_tickets(project_with_tickets):
 async def test_tickets_has_controls_row_with_counts_and_search(project_with_tickets):
     """The list yields a ControlsRow (counts + search) atop the table, and the
     counts cell reports the visible ticket total."""
+    from textual.widgets import Static
+
     from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.tickets import TicketsScreen
     from modulatio.tui.widgets.controls_row import ControlsRow
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
-        row = app.query_one(ControlsRow)
+        # Scope to the TICKETS screen — sibling tabs also carry a ControlsRow.
+        row = app.query_one(TicketsScreen).query_one(ControlsRow)
         assert row.query("#controls-counts")
         assert row.query("#controls-search")
-        from textual.widgets import Static
-        counts = str(app.query_one("#controls-counts", Static).render())
+        counts = str(row.query_one("#controls-counts", Static).render())
         assert "2 tickets" in counts
 
 
@@ -183,8 +186,9 @@ async def test_tickets_search_filters_rows_and_marks_filtered(project_with_ticke
         screen._query = "sign-off"  # matches only the MINOR "ready for sign-off"
         screen.refresh_tickets()
         await pilot.pause()
-        assert app.query_one("#tickets-table", DataTable).row_count == 1
-        assert "filtered" in str(app.query_one("#controls-counts", Static).render())
+        assert screen.query_one("#tickets-table", DataTable).row_count == 1
+        counts = str(screen.query_one("#controls-counts", Static).render())
+        assert "filtered" in counts
 
 
 async def test_tickets_affordance_reads_read_only(project_with_tickets):
