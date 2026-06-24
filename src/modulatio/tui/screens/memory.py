@@ -31,6 +31,7 @@ from modulatio import roster, vault
 from modulatio.memory import agent_memory, team_memory
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
 from modulatio.tui.widgets.master_detail import MasterDetail
+from modulatio.tui.widgets.text_entry_modal import TextEntryModal
 
 
 _TEAM_ONLY = "__team_only__"
@@ -55,6 +56,8 @@ class MemoryScreen(Vertical):
 
     BINDINGS = [
         Binding("r", "refresh", "Refresh", show=True),
+        Binding("a", "add", "Add", show=True),
+        Binding("e", "edit", "Edit", show=True),
         Binding("d", "delete", "Delete", show=True),
         Binding("x", "export", "Export md", show=True),
     ]
@@ -89,6 +92,7 @@ class MemoryScreen(Vertical):
         # selected entry's layer + owner; plus its rendered detail card.
         self._rows: dict[str, tuple[str, str, str]] = {}
         self._detail: dict[str, str] = {}
+        self._raw: dict[str, str] = {}  # row key → raw content (for edit prefill)
 
     def set_project(self, project_code: str) -> None:
         self._project_code = project_code
@@ -128,8 +132,8 @@ class MemoryScreen(Vertical):
                 table.add_columns("Layer", "When", "Kind", "Content")
                 yield table
                 yield Static(
-                    "↑↓ move · d delete · x export markdown — team entries are "
-                    "QC-curated (edit via the propose→approve flow)",
+                    "↑↓ move · a add · e edit · d delete · x export — team "
+                    "entries are QC-curated (edits go via propose→approve)",
                     id="memory-affordance",
                     classes="affordance",
                 )
@@ -196,6 +200,7 @@ class MemoryScreen(Vertical):
         )
         self._rows[key] = (layer, agent_id, entry_id)
         self._detail[key] = detail_md
+        self._raw[key] = content or ""
 
     def _refresh_views(self) -> None:
         try:
@@ -206,6 +211,7 @@ class MemoryScreen(Vertical):
         table.clear()
         self._rows = {}
         self._detail = {}
+        self._raw = {}
         if not self._project_code:
             stats_widget.update("(no project context yet — kick off a goal first)")
             return
@@ -282,6 +288,78 @@ class MemoryScreen(Vertical):
     def action_refresh(self) -> None:
         self._populate_agent_picker()
         self._refresh_views()
+
+    def action_add(self) -> None:
+        """`a` — add a durable (semantic) note to the focused agent's memory."""
+        agent = self._focused_agent
+        if not agent:
+            self.app.notify(
+                "Select an agent to add a memory to (team memory is QC-curated).",
+                severity="warning")
+            return
+        self.app.push_screen(
+            TextEntryModal(
+                title=f"Add a semantic memory for '{agent}'",
+                hint="A durable, operator-authored fact for this agent."),
+            lambda text: self._do_add(agent, text) if text else None,
+        )
+
+    def _do_add(self, agent: str, content: str) -> None:
+        try:
+            agent_memory.add_semantic(agent, content, project_code=self._project_code)
+        except Exception as exc:  # noqa: BLE001 — surface, never crash the screen
+            self.app.notify(f"Couldn't add: {exc}", severity="error")
+            return
+        self.app.notify(f"Added a semantic memory for '{agent}'.")
+        self._refresh_views()
+
+    def action_edit(self) -> None:
+        """`e` — edit the selected entry. Agent layers edit in place; a team
+        entry is QC-curated, so an edit becomes a propose→approve revision."""
+        key = self._selected_key()
+        if not key or key not in self._rows:
+            return
+        layer, agent_id, entry_id = self._rows[key]
+        initial = self._raw.get(key, "")
+        if layer == "team":
+            self.app.push_screen(
+                TextEntryModal(
+                    title="Propose a revision to this team memory",
+                    initial=initial,
+                    hint="Team memory is QC-curated — your edit is proposed for "
+                         "QC approval, not applied directly."),
+                lambda text: self._do_propose_revision(text) if text else None,
+            )
+            return
+        self.app.push_screen(
+            TextEntryModal(
+                title=f"Edit this {layer} memory of '{agent_id}'",
+                initial=initial),
+            lambda text: self._do_edit(layer, agent_id, entry_id, text)
+            if text else None,
+        )
+
+    def _do_edit(self, layer: str, agent_id: str, entry_id: str, content: str) -> None:
+        try:
+            updated = agent_memory.update_entry(
+                agent_id, entry_id, project_code=self._project_code,
+                layer=layer, content=content)
+        except Exception as exc:  # noqa: BLE001
+            self.app.notify(f"Couldn't edit: {exc}", severity="error")
+            return
+        self.app.notify("Edited." if updated else "Entry not found.")
+        self._refresh_views()
+
+    def _do_propose_revision(self, body: str) -> None:
+        try:
+            team_memory.propose(
+                proposer_id="operator", body=body,
+                project_code=self._project_code,
+                rationale="Operator-proposed revision from the MEMORY tab.")
+        except Exception as exc:  # noqa: BLE001
+            self.app.notify(f"Couldn't propose: {exc}", severity="error")
+            return
+        self.app.notify("Proposed a revision — QC will review it before it lands.")
 
     def action_delete(self) -> None:
         key = self._selected_key()

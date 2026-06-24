@@ -186,3 +186,60 @@ async def test_export_writes_markdown_for_the_focused_agent():
         dest = vault.project_dir(PROJECT_CODE) / "memory-writer-a.md"
         assert dest.exists()
         assert "exported fact" in dest.read_text()
+
+
+@pytest.mark.asyncio
+async def test_edit_updates_an_agent_entry_in_place():
+    from textual.widgets import TabbedContent
+
+    e = agent_memory.add_semantic("writer-a", "old fact", project_code=PROJECT_CODE)
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        app.query_one(TabbedContent).active = "tab-memory"
+        await pilot.pause()
+        screen = app.query_one("MemoryScreen")
+        screen.focus_agent("writer-a")
+        await pilot.pause()
+        screen._do_edit("semantic", "writer-a", e.id, "new fact")
+        await pilot.pause()
+        sem = agent_memory.get_semantic("writer-a", project_code=PROJECT_CODE)
+        assert [s.content for s in sem] == ["new fact"]
+
+
+@pytest.mark.asyncio
+async def test_add_appends_a_semantic_entry_for_the_agent():
+    from textual.widgets import TabbedContent
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        app.query_one(TabbedContent).active = "tab-memory"
+        await pilot.pause()
+        screen = app.query_one("MemoryScreen")
+        screen.focus_agent("writer-a")
+        await pilot.pause()
+        screen._do_add("writer-a", "a fresh operator note")
+        await pilot.pause()
+        sem = agent_memory.get_semantic("writer-a", project_code=PROJECT_CODE)
+        assert any(s.content == "a fresh operator note" for s in sem)
+
+
+@pytest.mark.asyncio
+async def test_editing_a_team_entry_creates_a_proposal_not_a_mutation():
+    from textual.widgets import TabbedContent
+
+    from modulatio.memory import team_memory as tm
+
+    tm.write(writer_id="qc-1", writer_tier="qc", body="original team fact",
+             project_code=PROJECT_CODE, artifact_kind="report")
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        app.query_one(TabbedContent).active = "tab-memory"
+        await pilot.pause()
+        screen = app.query_one("MemoryScreen")
+        screen._do_propose_revision("revised team fact")
+        await pilot.pause()
+        # the team entry is unchanged; a pending proposal now exists
+        bodies = [e.body for e in tm.list_entries(PROJECT_CODE)]
+        assert bodies == ["original team fact"]
+        proposals = tm.list_proposals(PROJECT_CODE)
+        assert any(p.body == "revised team fact" for p in proposals)
