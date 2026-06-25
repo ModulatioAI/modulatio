@@ -600,3 +600,52 @@ def test_bare_openai_without_base_url_gets_no_placeholder_key(monkeypatch):
     _litellm_model, kwargs = runners._resolve_model_call_args("bare")
 
     assert "api_key" not in kwargs
+
+
+# ── idle-stall watchdog: bounded per-completion timeout ─────────────────────
+
+def test_default_call_timeout_default_and_env(monkeypatch):
+    """The per-completion wall-clock cap defaults to 300s and is tunable via
+    MODULATIO_CALL_TIMEOUT; a non-positive or unparseable value falls back."""
+    from modulatio.runners import _default_call_timeout
+
+    monkeypatch.delenv("MODULATIO_CALL_TIMEOUT", raising=False)
+    assert _default_call_timeout() == 300.0
+    monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "90")
+    assert _default_call_timeout() == 90.0
+    monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "nonsense")
+    assert _default_call_timeout() == 300.0
+    monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "0")
+    assert _default_call_timeout() == 300.0
+
+
+def test_litellm_runner_applies_idle_stall_timeout(monkeypatch):
+    """Wiring: a runner built without an explicit timeout binds the watchdog
+    default (300s) onto the litellm.completion call, so a hung model call aborts
+    there (litellm Timeout → fallback-model + redo retry) instead of the old
+    30-min wait. The env override threads through too."""
+    import litellm
+    from modulatio.runners import litellm_runner
+
+    seen: dict = {}
+    fake_resp = _fake_chat_completion_response(content="ok")
+
+    def _capture(**kw):
+        seen.update(kw)
+        return fake_resp
+
+    monkeypatch.setattr(litellm, "completion", _capture)
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+    monkeypatch.setattr(
+        "modulatio.runners._resolve_model_call_args", lambda model: (model, {})
+    )
+    monkeypatch.setattr("modulatio.model_presets.load_presets", lambda: {})
+    monkeypatch.delenv("MODULATIO_CALL_TIMEOUT", raising=False)
+
+    litellm_runner("openrouter/test-model")("hi")
+    assert seen["timeout"] == 300.0
+
+    seen.clear()
+    monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "120")
+    litellm_runner("openrouter/test-model")("hi")
+    assert seen["timeout"] == 120.0

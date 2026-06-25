@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
@@ -529,10 +530,33 @@ def run_with_model_fallbacks(
     raise last_exc
 
 
+#: Per-completion wall-clock cap (seconds) when a caller doesn't pin one.
+#: Lowered from a 30-min default so a hung/stalled model call raises a litellm
+#: Timeout at this bound — already classified as a fallback-model trigger and a
+#: redo-loop retry — instead of sitting silent (a live producer wedged ~20 min,
+#: well under the old cap). Tunable via MODULATIO_CALL_TIMEOUT; raise it if a
+#: slow local model legitimately needs longer for a single call.
+_DEFAULT_CALL_TIMEOUT = 300.0
+
+
+def _default_call_timeout() -> float:
+    """Resolve the per-completion timeout from MODULATIO_CALL_TIMEOUT, falling
+    back to :data:`_DEFAULT_CALL_TIMEOUT` when unset, unparseable, or <= 0."""
+    raw = (os.environ.get("MODULATIO_CALL_TIMEOUT") or "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return _DEFAULT_CALL_TIMEOUT
+        if value > 0:
+            return value
+    return _DEFAULT_CALL_TIMEOUT
+
+
 def litellm_runner(
     model: str,
     *,
-    timeout: float = 1800.0,
+    timeout: float | None = None,
     disable_thinking: bool = True,
     api_base: str | None = None,
     api_key: str | None = None,
@@ -549,11 +573,15 @@ def litellm_runner(
     auth alert via ``auth_alerts.raise_alert`` and re-raise. On success,
     clear any prior alert for the provider so the banner self-heals.
 
-    ``timeout`` bounds a single completion (default 30 min, generous for
-    large local models). ``disable_thinking`` prepends ``/no_think`` —
-    reasoning-class models that emit ``<think>`` blocks honor this and
-    skip the inner-monologue output.
+    ``timeout`` bounds a single completion (the idle-stall watchdog). ``None``
+    resolves to :func:`_default_call_timeout` (300s, MODULATIO_CALL_TIMEOUT-
+    tunable) so a hung call aborts there rather than waiting out a 30-min cap;
+    an explicit value is honored unchanged. ``disable_thinking`` prepends
+    ``/no_think`` — reasoning-class models that emit ``<think>`` blocks honor
+    this and skip the inner-monologue output.
     """
+    if timeout is None:
+        timeout = _default_call_timeout()
     # Resolve once at runner-construction time for raw-id callers (so the
     # api_base / api_key kwargs they pass survive unchanged).
     litellm_model, resolved_kwargs = _resolve_model_call_args(model)
