@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
@@ -529,10 +530,33 @@ def run_with_model_fallbacks(
     raise last_exc
 
 
+#: Per-completion wall-clock cap (seconds) when a caller doesn't pin one.
+#: Lowered from a 30-min default so a hung/stalled model call raises a litellm
+#: Timeout at this bound — already classified as a fallback-model trigger and a
+#: redo-loop retry — instead of sitting silent (a live producer wedged ~20 min,
+#: well under the old cap). Tunable via MODULATIO_CALL_TIMEOUT; raise it if a
+#: slow local model legitimately needs longer for a single call.
+_DEFAULT_CALL_TIMEOUT = 300.0
+
+
+def _default_call_timeout() -> float:
+    """Resolve the per-completion timeout from MODULATIO_CALL_TIMEOUT, falling
+    back to :data:`_DEFAULT_CALL_TIMEOUT` when unset, unparseable, or <= 0."""
+    raw = (os.environ.get("MODULATIO_CALL_TIMEOUT") or "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return _DEFAULT_CALL_TIMEOUT
+        if value > 0:
+            return value
+    return _DEFAULT_CALL_TIMEOUT
+
+
 def litellm_runner(
     model: str,
     *,
-    timeout: float = 1800.0,
+    timeout: float | None = None,
     disable_thinking: bool = True,
     api_base: str | None = None,
     api_key: str | None = None,
@@ -549,11 +573,15 @@ def litellm_runner(
     auth alert via ``auth_alerts.raise_alert`` and re-raise. On success,
     clear any prior alert for the provider so the banner self-heals.
 
-    ``timeout`` bounds a single completion (default 30 min, generous for
-    large local models). ``disable_thinking`` prepends ``/no_think`` —
-    reasoning-class models that emit ``<think>`` blocks honor this and
-    skip the inner-monologue output.
+    ``timeout`` bounds a single completion (the idle-stall watchdog). ``None``
+    resolves to :func:`_default_call_timeout` (300s, MODULATIO_CALL_TIMEOUT-
+    tunable) so a hung call aborts there rather than waiting out a 30-min cap;
+    an explicit value is honored unchanged. ``disable_thinking`` prepends
+    ``/no_think`` — reasoning-class models that emit ``<think>`` blocks honor
+    this and skip the inner-monologue output.
     """
+    if timeout is None:
+        timeout = _default_call_timeout()
     # Resolve once at runner-construction time for raw-id callers (so the
     # api_base / api_key kwargs they pass survive unchanged).
     litellm_model, resolved_kwargs = _resolve_model_call_args(model)
@@ -1214,6 +1242,11 @@ def run_llm_with_tools(
     # WARNINGs. Track whether we've already warned in this invocation
     # so the gate fires once per loop instead of once per iteration.
     soft_warn_seen = False
+    # Per-attempt compression-churn guard: one run_llm_with_tools call IS one
+    # producer attempt, so compressions here count toward this attempt's cap.
+    # check_and_compress returns a NEW list only when it actually compressed
+    # (same reference when in-band), so identity is the "did compress" signal.
+    compressions = 0
     # re-sweep (metered Finding 1): cache each metered tool's successful result
     # keyed by (name, canonical args) so an idempotent replay — flagged
     # structurally by the authorizer (``idempotent_reuse``) — reuses the prior
@@ -1234,13 +1267,25 @@ def run_llm_with_tools(
         # path keeps its pre-Slice-90 shape.
         ctx_cfg = _ctx_budget.current_config()
         if ctx_cfg is not None and ctx_cfg.enabled and model:
-            messages, did_warn = _ctx_budget.check_and_compress(
+            compressed, did_warn = _ctx_budget.check_and_compress(
                 messages,
                 model=model,
                 call_id=_ctx_budget.call_id_for_iteration(iteration),
                 config=ctx_cfg,
                 soft_warn_already_seen=soft_warn_seen,
             )
+            if compressed is not messages:
+                compressions += 1
+                cap = ctx_cfg.max_compressions_per_attempt
+                if cap > 0 and compressions > cap:
+                    # This attempt is thrashing the budget — abort so the redo
+                    # loop counts the try (already incremented) and redoes with
+                    # the exception message as corrective feedback, instead of
+                    # grinding many compressions inside one invisible attempt.
+                    raise _ctx_budget.CompressionChurnExceeded(
+                        compressions=compressions, limit=cap,
+                    )
+            messages = compressed
             if did_warn:
                 soft_warn_seen = True
         response = chat_runner(messages=messages, tools=tools_schema)

@@ -3922,6 +3922,16 @@ class Orchestrator:
         checksum = f"sha256:{hashlib.sha256(response.encode()).hexdigest()}"
         return path, checksum, len(response.split())
 
+    @staticmethod
+    def _producer_budget_role(task: Task) -> str | None:
+        """Budget pool for a producer running ``task``. Research-artifact work
+        (sourcing/consolidation) routes to the larger ``research`` pool — its
+        tool loop accumulates fetched context, and its assembly reads multiple
+        sources, both of which the generic ``producer`` cap can't hold (a live
+        sourcing task churned at the producer cap). ``None`` → the caller's
+        default ('producer'); code/text artifacts stay there."""
+        return "research" if task.artifact_kind == "research" else None
+
     def _producer_execute(self, task: Task, corrective_notes: str = "") -> tuple[Path, str, int]:
         """Drafter writes the task's artifact to artifacts/drafts/.
 
@@ -4211,7 +4221,8 @@ class Orchestrator:
         # (Assembler tasks with resolvable units never reach here — they're bound
         # by the engine at the top of this method, before the mode dispatch.)
         raw_response = self._run_agent_call(
-            task.assigned_agent_id, producer_role, prompt
+            task.assigned_agent_id, producer_role, prompt,
+            budget_role=self._producer_budget_role(task),
         )
         # (c11): extract producer inbox_proposals BEFORE the
         # summary parser runs. The summary parser takes everything
@@ -6069,6 +6080,7 @@ class Orchestrator:
             skill_name=skill.name,
             needs_network=skill.needs_network,
             pass_env=skill.pass_env,
+            budget_role=self._producer_budget_role(task),
         )
 
         # (c11): extract producer inbox_proposals BEFORE the
@@ -9410,6 +9422,18 @@ class Orchestrator:
         # behavior, unchanged for projects that haven't authored a
         # tool-using leader-verify skill).
         leader_tool_skill = self._leader_verify_tool_loadout_skill()
+        # Tool-using verify needs both a chat_runner to drive the loop AND its
+        # loadout tools present in the registry (run_shell is bound only when the
+        # run has an artifacts root — true for every real kickoff, but not bare
+        # test/CLI registries). When either is missing, DEGRADE to the single-shot
+        # verdict rather than crash the goal's verdict — the verdict is essential,
+        # the artifact-reading is the enhancement.
+        if leader_tool_skill is not None:
+            registry = self._active_tool_registry()
+            if self._resolve_chat_runner("leader") is None or not all(
+                tool in registry for tool in leader_tool_skill.tool_loadout
+            ):
+                leader_tool_skill = None
 
         try:
             if leader_tool_skill is not None:

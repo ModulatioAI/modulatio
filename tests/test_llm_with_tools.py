@@ -670,3 +670,81 @@ def test_compose_broker_exception_is_fail_closed():
     # a broker-side exception (e.g. sandbox-probe I/O) → DENY, never run.
     ran, _ = _compose_run(callback_allows=True, broker=_Broker(boom=True))
     assert ran == 0
+
+
+# ── compression-churn guard (per-attempt cap) ───────────────────────────────
+
+def test_compression_churn_raises_after_per_attempt_cap(monkeypatch):
+    """A single attempt that compresses MORE than
+    ``max_compressions_per_attempt`` times is thrashing the budget — the loop
+    raises ``CompressionChurnExceeded`` so the redo loop counts the try and
+    stops the otherwise-invisible grind (Clif 2026-06-25). Cap=2 → the 3rd
+    compression trips it."""
+    from modulatio import context_budget as cb
+
+    # Force a compression every iteration: the real check_and_compress returns
+    # a NEW list when it compresses (same reference when it doesn't), so a copy
+    # is the faithful "compressed" signal.
+    def always_compress(messages, **kw):
+        return list(messages), False
+
+    monkeypatch.setattr(cb, "check_and_compress", always_compress)
+    monkeypatch.setattr(
+        cb, "current_config",
+        lambda: cb.ContextBudgetConfig(enabled=True, max_compressions_per_attempt=2),
+    )
+
+    registry = {"noop": tools.Tool(name="noop", description="noop", call=lambda: "ok")}
+
+    def always_tool(messages=None, tools=None):
+        return ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c", name="noop", args={}),
+        ))
+
+    with pytest.raises(cb.CompressionChurnExceeded) as ei:
+        runners.run_llm_with_tools(
+            chat_runner=always_tool,
+            prompt="go",
+            tool_loadout=("noop",),
+            tool_registry=registry,
+            max_iters=16,
+            model="some-model",
+        )
+    assert ei.value.limit == 2
+    assert ei.value.compressions == 3
+    assert "2" in str(ei.value)  # message names the limit as corrective feedback
+
+
+def test_compression_within_cap_does_not_raise(monkeypatch):
+    """Routine compression (at or below the cap) never trips the guard — a
+    healthy long task that compresses a couple times still completes."""
+    from modulatio import context_budget as cb
+
+    calls = {"n": 0}
+
+    def compress_twice(messages, **kw):
+        calls["n"] += 1
+        # compress on the first two iterations only (new list), then no-op
+        return (list(messages) if calls["n"] <= 2 else messages), False
+
+    monkeypatch.setattr(cb, "check_and_compress", compress_twice)
+    monkeypatch.setattr(
+        cb, "current_config",
+        lambda: cb.ContextBudgetConfig(enabled=True, max_compressions_per_attempt=3),
+    )
+
+    registry = {"noop": tools.Tool(name="noop", description="noop", call=lambda: "ok")}
+    scripted = [
+        ChatResponse(content=None, tool_calls=(ToolCall(id="a", name="noop", args={}),)),
+        ChatResponse(content=None, tool_calls=(ToolCall(id="b", name="noop", args={}),)),
+        ChatResponse(content="done", tool_calls=()),
+    ]
+    out = runners.run_llm_with_tools(
+        chat_runner=runners.stub_chat_runner(scripted),
+        prompt="go",
+        tool_loadout=("noop",),
+        tool_registry=registry,
+        max_iters=16,
+        model="some-model",
+    )
+    assert out == "done"

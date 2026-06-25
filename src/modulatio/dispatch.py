@@ -144,32 +144,32 @@ def _capability_shortfall(agent: Agent, effective_caps: list[str]) -> tuple[str,
     return tuple(c for c in effective_caps if c not in held)
 
 
-def _rank_producers(
-    producers: list[Agent], effective_caps: list[str]
-) -> tuple[list[Agent], bool]:
-    """Return ``(pool, is_fallback)``. The pool is the producers that meet
-    the capability floor; if NONE do, it's ALL producers (best-available,
-    never block) and ``is_fallback`` is True."""
-    meeting = [a for a in producers if a.covers_capabilities(effective_caps)]
-    if meeting:
-        return meeting, False
-    return list(producers), True
-
-
 def _producer_sort_key(
-    agent: Agent, load: dict[str, int], is_fallback: bool
+    agent: Agent, load: dict[str, int], effective_caps: list[str]
 ) -> tuple:
     """Availability-first ranking shared by the single-pick and the wave
-    scheduler so they can't drift. Least-loaded first (spread a wave across
-    idle models, never serialize onto one); then — among producers that meet
-    the floor — cheapest wins (cheap producers do the bulk, the QC thesis);
-    among the best-available fallback set, highest tier wins (closest to the
-    requested floor). Lexicographic id is the deterministic final tiebreak."""
+    scheduler so they can't drift. The capability floor ORDERS producers, it
+    does NOT gate them — every producer is always a candidate, so an idle
+    under-floor producer still beats a saturated qualifier and no producer
+    starves while work waits (the live 'only 2 of 3 producers work' bug).
+
+    Order: least-loaded first (spread a wave across idle models, never
+    serialize onto one); then floor-meeting producers before under-floor ones;
+    then — among floor-meeting producers — cheapest wins (cheap producers do
+    the bulk, the QC thesis), while among under-floor producers the highest
+    tier wins (closest to the requested floor). Lexicographic id is the
+    deterministic final tiebreak. A picked under-floor producer ships a
+    capability-shortfall PQR reservation (``_capability_shortfall``), so
+    routing best-available stays honest — never a silent quality drop."""
     base = load.get(agent.id, 0)
-    if is_fallback:
-        return (base, -_TIER_RANK.get(agent.model_tier or "", 0),
-                _cost_rank(agent.cost_class), agent.id)
-    return (base, _cost_rank(agent.cost_class), agent.id)
+    meets = agent.covers_capabilities(effective_caps)
+    return (
+        base,
+        0 if meets else 1,
+        0 if meets else -_TIER_RANK.get(agent.model_tier or "", 0),
+        _cost_rank(agent.cost_class),
+        agent.id,
+    )
 
 
 def select_agent(
@@ -206,15 +206,14 @@ def select_agent(
     effective_caps = _effective_required_capabilities(
         task, skill_floor_for, domain_floor_for
     )
-    pool, is_fallback = _rank_producers(producers, effective_caps)
 
     hint = getattr(task, "preferred_continuity_agent", None)
     if hint:
-        for a in pool:
+        for a in producers:
             if a.id == hint:
                 return a
 
-    return min(pool, key=lambda a: _producer_sort_key(a, load, is_fallback))
+    return min(producers, key=lambda a: _producer_sort_key(a, load, effective_caps))
 
 
 def _qualifying_candidates(
@@ -225,10 +224,11 @@ def _qualifying_candidates(
 ) -> list[Agent]:
     """The producers eligible to run ``task`` this wave, ranked best-fit
     first by the SAME sort ``select_agent`` uses (so the wave scheduler and
-    the single picker never drift). Skills don't gate — every producer is a
-    candidate; the capability floor only orders them (with the
-    best-available fallback when none meet it). Empty required_skills → no
-    skill-routed candidate (legacy NO_CONSTRAINT handled by the caller)."""
+    the single picker never drift). Neither skills NOR the capability floor
+    gate — every producer is a candidate; the floor only ORDERS them, so when
+    the qualifiers are saturated an idle under-floor producer still gets work.
+    Empty required_skills → no skill-routed candidate (legacy NO_CONSTRAINT
+    handled by the caller)."""
     if not task.required_skills:
         return []
     producers = _producer_pool(agents)
@@ -237,8 +237,7 @@ def _qualifying_candidates(
     effective_caps = _effective_required_capabilities(
         task, skill_floor_for, domain_floor_for
     )
-    pool, is_fallback = _rank_producers(producers, effective_caps)
-    return sorted(pool, key=lambda a: _producer_sort_key(a, {}, is_fallback))
+    return sorted(producers, key=lambda a: _producer_sort_key(a, {}, effective_caps))
 
 
 @dataclass(frozen=True)
