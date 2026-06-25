@@ -265,8 +265,17 @@ def save_defaults(defaults: dict) -> None:
 
 def _expand(p: Optional[str], fallback: str) -> Path:
     """Expand ~ and turn into an absolute Path. Falls back to provided default
-    when value is missing or empty."""
-    return Path(os.path.expanduser(p or fallback)).resolve()
+    when value is missing or empty.
+
+    A *relative* value is anchored to ``$HOME``, never the process cwd: the
+    daemon (or a launch from a different directory) would otherwise resolve the
+    vault to a different place after a reboot and the project's config would
+    appear lost. ``.resolve()`` on a relative path uses cwd — so anchor first.
+    """
+    path = Path(os.path.expanduser(p or fallback))
+    if not path.is_absolute():
+        path = Path.home() / path
+    return path.resolve()
 
 
 def get_vault_root() -> Path:

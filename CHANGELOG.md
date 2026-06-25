@@ -4,6 +4,25 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8.1] — 2026-06-24
+
+Bug fixes from live use of v0.9.8. No feature changes.
+
+### Fixed
+
+- **Switching launch directory (or a reboot) no longer loses a project.** A
+  `vault_root` saved as a *relative* path resolved against the current working
+  directory, so launching from a different folder — or the daemon starting
+  after a reboot — pointed the vault somewhere else and the project's config
+  appeared lost. Relative vault paths now anchor to your home directory, so the
+  vault resolves to the same place regardless of where Modulatio is launched.
+- **CONFIG · AGENTS: the last action button is no longer clipped.** The four
+  actions (Change model / Fallbacks / + Agent / Remove) overflowed the registry
+  pane on a narrower terminal and cut off "Remove"; they now lay out 2×2 and fit.
+- **PROJECTS: the New-project form closes after you create.** Pressing **Create**
+  created the project but left the form open (only **Cancel** dismissed it); it
+  now returns to the project detail on a successful create.
+
 ## [0.9.8.0] — 2026-06-24
 
 The Feng-Tui interface, finished. The phosphor *theme* shipped in v0.9.3, but the

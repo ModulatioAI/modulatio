@@ -158,6 +158,9 @@ class ProjectsScreen(Vertical):
         self.notify(f"Created project '{code}'.", severity="information")
         self._flow = None
         self._refresh()
+        # The create succeeded — dismiss the form back to the resting detail
+        # card (_refresh only rebuilds the left list, not the companion).
+        self.run_worker(self._rest_companion())
 
     def action_switch(self) -> None:
         code = self._selected_code()

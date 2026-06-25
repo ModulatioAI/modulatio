@@ -22,7 +22,7 @@ import re
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import (
     Button,
     DataTable,
@@ -95,8 +95,15 @@ class AgentBuilderScreen(Vertical):
         color: $text-muted; height: auto;
     }
     AgentBuilderScreen #agt-rest { color: $text-muted; }
-    AgentBuilderScreen #agt-buttons { height: 3; }
-    AgentBuilderScreen #agt-buttons Button { margin-right: 1; }
+    /* Four actions share the narrow registry pane — a single row overflows and
+       clips the last button, so lay them out 2x2 (each fills its cell). */
+    AgentBuilderScreen #agt-buttons {
+        height: 7;
+        grid-size: 2 2;
+        grid-gutter: 0 1;
+        grid-rows: 3 3;
+    }
+    AgentBuilderScreen #agt-buttons Button { width: 1fr; min-width: 0; }
     AgentBuilderScreen Input { margin: 1 0; }
     """
 
@@ -180,7 +187,7 @@ class AgentBuilderScreen(Vertical):
                 escape(a.tier), escape(a.name or a.id), escape(model),
                 "ready ✓" if ready else "needs setup", key=a.id,
             )
-        buttons = Horizontal(
+        buttons = Grid(
             Button("Change model", id="agt-change", variant="primary"),
             Button("Fallbacks", id="agt-fallbacks"),
             Button("+ Agent", id="agt-add"),
