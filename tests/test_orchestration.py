@@ -7322,6 +7322,37 @@ def test_producer_execute_increments_lifetime_attempts_exactly_once(project):
     assert task.lifetime_attempts == 2  # exactly once per call — not dropped, not doubled
 
 
+def test_producer_budget_role_routes_research_artifact_to_research_pool(project):
+    """The predicate: a research-artifact producer task routes to the 'research'
+    budget pool (64K); any other artifact stays on the producer default (None →
+    'producer')."""
+    orch = _qcfix_orch(project)
+    assert orch._producer_budget_role(_qcfix_task(artifact_kind="research")) == "research"
+    assert orch._producer_budget_role(_qcfix_task(artifact_kind="text")) is None
+    assert orch._producer_budget_role(_qcfix_task(artifact_kind="code")) is None
+
+
+def test_producer_execute_threads_research_budget_role(project):
+    """Wiring (not just the predicate): the REAL _producer_execute binds the
+    'research' budget_role for a research-artifact task and leaves a non-research
+    task on the default — so the sourcing/consolidation loops actually get the
+    larger pool, not only the helper agreeing in isolation."""
+    orch = _qcfix_orch(project)
+    seen = []
+
+    def capture(agent_id, role, prompt, *, budget_role=None, **kw):
+        seen.append(budget_role)
+        return "DRAFT BODY, on contract."
+
+    orch._run_agent_call = capture  # type: ignore[assignment]
+
+    orch._producer_execute(_qcfix_task(artifact_kind="research"))
+    assert seen[-1] == "research"
+
+    orch._producer_execute(_qcfix_task(artifact_kind="text"))
+    assert seen[-1] is None
+
+
 def test_producer_budget_is_lifetime_not_reset_on_reentry(project, monkeypatch):
     """#18 keystone: a task's producer budget is LIFETIME. Re-entering
     _run_task_with_redo (the goal-redo / declined-ticket / re-dispatch path) must NOT
