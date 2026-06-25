@@ -67,3 +67,37 @@ async def test_docs_search_filters_pages():
         assert nav.row_count == 1  # only the memory/jobs/cron page matches
         counts = str(screen.query_one("#controls-counts", Static).render())
         assert "filtered" in counts
+
+
+async def test_update_via_button_and_key(monkeypatch):
+    """Both the ⟳ Update docs button and the r key run update_docs (on a worker)
+    and show the status; never blocks, never blanks."""
+    import modulatio.docs as docsmod
+    calls = {"n": 0}
+
+    def fake_update(*a, **k):
+        calls["n"] += 1
+        return "Updated to v9.9.9 ✓"
+
+    monkeypatch.setattr(docsmod, "update_docs", fake_update)
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        from textual.widgets import Button
+        app.query_one(TabbedContent).active = "tab-docs"
+        await pilot.pause()
+
+        # button
+        [b for b in app.query(Button) if b.id == "docs-update"][0].press()
+        for _ in range(10):
+            await pilot.pause()
+        assert calls["n"] >= 1
+        status = app.query_one("#docs-status", Static)
+        assert "Updated to v9.9.9" in str(status.render())
+
+        # key (r) — focus the nav so the DocsScreen binding fires
+        app.query_one("#docs-nav", DataTable).focus()
+        await pilot.pause()
+        await pilot.press("r")
+        for _ in range(10):
+            await pilot.pause()
+        assert calls["n"] >= 2
