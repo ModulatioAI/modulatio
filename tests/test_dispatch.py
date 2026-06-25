@@ -1508,6 +1508,45 @@ def test_schedule_wave_respects_skill_capability_floor():
     assert sched_nofloor.assignments == {"W-T-001": "cheap"}
 
 
+def test_schedule_wave_spills_to_underfloor_agent_when_qualifiers_saturated():
+    """The capability floor ORDERS producers, it does not GATE them. When the
+    floor-meeting producers are all at capacity, an idle under-floor producer
+    still picks up the remaining work instead of the task deferring while that
+    producer sits idle. Reproduces the live 'only 2 of 3 producers work' bug:
+    two reasoning-tagged producers + one 'fast' producer + three reasoning-heavy
+    tasks (cap=1 each) must place ALL THREE, one per producer — not park the
+    third and starve the under-floor producer."""
+    tasks = [
+        _wtask(f"W-T-00{i}", ["drafter"]) for i in (1, 2, 3)
+    ]
+    for t in tasks:
+        t.required_capabilities = ["reasoning-heavy"]
+    q1 = _wagent("q1", ["drafter"], cap=1)
+    q2 = _wagent("q2", ["drafter"], cap=1)
+    q1.capability_tags = ["reasoning-heavy"]
+    q2.capability_tags = ["reasoning-heavy"]
+    weak = _wagent("weak", ["drafter"], cap=1)
+    weak.capability_tags = ["fast"]  # below the floor
+    sched = dispatch.schedule_wave(tasks, [q1, q2, weak])
+    assert len(sched.assignments) == 3
+    assert set(sched.assignments.values()) == {"q1", "q2", "weak"}
+    assert sched.deferred == ()
+
+
+def test_select_agent_picks_idle_underfloor_over_loaded_qualifier():
+    """Availability is primary: a floor-meeting producer that is already loaded
+    loses to an idle under-floor producer. (When load ties, the floor-meeting
+    producer still wins — see test_select_prefers_producer_meeting_the_floor.)"""
+    strong = _agent("strong", ["drafter"], capability_tags=["reasoning-heavy"])
+    weak = _agent("weak", ["drafter"], capability_tags=["fast"])
+    task = _task(["drafter"], required_capabilities=["reasoning-heavy"])
+    picked = dispatch.select_agent(
+        task, [strong, weak], load={"strong": 1, "weak": 0}
+    )
+    assert picked is not None
+    assert picked.id == "weak"
+
+
 def test_schedule_wave_continuity_hint_pointing_at_nonproducer_is_ignored():
     """Regression (finding H9): the wave scheduler's continuity-hint path
     must mirror ``select_agent`` and only honor a hint that names a member
