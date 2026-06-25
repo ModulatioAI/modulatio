@@ -11,6 +11,8 @@ NOT "sent" — the user still has to open and submit it.
 """
 from __future__ import annotations
 
+import webbrowser
+
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -63,9 +65,15 @@ class SendLogModal(ModalScreen[bool]):
             yield Static("Review — auto-redacted; edit before sending:")
             with VerticalScroll(id="send-body-scroll"):
                 yield TextArea(self._body, id="send-body", soft_wrap=True)
+            yield Static(
+                "No GitHub token needed — \"Open in browser\" files it yourself; "
+                "\"Send\" files it directly if you've set MODULATIO_GITHUB_TOKEN.",
+                id="send-help",
+            )
             yield Static("", id="send-status")
             with Horizontal(id="send-buttons"):
                 yield Button("Send", id="send-submit", variant="primary")
+                yield Button("Open in browser", id="send-open")
                 yield Button("Cancel", id="send-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -73,6 +81,25 @@ class SendLogModal(ModalScreen[bool]):
             self.dismiss(False)
         elif event.button.id == "send-submit":
             self._submit()
+        elif event.button.id == "send-open":
+            self._open_in_browser()
+
+    def _open_in_browser(self) -> None:
+        """File via the browser — NO token required. Open the prefilled new-issue
+        URL (built from the current, re-scrubbed title/body) so the user can file
+        with no account/token at all. Mirrors the DOCS tab's open-online pattern;
+        notifies with the URL as a fallback when no browser can open."""
+        title = logstore.scrub_secrets(
+            self.query_one("#send-title", Input).value.strip()
+        )[:240]
+        body = logstore.scrub_and_cap(self.query_one("#send-body", TextArea).text)
+        url = bug_report.prefilled_issue_url(title, body)
+        try:
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001 — opening is best-effort
+            pass
+        self.app.notify(url)
+        self.dismiss(False)
 
     def _set_status(self, text: str) -> None:
         # The in-flight worker can call back after the modal is dismissed.
@@ -116,8 +143,13 @@ class SendLogModal(ModalScreen[bool]):
             self.set_timer(1.4, lambda: self.dismiss(True))
         else:
             # Prefilled-URL fallback / a surfaced error — NOT filed; leave the
-            # modal open so the user can copy the URL or retry, and re-enable Send.
-            self._set_status(f"{result.detail}\n{result.url}".strip())
+            # modal open so the user can "Open in browser" or retry, and re-enable
+            # Send. Spell out the exit so the user never feels stuck (B3).
+            self._set_status(
+                f"{result.detail}\n{result.url}\n\n"
+                "Click \"Open in browser\" to file it (no token needed), or press "
+                "Escape / Cancel to close.".strip()
+            )
             try:
                 self.query_one("#send-submit", Button).disabled = False
             except NoMatches:

@@ -605,23 +605,23 @@ def test_bare_openai_without_base_url_gets_no_placeholder_key(monkeypatch):
 # ── idle-stall watchdog: bounded per-completion timeout ─────────────────────
 
 def test_default_call_timeout_default_and_env(monkeypatch):
-    """The per-completion wall-clock cap defaults to 300s and is tunable via
+    """The per-completion wall-clock cap defaults to 600s and is tunable via
     MODULATIO_CALL_TIMEOUT; a non-positive or unparseable value falls back."""
     from modulatio.runners import _default_call_timeout
 
     monkeypatch.delenv("MODULATIO_CALL_TIMEOUT", raising=False)
-    assert _default_call_timeout() == 300.0
+    assert _default_call_timeout() == 600.0
     monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "90")
     assert _default_call_timeout() == 90.0
     monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "nonsense")
-    assert _default_call_timeout() == 300.0
+    assert _default_call_timeout() == 600.0
     monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "0")
-    assert _default_call_timeout() == 300.0
+    assert _default_call_timeout() == 600.0
 
 
 def test_litellm_runner_applies_idle_stall_timeout(monkeypatch):
     """Wiring: a runner built without an explicit timeout binds the watchdog
-    default (300s) onto the litellm.completion call, so a hung model call aborts
+    default (600s) onto the litellm.completion call, so a hung model call aborts
     there (litellm Timeout → fallback-model + redo retry) instead of the old
     30-min wait. The env override threads through too."""
     import litellm
@@ -643,9 +643,38 @@ def test_litellm_runner_applies_idle_stall_timeout(monkeypatch):
     monkeypatch.delenv("MODULATIO_CALL_TIMEOUT", raising=False)
 
     litellm_runner("openrouter/test-model")("hi")
-    assert seen["timeout"] == 300.0
+    assert seen["timeout"] == 600.0
 
     seen.clear()
     monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "120")
     litellm_runner("openrouter/test-model")("hi")
     assert seen["timeout"] == 120.0
+
+
+def test_litellm_runner_bounds_the_clay_subprocess_with_timeout(monkeypatch):
+    """B4 wiring: the Clay (claude_cli) path must thread the watchdog timeout into
+    run_claude — otherwise run_claude falls back to its hardcoded 1800s default and
+    a hung Clay call is effectively unbounded (it nearly stalled run finalization)."""
+    from modulatio import claude_cli, oauth_helpers
+    from modulatio.runners import litellm_runner
+
+    seen: dict = {}
+
+    def _capture_run_claude(**kw):
+        seen.update(kw)
+        return "ok"
+
+    monkeypatch.setattr(claude_cli, "run_claude", _capture_run_claude)
+    monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: "/fake/claude")
+    monkeypatch.setattr(claude_cli, "current_seat_context", lambda: (None, []))
+    monkeypatch.setattr(
+        "modulatio.runners._resolve_model_call_args", lambda model: (model, {})
+    )
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {"clay-model": {"endpoint": "claude_cli"}},
+    )
+    monkeypatch.delenv("MODULATIO_CALL_TIMEOUT", raising=False)
+
+    litellm_runner("clay-model")("hi")
+    assert seen["timeout"] == 600.0  # the watchdog default reaches run_claude

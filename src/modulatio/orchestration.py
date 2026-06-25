@@ -8860,6 +8860,38 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — a ticket-write failure must never reverse the settle
             pass
 
+    def _close_recovered_task_tickets(self, summary: RunSummary) -> None:
+        """B6: a failed task opens a CRITICAL ticket (``_ticket_for_failed_task``);
+        if a later goal-redo recovers it to COMPLETED, that ticket should not
+        linger OPEN. At run-end, RESOLVE any OPEN ticket whose affected task ended
+        COMPLETED — so the user isn't left with a stale critical for work that
+        actually shipped. Path-agnostic (covers first-pass, concurrent-wave, and
+        redo recovery) and best-effort: a ticket-store failure never breaks the run."""
+        completed = {
+            t.id for t in summary.tasks if t.status == TaskStatus.COMPLETED
+        }
+        if not completed:
+            return
+        try:
+            open_tickets = store.list_tickets(
+                self.project.code,
+                status=TicketStatus.OPEN,
+                run_id=self.project.run_id,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        for tk in open_tickets:
+            if tk.affected_task_id in completed:
+                try:
+                    store.update_ticket_status(
+                        self.project.code, tk.id, TicketStatus.RESOLVED,
+                        actor="orchestrator",
+                        rationale=f"task {tk.affected_task_id} recovered to COMPLETED",
+                        run_id=self.project.run_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
     # ── Environmental defect — task BLOCKED, ticket fired ─────────────
     def _block_for_environmental(
         self,
@@ -12931,21 +12963,23 @@ class Orchestrator:
             "metrics": len(summary.drafts),
             "qc_assertions": len(summary.tasks),
         }
+        # B6: a task that failed (→ CRITICAL ticket) but was RECOVERED by a redo
+        # shouldn't leave a stale open ticket. Run-end sweep, after all redos.
+        self._close_recovered_task_tickets(summary)
         # B2: verify a bound JT's HARD output cardinality — report a shortfall
         # firmly in the PQR, never block (the operator's line, made visible).
         self._validate_output_contract(summary)
         # Brick B1b: silent per-run kickoff-history record — the substrate the
         # B4 recurrence trigger reads. Best-effort, never blocks.
         self._record_kickoff_history(summary)
-        # Brick 4: autonomous self-codification — recurring lessons become
-        # skills. Best-effort, never blocks; runs once per kickoff at the end.
-        self._post_run_codification(summary)
-        # Brick B4: the setup-side loop — recurring JOBS become Job Templates.
-        # Reads the kickoff-history record just written above. Best-effort.
-        self._post_run_jt_codification(summary)
         # §2: render finished products in the ENGINE (so every run path delivers,
         # not just the CLI command). Gated so stub/test kickoffs never touch the
         # real delivery dir; the real run paths construct with deliver_products=True.
+        # B1 (2026-06-25): delivery + the kickoff_ended completion signal run
+        # BEFORE the best-effort post-run codification below — the codification
+        # makes a leader call (slow, and unbounded on the Clay subprocess path)
+        # that must NOT be able to block or delay the user's deliverable + end
+        # report. The user gets their result first; codification runs after.
         if self._deliver_products:
             self._deliver_finished_products(summary)
         # F8-ONLY teardown (Clif 2026-06-05: only the kill-switch blows out the
@@ -12958,6 +12992,13 @@ class Orchestrator:
         self._emit_activity(
             role="orchestrator", phase="kickoff_ended", agent_id="orchestrator",
         )
+        # Brick 4: autonomous self-codification — recurring lessons become
+        # skills. Best-effort, never blocks; runs AFTER delivery + kickoff_ended
+        # (B1) so it's pure background learning, never on the user's critical path.
+        self._post_run_codification(summary)
+        # Brick B4: the setup-side loop — recurring JOBS become Job Templates.
+        # Reads the kickoff-history record written above. Best-effort.
+        self._post_run_jt_codification(summary)
         return summary
 
 

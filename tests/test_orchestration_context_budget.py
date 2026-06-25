@@ -307,6 +307,71 @@ def test_kickoff_unbinds_after_run(project_with_run):
     )
 
 
+def test_kickoff_delivers_and_completes_before_codification(project_with_run):
+    """B1: delivery + the kickoff_ended completion signal must fire BEFORE the
+    best-effort post-run codification, so a slow/hung codification (e.g. a Clay
+    leader call) can't block or delay the user's deliverable + end-of-run report.
+    Reproduces the live no-end-report stall: codification ran first and hung."""
+    from unittest.mock import patch
+
+    orch = _make_orchestrator(project_with_run)
+    orch._deliver_products = True
+    order: list[str] = []
+
+    def _rec(label):
+        def _f(self, *a, **k):
+            order.append(label)
+        return _f
+
+    def _emit_rec(self, *a, **k):
+        if k.get("phase") == "kickoff_ended":
+            order.append("kickoff_ended")
+
+    with patch.object(Orchestrator, "_leader_decompose", lambda self, *a, **k: []), \
+         patch.object(Orchestrator, "_deliver_finished_products", _rec("deliver")), \
+         patch.object(Orchestrator, "_post_run_codification", _rec("codify")), \
+         patch.object(Orchestrator, "_post_run_jt_codification", _rec("jt_codify")), \
+         patch.object(Orchestrator, "_emit_activity", _emit_rec):
+        orch.kickoff("anything")
+
+    assert {"deliver", "kickoff_ended", "codify", "jt_codify"} <= set(order), order
+    assert order.index("deliver") < order.index("codify")
+    assert order.index("kickoff_ended") < order.index("codify")
+    assert order.index("kickoff_ended") < order.index("jt_codify")
+
+
+def test_recovered_task_failure_ticket_is_resolved_at_finalization(project_with_run):
+    """B6: a failed task opens a CRITICAL ticket (affected_task_id set); when a
+    goal-redo recovers it to COMPLETED, the run-end sweep RESOLVES the ticket so
+    the user isn't left with a stale critical for work that actually shipped."""
+    from modulatio import store
+    from modulatio.types import TaskStatus, TicketPriority, TicketStatus
+
+    orch = _make_orchestrator(project_with_run)
+    task = _make_task()
+    task.status = TaskStatus.COMPLETED  # recovered
+    tk = store.create_ticket(
+        project_id=project_with_run.id,
+        project_code=project_with_run.code,
+        run_id=project_with_run.run_id,
+        priority=TicketPriority.CRITICAL,
+        title=f"task {task.id} failed: churn",
+        body="b",
+        affected_task_id=task.id,
+        actor="orchestrator",
+    )
+    summary = RunSummary(project=project_with_run)
+    summary.tasks = [task]
+
+    orch._close_recovered_task_tickets(summary)
+
+    reread = store.get_ticket(
+        project_with_run.code, tk.id, run_id=project_with_run.run_id
+    )
+    assert reread is not None
+    assert reread.status == TicketStatus.RESOLVED
+
+
 def test_run_chat_loop_threads_model_to_run_llm_with_tools(project_with_run, monkeypatch):
     """F11 audit follow-up: Orchestrator._run_chat_loop must pass
     ``model=`` to ``runners.run_llm_with_tools`` so the Layer 1 +
