@@ -185,6 +185,132 @@ def test_leader_verify_falls_back_to_drafts_convention(project: Project, tmp_pat
     assert "DRAFTS-FALLBACK-MARKER-789" in prompt
 
 
+def test_leader_verify_registry_run_shell_widened_to_run_dir(
+    project: Project, tmp_path: Path, monkeypatch
+):
+    """B5: the Leader-verify registry's ``run_shell`` is rooted at the whole RUN
+    dir (``_scope_root()``), not just ``artifacts/`` — so the trusted Leader-
+    reviewer can ``ls``/``cat`` the entire harness (logs, reports, tickets) for
+    its verdict, while producers stay confined to staging. READ widens; the
+    verify loadout (``run_shell``, passive) keeps WRITE in its lane."""
+    from modulatio import tools
+
+    seen_roots: list[Path] = []
+    real = tools.make_run_shell
+    monkeypatch.setattr(
+        tools, "make_run_shell",
+        lambda root, *a, **k: (seen_roots.append(Path(root)), real(root, *a, **k))[1],
+    )
+
+    orch, _ = _capturing_orch(project)
+    registry = orch._leader_verify_tool_registry()
+
+    assert "run_shell" in registry
+    assert seen_roots[-1] == orch._scope_root()
+    assert seen_roots[-1] != orch._artifacts_root(), (
+        "verify run_shell must be widened beyond artifacts/ to the run dir"
+    )
+
+
+def test_leader_verify_chat_loop_widens_registry_and_grants_run_dir(
+    project: Project, tmp_path: Path, monkeypatch
+):
+    """B5 wiring (both seats, same scope): when leader-verify routes through the
+    tool-using chat loop, (a) a litellm leader's registry is the run-dir-widened
+    one (a different, wider-rooted ``run_shell``), and (b) the Clay seat is
+    granted the run dir so a claude -p reviewer sees the harness — Clay treated
+    like any model, writes still gated. Both thread-local hints restored after."""
+    from types import SimpleNamespace
+
+    from modulatio import tools
+
+    artifacts_root = tmp_path / PROJECT_CODE.lower() / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    (artifacts_root / "doc.md").write_text("# Doc\n\nbody\n")
+
+    goal = Goal(
+        id="LVA-G-009", project_id=project.id, description="d",
+        success_criteria="c", status=GoalStatus.IN_PROGRESS,
+    )
+    store.save_goal(project.code, goal)
+    task = Task(
+        id="LVA-T-009", project_id=project.id, goal_id=goal.id,
+        description="t", output_path="doc.md", status=TaskStatus.COMPLETED,
+    )
+    store.save_task(project.code, task)
+
+    orch, _ = _capturing_orch(project)
+    orch.tool_registry = tools.build_registry(
+        artifacts_root=artifacts_root, project_code=project.code,
+    )
+    monkeypatch.setattr(
+        orch, "_leader_verify_tool_loadout_skill",
+        lambda: SimpleNamespace(
+            tool_loadout=["run_shell"], prompt_template="", name="leader-verify",
+            needs_network=False, pass_env=(),
+        ),
+    )
+    monkeypatch.setattr(
+        orch, "_resolve_chat_runner", lambda role: (lambda *a, **k: ""),
+    )
+
+    seen: dict = {}
+
+    def _fake_loop(**kwargs):
+        seen["registry"] = orch._active_tool_registry()  # capture mid-loop
+        seen["grants"] = getattr(orch._tls, "seat_extra_grants", None)
+        return (
+            "```json\n"
+            + json.dumps(
+                {"verdict": "satisfied", "rationale": "ok", "report_body": "ok"}
+            )
+            + "\n```"
+        )
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _fake_loop)
+
+    summary = RunSummary(project=project)
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert "registry" in seen, "verify did not route through the chat loop"
+    # (a) litellm seat: run_shell widened beyond the base (artifacts-rooted) one.
+    assert "run_shell" in seen["registry"]
+    assert seen["registry"]["run_shell"] is not orch.tool_registry["run_shell"], (
+        "the chat loop must run under the widened override, not the base registry"
+    )
+    # (b) Clay seat: the run dir is granted so claude -p can see the harness.
+    assert seen["grants"] and str(orch._scope_root()) in seen["grants"], (
+        "the Clay verify seat must be granted the run dir"
+    )
+    # both restored
+    assert getattr(orch._tls, "tool_registry_override", None) is None
+    assert getattr(orch._tls, "seat_extra_grants", None) is None
+
+
+def test_seat_context_folds_in_tls_extra_grants(project: Project, monkeypatch):
+    """``_seat_context`` folds a thread-local ``seat_extra_grants`` hint into the
+    grants it hands the Clay seat — additively, on top of the operator-widen
+    gate's roots. This is the seam leader-verify uses to grant the run dir."""
+    import contextlib
+
+    from modulatio import claude_cli
+
+    seen: dict = {}
+
+    def _spy(ws, grants, **kw):
+        seen["grants"] = grants
+        return contextlib.nullcontext()
+
+    monkeypatch.setattr(claude_cli, "seat_context", _spy)
+
+    orch, _ = _capturing_orch(project)
+    orch._tls.seat_extra_grants = ("/some/run/dir",)
+    with orch._seat_context():
+        pass
+
+    assert "/some/run/dir" in seen["grants"]
+
+
 def _disappointed_orch(project: Project):
     """Orchestrator whose Leader always returns a 'disappointed' verdict."""
     calls: list[str] = []

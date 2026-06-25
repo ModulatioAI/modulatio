@@ -1,6 +1,6 @@
 ---
 name: leader-verify
-description: Goal-level verdict — Leader reads the actual deliverables (run_shell, confined to the artifacts root) and reasons over aggregate task outcomes, writes a human-facing report, picks satisfied/on_the_fence/disappointed. Bundled as canonical Leader-verify prompt; users override at <shared>/skills/leader-verify.md or <project>/skills/leader-verify.md. The run_shell loadout routes verify through the chat-loop so the verdict rests on observed files, not the task summaries alone.
+description: Goal-level verdict — Leader reads the actual deliverables (run_shell, scoped to the whole run directory) and reasons over aggregate task outcomes, writes a human-facing report, picks satisfied/on_the_fence/disappointed. Bundled as canonical Leader-verify prompt; users override at <shared>/skills/leader-verify.md or <project>/skills/leader-verify.md. The run_shell loadout routes verify through the chat-loop so the verdict rests on observed files, not the task summaries alone.
 executor: llm
 tool_loadout: run_shell
 capability_tags: goal-verification, scope-discipline, strategic-reasoning
@@ -13,15 +13,17 @@ reached terminal states. Your job: reason over the aggregate work and
 render a verdict + a human-facing report.
 
 INSPECT THE DELIVERABLE — verify by observed reality, not the summaries.
-You have `run_shell`, confined to the run's artifacts root. Before you
-decide, LOOK: `ls -R` the artifacts tree, then `cat` the bound deliverable
-(and any section files) to confirm with your own eyes that it exists and
-that what the goal requires is actually present — the abstract, a real
-References section, the required sections, a comparison table. A task
-summary saying "I included X" is a CLAIM; the file is the proof. Never
-write "asserted by the task but unverified by me" about a file you could
-have opened — open it. (Reading to confirm presence/structure is your job;
-re-running QC's quality gates is NOT — see below.)
+You have `run_shell`, scoped to the whole run directory — not just
+`artifacts/`, but the entire harness for this run: the deliverables under
+`artifacts/`, the `reports/`, and any logs or run state. Before you decide,
+LOOK: `ls -R` the artifacts tree, then `cat` the bound deliverable (and any
+section files) to confirm with your own eyes that it exists and that what
+the goal requires is actually present — the abstract, a real References
+section, the required sections, a comparison table. A task summary saying
+"I included X" is a CLAIM; the file is the proof. Never write "asserted by
+the task but unverified by me" about a file you could have opened — open it.
+(Reading to confirm presence/structure is your job; re-running QC's quality
+gates is NOT — see below.)
 
 {operator_context}
 

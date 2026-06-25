@@ -7383,7 +7383,15 @@ class Orchestrator:
         from modulatio import claude_cli as _clay
         ws = workspace if workspace is not None else self._leader_workspace()
         grants = tuple(str(r) for r in self.leader_gate().granted_roots())
-        return _clay.seat_context(ws, grants, on_tool_call=on_tool_call, confined=confined)
+        # A seat path may temporarily widen its own visibility via a thread-local
+        # hint: leader-verify grants the whole run dir so a Clay-backed reviewer
+        # sees the harness (artifacts, reports, logs, tickets) like any model in
+        # it — writes still pass through the same operator-widen gate. Folded in
+        # additively; unset (and thus a no-op) on every other seat path.
+        extra = tuple(getattr(self._tls, "seat_extra_grants", ()) or ())
+        return _clay.seat_context(
+            ws, grants + extra, on_tool_call=on_tool_call, confined=confined,
+        )
 
     def _seat_tool_sink(
         self,
@@ -7457,6 +7465,34 @@ class Orchestrator:
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # workspace-bound builtins win over shared ones
+        return merged
+
+    def _leader_verify_tool_registry(self) -> "dict[str, tools.Tool]":
+        """The Leader's GOAL-VERIFY registry: path-bound builtins rebound to the
+        whole RUN directory (``_scope_root()``) instead of only its ``artifacts/``
+        subtree, so the trusted Leader-reviewer can ``ls``/``cat`` the entire
+        harness for this run — logs, reports, tickets, run state — not just the
+        deliverables, when rendering its verdict (the "eyes everywhere" north-
+        star). READ widens to the run dir; the verify loadout is read-only
+        (``run_shell`` inspection, passive profile), so nothing here lets the
+        Leader WRITE outside its lane — this is the trusted-reviewer exception to
+        the producer confinement, which stays on staging (``_staging_tool_registry``).
+        Only the READ-class path tools are widened; the write-class builtins and
+        any caller-registered tools (http_get, web_search, custom) are kept."""
+        root = self._scope_root()
+        rebound = tools.build_registry(
+            artifacts_root=root,
+            tool_calls_dir=root / "artifacts" / "tool_calls",
+            project_code=self.project.code,
+        )
+        # Widen ONLY the read-class path builtins to the run dir. The write-class
+        # tools (write_artifact / edit_file) keep the caller's artifacts-bound
+        # versions — READ widens, WRITE stays in its lane — and every other tool
+        # the caller registered (http_get, custom tools) is preserved untouched.
+        merged = dict(self.tool_registry)
+        for name in ("run_shell", "read_file", "read_tool_result"):
+            if name in rebound:
+                merged[name] = rebound[name]
         return merged
 
     def _merge_wave_artifacts(
@@ -9482,19 +9518,32 @@ class Orchestrator:
                     artifacts_root / "tool_calls"
                     / f"leader_{goal.id.lower()}.jsonl"
                 )
-                response = self._run_chat_loop(
-                    prompt=leader_prompt,
-                    tool_loadout=tuple(leader_tool_skill.tool_loadout),
-                    role="leader",
-                    agent_id="leader",
-                    task_id=goal.id,
-                    transcript_path=transcript_path,
-                    skill_name=leader_tool_skill.name,
-                    needs_network=leader_tool_skill.needs_network,
-                    pass_env=leader_tool_skill.pass_env,
-                    budget_role="leader-chat",
-                    goal_id=goal.id,
-                )
+                # Widen the verify loop to the whole RUN dir so the Leader-reviewer
+                # sees the harness (artifacts, reports, logs, tickets), not just
+                # artifacts/. Two seats, same scope: a litellm leader drives the
+                # tool registry, so override run_shell's root (_run_chat_loop reads
+                # via _active_tool_registry()); a Clay leader drives claude -p with
+                # its own tools, so grant the run dir to its seat. Both restored
+                # after so nothing else inherits the wider scope.
+                self._tls.tool_registry_override = self._leader_verify_tool_registry()
+                self._tls.seat_extra_grants = (str(self._scope_root()),)
+                try:
+                    response = self._run_chat_loop(
+                        prompt=leader_prompt,
+                        tool_loadout=tuple(leader_tool_skill.tool_loadout),
+                        role="leader",
+                        agent_id="leader",
+                        task_id=goal.id,
+                        transcript_path=transcript_path,
+                        skill_name=leader_tool_skill.name,
+                        needs_network=leader_tool_skill.needs_network,
+                        pass_env=leader_tool_skill.pass_env,
+                        budget_role="leader-chat",
+                        goal_id=goal.id,
+                    )
+                finally:
+                    self._tls.tool_registry_override = None
+                    self._tls.seat_extra_grants = None
             else:
                 # Explicit budget_role so simple-shot Leader-verify is
                 # measured under 'leader-reflect' instead of collapsing
