@@ -496,6 +496,19 @@ def test_rigorous_sourcing_skill_ships_for_producers():
     assert "fabricat" in body.lower()      # never fabricate
 
 
+def test_rigorous_sourcing_leads_with_the_cognitive_runbook():
+    """The sourcing skill leads with the cognitive runbook (name the operation
+    → commit the bar → verify by OBSERVED REALITY) so the producer grounds
+    citations on the FIRST pass instead of fabricating-then-getting-rejected.
+    Includes the date discipline (don't stamp training-cutoff dates) that fixes
+    the impossible-access-date defect QC keeps flagging."""
+    from modulatio.skills import _SEED_SKILLS_ROOT
+    body = (_SEED_SKILLS_ROOT / "rigorous-sourcing.md").read_text().lower()
+    assert "name the operation" in body          # runbook lead (mirrors coding.md)
+    assert "observed reality" in body            # the spine: cite what you fetched
+    assert "training cutoff" in body             # the date discipline
+
+
 # === delete_skill (Feng-Tui SKILLS overhaul) ================================
 
 
