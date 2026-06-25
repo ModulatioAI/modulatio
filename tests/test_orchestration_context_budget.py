@@ -566,6 +566,31 @@ def test_generic_exception_still_uses_retry_budget(project_with_run, monkeypatch
     )
 
 
+def test_compression_churn_counts_as_a_try_and_redoes(project_with_run, monkeypatch):
+    """A CompressionChurnExceeded (a thrashing attempt) is NOT a
+    RecoverableContextError: it must take the retry path (count the try, redo
+    with feedback) — max_retries+1 invocations, then BLOCKED — rather than the
+    one-and-done decompose path (Clif 2026-06-25, plan A)."""
+    orch = _make_orchestrator(project_with_run)
+    task = _make_task()
+    summary = RunSummary(project=project_with_run)
+
+    call_count = {"n": 0}
+
+    def fake_producer(self, t, corrective_notes=""):
+        call_count["n"] += 1
+        raise context_budget.CompressionChurnExceeded(compressions=4, limit=3)
+
+    monkeypatch.setattr(Orchestrator, "_producer_execute", fake_producer)
+    orch._run_task_with_redo(task, summary)
+
+    assert call_count["n"] == 4, (
+        "compression churn must retry like a generic exception (counts as a "
+        f"try), not decompose one-and-done; got {call_count['n']}, expected 4"
+    )
+    assert task.status == TaskStatus.BLOCKED
+
+
 # ── overflow → decompose (2026-05-30) ────────────────────────────────────
 
 def _ctx_err(tmp_path, est=200_000, cap=16_000):

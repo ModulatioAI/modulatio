@@ -1214,6 +1214,11 @@ def run_llm_with_tools(
     # WARNINGs. Track whether we've already warned in this invocation
     # so the gate fires once per loop instead of once per iteration.
     soft_warn_seen = False
+    # Per-attempt compression-churn guard: one run_llm_with_tools call IS one
+    # producer attempt, so compressions here count toward this attempt's cap.
+    # check_and_compress returns a NEW list only when it actually compressed
+    # (same reference when in-band), so identity is the "did compress" signal.
+    compressions = 0
     # re-sweep (metered Finding 1): cache each metered tool's successful result
     # keyed by (name, canonical args) so an idempotent replay — flagged
     # structurally by the authorizer (``idempotent_reuse``) — reuses the prior
@@ -1234,13 +1239,25 @@ def run_llm_with_tools(
         # path keeps its pre-Slice-90 shape.
         ctx_cfg = _ctx_budget.current_config()
         if ctx_cfg is not None and ctx_cfg.enabled and model:
-            messages, did_warn = _ctx_budget.check_and_compress(
+            compressed, did_warn = _ctx_budget.check_and_compress(
                 messages,
                 model=model,
                 call_id=_ctx_budget.call_id_for_iteration(iteration),
                 config=ctx_cfg,
                 soft_warn_already_seen=soft_warn_seen,
             )
+            if compressed is not messages:
+                compressions += 1
+                cap = ctx_cfg.max_compressions_per_attempt
+                if cap > 0 and compressions > cap:
+                    # This attempt is thrashing the budget — abort so the redo
+                    # loop counts the try (already incremented) and redoes with
+                    # the exception message as corrective feedback, instead of
+                    # grinding many compressions inside one invisible attempt.
+                    raise _ctx_budget.CompressionChurnExceeded(
+                        compressions=compressions, limit=cap,
+                    )
+            messages = compressed
             if did_warn:
                 soft_warn_seen = True
         response = chat_runner(messages=messages, tools=tools_schema)

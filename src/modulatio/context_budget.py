@@ -199,6 +199,33 @@ class ContextBudgetConfig:
     #: secrets into responses (e.g. all-local-Ollama runs with no
     #: customer data in the loop).
     checkpoint_redact_secrets: bool = True
+    #: Max times a single producer ATTEMPT may compress its context before the
+    #: attempt is treated as thrashing the budget and aborted (raises
+    #: CompressionChurnExceeded). One ``_producer_execute`` runs a whole tool
+    #: loop; without this a single attempt can compress many times — grinding
+    #: invisibly, since the redo counter only moves between attempts. Default 3
+    #: (Clif 2026-06-25): a couple of compressions is healthy long-task
+    #: behavior; persistent churn is not. ``<= 0`` disables the guard. Tunable
+    #: like the other knobs.
+    max_compressions_per_attempt: int = 3
+
+
+class CompressionChurnExceeded(Exception):
+    """A single producer attempt compressed its context more than
+    ``ContextBudgetConfig.max_compressions_per_attempt`` times — the attempt is
+    thrashing the budget. The redo loop catches it like any producer exception:
+    the lifetime attempt already counted (top of ``_producer_execute``), so it
+    consumes a try and redoes with corrective feedback instead of grinding
+    invisibly inside one attempt. The message doubles as that feedback."""
+
+    def __init__(self, *, compressions: int, limit: int) -> None:
+        self.compressions = compressions
+        self.limit = limit
+        super().__init__(
+            f"context compressed {compressions} times in one attempt "
+            f"(limit {limit}) — be more concise: fewer/shorter tool calls, "
+            f"and summarize results as you go instead of carrying raw payloads"
+        )
 
 
 class RecoverableContextError(Exception):
@@ -1376,6 +1403,7 @@ __all__ = [
     "CTX_BUDGET_MIN_TOKENS",
     "CTX_BUDGET_WARN_THRESHOLD",
     "CliOverrideSpec",
+    "CompressionChurnExceeded",
     "ContextBudgetConfig",
     "ContextBudgetTelemetryContext",
     "EXPERIMENTAL_DEFAULTS",
