@@ -8860,6 +8860,38 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — a ticket-write failure must never reverse the settle
             pass
 
+    def _close_recovered_task_tickets(self, summary: RunSummary) -> None:
+        """B6: a failed task opens a CRITICAL ticket (``_ticket_for_failed_task``);
+        if a later goal-redo recovers it to COMPLETED, that ticket should not
+        linger OPEN. At run-end, RESOLVE any OPEN ticket whose affected task ended
+        COMPLETED — so the user isn't left with a stale critical for work that
+        actually shipped. Path-agnostic (covers first-pass, concurrent-wave, and
+        redo recovery) and best-effort: a ticket-store failure never breaks the run."""
+        completed = {
+            t.id for t in summary.tasks if t.status == TaskStatus.COMPLETED
+        }
+        if not completed:
+            return
+        try:
+            open_tickets = store.list_tickets(
+                self.project.code,
+                status=TicketStatus.OPEN,
+                run_id=self.project.run_id,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        for tk in open_tickets:
+            if tk.affected_task_id in completed:
+                try:
+                    store.update_ticket_status(
+                        self.project.code, tk.id, TicketStatus.RESOLVED,
+                        actor="orchestrator",
+                        rationale=f"task {tk.affected_task_id} recovered to COMPLETED",
+                        run_id=self.project.run_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
     # ── Environmental defect — task BLOCKED, ticket fired ─────────────
     def _block_for_environmental(
         self,
@@ -12931,6 +12963,9 @@ class Orchestrator:
             "metrics": len(summary.drafts),
             "qc_assertions": len(summary.tasks),
         }
+        # B6: a task that failed (→ CRITICAL ticket) but was RECOVERED by a redo
+        # shouldn't leave a stale open ticket. Run-end sweep, after all redos.
+        self._close_recovered_task_tickets(summary)
         # B2: verify a bound JT's HARD output cardinality — report a shortfall
         # firmly in the PQR, never block (the operator's line, made visible).
         self._validate_output_contract(summary)
