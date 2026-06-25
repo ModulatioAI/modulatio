@@ -123,16 +123,18 @@ def test_01_default_per_role_budget_for_drafter(orch, project):
 
 def test_02_default_table_distinct_per_role():
     # 2026-06-03: doubled from the 8K-era presets (see EXPERIMENTAL_DEFAULTS).
+    # 2026-06-25: +16K per role — inching the cap up to cut producer
+    # compression churn (the models' real windows have the room).
     for role, expected in [
-        ("producer", 32_000),
-        ("qc", 16_000),
-        ("planner", 16_000),
-        ("leader-decompose", 32_000),
-        ("leader-iterate", 16_000),
-        ("leader-reflect", 24_000),
-        ("leader-chat", 32_000),
-        ("research", 48_000),       # Brick A: capability-named research budget
-        ("researcher", 48_000),     # legacy alias kept for --ctx-budget back-compat
+        ("producer", 48_000),
+        ("qc", 32_000),
+        ("planner", 32_000),
+        ("leader-decompose", 48_000),
+        ("leader-iterate", 32_000),
+        ("leader-reflect", 40_000),
+        ("leader-chat", 48_000),
+        ("research", 64_000),       # Brick A: capability-named research budget
+        ("researcher", 64_000),     # legacy alias kept for --ctx-budget back-compat
     ]:
         assert cb.EXPERIMENTAL_DEFAULTS[role] == expected, (
             f"{role} default drifted from spec ({expected})"
@@ -398,7 +400,7 @@ def test_16_planner_fallthrough_preserves_budget_role(project):
 
 def test_17_effective_cap_when_model_caps_below_resolved():
     # A KNOWN model whose input window (10k) is below the producer role
-    # budget (32k) must clamp it. dispatch_context reads the window via
+    # budget (48k) must clamp it. dispatch_context reads the window via
     # get_known_max_input_tokens (None when unknown), so that's the seam.
     with patch.object(
         cb, "get_known_max_input_tokens", return_value=10_000,
@@ -411,7 +413,7 @@ def test_17_effective_cap_when_model_caps_below_resolved():
             run_id="r1",
         ) as res:
             tel = cb.current_telemetry_context()
-            assert res.resolved_budget_tokens == 32_000
+            assert res.resolved_budget_tokens == 48_000
             assert tel is not None
             assert tel.effective_cap == 10_000
             assert tel.status == "model_cap_enforced"
@@ -420,7 +422,7 @@ def test_17_effective_cap_when_model_caps_below_resolved():
 def test_17b_unknown_model_does_not_undercut_role_budget():
     # Model-agnostic guarantee: when litellm doesn't recognize the model, the
     # per-role budget governs UNCHANGED — not clamped to a fallback. Direct
-    # regression for the blocked run where an unknown model dropped a 48k
+    # regression for the blocked run where an unknown model dropped a 64k
     # researcher budget to the fallback and wedged every task.
     with cb.dispatch_context(
         budget_role="researcher",
@@ -430,9 +432,9 @@ def test_17b_unknown_model_does_not_undercut_role_budget():
         run_id="r1",
     ) as res:
         tel = cb.current_telemetry_context()
-        assert res.resolved_budget_tokens == 48_000
+        assert res.resolved_budget_tokens == 64_000
         assert tel is not None
-        assert tel.effective_cap == 48_000   # role budget, NOT the fallback
+        assert tel.effective_cap == 64_000   # role budget, NOT the fallback
         assert tel.status == "active"         # no model cap "enforced"
 
 
@@ -448,7 +450,7 @@ def test_17c_known_large_model_does_not_lower_role_budget():
         ):
             tel = cb.current_telemetry_context()
             assert tel is not None
-            assert tel.effective_cap == 48_000   # role budget governs
+            assert tel.effective_cap == 64_000   # role budget governs
             assert tel.status == "active"
 
 

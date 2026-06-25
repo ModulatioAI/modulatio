@@ -98,25 +98,31 @@ _WARNED_UNBOUND_GATE_FIRE: list[bool] = []
 # (a 6-story assembly / the Leader reading 6 deliverables ≈15K tokens crashed).
 # Every model in use has ≥32K real window, so the heavy roles now land at 32K
 # with headroom; same compress/operate behavior, just more room. Reversible.
+# 2026-06-25: +16K per role (Clif's call). A live sourcing producer fired 19
+# compressions in one attempt at the 32K producer cap — lossy churn the models'
+# real windows (cloud 128K+, local gemma 262K) have ample room to avoid. Kept
+# deliberately conservative: an INCH, not a leap — inch up again if the churn
+# persists. Same compress/operate behavior, just more room. Reversible.
 EXPERIMENTAL_DEFAULTS: dict[str, int] = {
-    "producer":        32_000,
-    "qc":              16_000,
-    "planner":         16_000,
-    "leader-decompose": 32_000,
-    "leader-iterate":  16_000,
-    "leader-reflect":  24_000,
-    "leader-chat":     32_000,
+    "producer":        48_000,
+    "qc":              32_000,
+    "planner":         32_000,
+    "leader-decompose": 48_000,
+    "leader-iterate":  32_000,
+    "leader-reflect":  40_000,
+    "leader-chat":     48_000,
     # Research gets more room than a generic producer. Reached via an explicit
     # budget_role="research" on the research fetch (Brick A). "researcher" is
     # kept as a back-compat alias so `--ctx-budget researcher=N` still validates.
-    "research":        48_000,
-    "researcher":      48_000,
+    "research":        64_000,
+    "researcher":      64_000,
 }
 
 #: Fallback for unknown budget_roles. Producer-class default so custom
 #: agents have a reasonable starting point until they explicitly opt into
-#: a different budget. (Doubled 2026-06-04 with the rest.)
-CUSTOM_WORKER_DEFAULT = 32_000
+#: a different budget. (Doubled 2026-06-04; +16K 2026-06-25 with the rest —
+#: tracks the producer default.)
+CUSTOM_WORKER_DEFAULT = 48_000
 
 #: Hard ceiling for ANY single LLM call's resolved budget. Discipline
 #: lever, not a model-capability claim — raising it requires an explicit
