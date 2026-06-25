@@ -2,20 +2,22 @@
 """SendLogModal UX: filing a log must never require a token, and the modal must
 always be exitable (B2/B3, 2026-06-25 live).
 
-- B2: an always-visible "Open in browser" button opens the prefilled new-issue URL
-  (no token needed) — the tokenless path is a first-class action, not a buried URL.
+- B2: a "Copy for email" button copies the report to the OS clipboard so the user
+  emails it to CONTACT_EMAIL — tokenless, browserless, headless-friendly (no SMTP;
+  the human is the transport). The GitHub API needs a token and the new-issue URL
+  needs a browser; on a remote/NoMachine box neither is available, so email is the
+  one path that always works.
 - B3: after a no-token / failed send, the status spells out the exit so the user
   isn't left feeling stuck (Cancel + Escape already work; this is the signpost).
 """
 from __future__ import annotations
 
-import webbrowser
 from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.widgets import Static
 
-from modulatio import bug_report, logstore
+from modulatio import bug_report, clipboard, logstore
 from modulatio.tui.widgets.send_log_modal import SendLogModal
 
 
@@ -37,11 +39,11 @@ def _entry() -> logstore.LogEntry:
     )
 
 
-async def test_open_in_browser_files_without_a_token(monkeypatch):
-    monkeypatch.setattr(logstore, "compose_issue", lambda e: ("T", "B"))
-    opened: dict = {}
+async def test_copy_for_email_copies_the_report_no_token(monkeypatch):
+    monkeypatch.setattr(logstore, "compose_issue", lambda e: ("My Title", "the body"))
+    copied: dict = {}
     monkeypatch.setattr(
-        webbrowser, "open", lambda url: opened.setdefault("url", url) is None
+        clipboard, "copy", lambda text: copied.setdefault("text", text) is None or True
     )
 
     app = _Host()
@@ -49,11 +51,11 @@ async def test_open_in_browser_files_without_a_token(monkeypatch):
         modal = SendLogModal(_entry())
         await app.push_screen(modal)
         await pilot.pause()
-        modal._open_in_browser()  # the no-token path
+        modal._copy_for_email()  # the tokenless / browserless path
         await pilot.pause()
 
-    assert "github.com" in opened.get("url", "")
-    assert "issues/new" in opened.get("url", "")
+    assert "My Title" in copied.get("text", "")
+    assert "the body" in copied.get("text", "")
 
 
 async def test_failure_status_spells_out_the_exit(monkeypatch):
@@ -76,4 +78,5 @@ async def test_failure_status_spells_out_the_exit(monkeypatch):
         await pilot.pause()
 
     text = captured.get("text", "")
+    assert bug_report.CONTACT_EMAIL in text
     assert "Escape" in text or "Cancel" in text

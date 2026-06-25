@@ -11,8 +11,6 @@ NOT "sent" — the user still has to open and submit it.
 """
 from __future__ import annotations
 
-import webbrowser
-
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -21,7 +19,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, TextArea
 
-from modulatio import bug_report, logstore
+from modulatio import bug_report, clipboard, logstore
 
 
 class SendLogModal(ModalScreen[bool]):
@@ -66,14 +64,15 @@ class SendLogModal(ModalScreen[bool]):
             with VerticalScroll(id="send-body-scroll"):
                 yield TextArea(self._body, id="send-body", soft_wrap=True)
             yield Static(
-                "No GitHub token needed — \"Open in browser\" files it yourself; "
-                "\"Send\" files it directly if you've set MODULATIO_GITHUB_TOKEN.",
+                f"No GitHub token needed — \"Copy for email\" copies the report; "
+                f"email it to {bug_report.CONTACT_EMAIL}. \"Send\" files it "
+                f"directly to GitHub if you've set MODULATIO_GITHUB_TOKEN.",
                 id="send-help",
             )
             yield Static("", id="send-status")
             with Horizontal(id="send-buttons"):
                 yield Button("Send", id="send-submit", variant="primary")
-                yield Button("Open in browser", id="send-open")
+                yield Button("Copy for email", id="send-copy")
                 yield Button("Cancel", id="send-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -81,24 +80,29 @@ class SendLogModal(ModalScreen[bool]):
             self.dismiss(False)
         elif event.button.id == "send-submit":
             self._submit()
-        elif event.button.id == "send-open":
-            self._open_in_browser()
+        elif event.button.id == "send-copy":
+            self._copy_for_email()
 
-    def _open_in_browser(self) -> None:
-        """File via the browser — NO token required. Open the prefilled new-issue
-        URL (built from the current, re-scrubbed title/body) so the user can file
-        with no account/token at all. Mirrors the DOCS tab's open-online pattern;
-        notifies with the URL as a fallback when no browser can open."""
+    def _copy_for_email(self) -> None:
+        """Tokenless + browserless path: copy the (re-scrubbed) report to the OS
+        clipboard so the user can email it to ``CONTACT_EMAIL`` from their own
+        mail client. Works headless / over NoMachine — the one path that needs no
+        token, no browser, and no SMTP (the human is the transport)."""
         title = logstore.scrub_secrets(
             self.query_one("#send-title", Input).value.strip()
         )[:240]
         body = logstore.scrub_and_cap(self.query_one("#send-body", TextArea).text)
-        url = bug_report.prefilled_issue_url(title, body)
-        try:
-            webbrowser.open(url)
-        except Exception:  # noqa: BLE001 — opening is best-effort
-            pass
-        self.app.notify(url)
+        report = f"Subject: {title}\n\n{body}"
+        copied = clipboard.copy(report)
+        if copied:
+            self.app.notify(f"Report copied — email it to {bug_report.CONTACT_EMAIL}")
+        else:
+            # No clipboard backend — don't lose the report; show it to copy by hand.
+            self.app.notify(
+                f"Couldn't reach the clipboard. Email this report to "
+                f"{bug_report.CONTACT_EMAIL}.",
+                severity="warning",
+            )
         self.dismiss(False)
 
     def _set_status(self, text: str) -> None:
@@ -142,13 +146,12 @@ class SendLogModal(ModalScreen[bool]):
             self._set_status(f"[bold]Filed:[/] {result.url}")
             self.set_timer(1.4, lambda: self.dismiss(True))
         else:
-            # Prefilled-URL fallback / a surfaced error — NOT filed; leave the
-            # modal open so the user can "Open in browser" or retry, and re-enable
-            # Send. Spell out the exit so the user never feels stuck (B3).
+            # No-token / surfaced error — NOT filed. Point at the tokenless path
+            # (email) and spell out the exit so the user never feels stuck (B3).
             self._set_status(
-                f"{result.detail}\n{result.url}\n\n"
-                "Click \"Open in browser\" to file it (no token needed), or press "
-                "Escape / Cancel to close.".strip()
+                f"{result.detail}\n\n"
+                f"No token? Click \"Copy for email\" and send the report to "
+                f"{bug_report.CONTACT_EMAIL} — or press Escape / Cancel to close."
             )
             try:
                 self.query_one("#send-submit", Button).disabled = False

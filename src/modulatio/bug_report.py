@@ -23,6 +23,12 @@ REPO = "ModulatioAI/modulatio"
 _API = f"https://api.github.com/repos/{REPO}/issues"
 _NEW_ISSUE = f"https://github.com/{REPO}/issues/new"
 
+#: The tokenless / browserless fallback — email the report to the team. The
+#: GitHub API needs a token and the new-issue URL needs a browser; on a headless
+#: or remote box neither is available, so a plain email is the one path that
+#: always works. The send-log modal copies the report and points here.
+CONTACT_EMAIL = "contact@modulatio.ai"
+
 
 @dataclass(frozen=True)
 class BugReportResult:
