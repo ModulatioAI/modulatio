@@ -6087,11 +6087,14 @@ def test_leader_verify_writes_transcript_sidecar(
     assert lines[0]["role"] == "leader"
 
 
-def test_leader_verify_tool_loadout_skill_helper_returns_none_when_no_skill(
+def test_leader_verify_seed_is_tool_using_by_default(
     project: Project,
 ):
-    """The helper returns None when ``leader-verify.md`` is absent —
-    the legacy single-shot path remains the default."""
+    """The shipped seed ``leader-verify.md`` declares ``run_shell`` so the
+    Leader's goal verdict routes through the chat-loop and can ACTUALLY read
+    the deliverables (ls/cat the artifacts root) before deciding — not rule
+    blind on the task summaries. Tool-using verify is the DEFAULT now, not an
+    opt-in override."""
     runners = {
         "leader": _leader_stub,
         "planner": _planner_stub,
@@ -6099,7 +6102,9 @@ def test_leader_verify_tool_loadout_skill_helper_returns_none_when_no_skill(
         "qc": _qc_stub,
     }
     orch = Orchestrator(project, runners)
-    assert orch._leader_verify_tool_loadout_skill() is None
+    sk = orch._leader_verify_tool_loadout_skill()
+    assert sk is not None
+    assert "run_shell" in sk.tool_loadout
 
 
 def test_leader_verify_tool_loadout_skill_helper_returns_none_for_empty_loadout(
@@ -9752,6 +9757,63 @@ def test_satisfied_over_readable_deliverable_does_not_false_blind(tmp_path, monk
 
     assert not any("could NOT verify" in r.get("concern", "")
                    for r in summary.recommendations)
+
+
+def test_leader_verify_routes_through_tool_loop_when_run_shell_available(
+    tmp_path, monkeypatch,
+):
+    """The actual fix: with run_shell in the registry AND a chat_runner wired
+    (every real kickoff), the seed leader-verify routes through the tool-loop so
+    the Leader reads the deliverables with its own eyes — the single-shot
+    'leader' runner is NOT used."""
+    from uuid import uuid4
+    from modulatio import vault, tools
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Project
+    from modulatio.runners import ChatResponse, stub_chat_runner
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("LTV", "leader tool verify", "obj")
+    vault.init_run("LTV", "run-1", "obj")
+    project = Project(code="LTV", name="LTV", objective="obj", leader_model="stub",
+                      wiki_path=str(tmp_path / "ltv"), run_id="run-1")
+    run_ws = vault.run_dir("LTV", "run-1")
+    registry = tools.build_registry(
+        artifacts_root=run_ws / "artifacts", tool_calls_dir=run_ws / "tool_calls",
+    )
+    assert "run_shell" in registry  # precondition for the tool path
+
+    verdict = (
+        '```json\n{"verdict": "satisfied", "rationale": "read the file",'
+        ' "recommendations": [], "report_body": "ok"}\n```'
+    )
+    chat = stub_chat_runner([ChatResponse(content=verdict, tool_calls=())])
+    leader_singleshot_calls = {"n": 0}
+
+    def _leader_singleshot(prompt):
+        leader_singleshot_calls["n"] += 1
+        return verdict
+
+    orch = Orchestrator(
+        project,
+        {"leader": _leader_singleshot, "drafter": _drafter_stub, "qc": _qc_stub},
+        tool_registry=registry, chat_runner=chat,
+    )
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "out.md").write_text("# Readable\n\ndeliverable")
+    task = _deliverable_task("LTV", output="out.md")
+    goal = Goal(id="LTV-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    # Routed through the tool-loop (chat_runner drove it), NOT the single-shot
+    # leader runner — the Leader can now inspect artifacts.
+    assert chat.calls, "verify should have driven the chat-loop"
+    assert leader_singleshot_calls["n"] == 0
 
 
 def test_binding_a_jt_sets_deliverable_spec(tmp_path, monkeypatch):

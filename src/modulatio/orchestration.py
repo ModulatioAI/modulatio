@@ -9422,6 +9422,18 @@ class Orchestrator:
         # behavior, unchanged for projects that haven't authored a
         # tool-using leader-verify skill).
         leader_tool_skill = self._leader_verify_tool_loadout_skill()
+        # Tool-using verify needs both a chat_runner to drive the loop AND its
+        # loadout tools present in the registry (run_shell is bound only when the
+        # run has an artifacts root — true for every real kickoff, but not bare
+        # test/CLI registries). When either is missing, DEGRADE to the single-shot
+        # verdict rather than crash the goal's verdict — the verdict is essential,
+        # the artifact-reading is the enhancement.
+        if leader_tool_skill is not None:
+            registry = self._active_tool_registry()
+            if self._resolve_chat_runner("leader") is None or not all(
+                tool in registry for tool in leader_tool_skill.tool_loadout
+            ):
+                leader_tool_skill = None
 
         try:
             if leader_tool_skill is not None:
