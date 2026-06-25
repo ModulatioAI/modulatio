@@ -17,9 +17,9 @@ from __future__ import annotations
 import pytest
 from textual.app import App, ComposeResult
 from textual.css.query import NoMatches
-from textual.widgets import Static
+from textual.widgets import Input, Static, TextArea
 
-from modulatio import bug_report
+from modulatio import bug_report, clipboard
 from modulatio.tui.widgets.bug_report_modal import BugReportModal
 
 
@@ -81,3 +81,50 @@ async def test_set_status_swallows_nomatches_on_detached_modal():
     with pytest.raises(NoMatches):
         modal.query_one("#bug-status", Static)  # sanity: it would raise
     modal._set_status("anything")  # guard returns; no NoMatches
+
+
+async def test_copy_for_email_copies_the_report_no_token(monkeypatch):
+    """The tokenless / browserless path: "Copy for email" copies the composed
+    report to the OS clipboard so the user emails it to CONTACT_EMAIL — no
+    GitHub token, no browser, no SMTP (B2 ported from the send-log modal)."""
+    copied: dict = {}
+    monkeypatch.setattr(
+        clipboard, "copy", lambda text: copied.setdefault("text", text) is None or True
+    )
+
+    app = _Host()
+    async with app.run_test() as pilot:
+        modal = BugReportModal()
+        await app.push_screen(modal)
+        await pilot.pause()
+        modal.query_one("#bug-title", Input).value = "It crashed"
+        modal.query_one("#bug-desc", TextArea).text = "the run hung at QC"
+        modal._copy_for_email()
+        await pilot.pause()
+
+    assert "It crashed" in copied.get("text", "")
+    assert "the run hung at QC" in copied.get("text", "")
+
+
+async def test_no_token_status_points_at_email(monkeypatch):
+    """After a no-token / failed submit, the status spells out the email path +
+    the exit so the user isn't left feeling stuck (B3)."""
+    app = _Host()
+    async with app.run_test() as pilot:
+        modal = BugReportModal()
+        await app.push_screen(modal)
+        await pilot.pause()
+        captured: dict = {}
+        monkeypatch.setattr(modal, "_set_status", lambda t: captured.update(text=t))
+        modal._show_result(
+            bug_report.BugReportResult(
+                submitted=False,
+                url=bug_report.prefilled_issue_url("T", "B"),
+                detail="No MODULATIO_GITHUB_TOKEN — open this URL to file it yourself.",
+            )
+        )
+        await pilot.pause()
+
+    text = captured.get("text", "")
+    assert bug_report.CONTACT_EMAIL in text
+    assert "Escape" in text or "Cancel" in text
