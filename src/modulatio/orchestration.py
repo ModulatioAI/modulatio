@@ -12937,15 +12937,14 @@ class Orchestrator:
         # Brick B1b: silent per-run kickoff-history record — the substrate the
         # B4 recurrence trigger reads. Best-effort, never blocks.
         self._record_kickoff_history(summary)
-        # Brick 4: autonomous self-codification — recurring lessons become
-        # skills. Best-effort, never blocks; runs once per kickoff at the end.
-        self._post_run_codification(summary)
-        # Brick B4: the setup-side loop — recurring JOBS become Job Templates.
-        # Reads the kickoff-history record just written above. Best-effort.
-        self._post_run_jt_codification(summary)
         # §2: render finished products in the ENGINE (so every run path delivers,
         # not just the CLI command). Gated so stub/test kickoffs never touch the
         # real delivery dir; the real run paths construct with deliver_products=True.
+        # B1 (2026-06-25): delivery + the kickoff_ended completion signal run
+        # BEFORE the best-effort post-run codification below — the codification
+        # makes a leader call (slow, and unbounded on the Clay subprocess path)
+        # that must NOT be able to block or delay the user's deliverable + end
+        # report. The user gets their result first; codification runs after.
         if self._deliver_products:
             self._deliver_finished_products(summary)
         # F8-ONLY teardown (Clif 2026-06-05: only the kill-switch blows out the
@@ -12958,6 +12957,13 @@ class Orchestrator:
         self._emit_activity(
             role="orchestrator", phase="kickoff_ended", agent_id="orchestrator",
         )
+        # Brick 4: autonomous self-codification — recurring lessons become
+        # skills. Best-effort, never blocks; runs AFTER delivery + kickoff_ended
+        # (B1) so it's pure background learning, never on the user's critical path.
+        self._post_run_codification(summary)
+        # Brick B4: the setup-side loop — recurring JOBS become Job Templates.
+        # Reads the kickoff-history record written above. Best-effort.
+        self._post_run_jt_codification(summary)
         return summary
 
 
