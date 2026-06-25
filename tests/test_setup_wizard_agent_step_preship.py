@@ -149,3 +149,18 @@ def test_step_header_uses_real_position(monkeypatch):
     from modulatio.setup_wizard import _STEP_TITLES
     assert agent_step._STEP_TOTAL == len(_STEP_TITLES)
     assert agent_step._STEP_NUMBER == 5
+
+
+# ---------------------------------------------------------------------------
+# Wizard per-role budgets must track the engine defaults (no stale drift)
+# ---------------------------------------------------------------------------
+def test_tested_role_budgets_track_experimental_defaults():
+    """The wizard's shown per-role context budgets are DERIVED from the engine's
+    EXPERIMENTAL_DEFAULTS, not a hardcoded copy — so they can't drift stale (they
+    did: the wizard kept showing the 8k–16k era after the per-role +16K bump).
+    producer/qc map directly; leader uses its reflect anchor."""
+    from modulatio.context_budget import EXPERIMENTAL_DEFAULTS as D
+    shown = {role: tokens for role, tokens, _note in agent_step._tested_role_budgets()}
+    assert shown["producer"] == D["producer"]
+    assert shown["qc"] == D["qc"]
+    assert shown["leader"] == D["leader-reflect"]

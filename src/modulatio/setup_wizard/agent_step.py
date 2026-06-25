@@ -368,15 +368,19 @@ def _provision_workers(state: dict, default_models: dict[str, str]) -> Any:
     return "configured"
 
 
-# Headline tested per-role context budgets (model-agnostic, by role). These
-# mirror context_budget.EXPERIMENTAL_DEFAULTS — the Leader runs 8k–16k by call
-# pattern, 12k is the reflect anchor (Lovecraft's number, at the Stanford
-# "Lost in the Middle" onset). Shown to the user as the discouraged baseline.
-_TESTED_ROLE_BUDGETS = (
-    ("leader", 12_000, "reflect anchor; 8k–16k across call patterns"),
-    ("producer", 16_000, "drafting"),
-    ("qc", 8_000, "verification"),
-)
+def _tested_role_budgets() -> tuple[tuple[str, int, str], ...]:
+    """Headline per-role context budgets shown as the tuned baseline, DERIVED
+    from ``context_budget.EXPERIMENTAL_DEFAULTS`` so the wizard can never drift
+    from the engine's real defaults (it did: the wizard kept showing the 8k–16k
+    era after the per-role budgets were raised). Allocation is BY ROLE,
+    model-agnostic. The Leader runs several call patterns (decompose / iterate /
+    reflect / chat); its reflect budget is the steady anchor shown here."""
+    from modulatio.context_budget import EXPERIMENTAL_DEFAULTS as _D
+    return (
+        ("leader", _D["leader-reflect"], "reflect anchor; varies across call patterns"),
+        ("producer", _D["producer"], "drafting"),
+        ("qc", _D["qc"], "verification"),
+    )
 
 
 def _prompt_role_budget(role: str, default_tokens: int) -> int | None:
@@ -409,8 +413,9 @@ def _prompt_role_budget(role: str, default_tokens: int) -> int | None:
         if val > HARD_GLOBAL_CEILING:
             theme.error(
                 f"Refused — {val} exceeds the {HARD_GLOBAL_CEILING}-token hard "
-                f"ceiling. Large windows broke the engine in testing; that ceiling "
-                f"is deliberate."
+                f"ceiling. The ceiling is a deliberate discipline lever: a single "
+                f"call shouldn't carry an unbounded window even when the model "
+                f"could hold it."
             )
             continue
         if val > CTX_BUDGET_CONFIRM_THRESHOLD:
@@ -426,21 +431,22 @@ def _prompt_role_budget(role: str, default_tokens: int) -> int | None:
 def _maybe_customize_context_budgets(state: dict) -> None:
     """Discouraged opt-in to override the tested per-role context budgets.
 
-    Context is allocated BY ROLE, model-agnostic. The defaults are the tuned
-    Project-Sid/PIANO values from two days of testing — large context windows
-    broke the engine; small role-bounded windows are the design. So the
+    Context is allocated BY ROLE, model-agnostic. The defaults are tuned from
+    extensive testing: roomy enough for the role's work, bounded so a single
+    call can't run away — and sized to fit within the models' real windows. The
     default path keeps them (sets nothing → the engine's per-role defaults
     govern); customization is gated behind a warn and defaults to No."""
     theme.clear_screen()
     theme.step_header(_STEP_NUMBER, _STEP_TOTAL, "Context budgets (tuned — change is discouraged)")
     print(theme.color(
         "  Modulatio allocates context BY ROLE, not by model. These per-role "
-        "budgets are tuned from extensive Project-Sid testing — large context "
-        "windows broke the engine; small, role-bounded windows are the design.",
+        "budgets are tuned from extensive testing — roomy for the work, bounded "
+        "so a single call can't run away, and sized to fit the models' real "
+        "windows.",
         "muted",
     ))
     print()
-    for role, tokens, note in _TESTED_ROLE_BUDGETS:
+    for role, tokens, note in _tested_role_budgets():
         print(f"    {theme.color(role, 'highlight'):20s} {tokens:>7,} tokens  "
               f"{theme.color(note, 'muted')}")
     print()
@@ -456,7 +462,7 @@ def _maybe_customize_context_budgets(state: dict) -> None:
 
     print()
     theme.warn("  Overriding tuned budgets. Blank keeps the tested default for that role.")
-    for role, tokens, _note in _TESTED_ROLE_BUDGETS:
+    for role, tokens, _note in _tested_role_budgets():
         chosen = _prompt_role_budget(role, tokens)
         if chosen is None:
             continue
