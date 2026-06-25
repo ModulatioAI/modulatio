@@ -534,9 +534,11 @@ def run_with_model_fallbacks(
 #: Lowered from a 30-min default so a hung/stalled model call raises a litellm
 #: Timeout at this bound — already classified as a fallback-model trigger and a
 #: redo-loop retry — instead of sitting silent (a live producer wedged ~20 min,
-#: well under the old cap). Tunable via MODULATIO_CALL_TIMEOUT; raise it if a
-#: slow local model legitimately needs longer for a single call.
-_DEFAULT_CALL_TIMEOUT = 300.0
+#: well under the old cap). Set to 600s (was 300): a legit heavy cloud
+#: generation hit 287s in testing, so 300 was too tight a margin for a
+#: completing call. Tunable via MODULATIO_CALL_TIMEOUT; raise it if a slow local
+#: model legitimately needs longer for a single call.
+_DEFAULT_CALL_TIMEOUT = 600.0
 
 
 def _default_call_timeout() -> float:
@@ -705,6 +707,11 @@ def litellm_runner(
                 allowed_tools=claude_cli._ALLOWED_CONFINED_TOOLS,
                 safe_mode=True,
                 disallowed_tools=claude_cli._DISALLOWED_TOOLS,
+                # B4: bound the Clay subprocess with the watchdog timeout — else
+                # run_claude falls back to its 1800s default and a hung Clay call
+                # is effectively unbounded (the watchdog covers litellm calls, not
+                # the subprocess, so this is the only bound on the Clay path).
+                timeout=timeout,
             )
 
         # ── Codex (ChatGPT-subscription) Responses path ──────────────
