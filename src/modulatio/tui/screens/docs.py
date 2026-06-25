@@ -15,7 +15,7 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import DataTable, Input, Markdown, Static
+from textual.widgets import Button, DataTable, Input, Markdown, Static
 
 from modulatio import docs
 from modulatio.tui.widgets.controls_row import ControlsRow
@@ -26,13 +26,15 @@ class DocsScreen(Vertical):
     """DOCS tab content — bundled-doc nav list + a wide reading pane."""
 
     BINDINGS = [
-        Binding("r", "refresh", "Refresh", show=True),
+        Binding("r", "update", "Update docs", show=True),
         Binding("o", "open_online", "Open online", show=True),
     ]
 
     DEFAULT_CSS = """
     DocsScreen { padding: 1; }
     DocsScreen #docs-nav { height: 1fr; }
+    DocsScreen #docs-update { margin-bottom: 1; min-width: 0; }
+    DocsScreen #docs-status { color: $text-muted; height: 1; }
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -44,14 +46,16 @@ class DocsScreen(Vertical):
             with Vertical(id="md-list"):
                 yield ControlsRow(
                     counts=True, search=True, search_placeholder="/ search docs…")
+                yield Button("⟳ Update docs", id="docs-update")
                 nav = DataTable(id="docs-nav", cursor_type="row", show_header=False)
                 nav.add_columns("Page")
                 yield nav
                 yield Static(
-                    "↑↓ move · type to search · o open online · r refresh",
+                    "↑↓ move · type to search · ⟳ update docs · o open online",
                     id="docs-affordance",
                     classes="affordance",
                 )
+                yield Static("", id="docs-status")
             with VerticalScroll(id="md-detail"):
                 yield Markdown("_Select a page._", id="docs-page-md")
 
@@ -110,8 +114,35 @@ class DocsScreen(Vertical):
         except Exception:
             pass
 
-    def action_refresh(self) -> None:
+    # ── update: download the latest docs for offline reading ───────────────
+
+    def action_update(self) -> None:
+        self._do_update()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "docs-update":
+            self._do_update()
+
+    def _do_update(self) -> None:
+        """Fetch the latest docs on a worker thread (the network call must not
+        block the UI), then refresh the nav + show the result."""
+        self._set_status("Checking for updates…")
+        self.run_worker(self._update_work, thread=True, exclusive=True,
+                        group="docs-update")
+
+    def _update_work(self) -> None:
+        msg = docs.update_docs()
+        self.app.call_from_thread(self._apply_update, msg)
+
+    def _apply_update(self, msg: str) -> None:
         self.refresh_docs()
+        self._set_status(msg)
+
+    def _set_status(self, text: str) -> None:
+        try:
+            self.query_one("#docs-status", Static).update(escape(text))
+        except Exception:
+            pass
 
     def action_open_online(self) -> None:
         try:

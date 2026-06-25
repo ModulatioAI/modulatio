@@ -9,9 +9,9 @@ from modulatio import docs
 def test_list_docs_returns_bundled_pages_in_order():
     pages = docs.list_docs()
     slugs = [s for s, _ in pages]
-    assert "01-overview" in slugs
-    # numeric prefixes order the nav: overview comes before getting-started
-    assert slugs.index("01-overview") < slugs.index("02-getting-started")
+    # numeric prefixes order the nav: list is in filename order, overview first.
+    assert slugs[0] == "01-overview"
+    assert slugs == sorted(slugs)
 
 
 def test_list_docs_titles_come_from_the_heading():

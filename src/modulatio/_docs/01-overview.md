@@ -1,32 +1,91 @@
 # Overview
 
-**Modulatio** is a multi-model agent orchestration tool. You give it an
-objective; a **Leader** agent plans the work, breaks it into tasks, and hands
-each to a **producer** agent best suited to it. A **QC** agent reviews the
-output and, when it falls short, fixes it in place rather than throwing it away.
-The result is assembled into the artifacts you asked for.
+**A multi-model agent framework for running long, high-stakes projects with real quality control.**
 
-Everything runs locally if you want it to — Modulatio is built to drive local
-models with no internet — so this documentation ships **bundled in the install**
-and is readable offline, right here in the DOCS tab.
+> **Beta software**
+>
+> v0.9.6 is a **reliability** release — **the team always finishes the job.** A producer's attempts are now budgeted **per task** (across every retry, hand-off, and re-run, and never reset), so a model can't loop forever or quietly skirt the quality gate; when that budget is spent, **QC finishes the work itself** — patching the existing draft, or writing the artifact from the task's brief when there's nothing to patch — so a run lands a real deliverable instead of wedging. Plus a leaner team (the **Leader is the only required role**), **lifecycle tooling** (`modulatio uninstall` / `modulatio repair`, tiered and backed-up), clearer signals (each **QC review shows in the activity feed** against its task; a plain message when the **Leader's model is unavailable**, instead of a stack trace), and **fail-closed confinement** for a Clay subscription seat running as producer/QC. Every change cleared a **four-lens cadre review** (security, hull/terminal-state, code-quality, coherence), each finding remediated and re-verified by a reviewer who ran the code; **4733 tests pass** ([release notes](/v0-9-6/)). It builds on **v0.9.5** — **subscription seats** — bring your own Claude and GPT-5.5 to the team: **Clay** runs any seat through your **Claude Code** subscription (`claude -p`, the official harness — never a metered key and never `api.anthropic.com`; treated like any other agent, confined to its own folder, and purely additive to the existing Anthropic API-key path), **GPT-5.5** runs through your **OpenAI Codex** subscription (the ChatGPT backend's Responses API), and each seat can carry **fallback models** so a rate-limited or down provider restarts the whole task on a backup instead of stalling the team ([release notes](/v0-9-5/)). It builds on **v0.9.4** — **the two-lane Leader**: the same Leader that orchestrates the team can now also work on its own — a standalone coding agent you pair with directly, reading, editing, and **running** files in a folder you point it at with `/work`, confined by default to its own per-project workspace (a *structural* cheat-guard — it physically can't touch the team's deliverables) and widened only by an explicit, scoped operator approval (**once / this session / always / deny**; `/rp` revokes everything; a dotfile secret-floor keeps `.env`/`.ssh` refused even inside a granted folder; **sandbox-required, fail-closed** for anything it runs, with no global-bypass escape). Three **autonomy modes** turn it loose *within bounds* — **`/yolo`** auto-grants capabilities (network/shell), **`/goal`** delegates judgment (decide *how* without asking), **`/yolo-goal`** both — while one fence holds through all of them: **running free outside your own yard always needs permission** (no mode opens the folder gate; the capability controls and the filesystem fence compose as independent gates, both must pass, fence first). It carries an **embedded runbook** so it stays rigorous working alone. Every arc cleared **full design and code cadre review** (coherence, hull, bypass-surface, contract); **4538 tests pass** ([release notes](/v0-9-4/)). It builds on **v0.9.3** — **Feng-Tui, the harmonious terminal interface**: a full phosphor-terminal reskin of the TUI — a pure-black ground, thin frames, and a single monochrome accent in one of three **live-cycling variants** (amber / green / cyan, switched with **F2** and remembered across launches), with state read as **glyph + WORD** rather than colour alone, a low-res **boot splash** that loads the dithered `MODULATIO` wordmark on launch, a shared full-height-divider **master-detail** layout across the list tabs, a read-only skills preview, app-wide copy/paste, and uniform delete-confirmation guards — **layout-only, no backend wiring changed**, reviewed across coherence, hull, and hooks/regression passes ([release notes](/v0-9-3/)). It builds on **v0.9.1** — an **agent role refinement** release: producers, the Leader, and QC work to a **per-operation** standard — every task is classified by the **kind of work** it is (building, improving, fixing, measuring, explaining, researching, assessing, operating) and that selects the **definition of "done"** the work is judged against, the **approach guidance** the producer gets, and the **bar** the Leader and QC verify against, so a *fix* is judged on the reported problem actually being **gone** and a *research* task on its sources being real and synthesized, instead of one generic bar for every kind of work ([release notes](/v0-9-1/)). It builds on **v0.9.0** — **stability + reporting**: two full-codebase **debug passes** — an exhaustive sweep then an independent re-debug, each cadre-reviewed — hardened the engine with hundreds of edge-case, concurrency, and cost fixes and **no behavior change for a normal run**, plus a built-in crash / error / doctor **log** system (a `LOGS` tab in the TUI and `modulatio logs` on the CLI) that captures failures and lets you review and send them to the team — capture-always, submit-on-consent, auto-redacted before anything reaches a public issue ([release notes](/v0-9-0/)). It builds on **v0.8.9** — **security hardening** (a full-codebase audit plus two independent mirror-audits closed nine findings, the keystone a tool-call authorization bypass found by the *independent* pass; no behavior change for a normal run, every fix an engine-bound invariant — [release notes](/v0-8-9/)) — and on **v0.8.8**, which lands two arcs on one north star — cheap producers generate, the smart QC reviews cheaply and patches only the errors, and the cost curve bends toward the cheap model over time: **deterministic assembly validation** (QC can now pass an assembled `code` or `media` deliverable *cheaply*, without re-reading the bytes into the model, when it is *provably* correct — the engine proves the composite *contains* the declared units, not merely that it has their shape; code wiring is statically checked while SaaS/API-key'd imports are *expected* not failures, a `bundle` is verified by exact byte equality, and lossy `video`/`audio`/`image` composites honestly fall back rather than claim a proof they can't back) and **codify-the-win** (the self-codification loop now learns from QC *recoveries* — when the smart QC rescues a producer by writing the fix it couldn't, that patch is a *technique the producer lacked*, codified project-local with a loud non-independent spot-check flag — so failures teach what-not-to-do and recoveries teach how-to-do-it). It builds on **v0.8.6** — *Leader self-remediation* (the lead fixes fixable, in-scope concerns in place under a typed gate + engine-owned fix window) and *JT generativity* (refuse a saved template a job can't fill, derive a fitting one, skip a drifted cron slot) — and on v0.8.4, which **verifies the whole assembled deliverable against the brief — not just the parts:** a run could join eight real parts into one product and still ship it bare (no title or table of contents, parts mis-numbered so eight read like nine, several under the brief's per-part length floor) and pass review, because everything checked verified the *parts* and the *plumbing*, never the *product*. v0.8.4 gives the lead **eyes** (an engine-extracted structural *digest* + a readable text *twin*, so the whole is judged on what it actually *is*, never on binary bytes the model can't read — a deliverable the engine can't read can no longer ship clean); a declared **`DeliverableSpec`** (a sibling of `OutputSpec` — checkable facts vs control-flow) carries the per-part floor / required structure / title from the job template into the run and is checked against the whole at verify; the engine **binds the floor at produce** (the cheap producer is held to it upstream, on the assembler's *real* part set — never a front-matter page); and it **produces the framing** (title + table of contents) and **normalizes part numbering** to a clean 1..N. Every product-specific move is a per-family dispatch — document-first, every other family a graceful no-op — so it stays product- *and* agent-agnostic ([deep-dive](/architecture/deliverable-fidelity/)). It builds on [v0.8.2](/v0-8-2/)'s **assembler families + metered-tool tier**, [v0.8.1](/v0-8-1/)'s **content-addressed review-ledger**, [v0.8.0](/v0-8-0/)'s **ACP server**, v0.7's **conversation-first Leader**, and the **QC-thesis arc** from v0.2.x. Both v0.8.8 arcs cleared independent **hull + coherence** reviews and an **architecture** pass (every BLOCK remediated to sign-off before merge). Read the [v0.8.8 release notes](/v0-8-8/) and the [Beta calibration page](/v0-1-0-beta/) before kicking off serious work — knowing the engine's real ceilings is the difference between a smooth run and a frustrated one. **Python 3.12+**. Bug reports and discussions welcome at the [issues tab](https://github.com/ModulatioAI/modulatio/issues) and [discussions](https://github.com/ModulatioAI/modulatio/discussions).
 
-## The shape of the system
+Modulatio is a TUI-and-CLI framework for orchestrating teams of LLM agents on projects that take more than one prompt. You define an objective, set the standards, pick the models, and the team — your **Mod Squad** — plans, executes, reviews, and iterates, with you in the loop at the levels that matter and out of the loop where automation is safe.
 
-- **Leader** — orchestrates a run: plans goals and tasks, assigns them, and
-  reviews the result. It's also a standalone coding/answering agent you can just
-  talk to on the CONSOLE.
-- **Producers** — do the work. There are no fixed roles; a producer *is* its
-  skills. The engine capability-matches each task to a skill and loads it onto
-  whatever producer is best placed to run it.
-- **QC** — reviews finished work against the task's contract and recovers it
-  when it misses, instead of leaving it dead.
-- **The Mod Squad** — the collective name for your agent team.
+It's designed for work like:
 
-## Where things live
+- Drafting and revising long-form content (essays, reports, books) against an editorial standard
+- Running a small business loop (research, content production, social engagement, weekly review)
+- Multi-step research where the team has to track decisions across many sub-tasks
+- Any artifact class where quality matters and a single LLM call won't cut it
 
-Your work is stored in a **project vault** on disk. A project holds its agent
-roster, skills, memory, and one folder per **run** (a "job"): each run keeps its
-own objective, goals, tasks, decisions, tickets, research, artifacts, and
-reports. Memory persists at the project level, accruing across runs.
+What makes Modulatio different from "spin up a chat" or single-agent tools:
 
-See **Getting started** next, then **The CONSOLE** for how to drive a run.
+- **Real multi-model routing per agent.** Drafter on GLM 5.1, Quality Control on Kimi-K2.5, Leader on Sonnet — each role on its own model and its own provider. Native to the architecture, not an afterthought.
+- **Quality Control as a first-class subsystem.** Modulatio's quality gate is built on **Total Quality Management** (TQM) — the established quality-engineering discipline behind the ISO 9000 family of standards — applied in three layers: universal axes × per-artifact-kind standards × per-team overrides. The Quality Control (QC) agent reviews every artifact before it ships; rejects route back to the producer, and when the producer can't clear the bar QC patches the artifact itself. The economics are the point: cheap producers generate the bulk, the smarter QC patches only the errors — the cost of a cheap model with the quality of a strong one.
+- **An honest covering note on every product.** When the lead has reservations it can't resolve inside the team — citations it couldn't independently verify, a claim worth double-checking — it ships them to you as an advisory **Product Quality Report** beside the work. Honest caveats, never a gate: they don't block the deliverable or stall the run.
+- **A producer is a model endpoint.** No fixed roles, and no skills to assign — you give a producer an LLM and tag what it's good at, and the team composes the skills each task needs from a shared library at run-time. Routing reasons over each model's capabilities and never blocks on a gap.
+- **Plan-mode end-to-end.** Leader is a conversational partner. Project is the unit being led. Plan is the unit of execution. Long plans run as daemons in the background, with reflection between sub-objectives and Telegram approvals where needed.
+- **One cooperative team, one sandbox.** Modulatio is two things at once: a coding harness for hands-on work, and a long-horizon, self-looping digital factory staffed by a cast of models you design. Not many copies of one model, not sandboxed agents passing notes over a wall — your models, harnessed into a single functional team inside one sandbox.
+- **Diversity as a quality edge.** Models from different providers and training lineages bring different instincts to a problem; where one is blind, another sees. Mixing them turns variety of approach into better work instead of one model's blind spots, repeated.
+- **Local, cloud, or offline.** No preference for either — lean on local models to cut cost further, mix in cloud where it pays, and keep working when the connection drops.
+- **Open architecture.** Your data, your vault, your providers, your models. No SaaS, no per-instance subscription, no vendor lock-in.
+
+---
+
+## What's in the rest of the docs
+
+**[v0.9.6 release notes](/v0-9-6/)** — the current release: **reliability** — **the team always finishes the job.** A producer's attempts are budgeted **per task** (across every retry, hand-off, and re-run, never reset), and when that budget is spent **QC finishes the work itself** (patches the existing draft, or writes the artifact from the task's brief) — so a run lands a real deliverable instead of wedging. Plus a leaner team (the **Leader is the only required role**), **lifecycle tooling** (`modulatio uninstall` / `modulatio repair`), clearer signals (each **QC review shows against its task**; a plain message when the **Leader's model is unavailable**), and **fail-closed confinement** for a Clay producer/QC seat. The prior **[v0.9.5 release notes](/v0-9-5/)** — **subscription seats** — bring your own Claude and GPT-5.5 to the team: **Clay** runs any seat through your **Claude Code** subscription (`claude -p`, the official harness — never a metered key, confined like any other seat, additive), **GPT-5.5** runs through your **OpenAI Codex** subscription, and each seat can carry **fallback models** (the engine warns and restarts the whole task on a backup when a model is unavailable). The prior **[v0.9.4 release notes](/v0-9-4/)** — **the two-lane Leader** — the Leader can now work on its own as a standalone coding agent (read / edit / **run** files in a folder you grant with **`/work`**; confined by default to its own workspace; widened only by a scoped approval — once / session / always / deny, `/rp` to revoke; **sandbox-required, fail-closed** for anything it runs), with three **autonomy modes** — **`/yolo`** (auto-grant capabilities), **`/goal`** (delegate judgment), **`/yolo-goal`** (both) — and one fence through all of them: **running free outside your own yard always needs permission** (no mode opens the folder gate). The prior **[v0.9.3 release notes](/v0-9-3/)** — **Feng-Tui, the harmonious terminal interface** — a full phosphor-terminal reskin of the TUI (pure black, thin frames, three live-cycling monochrome variants — amber / green / cyan, switched with F2 and remembered across launches; state read as glyph + WORD; a low-res boot splash; a shared master-detail layout across the list tabs; a read-only skills preview; app-wide copy/paste; uniform delete guards — layout-only, no backend change). The prior **[v0.9.1 release notes](/v0-9-1/)** — **agent role refinement**: producers, the Leader, and QC work to a per-operation standard (the right definition of "done" per kind of work — a fix judged on the reported problem being gone, research on real synthesized sources, an assessment on evidence; no behavior change for work that declares no operation). The prior **[v0.9.0 release notes](/v0-9-0/)** — **stability + reporting** — two full-codebase debug passes (hundreds of fixes, no behavior change for a normal run) plus a crash / error / doctor **log** system (a `LOGS` tab + `modulatio logs`; capture-always, submit-on-consent, auto-redacted). The prior **[v0.8.9 release notes](/v0-8-9/)** — **security hardening**: a full-codebase audit + two independent mirror-audits closed nine findings (keystone: a tool-call authorization bypass found by the independent pass), no behavior change for a normal run. The prior **[v0.8.8 release notes](/v0-8-8/)** — deterministic assembly validation (QC cheap-passes a provably-correct code or media assembly — containment, not shape; SaaS imports expected; lossy media falls back honestly) and codify-the-win (learn techniques from QC recoveries, not just repeated fails — project-local, flagged non-independent). The prior **[v0.8.6 release notes](/v0-8-6/)** cover Leader self-remediation (fix fixable concerns in place, under a typed gate + engine-owned fix window) and JT generativity (refuse a job template a job can't fill; derive a fitting one; cron skip-the-slot). See the [Assembly + the review-ledger](/architecture/assembly/) and [Skill system](/architecture/skill-system/) deep-dives.
+
+**[v0.8.1 release notes](/v0-8-1/)** — product-aware familial assemblers (document / code / data) and a content-addressed review-ledger so QC verifies the marks instead of re-reading the finished work.
+
+**[v0.8.0 release notes](/v0-8-0/)** — an Agent Client Protocol (ACP) server: drive the same conversational Leader from a Zed-class editor over stdio, with client-approved tool calls.
+
+**[v0.7.2 release notes](/v0-7-2/)** — conversation-first: approvals via the Leader (he asks before he touches anything), the Job-Template Library, attachments, and the constitution.
+
+**[v0.7.0 release notes](/v0-7-0/)** — the API key pool (pool by default, pin to isolate) and the Configuration tab.
+
+**[v0.6.0 release notes](/v0-6-0/)** — the role-language migration: routing reality wired on every headless path, the specialist/researcher roles collapsed into producers, and an operator-presence-aware Leader that judges when it runs alone and defers when you're present.
+
+**[v0.4.0 release notes](/v0-4-0/)** — autonomous skill self-codification: the team learns from its own repeated failures, codifying recurring corrections into durable, git-versioned skill guidance.
+
+**[v0.3.0 release notes](/v0-3-0/)** — the skill-library keystone: producers as model endpoints, capability + availability routing that never blocks, and self-contained goal decomposition.
+
+**[v0.2.2 release notes](/v0-2-2/)** — web search (the first skill-library brick), source-credibility flagging, and a provably-terminating redo loop.
+
+**[v0.2.1 release notes](/v0-2-1/)** — in-place editing (`--attach`), surgical patch mode, the code read-toolkit, and the delivery / verify-goal fixes.
+
+**[v0.2.0 release notes](/v0-2-0/)** — the QC-thesis arc, the Product Quality Report, default standards, and the context-budget hardening.
+
+**[Beta calibration](/v0-1-0-beta/)** — what the engine does well, what it does NOT do yet, the QC-as-fixer / self-heal scope, and how to report bugs. Read this before serious work.
+
+**[Getting started](/getting-started/install/)** — install, run the setup wizard, get to a working first plan.
+
+**[Concepts](/concepts/concepts/)** — the mental model: project, plan, agent, skill, standard, vault. Read this once and the rest of the system gets a lot less mysterious.
+
+**[Agents](/concepts/agents/)** — the Leader + QC structural roles, producers (skill-holders), choosing models by role, and how the team composes around a project.
+
+**[Plan lifecycle](/concepts/plan-lifecycle/)** — what actually happens from "Leader, can you help me with X" to "plan complete, here's your output." The state machine, the approval gates, the reflection step, the audit trail.
+
+**[Providers & models](/concepts/providers/)** — every supported provider (Anthropic, xAI, OpenRouter, Ollama, LM Studio) with the auth flow, the gotchas, and how to point each agent at the model you want.
+
+**[CLI reference](/reference/cli/)** — every command, every flag, with examples.
+
+**[Roadmap](/roadmap/)** — what's shipping next, what's under design, and the long-horizon pillars.
+
+**[Troubleshooting](/troubleshooting/)** — common errors mapped to fixes. Auth failures, model-not-found, paused plans, divergence flags, what to do when QC keeps rejecting.
+
+---
+
+## Where Modulatio sits
+
+Modulatio is **standalone** — it runs entirely on your machine, talks to whichever model providers you configure, and stores everything in your Obsidian vault (or any directory of your choosing).
+
+It's intentionally a different shape from chat UIs (single-agent, no quality gate, no plan persistence) and from cloud agent platforms (multi-tenant, SaaS, your data on their servers). If you want a tool you fully own that runs real teams of agents on real work, Modulatio is built for that.
+
+---
+
+## Getting unstuck
+
+If you hit something the docs don't cover, or you find a mistake:
+
+- Errors at install or first run — start with [Troubleshooting](/troubleshooting/).
+- Provider auth issues — see the [Providers & models](/concepts/providers/) page for that specific provider.
+- Conceptual confusion ("why is this paused?", "why did QC reject?") — [Plan lifecycle](/concepts/plan-lifecycle/) covers state transitions; [Agents](/concepts/agents/) covers role responsibilities.
+- Open an issue at the project repo with the relevant `modulatio doctor` output.
