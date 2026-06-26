@@ -843,29 +843,24 @@ def _format_available_skills(names: list[str]) -> str:
 
 
 def _format_team_capacity(agents: list) -> str:
-    """State how many PRODUCERS the roster has, so both planning layers size their
-    fan-out to the team (Fix A at the task layer, Fix D at the goal layer). The
-    Leader is team-aware (§4); planning should be too — idle producers are wasted
-    parallelism. Layer-neutral: the surrounding PARALLEL-DELIVERABLES prose gives
-    the layer-specific instruction (one goal / one artifacts[] item)."""
-    producers = [
-        a for a in agents
-        if str(getattr(a, "tier", "producer") or "producer") == "producer"
-    ]
-    n = len(producers)
-    if n <= 1:
-        # 1 producer → nothing to parallelize; still split for right-sized work,
-        # but don't inflate the count chasing parallelism that isn't there.
-        return (
-            "Your team has 1 producer, so parallelism isn't available — still "
-            "split independent deliverables for right-sized work, but don't "
-            "inflate the count for parallelism."
-        )
-    names = ", ".join(str(getattr(a, "name", a.id)) for a in producers[:6])
+    """Sizing guidance for both planning layers (2026-06-26): task SIZE follows
+    the WORK and the per-task CONTEXT BUDGET, never the producer headcount. Each
+    task should finish comfortably BELOW its producer's compression trigger (the
+    engine soft-compresses near the top of the window), with headroom for tool
+    output and drafting; split anything that would fill the window. The engine
+    schedules however many tasks result across the producers in waves (1 or
+    1000), so the count is never padded to use idle producers nor squeezed to
+    match them. ``agents`` is accepted for call-site compatibility but the
+    guidance is intentionally headcount-independent. Layer-neutral: the
+    surrounding PARALLEL-DELIVERABLES prose gives the per-layer instruction."""
     return (
-        f"Your team has {n} producers ({names}) — structure the work so all {n} "
-        f"can run at once (keep independent deliverables in ONE goal, fanned into "
-        f"parallel tasks); idle producers are wasted parallelism."
+        "TASK SIZING: size each task to the WORK and to a producer's context "
+        "budget — small enough to finish comfortably BELOW the compression "
+        "trigger (the engine soft-compresses near the top of the window), leaving "
+        "headroom for tool output and drafting; split any unit that would fill "
+        "the window. Do NOT size to the producer headcount: the engine runs "
+        "however many tasks result across the team in waves, so never pad the "
+        "count to fill idle producers nor squeeze it to match them."
     )
 
 
@@ -1120,27 +1115,12 @@ class _PlanError(Exception):
     """
 
 
-#: W5-lite (Tier 2). Hard ceiling on tasks per sub-objective.
-#: Production-agnostic — based on plan-shape, never on artifact-class
-#: heuristics like "pages" / "chapters". Above this count the
-#: sub-objective is over-scoped for the Alpha engine; Leader should
-#: decompose. Lifted (or replaced) by V2.2 job-template architecture.
-_PLAN_HARD_CAP = 6
-
-
-def _plan_work_count(data: list[dict]) -> int:
-    """WORK-task count of a raw plan — total minus fan-in tasks, which are
-    exempt from the per-sub-objective cap.
-
-    A fan-in (synthesis/assembly) task COMBINES the parallel work and depends on
-    >=2 plan tasks; it's the back-end of a fan-out, not extra work. A redundant
-    review/verify task depends on a SINGLE task, so it stays counted as work —
-    verify-padding (the over-decomposition the cap guards against) can't hide
-    behind the exemption. Parallel work tasks (no intra-plan deps) all count, so
-    the cap bounds the BREADTH of the fan-out, which is what we want it to.
-    """
-    fan_in = sum(1 for item in data if len(item.get("depends_on") or []) >= 2)
-    return len(data) - fan_in
+# The fixed per-sub-objective task COUNT cap was removed 2026-06-26: task count
+# follows the WORK and the per-task CONTEXT BUDGET (the real ceiling — each task
+# runs under its budget_role window with a runtime compression-churn backstop),
+# never a magic number. Over-decomposition is now a soft YAGNI discipline in the
+# planning prompts; the catastrophic case (verify-storm) stays HARD-bound by the
+# no-standalone-verification-goal invariant below.
 
 
 # ── ENGINE-ENFORCED INVARIANT: no standalone verification goals ────────────
@@ -3281,8 +3261,9 @@ class Orchestrator:
         specs (each a single ``output_path``, no ``depends_on``, no ``artifacts``)
         instead of ONE ``artifacts: [...]`` fan-out, bind each homogeneous group of
         ≥2 into a single artifacts-spec. One plan item → N parallel sub-tasks: the
-        wide wave forms AND the plan fits the per-goal task cap (the live anthology
-        died at 9 separate tasks > 6). A dependent task (a compile/assembly step)
+        wide wave forms from a single clean spec (the size floor inherits, deps
+        remap once), instead of N redundant separate specs (the live anthology
+        shape: 8 separate story tasks + a compile). A dependent task (a compile/assembly step)
         keeps its ``depends_on``; the dep indices are remapped onto the merged spec,
         and the artifacts expansion then multiplies that dep onto every sub-task.
 
@@ -3453,22 +3434,11 @@ class Orchestrator:
         # collapse: prose steers the planner to use `artifacts`; the engine binds it.
         data = self._bind_wide_artifacts(data)
 
-        # Concurrency-shaped cap (replaces the old evidence-proportional cap).
-        # The canonical shape is a parallel fan-out: N INDEPENDENT work tasks
-        # that run concurrently, plus a synthesis/assembly task that COMBINES
-        # them (fan-in, exempt). See ``_plan_work_count`` — verify-padding (a
-        # single-dep task) still counts, so over-decomposition still busts it.
-        work_count = _plan_work_count(data)
-        if work_count > _PLAN_HARD_CAP:
-            raise _PlanError(
-                f"plan has {work_count} work tasks — exceeds the cap of "
-                f"{_PLAN_HARD_CAP} per sub-objective. Either group the "
-                f"independent areas into FEWER parallel batches (each covers "
-                f"several areas), or decompose the goal into smaller "
-                f"sub-objectives. Do NOT add separate review/verify/test "
-                f"tasks — QC reviews every task automatically: wait for QC, "
-                f"don't create verification tasks."
-            )
+        # (The fixed work-task count cap was removed 2026-06-26 — task count
+        # follows the work + the per-task context budget, not a magic number.
+        # Over-decomposition is a soft YAGNI concern in the planning prompts now;
+        # the runtime context-budget/churn cap bounds an oversized task, and the
+        # no-standalone-verification-goal invariant still hard-blocks verify-storms.)
 
         # Slice #7b: a plan item may declare either a single
         # ``output_path`` OR an ``artifacts: [...]`` list that expands
@@ -13528,17 +13498,17 @@ setup, ingestion, schema versioning, dual-source verification) unless
 goal explicitly asks to BUILD that infra as deliverable. Prefer
 smallest plan; team adds follow-ons later if artifact reveals gap.
 
-SWEEP work — bound it at PLAN time, WITHIN the task cap. When the goal
-is "do X for EACH of N items" (survey/catalog/gather/compare across a
-set), don't pile all N into one vague task — but don't fan to
-one-task-per-item either: that busts the per-sub-objective task cap (a
-research goal with no per-item artifact evidence caps low, ~3 tasks).
-Web fetches are size-bounded, so ONE research task can cover a small
-handful of items. So GROUP items into a FEW bounded tasks that fit the
-cap (each surveys a batch); a separate draft/synthesis sub-objective
-combines their artifacts. Signals: "all/each/every/top N",
-"survey/compare across", an enumerable list. More items than fit the cap
-→ cover a bounded BATCH now, name the rest as a deferred PHASE. Items
+SWEEP work — bound it at PLAN time to a producer's CONTEXT BUDGET. When
+the goal is "do X for EACH of N items" (survey/catalog/gather/compare
+across a set), don't pile all N into one vague task — but don't fan to
+one-task-per-item either (it wastes producer slots and duplicates
+sourcing). Web fetches are size-bounded, so ONE research task can cover a
+small handful of items. So GROUP items into bounded tasks that each fit
+comfortably below a producer's compression trigger, with headroom (each
+surveys a batch); a separate draft/synthesis sub-objective combines their
+artifacts. Signals: "all/each/every/top N", "survey/compare across", an
+enumerable list. More items than fit one budget → cover a bounded BATCH
+now, name the rest as a deferred PHASE. Items
 not named yet ("the current SOTA in X") → a cheap SCOUT task enumerates
 them first, then the batch tasks build on it. Never one task that both
 discovers AND deep-dives the whole set. (Grouping is for size-bounded

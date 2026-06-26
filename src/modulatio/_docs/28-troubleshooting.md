@@ -319,14 +319,6 @@ Fix: usually nothing. If you see soft-warn lines reliably in the same place, tha
 
 If your monitoring parses logs programmatically, filter on `modulatio_event="context_budget_soft_warn"` to ignore them.
 
-### "plan has X tasks — exceeds the per-goal task cap"
-
-Symptom: a CRITICAL ticket fires when the daemon claims a plan; the body cites `_PLAN_HARD_CAP`.
-
-Cause: the planner emitted more than 6 tasks for one sub-objective. The hard cap is a guardrail; plans wanting more raise `_PlanError` and route to `revise-major`.
-
-Fix: split the sub-objective. If the plan was emitted by Leader and you want to fix it once, edit the plan body to break the offending sub-objective into two narrower ones and re-approve. If Leader is consistently emitting over-scoped plans, the project's deliverable shape is production-scale — see [Example: production-scale Phase 1](/getting-started/example-production-scale/).
-
 ### "Engine calibration: ! Multi-phase / long-running work — NOT yet supported"
 
 Symptom: `modulatio doctor` shows this line in its calibration banner, you're trying to ship a 200-page novel.

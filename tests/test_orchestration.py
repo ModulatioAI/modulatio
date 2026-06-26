@@ -6138,14 +6138,14 @@ def test_leader_verify_tool_loadout_skill_helper_returns_none_for_empty_loadout(
 
 # ── Coordinator over-decomposition cap (post-NXT e2e) ────────────────────
 
-def test_coordinator_overdecomposition_rejected_for_single_artifact_goal(
+def test_high_work_task_count_no_longer_capped(
     project: Project, tmp_path, monkeypatch
 ):
-    """Over-decomposition is rejected structurally. Under the concurrency cap,
-    the boundary is WORK tasks > ``_PLAN_HARD_CAP`` (6) — 7 independent work
-    tasks (no fan-in to exempt) trips it: opens a CRITICAL ticket, marks the
-    goal as having no dispatched tasks, and the human sees the gap. (Parallel
-    fan-outs at or under the cap are allowed — see the fan-out test.)"""
+    """The fixed count cap is GONE (2026-06-26): task count follows the WORK +
+    the per-task context budget, not a magic number. A 7-work-task plan — which
+    the old ``_PLAN_HARD_CAP`` (6) rejected structurally — now dispatches every
+    task. Over-decomposition is a soft YAGNI concern (prose), not a hard reject;
+    the catastrophic case (verify-storm) stays bound by the no-verify invariant."""
     drafter_calls = {"n": 0}
 
     def _drafter_counting(prompt: str) -> str:
@@ -6153,7 +6153,7 @@ def test_coordinator_overdecomposition_rejected_for_single_artifact_goal(
         return _drafter_stub(prompt)
 
     def _coord_overdecompose(prompt: str) -> str:
-        # 7 independent work tasks (no fan-in) > the cap of 6 → rejected.
+        # 7 independent work tasks — over the OLD cap of 6, now allowed.
         tasks = [
             {
                 "description": f"spurious task {i}",
@@ -6173,23 +6173,17 @@ def test_coordinator_overdecomposition_rejected_for_single_artifact_goal(
     orch = Orchestrator(project, runners)
     orch.kickoff("anything")
 
-    # Drafter NEVER ran — the plan was rejected before dispatch.
-    assert drafter_calls["n"] == 0, (
-        "over-decomposed plan should be rejected before any drafter call"
-    )
-
-    # A ticket was opened with the cap-rationale visible to the human.
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert tickets, "expected a ticket from the rejected plan"
-    body_text = " ".join(t.body for t in tickets).lower()
-    assert "cap" in body_text or "verify" in body_text or "wait for qc" in body_text, (
-        "rejected-plan ticket body should reference the cap or 'wait for QC' guidance"
-    )
+    # All 7 work tasks are created and dispatched — no pre-dispatch rejection.
+    assert drafter_calls["n"] > 0, "the plan should dispatch, not be rejected"
+    assert len(store.list_tasks(PROJECT_CODE)) == 7, "all 7 work tasks created"
+    over_cap = [
+        t for t in store.list_tickets(PROJECT_CODE) if "exceeds the cap" in t.body
+    ]
+    assert not over_cap, "the count cap was removed — no over-cap rejection ticket"
 
 
-def test_plan_tasks_within_cap_passes(project: Project):
-    """Sanity: a plan whose WORK-task count is at-or-under the cap (6) goes
-    through without rejection. A 3-task plan is well inside it."""
+def test_plan_tasks_modest_count_passes(project: Project):
+    """Sanity: a small plan goes through without rejection. A 3-task plan."""
     runners = {
         "leader": _leader_stub,
         "planner": _planner_stub,  # emits 3 tasks (drafter default)
@@ -6198,142 +6192,16 @@ def test_plan_tasks_within_cap_passes(project: Project):
     }
     orch = Orchestrator(project, runners)
     summary = orch.kickoff("anything")
-    assert len(summary.tasks) == 3  # 3 work tasks <= cap 6 → allowed
-
-
-def test_plan_work_count_exempts_fan_in_not_verify():
-    """The concurrency cap counts WORK tasks: a fan-in (synthesis/assembly,
-    depends on >=2 plan tasks) is exempt, but a single-dep review/verify task
-    still counts — so a wide fan-out is allowed while verify-padding can't hide
-    behind a dependency."""
-    from modulatio.orchestration import _PLAN_HARD_CAP, _plan_work_count
-
-    assert _PLAN_HARD_CAP == 6  # Alpha pin
-
-    # 5 independent work tasks + 1 fan-in synthesis → 5 work (fan-in exempt).
-    fanout = [{"description": f"t{i}"} for i in range(5)]
-    fanout.append({"description": "synth", "depends_on": [0, 1, 2, 3, 4]})
-    assert _plan_work_count(fanout) == 5
-
-    # A single-dep verify task is NOT a fan-in — it still counts as work.
-    padded = [{"description": "work"}, {"description": "verify", "depends_on": [0]}]
-    assert _plan_work_count(padded) == 2
-
-    # No deps at all → every task is work.
-    assert _plan_work_count([{"description": "a"}, {"description": "b"}]) == 2
-
-
-def test_plan_tasks_overdecomp_diagnostic_wins_when_both_apply(
-    project: Project, monkeypatch
-):
-    """F4 audit follow-up: when a plan trips BOTH the over-decomp
-    cap (more tasks than artifacts justify) AND the Alpha hard
-    cap (>6), the more-precise diagnostic (over-decomp + wait-for-QC
-    framing) wins. The hard-cap framing alone is too generic when
-    the real cause is verify-tasks-for-2-files. Both messages may
-    coexist in the body; the over-decomp framing must lead."""
-    drafter_calls = {"n": 0}
-
-    def _drafter_counting(prompt: str) -> str:
-        drafter_calls["n"] += 1
-        return _drafter_stub(prompt)
-
-    def _coord_overdecompose_huge(prompt: str) -> str:
-        # 8 tasks for a goal whose evidence is 1 artifact (evidence_cap = 3).
-        # Trips both gates: 8 > 3 (over-decomp) and 8 > 6 (hard cap).
-        tasks = [
-            {
-                "description": f"task {i}",
-                "artifact_kind": "code",
-                "evidence_required": [{"kind": "artifact", "description": "f"}],
-            }
-            for i in range(8)
-        ]
-        return f"```json\n{json.dumps(tasks)}\n```"
-
-    runners = {
-        "leader": _leader_stub,
-        "planner": _coord_overdecompose_huge,
-        "drafter": _drafter_counting,
-        "qc": _qc_stub,
-    }
-    orch = Orchestrator(project, runners)
-    orch.kickoff("anything")
-
-    assert drafter_calls["n"] == 0
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert tickets, "expected a rejected-plan ticket"
-    body_text = " ".join(t.body for t in tickets).lower()
-    # Over-decomp framing must lead — this is the actionable message.
-    assert "wait for qc" in body_text or "verification tasks" in body_text, (
-        f"F4 regression: over-decomp diagnostic suppressed when both "
-        f"gates trip; body: {body_text!r}"
-    )
-
-
-def test_plan_tasks_hard_cap_rejects_over_scoped_sub_objective(
-    project: Project, monkeypatch
-):
-    """W5-lite (Tier 2): a plan with > 6 tasks must be rejected
-    with a decompose-required framing — even when the artifact count
-    would naturally permit more. The Coordinator over-scope gate.
-    The error message names the cap and surfaces the V2.2-job-template
-    forward note so leader-reflect routes to revise-major instead of
-    accepting a 12-task megaplan."""
-    drafter_calls = {"n": 0}
-
-    def _drafter_counting(prompt: str) -> str:
-        drafter_calls["n"] += 1
-        return _drafter_stub(prompt)
-
-    def _coord_overscope(prompt: str) -> str:
-        # 8 tasks — exceeds the hard cap of 6 regardless of
-        # artifact count.
-        tasks = [
-            {
-                "description": f"task {i}",
-                "artifact_kind": "code",
-                "evidence_required": [{"kind": "artifact", "description": "f"}],
-            }
-            for i in range(8)
-        ]
-        return f"```json\n{json.dumps(tasks)}\n```"
-
-    runners = {
-        "leader": _leader_stub,
-        "planner": _coord_overscope,
-        "drafter": _drafter_counting,
-        "qc": _qc_stub,
-    }
-    orch = Orchestrator(project, runners)
-    orch.kickoff("anything")
-
-    # Drafter never ran — plan rejected before dispatch.
-    assert drafter_calls["n"] == 0, (
-        "over-scoped plan should be rejected before any drafter call"
-    )
-
-    tickets = store.list_tickets(PROJECT_CODE)
-    assert tickets, "expected a rejected-plan ticket"
-    body_text = " ".join(t.body for t in tickets).lower()
-    # Decomposition framing is the load-bearing message — drives
-    # leader-reflect to revise-major.
-    assert "decompose" in body_text or "decompos" in body_text, (
-        f"expected decompose framing in over-scope ticket; body: {body_text!r}"
-    )
-    # Ticket points at the hard cap so the human knows why.
-    assert "6" in body_text or "hard cap" in body_text, (
-        f"expected hard-cap reference in ticket; body: {body_text!r}"
-    )
+    assert len(summary.tasks) == 3
 
 
 def test_plan_tasks_allows_parallel_fanout_with_synthesis(
     project: Project, monkeypatch
 ):
     """Concurrency: N independent WORK tasks PLUS a fan-in synthesis (depends on
-    >=2 of them) is ALLOWED — the synthesis is exempt from the cap, so a wide
-    research fan-out isn't blocked the way the old evidence-cap (~3 for research)
-    blocked it. 5 parallel work + 1 synthesis = work_count 5 <= cap 6 → accepted."""
+    >=2 of them) is ALLOWED — a wide research fan-out isn't blocked the way the
+    old evidence-cap (~3 for research) blocked it. 5 parallel work + 1 synthesis
+    → all 6 tasks dispatch (no count cap)."""
     def _coord_fanout(prompt: str) -> str:
         tasks = [
             {
@@ -6347,7 +6215,7 @@ def test_plan_tasks_allows_parallel_fanout_with_synthesis(
             "description": "synthesize the brief from the area research",
             "artifact_kind": "report",
             "evidence_required": [{"kind": "artifact", "description": "report"}],
-            "depends_on": [0, 1, 2, 3, 4],  # fan-in — exempt from the cap
+            "depends_on": [0, 1, 2, 3, 4],  # fan-in synthesis
         })
         return f"```json\n{json.dumps(tasks)}\n```"
 
@@ -6360,10 +6228,8 @@ def test_plan_tasks_allows_parallel_fanout_with_synthesis(
     orch = Orchestrator(project, runners)
     orch.kickoff("anything")
 
-    # 6 tasks created (5 parallel + 1 synthesis) — NOT rejected by the cap.
+    # 6 tasks created (5 parallel + 1 synthesis) — all dispatch.
     assert len(store.list_tasks(PROJECT_CODE)) == 6
-    over_cap = [t for t in store.list_tickets(PROJECT_CODE) if "exceeds the cap" in t.body]
-    assert not over_cap, f"parallel fan-out wrongly capped: {[t.body for t in over_cap]}"
 
 
 # ── Environmental defect type (Slice C #13) ──────────────────────────────
@@ -9310,25 +9176,26 @@ def test_wave_global_cap_clamps_both_ends(monkeypatch):
     assert Orchestrator._wave_global_cap() is None
 
 
-def test_format_team_capacity_sizes_fanout_to_producer_count():
-    """Fix A: the planner is told the producer count so it fans independent
-    deliverables wide enough to use the whole team (idle producers = wasted
-    parallelism). 1 producer → no parallelism push."""
+def test_format_team_capacity_sizes_to_work_not_producer_count():
+    """Sizing guidance follows the WORK + per-task CONTEXT BUDGET, NEVER the
+    producer headcount (2026-06-26). The output must not couple task count to the
+    team, and it steers each task to sit below the compression trigger."""
     from modulatio.orchestration import _format_team_capacity
     from modulatio.roster import Agent
 
     def _a(aid, name, tier="producer"):
         return Agent(id=aid, name=name, model="m", tier=tier)
 
-    two = [_a("p1", "Hal 9000"), _a("p2", "Larry"), _a("q", "QC", tier="qc"),
-           _a("l", "Leader", tier="leader")]
-    out = _format_team_capacity(two)
-    assert "2 producers" in out and "Hal 9000" in out and "Larry" in out
-    assert "all 2 can run at once" in out  # layer-neutral: use the whole team
-
-    one = [_a("p1", "Solo"), _a("l", "Leader", tier="leader")]
-    out1 = _format_team_capacity(one)
-    assert "1 producer" in out1 and "parallelism isn't available" in out1
+    roster = [_a("p1", "Hal 9000"), _a("p2", "Larry"), _a("q", "QC", tier="qc"),
+              _a("l", "Leader", tier="leader")]
+    out = _format_team_capacity(roster)
+    low = out.lower()
+    # No producer-count coupling — counts/names must NOT drive the sizing.
+    assert "2 producers" not in out and "Hal 9000" not in out and "Larry" not in out
+    # It DOES steer to work/budget sizing below the compression trigger.
+    assert "budget" in low
+    assert "compress" in low
+    assert "headcount" in low
 
 
 # ── Fix C: operator kill-switch (cooperative abort) ──────────────────────────

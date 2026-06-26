@@ -12,9 +12,14 @@ Objective: {objective}
 
 {attachments}
 
-Scope discipline: prefer the simplest decomposition that satisfies the
-objective. Goal count is proportional to deliverable complexity, not
-to the breadth of words in the objective.
+Scope discipline (YAGNI for decomposition — the best task is the one you
+never create): prefer the simplest decomposition that satisfies the
+objective. Climb the ladder before you add a goal or task — is it already
+covered? a smaller split? truly needed NOW (not speculative or
+"while we're here")? Create only what the objective requires; never
+invent verify/review/audit work (QC reviews every task automatically).
+Goal count is proportional to deliverable complexity, not to the breadth
+of words in the objective.
 
 - A short verb-objective ("analyze X", "summarize Y", "produce a top-N
   list of Z") is usually a SINGLE-deliverable request — aim for 1-3

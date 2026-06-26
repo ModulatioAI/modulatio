@@ -30,16 +30,18 @@ asks to BUILD that infra as deliverable. Prefer the smallest plan that keeps the
 team CONCURRENT; team adds follow-ons later if the artifact reveals a gap.
 
 SWEEP / GATHER (research, survey, "X for EACH of N items"): FAN the independent
-areas into a FEW PARALLEL batch tasks (each a handful of related areas) the team
+areas into PARALLEL batch tasks (each a handful of related areas) the team
 researches CONCURRENTLY, then a SYNTHESIS sub-objective (`depends_on` the
-batches) combines them. The synthesis is EXEMPT from the task cap, so N batches
-+ 1 synthesis is allowed — prefer this fan-out over ONE serial research task
-(one producer, no concurrency). Don't fan one-task-per-item either (web fetches
-are size-bounded — each batch covers a handful; one-per-item busts the cap AND
-duplicates sourcing). Signals: "all/each/every/top N", an enumerable list of
-areas. Unnamed set ("SOTA in X") → a cheap SCOUT enumerates first, then the
-batches build on it. More areas than fit → a bounded BATCH SET now, the rest a
-deferred PHASE. (The GATHER cousin of PARALLEL DELIVERABLES.)
+batches) combines them — prefer this fan-out over ONE serial research task (one
+producer, no concurrency). SIZE each batch to fit below a producer's compression
+trigger with headroom: a handful of items. Don't fan one-task-per-item (web
+fetches are size-bounded, so one-per-item wastes slots and duplicates sourcing),
+and don't overpack a batch (it blows the window and churns). Signals:
+"all/each/every/top N", an
+enumerable list of areas. Unnamed set ("SOTA in X") → a cheap SCOUT enumerates
+first, then the batches build on it. More areas than fit the budget → a bounded
+BATCH SET now, the rest a deferred PHASE. (The GATHER cousin of PARALLEL
+DELIVERABLES.)
 
 PARALLEL DELIVERABLES — when the goal yields N INDEPENDENT, substantial
 GENERATIVE deliverables (N stories, chapters, sections, profiles, per-item

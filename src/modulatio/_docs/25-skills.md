@@ -92,7 +92,7 @@ For the architectural deep-dive on how skills compose and dispatch, read [Skill 
 
 **Tool loadout:** none.
 
-**Contract:** hard cap of 6 tasks per sub-objective (`_PLAN_HARD_CAP`). Plans wanting more raise `_PlanError` with decompose-required framing; Leader-reflect routes to `revise-major`.
+**Contract:** task count follows the work and each task's context budget — there is no fixed task-count cap. Over-decomposition is a soft scope-discipline concern in the planning prompts; an oversized task is bounded at runtime by its context budget (compression + churn cap), and standalone verify/review goals remain hard-blocked by the engine invariant.
 
 ---
 

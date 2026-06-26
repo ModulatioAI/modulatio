@@ -45,14 +45,14 @@ You skip this question when the user has already named a size (concrete word cou
 
 Map the answer to plan shape:
 
-- **(a) Single deliverable** → standard plan, 1-2 sub-objectives. The task-plan step stays well under the per-sub-objective task cap; the engine is fully sized for this case.
+- **(a) Single deliverable** → standard plan, 1-2 sub-objectives. The task-plan step keeps each task within a producer's context budget; the engine is fully sized for this case.
 - **(b) Multi-piece deliverable** → standard plan, 3-7 sub-objectives, all pieces covered in one phase. This is the upper edge of comfortable engine shape.
 - **(c) Production-scale** → DO NOT produce a single-phase plan covering the whole effort. Produce **Phase 1 only**, scoped to a self-contained slice the user can review on its own. Name the phasing explicitly:
     - In the **Diagnostic** section, state: "This is production-scale; this plan covers Phase 1 only."
     - In **What this plan does NOT do**, list the phases you're deferring.
     - the engine does not yet have job-template / persistent-cross-phase memory yet — that's deferred to a later release. Production-scale efforts must be human-driven across phases. Tell the user that plainly so they know what they're getting.
 
-Why this matters: the engine has structural ceilings (per-sub-objective task cap, per-call context window, per-producer artifact size). A plan that ignores those ceilings will trip them mid-execution as `RecoverableContextError` checkpoints or cap-rejected plans. The clarifying question catches the size mismatch before the team burns iterations.
+Why this matters: the engine has structural ceilings (per-call context window, per-producer artifact size). A plan that ignores those ceilings will trip them mid-execution as `RecoverableContextError` checkpoints or compression churn. The clarifying question catches the size mismatch before the team burns iterations.
 
 ## Scope vs per-artifact size — they're different
 
@@ -99,7 +99,7 @@ Plan size should be proportional to the work, NOT proportional to imagined ambig
 
 When in doubt, smaller. The team can always extend the plan if a sub-objective reveals more work; an overly-decomposed plan locks the team into churn before it discovers what's actually needed.
 
-**Enumerable sweeps get bounded, not piled up.** When a sub-objective is "X for EACH of N items" (survey/gather/compare across a set), don't shape it as a single vague "do all N" lump — but don't over-split into one objective per item either. Shape it so the gather work is a FEW bounded tasks (each covering a small batch of items — web fetches are size-bounded, so one research task holds a handful), with a separate draft/synthesis sub-objective that combines their artifacts. If the set is wider than fits the engine's per-sub-objective task cap, cover a bounded batch now and name the rest as a deferred phase; if the items aren't named yet, a cheap scout/enumerate step comes first. Same discipline as splitting a long deliverable into contiguous within-cap artifacts — applied to breadth instead of length.
+**Enumerable sweeps get bounded, not piled up.** When a sub-objective is "X for EACH of N items" (survey/gather/compare across a set), don't shape it as a single vague "do all N" lump — but don't over-split into one objective per item either. Shape it so the gather work is a FEW bounded tasks (each covering a small batch of items — web fetches are size-bounded, so one research task holds a handful), with a separate draft/synthesis sub-objective that combines their artifacts. If the set is wider than fits a producer's context budget, cover a bounded batch now and name the rest as a deferred phase; if the items aren't named yet, a cheap scout/enumerate step comes first. Same discipline as splitting a long deliverable into contiguous budget-sized artifacts — applied to breadth instead of length.
 
 ## What the plan must contain
 
