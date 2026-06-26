@@ -217,6 +217,78 @@ def test_maybe_build_chat_runner_threads_disable_thinking(monkeypatch):
     assert seen["messages"][0]["content"] == "lead"
 
 
+def test_accepts_reasoning_disable_probes_litellm_per_model():
+    """The guard reflects what each provider actually accepts: Gemini/Ollama take
+    reasoning_effort='disable'; a non-reasoning model and Anthropic (low/med/high
+    only) do not — so we never send a param that would raise (drop_params off)."""
+    from modulatio.runners import _REASONING_DISABLE_CACHE, _accepts_reasoning_disable
+
+    _REASONING_DISABLE_CACHE.clear()
+    assert _accepts_reasoning_disable("gemini/gemini-2.5-flash") is True
+    assert _accepts_reasoning_disable("ollama/qwen3:32b") is True
+    assert _accepts_reasoning_disable("gpt-4o-mini") is False
+    assert _accepts_reasoning_disable("anthropic/claude-sonnet-4-5") is False
+
+
+def _completion_kwargs_capturing(monkeypatch):
+    """Mock litellm.completion to capture the kwargs it's called with."""
+    import litellm
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        litellm, "completion",
+        lambda **k: seen.update(k)
+        or _fake_chat_completion_response(content="ok", prompt_tokens=1, completion_tokens=1),
+    )
+    monkeypatch.setattr(litellm, "completion_cost", lambda **k: 0.0)
+    monkeypatch.setattr("modulatio.runners._resolve_model_call_args", lambda m: (m, {}))
+    monkeypatch.setattr("modulatio.model_presets.load_presets", lambda: {})
+    return seen
+
+
+def test_chat_runner_sends_reasoning_disable_when_provider_accepts(monkeypatch):
+    from modulatio import runners
+    from modulatio.runners import litellm_chat_runner
+
+    monkeypatch.setattr(runners, "_accepts_reasoning_disable", lambda m: True)
+    seen = _completion_kwargs_capturing(monkeypatch)
+    runner = litellm_chat_runner("gemini/gemini-2.5-flash")  # disable_thinking default True
+    runner(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert seen.get("reasoning_effort") == "disable"
+
+
+def test_chat_runner_omits_reasoning_disable_when_provider_rejects(monkeypatch):
+    from modulatio import runners
+    from modulatio.runners import litellm_chat_runner
+
+    monkeypatch.setattr(runners, "_accepts_reasoning_disable", lambda m: False)
+    seen = _completion_kwargs_capturing(monkeypatch)
+    runner = litellm_chat_runner("gpt-4o-mini")
+    runner(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert "reasoning_effort" not in seen
+
+
+def test_chat_runner_omits_reasoning_disable_when_thinking_on(monkeypatch):
+    from modulatio import runners
+    from modulatio.runners import litellm_chat_runner
+
+    monkeypatch.setattr(runners, "_accepts_reasoning_disable", lambda m: True)
+    seen = _completion_kwargs_capturing(monkeypatch)
+    runner = litellm_chat_runner("gemini/gemini-2.5-flash", disable_thinking=False)
+    runner(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert "reasoning_effort" not in seen
+
+
+def test_single_shot_runner_sends_reasoning_disable_when_accepted(monkeypatch):
+    from modulatio import runners
+    from modulatio.runners import litellm_runner
+
+    monkeypatch.setattr(runners, "_accepts_reasoning_disable", lambda m: True)
+    seen = _completion_kwargs_capturing(monkeypatch)
+    litellm_runner("gemini/gemini-2.5-flash")("do the task")  # disable_thinking default True
+    assert seen.get("reasoning_effort") == "disable"
+
+
 def _pooled_preset(env_var, pool):
     return {
         "label": "Pooled", "base_url": "https://integrate.api.nvidia.com/v1",

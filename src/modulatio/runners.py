@@ -555,6 +555,43 @@ def _default_call_timeout() -> float:
     return _DEFAULT_CALL_TIMEOUT
 
 
+_REASONING_DISABLE_CACHE: dict[str, bool] = {}
+
+
+def _accepts_reasoning_disable(model: str) -> bool:
+    """True if ``model``'s provider accepts ``reasoning_effort="disable"`` — the
+    second producer thinking-OFF mechanism, on top of the ``/no_think`` prefix.
+    litellm maps it per-provider: Gemini → thinking-budget 0, Ollama → think
+    False; o1/o3 ignore it harmlessly. False when litellm would RAISE on it
+    (non-reasoning models; Anthropic's low/medium/high-only enum) — drop_params
+    is off, so the caller must skip the param rather than crash the call. Probed
+    once per model via ``get_optional_params`` and cached."""
+    cached = _REASONING_DISABLE_CACHE.get(model)
+    if cached is not None:
+        return cached
+    import contextlib
+    import io
+
+    import litellm
+
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(model)
+    except Exception:  # noqa: BLE001 — unknown id → let get_optional_params decide
+        provider = None
+    ok = False
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            litellm.get_optional_params(
+                model=model, custom_llm_provider=provider,
+                reasoning_effort="disable",
+            )
+            ok = True
+        except Exception:  # noqa: BLE001 — provider rejects "disable" → skip it
+            ok = False
+    _REASONING_DISABLE_CACHE[model] = ok
+    return ok
+
+
 def litellm_runner(
     model: str,
     *,
@@ -805,6 +842,13 @@ def litellm_runner(
             return str(resp)
 
         # ── Chat completions path (default) ──────────────────────────
+        # Producer thinking-OFF, mechanism 2: alongside the /no_think prefix,
+        # ask the provider to disable reasoning where it can (Gemini thinking
+        # budget 0, Ollama think=False). Guarded so it's never sent to a provider
+        # that would reject it (drop_params is off). Reached only on the chat
+        # path — codex/responses/claude_cli returned above with their own control.
+        if disable_thinking and _accepts_reasoning_disable(litellm_model):
+            call_kwargs["reasoning_effort"] = "disable"
         msgs = [{"role": "user", "content": body}]
 
         try:
@@ -1707,6 +1751,14 @@ def litellm_chat_runner(
             f"endpoint declared by preset {model!r}. Tool-calling on "
             f"Responses requires separate plumbing (xAI multi-agent et al)."
         )
+
+    # Producer thinking-OFF, mechanism 2 (chat path): alongside the /no_think
+    # prefix in run(), ask the provider to disable reasoning where it can (Gemini
+    # → thinking budget 0, Ollama → think False). Guarded so it's never sent to a
+    # provider that would reject it (drop_params is off). Resolved once here on
+    # the plain-chat path — codex/claude_cli returned above with their own control.
+    if disable_thinking and _accepts_reasoning_disable(litellm_model):
+        kwargs["reasoning_effort"] = "disable"
 
     def run(
         *, messages: list[dict], tools: list[dict],
