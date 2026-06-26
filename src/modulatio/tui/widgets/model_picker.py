@@ -140,11 +140,14 @@ class ModelPicker(Vertical):
         try:
             accent, _dim, base, _err = theme_tiers(self.app)
         except Exception:
-            accent, base = "#FFC933", "#E0E0E0"
+            accent, _dim, base = "#FFC933", "#8A8A8A", "#E0E0E0"
         line = Text()
         line.append(m.id, style=base)
         if m.is_free:
             line.append("  [FREE]", style=f"bold {accent}")
+        caps = pc.capability_flags(m.id)  # r=reasoning v=vision t=tools (live)
+        if caps:
+            line.append(f"  {' '.join(caps)}", style=_dim)
         return line
 
     def on_input_changed(self, event: Input.Changed) -> None:

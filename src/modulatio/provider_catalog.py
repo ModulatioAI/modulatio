@@ -658,6 +658,42 @@ def fetch_models(
 
 # ── picker helpers: free / curated-default / search ──────────────────────────
 
+#: Compact capability letters surfaced in the live picker, each backed by one of
+#: litellm's free per-model ``supports_*`` probes. Extend the tuple to add a flag.
+_CAP_PROBES = (
+    ("r", "supports_reasoning"),
+    ("v", "supports_vision"),
+    ("t", "supports_function_calling"),
+)
+_CAP_CACHE: dict[str, str] = {}
+
+
+def capability_flags(model_id: str) -> str:
+    """Compact capability letters for a model — ``r``(easoning) / ``v``(ision) /
+    ``t``(ools) — read live from litellm's free per-model metadata. Memoized;
+    an unknown id (or a probe that raises) just contributes no letter, so this
+    never raises into the picker. litellm warns to stderr on unknown ids — keep
+    that out of the TUI."""
+    cached = _CAP_CACHE.get(model_id)
+    if cached is not None:
+        return cached
+    import contextlib
+    import io
+
+    import litellm
+
+    letters: list[str] = []
+    with contextlib.redirect_stderr(io.StringIO()):
+        for letter, probe in _CAP_PROBES:
+            try:
+                if getattr(litellm, probe)(model_id):
+                    letters.append(letter)
+            except Exception:  # noqa: BLE001 — unknown id / probe gap → no letter
+                pass
+    flags = "".join(letters)
+    _CAP_CACHE[model_id] = flags
+    return flags
+
 
 def of_modality(models: list[CatalogModel], modality: Modality) -> list[CatalogModel]:
     """Filter by modality — role assignment (leader/qc/producer) wants

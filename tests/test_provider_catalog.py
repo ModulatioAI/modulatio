@@ -505,3 +505,29 @@ def test_catalog_pick_registers_a_real_preset(tmp_path, monkeypatch):
     assert entry["base_url"] == "https://openrouter.ai/api/v1"
     assert entry["model"] == "openrouter/free"
     assert model_presets.get_preset(key) is not None
+
+
+def test_capability_flags_maps_litellm_signals(monkeypatch):
+    """Compact picker letters come straight from litellm's free supports_* probes:
+    reasoning→r, vision→v, tools(function-calling)→t."""
+    import litellm
+    pc._CAP_CACHE.clear()
+    monkeypatch.setattr(litellm, "supports_reasoning", lambda m: True)
+    monkeypatch.setattr(litellm, "supports_vision", lambda m: False)
+    monkeypatch.setattr(litellm, "supports_function_calling", lambda m: True)
+    assert pc.capability_flags("any/model") == "rt"
+
+
+def test_capability_flags_swallows_probe_errors(monkeypatch):
+    """An unknown id (probe raises) must not crash the picker — that letter is
+    simply dropped, the rest still contribute."""
+    import litellm
+    pc._CAP_CACHE.clear()
+
+    def boom(_m):
+        raise RuntimeError("unknown model id")
+
+    monkeypatch.setattr(litellm, "supports_reasoning", boom)
+    monkeypatch.setattr(litellm, "supports_vision", lambda m: True)
+    monkeypatch.setattr(litellm, "supports_function_calling", boom)
+    assert pc.capability_flags("weird/id") == "v"

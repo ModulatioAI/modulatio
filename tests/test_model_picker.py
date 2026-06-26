@@ -77,5 +77,28 @@ def test_on_loaded_populates_when_mounted():
     assert "model" in populated["status"].lower()
 
 
+def test_label_appends_capability_letters(monkeypatch):
+    """Each model is tagged with compact capability letters (r/v/t) read live
+    from litellm, next to the [FREE] marker."""
+    import modulatio.tui.widgets.model_picker as mp
+    monkeypatch.setattr(mp.pc, "capability_flags", lambda mid: "rt")
+    picker = ModelPicker(_cloud_provider())
+    label = picker._label(
+        pc.CatalogModel(id="vendor/model-a", name="A", provider_id="openrouter")
+    )
+    assert "vendor/model-a" in label.plain
+    assert "r t" in label.plain  # spaced letters; not a coincidental substring
+
+
+def test_label_omits_letters_when_no_capabilities(monkeypatch):
+    import modulatio.tui.widgets.model_picker as mp
+    monkeypatch.setattr(mp.pc, "capability_flags", lambda mid: "")
+    picker = ModelPicker(_cloud_provider())
+    label = picker._label(
+        pc.CatalogModel(id="plain/model", name="P", provider_id="openrouter")
+    )
+    assert label.plain.strip() == "plain/model"
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
