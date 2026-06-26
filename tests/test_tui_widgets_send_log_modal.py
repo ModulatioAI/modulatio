@@ -58,6 +58,36 @@ async def test_copy_for_email_copies_the_report_no_token(monkeypatch):
     assert "the body" in copied.get("text", "")
 
 
+async def test_open_schedules_a_none_returning_dismiss(monkeypatch):
+    """Regression (live crash 2026-06-25): the post-open close is deferred via a
+    timer callback that MUST return None. Textual awaits a callback's return
+    value, so a callback returning the dismiss() AwaitComplete gets it awaited in
+    the screen's own pump → ScreenError (crashed the app on the GitHub button)."""
+    monkeypatch.setattr(logstore, "compose_issue", lambda e: ("T", "B"))
+    monkeypatch.setattr(
+        bug_report, "open_issue",
+        lambda t, b: (True, "https://github.com/ModulatioAI/modulatio/issues/new"),
+    )
+    monkeypatch.setattr(logstore, "mark_sent", lambda *a, **k: None)
+
+    app = _Host()
+    async with app.run_test() as pilot:
+        modal = SendLogModal(_entry())
+        await app.push_screen(modal)
+        await pilot.pause()
+        scheduled: list = []
+        monkeypatch.setattr(
+            modal, "set_timer", lambda delay, cb, **k: scheduled.append(cb)
+        )
+        modal._report_on_github()  # browser-open success → schedules the close
+        await pilot.pause()
+        assert scheduled, "a successful open must schedule a deferred dismiss"
+        # The exact crash vector: Textual `await`s the callback's return value.
+        # It must be None, never the dismiss() AwaitComplete.
+        assert scheduled[0]() is None
+        await pilot.pause()
+
+
 async def test_headless_status_spells_out_the_exit(monkeypatch):
     """No browser: Report on GitHub falls back to copying the issue link, and the
     status spells out the email + exit so the user never feels stuck (B3)."""

@@ -105,6 +105,12 @@ class SendLogModal(ModalScreen[bool]):
             )
         self.dismiss(False)
 
+    def _dismiss_filed(self) -> None:
+        """Timer callback for the post-open close. Returns None on purpose — see
+        the note in ``_report_on_github``: a callback that returns the dismiss()
+        AwaitComplete makes Textual await it inside the screen's pump and raise."""
+        self.dismiss(True)
+
     def _set_status(self, text: str) -> None:
         # Defensive: the status Static may be gone if the modal was dismissed —
         # swallow NoMatches rather than raise.
@@ -132,7 +138,12 @@ class SendLogModal(ModalScreen[bool]):
         if opened:
             logstore.mark_sent(self._entry.path, url)
             self._set_status(f"[bold]Opened:[/] {url}")
-            self.set_timer(1.4, lambda: self.dismiss(True))
+            # Defer the close so the operator sees "Opened" first. The timer
+            # callback MUST return None: Textual `await`s a callback's return
+            # value, and a callback that returns the dismiss() AwaitComplete gets
+            # it awaited inside the screen's own pump → ScreenError. (_dismiss_filed
+            # calls dismiss and returns None, breaking that chain.)
+            self.set_timer(1.4, self._dismiss_filed)
             return
         clipboard.copy(url)
         self._set_status(
