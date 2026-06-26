@@ -401,11 +401,13 @@ def _make_dispatch_callback(*, stub: bool):
                 or defaults["leader"]
             )
             runners = {
-                # Leader reasons (deliberative seat); others thinking-OFF.
+                # Leader + planner + QC reason (judgment seats); producers thinking-OFF.
                 "leader": litellm_runner(defaults["leader"], disable_thinking=False),
-                "planner": litellm_runner(planner_model),
+                "planner": litellm_runner(planner_model, disable_thinking=False),
                 "drafter": litellm_runner(producer_model),
-                "qc": litellm_runner(defaults.get("qc") or producer_model),
+                "qc": litellm_runner(
+                    defaults.get("qc") or producer_model, disable_thinking=False
+                ),
                 # Research runs on the producer model (Brick A collapse).
                 "researcher": litellm_runner(producer_model),
             }
@@ -452,9 +454,13 @@ def _make_dispatch_callback(*, stub: bool):
                 tool_calls_dir=run_workspace / "tool_calls",
                 project_code=project_code,
             )
+            # Shared runner backs the Leader (the _resolve_chat_runner("leader")
+            # fallback) — keep thinking ON for the judgment seat. Producers get
+            # their own thinking-OFF runners below.
             chat_runner = maybe_build_chat_runner(
                 defaults.get("qc") or producer_model,
                 on_unavailable=lambda msg: logger.info(msg),
+                disable_thinking=False,
             )
             # Per-agent chat runners (tool-using producer path — the PRIMARY
             # producer channel). Without these, tool-using producers collapse

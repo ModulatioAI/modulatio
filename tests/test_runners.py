@@ -155,6 +155,68 @@ def test_litellm_chat_runner_records_usage_to_active_tracker(monkeypatch):
     assert tracker.cost_usd_used == 0.0
 
 
+def _chat_runner_capturing_messages(monkeypatch, model: str, **kw):
+    """Build a litellm_chat_runner with litellm.completion mocked to capture the
+    messages it's handed. Returns (runner, seen) where seen['messages'] is set
+    after a call."""
+    import litellm
+
+    from modulatio.runners import litellm_chat_runner
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        litellm, "completion",
+        lambda **k: seen.update(messages=k["messages"])
+        or _fake_chat_completion_response(content="ok", prompt_tokens=1, completion_tokens=1),
+    )
+    monkeypatch.setattr(litellm, "completion_cost", lambda **k: 0.0)
+    monkeypatch.setattr("modulatio.runners._resolve_model_call_args", lambda m: (m, {}))
+    monkeypatch.setattr("modulatio.model_presets.load_presets", lambda: {})
+    return litellm_chat_runner(model, **kw), seen
+
+
+def test_chat_runner_disables_thinking_by_default(monkeypatch):
+    """The tool-loop producer path defaults thinking-OFF: ``/no_think`` is
+    prefixed so reasoning-toggle models act instead of deliberate (the producer
+    context-churn fix — reasoning tokens are the unprunable bloat)."""
+    runner, seen = _chat_runner_capturing_messages(monkeypatch, "openrouter/test")
+    runner(messages=[{"role": "system", "content": "do the task"}], tools=[])
+    assert seen["messages"][0]["content"].startswith("/no_think")
+    assert "do the task" in seen["messages"][0]["content"]
+
+
+def test_chat_runner_leader_keeps_thinking_when_overridden(monkeypatch):
+    """disable_thinking=False (the Leader's reasoning seat, the override) leaves
+    the messages untouched — no ``/no_think`` prefix."""
+    runner, seen = _chat_runner_capturing_messages(
+        monkeypatch, "openrouter/test", disable_thinking=False
+    )
+    runner(messages=[{"role": "system", "content": "judge the work"}], tools=[])
+    assert seen["messages"][0]["content"] == "judge the work"
+
+
+def test_maybe_build_chat_runner_threads_disable_thinking(monkeypatch):
+    """maybe_build_chat_runner passes disable_thinking through so the CLI/daemon
+    can build the Leader's shared runner thinking-ON while producers default OFF."""
+    import litellm
+
+    from modulatio.runners import maybe_build_chat_runner
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        litellm, "completion",
+        lambda **k: seen.update(messages=k["messages"])
+        or _fake_chat_completion_response(content="ok", prompt_tokens=1, completion_tokens=1),
+    )
+    monkeypatch.setattr(litellm, "completion_cost", lambda **k: 0.0)
+    monkeypatch.setattr("modulatio.runners._resolve_model_call_args", lambda m: (m, {}))
+    monkeypatch.setattr("modulatio.model_presets.load_presets", lambda: {})
+
+    runner = maybe_build_chat_runner("openrouter/test", disable_thinking=False)
+    runner(messages=[{"role": "system", "content": "lead"}], tools=[])
+    assert seen["messages"][0]["content"] == "lead"
+
+
 def _pooled_preset(env_var, pool):
     return {
         "label": "Pooled", "base_url": "https://integrate.api.nvidia.com/v1",
@@ -540,14 +602,42 @@ def test_build_chat_runners_keys_by_agent_id_skips_model_less_and_unbuildable(mo
     ]
     monkeypatch.setattr(roster, "list_agents", lambda code: agents)
 
-    def fake_builder(model):
-        return None if model == "bad" else (lambda **kw: f"chat:{model}")
+    def fake_builder(model, **kw):
+        return None if model == "bad" else (lambda **k: f"chat:{model}")
 
     chat_runners, models = runners.build_chat_runners("X", builder=fake_builder)
 
     assert set(chat_runners) == {"a", "b"}        # keyed by agent.id
     assert models == {"a": "m1", "b": "m2"}
     assert chat_runners["a"]() == "chat:m1"
+
+
+def test_build_chat_runners_thinking_default_by_tier_and_override(monkeypatch):
+    """Tier-aware default: a producer is thinking-OFF, QC (a judgment seat) is
+    thinking-ON. A per-agent ``disable_thinking`` overrides either way."""
+    from types import SimpleNamespace
+
+    from modulatio import roster, runners
+
+    agents = [
+        SimpleNamespace(id="prod", model="m1", tier="producer", disable_thinking=None),
+        SimpleNamespace(id="qc", model="m2", tier="qc", disable_thinking=None),
+        SimpleNamespace(id="prod-reasons", model="m3", tier="producer",
+                        disable_thinking=False),
+        SimpleNamespace(id="qc-quiet", model="m4", tier="qc", disable_thinking=True),
+    ]
+    monkeypatch.setattr(roster, "list_agents", lambda code: agents)
+    seen: dict = {}
+
+    def fake_builder(model, *, disable_thinking=True):
+        seen[model] = disable_thinking
+        return lambda **k: "ok"
+
+    runners.build_chat_runners("X", builder=fake_builder)
+    assert seen["m1"] is True    # producer default → thinking-OFF
+    assert seen["m2"] is False   # qc default → thinking-ON
+    assert seen["m3"] is False   # producer override → reasons
+    assert seen["m4"] is True    # qc override → quiet
 
 
 def _local_openai_preset(**overrides):

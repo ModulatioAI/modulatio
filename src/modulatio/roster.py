@@ -90,6 +90,11 @@ class Agent(BaseModel):
     #: default for the budget_role mapped from ``tier``. ``None`` →
     #: inherit. Opt-in only.
     context_budget: int | None = None
+    #: Per-agent reasoning override for the tool-loop chat path. ``None`` →
+    #: inherit the default (thinking-OFF for producers/QC: ``/no_think`` keeps
+    #: reasoning tokens from churning context). Set ``false`` in the agent file
+    #: to let a genuinely reasoning-heavy producer deliberate. Opt-in only.
+    disable_thinking: bool | None = None
 
     @field_validator("capacity_cap")
     @classmethod
@@ -200,6 +205,19 @@ def _parse_file(path: Path) -> Agent:
     else:
         context_budget = None
 
+    dt_raw = meta.get("disable_thinking", "").strip().lower()
+    if dt_raw in ("true", "1", "yes", "on"):
+        disable_thinking: bool | None = True
+    elif dt_raw in ("false", "0", "no", "off"):
+        disable_thinking = False
+    elif dt_raw == "":
+        disable_thinking = None
+    else:
+        raise ValueError(
+            f"agent {path.stem!r}: disable_thinking must be true/false, "
+            f"got {dt_raw!r}"
+        )
+
     model = meta.get("model") or None
     model_tier = meta.get("model_tier") or None
     cost_class = meta.get("cost_class") or None
@@ -226,6 +244,7 @@ def _parse_file(path: Path) -> Agent:
         last_verified_at=meta.get("last_verified_at") or None,
         tier=meta.get("tier") or "producer",
         context_budget=context_budget,
+        disable_thinking=disable_thinking,
     )
 
 
@@ -288,6 +307,8 @@ def save(agent: Agent, project_code: str) -> Path:
         fm_lines.append(f"last_verified_at: {agent.last_verified_at}")
     if agent.context_budget is not None:
         fm_lines.append(f"context_budget: {agent.context_budget}")
+    if agent.disable_thinking is not None:
+        fm_lines.append(f"disable_thinking: {str(agent.disable_thinking).lower()}")
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + agent.identity.rstrip() + "\n"
     path.write_text(content, encoding="utf-8")
@@ -695,6 +716,7 @@ def _seed_from_team_template(
             # None → the tested per-role PIANO defaults govern; set only when
             # the user deliberately overrode it in the wizard (discouraged).
             context_budget=entry.get("context_budget"),
+            disable_thinking=entry.get("disable_thinking"),
         )
         save(agent, project_code)
         written.append(agent)

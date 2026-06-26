@@ -935,7 +935,7 @@ def _warn_if_dangling_preset(model: str, who: str) -> None:
 
 def build_chat_runners(
     project_code: str,
-    builder: Callable[[str], Callable[..., ChatResponse] | None] | None = None,
+    builder: Callable[..., Callable[..., ChatResponse] | None] | None = None,
 ) -> tuple[dict[str, Callable[..., ChatResponse]], dict[str, str]]:
     """Per-agent chat runners + their models for the TOOL-USING producer path.
 
@@ -965,7 +965,16 @@ def build_chat_runners(
         if not agent.model:
             continue
         _warn_if_dangling_preset(agent.model, _agent_label(agent))
-        runner = build(agent.model)
+        # Judgment layers reason; producers act. A producer defaults thinking-OFF
+        # (reasoning tokens are the unprunable tool-loop churn); QC — a judgment
+        # seat that verdicts + reasons about quality — defaults thinking-ON. A
+        # per-agent ``disable_thinking`` in the agent file overrides either way.
+        override = getattr(agent, "disable_thinking", None)
+        disable_thinking = (
+            override if override is not None
+            else getattr(agent, "tier", "producer") == "producer"
+        )
+        runner = build(agent.model, disable_thinking=disable_thinking)
         if runner is not None:
             chat_runners[agent.id] = runner
             chat_runner_models[agent.id] = agent.model
@@ -1627,12 +1636,25 @@ def _build_claude_cli_chat_runner(
     return run
 
 
+def _prepend_no_think(messages: list[dict]) -> list[dict]:
+    """Return a copy of ``messages`` with ``/no_think`` prefixed to the first
+    message's text content — the chat-path analog of ``litellm_runner``'s
+    single-shot prefix. Reasoning-toggle models (Qwen-class) honor it and skip
+    the inner monologue; others read it as inert text. No-op (returns the input)
+    when the first message has no string content (nothing to prefix)."""
+    if not messages or not isinstance(messages[0].get("content"), str):
+        return messages
+    first = {**messages[0], "content": f"/no_think\n\n{messages[0]['content']}"}
+    return [first, *messages[1:]]
+
+
 def litellm_chat_runner(
     model: str,
     *,
     timeout: float = 1800.0,
     api_base: str | None = None,
     api_key: str | None = None,
+    disable_thinking: bool = True,
 ) -> Callable[..., ChatResponse]:
     """Build a ChatRunner backed by LiteLLM's chat completions with tools.
 
@@ -1692,6 +1714,12 @@ def litellm_chat_runner(
     ) -> ChatResponse:
         from litellm import completion
         from litellm.exceptions import AuthenticationError, RateLimitError
+
+        # Thinking-OFF default for the tool-loop (producers/QC): prefix /no_think
+        # so reasoning tokens don't accumulate as unprunable context. The Leader's
+        # seat overrides with disable_thinking=False (built that way in cli/daemon).
+        if disable_thinking:
+            messages = _prepend_no_think(messages)
 
         def _call(api_key_override: str | None = None):
             ck = dict(kwargs)
@@ -1795,6 +1823,7 @@ def maybe_build_chat_runner(
     model: str | None,
     *,
     on_unavailable: Callable[[str], None] | None = None,
+    disable_thinking: bool = True,
 ) -> Callable[..., ChatResponse] | None:
     """Try to build a ``litellm_chat_runner`` for ``model``. Returns the
     runner on success, ``None`` on any handled failure (model is None /
@@ -1817,7 +1846,7 @@ def maybe_build_chat_runner(
             )
         return None
     try:
-        return litellm_chat_runner(model)
+        return litellm_chat_runner(model, disable_thinking=disable_thinking)
     except NotImplementedError as exc:
         if on_unavailable is not None:
             on_unavailable(

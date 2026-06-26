@@ -300,15 +300,17 @@ def _build_runners(
         return default_generic_stub_runners()
 
     planner = planner_model or coordinator_model or leader_model
-    # #150/model-recs: the Leader is the one DELIBERATIVE seat — it must be
-    # allowed to reason. All other roles keep the thinking-OFF default
-    # (/no_think prefix) since producers + QC + the tactical planner want to
-    # act, not deliberate (the documented reasoning-vs-agentic split).
+    # #150/model-recs: the DELIBERATIVE/judgment seats reason — the Leader (plan
+    # + verify), the planner (the Leader's task-planning utility; planning is the
+    # Leader's job, defaults to leader_model), and QC (verdicts + reasons about
+    # quality and fit). Only the producers (drafter + research) keep the
+    # thinking-OFF default (/no_think prefix): they act, not deliberate (the
+    # reasoning-vs-agentic split).
     return {
         "leader": litellm_runner(leader_model, disable_thinking=False),
-        "planner": litellm_runner(planner),
+        "planner": litellm_runner(planner, disable_thinking=False),
         "drafter": litellm_runner(producer_model),
-        "qc": litellm_runner(qc_model or producer_model),
+        "qc": litellm_runner(qc_model or producer_model, disable_thinking=False),
         # Research runner-role, bound to the producer model — no separate
         # researcher model (research is producer work; Brick A collapse).
         "researcher": litellm_runner(producer_model),
@@ -582,13 +584,20 @@ def kickoff(
             tool_calls_dir=run_workspace / "tool_calls",
             project_code=code,
         )
+        # This shared runner backs the Leader (the _resolve_chat_runner("leader")
+        # fallback — the Leader isn't a dispatched agent), so it keeps thinking ON:
+        # converse + verify are judgment seats that reason. Producers get their own
+        # thinking-OFF runners below.
         chat_runner = maybe_build_chat_runner(
             qc_model or producer_model,
             on_unavailable=lambda msg: typer.echo(f"  (info) {msg}"),
+            disable_thinking=False,
         )
         # Per-agent chat runners (the tool-using producer path — the PRIMARY
         # producer channel). Without these, tool-using producers collapse onto
         # the single chat model above regardless of which agent dispatch picked.
+        # These default thinking-OFF (maybe_build_chat_runner's default) — producers
+        # act, they don't deliberate; reasoning tokens are the unprunable churn.
         chat_runners, chat_runner_models = build_chat_runners(code)
 
     typer.echo(f"Kicking off {code} — {objective}")

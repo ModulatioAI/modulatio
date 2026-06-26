@@ -182,6 +182,24 @@ def test_agent_tier_round_trip_through_save_load(project_vault):
     assert loaded.tier == "qc"
 
 
+def test_agent_disable_thinking_override_round_trips(project_vault):
+    """The per-agent reasoning override persists: ``false`` (a reasoning-heavy
+    producer that should deliberate) round-trips, and an unset agent stays None
+    (inherit the thinking-OFF default) with no frontmatter line written."""
+    roster.save(
+        roster.Agent(id="deep", name="Deep", model="m", disable_thinking=False),
+        project_code=PROJECT_CODE,
+    )
+    assert roster.load("deep", project_code=PROJECT_CODE).disable_thinking is False
+
+    path = roster.save(
+        roster.Agent(id="plain", name="Plain", model="m"),
+        project_code=PROJECT_CODE,
+    )
+    assert "disable_thinking" not in path.read_text()
+    assert roster.load("plain", project_code=PROJECT_CODE).disable_thinking is None
+
+
 def test_agent_covers_required_skills_all_or_nothing():
     """The dispatch predicate: agent covers the task when it holds every
     skill the task requires. Missing any single required skill → not a
