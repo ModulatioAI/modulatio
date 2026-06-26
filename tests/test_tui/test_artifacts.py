@@ -218,9 +218,45 @@ async def test_export_error_surfaces_in_dialog(tui_vault_with_artifacts):
 
         status = app.query_one("#export-status")
         rendered = str(status.render()).lower()
+        # A FAILED export keeps the panel open so the error stays readable +
+        # the user can adjust and retry (only success auto-closes).
+        assert not app.query_one("#artifacts-export-panel").has_class("hidden")
 
     assert "pandoc" in rendered
     assert "available" in rendered or "install" in rendered
+
+
+async def test_successful_export_auto_closes_the_panel(tui_vault_with_artifacts):
+    """After a successful export the panel auto-closes — no manual Cancel needed
+    (the live 0.9.8.5 UX bug: the user was stranded in the export menu)."""
+    from textual.widgets import Input, ListView, TabbedContent
+
+    from modulatio.export import ExportResult
+    from modulatio.tui.app import ModulatioApp
+
+    def _ok_export(source, dest, format):
+        return ExportResult(source=source, dest=dest, format=format, error=None)
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        app.query_one("#artifacts-list", ListView).index = 0
+        await pilot.pause()
+        await pilot.click("#artifacts-export-btn")
+        await pilot.pause()
+        assert not app.query_one("#artifacts-export-panel").has_class("hidden")
+        app.query_one("#export-dest-path", Input).value = "/tmp/out.docx"
+        await pilot.pause()
+        with patch(
+            "modulatio.tui.widgets.export_dialog.export_artifact",
+            side_effect=_ok_export,
+        ):
+            await pilot.click("#export-confirm-btn")
+            await pilot.pause()
+        # success → the panel closed itself
+        assert app.query_one("#artifacts-export-panel").has_class("hidden")
 
 
 async def test_cancel_button_hides_panel(tui_vault_with_artifacts):

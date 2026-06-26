@@ -247,7 +247,13 @@ class ArtifactsScreen(Vertical):
         elif event.button.id == "export-cancel-btn":
             panel.add_class("hidden")
         elif event.button.id == "export-confirm-btn":
-            panel.run_export()
+            result = panel.run_export()
+            # A successful export closes the panel — no manual Cancel needed. A
+            # failure (None, or a result carrying .error) keeps it open so the
+            # error stays visible and the user can adjust + retry.
+            if result is not None and not result.error:
+                self.notify(f"Exported to {result.dest}")
+                panel.add_class("hidden")
         elif event.button.id == "export-browse-btn":
             self._open_folder_picker(panel)
 
