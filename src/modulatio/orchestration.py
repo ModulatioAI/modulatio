@@ -4218,6 +4218,10 @@ class Orchestrator:
         # (MVP-default "drafter"; a crypto harness would pass "analyst",
         # a software shop "engineer", etc — Modulatio is output-agnostic).
         producer_role = self.default_producer_role
+        # The producer runbook rides at the HEAD of the task prompt — the
+        # always-on bar-commit spine, the same on the single-shot and tool-loop
+        # producer paths.
+        prompt = self._with_producer_runbook(prompt)
         # (Assembler tasks with resolvable units never reach here — they're bound
         # by the engine at the top of this method, before the mode dispatch.)
         raw_response = self._run_agent_call(
@@ -5107,6 +5111,18 @@ class Orchestrator:
         # via the leader-runbook seed/override, engine default otherwise.
         runbook = self._prompt("leader-runbook", _LEADER_RUNBOOK)
         return runbook.rstrip() + "\n\n---\n\n" + formatted + self._autonomy_block()
+
+    def _with_producer_runbook(self, prompt: str) -> str:
+        """Prepend the producer runbook (the always-on bar-commit spine) to a
+        producer's task prompt — the producer analog of the leader-runbook
+        injection at converse. The generic discipline rides EVERY producer task;
+        the craft for the artifact kind stays in the task's skill + standards
+        (no duplication). Overridable via the producer-runbook seed/override,
+        engine default otherwise. This is what makes a thinking-OFF producer a
+        rigorous one — the procedural scaffold reasoning would otherwise supply,
+        at fixed prompt cost instead of churning context with reasoning tokens."""
+        runbook = self._prompt("producer-runbook", _PRODUCER_RUNBOOK)
+        return runbook.rstrip() + "\n\n---\n\n" + prompt
 
     def _autonomy_block(self) -> str:
         """§2.4 — the judgment-posture framing for the active mode, injected at the
@@ -6064,6 +6080,9 @@ class Orchestrator:
                 f"{skill.prompt_template.strip()}\n\n"
                 f"## Task\n\n{prompt}"
             )
+        # The producer runbook rides at the very HEAD — read first, every time —
+        # ahead of the skill guidance and the task (the always-on bar-commit spine).
+        prompt = self._with_producer_runbook(prompt)
 
         artifacts_root = self._artifacts_root()
         transcript_path = artifacts_root / "tool_calls" / f"{task.id.lower()}.jsonl"
@@ -13098,6 +13117,47 @@ You are working on your own here — no QC behind you, no team to catch a miss.
 The discipline IS the safety net. When "done" isn't obvious, slow down and
 commit the bar before you touch anything. For deeper method on any operation,
 load the matching skill from the library.
+"""
+
+
+# Fallback for the producer-runbook seed — a producer's always-on working
+# discipline, injected at the HEAD of every producer task (see
+# _with_producer_runbook). The generic bar-commit spine lives here ONCE; the
+# craft for a given artifact kind lives in the task's skill + standards. Source
+# of truth is _seed_skills/producer-runbook.md; this is the fresh-clone / test
+# fallback. Keep the two in sync.
+_PRODUCER_RUNBOOK = """\
+# Your runbook — read this first, every time
+
+You are producing an artifact someone will rely on. Before you make anything, in
+one beat: NAME THE OPERATION, then commit the RIGHT definition of "done" for it.
+Almost every avoidable miss is a bar-mismatch — clearing the wrong bar: "it's
+written" vs "it works", "it looks complete" vs "every part the task asked for is
+actually there", "I remember this" vs "the source actually says it".
+
+Every task, ask yourself:
+- What operation is this really? (produce / extend / fix / revise / assemble) —
+  am I sure, or did I pattern-match the surface?
+- What is the TRUE bar — and am I about to check the wrong thing? Did I exercise
+  it, or only write it? Is every required part present? Does each claim trace to
+  real evidence?
+- Am I grounding in reality before I produce? Read the real material — the source,
+  the standard, a sibling artifact — never produce from memory or assumption.
+- Am I reporting observed truth, or what I expect to be true? Re-read the artifact
+  against the bar and check the real state before I hand it off.
+
+Cross-cutting reflexes: orient before acting · observe, don't assume · ground in
+the real material · pragmatic over pretty (the thing that holds up) · distrust
+"looks done", verify "is done".
+
+The depth for THIS operation and the craft for THIS kind of artifact live in your
+task's skill + the standards file — load and follow them. This runbook is the
+spine they hang on.
+
+QC holds your work to the standard. The way to clear it on the FIRST pass —
+instead of after a rejection — is to commit the real bar up front and verify
+against it before you call it done. A plausible-looking artifact that was never
+checked is exactly the failure QC exists to catch; beat it to the check.
 """
 
 

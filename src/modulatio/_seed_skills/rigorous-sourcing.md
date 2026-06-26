@@ -16,12 +16,10 @@ check. Fetch with `http_get`, cite what the page actually said, and be honest
 about what you couldn't confirm. QC holds the work to the research standard — this
 is how you clear it on the FIRST pass instead of after three rejections.
 
-## First — name the operation, then commit the bar
+## The bar, by operation — for sourcing
 
-Before you assert anything, in one beat: **name the operation** — gather, compare,
-synthesize, or update — and commit to **the bar** it has to clear. Then work to
-*that* bar, not a looser one. The avoidable miss here is always the same shape: a
-confident claim the sources don't actually support.
+Your runbook named the operation and committed its bar; here is what that bar
+means for fact-bearing work, per operation:
 
 - **Gather / survey** → the bar is *every load-bearing fact traces to a real
   source you fetched this run.* Pull primary/authoritative material first; breadth
@@ -35,13 +33,12 @@ confident claim the sources don't actually support.
   can fetch, and ≥2 independent credible ones for any contested or fast-moving
   claim.
 
-The reflex that rides every operation: **verify by observed reality, not by what
-you'd expect to be true.** A citation is valid only if it points at a page YOU
-ACTUALLY FETCHED this run and that page actually says what you claim. The source
-you "know" exists, the statistic that "sounds about right," the quote you
-half-remember — those are *reported status*, not evidence. Re-read your fetched
-results before you write the citation, the same way you'd re-run code before
-calling it done.
+For sourcing, "verify by observed reality" is literal: a citation is valid only
+if it points at a page YOU ACTUALLY FETCHED this run and that page actually says
+what you claim. The source you "know" exists, the statistic that "sounds about
+right," the quote you half-remember — those are *reported status*, not evidence.
+Re-read your fetched results before you write the citation, the same way you'd
+re-run code before calling it done.
 
 ## Dates come from the world, not from your memory
 

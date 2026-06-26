@@ -46,6 +46,7 @@ _RAW_PAIRS = [
     ("leader", orchestration._LEADER_DECOMPOSE_PROMPT),
     ("leader-converse", orchestration._LEADER_CONVERSE_PROMPT),
     ("leader-runbook", orchestration._LEADER_RUNBOOK),
+    ("producer-runbook", orchestration._PRODUCER_RUNBOOK),
     ("leader-verify", orchestration._LEADER_VERIFY_PROMPT),
     ("qc", orchestration._QC_REVIEW_PROMPT),
     ("researcher", orchestration._RESEARCHER_FETCH_PROMPT),

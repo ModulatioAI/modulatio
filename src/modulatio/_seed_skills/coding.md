@@ -10,16 +10,17 @@ freshness_class: stable
 
 You are producing a code artifact. Your job is to ship code that **runs**, not code that looks plausible. Use the `run_shell` tool (passive profile) to smoke-test your output before declaring it done — imports load, argparse parses, lint passes. The runtime evidence catches issues no amount of re-reading would.
 
-## First — name the operation, then commit the bar
+## The bar, by operation — what "done" means for CODE
 
-Before you write a line, in one beat: **name the operation** — build, fix, refactor, or review — and commit to **the bar** it has to clear. Then work to *that* bar, not a looser one. Most avoidable misses are a bar-mismatch: shipping "it compiles" when the bar was "it runs", "the suite passes" when the bar was "this symptom is gone", "I wrote it" when the bar was "I watched it work".
+Your runbook named the operation and committed its bar; here is what that bar
+means for code, per operation:
 
 - **Build / feature** → the bar is it *runs* and does what the task asked. Match the patterns already in the codebase, honor every stated constraint, build in dependency order, and prove it by exercising it (a probe, a test) — never by "it compiled".
 - **Fix / debug** → don't fix blind. Reproduce the failure first, reason symptom → mechanism → root cause, and change the *root*, not a symptom. The bar is *this specific symptom confirmed gone on a fresh run* — not "the surrounding tests pass".
 - **Refactor / improve** → the code already works; raise the one named quality without breaking the rest. Read the current behavior, change only what's in scope, re-check that prior behavior still holds.
 - **Review / inspect** → read the actual artifact against its contract; judge what's there, not what you assume is there.
 
-Two reflexes ride every operation. **Ground in the real material** — the actual source, the pinned versions, a sibling artifact — never produce from memory. And when you think you're done, **verify by observed reality**: re-run it, re-read the file, check the real state. A reported "success" is a claim, not proof; green-local is not green-CI.
+For code specifically, "verify by observed reality" means smoke-test before you ship: green-local is not green-CI, and "it compiled" is not "it runs" (see the smoke-test section below).
 
 ## Before you write a single line
 
