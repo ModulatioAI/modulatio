@@ -206,6 +206,12 @@ class RunSummary:
     #: human-facing markdown report lives here and is linked from the
     #: sign-off ticket.
     goal_reports: list[Path] = field(default_factory=list)
+    #: The Leader's final per-goal verdict, recorded so the run's SIGN-OFF is
+    #: surfaceable (the TUI shows the actual verdict + a Product Quality Report
+    #: digest, not just a stats line). Each item: {goal_id, verdict, report_body}.
+    #: Recorded with the FINAL effective verdict (after the clamp), so a redone
+    #: goal's last entry per goal_id is its settled verdict.
+    verdicts: list[dict] = field(default_factory=list)
     #: QC-as-fixer Slice 3: task ids whose artifact was QC-AUTHORED as a
     #: last-resort rescue (producer exhausted attempts). CONTROLLED
     #: DEGRADATION — these completed WITHOUT independent producer/QC
@@ -9726,6 +9732,14 @@ class Orchestrator:
                 f"{len(goal_spec_issues)} declared-spec (HARD) violation(s) measured"
             )
             verdict = "disappointed"
+
+        # Record the FINAL effective verdict (post-clamp) so the run's sign-off
+        # is surfaceable — the TUI shows the actual verdict + a PQR digest instead
+        # of a bare stats line. A redone goal re-enters here and appends again, so
+        # the last entry per goal_id is its settled verdict (the consumer dedups).
+        summary.verdicts.append(
+            {"goal_id": goal.id, "verdict": verdict, "report_body": report_body}
+        )
 
         # Reservations are ADVISORY — gather them for the human-facing
         # Product Quality Report (2026-05-30). They never fail a goal, loop

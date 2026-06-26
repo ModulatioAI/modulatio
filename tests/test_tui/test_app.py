@@ -195,3 +195,34 @@ async def test_empty_objective_does_not_run_kickoff(tui_vault):
     assert "goal" not in app.last_summary_text.lower()
     # But some feedback text surfaced.
     assert app.last_summary_text
+
+
+def test_format_verdict_signoff_surfaces_verdict_and_digest():
+    """The sign-off must show the Leader's ACTUAL verdict + a PQR digest — the
+    fix for "run completed but no leader sign-off" (the verdict was on disk but
+    the stream showed only a stats line)."""
+    from modulatio.tui.app import ModulatioApp
+
+    out = ModulatioApp._format_verdict_signoff([
+        {"goal_id": "P-G-001", "verdict": "on_the_fence",
+         "report_body": "The deliverable is solid and ships.\n\nmore detail"},
+    ])
+    assert "on the fence" in out  # underscore rendered readable
+    assert "P-G-001" in out
+    assert "The deliverable is solid and ships." in out  # first paragraph digest
+    assert "more detail" not in out  # only the first paragraph
+    assert "Reports tab" in out
+
+
+def test_format_verdict_signoff_dedups_to_last_per_goal_and_empty():
+    """A redone goal appends more than once → only its LAST (settled) verdict
+    shows. No verdicts → empty string (nothing appended to the message)."""
+    from modulatio.tui.app import ModulatioApp
+
+    assert ModulatioApp._format_verdict_signoff([]) == ""
+    out = ModulatioApp._format_verdict_signoff([
+        {"goal_id": "G1", "verdict": "disappointed", "report_body": "first try"},
+        {"goal_id": "G1", "verdict": "satisfied", "report_body": "redone, good now"},
+    ])
+    assert "satisfied" in out and "redone, good now" in out
+    assert "disappointed" not in out and "first try" not in out

@@ -469,6 +469,50 @@ def test_leader_verify_report_rides_outside_the_verdict_json(project: Project, t
     )
 
 
+def test_leader_verify_records_verdict_on_summary(project: Project, tmp_path: Path):
+    """The leader sign-off must be SURFACEABLE: ``_leader_verify_goal`` records the
+    final verdict + report body onto ``summary.verdicts`` so the TUI can show the
+    actual verdict (not just a stats line). The PQR exists on disk but the
+    conversational sign-off had nothing to render — this is the data feed for it."""
+    artifacts_root = tmp_path / PROJECT_CODE.lower() / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    (artifacts_root / "doc.md").write_text("# Doc\n\nbody\n")
+
+    goal = Goal(
+        id="LVA-G-VERD", project_id=project.id, description="d",
+        success_criteria="c", status=GoalStatus.IN_PROGRESS,
+    )
+    store.save_goal(project.code, goal)
+    task = Task(
+        id="LVA-T-VERD", project_id=project.id, goal_id=goal.id,
+        description="t", output_path="doc.md", status=TaskStatus.COMPLETED,
+    )
+    store.save_task(project.code, task)
+
+    def _leader(prompt: str) -> str:
+        return (
+            "```json\n"
+            + json.dumps({"verdict": "on_the_fence", "rationale": "ships with reservations",
+                          "recommendations": []})
+            + "\n```\n\n## Product Quality Report\n\n"
+            + "The deliverable is solid and ships."
+        )
+
+    runners = {
+        "leader": _leader, "planner": lambda p: "```json\n[]\n```",
+        "drafter": lambda p: "", "qc": lambda p: "",
+    }
+    orch = Orchestrator(project, runners)
+    summary = RunSummary(project=project)
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert summary.verdicts, "the verdict must be recorded on the summary for surfacing"
+    v = summary.verdicts[-1]
+    assert v["goal_id"] == "LVA-G-VERD"
+    assert v["verdict"] == "on_the_fence"
+    assert "ships" in v["report_body"]
+
+
 def _disappointed_orch(project: Project):
     """Orchestrator whose Leader always returns a 'disappointed' verdict."""
     calls: list[str] = []

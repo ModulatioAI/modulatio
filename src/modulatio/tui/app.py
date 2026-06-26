@@ -538,6 +538,10 @@ class ModulatioApp(App):
             "errors": len(summary.errors),
             "blocked_tasks": blocked_tasks,
             "incomplete_goals": incomplete_goals,
+            # The Leader's per-goal verdicts so the sign-off shows his ACTUAL
+            # verdict + PQR digest, not just a stats line (last entry per goal_id
+            # wins — a redone goal appends its settled verdict last).
+            "verdicts": list(summary.verdicts),
         }
 
     def _update_kickoff_progress(self) -> None:
@@ -705,7 +709,34 @@ class ModulatioApp(App):
                 f"{delivered} deliverable(s). Deliverables are in. Ask me anything "
                 "about it."
             )
+        # The actual SIGN-OFF: surface the Leader's per-goal verdict + a digest of
+        # his Product Quality Report. Without this the stream showed only the stats
+        # line above and the real verdict (on disk in reports/) was invisible.
+        msg += self._format_verdict_signoff(result.get("verdicts") or [])
         tv.add_leader_message(msg)
+
+    @staticmethod
+    def _format_verdict_signoff(verdicts: list[dict]) -> str:
+        """Render the Leader's per-goal verdict(s) + a short PQR digest for the
+        sign-off message. Dedups to the LAST verdict per goal (a redone goal
+        appends more than once). Empty string when there are no verdicts."""
+        if not verdicts:
+            return ""
+        by_goal: dict = {}
+        for v in verdicts:
+            by_goal[v.get("goal_id")] = v  # last wins
+        lines = []
+        for v in by_goal.values():
+            digest = (v.get("report_body") or "").strip().split("\n\n")[0].strip()
+            if len(digest) > 280:
+                digest = digest[:280].rstrip() + "…"
+            verdict = str(v.get("verdict") or "?")
+            head = f"• {v.get('goal_id')} — {verdict.replace('_', ' ')}"
+            lines.append(f"{head}: {digest}" if digest else head)
+        return (
+            "\n\nMy sign-off:\n" + "\n".join(lines)
+            + "\n\nFull Product Quality Report is in the Reports tab."
+        )
 
     def _build_real_runners(self) -> dict | None:
         """Build the {role: runner} dict for real-model dispatch.
