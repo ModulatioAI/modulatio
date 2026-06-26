@@ -1198,6 +1198,14 @@ INTERRUPTED_REPLY = "(Stopped — I halted what I was doing at your interrupt. W
 #: Back-compat alias (the sentinel was private through 0.9.5).
 _INTERRUPTED_REPLY = INTERRUPTED_REPLY
 
+#: Read-only, side-effect-free builtins whose result for the SAME args is stable
+#: within one producer attempt — so a re-fetch is pure waste (and a thrash signal,
+#: e.g. a thinking-OFF producer that lost track and re-pulls the same source). The
+#: tool-loop caches these per attempt: a repeat returns the prior result with a
+#: "you already fetched this" nudge instead of re-hitting the network. NOT for
+#: effectful tools (run_shell, write_artifact) — those must run each time.
+_IDEMPOTENT_TOOLS = frozenset({"http_get", "web_search"})
+
 
 def run_llm_with_tools(
     *,
@@ -1312,6 +1320,10 @@ def run_llm_with_tools(
     # structurally by the authorizer (``idempotent_reuse``) — reuses the prior
     # result instead of re-invoking (and re-paying) the provider.
     metered_result_cache: dict[tuple[str, str], str] = {}
+    # Per-attempt idempotent cache for read-only builtins (_IDEMPOTENT_TOOLS):
+    # a repeat call with identical args reuses the prior result + a nudge, so a
+    # producer can't thrash the network re-fetching the same URL/query.
+    idempotent_result_cache: dict[tuple[str, str], str] = {}
 
     for iteration in range(max_iters):
         # Operator interrupt (ESC in the TUI): the orchestrator's abort_event is
@@ -1463,6 +1475,27 @@ def run_llm_with_tools(
                                 metered_result_cache[cache_key] = result
                             except Exception as exc:
                                 result = f"ERROR: {type(exc).__name__}: {exc}"
+            elif call.name in _IDEMPOTENT_TOOLS:
+                cache_key = (
+                    call.name,
+                    json.dumps(call.args, sort_keys=True, default=str),
+                )
+                if cache_key in idempotent_result_cache:
+                    # Re-fetch of the SAME call this attempt — pure waste and a
+                    # thrash signal. Reuse the prior result AND tell the model it
+                    # already has this, to break the loop without re-hitting the
+                    # network.
+                    result = (
+                        "[already fetched this exact call earlier in this task — "
+                        "reusing the prior result; you have this content, do not "
+                        "fetch it again]\n\n" + idempotent_result_cache[cache_key]
+                    )
+                else:
+                    try:
+                        result = str(tool.call(**call.args))
+                        idempotent_result_cache[cache_key] = result
+                    except Exception as exc:
+                        result = f"ERROR: {type(exc).__name__}: {exc}"
             else:
                 try:
                     result = str(tool.call(**call.args))

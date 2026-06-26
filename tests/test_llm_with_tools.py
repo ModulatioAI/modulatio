@@ -141,6 +141,84 @@ def test_loop_executes_tool_then_continues_to_final(monkeypatch):
     assert tool_msgs[0]["tool_call_id"] == "c1"
 
 
+def test_idempotent_tool_refetch_is_cached_and_nudges():
+    """A producer that re-fetches the SAME http_get this attempt gets the cached
+    body + a 'you already fetched this' nudge — the network runs ONCE and the
+    loop-breaking signal reaches the model (the live deepseek-thrash fix)."""
+    calls: list[str] = []
+
+    def fake_get(url, timeout=10.0):
+        calls.append(url)
+        return f"BODY for {url}"
+
+    registry = {"http_get": tools.Tool(name="http_get", description="GET", call=fake_get)}
+    scripted = [
+        ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c1", name="http_get", args={"url": "http://x.test"}),)),
+        ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c2", name="http_get", args={"url": "http://x.test"}),)),
+        ChatResponse(content="done", tool_calls=()),
+    ]
+    runner = runners.stub_chat_runner(scripted)
+    out = runners.run_llm_with_tools(
+        chat_runner=runner, prompt="fetch it", tool_loadout=("http_get",),
+        tool_registry=registry, max_iters=5,
+    )
+    assert out == "done"
+    assert calls == ["http://x.test"]  # network fetch ran ONCE despite two calls
+    tool_msgs = [m for m in runner.calls[2]["messages"] if m.get("role") == "tool"]
+    assert any("already fetched this exact call" in m["content"] for m in tool_msgs)
+    assert any("BODY for http://x.test" in m["content"] for m in tool_msgs)
+
+
+def test_idempotent_cache_keys_on_args_no_false_reuse():
+    """Different URLs each fetch — the cache keys on args, never a false hit."""
+    calls: list[str] = []
+
+    def fake_get(url, timeout=10.0):
+        calls.append(url)
+        return f"BODY {url}"
+
+    registry = {"http_get": tools.Tool(name="http_get", description="GET", call=fake_get)}
+    scripted = [
+        ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c1", name="http_get", args={"url": "http://a.test"}),)),
+        ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c2", name="http_get", args={"url": "http://b.test"}),)),
+        ChatResponse(content="done", tool_calls=()),
+    ]
+    runner = runners.stub_chat_runner(scripted)
+    runners.run_llm_with_tools(
+        chat_runner=runner, prompt="x", tool_loadout=("http_get",),
+        tool_registry=registry, max_iters=5,
+    )
+    assert calls == ["http://a.test", "http://b.test"]
+
+
+def test_effectful_tool_is_never_cached():
+    """run_shell is effectful — it MUST run every time, never reuse a result."""
+    calls: list[str] = []
+
+    def fake_shell(cmd, **k):
+        calls.append(cmd)
+        return "ok"
+
+    registry = {"run_shell": tools.Tool(name="run_shell", description="shell", call=fake_shell)}
+    scripted = [
+        ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c1", name="run_shell", args={"cmd": "ls"}),)),
+        ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c2", name="run_shell", args={"cmd": "ls"}),)),
+        ChatResponse(content="done", tool_calls=()),
+    ]
+    runner = runners.stub_chat_runner(scripted)
+    runners.run_llm_with_tools(
+        chat_runner=runner, prompt="x", tool_loadout=("run_shell",),
+        tool_registry=registry, max_iters=5,
+    )
+    assert calls == ["ls", "ls"]  # ran twice — not cached
+
+
 def test_loop_processes_multiple_tool_calls_in_one_response():
     """A single response can have N tool_calls (model batches). Loop
     executes ALL of them serially, appends N tool messages, then the
