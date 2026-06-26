@@ -103,7 +103,10 @@ confirm, the absence of a plagiarism scan, a claim worth double-checking
 goal, loop the swarm, edit the work, or block the run; they ride out in
 the human-addressed **Product Quality Report** beside the delivered work.
 
-Respond with a fenced ```json ... ``` block with exactly these keys:
+Respond in TWO parts, in this order:
+
+1. A fenced ```json ... ``` block with exactly these keys. Keep every value
+   SHORT (one or two sentences) so the JSON always parses cleanly:
 
     {{
       "verdict": "satisfied" | "on_the_fence" | "disappointed",
@@ -111,11 +114,18 @@ Respond with a fenced ```json ... ``` block with exactly these keys:
       "recommendations": [
         {{"concern": "<what you don't fully trust / couldn't verify>",
           "suggestion": "<the specific check you'd advise the human to run>"}}
-      ],
-      "report_body": "<your human-facing assessment of the finished product, 150-400 words>"
+      ]
     }}
 
-"recommendations" may be empty []. report_body and recommendations are
-the Leader's contribution to the **Product Quality Report** that ships to
-the human beside the deliverables — be specific about what was delivered,
-what you stand behind, and what you'd have the human double-check.
+2. AFTER the closing ``` of that JSON block, a Markdown section headed exactly:
+
+    ## Product Quality Report
+
+   followed by your 150-400 word human-facing assessment of the finished
+   product, as plain Markdown prose. Do NOT put this long text inside the JSON
+   — keeping it OUT of the JSON is what guarantees the verdict always parses.
+
+"recommendations" may be empty []. The Product Quality Report and the
+recommendations are the Leader's contribution to the report that ships to the
+human beside the deliverables — be specific about what was delivered, what you
+stand behind, and what you'd have the human double-check.

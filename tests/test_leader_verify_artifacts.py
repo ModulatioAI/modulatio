@@ -378,6 +378,97 @@ def test_leader_verify_retries_an_unparseable_verdict(project: Project, tmp_path
     assert goal.status == GoalStatus.COMPLETED
 
 
+def test_split_leader_report_body_extracts_section_after_header():
+    """De-fragilize helper: the human report rides as a ``## Product Quality
+    Report`` section after the verdict JSON; the helper returns the prose that
+    follows that header."""
+    from modulatio.orchestration import _split_leader_report_body
+
+    raw = (
+        '```json\n{"verdict": "satisfied"}\n```\n\n'
+        "## Product Quality Report\n\n"
+        "The team delivered a solid guide. It covers X, Y, Z.\n"
+    )
+    assert _split_leader_report_body(raw) == (
+        "The team delivered a solid guide. It covers X, Y, Z."
+    )
+
+
+def test_split_leader_report_body_tolerates_bold_and_alt_heading():
+    """Match the section whether the Leader headed it ``##``, ``#``, or **bold**."""
+    from modulatio.orchestration import _split_leader_report_body
+
+    assert _split_leader_report_body("**Product Quality Report**\nbody here") == "body here"
+    assert _split_leader_report_body("# Product Quality Report\nbody here") == "body here"
+
+
+def test_split_leader_report_body_missing_or_inline_mention_returns_empty():
+    """No header → empty. An INLINE mention (not a heading line) must NOT be
+    mistaken for the section start."""
+    from modulatio.orchestration import _split_leader_report_body
+
+    assert _split_leader_report_body("") == ""
+    assert _split_leader_report_body("no header at all") == ""
+    assert _split_leader_report_body(
+        "See the Product Quality Report below for details."
+    ) == ""
+
+
+def test_leader_verify_report_rides_outside_the_verdict_json(project: Project, tmp_path: Path):
+    """De-fragilize: the long human-facing report rides as a ``## Product Quality
+    Report`` section AFTER the verdict JSON, not inside it — so prose with quotes
+    and literal newlines that would break an inlined JSON field can't fail the
+    verdict parse. The report still reaches the goal report artifact."""
+    artifacts_root = tmp_path / PROJECT_CODE.lower() / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    (artifacts_root / "doc.md").write_text("# Doc\n\nbody\n")
+
+    goal = Goal(
+        id="LVA-G-PQR", project_id=project.id, description="d",
+        success_criteria="c", status=GoalStatus.IN_PROGRESS,
+    )
+    store.save_goal(project.code, goal)
+    task = Task(
+        id="LVA-T-PQR", project_id=project.id, goal_id=goal.id,
+        description="t", output_path="doc.md", status=TaskStatus.COMPLETED,
+    )
+    store.save_task(project.code, task)
+
+    # Prose that WOULD break JSON if inlined: literal newlines + unescaped quotes.
+    report_prose = (
+        'The team delivered a "complete" guide.\n'
+        'It spans paragraphs — with "quotes" and\nliteral newlines.'
+    )
+
+    def _leader(prompt: str) -> str:
+        # Verdict JSON carries ONLY the short structured fields — no report_body.
+        return (
+            "```json\n"
+            + json.dumps(
+                {"verdict": "satisfied", "rationale": "ok", "recommendations": []}
+            )
+            + "\n```\n\n## Product Quality Report\n\n"
+            + report_prose
+        )
+
+    runners = {
+        "leader": _leader, "planner": lambda p: "```json\n[]\n```",
+        "drafter": lambda p: "", "qc": lambda p: "",
+    }
+    orch = Orchestrator(project, runners)
+    summary = RunSummary(project=project)
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert goal.status == GoalStatus.COMPLETED
+    assert not any("unparseable" in e for e in summary.errors), summary.errors
+    report = (
+        tmp_path / PROJECT_CODE.lower() / "reports" / "LVA-G-PQR.md"
+    ).read_text()
+    assert 'with "quotes" and' in report, (
+        "the report body that rode outside the JSON must reach the report artifact"
+    )
+
+
 def _disappointed_orch(project: Project):
     """Orchestrator whose Leader always returns a 'disappointed' verdict."""
     calls: list[str] = []

@@ -1648,9 +1648,9 @@ def _extract_json(text: str) -> dict | list:
     return _scan_balanced_json(cleaned, original=text)
 
 
-#: Appended to a leader prompt on a retry after its JSON didn't parse. Clay
-#: (claude -p) is prone to breaking the JSON of a long free-text field (e.g. a
-#: 400-word report_body) with unescaped quotes/newlines — one strict reminder
+#: Appended to a leader prompt on a retry after its JSON didn't parse. The long
+#: report now rides OUTSIDE the verdict JSON (de-fragilize), so this is a backstop
+#: for a stray unescaped quote/newline in the short fields — one strict reminder
 #: usually recovers it.
 _LEADER_JSON_CORRECTION = (
     "\n\nIMPORTANT: your previous reply could not be parsed as JSON. Reply with "
@@ -1678,6 +1678,32 @@ def _extract_json_resilient(call, *, context: str) -> "dict | list | None":
                 context, exc, (raw or "")[:400],
             )
     return None
+
+
+#: Heading the Leader emits (per leader-verify) to separate its long human-facing
+#: report from the short verdict JSON. The de-fragilize: the 150-400 word report
+#: rides as a Markdown section AFTER the JSON rather than as a JSON string field,
+#: so prose with unescaped quotes/newlines can no longer break the verdict parse.
+_LEADER_REPORT_HEADING = "Product Quality Report"
+
+
+def _split_leader_report_body(raw: str) -> str:
+    """Return the human-facing report the Leader wrote after the verdict JSON.
+
+    The verdict JSON carries only short structured fields; the report rides as a
+    Markdown section headed ``## Product Quality Report`` AFTER it. Scan for that
+    HEADING line (tolerating ``#``/``*`` decoration) and return everything after
+    it — an inline mention on a prose line is ignored, only a heading counts.
+    Empty string when the Leader omitted the section."""
+    if not raw:
+        return ""
+    lines = raw.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().strip("#*").strip().lower().startswith(
+            _LEADER_REPORT_HEADING.lower()
+        ):
+            return "\n".join(lines[i + 1:]).strip()
+    return ""
 
 
 def _scan_balanced_json(cleaned: str, *, original: str) -> dict | list:
@@ -9603,11 +9629,22 @@ class Orchestrator:
                 "leader", p, budget_role="leader-reflect", goal_id=goal.id,
             )
 
+        # Capture the raw of the SUCCESSFUL attempt — the de-fragilized report
+        # body rides as a Markdown section after the JSON, so we read it from the
+        # raw text, not a JSON field. The last raw is the one that parsed.
+        raw_holder: list[str] = []
+
+        def _capture(correction: str) -> str:
+            out = _render_verdict(correction)
+            raw_holder.append(out)
+            return out
+
         try:
-            # Clay can wrap a long report_body in invalid JSON — retry once with a
-            # strict-JSON correction before settling, not a one-shot spurious fail.
+            # The verdict JSON now carries only short structured fields (the long
+            # report rides outside it), so a parse failure is rare; the retry-once
+            # correction stays as a backstop for a stray quote in those fields.
             data = _extract_json_resilient(
-                _render_verdict, context=f"leader-verify {goal.id}"
+                _capture, context=f"leader-verify {goal.id}"
             )
             if data is None:
                 raise ValueError("verdict response unparseable after retry")
@@ -9640,7 +9677,14 @@ class Orchestrator:
 
         verdict = str(data.get("verdict", "")).strip().lower()
         rationale = str(data.get("rationale", "") or "")
-        report_body = str(data.get("report_body", "") or "")
+        # De-fragilize: the report rides as a `## Product Quality Report` section
+        # after the JSON. Prefer an inlined "report_body" only as back-compat for
+        # an older custom skill that still emits it in the JSON.
+        report_body = str(data.get("report_body") or "").strip()
+        if not report_body:
+            report_body = _split_leader_report_body(
+                raw_holder[-1] if raw_holder else ""
+            )
 
         # Write the report artifact first — the ticket will reference it.
         reports_dir = self._scope_root() / "reports"
@@ -13327,7 +13371,8 @@ confirm, the absence of a plagiarism scan, a claim worth double-checking
 goal, loop the swarm, edit the work, or block the run; they ride out in
 the human-addressed **Product Quality Report** beside the delivered work.
 
-Respond with a fenced ```json ... ``` block with exactly these keys:
+Respond in TWO parts, in this order. First, a fenced ```json ... ``` block with
+exactly these keys (keep every value SHORT so the JSON always parses cleanly):
 
     {{
       "verdict": "satisfied" | "on_the_fence" | "disappointed",
@@ -13336,13 +13381,18 @@ Respond with a fenced ```json ... ``` block with exactly these keys:
         {{"concern": "<what you don't fully trust / couldn't verify>",
           "suggestion": "<the specific check you'd advise the human to run>"}}
       ],
-      "report_body": "<your human-facing assessment of the finished product, 150-400 words>",
       "remediation": {{
         "action": "revise_in_place" | "defer",
         "reason_code": "fixable_goal_gap" | "missing_required_content" | "off_brief_content" | "needs_operator_authority" | "ambiguous_brief" | "outside_run_scope",
         "window_requested": false
       }}
     }}
+
+Then, AFTER the closing ``` of that JSON block, a Markdown section headed
+exactly ``## Product Quality Report`` followed by your 150-400 word human-facing
+assessment of the finished product, as plain Markdown prose. Do NOT put this
+long text inside the JSON — keeping it OUT of the JSON is what guarantees the
+verdict always parses.
 
 On a "disappointed" verdict, declare a "remediation": choose "revise_in_place"
 (reason_code one of fixable_goal_gap / missing_required_content / off_brief_content)
@@ -13353,11 +13403,10 @@ something the team can fix within this run — this records a reservation, no re
 Set "window_requested": true ONLY on the rare, exceptional fix where a watching
 operator should get a brief veto window before you proceed; default false. Omit
 "remediation" entirely to mean the ordinary revise-in-place. "recommendations" is
-separate (advisory notes). "recommendations" may be empty []. report_body and
-recommendations are
-the Leader's contribution to the **Product Quality Report** that ships to
-the human beside the deliverables — be specific about what was delivered,
-what you stand behind, and what you'd have the human double-check.
+separate (advisory notes), may be empty []. The Product Quality Report and the
+recommendations are the Leader's contribution to the report that ships to the
+human beside the deliverables — be specific about what was delivered, what you
+stand behind, and what you'd have the human double-check.
 """
 
 
