@@ -58,8 +58,15 @@ async def test_copy_for_email_copies_the_report_no_token(monkeypatch):
     assert "the body" in copied.get("text", "")
 
 
-async def test_failure_status_spells_out_the_exit(monkeypatch):
+async def test_headless_status_spells_out_the_exit(monkeypatch):
+    """No browser: Report on GitHub falls back to copying the issue link, and the
+    status spells out the email + exit so the user never feels stuck (B3)."""
     monkeypatch.setattr(logstore, "compose_issue", lambda e: ("T", "B"))
+    monkeypatch.setattr(
+        bug_report, "open_issue",
+        lambda t, b: (False, "https://github.com/ModulatioAI/modulatio/issues/new"),
+    )
+    monkeypatch.setattr(clipboard, "copy", lambda text: True)
 
     app = _Host()
     async with app.run_test() as pilot:
@@ -68,13 +75,7 @@ async def test_failure_status_spells_out_the_exit(monkeypatch):
         await pilot.pause()
         captured: dict = {}
         monkeypatch.setattr(modal, "_set_status", lambda t: captured.update(text=t))
-        modal._show_result(
-            bug_report.BugReportResult(
-                submitted=False,
-                url=bug_report.prefilled_issue_url("T", "B"),
-                detail="No MODULATIO_GITHUB_TOKEN — open this URL to file it yourself.",
-            )
-        )
+        modal._report_on_github()
         await pilot.pause()
 
     text = captured.get("text", "")

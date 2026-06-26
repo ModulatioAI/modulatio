@@ -897,13 +897,16 @@ def _doctor_offer_logs(report: str) -> None:
     if entry is None:
         return
     title, body = logstore.compose_issue(entry)
-    result = bug_report.submit_issue(title, body)
-    if result.submitted:
-        logstore.mark_sent(entry.path, result.url)
-        typer.echo(f"Filed: {result.url}")
+    opened, url = bug_report.open_issue(title, body)
+    if opened:
+        logstore.mark_sent(entry.path, url)
+        typer.echo(f"Opened the Modulatio issue tracker in your browser:\n{url}")
     else:
-        typer.echo(result.detail)
-        typer.echo(result.url)
+        # Headless / no browser — print the prefilled link to open elsewhere,
+        # plus the email fallback for users with no GitHub account.
+        typer.echo("Open this prefilled issue to file it (no browser here):")
+        typer.echo(url)
+        typer.echo(f"Or email the report to {bug_report.CONTACT_EMAIL}.")
 
 
 def _clay_doctor_check() -> None:
@@ -1155,8 +1158,8 @@ def logs_send(
     ),
     last: bool = typer.Option(False, "--last", help="Send the most recent log."),
 ) -> None:
-    """File a captured log to the Modulatio GitHub — redacted, and via a
-    prefilled new-issue URL when no MODULATIO_GITHUB_TOKEN is set."""
+    """File a captured log to the Modulatio issue tracker — redacted, opened
+    prefilled in your browser (or the link printed when there's no browser)."""
     from modulatio import bug_report, logstore
 
     entries = logstore.list_logs()
@@ -1177,13 +1180,16 @@ def logs_send(
         typer.echo("No matching log. Run `modulatio logs list`.", err=True)
         raise typer.Exit(code=1)
     title, body = logstore.compose_issue(entry)
-    result = bug_report.submit_issue(title, body)
-    if result.submitted:
-        logstore.mark_sent(entry.path, result.url)
-        typer.echo(f"Filed: {result.url}")
+    opened, url = bug_report.open_issue(title, body)
+    if opened:
+        logstore.mark_sent(entry.path, url)
+        typer.echo(f"Opened the Modulatio issue tracker in your browser:\n{url}")
     else:
-        typer.echo(result.detail)
-        typer.echo(result.url)
+        # Headless / no browser — print the prefilled link to open elsewhere,
+        # plus the email fallback for users with no GitHub account.
+        typer.echo("Open this prefilled issue to file it (no browser here):")
+        typer.echo(url)
+        typer.echo(f"Or email the report to {bug_report.CONTACT_EMAIL}.")
 
 
 @logs_app.command("rm")

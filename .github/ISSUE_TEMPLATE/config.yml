@@ -1,5 +1,8 @@
-blank_issues_enabled: false
+blank_issues_enabled: true  # keep ON: Modulatio's in-app "Report on GitHub" opens a prefilled blank issue (title + redacted body); disabling blank issues redirects /issues/new to the chooser and DROPS that prefill.
 contact_links:
   - name: How to file an effective issue
     url: https://github.com/ModulatioAI/modulatio/blob/main/CONTRIBUTING.md
     about: Read this first — what to include, how labels are applied, and how to attach a crash log.
+  - name: Report by email (no GitHub account needed)
+    url: mailto:contact@modulatio.ai
+    about: No GitHub account or browser? Email your report — Modulatio's in-app "Copy for email" prepares it for you.

@@ -4,7 +4,6 @@ from __future__ import annotations
 from textual.app import App, ComposeResult
 from textual.widgets import Input, Static, TextArea
 
-from modulatio import bug_report
 from modulatio.tui.widgets.bug_report_modal import BugReportModal
 
 
@@ -28,38 +27,37 @@ async def test_modal_mounts_with_fields():
         assert isinstance(modal, BugReportModal)
         assert modal.query("#bug-title")
         assert modal.query("#bug-desc")
-        assert modal.query("#bug-submit")
+        assert modal.query("#bug-github")  # the no-token "Report on GitHub" action
 
 
-async def test_validation_blocks_empty_submit(monkeypatch):
+async def test_validation_blocks_empty_report(monkeypatch):
     called = {"n": 0}
     monkeypatch.setattr(
-        "modulatio.tui.widgets.bug_report_modal.bug_report.submit_issue",
-        lambda *a, **k: called.__setitem__("n", called["n"] + 1),
+        "modulatio.tui.widgets.bug_report_modal.bug_report.open_issue",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or (True, "u"),
     )
     app = _Host()
     async with app.run_test() as pilot:
         app.push_screen(BugReportModal())
         await pilot.pause()
-        app.screen._submit()  # empty title + desc
+        app.screen._report_on_github()  # empty title + desc
         await pilot.pause()
-        assert called["n"] == 0  # never submitted
+        assert called["n"] == 0  # never opened the tracker
 
 
-async def test_submit_composes_body_and_files(monkeypatch):
+async def test_report_on_github_composes_body_and_opens(monkeypatch):
     from textual.widgets import Checkbox
 
     captured: dict = {}
 
-    def fake_submit(title, body, **k):
+    def fake_open(title, body):
         captured["title"] = title
         captured["body"] = body
-        return bug_report.BugReportResult(
-            submitted=True, url="https://x/issues/9", detail="ok")
+        return True, "https://github.com/ModulatioAI/modulatio/issues/new?title=boom"
 
     monkeypatch.setattr(
-        "modulatio.tui.widgets.bug_report_modal.bug_report.submit_issue",
-        fake_submit)
+        "modulatio.tui.widgets.bug_report_modal.bug_report.open_issue",
+        fake_open)
     app = _Host()
     async with app.run_test() as pilot:
         app.push_screen(BugReportModal())
@@ -68,7 +66,7 @@ async def test_submit_composes_body_and_files(monkeypatch):
         modal.query_one("#bug-title", Input).value = "boom"
         modal.query_one("#bug-desc", TextArea).text = "it broke"
         modal.query_one("#bug-diag", Checkbox).value = False  # skip diagnostics
-        modal._submit()
+        modal._report_on_github()
         await pilot.pause()
         await pilot.pause()
         assert captured.get("title") == "boom"

@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""SendLogModal — review + file a captured log to the Modulatio GitHub.
+"""SendLogModal — review + file a captured log to the Modulatio issue tracker.
 
 Prefilled from :func:`logstore.compose_issue` (title + a re-scrubbed, truncated
-body); the operator reviews and edits before it's sent. Submission runs on a
-worker thread (``bug_report.submit_issue`` — direct API with a token, else a
-prefilled new-issue URL). Dismisses ``True`` only when the issue was actually
-filed (so the caller refreshes the sent marker); the prefilled-URL fallback is
-NOT "sent" — the user still has to open and submit it.
+body); the operator reviews and edits before filing. "Report on GitHub" opens
+the project's issue tracker prefilled in the browser — no token, no account
+plumbing. Dismisses ``True`` once the issue page is opened (so the caller marks
+the log sent); on a headless / browserless box the issue link is copied and the
+modal stays open so the user can paste it or "Copy for email" instead.
 """
 from __future__ import annotations
 
-from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -64,22 +63,23 @@ class SendLogModal(ModalScreen[bool]):
             with VerticalScroll(id="send-body-scroll"):
                 yield TextArea(self._body, id="send-body", soft_wrap=True)
             yield Static(
-                f"No GitHub token needed — \"Copy for email\" copies the report; "
-                f"email it to {bug_report.CONTACT_EMAIL}. \"Send\" files it "
-                f"directly to GitHub if you've set MODULATIO_GITHUB_TOKEN.",
+                f"\"Report on GitHub\" opens the Modulatio issue tracker in your "
+                f"browser, prefilled. No browser? The link is copied so you can "
+                f"paste it elsewhere — or \"Copy for email\" to send it to "
+                f"{bug_report.CONTACT_EMAIL}.",
                 id="send-help",
             )
             yield Static("", id="send-status")
             with Horizontal(id="send-buttons"):
-                yield Button("Send", id="send-submit", variant="primary")
+                yield Button("Report on GitHub", id="send-github", variant="primary")
                 yield Button("Copy for email", id="send-copy")
                 yield Button("Cancel", id="send-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "send-cancel":
             self.dismiss(False)
-        elif event.button.id == "send-submit":
-            self._submit()
+        elif event.button.id == "send-github":
+            self._report_on_github()
         elif event.button.id == "send-copy":
             self._copy_for_email()
 
@@ -106,13 +106,18 @@ class SendLogModal(ModalScreen[bool]):
         self.dismiss(False)
 
     def _set_status(self, text: str) -> None:
-        # The in-flight worker can call back after the modal is dismissed.
+        # Defensive: the status Static may be gone if the modal was dismissed —
+        # swallow NoMatches rather than raise.
         try:
             self.query_one("#send-status", Static).update(text)
         except NoMatches:
             return
 
-    def _submit(self) -> None:
+    def _report_on_github(self) -> None:
+        """Open the project's issue tracker, prefilled, in the user's browser —
+        the universal no-token path. On open we mark the log sent and dismiss;
+        headless / no browser → copy the link and stay open so the user can
+        paste it or "Copy for email" instead."""
         title = self.query_one("#send-title", Input).value.strip()
         body = self.query_one("#send-body", TextArea).text
         if not title:
@@ -120,43 +125,21 @@ class SendLogModal(ModalScreen[bool]):
             return
         # Re-apply the redaction + size cap to whatever the user EDITED. The
         # prefilled body was already safe, but free-text edits bypass both, and
-        # the "auto-redacted" promise must hold for the sent bytes (Nemo M3).
+        # the "auto-redacted" promise must hold for the filed bytes (Nemo M3).
         title = logstore.scrub_secrets(title)[:240]
         body = logstore.scrub_and_cap(body)
-        self.query_one("#send-submit", Button).disabled = True  # no double-file (L6)
-        self._set_status("Filing…")
-        self._submit_worker(title, body)
-
-    @work(thread=True, exclusive=True)
-    def _submit_worker(self, title: str, body: str) -> None:
-        # Guard so a raise can't strand the modal on "Filing…" forever and
-        # re-raise as WorkerFailed on app exit (Nemo M2).
-        try:
-            result = bug_report.submit_issue(title, body)
-        except Exception as exc:  # noqa: BLE001 — surface, never strand
-            result = bug_report.BugReportResult(
-                submitted=False, url="",
-                detail=f"Couldn't file issue: {type(exc).__name__}: {exc}",
-            )
-        self.app.call_from_thread(self._show_result, result)
-
-    def _show_result(self, result: "bug_report.BugReportResult") -> None:
-        if result.submitted:
-            logstore.mark_sent(self._entry.path, result.url)
-            self._set_status(f"[bold]Filed:[/] {result.url}")
+        opened, url = bug_report.open_issue(title, body)
+        if opened:
+            logstore.mark_sent(self._entry.path, url)
+            self._set_status(f"[bold]Opened:[/] {url}")
             self.set_timer(1.4, lambda: self.dismiss(True))
-        else:
-            # No-token / surfaced error — NOT filed. Point at the tokenless path
-            # (email) and spell out the exit so the user never feels stuck (B3).
-            self._set_status(
-                f"{result.detail}\n\n"
-                f"No token? Click \"Copy for email\" and send the report to "
-                f"{bug_report.CONTACT_EMAIL} — or press Escape / Cancel to close."
-            )
-            try:
-                self.query_one("#send-submit", Button).disabled = False
-            except NoMatches:
-                pass
+            return
+        clipboard.copy(url)
+        self._set_status(
+            "No browser here — the issue link is [bold]copied[/]; paste it into a "
+            "browser to file it. No GitHub account? \"Copy for email\" sends it to "
+            f"{bug_report.CONTACT_EMAIL}. Escape / Cancel to close."
+        )
 
 
 __all__ = ["SendLogModal"]

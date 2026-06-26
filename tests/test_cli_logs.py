@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """`modulatio logs <list|send|rm>` + the doctor report.
 
-Send falls back to a prefilled URL with no MODULATIO_GITHUB_TOKEN (no network).
+Send opens the project's issue tracker prefilled in a browser; on a headless
+host it prints the prefilled URL instead (no token, no network submit).
 """
 from __future__ import annotations
 
@@ -18,7 +19,6 @@ from modulatio.cli import _doctor_offer_logs, logs_list, logs_rm, logs_send
 @pytest.fixture(autouse=True)
 def _store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MODULATIO_CRASH_DIR", str(tmp_path))
-    monkeypatch.delenv("MODULATIO_GITHUB_TOKEN", raising=False)  # force URL fallback
     return tmp_path
 
 
@@ -31,27 +31,34 @@ def test_logs_list_empty_and_populated(capsys):
     assert "Error log" in out and "a failure" in out
 
 
-def test_logs_send_no_token_gives_prefilled_url_and_does_not_mark_sent(capsys):
-    # No token → a prefilled new-issue URL; the issue isn't actually filed yet,
-    # so we must NOT claim it sent (the user still has to open + submit).
+def test_logs_send_headless_prints_prefilled_url_and_does_not_mark_sent(
+    monkeypatch, capsys
+):
+    # No browser (headless) → print the prefilled new-issue URL; the issue isn't
+    # filed yet, so we must NOT claim it sent (the user still has to open it).
+    from modulatio import bug_report
+    monkeypatch.setattr(
+        bug_report, "open_issue",
+        lambda title, body: (False, bug_report.prefilled_issue_url(title, body)),
+    )
     path = logstore.write_error_log("send me")
     logs_send(log_id=None, last=True)
     out = capsys.readouterr().out
     assert "github.com" in out
+    assert bug_report.CONTACT_EMAIL in out  # email fallback offered
     assert logstore.list_logs()[0].sent is False
     assert not path.with_name(path.name + ".sent").exists()
 
 
-def test_logs_send_marks_sent_when_api_files_it(monkeypatch, capsys):
+def test_logs_send_marks_sent_when_the_browser_opens(monkeypatch, capsys):
     path = logstore.write_error_log("send me for real")
     from modulatio import bug_report
     monkeypatch.setattr(
-        bug_report, "submit_issue",
-        lambda title, body, **k: bug_report.BugReportResult(
-            submitted=True, url="https://github.com/x/y/issues/7", detail="ok"),
+        bug_report, "open_issue",
+        lambda title, body: (True, "https://github.com/x/y/issues/new?title=t"),
     )
     logs_send(log_id=None, last=True)
-    assert "Filed: https://github.com/x/y/issues/7" in capsys.readouterr().out
+    assert "Opened the Modulatio issue tracker" in capsys.readouterr().out
     assert logstore.list_logs()[0].sent is True
     assert path.with_name(path.name + ".sent").exists()
 
@@ -114,12 +121,12 @@ def test_doctor_offer_sends_on_confirm(monkeypatch, capsys):
     sent = {}
     from modulatio import bug_report
     monkeypatch.setattr(
-        bug_report, "submit_issue",
-        lambda title, body, **k: sent.update(title=title) or bug_report.BugReportResult(
-            submitted=True, url="https://github.com/x/y/issues/42", detail="ok"),
+        bug_report, "open_issue",
+        lambda title, body: sent.update(title=title) or (
+            True, "https://github.com/x/y/issues/new?title=t"),
     )
     _doctor_offer_logs("doctor read")
     out = capsys.readouterr().out
-    assert "Filed: https://github.com/x/y/issues/42" in out
+    assert "Opened the Modulatio issue tracker" in out
     assert sent["title"].startswith("[Doctor]")
     assert logstore.list_logs()[0].sent is True

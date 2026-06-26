@@ -3,17 +3,15 @@
 """BugReportModal — file a bug from inside Modulatio.
 
 A small form (title, what happened, steps) + an "attach diagnostics" toggle.
-On submit it composes the issue body and files it via :mod:`modulatio.bug_report`
-— direct GitHub submission when ``MODULATIO_GITHUB_TOKEN`` is set, otherwise it
-surfaces the report for emailing. "Copy for email" copies the composed report to
-the OS clipboard so the user mails it to ``bug_report.CONTACT_EMAIL`` — the one
-path that needs no token, no browser, and no SMTP (the human is the transport),
-so it works headless / over NoMachine. The network call runs on a worker thread
-so the UI never blocks.
+"Report on GitHub" composes the issue body and opens the project's issue tracker
+prefilled, in the user's browser — the way anyone reports a bug to an open-source
+project, no token, no account plumbing. On a headless / browserless box the
+issue link is copied so it can be pasted elsewhere, and "Copy for email" copies
+the report for mailing to ``bug_report.CONTACT_EMAIL`` (no GitHub account / no
+browser needed). All local — nothing blocks the UI.
 """
 from __future__ import annotations
 
-from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -63,14 +61,15 @@ class BugReportModal(ModalScreen[None]):
                 id="bug-diag",
             )
             yield Static(
-                f"No GitHub token needed — \"Copy for email\" copies the report; "
-                f"email it to {bug_report.CONTACT_EMAIL}. \"Submit\" files it "
-                f"directly to GitHub if you've set MODULATIO_GITHUB_TOKEN.",
+                f"\"Report on GitHub\" opens the Modulatio issue tracker in your "
+                f"browser, prefilled. No browser? The link is copied so you can "
+                f"paste it elsewhere — or \"Copy for email\" to send the report to "
+                f"{bug_report.CONTACT_EMAIL}.",
                 id="bug-help",
             )
             yield Static("", id="bug-status")
             with Horizontal(id="bug-buttons"):
-                yield Button("Submit", id="bug-submit", variant="primary")
+                yield Button("Report on GitHub", id="bug-github", variant="primary")
                 yield Button("Copy for email", id="bug-copy")
                 yield Button("Cancel", id="bug-cancel")
 
@@ -80,16 +79,14 @@ class BugReportModal(ModalScreen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "bug-cancel":
             self.dismiss(None)
-        elif event.button.id == "bug-submit":
-            self._submit()
+        elif event.button.id == "bug-github":
+            self._report_on_github()
         elif event.button.id == "bug-copy":
             self._copy_for_email()
 
     def _set_status(self, text: str) -> None:
-        # re-sweep: the in-flight submit worker can't be interrupted, so it may
-        # call back through here after the modal was dismissed/unmounted. The
-        # status Static is gone by then, so swallow NoMatches instead of
-        # crashing the worker callback on the main thread.
+        # Defensive: the status Static may be gone if the modal was dismissed
+        # between composing and updating — swallow NoMatches rather than raise.
         try:
             self.query_one("#bug-status", Static).update(text)
         except NoMatches:
@@ -97,7 +94,7 @@ class BugReportModal(ModalScreen[None]):
 
     def _compose_report(self) -> "tuple[str, str] | None":
         """Validate the form and build (title, body), or surface the error and
-        return None. Shared by the GitHub submit and the copy-for-email paths."""
+        return None. Shared by the GitHub and the copy-for-email paths."""
         title = self.query_one("#bug-title", Input).value.strip()
         desc = self.query_one("#bug-desc", TextArea).text.strip()
         steps = self.query_one("#bug-steps", TextArea).text.strip()
@@ -108,19 +105,31 @@ class BugReportModal(ModalScreen[None]):
             "#bug-diag", Checkbox).value else ""
         return title, bug_report.compose_body(desc, steps, diag)
 
-    def _submit(self) -> None:
+    def _report_on_github(self) -> None:
+        """Open the project's issue tracker, prefilled, in the user's browser —
+        the universal no-token path. Headless / no browser: copy the issue link
+        so they can paste it elsewhere, and spell out the email + exit (B3)."""
         report = self._compose_report()
         if report is None:
             return
         title, body = report
-        self._set_status("Filing…")
-        self._submit_worker(title, body)
+        opened, url = bug_report.open_issue(title, body)
+        if opened:
+            self.app.notify("Opened the Modulatio issue tracker in your browser.")
+            self.dismiss(None)
+            return
+        clipboard.copy(url)
+        self._set_status(
+            "No browser here — the issue link is [bold]copied[/]; paste it into a "
+            "browser to file it. No GitHub account? \"Copy for email\" sends it to "
+            f"{bug_report.CONTACT_EMAIL}. Escape / Cancel to close."
+        )
 
     def _copy_for_email(self) -> None:
-        """Tokenless + browserless path: copy the composed report to the OS
+        """Browserless / no-account path: copy the composed report to the OS
         clipboard so the user can email it to ``CONTACT_EMAIL`` from their own
-        mail client. The one path that needs no token, no browser, and no SMTP
-        (the human is the transport) — works headless / over NoMachine."""
+        mail client — no GitHub, no browser, no SMTP (the human is the transport),
+        so it works headless / over NoMachine."""
         report = self._compose_report()
         if report is None:
             return
@@ -135,31 +144,6 @@ class BugReportModal(ModalScreen[None]):
                 severity="warning",
             )
         self.dismiss(None)
-
-    @work(thread=True, exclusive=True)
-    def _submit_worker(self, title: str, body: str) -> None:
-        # Guard so a raise can't strand the modal on "Filing…" and re-raise as
-        # WorkerFailed on app exit (mirror send_log_modal's Nemo M2 belt).
-        try:
-            result = bug_report.submit_issue(title, body)
-        except Exception as exc:  # noqa: BLE001 — surface, never strand
-            result = bug_report.BugReportResult(
-                submitted=False, url="",
-                detail=f"Couldn't file issue: {type(exc).__name__}: {exc}",
-            )
-        self.app.call_from_thread(self._show_result, result)
-
-    def _show_result(self, result: "bug_report.BugReportResult") -> None:
-        if result.submitted:
-            self._set_status(f"[bold]Filed:[/] {result.url}")
-        else:
-            # No-token / surfaced error — NOT filed. Point at the tokenless path
-            # (email) and spell out the exit so the user never feels stuck (B3).
-            self._set_status(
-                f"{result.detail}\n\n"
-                f"No token? Click \"Copy for email\" and send the report to "
-                f"{bug_report.CONTACT_EMAIL} — or press Escape / Cancel to close."
-            )
 
 
 __all__ = ["BugReportModal"]

@@ -101,15 +101,18 @@ async def test_send_opens_review_modal(tui_logs):
         assert isinstance(app.screen, SendLogModal)
 
 
-async def test_send_modal_survives_a_submit_exception(tui_logs, monkeypatch):
-    """Nemo M2: a raise in submit_issue must surface in the modal (not strand it
-    on 'Filing…' and re-raise as WorkerFailed), and re-enable Send."""
-    from textual.widgets import Button
-
-    from modulatio import bug_report
+async def test_send_modal_headless_copies_link_and_stays_exitable(tui_logs, monkeypatch):
+    """Headless / no browser: Report on GitHub copies the issue link, spells out
+    the email + exit in the status, and the modal stays dismissable (the old
+    Nemo-M2 'stranded worker' failure mode is gone — no worker, no network)."""
+    from modulatio import bug_report, clipboard
     monkeypatch.setattr(
-        bug_report, "submit_issue",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("network blew up")),
+        bug_report, "open_issue",
+        lambda t, b: (False, "https://github.com/ModulatioAI/modulatio/issues/new?title=t"),
+    )
+    copied: dict = {}
+    monkeypatch.setattr(
+        clipboard, "copy", lambda text: copied.setdefault("text", text) is None or True
     )
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
@@ -123,12 +126,14 @@ async def test_send_modal_survives_a_submit_exception(tui_logs, monkeypatch):
         await pilot.pause()
         modal = app.screen
         assert isinstance(modal, SendLogModal)
-        modal._submit()
-        await app.workers.wait_for_complete()
+        modal._report_on_github()
         await pilot.pause()
-        status = modal.query_one("#send-status", Static).render()
-        assert "Couldn't file issue" in str(status)              # surfaced, not stranded
-        assert modal.query_one("#send-submit", Button).disabled is False  # retry enabled
+        status = str(modal.query_one("#send-status", Static).render())
+        assert "copied" in status.lower()                       # link surfaced
+        assert bug_report.CONTACT_EMAIL in status               # email fallback
+        assert "github.com" in copied.get("text", "")           # the link was copied
+        modal.dismiss(False)  # still exitable; never stranded
+        await pilot.pause()
 
 
 # ─── Controls row + affordance (Feng-Tui overhaul) ──────────────────────────

@@ -33,7 +33,7 @@ def test_collect_reports_models_without_values(monkeypatch, tmp_path):
 
 def test_toggles_report_presence_not_value(monkeypatch, tmp_path):
     monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "p.json")
-    monkeypatch.setenv("MODULATIO_GITHUB_TOKEN", "ghp_DO_NOT_LEAK")
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "DO_NOT_LEAK_THIS_VALUE")
     out = diagnostics.collect()
-    assert "MODULATIO_GITHUB_TOKEN: set" in out
-    assert "ghp_DO_NOT_LEAK" not in out  # value never leaks
+    assert "MODULATIO_QC_FIXER: set" in out
+    assert "DO_NOT_LEAK_THIS_VALUE" not in out  # value never leaks, only presence
