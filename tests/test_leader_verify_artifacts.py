@@ -311,6 +311,73 @@ def test_seat_context_folds_in_tls_extra_grants(project: Project, monkeypatch):
     assert "/some/run/dir" in seen["grants"]
 
 
+def test_extract_json_resilient_parses_retries_and_gives_up():
+    """The shared resilient-JSON helper: parse on the first try; on a parse
+    failure retry ONCE with a correction appended; return None when both fail."""
+    from modulatio.orchestration import _LEADER_JSON_CORRECTION, _extract_json_resilient
+
+    seen: list = []
+    assert _extract_json_resilient(
+        lambda c: seen.append(c) or '{"v": 1}', context="t"
+    ) == {"v": 1}
+    assert seen == [""]  # parsed first try, no correction
+
+    seen2: list = []
+
+    def two(corr):
+        seen2.append(corr)
+        return "no json here" if corr == "" else '{"v": 2}'
+
+    assert _extract_json_resilient(two, context="t") == {"v": 2}
+    assert seen2 == ["", _LEADER_JSON_CORRECTION]  # retried with the correction
+
+    assert _extract_json_resilient(lambda c: "never json", context="t") is None
+
+
+def test_leader_verify_retries_an_unparseable_verdict(project: Project, tmp_path: Path):
+    """An unparseable first verdict (Clay broke the JSON) is retried once with a
+    strict correction and recovers — instead of spuriously settling the goal as
+    'verdict unparseable' (the live 0.9.8.5 Clay-leader failure)."""
+    artifacts_root = tmp_path / PROJECT_CODE.lower() / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    (artifacts_root / "doc.md").write_text("# Doc\n\nbody\n")
+
+    goal = Goal(
+        id="LVA-G-RETRY", project_id=project.id, description="d",
+        success_criteria="c", status=GoalStatus.IN_PROGRESS,
+    )
+    store.save_goal(project.code, goal)
+    task = Task(
+        id="LVA-T-RETRY", project_id=project.id, goal_id=goal.id,
+        description="t", output_path="doc.md", status=TaskStatus.COMPLETED,
+    )
+    store.save_task(project.code, task)
+
+    calls = {"n": 0}
+
+    def _leader(prompt: str) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "Looks complete to me, but here's a reply with no JSON object."
+        return "```json\n" + json.dumps({
+            "verdict": "satisfied", "rationale": "ok", "report_body": "good",
+        }) + "\n```"
+
+    runners = {
+        "leader": _leader, "planner": lambda p: "```json\n[]\n```",
+        "drafter": lambda p: "", "qc": lambda p: "",
+    }
+    orch = Orchestrator(project, runners)
+    summary = RunSummary(project=project)
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert calls["n"] == 2, "should have retried the unparseable verdict once"
+    assert not any("unparseable" in e for e in summary.errors), (
+        "the retry's valid verdict should drive the outcome, not a settle-as-failed"
+    )
+    assert goal.status == GoalStatus.COMPLETED
+
+
 def _disappointed_orch(project: Project):
     """Orchestrator whose Leader always returns a 'disappointed' verdict."""
     calls: list[str] = []

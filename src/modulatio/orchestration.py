@@ -1648,6 +1648,38 @@ def _extract_json(text: str) -> dict | list:
     return _scan_balanced_json(cleaned, original=text)
 
 
+#: Appended to a leader prompt on a retry after its JSON didn't parse. Clay
+#: (claude -p) is prone to breaking the JSON of a long free-text field (e.g. a
+#: 400-word report_body) with unescaped quotes/newlines — one strict reminder
+#: usually recovers it.
+_LEADER_JSON_CORRECTION = (
+    "\n\nIMPORTANT: your previous reply could not be parsed as JSON. Reply with "
+    "ONLY the single JSON object specified above — no prose before or after it — "
+    "and make sure every string value is valid JSON (escape quotes, newlines, "
+    "and backslashes inside long text fields)."
+)
+
+
+def _extract_json_resilient(call, *, context: str) -> "dict | list | None":
+    """Run a leader call that must return JSON, resiliently. On a parse failure
+    log the raw (truncated) response and retry the call ONCE with a strict-JSON
+    correction appended; return the parsed data, or ``None`` when both attempts
+    fail (the caller handles ``None``). A one-shot parse spuriously fails the
+    Leader's verdict / codification when Clay wraps a long field in invalid JSON.
+    ``call(correction)`` makes the leader call with ``correction`` appended to
+    its prompt (empty string on the first attempt)."""
+    for correction in ("", _LEADER_JSON_CORRECTION):
+        raw = call(correction)
+        try:
+            return _extract_json(raw)
+        except (ValueError, KeyError) as exc:
+            _logger.warning(
+                "leader JSON parse failed (%s): %s | raw[:400]=%r",
+                context, exc, (raw or "")[:400],
+            )
+    return None
+
+
 def _scan_balanced_json(cleaned: str, *, original: str) -> dict | list:
     """Helper for :func:`_extract_json`'s third strategy. Finds the
     leftmost ``{`` or ``[`` in ``cleaned`` and walks forward counting
@@ -9522,15 +9554,17 @@ class Orchestrator:
             ):
                 leader_tool_skill = None
 
-        try:
+        def _render_verdict(correction: str) -> str:
+            # ``correction`` is appended on a parse-failure retry (empty first try).
+            p = prompt + correction
             if leader_tool_skill is not None:
                 # Inject skill body as preamble, mirroring the QC path.
-                leader_prompt = prompt
+                leader_prompt = p
                 if leader_tool_skill.prompt_template.strip():
                     leader_prompt = (
                         "## Skill guidance\n\n"
                         f"{leader_tool_skill.prompt_template.strip()}\n\n"
-                        f"## Verify task\n\n{prompt}"
+                        f"## Verify task\n\n{p}"
                     )
                 artifacts_root = self._scope_root() / "artifacts"
                 transcript_path = (
@@ -9547,7 +9581,7 @@ class Orchestrator:
                 self._tls.tool_registry_override = self._leader_verify_tool_registry()
                 self._tls.seat_extra_grants = (str(self._scope_root()),)
                 try:
-                    response = self._run_chat_loop(
+                    return self._run_chat_loop(
                         prompt=leader_prompt,
                         tool_loadout=tuple(leader_tool_skill.tool_loadout),
                         role="leader",
@@ -9563,16 +9597,20 @@ class Orchestrator:
                 finally:
                     self._tls.tool_registry_override = None
                     self._tls.seat_extra_grants = None
-            else:
-                # Explicit budget_role so simple-shot Leader-verify is
-                # measured under 'leader-reflect' instead of collapsing
-                # into the default 'leader-decompose' mapping.
-                response = self._run(
-                    "leader", prompt,
-                    budget_role="leader-reflect",
-                    goal_id=goal.id,
-                )
-            data = _extract_json(response)
+            # Explicit budget_role so simple-shot Leader-verify is measured under
+            # 'leader-reflect' instead of collapsing into 'leader-decompose'.
+            return self._run(
+                "leader", p, budget_role="leader-reflect", goal_id=goal.id,
+            )
+
+        try:
+            # Clay can wrap a long report_body in invalid JSON — retry once with a
+            # strict-JSON correction before settling, not a one-shot spurious fail.
+            data = _extract_json_resilient(
+                _render_verdict, context=f"leader-verify {goal.id}"
+            )
+            if data is None:
+                raise ValueError("verdict response unparseable after retry")
         except (ValueError, KeyError) as exc:
             # Parse failure is rare but not impossible. Don't crash the
             # run — surface the error and move on. Previously this returned
@@ -10992,8 +11030,14 @@ class Orchestrator:
             fail_verdicts=feed, existing_skills=existing_index,
         )
         try:
-            decision = _extract_json(self._run_agent_call(None, "leader", prompt))
-        except Exception:  # noqa: BLE001
+            # Resilient parse: Clay can break a long field's JSON — retry once
+            # with a strict correction; a None result falls through to the
+            # not-list skip below (no separate guard needed).
+            decision = _extract_json_resilient(
+                lambda corr: self._run_agent_call(None, "leader", prompt + corr),
+                context="skill-codify (fail)",
+            )
+        except Exception:  # noqa: BLE001 — the leader call itself failed
             self._codification_skipped("leader_call_failed")
             return
         codifications = (
@@ -11039,8 +11083,11 @@ class Orchestrator:
                 recovery_cluster=feed, existing_skills=existing_index,
             )
             try:
-                decision = _extract_json(self._run_agent_call(None, "leader", prompt))
-            except Exception:  # noqa: BLE001
+                decision = _extract_json_resilient(
+                    lambda corr: self._run_agent_call(None, "leader", prompt + corr),
+                    context="skill-codify (win)",
+                )
+            except Exception:  # noqa: BLE001 — the leader call itself failed
                 self._codification_skipped("win_leader_call_failed")
                 continue
             codifications = (
@@ -11331,8 +11378,11 @@ class Orchestrator:
         except (KeyError, IndexError, ValueError):
             prompt = _JT_CREATE_PROMPT.format(recurring_jobs=feed, existing_jts=existing_index)
         try:
-            decision = _extract_json(self._run_agent_call(None, "leader", prompt))
-        except Exception:  # noqa: BLE001
+            decision = _extract_json_resilient(
+                lambda corr: self._run_agent_call(None, "leader", prompt + corr),
+                context="jt-codify",
+            )
+        except Exception:  # noqa: BLE001 — the leader call itself failed
             self._jt_codification_skipped("leader_call_failed")
             return
         codifications = (
