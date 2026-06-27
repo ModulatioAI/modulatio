@@ -232,10 +232,12 @@ def parse_claude_stream(
 # CLI / test call), Clay falls back to a fresh temp workspace so it can never run
 # unconfined-by-accident.
 
-#: (workspace_root | None, granted_roots) — None workspace → temp fallback.
-seat_context_var: contextvars.ContextVar[tuple[Path | None, tuple[str, ...]]] = (
-    contextvars.ContextVar("modulatio_clay_seat", default=(None, ()))
-)
+#: (workspace_root | None, rw_grants, ro_grants) — None workspace → temp fallback.
+#: ``ro_grants`` are READ-ONLY visibility grants (B5 deliverable inspection): bound
+#: ``--ro-bind`` so a Clay leader can read but not mutate them.
+seat_context_var: contextvars.ContextVar[
+    tuple[Path | None, tuple[str, ...], tuple[str, ...]]
+] = contextvars.ContextVar("modulatio_clay_seat", default=(None, (), ()))
 
 #: Tool-activity sink for the enclosed Clay call (None → don't log tools). Set by
 #: the orchestrator together with ``seat_context`` so Clay's in-sandbox tool
@@ -255,14 +257,15 @@ seat_confined_var: contextvars.ContextVar[bool] = (
 )
 
 
-def current_seat_context() -> tuple[Path, list[str]]:
-    """Resolve the seat's (workspace, add_dirs) for this call. Workspace falls
-    back to a fresh temp dir when the orchestrator hasn't set one; that temp dir
-    is not tracked and is the caller's responsibility to clean up."""
-    ws, granted = seat_context_var.get()
+def current_seat_context() -> tuple[Path, list[str], list[str]]:
+    """Resolve the seat's (workspace, rw_grants, ro_grants) for this call.
+    Workspace falls back to a fresh temp dir when the orchestrator hasn't set one;
+    that temp dir is not tracked and is the caller's responsibility to clean up.
+    ``ro_grants`` are read-only visibility grants (B5)."""
+    ws, granted, read_only = seat_context_var.get()
     if ws is None:
         ws = Path(tempfile.mkdtemp(prefix="clay-"))
-    return ws, list(granted)
+    return ws, list(granted), list(read_only)
 
 
 def current_confined_mode() -> bool:
@@ -275,14 +278,18 @@ def current_confined_mode() -> bool:
 @contextlib.contextmanager
 def seat_context(
     workspace: Path, granted_roots: tuple[str, ...],
+    read_only_roots: tuple[str, ...] = (),
     on_tool_call: "ToolCallSink | None" = None,
     confined: bool = False,
 ):
-    """Orchestrator-side: set the Clay seat context (workspace + grants, an
-    optional tool-activity sink, and whether the seat is confined) for the
-    enclosed runner call(s), then restore. Mirrors how the orchestrator sets the
-    sandbox contextvars around a tool call."""
-    token = seat_context_var.set((workspace, tuple(granted_roots)))
+    """Orchestrator-side: set the Clay seat context (workspace + rw grants + read-
+    only visibility grants, an optional tool-activity sink, and whether the seat is
+    confined) for the enclosed runner call(s), then restore. ``read_only_roots``
+    (B5 deliverable inspection) are bound read-only so a Clay leader can read but
+    not mutate them. Mirrors how the orchestrator sets the sandbox contextvars."""
+    token = seat_context_var.set(
+        (workspace, tuple(granted_roots), tuple(read_only_roots))
+    )
     atoken = seat_activity_var.set(on_tool_call)
     ctoken = seat_confined_var.set(confined)
     try:
@@ -344,6 +351,7 @@ def run_claude(
     prompt: str,
     workspace: Path,
     add_dirs: list[str],
+    read_only_dirs: list[str] | None = None,
     system: str | None = None,
     session_id: str | None = None,
     resume: str | None = None,
@@ -364,9 +372,14 @@ def run_claude(
             "Claude Code seat confined to its folder. Install/repair bubblewrap."
         )
     resolved = Path(claude_bin).resolve()  # follow symlinks → real ELF path
+    # READ-ONLY grants (B5 deliverable visibility) are VISIBLE to Clay (--add-dir)
+    # but mounted read-only in the sandbox — so a Clay leader can inspect a run's
+    # deliverables without being able to mutate them (cadre BLOCK: Wild Bill +
+    # Lovecraft). The operator-approved ``add_dirs`` stay read-write.
+    ro_dirs = read_only_dirs or []
     argv = build_claude_argv(
         claude_bin=str(resolved), model=model, prompt=prompt, system=system,
-        add_dirs=add_dirs, session_id=session_id, resume=resume,
+        add_dirs=add_dirs + ro_dirs, session_id=session_id, resume=resume,
         disallowed_tools=disallowed_tools,
         allowed_tools=allowed_tools, safe_mode=safe_mode,
     )
@@ -391,7 +404,7 @@ def run_claude(
         argv, workspace,
         allow_network=True,
         extra_rw_roots=tuple([claude_home] + [Path(d) for d in add_dirs]),
-        extra_binds=tuple(extra_ro),
+        extra_binds=tuple(extra_ro) + tuple(Path(d) for d in ro_dirs),
     )
     child_env = claude_env(env)  # scrub ANTHROPIC_API_KEY from the CURATED env
     child_env.setdefault("HOME", str(Path.home()))

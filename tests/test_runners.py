@@ -828,7 +828,7 @@ def test_litellm_runner_bounds_the_clay_subprocess_with_timeout(monkeypatch):
 
     monkeypatch.setattr(claude_cli, "run_claude", _capture_run_claude)
     monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: "/fake/claude")
-    monkeypatch.setattr(claude_cli, "current_seat_context", lambda: (None, []))
+    monkeypatch.setattr(claude_cli, "current_seat_context", lambda: (None, [], []))
     monkeypatch.setattr(
         "modulatio.runners._resolve_model_call_args", lambda model: (model, {})
     )

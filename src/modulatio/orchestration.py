@@ -1130,6 +1130,9 @@ class _PlanError(Exception):
 # impossible Turnitin plagiarism gate (ticket death-loop), and "verify ALL
 # claims" decompose-stormed (20 tickets, nothing shipped). QC already verifies
 # every PRODUCING task and repairs it; a separate reviewer can only report.
+# Since the per-sub-objective count cap was removed (2026-06-26), this is now the
+# SOLE HARD guard against the catastrophic verify-storm — task-level verify-padding
+# is a soft YAGNI concern in the planning prompts, but a verify-GOAL is impossible.
 # RULE (Clif 2026-05-30): the Leader MAY require producing goals to draw on
 # rigorous, credible sources — that's a quality spec on production — but it
 # MAY NOT request verification as its own goal/task. Distrust of a source or
@@ -1685,7 +1688,13 @@ def _split_leader_report_body(raw: str) -> str:
         return ""
     lines = raw.splitlines()
     for i, line in enumerate(lines):
-        if line.strip().strip("#*").strip().lower().startswith(
+        stripped = line.strip()
+        # Must be a HEADING line (Markdown `#`/`*` decoration) — a prose line that
+        # merely STARTS WITH the heading text is not the section (cadre: Jenny/
+        # Lovecraft/Nemo). Gate on the decoration, THEN match the heading text.
+        if not (stripped.startswith("#") or stripped.startswith("*")):
+            continue
+        if stripped.strip("#*").strip().lower().startswith(
             _LEADER_REPORT_HEADING.lower()
         ):
             return "\n".join(lines[i + 1:]).strip()
@@ -3426,12 +3435,12 @@ class Orchestrator:
             raise ValueError(f"expected list of tasks, got {type(data).__name__}")
 
         # Parallel-execution Phase 1.5: bind independent, same-kind, same-skill
-        # producer specs into ONE artifacts-fan-out task BEFORE the cap check, so a
-        # wide goal forms a wide parallel wave (1 plan item → N sub-tasks) instead
-        # of N separate tasks that bust the per-goal cap (the live anthology
-        # failure: a correct one-wide-goal whose 8 story tasks the planner emitted
-        # separately → 9 > 6 cap → rejected). The task-level twin of the goal
-        # collapse: prose steers the planner to use `artifacts`; the engine binds it.
+        # producer specs into ONE artifacts-fan-out task, so a wide goal forms a
+        # wide parallel wave (1 plan item → N sub-tasks) from a single clean spec
+        # instead of N redundant separate specs (the live anthology shape: 8 story
+        # tasks the planner emitted separately + a compile). The task-level twin of
+        # the goal collapse: prose steers the planner to use `artifacts`; the engine
+        # binds it. (The old per-goal count cap was removed 2026-06-26.)
         data = self._bind_wide_artifacts(data)
 
         # (The fixed work-task count cap was removed 2026-06-26 — task count
@@ -7484,13 +7493,16 @@ class Orchestrator:
         ws = workspace if workspace is not None else self._leader_workspace()
         grants = tuple(str(r) for r in self.leader_gate().granted_roots())
         # A seat path may temporarily widen its own visibility via a thread-local
-        # hint: leader-verify grants the whole run dir so a Clay-backed reviewer
-        # sees the harness (artifacts, reports, logs, tickets) like any model in
-        # it — writes still pass through the same operator-widen gate. Folded in
-        # additively; unset (and thus a no-op) on every other seat path.
+        # hint: leader-verify/converse grant the whole run dir so a Clay-backed
+        # reviewer SEES the harness (artifacts, reports, logs, tickets) like any
+        # model in it. This is a READ widen — routed as ``read_only_roots`` so the
+        # seat is bound --ro-bind (cadre BLOCK: a rw grant let Clay mutate the very
+        # deliverables it was meant to inspect). Writes stay in the operator-widen
+        # gate's rw ``grants``. Unset (and thus a no-op) on every other seat path.
         extra = tuple(getattr(self._tls, "seat_extra_grants", ()) or ())
         return _clay.seat_context(
-            ws, grants + extra, on_tool_call=on_tool_call, confined=confined,
+            ws, grants, read_only_roots=extra,
+            on_tool_call=on_tool_call, confined=confined,
         )
 
     def _seat_tool_sink(

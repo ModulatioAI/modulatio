@@ -120,7 +120,7 @@ def test_orchestrator_enters_seat_context_on_run(tmp_path, monkeypatch):
 
     def _spy_runner(prompt: str) -> str:
         # Read the seat context the orchestrator set for this call.
-        ws, grants = claude_cli.current_seat_context()
+        ws, grants, _ro = claude_cli.current_seat_context()
         captured["ws"] = ws
         captured["grants"] = grants
         return "ok"
@@ -159,7 +159,7 @@ def test_orchestrator_enters_seat_context_on_run_agent_call(tmp_path, monkeypatc
     captured: dict = {}
 
     def _spy_runner(prompt: str) -> str:
-        ws, grants = claude_cli.current_seat_context()
+        ws, grants, _ro = claude_cli.current_seat_context()
         captured["ws"] = ws
         captured["grants"] = grants
         return "ok"
@@ -182,7 +182,7 @@ def test_seat_context_default_is_temp_fallback():
     it to confine the seat to the real workspace."""
     from modulatio import claude_cli
 
-    ws, grants = claude_cli.current_seat_context()
+    ws, grants, _ro = claude_cli.current_seat_context()
     assert ws.exists()
     assert grants == []
 

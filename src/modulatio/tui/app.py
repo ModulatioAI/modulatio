@@ -722,6 +722,8 @@ class ModulatioApp(App):
         appends more than once). Empty string when there are no verdicts."""
         if not verdicts:
             return ""
+        # dict preserves insertion order (3.7+): goals render in first-seen order,
+        # and the last verdict per goal wins (a redone goal appends again).
         by_goal: dict = {}
         for v in verdicts:
             by_goal[v.get("goal_id")] = v  # last wins
@@ -769,11 +771,13 @@ class ModulatioApp(App):
         if not (leader and planner and producer and qc):
             return None
         return {
-            # Leader reasons (deliberative seat); others stay thinking-OFF.
+            # Judgment seats REASON (leader/planner/qc); producers run thinking-OFF.
+            # litellm_runner defaults disable_thinking=True, so the reasoning seats
+            # must pass False explicitly (mirrors daemon._make_runners_for).
             "leader": litellm_runner(leader, disable_thinking=False),
-            "planner": litellm_runner(planner),
+            "planner": litellm_runner(planner, disable_thinking=False),
             "drafter": litellm_runner(producer),
-            "qc": litellm_runner(qc),
+            "qc": litellm_runner(qc, disable_thinking=False),
             # Research runner-role, bound to the producer model (Brick A).
             "researcher": litellm_runner(producer),
         }

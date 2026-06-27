@@ -40,6 +40,39 @@ def test_run_claude_never_binds_home_dir(tmp_path, monkeypatch):
     # binding the single file $HOME/claude is acceptable; the home DIR is not
 
 
+def test_run_claude_routes_read_only_dirs_to_ro_bind_not_rw(tmp_path, monkeypatch):
+    """Cadre (Wild Bill BLOCK + Lovecraft): a B5 visibility grant passed as
+    ``read_only_dirs`` must be mounted READ-ONLY (sandbox ``extra_binds`` →
+    ``--ro-bind``), NOT read-write (``extra_rw_roots`` → ``--bind``). A rw grant
+    lets a Clay leader MUTATE the very deliverables it was only meant to inspect.
+    The operator rw grant (``add_dirs``) stays writable."""
+    import types
+
+    from modulatio import sandbox
+    captured = {}
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    monkeypatch.setattr(
+        sandbox, "build_sandboxed_argv",
+        lambda argv, root, **kw: (captured.update(kw) or (list(argv), {"PATH": "/bin"})),
+    )
+    monkeypatch.setattr(
+        claude_cli.subprocess, "run",
+        lambda *a, **k: types.SimpleNamespace(
+            stdout='{"type":"result","subtype":"success","result":"ok"}', returncode=0),
+    )
+    rw_dir = str(tmp_path / "workspace_grant")     # operator-approved rw grant
+    ro_dir = str(tmp_path / "run_dir_visibility")  # B5 read-only visibility grant
+    claude_cli.run_claude(
+        claude_bin="/x/claude", model="m", prompt="hi", workspace=tmp_path,
+        add_dirs=[rw_dir], read_only_dirs=[ro_dir], timeout=1,
+    )
+    rw = [str(p) for p in captured["extra_rw_roots"]]
+    ro = [str(p) for p in captured["extra_binds"]]
+    assert ro_dir in ro, "the B5 visibility grant must be read-only bound (--ro-bind)"
+    assert ro_dir not in rw, "the B5 visibility grant must NOT be read-write bound"
+    assert rw_dir in rw, "an operator rw grant stays writable"
+
+
 def test_run_claude_sandboxes_and_scrubs(tmp_path, monkeypatch):
     from modulatio import sandbox
     captured = {}

@@ -287,18 +287,21 @@ def test_leader_verify_chat_loop_widens_registry_and_grants_run_dir(
     assert getattr(orch._tls, "seat_extra_grants", None) is None
 
 
-def test_seat_context_folds_in_tls_extra_grants(project: Project, monkeypatch):
-    """``_seat_context`` folds a thread-local ``seat_extra_grants`` hint into the
-    grants it hands the Clay seat — additively, on top of the operator-widen
-    gate's roots. This is the seam leader-verify uses to grant the run dir."""
+def test_seat_context_routes_tls_extra_grants_to_read_only(project: Project, monkeypatch):
+    """``_seat_context`` routes the thread-local ``seat_extra_grants`` hint as a
+    READ-ONLY grant (``read_only_roots``), NOT merged into the rw grants — so a
+    Clay seat binds the run dir ``--ro-bind`` and a leader-reviewer can READ the
+    harness but not MUTATE it (cadre BLOCK: Wild Bill + Lovecraft). The rw grants
+    stay the operator-widen gate's roots."""
     import contextlib
 
     from modulatio import claude_cli
 
     seen: dict = {}
 
-    def _spy(ws, grants, **kw):
+    def _spy(ws, grants, read_only_roots=(), **kw):
         seen["grants"] = grants
+        seen["read_only"] = read_only_roots
         return contextlib.nullcontext()
 
     monkeypatch.setattr(claude_cli, "seat_context", _spy)
@@ -308,7 +311,8 @@ def test_seat_context_folds_in_tls_extra_grants(project: Project, monkeypatch):
     with orch._seat_context():
         pass
 
-    assert "/some/run/dir" in seen["grants"]
+    assert "/some/run/dir" in seen["read_only"], "visibility grant must be read-only"
+    assert "/some/run/dir" not in seen["grants"], "it must NOT be in the rw grants"
 
 
 def test_extract_json_resilient_parses_retries_and_gives_up():
@@ -412,6 +416,23 @@ def test_split_leader_report_body_missing_or_inline_mention_returns_empty():
     assert _split_leader_report_body(
         "See the Product Quality Report below for details."
     ) == ""
+
+
+def test_split_leader_report_body_prose_line_starting_with_heading_text():
+    """Cadre (Jenny/Lovecraft/Nemo): a PROSE line that STARTS WITH the heading
+    text but has no #/* decoration must NOT match — only a real heading line does.
+    Otherwise the parse grabs the wrong tail (the prose line's, including the real
+    heading) instead of the real report body."""
+    from modulatio.orchestration import _split_leader_report_body
+
+    raw = (
+        "```json\n{\"verdict\": \"satisfied\"}\n```\n\n"
+        "Product Quality Report is available below.\n\n"
+        "## Product Quality Report\n\n"
+        "The real report body."
+    )
+    # Must skip the prose line and find the REAL heading → its tail only.
+    assert _split_leader_report_body(raw) == "The real report body."
 
 
 def test_leader_verify_report_rides_outside_the_verdict_json(project: Project, tmp_path: Path):

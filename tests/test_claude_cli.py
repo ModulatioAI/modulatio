@@ -132,11 +132,11 @@ def test_parse_claude_stream_no_sink_just_returns_result():
 
 
 def test_seat_context_sets_and_restores(tmp_path):
-    with claude_cli.seat_context(tmp_path, ("/granted",)):
-        ws, add_dirs = claude_cli.current_seat_context()
-        assert ws == tmp_path and add_dirs == ["/granted"]
+    with claude_cli.seat_context(tmp_path, ("/granted",), read_only_roots=("/ro",)):
+        ws, add_dirs, ro_dirs = claude_cli.current_seat_context()
+        assert ws == tmp_path and add_dirs == ["/granted"] and ro_dirs == ["/ro"]
     # restored after the block → temp fallback (never the leaked prior workspace)
-    assert claude_cli.seat_context_var.get() == (None, ())  # var restored to default
+    assert claude_cli.seat_context_var.get() == (None, (), ())  # var restored to default
 
 
 def test_claude_cli_strategy_reads_no_secret():

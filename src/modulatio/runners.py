@@ -729,7 +729,7 @@ def litellm_runner(
             # → "claude-opus-4-8") — the claude CLI --model flag wants the bare
             # model name, not the LiteLLM composite id.
             bare_model = litellm_model.split("/", 1)[-1]
-            ws, add_dirs = claude_cli.current_seat_context()
+            ws, add_dirs, ro_dirs = claude_cli.current_seat_context()
             # KICKOFF seat (producer / QC / plan / reflect — single-shot): run
             # fail-closed. The available built-in SET is restricted to the
             # non-process tools (_ALLOWED_CONFINED_TOOLS, passed via --tools) and
@@ -740,7 +740,7 @@ def litellm_runner(
             # The HARNESS lane (chat runner) sets none of this — full loadout.
             return claude_cli.run_claude(
                 claude_bin=claude_bin, model=bare_model, prompt=body,
-                workspace=ws, add_dirs=add_dirs,
+                workspace=ws, add_dirs=add_dirs, read_only_dirs=ro_dirs,
                 allowed_tools=claude_cli._ALLOWED_CONFINED_TOOLS,
                 safe_mode=True,
                 disallowed_tools=claude_cli._DISALLOWED_TOOLS,
@@ -1696,7 +1696,7 @@ def _build_claude_cli_chat_runner(
             )
         system = "\n\n".join(m.get("content") or "" for m in messages if m.get("role") == "system")
         user = "\n\n".join(m.get("content") or "" for m in messages if m.get("role") == "user")
-        ws, add_dirs = claude_cli.current_seat_context()
+        ws, add_dirs, ro_dirs = claude_cli.current_seat_context()
         # A KICKOFF producer/QC chat-loop seat is fail-closed confined (same as the
         # single-shot path); the interactive Leader's chat loop is not. The
         # orchestrator sets the lane via the seat contextvar (default unconfined).
@@ -1704,6 +1704,7 @@ def _build_claude_cli_chat_runner(
         text = claude_cli.run_claude(
             claude_bin=claude_bin, model=bare_model, prompt=user,
             system=system or None, workspace=ws, add_dirs=add_dirs,
+            read_only_dirs=ro_dirs,
             allowed_tools=claude_cli._ALLOWED_CONFINED_TOOLS if confined else (),
             safe_mode=confined,
             disallowed_tools=claude_cli._DISALLOWED_TOOLS if confined else (),
