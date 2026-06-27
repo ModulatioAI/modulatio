@@ -4,6 +4,57 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8.5] — 2026-06-27
+
+Reliability + leadership polish, driven by live test runs and cleared by a
+four-reviewer code cadre. No interface redesign — the engine getting steadier.
+
+### Added
+
+- **Producer "thinking-off" by default.** Producers (drafters, research) run with
+  their inner monologue disabled — `/no_think` for reasoning-toggle models and
+  `reasoning_effort="disable"` where the provider honors it — while the judgment
+  seats (Leader, planner, QC) keep reasoning on. A per-agent `disable_thinking`
+  override in the agent file wins either way. An always-on **producer runbook**
+  (the bar-commit working spine) rides every producer prompt so a thinking-off
+  producer stays rigorous.
+- **The Leader sees the team's deliverables.** A Clay (`claude -p`) Leader is now
+  granted the run directory **read-only** so its own file tools can open and judge
+  the produced files — in both the goal-verify and the conversational paths. It
+  can inspect, never mutate. See [Clay as the Leader](/providers/) for the caveats.
+- **Downloadable offline docs** — the DOCS tab can fetch a full offline bundle.
+
+### Changed
+
+- **Task count follows the work, not a fixed cap.** The old 6-task-per-goal limit
+  is gone; the planner sizes each task to fit a producer's context budget (below
+  the compression trigger) and fans as wide as the work needs. The runtime
+  compression/churn cap bounds an oversized task, and the no-standalone-
+  verification-goal invariant still blocks decompose-storms.
+- **Capability floor orders producers, never gates them** — an idle under-floor
+  producer takes work when the qualifiers are busy, so nobody starves.
+- **The end-of-run sign-off shows the Leader's actual verdict** + a Product
+  Quality Report digest in the conversation, not just a stats line.
+- Per-role context budgets raised; research-artifact producers routed to the
+  larger research pool; an idle-stall watchdog bounds a hung producer/Clay call.
+
+### Fixed
+
+- **The Leader verdict no longer false-fails on a long report.** The human-facing
+  report rides as a Markdown section *outside* the verdict JSON, so prose with
+  quotes/newlines can't break the parse.
+- The model picker shows reasoning/vision/tools capability letters; the bug-report
+  flow opens the issue tracker (no maintainer token needed); a recovered task's
+  failure ticket is auto-resolved at run-end; delivery + the end report happen
+  before best-effort codification; the send-log modal never requires a token and
+  is always exitable.
+
+### Security
+
+- **A Clay Leader's deliverable-visibility grant is read-only** (`--ro-bind`), not
+  read-write — so a Clay seat handed a run directory to inspect cannot modify the
+  deliverables it was meant to review. Caught and verified by the code cadre.
+
 ## [0.9.8.1] — 2026-06-24
 
 Bug fixes from live use of v0.9.8. No feature changes.

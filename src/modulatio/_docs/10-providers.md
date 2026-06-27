@@ -107,6 +107,41 @@ authentication_error`, so setup no longer offers it. See
 
 `api_key` with an `sk-ant-...` key remains the metered path for unattended runs.
 
+##### Clay as the Leader — what works, and what's limited
+
+Clay can hold any seat, **including the Leader**, and it functions as a full
+Leader: it converses with you, decomposes objectives into plans, drives the swarm,
+and renders a goal verdict plus a human-facing Product Quality Report at the end.
+But because Clay runs as a sandboxed `claude -p` subprocess — reaching Claude
+through its *own* native Claude Code tools rather than Modulatio's in-process
+tools — it has a few caveats worth knowing:
+
+- **It inspects deliverables with its own file tools, read-only.** Clay cannot
+  call the engine's `team_status` / `read_deliverable` helpers (those are
+  in-process tools a metered-API Leader uses). Instead, the run's directory is
+  granted to Clay's seat **read-only** (v0.9.8.5), so its native `Read`/`Grep`
+  can open the produced files to judge them — but it **cannot modify** a
+  deliverable it was only meant to review. (A metered-API Leader uses the helper
+  tools and reaches the same files; the destination is identical, the path
+  differs.)
+- **Its goal-verdict can lean on task summaries.** During the automated
+  end-of-run verification, Clay sometimes judges from the engine's task-outcome
+  digest rather than opening every file, so it tends toward a conservative
+  verdict — often *"on the fence"* with an explicit *"I couldn't independently
+  confirm X"* reservation addressed to you. The verdict and report are still
+  valid and the work still ships; the reservation is a flag for your spot-check,
+  not a failure. (Deeper read-during-verify is a planned refinement.)
+- **An occasional turn can come back empty.** A `claude -p` call can rarely
+  return no text; the engine's model-fallback and a simple retry recover it.
+- **Reads widen, writes stay gated.** A Clay leader's visibility into the run
+  directory is read-only; any *write* outside its own workspace still passes
+  through the same operator-widen permission gate as any other model — Clay is
+  treated like any seat, with no bespoke trust and no bespoke confinement.
+
+None of these stop Clay from leading a project end-to-end; they're the honest
+edges of running a subscription CLI as an orchestrator. For fully unattended,
+deep-verifying runs, a metered-API Leader (`api_key`) has no subprocess caveats.
+
 #### `cli_subprocess` — Claude CLI passthrough
 
 Routes through `claude` on PATH. Fully TOS-safe (uses Claude Code attribution).
