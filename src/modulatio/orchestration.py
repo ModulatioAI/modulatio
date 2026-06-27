@@ -5074,6 +5074,33 @@ class Orchestrator:
         from modulatio import vault as _vault
         return self.project.run_id or _vault.latest_run(self.project.code)
 
+    def _run_deliverables_block(self) -> str:
+        """Surface the latest run's deliverable PATHS in the converse prompt. A
+        Clay leader can't call the ``team_status`` / ``read_deliverable`` function
+        tools (those are litellm tool-loop tools, not bridged to ``claude -p``),
+        and its native file tools default to the empty ``leader_workspace`` — so a
+        Clay leader genuinely can't find a run's output without this. With the
+        paths named here AND the run dir granted to its seat (B5, set in the
+        converse path), Clay reads the deliverables with its OWN tools. Empty when
+        there is no run or nothing on disk yet."""
+        run_id = self._converse_run_scope()
+        if not run_id:
+            return ""
+        root = self._run_artifacts_root(run_id)
+        inventory = self._artifact_inventory(root)
+        if not inventory:
+            return ""
+        lines = [
+            "## The team's deliverables (latest run)",
+            "",
+            f"Run `{run_id}` produced these files. To answer questions about the "
+            "work, READ them with your own tools — don't judge from memory or say "
+            "you can't see them:",
+            "",
+        ]
+        lines += [f"- `{root / rel}` ({toks} tokens)" for rel, toks in inventory]
+        return "\n".join(lines)
+
     def _pending_approvals_block(self) -> str:
         """Open approvals awaiting the operator's decision, rendered for the
         converse prompt so the Leader can surface them and resolve them via the
@@ -5144,7 +5171,15 @@ class Orchestrator:
         # JIT-load the reflex that tells you to reach for the reflex. Overridable
         # via the leader-runbook seed/override, engine default otherwise.
         runbook = self._prompt("leader-runbook", _LEADER_RUNBOOK)
-        return runbook.rstrip() + "\n\n---\n\n" + formatted + self._autonomy_block()
+        # Surface the latest run's deliverable paths so a Clay leader (which can't
+        # call team_status/read_deliverable and whose native tools default to the
+        # empty leader_workspace) knows where its deliverables live and reads them.
+        deliverables = self._run_deliverables_block()
+        deliverables_section = ("\n\n---\n\n" + deliverables) if deliverables else ""
+        return (
+            runbook.rstrip() + "\n\n---\n\n" + formatted
+            + deliverables_section + self._autonomy_block()
+        )
 
     def _with_producer_runbook(self, prompt: str) -> str:
         """Prepend the producer runbook (the always-on bar-commit spine) to a
@@ -5902,6 +5937,17 @@ class Orchestrator:
                     augmented = dict(self._leader_tool_registry())
                     augmented.update(self._leader_function_tools())
                     self._tls.tool_registry_override = augmented
+                    # B5 (converse): grant a Clay leader the latest run's dir so its
+                    # native file tools reach the deliverables (team_status /
+                    # read_deliverable aren't callable from claude -p; its tools
+                    # otherwise see only the empty leader_workspace). READ widens;
+                    # writes stay governed by the operator-widen gate. A litellm
+                    # leader ignores the hint and uses the function tools.
+                    _conv_run = self._converse_run_scope()
+                    if _conv_run:
+                        self._tls.seat_extra_grants = (
+                            str(_vault_run_dir(self.project.code, _conv_run)),
+                        )
                     try:
                         reply = self._run_chat_loop(
                             prompt=prompt,
@@ -5918,6 +5964,7 @@ class Orchestrator:
                         )
                     finally:
                         self._tls.tool_registry_override = None
+                        self._tls.seat_extra_grants = None
             except Exception as exc:
                 self._append_conversation(
                     "leader",

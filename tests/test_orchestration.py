@@ -9055,6 +9055,24 @@ def test_team_status_reports_running_liveness(tmp_path, monkeypatch):
     assert "RUNNING" in out
 
 
+def test_converse_deliverables_block_surfaces_run_artifacts(tmp_path, monkeypatch):
+    """B5 (converse): a Clay leader can't call team_status/read_deliverable (those
+    are litellm-loop function tools, not bridged to claude -p), and its native file
+    tools default to the empty leader_workspace — so the converse prompt must
+    surface the latest run's deliverable PATHS, which Clay then reads with its OWN
+    tools. Empty when there's no run / no artifacts."""
+    orch = _redo_orch(tmp_path, monkeypatch, _leader_stub, code="DLV")
+    assert orch._run_deliverables_block() == ""  # nothing produced yet
+    art = orch._run_artifacts_root("run-1")
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "paper.md").write_text("# Paper\n\n" + " ".join(["w"] * 40) + "\n")
+
+    block = orch._run_deliverables_block()
+    assert "paper.md" in block
+    assert str(art / "paper.md") in block  # the ABSOLUTE path Clay can Read
+    assert "read them" in block.lower() or "your own tools" in block.lower()
+
+
 def test_read_deliverable_reads_artifact(tmp_path, monkeypatch):
     """read_deliverable returns a produced file's full content for the Leader to
     judge."""

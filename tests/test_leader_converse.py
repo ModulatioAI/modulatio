@@ -104,6 +104,33 @@ def test_converse_runs_the_tool_loop_with_a_chat_runner(project: Project):
     assert "only run jobs" not in reply.lower()
 
 
+def test_converse_grants_run_dir_to_clay_seat(project: Project, monkeypatch):
+    """B5 (converse): the converse path grants the latest run's dir as a seat
+    extra-grant so a Clay leader's NATIVE file tools reach the deliverables (the
+    team_status/read_deliverable function tools aren't callable from claude -p).
+    A litellm leader ignores the hint. The grant is restored after the loop."""
+    project.run_id = "run-1"
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": lambda **k: ChatResponse(content="ok", tool_calls=())},
+        chat_runner_models={"leader": "mock-model"},
+    )
+    seen: dict = {}
+
+    def _fake_loop(**kwargs):
+        seen["grants"] = getattr(orch._tls, "seat_extra_grants", None)
+        return "ok"
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _fake_loop)
+    orch.converse("what did the team produce?")
+
+    run = vault.run_dir(project.code, "run-1")
+    assert seen.get("grants") and str(run) in seen["grants"], (
+        "converse must grant the latest run dir so Clay's tools can reach it"
+    )
+    assert getattr(orch._tls, "seat_extra_grants", None) is None, "grant must restore"
+
+
 def test_converse_prompt_carries_operator_context(project: Project):
     """The {operator_context} slot renders — the partnership framing the
     Leader reasons within (present vs autonomous)."""
