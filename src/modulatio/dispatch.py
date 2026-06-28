@@ -266,6 +266,7 @@ def schedule_wave(
     agents: list[Agent],
     *,
     global_in_flight_cap: int | None = None,
+    occupied_by_agent: dict[str, int] | None = None,
     skill_floor_for: SkillFloorLookup | None = None,
     domain_floor_for: DomainFloorLookup | None = None,
 ) -> WaveSchedule:
@@ -287,9 +288,15 @@ def schedule_wave(
     NOT skill-scheduled here — the caller routes them via the legacy path.
     They are silently skipped (neither scheduled nor deferred nor gapped).
 
+    ``occupied_by_agent`` (continuous-pull, W1): each agent's already-in-flight
+    task count, subtracted from its ``capacity_cap`` so this allocation can't
+    assign a still-busy agent past its cap. The wave path passes ``None`` (no
+    occupancy) → identical to the per-wave behavior.
+
     Pure function: capacity is tracked locally; ``agents`` is not mutated.
     """
-    remaining = {a.id: max(0, a.capacity_cap) for a in agents}
+    busy = occupied_by_agent or {}
+    remaining = {a.id: max(0, a.capacity_cap - busy.get(a.id, 0)) for a in agents}
     by_id = {a.id: a for a in agents}
     global_remaining = global_in_flight_cap
 

@@ -1582,3 +1582,23 @@ def test_schedule_wave_continuity_hint_at_producer_still_honored():
     ]
     sched = dispatch.schedule_wave([task], agents)
     assert sched.assignments == {"W-T-001": "p-pricey"}  # hint honored
+
+
+def test_schedule_wave_respects_in_flight_occupancy():
+    """W1 (continuous-pull): an agent already running a task (occupied_by_agent)
+    has its effective per-pump capacity reduced — it is NOT assigned past
+    capacity_cap. cap=1 + 1 in-flight → the ready task DEFERS, not double-assigned."""
+    tasks = [_wtask("W-T-009", ["drafter"])]
+    agents = [_wagent("solo", ["drafter"], cap=1)]
+    sched = dispatch.schedule_wave(tasks, agents, occupied_by_agent={"solo": 1})
+    assert sched.assignments == {}
+    assert {d[0] for d in sched.deferred} == {"W-T-009"}
+    assert sched.gaps == ()
+
+
+def test_schedule_wave_occupancy_default_empty_unchanged():
+    """The wave path passes no occupancy → behavior identical to today."""
+    tasks = [_wtask("W-T-010", ["drafter"])]
+    agents = [_wagent("solo", ["drafter"], cap=1)]
+    sched = dispatch.schedule_wave(tasks, agents)
+    assert sched.assignments == {"W-T-010": "solo"}
