@@ -843,6 +843,21 @@ class ModulatioApp(App):
         self._conv_orch = orch
         return orch
 
+    def reload_services(self) -> tuple[bool, str]:
+        """Apply config/roster changes (e.g. a new Leader model from the picker)
+        to the live services without a full TUI restart. The cached conversation
+        orchestrator (``_conv_orch``) is the only long-lived runner state —
+        kickoff builds fresh per run — so reload drops it and refreshes the config
+        cache; the next message/run rebuilds from disk. Refuses while the Leader
+        or a job is busy (invalidating mid-turn would race the worker). Returns
+        ``(ok, toast)`` for the caller to surface."""
+        if self._any_job_in_flight() or self._converse_worker_live():
+            return False, "Can't reload while the Leader or a job is busy — finish or stop it first."
+        from modulatio import config
+        config.reload()
+        self._conv_orch = None
+        return True, "Services reloaded — model & config changes apply on your next message or run."
+
     def _operator_message(self, text: str, attachments=None) -> None:
         """Operator sent a chat message (+ optional attachments) → hand it to
         the Leader's converse function on a worker thread; the reply renders
@@ -878,6 +893,12 @@ class ModulatioApp(App):
 
     def _on_converse_done(self, reply: str) -> None:
         try:
+            if not (reply or "").strip():
+                # An empty/whitespace turn (model refusal, a turn that ends on tool
+                # calls with no final content, a Clay hiccup) renders as a silent
+                # "◆ Leader" with no text — surface a visible fallback so it never
+                # reads as the Leader ignoring you.
+                reply = "(I didn't get a reply that time — try again.)"
             self.query_one("#stream-leader", StreamView).add_leader_message(reply)
         except NoMatches:
             pass

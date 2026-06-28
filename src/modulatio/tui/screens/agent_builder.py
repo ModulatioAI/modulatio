@@ -194,7 +194,10 @@ class AgentBuilderScreen(Vertical):
             Button("Remove", id="agt-remove", variant="warning"),
             id="agt-buttons",
         )
-        await lst.mount(table, buttons, Static(message, id="agt-list-status"))
+        # A distinct "apply my changes live" action — separate from the per-agent
+        # CRUD grid above — so a model change takes effect without a TUI restart.
+        reload_btn = Button("↻ Reload services", id="agt-reload")
+        await lst.mount(table, buttons, reload_btn, Static(message, id="agt-list-status"))
         await self._rest_companion()
 
     def _selected_agent_id(self) -> str | None:
@@ -359,6 +362,9 @@ class AgentBuilderScreen(Vertical):
             await self._fb_move(-1)
         elif bid == "agt-fb-down":
             await self._fb_move(1)
+        elif bid == "agt-reload":
+            ok, msg = self.app.reload_services()
+            self.app.notify(msg, severity="information" if ok else "warning")
         elif bid == "agt-add":
             await self._show_add_agent()
         elif bid == "agt-remove":
