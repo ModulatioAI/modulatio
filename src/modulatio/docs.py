@@ -39,6 +39,24 @@ def _cache_root() -> Path:
     return config.CONFIG_DIR / "docs-cache"
 
 
+def sweep_orphaned_staging() -> int:
+    """Remove orphaned ``modulatio-docs-*`` staging dirs left next to the cache.
+
+    ``update_docs`` stages into ``mkdtemp(prefix="modulatio-docs-", dir=cache.parent)``
+    then atomically swaps it in; its normal failure path cleans up its own
+    staging, but a hard kill between ``rmtree(cache)`` and ``os.replace`` can't —
+    leaving litter (harmless: the reader falls back to the baseline). Best-effort
+    + idempotent; returns the count removed. The glob can't match the real
+    ``docs-cache`` (distinct prefix)."""
+    parent = _cache_root().parent
+    removed = 0
+    for d in parent.glob("modulatio-docs-*"):
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+    return removed
+
+
 def _docs_root() -> Path:
     """Read from the downloaded cache when it holds a valid bundle (a
     ``manifest.json``), else the install baseline. A cache without its manifest
@@ -135,6 +153,7 @@ def update_docs(base_url: str = DOCS_UPDATE_URL) -> str:
     current docs on any failure — offline, a bad checksum, or a bad bundle.
     """
     base = base_url.rstrip("/")
+    sweep_orphaned_staging()  # clear any prior update-crash litter before staging
     try:
         manifest = _fetch_json(base + "/manifest.json")
     except Exception:
@@ -167,4 +186,7 @@ def update_docs(base_url: str = DOCS_UPDATE_URL) -> str:
     return f"Updated to v{remote_v} ✓"
 
 
-__all__ = ["DOCS_URL", "DOCS_UPDATE_URL", "list_docs", "read_doc", "update_docs"]
+__all__ = [
+    "DOCS_URL", "DOCS_UPDATE_URL", "list_docs", "read_doc", "update_docs",
+    "sweep_orphaned_staging",
+]

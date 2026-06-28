@@ -43,6 +43,33 @@ def test_partial_cache_without_manifest_falls_back_to_baseline(tmp_path):
     assert "99-cached" not in slugs, "no manifest => baseline, not the partial cache"
 
 
+# ── orphaned-staging sweep (crash between rmtree(cache) and os.replace) ────
+
+
+def test_sweep_removes_orphaned_staging_and_keeps_cache():
+    cfg = config.CONFIG_DIR
+    cfg.mkdir(parents=True, exist_ok=True)
+    _seed_cache()  # the real cache at cfg/docs-cache — must SURVIVE the sweep
+    # Two orphaned staging dirs, as a hard-kill mid-update would leave behind.
+    (cfg / "modulatio-docs-aaa").mkdir()
+    (cfg / "modulatio-docs-bbb").mkdir()
+    (cfg / "modulatio-docs-bbb" / "junk.md").write_text("x", "utf-8")
+
+    n = docs.sweep_orphaned_staging()
+
+    assert n == 2
+    assert not (cfg / "modulatio-docs-aaa").exists()
+    assert not (cfg / "modulatio-docs-bbb").exists()
+    assert (cfg / "docs-cache" / "manifest.json").is_file(), (
+        "the real cache must survive the orphan sweep (distinct prefix)"
+    )
+
+
+def test_sweep_is_safe_when_nothing_to_clean():
+    # No CONFIG_DIR / no orphans → returns 0, never raises.
+    assert docs.sweep_orphaned_staging() == 0
+
+
 # ── update_docs: fetch + verify + atomic swap ─────────────────────────────
 
 import hashlib  # noqa: E402

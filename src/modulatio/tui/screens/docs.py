@@ -60,6 +60,7 @@ class DocsScreen(Vertical):
                 yield Markdown("_Select a page._", id="docs-page-md")
 
     def on_mount(self) -> None:
+        docs.sweep_orphaned_staging()  # clear any update-crash litter on entry
         self.refresh_docs()
 
     def refresh_docs(self) -> None:
