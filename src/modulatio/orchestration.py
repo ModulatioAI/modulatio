@@ -9620,13 +9620,18 @@ class Orchestrator:
             p = prompt + correction
             if leader_tool_skill is not None:
                 # Inject skill body as preamble, mirroring the QC path.
-                leader_prompt = p
+                body = p
                 if leader_tool_skill.prompt_template.strip():
-                    leader_prompt = (
+                    body = (
                         "## Skill guidance\n\n"
                         f"{leader_tool_skill.prompt_template.strip()}\n\n"
                         f"## Verify task\n\n{p}"
                     )
+                # Ground the verdict in the files: a Clay leader has the run-dir
+                # grant (below) + native file tools but no function-tool nudge, so
+                # without this it judges from the inline digest and hedges. The
+                # verify analog of the converse deliverables block (harder half of B5).
+                leader_prompt = _LEADER_VERIFY_GROUNDING + body
                 artifacts_root = self._scope_root() / "artifacts"
                 transcript_path = (
                     artifacts_root / "tool_calls"
@@ -13326,6 +13331,22 @@ usefully. Use tools as the work requires. When they ask where things stand or
 whether the deliverables are any good, pull ``team_status`` and
 ``read_deliverable`` and see for yourself before answering — don't guess or
 punt it back. Keep it conversational.
+"""
+
+#: Prepended to the verify prompt ONLY on the tool-using path, where the reviewer
+#: actually has tools (a litellm leader's run-dir ``run_shell``, or a Clay leader's
+#: native file tools + the run-dir seat grant). A Clay leader otherwise judges from
+#: the inline digest and hedges ``on_the_fence``; this is the verify analog of the
+#: converse deliverables nudge — the harder half of B5.
+_LEADER_VERIFY_GROUNDING = """\
+## Ground your verdict in the actual files
+
+The deliverables, logs, and tickets for this run are on disk under the run
+directory — their paths are named below. Before you judge,
+READ the real files with your own tools. Don't decide only from the inline
+snippet or digest, and don't hedge with "I couldn't independently confirm"
+when you can open them yourself.
+
 """
 
 _LEADER_VERIFY_PROMPT = """\

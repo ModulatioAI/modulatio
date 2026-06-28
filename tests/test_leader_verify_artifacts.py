@@ -630,3 +630,68 @@ def test_leader_verify_no_midrun_budget_reset_on_date_roll(project: Project, tmp
         "could not fully satisfy" in r.get("concern", "")
         for r in summary.recommendations
     ), summary.recommendations
+
+
+def test_leader_verify_tool_loop_prompt_grounds_reviewer_in_the_files(
+    project: Project, tmp_path: Path, monkeypatch
+):
+    """The tool-using verify prompt must explicitly tell the Leader-reviewer to
+    READ the real files with its own tools before judging. Without this a Clay
+    leader (which has the run-dir grant but no function-tool nudge) judges from
+    the inline digest and hedges on_the_fence — the harder half of B5."""
+    from types import SimpleNamespace
+
+    from modulatio import tools
+
+    artifacts_root = tmp_path / PROJECT_CODE.lower() / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    (artifacts_root / "doc.md").write_text("# Doc\n\nbody\n")
+
+    goal = Goal(
+        id="LVA-G-010", project_id=project.id, description="d",
+        success_criteria="c", status=GoalStatus.IN_PROGRESS,
+    )
+    store.save_goal(project.code, goal)
+    task = Task(
+        id="LVA-T-010", project_id=project.id, goal_id=goal.id,
+        description="t", output_path="doc.md", status=TaskStatus.COMPLETED,
+    )
+    store.save_task(project.code, task)
+
+    orch, _ = _capturing_orch(project)
+    orch.tool_registry = tools.build_registry(
+        artifacts_root=artifacts_root, project_code=project.code,
+    )
+    monkeypatch.setattr(
+        orch, "_leader_verify_tool_loadout_skill",
+        lambda: SimpleNamespace(
+            tool_loadout=["run_shell"], prompt_template="", name="leader-verify",
+            needs_network=False, pass_env=(),
+        ),
+    )
+    monkeypatch.setattr(
+        orch, "_resolve_chat_runner", lambda role: (lambda *a, **k: ""),
+    )
+
+    seen: dict = {}
+
+    def _fake_loop(**kwargs):
+        seen["prompt"] = kwargs.get("prompt", "")
+        return (
+            "```json\n"
+            + json.dumps(
+                {"verdict": "satisfied", "rationale": "ok", "report_body": "ok"}
+            )
+            + "\n```"
+        )
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _fake_loop)
+
+    summary = RunSummary(project=project)
+    orch._leader_verify_goal(goal, [task], summary)
+
+    prompt = seen.get("prompt", "").lower()
+    assert "read the real files with your own tools" in prompt, (
+        "the tool-loop verify prompt must tell the reviewer to read the real files "
+        "with its own tools before judging"
+    )
