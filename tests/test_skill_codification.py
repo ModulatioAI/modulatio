@@ -648,3 +648,17 @@ def test_daemon_raise_records_breadcrumb(proj, monkeypatch):
     o._run_post_run_codification_bounded(RunSummary(project=pr))  # must not raise
 
     assert skips == ["daemon_raised"]
+
+
+def test_codification_timeout_env_override(monkeypatch):
+    """Nemo suggestion A: MODULATIO_CODIFICATION_TIMEOUT_S retunes the bound (parallel
+    to the other env knobs); empty/bad/degenerate falls back to the 180s default."""
+    from modulatio import orchestration
+    monkeypatch.setenv("MODULATIO_CODIFICATION_TIMEOUT_S", "42.5")
+    assert orchestration._codification_timeout() == 42.5
+    monkeypatch.delenv("MODULATIO_CODIFICATION_TIMEOUT_S", raising=False)
+    assert orchestration._codification_timeout() == orchestration._CODIFICATION_TIMEOUT_DEFAULT
+    monkeypatch.setenv("MODULATIO_CODIFICATION_TIMEOUT_S", "garbage")
+    assert orchestration._codification_timeout() == orchestration._CODIFICATION_TIMEOUT_DEFAULT
+    monkeypatch.setenv("MODULATIO_CODIFICATION_TIMEOUT_S", "0")  # degenerate join(0) → default
+    assert orchestration._codification_timeout() == orchestration._CODIFICATION_TIMEOUT_DEFAULT

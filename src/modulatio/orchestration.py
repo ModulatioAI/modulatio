@@ -188,8 +188,26 @@ _FIX_WINDOW_MAX_S = 300.0
 #: Duration cap on the best-effort post-run codification phase (Alfred loop). B1
 #: runs it AFTER delivery; this bounds how long it can hold the process if a cloud
 #: leader call stalls — otherwise it rides the full ~600s per-call watchdog. A
-#: best-effort skill recodifies next run, so giving up here is cheap.
-_CODIFICATION_TIMEOUT_S = 180.0
+#: best-effort skill recodifies next run, so giving up here is cheap. Tunable via
+#: MODULATIO_CODIFICATION_TIMEOUT_S (raise it for a slow-network leader); a
+#: degenerate/malformed value falls back to the default (mirrors _win_codify_floor).
+_CODIFICATION_TIMEOUT_DEFAULT = 180.0
+
+
+def _codification_timeout() -> float:
+    raw = (os.environ.get("MODULATIO_CODIFICATION_TIMEOUT_S") or "").strip()
+    if not raw:
+        return _CODIFICATION_TIMEOUT_DEFAULT
+    try:
+        val = float(raw)
+    except ValueError:
+        return _CODIFICATION_TIMEOUT_DEFAULT
+    return val if val > 0 else _CODIFICATION_TIMEOUT_DEFAULT
+
+
+#: Resolved once at import via the guarded parser, so a malformed env value can never
+#: raise at import time. Tests monkeypatch this attribute directly.
+_CODIFICATION_TIMEOUT_S = _codification_timeout()
 
 #: Cancellation boundary for the bounded codify daemon (cadre: Wild Bill BLOCK). On
 #: timeout the wrapper SETS this Event; the persist seams (`_persist_codification`,
