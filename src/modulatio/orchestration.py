@@ -185,6 +185,12 @@ class FixWindowNotice:
 #: Hard ceiling on the window — config can never turn it into an unbounded gate.
 _FIX_WINDOW_MAX_S = 300.0
 
+#: Duration cap on the best-effort post-run codification phase (Alfred loop). B1
+#: runs it AFTER delivery; this bounds how long it can hold the process if a cloud
+#: leader call stalls — otherwise it rides the full ~600s per-call watchdog. A
+#: best-effort skill recodifies next run, so giving up here is cheap.
+_CODIFICATION_TIMEOUT_S = 180.0
+
 
 class AgentRunner(Protocol):
     """Anything that takes a prompt and returns a string response."""
@@ -11302,6 +11308,27 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — observability must never break a run
             pass
 
+    def _run_post_run_codification_bounded(self, summary: RunSummary) -> None:
+        """Run the best-effort post-run codification (skill + JT) bounded by
+        ``_CODIFICATION_TIMEOUT_S``, so a stalled cloud leader call can't hold the
+        process for the full ~600s per-call watchdog. B1 already made codify run
+        AFTER delivery (never blocks the deliverable); this caps its DURATION too —
+        a best-effort skill isn't worth a 10-minute process hang and recodifies next
+        run if the pattern recurs. Daemon thread + ``copy_context`` so the budget /
+        tool-summarization binds reach it (the fix-window-callback idiom); on timeout
+        the caller proceeds and the orphaned daemon bails at the per-call watchdog."""
+        def _codify() -> None:
+            self._post_run_codification(summary)
+            self._post_run_jt_codification(summary)
+        ctx = contextvars.copy_context()
+        t = threading.Thread(
+            target=lambda: ctx.run(_codify), name="post-run-codify", daemon=True,
+        )
+        t.start()
+        t.join(timeout=_CODIFICATION_TIMEOUT_S)
+        if t.is_alive():
+            self._codification_skipped("timeout")
+
     def _post_run_codification(self, summary: RunSummary) -> None:
         """End-of-run hook (the Alfred loop). The LEADER reviews recent QC
         failures and JUDGES whether any problem recurred enough to codify into a
@@ -13450,13 +13477,12 @@ class Orchestrator:
         self._emit_activity(
             role="orchestrator", phase="kickoff_ended", agent_id="orchestrator",
         )
-        # Brick 4: autonomous self-codification — recurring lessons become
-        # skills. Best-effort, never blocks; runs AFTER delivery + kickoff_ended
-        # (B1) so it's pure background learning, never on the user's critical path.
-        self._post_run_codification(summary)
-        # Brick B4: the setup-side loop — recurring JOBS become Job Templates.
-        # Reads the kickoff-history record written above. Best-effort.
-        self._post_run_jt_codification(summary)
+        # Brick 4 + B4: autonomous self-codification (recurring lessons → skills)
+        # and JT codification (recurring jobs → Job Templates). Best-effort; runs
+        # AFTER delivery + kickoff_ended (B1) so it's pure background learning, never
+        # on the user's critical path — and DURATION-bounded so a stalled cloud leader
+        # call can't hold the process for the full per-call watchdog (post-A/B fix).
+        self._run_post_run_codification_bounded(summary)
         return summary
 
 

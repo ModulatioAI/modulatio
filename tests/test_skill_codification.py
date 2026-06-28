@@ -519,3 +519,44 @@ def test_win_persist_failure_does_not_consume_cluster(proj, monkeypatch):
     monkeypatch.setattr(o, "_persist_codification", boom)
     o._post_run_win_codification(RunSummary(project=pr))
     assert len(recoveries.unconsumed_recoveries(proj)) == 3  # retained for retry
+
+
+# ── B1 completion: bound the codification DURATION (post-A/B finding 2026-06-28) ──
+
+
+def test_post_run_codification_bounded_by_timeout(proj, monkeypatch):
+    """A best-effort codification that stalls on a slow leader call must NOT hold the
+    process for the full ~600s call-timeout watchdog — the bounded wrapper gives up at
+    `_CODIFICATION_TIMEOUT_S` and emits a 'timeout' skip breadcrumb. (B1 ordered codify
+    post-delivery; this caps its DURATION.)"""
+    import time
+
+    from modulatio import orchestration
+    o, pr = _orch(proj, {"codifications": []})
+    monkeypatch.setattr(orchestration, "_CODIFICATION_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(o, "_post_run_codification", lambda s: time.sleep(5))
+    monkeypatch.setattr(o, "_post_run_jt_codification", lambda s: None)
+    skips: list[str] = []
+    monkeypatch.setattr(o, "_codification_skipped", lambda r: skips.append(r))
+
+    start = time.monotonic()
+    o._run_post_run_codification_bounded(RunSummary(project=pr))
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 2.0, f"bounded codify must return ~at the timeout, not wait the 5s hang; took {elapsed:.1f}s"
+    assert skips == ["timeout"]
+
+
+def test_post_run_codification_bounded_completes_when_fast(proj, monkeypatch):
+    """When codification finishes within the bound, BOTH phases run and no timeout fires."""
+    o, pr = _orch(proj, {"codifications": []})
+    ran: list[str] = []
+    monkeypatch.setattr(o, "_post_run_codification", lambda s: ran.append("skill"))
+    monkeypatch.setattr(o, "_post_run_jt_codification", lambda s: ran.append("jt"))
+    skips: list[str] = []
+    monkeypatch.setattr(o, "_codification_skipped", lambda r: skips.append(r))
+
+    o._run_post_run_codification_bounded(RunSummary(project=pr))
+
+    assert ran == ["skill", "jt"]
+    assert skips == []
