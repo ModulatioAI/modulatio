@@ -113,13 +113,12 @@ AB_HARNESS_EVENT_LITERALS = (
 VARIED_DIMENSION_LITERALS = (
     "compression",
     "concurrent_waves",
-    "continuous_pull",
 )
 
 #: Dimensions whose arm values must be strict ``bool`` (not "False"/0/1).
 #: Drives the type guard in :func:`_validate_config` and the explicit
 #: dict-key mapping in :func:`_apply_arm_override`.
-_BOOLEAN_DIMENSIONS = frozenset({"compression", "concurrent_waves", "continuous_pull"})
+_BOOLEAN_DIMENSIONS = frozenset({"compression", "concurrent_waves"})
 
 #: Maps a boolean varied-dimension name → the ``Project`` config key it
 #: toggles. Dimension names and field names deliberately differ (the
@@ -128,7 +127,6 @@ _BOOLEAN_DIMENSIONS = frozenset({"compression", "concurrent_waves", "continuous_
 _DIMENSION_CONFIG_KEY = {
     "compression": "compression_enabled",
     "concurrent_waves": "concurrent_waves_enabled",
-    "continuous_pull": "continuous_pull_enabled",
 }
 
 

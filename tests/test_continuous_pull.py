@@ -1,4 +1,4 @@
-"""Continuous-pull dispatch (Phase 2) — drives the real `_run_task_waves_continuous`
+"""Continuous-pull dispatch (Phase 2) — drives the real `_run_task_waves`
 loop. 4-lens cadre-signed design: docs/design/2026-06-27-continuous-pull-dispatch.md.
 
 Tasks here are NO_CONSTRAINT (empty required_skills) so they run the legacy path
@@ -47,7 +47,7 @@ def _run(orch, tasks):
     for t in tasks:
         store.save_task(orch.project.code, t, run_id=orch.project.run_id)
     summary = RunSummary(project=orch.project)
-    orch._run_task_waves_continuous(_goal(), tasks, summary, {t.id: t for t in tasks})
+    orch._run_task_waves(_goal(), tasks, summary, {t.id: t for t in tasks})
     return summary
 
 
@@ -112,7 +112,7 @@ def test_continuous_pull_before_slow_sibling(tmp_path, monkeypatch):
     summary = RunSummary(project=orch.project)
 
     runner = threading.Thread(
-        target=orch._run_task_waves_continuous,
+        target=orch._run_task_waves,
         args=(_goal(), [a, b, c], summary, {t.id: t for t in (a, b, c)}),
     )
     runner.start()
@@ -234,7 +234,7 @@ def test_continuous_global_cap_not_exceeded_mixed_skill_and_legacy(tmp_path, mon
         store.save_task(orch.project.code, t, run_id=orch.project.run_id)
     summary = RunSummary(project=orch.project)
     runner = threading.Thread(
-        target=orch._run_task_waves_continuous,
+        target=orch._run_task_waves,
         args=(_goal(), [skill, legacy], summary, {t.id: t for t in (skill, legacy)}),
     )
     runner.start()

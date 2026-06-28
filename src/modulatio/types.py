@@ -488,11 +488,6 @@ class Project(BaseModel):
     #: both directions (``=0`` is the absolute kill-switch, ``=1`` forces on).
     #: See ``Orchestrator._concurrent_waves_enabled``.
     concurrent_waves_enabled: bool = True
-    #: Continuous-pull dispatch (Phase 2) — a refinement INSIDE the concurrent
-    #: regime, only consulted when ``concurrent_waves_enabled``. Default False
-    #: (the wave-barrier path ships default); flip via ``MODULATIO_CONTINUOUS_PULL``
-    #: or this field (the A/B arm). See ``Orchestrator._continuous_pull_enabled``.
-    continuous_pull_enabled: bool = False
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

@@ -7330,27 +7330,6 @@ class Orchestrator:
             return project.concurrent_waves_enabled  # default True
         return True  # no project → default ON
 
-    @staticmethod
-    def _continuous_pull_enabled(project: "Project | None" = None) -> bool:
-        """Continuous-pull dispatch (Phase 2) — default OFF. A refinement INSIDE
-        the concurrent regime: the caller only consults this when
-        ``_concurrent_waves_enabled`` is True, so when OFF the wave-barrier path
-        runs unchanged. When ON, a freed producer pulls the next ready task
-        immediately instead of waiting on the wave barrier.
-
-        Precedence mirrors ``_concurrent_waves_enabled``:
-        - ``MODULATIO_CONTINUOUS_PULL=1`` → ON · ``=0`` → OFF (overrides the field).
-        - env unset → the project field (default False; the A/B harness varies it).
-        """
-        env = (os.environ.get("MODULATIO_CONTINUOUS_PULL") or "").strip()
-        if env == "1":
-            return True
-        if env == "0":
-            return False
-        if project is not None:
-            return project.continuous_pull_enabled  # default False
-        return False  # no project → default OFF
-
     def _iterate_enabled(self) -> bool:
         """The between-task iterate gate. #80 slice 7 (Q5 alignment): runs by
         DEFAULT regardless of operator presence — presence governs VISIBILITY,
@@ -7937,258 +7916,6 @@ class Orchestrator:
                 pass
         return 32
 
-    def _run_task_waves(
-        self, g: Goal, tasks: list[Task], summary: RunSummary,
-        task_map: dict[str, Task], initial_corrective_notes: str = "",
-    ) -> None:
-        """Core rebuild B4 — execute a goal's tasks in CONCURRENT WAVES.
-
-        Loop, per the signed-off design: cascade dep-failures → compute the
-        ready wave (``_ready_wave``) → capacity-aware allocate
-        (``dispatch.schedule_wave`` — capacity IN selection, rebalancing off
-        the cheapest specialist) → run the wave's tasks in parallel via a
-        ThreadPoolExecutor of ``_execute_task_isolated`` workers (no shared
-        mutation) → merge results on THIS thread in deterministic task-id
-        order (``_merge_task_result``, idempotent) → recompute. Goal
-        verification runs once, after all waves, in the caller.
-
-        Wave-boundary reflection + conditional compression are deferred
-        follow-ups; this lands the parallel execution + the bulkheads.
-        """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from concurrent.futures import CancelledError as _FuturesCancelled
-
-        _TERMINAL_FAIL = {
-            TaskStatus.BLOCKED, TaskStatus.QC_REJECTED, TaskStatus.ABANDONED,
-        }
-        merged_ids: set = set()
-        project_agents = roster.list_agents(self.project.code)
-        global_cap = self._wave_global_cap()
-
-        def _save(task: Task) -> None:
-            store.save_task(self.project.code, task, run_id=self.project.run_id)
-
-        # Cross-goal dep statuses (prior goals' tasks this goal depends on) are
-        # terminal by the time this goal runs (goals execute serially), so
-        # resolve them ONCE — a FAILED cross-goal input must block its dependent,
-        # a COMPLETED one admits it (#1437).
-        cross_goal_status = self._cross_goal_dep_status(tasks)
-        while True:
-            # Fix C: operator kill-switch — stop launching new waves. The current
-            # wave's in-flight tasks already finished (we only reach the top of
-            # the loop between waves); remaining tasks stay PENDING.
-            if self.abort_event.is_set():
-                self._record_abort(summary)
-                break
-            # 1. Cascade dep-failures: block any runnable task whose dep
-            #    reached a terminal-fail state (no producer call burned).
-            for t in tasks:
-                if not _runnable(t):
-                    continue
-                fd = _dep_failed(t, task_map, cross_goal_status)
-                if fd:
-                    t.transitions.append(StateTransition(
-                        from_state=t.status.value,
-                        to_state=TaskStatus.BLOCKED.value,
-                        actor="planner",
-                        rationale=f"dependency failed: {fd}; producer skipped",
-                    ))
-                    t.status = TaskStatus.BLOCKED
-                    summary.errors.append(
-                        f"{t.id}: blocked by failed dependency {fd}"
-                    )
-                    _save(t)
-
-            # 2. Next ready wave (runnable, deps all COMPLETED).
-            wave = _ready_wave(tasks, cross_goal_status)
-            if not wave:
-                break
-
-            # 3. Capacity-aware allocation. Skill-routed tasks get a
-            #    (possibly rebalanced) agent; NO_CONSTRAINT tasks run on the
-            #    legacy default path; DEFERRED_CAPACITY tasks wait for the
-            #    next wave (capacity frees as this wave completes).
-            sched = dispatch.schedule_wave(
-                wave, project_agents, global_in_flight_cap=global_cap,
-                skill_floor_for=self._skill_floor_for,
-                domain_floor_for=self._domain_floor_for,
-            )
-            to_run: list[Task] = []
-            # Global cap also constrains NO_CONSTRAINT legacy tasks (Nemo
-            # impl-sweep issue): schedule_wave already consumed slots for
-            # skill-routed assignments; legacy tasks draw from the rest.
-            global_left = (
-                None if global_cap is None
-                else max(0, global_cap - len(sched.assignments))
-            )
-            for t in wave:
-                if t.id in sched.assignments:
-                    t.assigned_agent_id = sched.assignments[t.id]
-                    to_run.append(t)
-                elif not t.required_skills:
-                    if global_left is not None and global_left <= 0:
-                        continue  # global cap exhausted — defer to next wave
-                    to_run.append(t)  # legacy NO_CONSTRAINT
-                    if global_left is not None:
-                        global_left -= 1
-                # else DEFERRED_CAPACITY — reappears next wave
-
-            # Blocker 1: preflight artifact-path conflicts WITHIN the wave.
-            # Two tasks writing the same path can't run concurrently.
-            by_path: dict[str, list[Task]] = {}
-            for t in to_run:
-                by_path.setdefault(self._task_output_key(t), []).append(t)
-            conflicts = {p: ts for p, ts in by_path.items() if len(ts) > 1}
-            if conflicts:
-                for path_key, group in conflicts.items():
-                    self._block_wave_path_conflict(group, path_key, summary)
-                to_run = [
-                    t for t in to_run
-                    if len(by_path[self._task_output_key(t)]) == 1
-                ]
-
-            if not to_run:
-                # Nothing to run this wave. If we blocked conflicts above,
-                # re-loop (those tasks are now terminal, so the next
-                # _ready_wave can advance). Otherwise everything is deferred
-                # for capacity with no slot freeing — break to avoid a spin.
-                if conflicts:
-                    continue
-                # Every ready task was DEFERRED_CAPACITY and no slot will ever
-                # free (a pathological roster — e.g. the only qualifying
-                # producers carry capacity_cap=0). Without this guard the wave
-                # loop just breaks and leaves those tasks PENDING-and-orphaned:
-                # never run, never BLOCKED, a silent goal stall with no surfaced
-                # signal. Bind it deterministically — BLOCK each still-runnable
-                # ready task with a capacity rationale and surface an error so a
-                # saturated roster fails VISIBLY (mirrors _block_wave_path_conflict).
-                for t in wave:
-                    if not _runnable(t):
-                        continue
-                    t.transitions.append(StateTransition(
-                        from_state=t.status.value,
-                        to_state=TaskStatus.BLOCKED.value,
-                        actor="planner",
-                        rationale=(
-                            "no producer with available capacity could be "
-                            "allocated (all qualifying producers saturated/"
-                            "capacity_cap=0); task deferred with no slot freeing"
-                        ),
-                    ))
-                    t.status = TaskStatus.BLOCKED
-                    summary.errors.append(
-                        f"{t.id}: blocked — no producer capacity available "
-                        "(roster saturated; would otherwise stall silently)"
-                    )
-                    _save(t)
-                break
-
-            # 4. Run the wave in parallel; collect results (no shared
-            #    mutation in the workers). §5: cap the pool so a very wide
-            #    fan-out wave (plan-time bounding over N items) can't spawn an
-            #    unbounded thread count now that concurrency is default-on — the
-            #    scheduler already bounds to_run by Σ capacity_cap, but a roster
-            #    with large caps + no MODULATIO_WAVE_GLOBAL_CAP could still be
-            #    huge. All tasks still run; excess just queues in the pool.
-            done: dict[str, TaskExecutionResult] = {}
-            pool_size = max(1, min(len(to_run), self._wave_pool_ceiling()))
-            with ThreadPoolExecutor(max_workers=pool_size) as ex:
-                # Carry the main thread's bound ContextVars (the plan
-                # BudgetTracker + the context-budget / tool-summarization binds)
-                # into each worker via a FRESH copy_context per future, run with
-                # ctx.run. ThreadPoolExecutor workers do NOT inherit ContextVars,
-                # so without this every producer's budget.record_usage was a
-                # silent no-op and max_tokens/max_cost_usd caps under-counted
-                # nearly all spend on the default-on concurrent path (Opus R2 H3).
-                # The tracker is a shared mutable object, so the worker's
-                # accumulation is visible to the main-thread cap check. A Context
-                # is single-entry — never share one across futures (RuntimeError:
-                # cannot enter context: already entered), hence a fresh copy each.
-                futures = {}
-                for t in to_run:
-                    ctx = contextvars.copy_context()
-                    futures[ex.submit(
-                        ctx.run,
-                        self._execute_task_isolated, t, initial_corrective_notes,
-                    )] = t.id
-                for fut in as_completed(futures):
-                    if fut.cancelled():
-                        continue
-                    tid = futures[fut]
-                    try:
-                        done[tid] = fut.result()
-                    except _FuturesCancelled:
-                        continue
-                    except Exception as exc:  # noqa: BLE001
-                        # Hero review (MINOR): an UNEXPECTED worker exception (an
-                        # engine bug — producer failures are caught INSIDE the
-                        # worker and returned as a result) must not propagate out
-                        # of collection and orphan the completed siblings already
-                        # in `done`. Record a synthetic failed-task result so the
-                        # merge proceeds and this task surfaces as BLOCKED rather
-                        # than vanishing.
-                        #
-                        # REVIEWER NOTE (0.9.0 cadre, 2026-06-14): a worker thread
-                        # canNOT silently die here — every future is drained via
-                        # `fut.result()` and a raise becomes a BLOCKED task above.
-                        # The non-deterministic `PytestUnhandledThreadException
-                        # Warning` seen once in the 0.9.0 suite is NOT this path:
-                        # all four reviewers (Lovecraft, Nemo/MiniMax-M3, Wild
-                        # Bill/Codex, + the GPT-5.5 pass) traced it to a raw-thread
-                        # TEST without exception capture, ruled it BENIGN test
-                        # hygiene — not a worker-isolation hazard. Full record:
-                        # docs/design/0.9.0-flaky-thread-warning.md. Don't
-                        # re-litigate this as an engine bug.
-                        crashed = task_map.get(tid)
-                        if crashed is not None:
-                            crashed.status = TaskStatus.BLOCKED
-                            done[tid] = TaskExecutionResult(
-                                task=crashed,
-                                errors=[f"wave worker crashed: {type(exc).__name__}: {exc}"],
-                            )
-                        # re-sweep F5: a worker that escapes BEFORE building its
-                        # result (e.g. _seed_staging / _staging_tool_registry throws
-                        # before the worker's own try) carries NO staging_root, so the
-                        # synthetic result above can't tell _merge_wave_artifacts to
-                        # tear down its .staging/<tid> dir — it would leak every crash.
-                        # Sweep it here directly (idempotent; no-op if never created).
-                        import shutil
-                        shutil.rmtree(
-                            self._scope_root() / ".staging" / tid, ignore_errors=True
-                        )
-                        _logger.exception(
-                            "wave worker for task %s crashed; recorded as BLOCKED", tid
-                        )
-                    # Fix C hardening (Nemo BLOCK): on operator stop, cancel every
-                    # not-yet-started task so the pool doesn't keep launching
-                    # queued work. Already-running tasks finish; their result is
-                    # collected above. (The _execute_task_isolated early-return is
-                    # the belt: a queued task that slips through no-ops anyway.)
-                    if self.abort_event.is_set():
-                        for f in futures:
-                            f.cancel()
-
-            # 5. Merge on the main thread, deterministic task-id order.
-            #    #151/e2e Blocker 2: durably write each worker's STAGED
-            #    artifacts into the shared tree FIRST (deterministic plan-
-            #    order conflict policy + draft-path remap), THEN fold the
-            #    results so summary.drafts already points at shared paths and
-            #    any merge-conflict transition gets persisted by _save.
-            self._merge_wave_artifacts(done, summary)
-            for tid in sorted(done):
-                _merge_task_result(
-                    done[tid], summary,
-                    save_task=_save,
-                    merged_ids=merged_ids,
-                )
-
-            # 6. #151 wave-boundary reflection (opt-in). The Leader reflects
-            #    on results-so-far and may revise/drop ONLY not-yet-dispatched
-            #    (PENDING) tasks — future-wave edits, no mid-wave mutation. On
-            #    the MAIN thread, after the committed merge (decision 5).
-            if self._wave_reflect_enabled():
-                self._wave_boundary_reflect(tasks, task_map, summary, _save)
-
     def _collect(self, fut, tid: str, task_map: dict) -> "TaskExecutionResult | None":
         """Continuous-pull drain handler — the OUTER wave-drain logic of
         ``_run_task_waves`` factored for the pull loop. Returns the worker result,
@@ -8240,16 +7967,15 @@ class Orchestrator:
                 safe.extend(group)
         return safe
 
-    def _run_task_waves_continuous(
+    def _run_task_waves(
         self, g: Goal, tasks: list[Task], summary: RunSummary,
         task_map: dict[str, Task], initial_corrective_notes: str = "",
     ) -> None:
-        """Continuous-pull variant of ``_run_task_waves`` (Phase 2, flag
-        ``continuous_pull``). Same dependency gating, producer isolation, and
-        deterministic main-thread merge as the wave path — but NO wave barrier:
-        one long-lived pool + a ``wait(FIRST_COMPLETED)`` loop, so a freed producer
-        pulls the next ready task immediately instead of idling behind the wave's
-        slowest task. 4-lens cadre-signed design:
+        """The concurrent task executor (continuous-pull dispatch). Dependency
+        gating, producer isolation, and deterministic main-thread merge — with NO
+        wave barrier: one long-lived pool + a ``wait(FIRST_COMPLETED)`` loop, so a
+        freed producer pulls the next ready task immediately instead of idling behind
+        a wave's slowest task. 4-lens cadre-signed design:
         ``docs/design/2026-06-27-continuous-pull-dispatch.md``."""
         from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
@@ -10722,16 +10448,10 @@ class Orchestrator:
         # an operator who forced the first pass serial.
         if self._concurrent_waves_enabled(self.project):
             task_map = {t.id: t for t in tasks}
-            if self._continuous_pull_enabled(self.project):
-                self._run_task_waves_continuous(
-                    goal, tasks, summary, task_map,
-                    initial_corrective_notes=leader_rationale,
-                )
-            else:
-                self._run_task_waves(
-                    goal, tasks, summary, task_map,
-                    initial_corrective_notes=leader_rationale,
-                )
+            self._run_task_waves(
+                goal, tasks, summary, task_map,
+                initial_corrective_notes=leader_rationale,
+            )
         else:
             for t in tasks:
                 self._run_task_with_redo(
@@ -13352,10 +13072,7 @@ class Orchestrator:
             # verification (after the loop) runs in BOTH modes.
             run_concurrent = self._concurrent_waves_enabled(self.project)
             if run_concurrent:
-                if self._continuous_pull_enabled(self.project):
-                    self._run_task_waves_continuous(g, tasks, summary, task_map)
-                else:
-                    self._run_task_waves(g, tasks, summary, task_map)
+                self._run_task_waves(g, tasks, summary, task_map)
             iterate_enabled = self._iterate_enabled()
             for idx, t in enumerate(tasks):
                 if run_concurrent:

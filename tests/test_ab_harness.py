@@ -131,10 +131,10 @@ def test_ab_harness_event_literals_closed() -> None:
 def test_varied_dimension_literals_closed() -> None:
     """The varied-dimension enum is closed and grows only by deliberate
     CHANGELOG entry. Started compression-only (alpha.6); concurrent_waves
-    added 2026-05-29 for the wave-executor eval; continuous_pull added
-    2026-06-28 for the continuous-pull dispatch eval (Phase 2)."""
+    added 2026-05-29 for the wave-executor eval. (continuous_pull was a 2026-06-28
+    eval dimension, removed when continuous-pull became THE dispatch path.)"""
     assert set(VARIED_DIMENSION_LITERALS) == {
-        "compression", "concurrent_waves", "continuous_pull",
+        "compression", "concurrent_waves",
     }
 
 
