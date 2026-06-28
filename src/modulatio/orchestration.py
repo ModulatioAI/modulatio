@@ -8496,6 +8496,15 @@ class Orchestrator:
                 last_error=last_exc, defect_type="runtime",
             ):
                 return
+            # B7: a compression-churn that SURVIVED its retry-with-feedback chain
+            # (Clif's 2026-06-25 plan A — retry first, don't decompose one-and-done)
+            # is genuine over-scale, not a sloppy producer the feedback could fix.
+            # Split it via the same decompose seam a hard context-refuse uses,
+            # before dead-ending at a ticket. Falls through to BLOCKED only when
+            # it can't be split (planner declines / recursion cap).
+            if isinstance(last_exc, _ctx_budget_module.CompressionChurnExceeded) \
+                    and self._try_decompose_and_run(t, last_exc, summary):
+                return
             # Slice #9c: exception exhaustion is NOT an escalation path.
             # A tier bump cannot fix a broken runtime; the correct
             # response is still BLOCKED + human resolution.

@@ -751,3 +751,43 @@ def test_decompose_and_run_falls_through_when_cannot_split(project_with_run, mon
     _planner_returns(monkeypatch, "no split possible")
     summary = RunSummary(project=project_with_run)
     assert orch._try_decompose_and_run(_make_task(), _ctx_err(tmp_path), summary) is False
+
+
+def test_churn_that_survives_retries_routes_to_decompose(project_with_run, monkeypatch):
+    """B7: a CompressionChurnExceeded that EXHAUSTS its retry-with-feedback chain
+    is genuine over-scale, not a sloppy producer — so the retry TERMINAL routes it
+    to the decompose seam (the over-budget remedy) instead of dead-ending at a
+    BLOCKED ticket. Drives the real terminal; a successful split leaves the task
+    non-BLOCKED. Preserves Clif's 2026-06-25 plan A (retry FIRST, not one-and-done)."""
+    orch = _make_orchestrator(project_with_run)
+    task = _make_task()
+    summary = RunSummary(project=project_with_run)
+
+    def fake_producer(self, t, corrective_notes=""):
+        raise context_budget.CompressionChurnExceeded(
+            compressions=4, limit=3,
+            estimated_tokens=70_000, max_input_tokens=64_000,
+        )
+
+    monkeypatch.setattr(Orchestrator, "_producer_execute", fake_producer)
+
+    seen = {}
+
+    def fake_decompose(self, t, ctx_exc, summ):
+        seen["exc"] = ctx_exc
+        seen["task_id"] = t.id
+        t.status = TaskStatus.COMPLETED  # simulate a successful split
+        return True
+
+    monkeypatch.setattr(Orchestrator, "_try_decompose_and_run", fake_decompose)
+
+    orch._run_task_with_redo(task, summary)
+
+    assert isinstance(seen.get("exc"), context_budget.CompressionChurnExceeded), (
+        "a churn that exhausts its retries must route to _try_decompose_and_run"
+    )
+    assert seen["task_id"] == task.id
+    # The over-scale fields the decompose prompt reads must be carried through.
+    assert seen["exc"].max_input_tokens == 64_000
+    assert seen["exc"].estimated_tokens == 70_000
+    assert task.status == TaskStatus.COMPLETED  # decompose handled it, not BLOCKED

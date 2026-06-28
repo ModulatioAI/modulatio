@@ -1354,8 +1354,18 @@ def run_llm_with_tools(
                     # loop counts the try (already incremented) and redoes with
                     # the exception message as corrective feedback, instead of
                     # grinding many compressions inside one invisible attempt.
+                    # Carry the estimate + cap so a churn that SURVIVES its
+                    # retries can be decomposed (the over-scale recovery path).
+                    max_input = (
+                        ctx_cfg.max_input_tokens
+                        or _ctx_budget.get_max_input_tokens_for_model(model)
+                    )
                     raise _ctx_budget.CompressionChurnExceeded(
                         compressions=compressions, limit=cap,
+                        estimated_tokens=_tool_sum.count_tokens(
+                            model, messages=compressed,
+                        ),
+                        max_input_tokens=max_input,
                     )
             messages = compressed
             if did_warn:

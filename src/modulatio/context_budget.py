@@ -218,9 +218,21 @@ class CompressionChurnExceeded(Exception):
     consumes a try and redoes with corrective feedback instead of grinding
     invisibly inside one attempt. The message doubles as that feedback."""
 
-    def __init__(self, *, compressions: int, limit: int) -> None:
+    def __init__(
+        self, *, compressions: int, limit: int,
+        estimated_tokens: int = 0, max_input_tokens: int = 0,
+        checkpoint_path: "Path | None" = None,
+    ) -> None:
         self.compressions = compressions
         self.limit = limit
+        # Decompose-compatible fields: when churn survives its retries the
+        # orchestrator routes it to the SAME _try_decompose_and_run path as a
+        # hard RecoverableContextError (which reads these), so a genuinely
+        # over-scale task splits instead of dead-ending at a ticket. Churn
+        # writes no checkpoint, so that stays None.
+        self.estimated_tokens = estimated_tokens
+        self.max_input_tokens = max_input_tokens
+        self.checkpoint_path = checkpoint_path
         super().__init__(
             f"context compressed {compressions} times in one attempt "
             f"(limit {limit}) — be more concise: fewer/shorter tool calls, "
