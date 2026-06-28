@@ -531,3 +531,42 @@ def test_capability_flags_swallows_probe_errors(monkeypatch):
     monkeypatch.setattr(litellm, "supports_vision", lambda m: True)
     monkeypatch.setattr(litellm, "supports_function_calling", boom)
     assert pc.capability_flags("weird/id") == "v"
+
+
+# ── capability tags discovered inline in the /models feed (picker letters) ────
+
+
+def test_parse_models_extracts_capability_tags_from_openrouter_shape():
+    payload = {"data": [
+        {"id": "x/vision-tools", "name": "VT",
+         "architecture": {"input_modalities": ["text", "image"]},
+         "supported_parameters": ["tools", "reasoning", "temperature"]},
+        {"id": "x/plain", "name": "P"},  # no capability fields → no tags
+    ]}
+    out = pc.parse_models(pc.get_provider("openrouter"), payload)
+    by_id = {m.id: m for m in out}
+    # canonical r/v/t order, only the caps the feed actually carried
+    assert by_id["x/vision-tools"].capability_tags == ["reasoning", "vision", "tools"]
+    assert by_id["x/plain"].capability_tags == []
+
+
+def test_parse_models_extracts_inline_capabilities_list():
+    payload = {"data": [
+        {"id": "ollama/llava", "name": "Llava", "capabilities": ["vision", "tools"]},
+    ]}
+    out = pc.parse_models(pc.get_provider("ollama_cloud"), payload)
+    assert out[0].capability_tags == ["vision", "tools"]
+
+
+def test_capability_flags_for_prefers_feed_tags_over_litellm(monkeypatch):
+    # When the feed carries caps, litellm is NOT consulted (would be "rt" here).
+    monkeypatch.setattr(pc, "capability_flags", lambda mid: "rt")
+    m = pc.CatalogModel(id="x/y", name="Y", provider_id="openrouter",
+                        capability_tags=["vision", "tools"])
+    assert pc.capability_flags_for(m) == "vt"
+
+
+def test_capability_flags_for_falls_back_to_litellm_when_no_feed_tags(monkeypatch):
+    monkeypatch.setattr(pc, "capability_flags", lambda mid: "r")
+    m = pc.CatalogModel(id="x/unknown", name="U", provider_id="openrouter")
+    assert pc.capability_flags_for(m) == "r"

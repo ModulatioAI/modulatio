@@ -120,6 +120,9 @@ class CatalogModel(BaseModel):
     context_length: Optional[int] = None
     is_free: bool = False
     created: Optional[int] = None  # provider's unix ts, for recency sorting
+    #: Capabilities discovered inline in the provider feed (subset of reasoning/
+    #: vision/tools), surfaced as the picker's r/v/t letters — set by parse_models.
+    #: NOT an agent's routing tags (a separate vocabulary, despite the shared name).
     capability_tags: list[str] = Field(default_factory=list)
 
 
@@ -508,6 +511,41 @@ def _coerce_int(value: object) -> Optional[int]:
         return None
 
 
+#: Capability tokens surfaced as the picker's r/v/t letters, in canonical order.
+#: The feed-discovered tags on a CatalogModel use this vocabulary.
+_CAP_TOKENS = (("r", "reasoning"), ("v", "vision"), ("t", "tools"))
+
+
+def _parse_caps(m: dict) -> list[str]:
+    """Capability tokens (subset of reasoning/vision/tools) discovered INLINE in
+    one ``/models`` entry — covers the OpenRouter shape (``architecture.
+    input_modalities`` + ``supported_parameters``) and a generic inline
+    ``capabilities`` list (Ollama-style). Defensive: an unknown/missing shape
+    yields ``[]`` (the picker then falls back to litellm, else blank). No
+    per-model fetch — only what the list payload already carries."""
+    found: set[str] = set()
+    arch = m.get("architecture")
+    mods = arch.get("input_modalities") if isinstance(arch, dict) else None
+    if isinstance(mods, list) and "image" in mods:
+        found.add("vision")
+    params = m.get("supported_parameters")
+    if isinstance(params, list):
+        if "tools" in params:
+            found.add("tools")
+        if "reasoning" in params or "include_reasoning" in params:
+            found.add("reasoning")
+    caps = m.get("capabilities")
+    if isinstance(caps, list):
+        for c in caps:
+            if c == "vision":
+                found.add("vision")
+            elif c == "tools":
+                found.add("tools")
+            elif c in ("thinking", "reasoning"):
+                found.add("reasoning")
+    return [tok for _letter, tok in _CAP_TOKENS if tok in found]
+
+
 def parse_models(
     provider: Provider, payload: object, *, modality: Modality = "text"
 ) -> list[CatalogModel]:
@@ -546,6 +584,7 @@ def parse_models(
                 context_length=_coerce_int(m.get("context_length")),
                 is_free=_is_free(m, provider.free_detect),
                 created=_coerce_int(m.get("created")),
+                capability_tags=_parse_caps(m),
             )
         )
     return out
@@ -693,6 +732,22 @@ def capability_flags(model_id: str) -> str:
     flags = "".join(letters)
     _CAP_CACHE[model_id] = flags
     return flags
+
+
+def _letters_from_tags(tags: list[str]) -> str:
+    """Map feed-discovered capability tokens to picker letters, in r/v/t order."""
+    have = set(tags)
+    return "".join(letter for letter, tok in _CAP_TOKENS if tok in have)
+
+
+def capability_flags_for(model: CatalogModel) -> str:
+    """Picker letters for a catalog model: prefer caps the provider feed carried
+    (covers models litellm doesn't know — Ollama/LM Studio/the OpenRouter tail),
+    else fall back to litellm's per-id probes, else blank. Feed caps are read off
+    the model each call — not cached by id, which would stick a stale blank."""
+    if model.capability_tags:
+        return _letters_from_tags(model.capability_tags)
+    return capability_flags(model.id)
 
 
 def of_modality(models: list[CatalogModel], modality: Modality) -> list[CatalogModel]:

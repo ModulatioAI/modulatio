@@ -102,3 +102,17 @@ def test_label_omits_letters_when_no_capabilities(monkeypatch):
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_label_uses_feed_capability_tags_even_when_litellm_blank(monkeypatch):
+    """The picker prefers caps discovered in the provider feed — proving the
+    label path calls capability_flags_for(model), not capability_flags(id).
+    litellm is forced blank, so any letters can only come from the feed."""
+    import modulatio.tui.widgets.model_picker as mp
+    monkeypatch.setattr(mp.pc, "capability_flags", lambda mid: "")
+    picker = ModelPicker(_cloud_provider())
+    label = picker._label(
+        pc.CatalogModel(id="ollama/llava", name="Llava", provider_id="ollama_cloud",
+                        capability_tags=["vision", "tools"])
+    )
+    assert "v t" in label.plain  # spaced letters from the FEED, not litellm

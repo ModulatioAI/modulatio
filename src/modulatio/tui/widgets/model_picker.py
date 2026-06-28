@@ -145,7 +145,7 @@ class ModelPicker(Vertical):
         line.append(m.id, style=base)
         if m.is_free:
             line.append("  [FREE]", style=f"bold {accent}")
-        caps = pc.capability_flags(m.id)  # r=reasoning v=vision t=tools (live)
+        caps = pc.capability_flags_for(m)  # r=reasoning v=vision t=tools (feed→litellm)
         if caps:
             line.append(f"  {' '.join(caps)}", style=_dim)
         return line
