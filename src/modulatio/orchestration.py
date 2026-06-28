@@ -191,6 +191,16 @@ _FIX_WINDOW_MAX_S = 300.0
 #: best-effort skill recodifies next run, so giving up here is cheap.
 _CODIFICATION_TIMEOUT_S = 180.0
 
+#: Cancellation boundary for the bounded codify daemon (cadre: Wild Bill BLOCK). On
+#: timeout the wrapper SETS this Event; the persist seams (`_persist_codification`,
+#: `_persist_jt_codification`) check it and refuse to write — so an orphaned daemon
+#: resuming after the run already returned can't race a late skill/JT write against
+#: the next run. Carried into the daemon by ``copy_context`` (per-call, no cross-run
+#: leak); ``None`` outside the daemon makes the gate inert on the normal path.
+_codify_cancel_var: "contextvars.ContextVar[threading.Event | None]" = contextvars.ContextVar(
+    "modulatio_codify_cancel", default=None,
+)
+
 
 class AgentRunner(Protocol):
     """Anything that takes a prompt and returns a string response."""
@@ -11308,26 +11318,51 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — observability must never break a run
             pass
 
+    @staticmethod
+    def _codify_cancelled() -> bool:
+        """True once the bounded wrapper has timed out — the persist seams honor it so
+        an orphaned daemon writes nothing after the run already returned."""
+        ev = _codify_cancel_var.get()
+        return ev is not None and ev.is_set()
+
     def _run_post_run_codification_bounded(self, summary: RunSummary) -> None:
         """Run the best-effort post-run codification (skill + JT) bounded by
         ``_CODIFICATION_TIMEOUT_S``, so a stalled cloud leader call can't hold the
         process for the full ~600s per-call watchdog. B1 already made codify run
         AFTER delivery (never blocks the deliverable); this caps its DURATION too —
         a best-effort skill isn't worth a 10-minute process hang and recodifies next
-        run if the pattern recurs. Daemon thread + ``copy_context`` so the budget /
-        tool-summarization binds reach it (the fix-window-callback idiom); on timeout
-        the caller proceeds and the orphaned daemon bails at the per-call watchdog."""
+        run if the pattern recurs.
+
+        Daemon thread + ``copy_context`` so the per-call budget / tool-summarization
+        ContextVars reach it (the ThreadPoolExecutor dispatch idiom — threads do NOT
+        inherit ContextVars; see ``_run_concurrent_wave``. NOT the fix-window callback,
+        which spawns a bare target). On timeout the caller proceeds; the wrapper sets a
+        CANCEL boundary so the orphaned daemon, when it resumes, writes nothing (cadre:
+        Wild Bill) — and emits NO phase-blind skip, leaving the cut phase to report its
+        own ``*_codification_skipped:timeout`` at its persist seam (cadre: Nemo Q2).
+        TODO(cadre Nemo Q1): a daemon mid-``skills.save``→``commit_paths`` can still race
+        interpreter shutdown; best-effort + recodify-next-run is the safety net."""
+        cancelled = threading.Event()
+
         def _codify() -> None:
-            self._post_run_codification(summary)
-            self._post_run_jt_codification(summary)
-        ctx = contextvars.copy_context()
+            try:
+                self._post_run_codification(summary)
+                self._post_run_jt_codification(summary)
+            except Exception:  # noqa: BLE001 — best-effort daemon must never surface a raise
+                self._codification_skipped("daemon_raised")
+
+        token = _codify_cancel_var.set(cancelled)
+        try:
+            ctx = contextvars.copy_context()  # snapshots `cancelled` into the daemon
+        finally:
+            _codify_cancel_var.reset(token)  # don't leak the binding to the caller thread
         t = threading.Thread(
             target=lambda: ctx.run(_codify), name="post-run-codify", daemon=True,
         )
         t.start()
         t.join(timeout=_CODIFICATION_TIMEOUT_S)
         if t.is_alive():
-            self._codification_skipped("timeout")
+            cancelled.set()  # gate the persist seams; the cut phase reports for itself
 
     def _post_run_codification(self, summary: RunSummary) -> None:
         """End-of-run hook (the Alfred loop). The LEADER reviews recent QC
@@ -11527,6 +11562,9 @@ class Orchestrator:
         (``consume_fn``), guards against replay via the durable ``learned_from``
         applied-signature (``cluster_signature``), and surfaces a louder spot-check
         recommendation. Defaults reproduce the FAIL path byte-for-byte."""
+        if self._codify_cancelled():  # cadre: bounded wrapper timed out — write nothing late
+            self._codification_skipped("timeout")
+            return
         consume = consume_fn or lessons.mark_consumed
         is_win = provenance == "win"
         action = str(spec.get("action", "")).strip().lower()
@@ -11808,6 +11846,9 @@ class Orchestrator:
         recurring group keys are consumed — a paraphrased/typoed slug can't
         silently consume the wrong shape, and a valid one reliably stops the
         templated shape re-firing."""
+        if self._codify_cancelled():  # cadre: bounded wrapper timed out — write nothing late
+            self._jt_codification_skipped("timeout")
+            return
         action = str(spec.get("action", "")).strip().lower()
         name = self._slug_skill(str(spec.get("name", "")))
         description = str(spec.get("description", "") or "").strip()

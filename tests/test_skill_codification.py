@@ -544,7 +544,10 @@ def test_post_run_codification_bounded_by_timeout(proj, monkeypatch):
     elapsed = time.monotonic() - start
 
     assert elapsed < 2.0, f"bounded codify must return ~at the timeout, not wait the 5s hang; took {elapsed:.1f}s"
-    assert skips == ["timeout"]
+    # Nemo BLOCK (Q2): the wrapper must NOT emit a phase-blind skip. The stalled phase
+    # never reached a persist seam, so NO breadcrumb fires here — the phase that is
+    # actually cut reports for itself (see the gate tests below).
+    assert skips == []
 
 
 def test_post_run_codification_bounded_completes_when_fast(proj, monkeypatch):
@@ -560,3 +563,88 @@ def test_post_run_codification_bounded_completes_when_fast(proj, monkeypatch):
 
     assert ran == ["skill", "jt"]
     assert skips == []
+
+
+# ── cadre remediation: cancellation boundary + phase-aware skip (2026-06-28) ──
+# Wild Bill BLOCK (HIGH): a codifier that resumes AFTER the wrapper timed out must not
+# persist (no late skill/JT write racing the next run). Nemo BLOCK (Q2): the timeout
+# skip must be phase-aware (the cut phase reports), never the wrapper's blind skip.
+
+
+def test_no_skill_persist_after_wrapper_timeout(proj, monkeypatch):
+    """Wild Bill BLOCK: the wrapper times out and sets a cancel boundary; when the
+    orphaned daemon resumes and reaches the skill persist seam, it must NOT write —
+    and the SKILL phase reports its own phase-aware `timeout` skip (Nemo Q2)."""
+    import threading
+    import time
+
+    from modulatio import orchestration
+    o, pr = _orch(proj, {"codifications": []})
+    monkeypatch.setattr(orchestration, "_CODIFICATION_TIMEOUT_S", 0.2)
+    saved: list = []
+    monkeypatch.setattr(orchestration.skills, "save", lambda *a, **k: saved.append(a))
+    skill_skips: list[str] = []
+    monkeypatch.setattr(o, "_codification_skipped", lambda r: skill_skips.append(r))
+    done = threading.Event()
+
+    def slow_then_persist(summary):
+        time.sleep(0.5)  # wrapper times out at 0.2s and sets cancel before we resume
+        o._persist_codification(
+            {"action": "create", "name": "late", "guidance": "g", "description": "d"},
+            [], summary,
+        )
+        done.set()
+
+    monkeypatch.setattr(o, "_post_run_codification", slow_then_persist)
+    monkeypatch.setattr(o, "_post_run_jt_codification", lambda s: None)
+
+    o._run_post_run_codification_bounded(RunSummary(project=pr))
+    assert done.wait(timeout=4), "the daemon should finish its resume"
+    assert saved == [], "a codifier resuming after timeout must not persist"
+    assert skill_skips == ["timeout"], "the cut SKILL phase reports its own phase-aware skip"
+
+
+def test_persist_jt_codification_gated_after_cancel(proj, monkeypatch):
+    """Wild Bill BLOCK (JT half) + Nemo Q2: with the cancel boundary set, the JT persist
+    seam writes nothing and emits the phase-aware `jt_codification_skipped:timeout`."""
+    import threading
+
+    from modulatio import job_templates, orchestration
+    o, pr = _orch(proj, {"codifications": []})
+    saved: list = []
+    monkeypatch.setattr(job_templates, "save", lambda *a, **k: saved.append(a))
+    jt_skips: list[str] = []
+    monkeypatch.setattr(o, "_jt_codification_skipped", lambda r: jt_skips.append(r))
+
+    ev = threading.Event()
+    ev.set()
+    token = orchestration._codify_cancel_var.set(ev)
+    try:
+        o._persist_jt_codification(
+            {"action": "create", "name": "late-jt", "description": "d",
+             "recurring_shape": "s", "interview_body": "b"},
+            [], RunSummary(project=pr),
+        )
+    finally:
+        orchestration._codify_cancel_var.reset(token)
+
+    assert saved == [], "a JT persist after cancel must not write"
+    assert jt_skips == ["timeout"]
+
+
+def test_daemon_raise_records_breadcrumb(proj, monkeypatch):
+    """Jenny LOW + Nemo Q4: an UNEXPECTED raise inside the daemon body must never
+    surface to the caller and must leave an audit row (`daemon_raised`), not silence."""
+    o, pr = _orch(proj, {"codifications": []})
+
+    def boom(summary):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(o, "_post_run_codification", boom)
+    monkeypatch.setattr(o, "_post_run_jt_codification", lambda s: None)
+    skips: list[str] = []
+    monkeypatch.setattr(o, "_codification_skipped", lambda r: skips.append(r))
+
+    o._run_post_run_codification_bounded(RunSummary(project=pr))  # must not raise
+
+    assert skips == ["daemon_raised"]
