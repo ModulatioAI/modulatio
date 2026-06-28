@@ -20,23 +20,23 @@ Evidence required:
 
 {inbox_notes}
 
-Scope discipline: task count tracks goal complexity. A SIMPLE single-artifact
-goal (one list/report/analysis doc/code file) decomposes into 1-2 production
-tasks: gather, draft. But if that one artifact spans MULTIPLE independent
-research areas (most briefs), FAN the gather into parallel batches + a synthesis,
+Scope discipline: task count tracks the work — YAGNI prunes to only the tasks
+the goal genuinely needs, never an arbitrary number. A SIMPLE single-artifact
+goal (one list/report/analysis doc/code file) decomposes into the production
+tasks it needs (e.g. gather, then draft). But if that one artifact spans MULTIPLE
+independent research areas (most briefs), FAN the gather into parallel batches + a synthesis,
 not one serial gather (see SWEEP). Do NOT add infrastructure tasks (db setup,
 ingestion, schema versioning, dual-source verification) unless goal explicitly
 asks to BUILD that infra as deliverable. Prefer the smallest plan that keeps the
 team CONCURRENT; team adds follow-ons later if the artifact reveals a gap.
 
 SWEEP / GATHER (research, survey, "X for EACH of N items"): FAN the independent
-areas into PARALLEL batch tasks (each a handful of related areas) the team
+areas into PARALLEL batch tasks (each sized to a producer's context budget) the team
 researches CONCURRENTLY, then a SYNTHESIS sub-objective (`depends_on` the
-batches) combines them — prefer this fan-out over ONE serial research task (one
-producer, no concurrency). SIZE each batch to fit below a producer's compression
-trigger with headroom: a handful of items. Don't fan one-task-per-item (web
-fetches are size-bounded, so one-per-item wastes slots and duplicates sourcing),
-and don't overpack a batch (it blows the window and churns). Signals:
+batches) combines them — prefer this fan-out over ONE serial research task.
+SIZE each batch to fit below a producer's compression
+trigger with headroom — pack as many related items as fit, split when a batch
+would exceed the budget (don't overpack: it blows the window and churns). Signals:
 "all/each/every/top N", an
 enumerable list of areas. Unnamed set ("SOTA in X") → a cheap SCOUT enumerates
 first, then the batches build on it. More areas than fit the budget → a bounded
@@ -51,8 +51,8 @@ serializes it, and busts that producer's context. Emit ONE plan item with
 an `artifacts` array — ONE entry per deliverable — and the engine fans it
 into N INDEPENDENT tasks the producers run IN PARALLEL. Set the per-item
 size floor on the parent; the sub-tasks inherit it. {team_capacity} This
-is the opposite of SWEEP grouping: SWEEP batches size-bounded gather items
-into a few tasks; PARALLEL DELIVERABLES fans independent generative outputs
+is the opposite of SWEEP grouping: SWEEP packs size-bounded gather items
+into budget-sized batches; PARALLEL DELIVERABLES fans independent generative outputs
 one-per-item so the whole team works at once. Signals: an enumerable list
 of deliverables each worth its own file ("write 6 stories", "a profile of
 each of the 8 founders", "one section per chapter").

@@ -22,14 +22,15 @@ Goal count is proportional to deliverable complexity, not to the breadth
 of words in the objective.
 
 - A short verb-objective ("analyze X", "summarize Y", "produce a top-N
-  list of Z") is usually a SINGLE-deliverable request — aim for 1-3
-  goals (research → produce → verify), not infrastructure.
+  list of Z") is usually a SINGLE-deliverable request — only the goals it
+  genuinely needs (e.g. research → produce), not infrastructure.
 - Multi-artifact platform work (e.g. "build a SaaS with auth + billing
   + admin + public site + API") legitimately decomposes into many
   goals. Use that breadth only when the objective explicitly names
   multiple distinct deliverables.
-- When in doubt, fewer goals. The team can open follow-on work later;
-  it can't easily un-decompose an over-planned project mid-run.
+- Let YAGNI set the count — only the goals the work genuinely needs, no
+  arbitrary number. The team can open follow-on work later; it can't
+  easily un-decompose an over-planned project mid-run.
 
 PARALLEL DELIVERABLES (load-balance): when the objective enumerates N
 deliverables of the SAME KIND that are independent of each other (6 stories,

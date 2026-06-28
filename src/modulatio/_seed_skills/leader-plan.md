@@ -45,8 +45,8 @@ You skip this question when the user has already named a size (concrete word cou
 
 Map the answer to plan shape:
 
-- **(a) Single deliverable** → standard plan, 1-2 sub-objectives. The task-plan step keeps each task within a producer's context budget; the engine is fully sized for this case.
-- **(b) Multi-piece deliverable** → standard plan, 3-7 sub-objectives, all pieces covered in one phase. This is the upper edge of comfortable engine shape.
+- **(a) Single deliverable** → a standard plan scoped to that deliverable. The task-plan step keeps each task within a producer's context budget; the engine is fully sized for this case.
+- **(b) Multi-piece deliverable** → a standard plan covering every piece in one phase.
 - **(c) Production-scale** → DO NOT produce a single-phase plan covering the whole effort. Produce **Phase 1 only**, scoped to a self-contained slice the user can review on its own. Name the phasing explicitly:
     - In the **Diagnostic** section, state: "This is production-scale; this plan covers Phase 1 only."
     - In **What this plan does NOT do**, list the phases you're deferring.
@@ -92,14 +92,13 @@ The user shouldn't have to re-sort, re-name, or re-stitch what the team produces
 
 Plan size should be proportional to the work, NOT proportional to imagined ambiguity. A small concrete deliverable produces a small plan:
 
-- **1-2 sub-objectives** is correct for: a single-file artifact, a short document, a contained refactor.
-- **3-5 sub-objectives** is correct for: a multi-section report, a small multi-file project, a feature with discovery + build + verify phases.
-- **6-7 sub-objectives** is the upper bound — only when work genuinely splits into that many distinct phases.
-- **More than 7** means split into phases; this plan represents Phase 1, with subsequent phases authorized separately.
+- A **single-file artifact, a short document, a contained refactor** → a small plan: just the sub-objectives that work genuinely needs.
+- A **multi-section report, a small multi-file project, a feature with discovery + build + verify** → more sub-objectives, one per genuinely distinct unit of work.
+- A very large effort that won't fit one coherent, reviewable phase → split into phases; this plan represents Phase 1, with subsequent phases authorized separately.
 
-When in doubt, smaller. The team can always extend the plan if a sub-objective reveals more work; an overly-decomposed plan locks the team into churn before it discovers what's actually needed.
+Let YAGNI set the count — only the sub-objectives the work genuinely needs, no speculative or padding ones, no arbitrary number. The team can always extend the plan if a sub-objective reveals more work.
 
-**Enumerable sweeps get bounded, not piled up.** When a sub-objective is "X for EACH of N items" (survey/gather/compare across a set), don't shape it as a single vague "do all N" lump — but don't over-split into one objective per item either. Shape it so the gather work is a FEW bounded tasks (each covering a small batch of items — web fetches are size-bounded, so one research task holds a handful), with a separate draft/synthesis sub-objective that combines their artifacts. If the set is wider than fits a producer's context budget, cover a bounded batch now and name the rest as a deferred phase; if the items aren't named yet, a cheap scout/enumerate step comes first. Same discipline as splitting a long deliverable into contiguous budget-sized artifacts — applied to breadth instead of length.
+**Enumerable sweeps get bounded by context, not piled up.** When a sub-objective is "X for EACH of N items" (survey/gather/compare across a set), don't shape it as a single "do all N" lump that busts a producer's context budget. Shape the gather work as budget-bounded tasks — each covering as many items as fit below the compression trigger with headroom — with a separate draft/synthesis sub-objective that combines their artifacts. If the set is wider than fits a producer's context budget, cover a bounded batch now and name the rest as a deferred phase; if the items aren't named yet, a cheap scout/enumerate step comes first. Same discipline as splitting a long deliverable into contiguous budget-sized artifacts — applied to breadth instead of length.
 
 ## What the plan must contain
 
@@ -127,7 +126,7 @@ An ordered list of next-step objectives. Each one shaped like a single PR descri
   - *Done when:* (acceptance criterion the team can verify)
   - *Out of scope:* (what this sub-objective explicitly does NOT touch)
 
-Aim for 3–7 sub-objectives. Fewer if the work is genuinely small; never more than 7 in a single plan — if you need more, that's a sign the plan needs to split into phases.
+Create the sub-objectives the work genuinely needs — no arbitrary count, no padding, let YAGNI prune the speculative ones; each a coherent, reviewable unit. If a plan would grow too large to execute coherently in one phase, split the later breadth into deferred phases (this plan = Phase 1) rather than capping the work.
 
 ### Risks
 What could go wrong? What's the failure mode if a sub-objective lands incorrectly? Anything that needs a human decision before kickoff (security, cost, scope creep, dependency timing).

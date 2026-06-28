@@ -13537,14 +13537,15 @@ objective. Goal count is proportional to deliverable complexity, not
 to the breadth of words in the objective.
 
 - A short verb-objective ("analyze X", "summarize Y", "produce a top-N
-  list of Z") is usually a SINGLE-deliverable request — aim for 1-2
-  goals (e.g. research → produce), not infrastructure.
+  list of Z") is usually a SINGLE-deliverable request — only the goals it
+  genuinely needs (e.g. research → produce), not infrastructure.
 - Multi-artifact platform work (e.g. "build a SaaS with auth + billing
   + admin + public site + API") legitimately decomposes into many
   goals. Use that breadth only when the objective explicitly names
   multiple distinct deliverables.
-- When in doubt, fewer goals. The team can open follow-on work later;
-  it can't easily un-decompose an over-planned project mid-run.
+- Let YAGNI set the count — only the goals the work genuinely needs, no
+  arbitrary number. The team can open follow-on work later; it can't
+  easily un-decompose an over-planned project mid-run.
 
 PARALLEL DELIVERABLES (load-balance): when the objective enumerates N
 deliverables of the SAME KIND that are independent of each other (6 stories,
@@ -13621,22 +13622,21 @@ Evidence required:
 
 {inbox_notes}
 
-Scope discipline: task count tracks goal complexity. Single-artifact
-goal (list, report, analysis doc, code file) decomposes into 1-2
-production tasks: gather, draft. Do NOT add infrastructure tasks (db
+Scope discipline: task count tracks the work — YAGNI prunes to only the
+tasks the goal genuinely needs, never an arbitrary number. Single-artifact
+goal (list, report, analysis doc, code file) decomposes into the production
+tasks it needs (e.g. gather, then draft). Do NOT add infrastructure tasks (db
 setup, ingestion, schema versioning, dual-source verification) unless
-goal explicitly asks to BUILD that infra as deliverable. Prefer
-smallest plan; team adds follow-ons later if artifact reveals gap.
+goal explicitly asks to BUILD that infra as deliverable. Prefer the
+simplest plan that does the job; team adds follow-ons later if artifact reveals gap.
 
 SWEEP work — bound it at PLAN time to a producer's CONTEXT BUDGET. When
 the goal is "do X for EACH of N items" (survey/catalog/gather/compare
-across a set), don't pile all N into one vague task — but don't fan to
-one-task-per-item either (it wastes producer slots and duplicates
-sourcing). Web fetches are size-bounded, so ONE research task can cover a
-small handful of items. So GROUP items into bounded tasks that each fit
-comfortably below a producer's compression trigger, with headroom (each
-surveys a batch); a separate draft/synthesis sub-objective combines their
-artifacts. Signals: "all/each/every/top N", "survey/compare across", an
+across a set), don't pile all N into one task that busts the budget. Size
+each gather task to fit comfortably below a producer's compression trigger,
+with headroom — pack as many items as fit, split when a task would exceed
+the budget (each surveys a batch); a separate draft/synthesis sub-objective
+combines their artifacts. Signals: "all/each/every/top N", "survey/compare across", an
 enumerable list. More items than fit one budget → cover a bounded BATCH
 now, name the rest as a deferred PHASE. Items
 not named yet ("the current SOTA in X") → a cheap SCOUT task enumerates
@@ -13653,7 +13653,7 @@ serializes it, and busts that producer's context. Emit ONE plan item with
 an `artifacts` array — ONE entry per deliverable — and the engine fans it
 into N INDEPENDENT tasks the producers run IN PARALLEL. Set the per-item
 size floor on the parent; sub-tasks inherit it. {team_capacity} Opposite of
-SWEEP grouping: SWEEP batches size-bounded gather items into a few tasks;
+SWEEP grouping: SWEEP packs size-bounded gather items into budget-sized batches;
 PARALLEL DELIVERABLES fans independent generative outputs one-per-item so
 the whole team works at once. Signals: an enumerable list of deliverables
 each worth its own file ("write 6 stories", "a profile of each founder").
