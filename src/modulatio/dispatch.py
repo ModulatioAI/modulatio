@@ -180,12 +180,15 @@ def select_agent(
     load: dict[str, int] | None = None,
 ) -> Agent | None:
     """Pick the best PRODUCER for ``task`` — capability-and-availability
-    routing. Returns ``None`` only when the task declared no required_skills
-    (legacy NO_CONSTRAINT fallback) or no producer exists at all.
+    routing. Returns ``None`` only when no producer exists at all.
 
-    Since the skill-library arc (Brick 3), skills are NOT a routing
-    constraint: a producer checks out whatever its task needs from the
-    library, so any producer can run any task. The capability floor is a
+    A producer is NEVER picked for OWNING a skill (Clif 2026-06-28): it JIT-loads
+    whatever skill its task needs from the floating library, so any producer can
+    run any task — including a task with NO required_skills, which routes by
+    capability + load-balance like any other (no special funnel). Skills route
+    nothing; the only routing inputs are CAPABILITY (task ``required_capabilities``
+    + the skill/domain capability floor — what the work can-or-can't be done on,
+    e.g. shell-access/image-gen) and availability. The capability floor is a
     SOFT preference — producers that meet it are preferred, but if none do,
     the best-available producer is picked anyway and the shortfall ships as a
     Product Quality Report reservation (never a block). Availability is
@@ -197,8 +200,6 @@ def select_agent(
     (a code-task chain sticks with the producer that has the prior file in
     its working memory). A hint outside the pool is silently ignored.
     """
-    if not task.required_skills:
-        return None
     producers = _producer_pool(agents)
     if not producers:
         return None
@@ -229,8 +230,6 @@ def _qualifying_candidates(
     the qualifiers are saturated an idle under-floor producer still gets work.
     Empty required_skills → no skill-routed candidate (legacy NO_CONSTRAINT
     handled by the caller)."""
-    if not task.required_skills:
-        return []
     producers = _producer_pool(agents)
     if not producers:
         return []
@@ -305,10 +304,9 @@ def schedule_wave(
     gaps: list[str] = []
 
     for task in sorted(wave_tasks, key=lambda t: t.id):
-        if not task.required_skills:
-            continue  # legacy NO_CONSTRAINT — not skill-scheduled
-        # candidates are every producer, already ranked best-fit first
-        # (capability floor + best-available fallback). Skills don't gate.
+        # Every task is scheduled by capability + load-balance — skills never
+        # route (Clif 2026-06-28), so a task with NO required_skills is handled
+        # here too, not skipped to a caller legacy path.
         candidates = _qualifying_candidates(
             task, agents, skill_floor_for, domain_floor_for
         )

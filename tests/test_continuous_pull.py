@@ -11,7 +11,7 @@ import threading
 import time
 from uuid import uuid4
 
-from modulatio import dispatch, store, vault
+from modulatio import dispatch, roster, store, vault
 from modulatio.orchestration import Orchestrator, RunSummary, TaskExecutionResult
 from modulatio.types import Goal, GoalStatus, Project, Task, TaskStatus
 
@@ -20,6 +20,14 @@ def _orch(tmp_path, monkeypatch, code="CPL"):
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
     vault.init_project(code, "continuous-pull test", "obj")
     vault.init_run(code, "run-1", "obj")
+    # Real producer roster: NO_CONSTRAINT tasks route through schedule_wave
+    # (capability + load-balance) like a real run — there is no rosterless path.
+    for pid in ("p1", "p2", "p3", "p4"):
+        roster.save(
+            roster.Agent(id=pid, name=pid, identity=f"{pid} id",
+                         model="stub", tier="producer", capacity_cap=1),
+            code,
+        )
     project = Project(
         code=code, name="CP", objective="obj", leader_model="stub",
         wiki_path=str(tmp_path / code.lower()), run_id="run-1",
@@ -193,24 +201,13 @@ def test_continuous_saturated_roster_stall_guard(tmp_path, monkeypatch):
     assert any("CPL-T-STUCK" in e for e in summary.errors), "the stall must surface an error"
 
 
-def test_continuous_global_cap_not_exceeded_mixed_skill_and_legacy(tmp_path, monkeypatch):
-    """W1/F1 (Wild Bill + Nemo, convergent BLOCK): with a finite global cap, a pump
-    that mixes a skill-routed assignment AND a legacy NO_CONSTRAINT task must not
-    over-admit — `legacy_left` must start from `free` MINUS the slots schedule_wave
-    already consumed, not from the raw `free`. cap=1 + 1 skill + 1 legacy → only ONE
-    worker active at a time. Without the fix both launch from the same slot (cap=1 → 2)."""
-    import threading
-    import types as _types
-
+def test_continuous_global_cap_limits_concurrency(tmp_path, monkeypatch):
+    """The pull loop honors MODULATIO_WAVE_GLOBAL_CAP — schedule_wave gates EVERY
+    task (skills or not) on the global in-flight cap through the one unified path,
+    so cap=1 → only ONE worker active even with idle producers + multiple ready
+    tasks. (Replaces the old mixed-skill/legacy F1 test; there's no legacy path now.)"""
     monkeypatch.setenv("MODULATIO_WAVE_GLOBAL_CAP", "1")
-    orch = _orch(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        dispatch, "schedule_wave",
-        lambda tasks, *a, **k: _types.SimpleNamespace(
-            assignments={t.id: "drafter" for t in tasks if t.required_skills},
-            deferred=(), gaps=(),
-        ),
-    )
+    orch = _orch(tmp_path, monkeypatch)  # 4 idle producers
     active = 0
     max_active = 0
     lock = threading.Lock()
@@ -228,19 +225,19 @@ def test_continuous_global_cap_not_exceeded_mixed_skill_and_legacy(tmp_path, mon
         return TaskExecutionResult(task=t)
 
     monkeypatch.setattr(orch, "_execute_task_isolated", fake)
-    skill = _task("CPL-T-SKILL", skills=["drafter"])
-    legacy = _task("CPL-T-LEGACY")
-    for t in (skill, legacy):
+    t1 = _task("CPL-T-1")
+    t2 = _task("CPL-T-2")  # both NO_CONSTRAINT; 4 producers free
+    for t in (t1, t2):
         store.save_task(orch.project.code, t, run_id=orch.project.run_id)
     summary = RunSummary(project=orch.project)
     runner = threading.Thread(
         target=orch._run_task_waves,
-        args=(_goal(), [skill, legacy], summary, {t.id: t for t in (skill, legacy)}),
+        args=(_goal(), [t1, t2], summary, {t.id: t for t in (t1, t2)}),
     )
     runner.start()
-    time.sleep(0.6)  # let the pump submit; without the fix both run concurrently
+    time.sleep(0.6)  # let the pump submit; without the global cap both run at once
     observed = max_active
     gate.set()
     runner.join(timeout=10)
     assert observed <= 1, f"global cap=1 violated: {observed} workers ran concurrently"
-    assert skill.status == legacy.status == TaskStatus.COMPLETED
+    assert t1.status == t2.status == TaskStatus.COMPLETED

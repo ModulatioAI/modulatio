@@ -37,6 +37,19 @@ def project(tmp_path: Path, monkeypatch) -> Project:
     )
 
 
+def _seed_producers(code: str = PROJECT_CODE, n: int = 3) -> None:
+    """Seed a producer roster so NO_CONSTRAINT tasks route through schedule_wave
+    (capability + load-balance) like a real run. The producers' ``stub`` model
+    isn't in the per-agent runner pool, so the worker falls back to the role-keyed
+    runner the test supplies. (There is no rosterless dispatch path.)"""
+    for i in range(n):
+        roster.save(
+            roster.Agent(id=f"prod-{i}", name=f"prod-{i}", identity=f"prod-{i} id",
+                         model="stub", tier="producer", capacity_cap=1),
+            code,
+        )
+
+
 def _leader_stub(prompt: str) -> str:
     # Leader agent handles two call shapes on the same runner key:
     # decomposition (objective → goals, slice #1) and goal verification
@@ -6833,6 +6846,7 @@ def test_concurrent_waves_runs_independent_tasks(project: Project, monkeypatch):
         "qc": _qc_stub,
     }
     orch = Orchestrator(project, runners)
+    _seed_producers()
     orch.kickoff("do three independent things")
 
     tasks = store.list_tasks(PROJECT_CODE)
@@ -8890,6 +8904,7 @@ def test_run_task_waves_records_blocked_on_worker_crash(project: Project, monkey
 
     monkeypatch.setattr(orch, "_execute_task_isolated", crashing)
 
+    _seed_producers()
     orch.kickoff("two independent things, one explodes")
 
     by_desc = {t.description: t for t in store.list_tasks(PROJECT_CODE)}
@@ -10785,6 +10800,7 @@ def test_concurrent_wave_workers_inherit_budget_tracker(project: Project, monkey
         "leader": _leader_stub, "planner": _coord_two,
         "drafter": _capturing_drafter, "qc": _qc_stub,
     })
+    _seed_producers()
     with budget.with_tracker(tracker):
         orch.kickoff("two independent things")
 

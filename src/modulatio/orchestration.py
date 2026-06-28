@@ -8042,29 +8042,16 @@ class Orchestrator:
                     skill_floor_for=self._skill_floor_for,
                     domain_floor_for=self._domain_floor_for,
                 )
-                # F1 (Wild Bill + Nemo BLOCK): legacy NO_CONSTRAINT tasks draw from
-                # the global slots LEFT AFTER schedule_wave consumed its share for
-                # the skill-routed assignments — NOT the raw `free`. Without this a
-                # skill assignment and a legacy task both launch from the same slot,
-                # over-admitting past the global cap (mirrors the wave path :7986).
-                legacy_left = (
-                    None if free is None
-                    else max(0, free - len(sched.assignments))
-                )
                 for t in selectable:
                     if len(futures) >= pool_size:
                         break
-                    if t.id in sched.assignments:
-                        t.assigned_agent_id = sched.assignments[t.id]
-                    elif not t.required_skills:
-                        # legacy NO_CONSTRAINT — schedule_wave skips it; gate on the
-                        # global cap directly (mirrors the wave path).
-                        if legacy_left is not None and legacy_left <= 0:
-                            continue
-                        if legacy_left is not None:
-                            legacy_left -= 1
-                    else:
-                        continue  # DEFERRED_CAPACITY / ROSTER_GAP — re-try next pump
+                    # Every task — with skills or not — is routed by schedule_wave
+                    # (capability + load-balance, global-cap aware). In `assignments`
+                    # → dispatch; otherwise DEFERRED_CAPACITY / ROSTER_GAP, retry next
+                    # pump. (Skills never route; no separate NO_CONSTRAINT path.)
+                    if t.id not in sched.assignments:
+                        continue
+                    t.assigned_agent_id = sched.assignments[t.id]
                     prev = t.status.value
                     t.status = TaskStatus.DISPATCHED  # W3: claim BEFORE submit
                     t.transitions.append(StateTransition(

@@ -60,11 +60,13 @@ def _agent(
 
 # ── fallback signals ───────────────────────────────────────────────────────
 
-def test_select_returns_none_when_task_has_no_required_skills():
-    """Empty required_skills = no routing constraint — orchestrator uses
-    the hardcoded role path. Dispatch doesn't pick arbitrarily."""
+def test_select_routes_no_constraint_task_to_a_producer():
+    """Skills never route (Clif 2026-06-28): an empty-required_skills task still
+    routes to a producer by capability + load-balance — NOT funneled to a single
+    default role. Dispatch picks a producer like it would for any task."""
     agents = [_agent("drafter", ["drafter"])]
-    assert dispatch.select_agent(_task([]), agents) is None
+    picked = dispatch.select_agent(_task([]), agents)
+    assert picked is not None and picked.id == "drafter"
 
 
 def test_select_returns_none_when_roster_is_empty():
@@ -1463,24 +1465,26 @@ def test_schedule_wave_global_cap_limits_total():
     assert len(sched.deferred) == 1
 
 
-def test_schedule_wave_skips_no_constraint_tasks():
-    """Empty required_skills (legacy NO_CONSTRAINT) are not skill-scheduled
-    — neither scheduled, deferred, nor gapped here (caller's legacy path)."""
-    tasks = [_wtask("W-T-001", []), _wtask("W-T-002", ["drafter"])]
-    agents = [_wagent("d", ["drafter"])]
+def test_schedule_wave_assigns_no_constraint_tasks_load_balanced():
+    """Skills never route (Clif 2026-06-28): empty-required_skills tasks ARE
+    scheduled — by capability + load-balance, spread across producers like any
+    other task, not skipped to a caller legacy path."""
+    tasks = [_wtask("W-T-001", []), _wtask("W-T-002", [])]
+    agents = [_wagent("a", []), _wagent("b", [])]
     sched = dispatch.schedule_wave(tasks, agents)
-    assert sched.assignments == {"W-T-002": "d"}
-    assert "W-T-001" not in sched.assignments
+    assert set(sched.assignments) == {"W-T-001", "W-T-002"}
+    assert set(sched.assignments.values()) == {"a", "b"}  # spread, not piled on one
     assert sched.gaps == ()
     assert sched.deferred == ()
 
 
 def test_schedule_wave_respects_skill_capability_floor():
-    """Nemo impl-sweep B2: the wave scheduler must apply skill/domain
-    capability floors, so a capacity rebalance can't hand a task to a
-    cheaper agent that covers the skill name but NOT the skill's hidden
-    floor. With the floor passed, the floored (pricier) agent wins; without
-    it, the cheaper under-floor agent would — proving the floor is enforced."""
+    """A skill's capability floor is a CAPABILITY source, not skill-routing: it
+    declares the hard capability the work needs (e.g. shell-access), and the
+    scheduler routes to a producer that HAS that capability. With the floor
+    passed, the floored (capable) agent wins; without it, the cheaper agent would
+    — proving the capability the skill declared is honored (a producer is never
+    picked for OWNING the skill, only for the capability)."""
     def _floor(name: str):
         return ("reasoning-heavy",) if name == "drafter" else ()
 
