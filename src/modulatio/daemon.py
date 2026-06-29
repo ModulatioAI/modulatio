@@ -441,9 +441,11 @@ def _make_dispatch_callback(*, stub: bool):
                 tool_calls_dir=run_workspace / "tool_calls",
                 project_code=project_code,
             )
-            # Shared runner backs the Leader (the _resolve_chat_runner("leader")
-            # fallback) — keep thinking ON for the judgment seat. Producers get
-            # their own thinking-OFF runners below.
+            # Shared FALLBACK chat runner — it does NOT back the Leader:
+            # _resolve_chat_runner("leader") never falls through to this shared
+            # default (it would be a producer/QC-sourced model); the Leader uses its
+            # own roster chat runner, else the single-shot path. Thinking ON (it
+            # backs judgment seats). Producers get thinking-OFF runners below.
             chat_runner = maybe_build_chat_runner(
                 chat_default_model,
                 on_unavailable=lambda msg: logger.info(msg),

@@ -554,10 +554,12 @@ def kickoff(
             tool_calls_dir=run_workspace / "tool_calls",
             project_code=code,
         )
-        # This shared runner backs the Leader (the _resolve_chat_runner("leader")
-        # fallback — the Leader isn't a dispatched agent), so it keeps thinking ON:
-        # converse + verify are judgment seats that reason. Producers get their own
-        # thinking-OFF runners below.
+        # Shared FALLBACK chat runner for agents with no per-agent runner — it does
+        # NOT back the Leader: _resolve_chat_runner("leader") never falls through to
+        # this shared default (it would be a producer/QC-sourced model); the Leader
+        # uses its own roster chat runner, else degrades to the single-shot path.
+        # Kept thinking-ON since it backs judgment seats. Producers get thinking-OFF
+        # runners below.
         chat_runner = maybe_build_chat_runner(
             qc_model or producer_model,
             on_unavailable=lambda msg: typer.echo(f"  (info) {msg}"),
