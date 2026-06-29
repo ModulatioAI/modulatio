@@ -840,3 +840,41 @@ def test_litellm_runner_bounds_the_clay_subprocess_with_timeout(monkeypatch):
 
     litellm_runner("clay-model")("hi")
     assert seen["timeout"] == 600.0  # the watchdog default reaches run_claude
+
+
+def test_litellm_runner_bounds_the_codex_stream_read_with_timeout(monkeypatch):
+    """Regression: the Codex Responses stream is born from
+    ``litellm.responses(stream=True)``, and the watchdog ``timeout`` MUST reach
+    that call — it is the transport (httpx) read bound that aborts a SILENT socket
+    (``next(stream)`` blocked on a read with no bytes). Together with the loop-level
+    deadline in ``chat_response_from_codex_stream`` (which catches the slow-drip /
+    endless-keepalive shape), both I/O stall shapes of the stream are bounded. This
+    pins the timeout into the call so a refactor of the kwargs plumbing can't
+    silently drop it and reintroduce the silent-read hang. (A CPU-bound spin is a
+    different beast — uninterruptable in-thread; that needs the process boundary.)"""
+    import litellm
+    from modulatio.runners import litellm_runner
+
+    seen: dict = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return []  # empty stream → aggregator returns an empty ChatResponse
+
+    monkeypatch.setattr(litellm, "responses", _capture)
+    monkeypatch.setattr(
+        "modulatio.runners._resolve_model_call_args", lambda model: (model, {})
+    )
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {"codex-model": {"endpoint": "codex"}},
+    )
+    monkeypatch.delenv("MODULATIO_CALL_TIMEOUT", raising=False)
+
+    litellm_runner("codex-model")("hi")
+    assert seen["timeout"] == 600.0
+
+    seen.clear()
+    monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "120")
+    litellm_runner("codex-model")("hi")
+    assert seen["timeout"] == 120.0
