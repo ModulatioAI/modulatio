@@ -395,9 +395,9 @@ def _make_dispatch_callback(*, stub: bool):
             runners = build_role_runners(project_code)
             if runners is None:
                 raise RuntimeError(
-                    "daemon real-model dispatch: the project roster has no Leader "
-                    "model. Configure a Leader agent + model in the Config tab "
-                    "(or run `modulatio setup`)."
+                    "daemon real-model dispatch: the project roster is incomplete "
+                    "— a kickoff needs a Leader, a QC, and at least one producer, "
+                    "each with a model. Configure the team in the Config tab."
                 )
 
         # Per-kickoff run isolation: each daemon-dispatched kickoff
@@ -566,9 +566,9 @@ def _make_runners_for(*, stub: bool):
         runners = build_role_runners(_project.code)
         if runners is None:
             raise RuntimeError(
-                "daemon real-model project-execution: the project roster has no "
-                "Leader model. Configure a Leader agent + model in the Config tab "
-                "(or run `modulatio setup`)."
+                "daemon real-model project-execution: the project roster is "
+                "incomplete — a kickoff needs a Leader, a QC, and at least one "
+                "producer, each with a model. Configure the team in the Config tab."
             )
         return runners
     return _runners

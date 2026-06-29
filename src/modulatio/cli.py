@@ -480,9 +480,10 @@ def kickoff(
         runners = build_role_runners(code)
         if runners is None:
             typer.echo(
-                "  ! This project's roster has no Leader model. Configure a "
-                "Leader agent + model, or re-run on a net-new project with "
-                "--leader-model.",
+                "  ! This project's roster is incomplete — a kickoff needs a "
+                "Leader, a QC, and at least one producer, each with a model. "
+                "Configure the team in the Config tab, or seed a net-new project "
+                "with the --*-model flags.",
                 err=True,
             )
             raise typer.Exit(code=2)

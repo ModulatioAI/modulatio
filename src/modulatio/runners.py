@@ -1043,19 +1043,21 @@ def build_role_runners(project_code: str) -> dict[str, Callable[[str], str]] | N
     ≠ leader-converse split-brain). NO ``default_models`` snapshot is read — that
     frozen second binding was the divergence source.
 
-    Returns ``None`` when the roster has no leader model configured — the caller
-    nudges the operator to configure a model + agent in the Config tab. ``planner``
-    is the Leader's own job (his model); ``qc``/``researcher``/``drafter`` fall
-    back to a producer model, else the leader. The judgment seats (leader/planner/
-    qc) reason (``disable_thinking=False``); producers run thinking-OFF.
+    Returns ``None`` when the roster is INCOMPLETE for a kickoff — it requires the
+    full triad: a Leader, a QC, and at least one producer, each a roster agent with
+    a model. An incomplete roster refuses cleanly (the caller nudges to the Config
+    tab) rather than running a hobbled team. (The setup wizard no longer seeds a
+    team, so a fresh install configures Leader/QC/producers in the TUI Config tab
+    first.) ``planner`` is the Leader's own job (his model); producers run
+    thinking-OFF, the judgment seats (leader/planner/qc) reason.
     """
     from modulatio import roster
 
     leader = roster.model_for_tier(project_code, "leader")
-    if not leader:
+    qc = roster.model_for_tier(project_code, "qc")
+    producer = roster.model_for_tier(project_code, "producer")
+    if not (leader and qc and producer):
         return None
-    producer = roster.model_for_tier(project_code, "producer") or leader
-    qc = roster.model_for_tier(project_code, "qc") or producer
     return {
         "leader": litellm_runner(leader, disable_thinking=False),
         "planner": litellm_runner(leader, disable_thinking=False),

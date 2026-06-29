@@ -390,8 +390,9 @@ class ACPServer:
             runners = build_role_runners(code)
             if runners is None:
                 raise RuntimeError(
-                    "ACP real-model session: the project roster has no Leader "
-                    "model. Configure a Leader agent + model in the Config tab."
+                    "ACP real-model session: the project roster is incomplete — a "
+                    "kickoff needs a Leader, a QC, and at least one producer, each "
+                    "with a model. Configure the team in the Config tab."
                 )
             leader_model = roster.model_for_tier(code, "leader")
             chat_runners = (

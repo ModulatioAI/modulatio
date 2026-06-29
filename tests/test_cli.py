@@ -272,6 +272,11 @@ def test_kickoff_existing_project_team_lane_is_roster_sourced(tmp_path, monkeypa
         roster.Agent(id="hal", name="Hal", tier="producer", model="roster-prod"),
         "EXIST",
     )
+    # A kickoff needs the full triad (Leader + QC + a producer).
+    roster.save(
+        roster.Agent(id="qc", name="QC", tier="qc", model="roster-qc"),
+        "EXIST",
+    )
 
     def _fake_runner(model, **kw):
         r = lambda prompt: ""  # noqa: E731

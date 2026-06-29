@@ -126,11 +126,11 @@ def test_make_dispatch_callback_stub_mode_runs_kickoff(tmp_path):
     )
 
 
-def test_make_dispatch_callback_real_mode_requires_roster_leader_model():
-    """With no Leader model in the project roster (the single source of a seat's
-    model), real-mode dispatch must fail loudly rather than silently downgrade."""
+def test_make_dispatch_callback_real_mode_requires_complete_roster():
+    """An incomplete roster (here: empty — no Leader/QC/producer) must fail loudly
+    rather than silently downgrade. A kickoff needs the full triad."""
     cb = daemon._make_dispatch_callback(stub=False)
-    with pytest.raises(RuntimeError, match="Leader model"):
+    with pytest.raises(RuntimeError, match="roster is incomplete"):
         cb("DTEST", "anything")
 
 
@@ -182,10 +182,14 @@ def test_make_dispatch_callback_real_mode_builds_and_passes_agent_runners(
         ),
         project_code="DT2",
     )
-    # The roster is the single source of every seat's model — a Leader agent with
-    # a model must exist for real-mode dispatch (build_role_runners reads it).
+    # A real kickoff needs the full triad (Leader + QC + a producer), each with a
+    # model — build_role_runners refuses an incomplete roster.
     roster.save(
         roster.Agent(id="leader", name="Leader", tier="leader", model="L"),
+        project_code="DT2",
+    )
+    roster.save(
+        roster.Agent(id="qc", name="QC", tier="qc", model="Q"),
         project_code="DT2",
     )
 

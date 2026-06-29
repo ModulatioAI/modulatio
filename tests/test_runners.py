@@ -912,3 +912,30 @@ def test_codex_CHAT_runner_bounds_the_stream_with_timeout(monkeypatch):
     runner = litellm_chat_runner("codex-model", timeout=123.0)
     runner(messages=[{"role": "user", "content": "hi"}], tools=[])
     assert seen["timeout"] == 123.0
+
+
+def test_build_role_runners_requires_full_triad(tmp_path, monkeypatch):
+    """A kickoff needs the full triad — build_role_runners returns None (the caller
+    refuses + nudges to the Config tab) unless the roster has a Leader, a QC, AND at
+    least one producer, each with a model. (The wizard no longer seeds a team, so a
+    fresh/empty roster must refuse cleanly, not run a hobbled team.)"""
+    from modulatio import roster
+    from modulatio import runners as runners_mod
+    from modulatio import vault
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("TRIAD", "TRIAD", "obj")
+    monkeypatch.setattr(runners_mod, "litellm_runner", lambda m, **k: (lambda p: ""))
+
+    def _save(tier: str) -> None:
+        roster.save(roster.Agent(id=tier, name=tier, tier=tier, model="m"), "TRIAD")
+
+    assert runners_mod.build_role_runners("TRIAD") is None  # empty roster
+    _save("leader")
+    assert runners_mod.build_role_runners("TRIAD") is None  # no QC, no producer
+    _save("qc")
+    assert runners_mod.build_role_runners("TRIAD") is None  # still no producer
+    _save("producer")
+    runners = runners_mod.build_role_runners("TRIAD")  # complete triad
+    assert runners is not None
+    assert set(runners) >= {"leader", "qc", "drafter", "planner"}

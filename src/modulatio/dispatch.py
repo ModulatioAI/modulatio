@@ -379,9 +379,10 @@ class DispatchOutcome(str, Enum):
     #: Task declared no required_skills — orchestrator uses the
     #: hardcoded-role path. Not a gap; not a ticket.
     NO_CONSTRAINT = "no_constraint"
-    #: No producer-tier agent exists in the roster at all — a SETUP gap
-    #: (the wizard guarantees at least one producer, so this only fires on
-    #: a hand-broken roster). Unlike the pre-skill-library era this is no
+    #: No producer-tier agent exists in the roster at all — a SETUP gap.
+    #: (A real kickoff refuses up front without the Leader/QC/producer triad —
+    #: ``build_role_runners`` returns None — so this now only fires on a
+    #: hand-broken roster mid-run.) Unlike the pre-skill-library era this is no
     #: longer a per-task capability gap: a producer that lacks a skill just
     #: checks it out, and one below the capability floor still runs
     #: best-available. Kept as the one legitimate ticket.
