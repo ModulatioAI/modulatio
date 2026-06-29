@@ -1,5 +1,5 @@
 {
-  "_doc": "Curated model lists shown by the setup wizard's OAuth provider step (provider_step.py). OAuth flows for these vendors don't expose a /v1/models endpoint, so the wizard ships a snapshot list rather than free-text. Refresh when the vendor publishes a new model. Kept as data here so updates don't require a code edit.",
+  "_doc": "Curated model lists shown by the model-config picker (loaded by provider_catalog.py, surfaced in the TUI Config tab). OAuth flows for these vendors don't expose a /v1/models endpoint, so a snapshot list ships rather than free-text. Refresh when the vendor publishes a new model. Kept as data here so updates don't require a code edit.",
   "anthropic": [
     "claude-opus-4-8",
     "claude-sonnet-4-6",

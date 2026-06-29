@@ -92,10 +92,10 @@ def _derive_providers(state: dict) -> list[str]:
     providers: set[str] = set()
     for env_var in state.get("staged_api_keys", {}):
         name = str(env_var).strip()
-        # re-sweep: the neutral 'API_KEY' sentinel (default_env_var_for's
-        # fallback for a malformed base_url) carries no provider — it's 7 chars
-        # so it doesn't end with '_API_KEY' (8) and would otherwise render a
-        # bogus 'api_key' provider on the confirm line. Skip it.
+        # re-sweep: the neutral 'API_KEY' sentinel (the malformed-base-url
+        # fallback) carries no provider — it's 7 chars so it doesn't end with
+        # '_API_KEY' (8) and would otherwise render a bogus 'api_key' provider
+        # on the confirm line. Skip it.
         if name.upper() == "API_KEY":
             continue
         if name.upper().endswith("_API_KEY"):

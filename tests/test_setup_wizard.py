@@ -14,7 +14,6 @@ import pytest
 
 from modulatio import config, setup_state
 from modulatio.setup_wizard import (
-    agent_step,
     budget_step,
     embedded_llm_step,
     finalize,
@@ -120,50 +119,6 @@ def test_suggested_paths_with_obsidian(monkeypatch, tmp_path):
     assert "Obsidian" in vault
     assert "Modulatio" in vault
     assert "Obsidian" in shared
-
-
-# === agent_step constants ===
-
-def test_min_max_agent_caps():
-    # #13: the Leader is the one required role; QC + producers are optional.
-    assert agent_step.MIN_AGENTS == 1
-    assert agent_step.MAX_AGENTS == 10
-
-
-def test_run_accepts_leader_only_roster(monkeypatch):
-    """#13 WIRING: a Leader-only finish (QC + producers skipped) must reach the
-    end of run() — the floor check requires only the Leader, not the old triad.
-    (The provisioner unit tests cover the parts; this covers run() itself.)"""
-    def _workers(state, dm):
-        state["worker_agents"] = []
-        return "configured"
-
-    def _triad(state, dm):
-        state["triad_agents"] = [{"tier": "leader", "model": "m"}]
-        return "configured"
-
-    monkeypatch.setattr(agent_step, "_provision_workers", _workers)
-    monkeypatch.setattr(agent_step, "_provision_triad", _triad)
-    monkeypatch.setattr(agent_step, "_maybe_customize_context_budgets", lambda s: None)
-    state: dict = {}
-    assert agent_step.run(state) == "provisioned"  # not steps.BACK
-    assert [a["tier"] for a in state["triad_agents"]] == ["leader"]
-    assert state["worker_agents"] == []
-
-
-def test_build_agent_from_template_round_trips():
-    agent = agent_step._build_agent_from_template("writer", "ollama_chat/glm-5.1")
-    assert agent["id"] == "writer"
-    assert agent["name"] == "Writer"
-    assert agent["tier"] == "producer"
-    assert "drafter" in agent["skills"]
-    assert agent["model"] == "ollama_chat/glm-5.1"
-    assert agent["template_origin"] == "writer"
-
-
-def test_build_agent_from_template_unknown_id_raises():
-    with pytest.raises(ValueError, match="not found"):
-        agent_step._build_agent_from_template("not-a-template", "stub")
 
 
 # === embedded_llm_step ===

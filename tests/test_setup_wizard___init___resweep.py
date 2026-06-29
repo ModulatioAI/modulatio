@@ -29,14 +29,12 @@ from unittest import mock
 
 from modulatio import setup_wizard
 from modulatio.setup_wizard import (
-    agent_step,
     budget_step,
     clipboard_step,
     embedded_llm_step,
     finalize,
     first_project_step,
     pandoc_step,
-    provider_step,
     vault_path_step,
 )
 
@@ -71,8 +69,6 @@ def _run_body_recording():
         mock.patch.object(pandoc_step, "run", _rec("pandoc")),
         mock.patch.object(clipboard_step, "run", _rec("clipboard")),
         mock.patch.object(vault_path_step, "run", _rec("vault_path")),
-        mock.patch.object(provider_step, "run", _rec("models")),
-        mock.patch.object(agent_step, "run", _rec("agents")),
         mock.patch.object(budget_step, "run", _rec("budget")),
         mock.patch.object(first_project_step, "run", _rec("first_project")),
         mock.patch.object(embedded_llm_step, "run", _rec("embedded_llm")),

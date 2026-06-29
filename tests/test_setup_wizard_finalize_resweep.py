@@ -11,7 +11,6 @@ now skips the sentinel entirely.
 from __future__ import annotations
 
 from modulatio.setup_wizard import finalize
-from modulatio.setup_wizard.provider_step import default_env_var_for
 
 
 def test_derive_providers_skips_neutral_api_key_sentinel():
@@ -37,10 +36,8 @@ def test_derive_providers_sentinel_dropped_real_keys_kept():
     assert finalize._derive_providers(state) == ["openai", "xai"]
 
 
-def test_sentinel_matches_default_env_var_for_fallback():
-    # Guard the contract: the malformed-url fallback the wizard stages under is
-    # exactly the sentinel finalize now skips, so the end-to-end path is clean.
-    sentinel = default_env_var_for("not-a-url")
-    assert sentinel == "API_KEY"
-    state = {"staged_api_keys": {sentinel: "sk-x"}}
+def test_finalize_skips_neutral_api_key_sentinel_directly():
+    # finalize._derive_providers drops the neutral 'API_KEY' sentinel (the
+    # malformed-url fallback) so it never renders as a real provider.
+    state = {"staged_api_keys": {"API_KEY": "sk-x"}}
     assert finalize._derive_providers(state) == []
