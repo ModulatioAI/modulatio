@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import faulthandler
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -191,6 +192,12 @@ _FIX_WINDOW_MAX_S = 300.0
 #: longer stalls the whole run (Op A). Small enough to keep the team busy, large
 #: enough not to spin.
 _PUMP_TICK_S = 2.0
+
+#: Grace added to the per-call network timeout to set the CPU-spin watchdog
+#: deadline. The watchdog fires only AFTER litellm's own timeout has had its
+#: chance, so an I/O hang raises + recovers normally there and the watchdog is the
+#: backstop for a genuine CPU spin the network timeout can't see (Stage 0).
+_SPIN_WATCHDOG_GRACE_S = 30.0
 
 #: Duration cap on the best-effort post-run codification phase (Alfred loop). B1
 #: runs it AFTER delivery; this bounds how long it can hold the process if a cloud
@@ -2947,6 +2954,65 @@ class Orchestrator:
                 f"skip_leader_model_guard=True."
             )
 
+    def _spin_watchdog_timeout(self) -> float:
+        """The deadline after which a still-running call is treated as a CPU-spin
+        wedge — the network call-timeout plus a grace, so litellm's own timeout
+        wins for an I/O hang (the call raises + recovers there) and the spin
+        watchdog is the BACKSTOP for a spin the network timeout can't see."""
+        from modulatio.runners import _default_call_timeout
+        return _default_call_timeout() + _SPIN_WATCHDOG_GRACE_S
+
+    def _on_call_wedged(
+        self, role: str, agent_id: "str | None", task_id: "str | None",
+    ) -> None:
+        """Stage 0: the spin-watchdog fired — the call ran past its deadline with NO
+        network timeout, i.e. a CPU-bound spin invisible to every in-thread
+        mechanism (the litellm I/O timeout, the cooperative abort) and unkillable
+        in-thread: the 68-minute wedge. Dump the wedged thread's stack so the spin
+        is DIAGNOSABLE, log it, and surface an honest terminal on the lane. Does NOT
+        kill the spin (Stage 0 = diagnose + surface; the interrupt is Stage 1/2).
+        Runs on the Timer thread — raise-safe, must never crash."""
+        try:
+            dump_path = self._scope_root() / "wedged-calls.txt"
+            with dump_path.open("a", encoding="utf-8") as f:
+                f.write(
+                    f"\n=== WEDGED CALL: role={role} agent={agent_id} "
+                    f"task={task_id} (spin-watchdog fired at "
+                    f"{self._spin_watchdog_timeout():.0f}s; all-thread stacks) ===\n"
+                )
+                # faulthandler writes raw to the fd (bypassing the text buffer) —
+                # flush the header first so it lands BEFORE the stack, not after.
+                f.flush()
+                faulthandler.dump_traceback(file=f, all_threads=True)
+            _logger.warning(
+                "spin-watchdog: %s call (agent=%s task=%s) wedged past %.0fs with no "
+                "network timeout — likely a CPU-bound spin; stack dumped to %s",
+                role, agent_id, task_id, self._spin_watchdog_timeout(), dump_path,
+            )
+        except Exception:  # noqa: BLE001 — the diagnostic must never crash the timer
+            pass
+        self._emit_call_failed(role, agent_id, task_id)
+
+    def _run_with_spin_watchdog(
+        self, fn: "Callable[[], Any]", role: str,
+        agent_id: "str | None", task_id: "str | None",
+    ) -> "Any":
+        """Run ``fn`` under the Stage-0 CPU-spin watchdog: a daemon Timer that, if
+        ``fn`` hasn't returned by ``_spin_watchdog_timeout``, dumps the wedged
+        thread's stack + surfaces an honest terminal (a spin the network watchdog +
+        cooperative abort can't catch). Cancelled the instant ``fn`` returns or
+        raises, so a normal call trips nothing."""
+        timer = threading.Timer(
+            self._spin_watchdog_timeout(),
+            self._on_call_wedged, args=(role, agent_id, task_id),
+        )
+        timer.daemon = True
+        timer.start()
+        try:
+            return fn()
+        finally:
+            timer.cancel()
+
     def _emit_call_failed(
         self, role: str, agent_id: "str | None", task_id: "str | None",
     ) -> None:
@@ -3049,7 +3115,13 @@ class Orchestrator:
                 on_tool_call=self._seat_tool_sink(role, task_id, agent_id)
             ):
                 try:
-                    return runner(prompt)
+                    # Stage 0: run under the CPU-spin watchdog so a call that
+                    # wedges past the network timeout (a spin litellm + the
+                    # cooperative abort can't catch) is dumped + surfaced, not
+                    # silently burning (the 68-min leader wedge lived here).
+                    return self._run_with_spin_watchdog(
+                        lambda: runner(prompt), role, agent_id, task_id,
+                    )
                 except Exception:
                     # Op C: emit an honest terminal so the TUI clears the stuck
                     # "working" status (KeyboardInterrupt/SystemExit = teardown,
@@ -3121,7 +3193,10 @@ class Orchestrator:
                             on_tool_call=self._seat_tool_sink(role, task_id, agent_id)
                         ):
                             try:
-                                return runner(prompt)
+                                # Stage 0: CPU-spin watchdog (see _run).
+                                return self._run_with_spin_watchdog(
+                                    lambda: runner(prompt), role, agent_id, task_id,
+                                )
                             except Exception:
                                 self._emit_call_failed(role, agent_id, task_id)
                                 raise

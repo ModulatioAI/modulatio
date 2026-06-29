@@ -233,6 +233,56 @@ def test_resolve_chat_runner_leader_never_uses_shared_producer_qc_default(projec
     assert orch._resolve_chat_runner_model("some-producer") == "producer-qc-model"
 
 
+# ── Stage 0: the CPU-spin watchdog (diagnose + surface a wedged call) ────────
+
+def test_spin_watchdog_dumps_stack_and_surfaces_wedged_call(
+    project: Project, tmp_path, monkeypatch
+):
+    """Stage-0 CPU-spin watchdog: a call that runs past the spin-deadline WITHOUT
+    the network timeout raising (a CPU-bound spin — invisible to litellm's I/O
+    timeout, the cooperative abort, and unkillable in-thread: the 68-min wedge)
+    gets the wedged thread's stack dumped + an honest terminal surfaced, so the
+    spin is diagnosable instead of silently burning."""
+    import time as _time
+
+    events: list = []
+    orch = Orchestrator(project, {"leader": _leader_stub},
+                        activity_callback=events.append)
+    monkeypatch.setattr(orch, "_scope_root", lambda: tmp_path)
+    monkeypatch.setattr(orch, "_spin_watchdog_timeout", lambda: 0.1)
+
+    def _wedged() -> str:
+        _time.sleep(0.35)  # outlasts the 0.1s deadline; returns so the test can't hang
+        return "done"
+
+    result = orch._run_with_spin_watchdog(_wedged, "leader", "leader", "T-1")
+    assert result == "done"
+    dump = tmp_path / "wedged-calls.txt"
+    assert dump.exists(), "spin-watchdog must dump the wedged thread's stack"
+    body = dump.read_text()
+    assert "WEDGED CALL" in body and "leader" in body
+    assert "leader_call_failed" in [e.phase for e in events], (
+        "spin-watchdog must surface an honest terminal on the lane"
+    )
+
+
+def test_spin_watchdog_silent_on_call_that_returns_in_time(
+    project: Project, tmp_path, monkeypatch
+):
+    """A normal call that returns within the deadline never trips the watchdog —
+    no stack dump, no false terminal."""
+    events: list = []
+    orch = Orchestrator(project, {"leader": _leader_stub},
+                        activity_callback=events.append)
+    monkeypatch.setattr(orch, "_scope_root", lambda: tmp_path)
+    monkeypatch.setattr(orch, "_spin_watchdog_timeout", lambda: 5.0)
+
+    result = orch._run_with_spin_watchdog(lambda: "fast", "leader", "leader", "T-1")
+    assert result == "fast"
+    assert not (tmp_path / "wedged-calls.txt").exists()
+    assert "leader_call_failed" not in [e.phase for e in events]
+
+
 def test_autonomy_status_reads_live_substrate(project: Project, monkeypatch):
     """§2.5: the orch's two-row status reflects the live mode + sandbox — /yolo
     with the sandbox down still shows UNAVAILABLE (mode can't hide the substrate)."""
