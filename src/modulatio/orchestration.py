@@ -4877,6 +4877,11 @@ class Orchestrator:
         return agent_id
 
     # ── LLM-with-tools executor (Phase 2A) ───────────────────────────────
+    def _is_leader_chat_role(self, agent_id: str) -> bool:
+        """True when a chat-runner lookup is for the conceptual Leader role — the
+        literal ``"leader"`` or the Leader-tier agent's real roster id."""
+        return agent_id == "leader" or agent_id == self._leader_agent_id()
+
     def _resolve_chat_runner(self, agent_id: str) -> "Callable[..., Any] | None":
         """Two-layer chat-runner lookup: per-agent dict first, then the
         single shared default. Returns ``None`` when neither is wired —
@@ -4888,11 +4893,19 @@ class Orchestrator:
         TUI, tests) that haven't switched to the dict yet. The leader role
         resolves to its real roster id (``_leader_chat_key``) so a renamed
         Leader agent's runner is still found.
-        """
+
+        The Leader NEVER falls back to the shared ``chat_runner`` default — that
+        default may be a producer/QC-sourced model (the CLI builds it from
+        ``--qc-model``/``--producer-model``). When the Leader-tier agent has no
+        per-agent chat runner (its model can't build one — ``build_chat_runners``
+        skips it), return ``None`` so the caller degrades to the single-shot
+        ``runners["leader"]`` path (the roster Leader model), never a flag-sourced
+        producer/QC default (cadre HIGH)."""
+        is_leader = self._is_leader_chat_role(agent_id)
         agent_id = self._leader_chat_key(agent_id)
         if agent_id and agent_id in self.chat_runners:
             return self.chat_runners[agent_id]
-        return self.chat_runner
+        return None if is_leader else self.chat_runner
 
     def _resolve_chat_runner_model(self, agent_id: str) -> str | None:
         """ parallel lookup for the model id
@@ -4904,12 +4917,14 @@ class Orchestrator:
         per-agent runner stays paired with its per-agent model. Falls
         through to ``chat_runner_default_model`` when no per-agent
         entry matches; ``None`` only when neither is wired (gate
-        falls back to no-op, preserving pre-F11 stub-test behavior).
-        """
+        falls back to no-op, preserving pre-F11 stub-test behavior). The
+        Leader never falls to the shared default model (see
+        ``_resolve_chat_runner``)."""
+        is_leader = self._is_leader_chat_role(agent_id)
         agent_id = self._leader_chat_key(agent_id)
         if agent_id and agent_id in self.chat_runner_models:
             return self.chat_runner_models[agent_id]
-        return self.chat_runner_default_model
+        return None if is_leader else self.chat_runner_default_model
 
     def _leader_agent_id(self) -> str | None:
         """The id of the Leader-tier agent in the roster — the key under which the

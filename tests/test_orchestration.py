@@ -205,6 +205,34 @@ def test_resolve_chat_runner_finds_renamed_leader_agent(project: Project):
     assert orch._resolve_chat_runner_model("leader") == "codex_gpt_5_5"
 
 
+def test_resolve_chat_runner_leader_never_uses_shared_producer_qc_default(project: Project):
+    """cadre HIGH (Wild Bill R3): when the Leader-tier agent has no per-agent chat
+    runner (its model can't build one, so build_chat_runners SKIPS it), the leader
+    role must NOT fall back to the shared chat_runner / default model — that shared
+    default is producer/QC-sourced (the CLI builds it from --qc-model/
+    --producer-model). It must return None so leader-verify degrades to the
+    single-shot runners["leader"] (roster Leader), never a flag-sourced model."""
+    roster.save(
+        roster.Agent(id="captain", name="Captain", tier="leader",
+                     model="codex_gpt_5_5"),
+        PROJECT_CODE,
+    )
+    orch = Orchestrator(
+        project, {"leader": _runner_named("codex_gpt_5_5")},
+        chat_runners={},  # leader's model couldn't build a chat runner → skipped
+        chat_runner_models={},
+        chat_runner="SHARED_PRODUCER_QC_RUNNER",
+        chat_runner_default_model="producer-qc-model",
+    )
+    # The Leader degrades to None (→ single-shot roster Leader), NOT the shared
+    # producer/QC default.
+    assert orch._resolve_chat_runner("leader") is None
+    assert orch._resolve_chat_runner_model("leader") is None
+    # A non-leader producer still gets the shared default (unchanged behavior).
+    assert orch._resolve_chat_runner("some-producer") == "SHARED_PRODUCER_QC_RUNNER"
+    assert orch._resolve_chat_runner_model("some-producer") == "producer-qc-model"
+
+
 def test_autonomy_status_reads_live_substrate(project: Project, monkeypatch):
     """§2.5: the orch's two-row status reflects the live mode + sandbox — /yolo
     with the sandbox down still shows UNAVAILABLE (mode can't hide the substrate)."""
@@ -6067,7 +6095,7 @@ def test_leader_verify_routes_through_chat_loop_when_skill_has_tool_loadout(
     }
     orch = Orchestrator(
         project, runners,
-        tool_registry=tool_registry, chat_runner=chat_runner,
+        tool_registry=tool_registry, chat_runners={"leader": chat_runner},
     )
     orch.kickoff("anything")
 
@@ -6150,7 +6178,7 @@ def test_leader_verify_writes_transcript_sidecar(
     }
     orch = Orchestrator(
         project, runners,
-        tool_registry=tool_registry, chat_runner=chat_runner,
+        tool_registry=tool_registry, chat_runners={"leader": chat_runner},
     )
     summary = orch.kickoff("anything")
 
@@ -9769,7 +9797,7 @@ def test_leader_verify_routes_through_tool_loop_when_run_shell_available(
     orch = Orchestrator(
         project,
         {"leader": _leader_singleshot, "drafter": _drafter_stub, "qc": _qc_stub},
-        tool_registry=registry, chat_runner=chat,
+        tool_registry=registry, chat_runners={"leader": chat},
     )
     art = orch._artifacts_root()
     art.mkdir(parents=True, exist_ok=True)

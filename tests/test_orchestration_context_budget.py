@@ -478,6 +478,9 @@ def test_run_chat_loop_confines_producer_seat_not_leader(project_with_run, monke
     monkeypatch.setattr(_runners_mod, "run_llm_with_tools", fake_run_llm_with_tools)
     orch = _make_orchestrator(project_with_run)
     orch.chat_runner = lambda *a, **k: None
+    # Per-agent wiring (the leader no longer falls back to the shared default —
+    # cadre HIGH): both seats resolve their own chat runner.
+    orch.chat_runners = {"writer": orch.chat_runner, "leader": orch.chat_runner}
     orch.chat_runner_models = {"writer": "m", "leader": "m"}
 
     orch._run_chat_loop(prompt="x", tool_loadout=("read_tool_result",), role="writer",
