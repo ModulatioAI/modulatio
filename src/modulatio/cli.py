@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Callable
 
 import typer
 
@@ -45,7 +44,7 @@ from modulatio import (  # noqa: E402 — env must load before modulatio imports
 from modulatio import context_budget as _ctx_budget_mod  # noqa: E402
 from modulatio.attachments import build_attachment  # noqa: E402
 from modulatio.orchestration import Orchestrator  # noqa: E402
-from modulatio.runners import build_agent_runners, build_chat_runners, default_generic_stub_runners, litellm_runner, maybe_build_chat_runner  # noqa: E402
+from modulatio.runners import build_agent_runners, build_chat_runners, build_role_runners, default_generic_stub_runners, maybe_build_chat_runner  # noqa: E402
 from modulatio import tools as _tools_mod  # noqa: E402
 from modulatio.types import Project  # noqa: E402
 from modulatio.vault import project_dir  # noqa: E402
@@ -267,56 +266,6 @@ logs_app = typer.Typer(help="Diagnostic logs — list captured crash/error/docto
 app.add_typer(logs_app, name="logs")
 
 
-# === Shared helpers ===
-
-def _build_runners(
-    *,
-    stub: bool,
-    leader_model: str | None,
-    producer_model: str | None,
-    qc_model: str | None,
-    # DEPRECATED/ignored — research routes by capability (Brick A); accepted
-    # for back-compat with callers passing --researcher-model.
-    researcher_model: str | None = None,
-    planner_model: str | None = None,
-    coordinator_model: str | None = None,
-) -> dict[str, Callable[[str], str]]:
-    """Assemble the {runner-key: runner} dict the Orchestrator consumes.
-
-    Stub mode returns canned runners and ignores model flags. Non-stub
-    mode builds LiteLLM-backed runners; QC falls back to ``producer_model``
-    when its own model is not provided (different minds preferred but not
-    mandatory per quality-architecture.md §5). (Post-keystone there are only
-    producers — ``drafter`` is the producer runner slot, not a fixed role;
-    research routes by capability to a producer, not a runner slot.)
-
-    Skills-first (#143): the task-planning utility binds to the "planner"
-    runner. ``planner_model`` picks the LLM behind it; ``coordinator_model``
-    is the deprecated alias (back-compat with pre-configs/scripts).
-    Planning is the Leader's job, so ``planner`` falls back to the Leader's
-    model when neither is supplied.
-    """
-    if stub:
-        return default_generic_stub_runners()
-
-    planner = planner_model or coordinator_model or leader_model
-    # #150/model-recs: the DELIBERATIVE/judgment seats reason — the Leader (plan
-    # + verify), the planner (the Leader's task-planning utility; planning is the
-    # Leader's job, defaults to leader_model), and QC (verdicts + reasons about
-    # quality and fit). Only the producers (drafter + research) keep the
-    # thinking-OFF default (/no_think prefix): they act, not deliberate (the
-    # reasoning-vs-agentic split).
-    return {
-        "leader": litellm_runner(leader_model, disable_thinking=False),
-        "planner": litellm_runner(planner, disable_thinking=False),
-        "drafter": litellm_runner(producer_model),
-        "qc": litellm_runner(qc_model or producer_model, disable_thinking=False),
-        # Research runner-role, bound to the producer model — no separate
-        # researcher model (research is producer work; Brick A collapse).
-        "researcher": litellm_runner(producer_model),
-    }
-
-
 # === modulatio acp (Agent Client Protocol server over stdio) ===
 
 @app.command(name="acp")
@@ -460,14 +409,6 @@ def kickoff(
         )
         raise typer.Exit(code=2)
 
-    runners = _build_runners(
-        stub=stub,
-        leader_model=leader_model,
-        planner_model=planner_model,
-        producer_model=producer_model,
-        qc_model=qc_model,
-    )
-
     # Validate + build attachments BEFORE any disk side-effect (project
     # init, roster seed, run-folder creation). build_attachment is
     # independent of project/run state, so doing it here means a
@@ -526,6 +467,35 @@ def kickoff(
             qc_model=qc_model,
         )
         typer.echo(f"Initialized project vault at {wiki}")
+
+    # Team-lane runners come from the ROSTER (the single source of every seat's
+    # model), same as TUI/daemon/ACP. The --*-model flags SEED a net-new roster
+    # (above); on an existing project the roster is authoritative — so the team/
+    # decompose lane and the Leader chat/verify lane resolve to ONE Leader model.
+    # (Was: built from the flags here, a SECOND source that could split the Leader
+    # across lanes — cadre HIGH.)
+    if stub:
+        runners = default_generic_stub_runners()
+    else:
+        runners = build_role_runners(code)
+        if runners is None:
+            typer.echo(
+                "  ! This project's roster has no Leader model. Configure a "
+                "Leader agent + model, or re-run on a net-new project with "
+                "--leader-model.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        # Honesty: an explicit --leader-model that disagrees with an existing
+        # roster is IGNORED (the roster is the single source) — say so, don't
+        # silently diverge.
+        roster_leader = roster.model_for_tier(code, "leader")
+        if not net_new and leader_model and roster_leader not in (None, leader_model):
+            typer.echo(
+                f"  (info) --leader-model {leader_model!r} ignored — this project's "
+                f"roster Leader runs {roster_leader!r} (the single source); change "
+                f"it in the Config tab."
+            )
 
     # Per-kickoff run isolation: generate a fresh run_id and create
     # the run subfolder before constructing Project. All run-scoped
@@ -633,12 +603,6 @@ def kickoff(
             None if stub else _litellm_runner
         ),
         user_budget_overrides=user_budget_overrides or None,
-        # The headless CLI builds the team lane from explicit --leader-model
-        # flags, a DELIBERATE operator override that may differ from the project
-        # roster (the single source for the TUI/daemon/ACP paths). Opt OUT of the
-        # single-leader-model guard explicitly — an explicit skip is a contract;
-        # a silent pass is a hole (cadre HIGH/MED). Stub runs carry no model.
-        skip_leader_model_guard=not stub,
     )
     if _atts:
         names = ", ".join(a.name for a in _atts)

@@ -1,127 +1,15 @@
 """CLI-level tests for model wiring.
 
-The CLI is thin: its only real job is converting model-name flags into a
-runners dict the Orchestrator can consume. Slice #3 item #3 splits the
-QC model from the Drafter model so QC can run on a different mind per
-quality-architecture.md §5.
+The CLI scaffolds a project + seeds a net-new roster from the --*-model flags,
+then sources its runtime runners from the ROSTER (build_role_runners) — the single
+source of every seat's model, same as TUI/daemon/ACP. The --leader-model flag is a
+net-new SEED; on an existing project the roster is authoritative (no second source
+that could split the Leader across lanes — cadre HIGH).
 """
 
 from __future__ import annotations
 
 from modulatio import cli
-
-
-def test_build_runners_stub_mode_ignores_model_flags(monkeypatch):
-    """In stub mode, model flags are ignored and canned runners are returned.
-    litellm_runner must not be invoked — stub mode is explicitly offline."""
-    calls: list[str] = []
-
-    def record(model, **kwargs):
-        calls.append(model)
-        return lambda _p: ""
-
-    monkeypatch.setattr(cli, "litellm_runner", record)
-    runners = cli._build_runners(
-        stub=True,
-        leader_model=None,
-        coordinator_model=None,
-        producer_model=None,
-        qc_model=None,
-        researcher_model=None,
-    )
-    assert set(runners) == {"leader", "planner", "drafter", "qc", "researcher"}
-    assert calls == []  # no real-runner construction in stub mode
-
-
-def test_build_runners_routes_qc_to_qc_model_when_provided(monkeypatch):
-    """When --qc-model is supplied, the QC runner uses it, independent of
-    --specialist-model. Different-mind verification becomes possible."""
-    calls: list[str] = []
-
-    def record(model, **kwargs):
-        calls.append(model)
-        return lambda _p: ""
-
-    monkeypatch.setattr(cli, "litellm_runner", record)
-    cli._build_runners(
-        stub=False,
-        leader_model="leader/A",
-        coordinator_model="coord/B",
-        producer_model="drafter/C",
-        qc_model="qc/D",
-        researcher_model=None,
-    )
-    # Construction order: leader, coordinator, drafter, qc, researcher
-    # (researcher falls back to specialist when its model is omitted).
-    assert calls == ["leader/A", "coord/B", "drafter/C", "qc/D", "drafter/C"]
-
-
-def test_build_runners_ignores_deprecated_researcher_model(monkeypatch):
-    """--researcher-model is deprecated and accepted-but-ignored: research runs
-    on the PRODUCER model (Brick A — research is a capability a producer
-    composes, not a separate role/model)."""
-    calls: list[str] = []
-
-    def record(model, **kwargs):
-        calls.append(model)
-        return lambda _p: ""
-
-    monkeypatch.setattr(cli, "litellm_runner", record)
-    cli._build_runners(
-        stub=False,
-        leader_model="leader/A",
-        coordinator_model="coord/B",
-        producer_model="drafter/C",
-        qc_model="qc/D",
-        researcher_model="research/E",  # passed but ignored
-    )
-    # leader, planner(=coordinator), drafter, qc, researcher — the researcher
-    # runner is bound to the PRODUCER model; research/E is ignored.
-    assert calls == ["leader/A", "coord/B", "drafter/C", "qc/D", "drafter/C"]
-
-
-def test_build_runners_researcher_falls_back_to_specialist_when_omitted(monkeypatch):
-    """No --researcher-model → Researcher shares --specialist-model. The
-    specialist pool is the ergonomic default; distinct Researcher is earned."""
-    calls: list[str] = []
-
-    def record(model, **kwargs):
-        calls.append(model)
-        return lambda _p: ""
-
-    monkeypatch.setattr(cli, "litellm_runner", record)
-    cli._build_runners(
-        stub=False,
-        leader_model="leader/A",
-        coordinator_model="coord/B",
-        producer_model="drafter/C",
-        qc_model=None,
-        researcher_model=None,
-    )
-    # Researcher and QC both fall back to specialist.
-    assert calls == ["leader/A", "coord/B", "drafter/C", "drafter/C", "drafter/C"]
-
-
-def test_build_runners_qc_falls_back_to_specialist_when_qc_model_omitted(monkeypatch):
-    """If --qc-model is not supplied, QC uses the same model as Drafter.
-    Different-mind is preferred but not mandatory per architecture §5."""
-    calls: list[str] = []
-
-    def record(model, **kwargs):
-        calls.append(model)
-        return lambda _p: ""
-
-    monkeypatch.setattr(cli, "litellm_runner", record)
-    cli._build_runners(
-        stub=False,
-        leader_model="leader/A",
-        coordinator_model="coord/B",
-        producer_model="drafter/C",
-        qc_model=None,
-        researcher_model=None,
-    )
-    # QC and Researcher both fall back to specialist.
-    assert calls == ["leader/A", "coord/B", "drafter/C", "drafter/C", "drafter/C"]
 
 
 # ── kickoff scaffolding (slice #11c) ───────────────────────────────────────
@@ -344,3 +232,81 @@ def test_project_list_marks_current_default(tmp_path, monkeypatch):
     # the current default is flagged with a marker on its line
     beta_line = next(ln for ln in result.output.splitlines() if "beta" in ln)
     assert "*" in beta_line
+
+
+def test_kickoff_existing_project_team_lane_is_roster_sourced(tmp_path, monkeypatch):
+    """cadre HIGH (Wild Bill): CLI kickoff on an EXISTING project sources the
+    team/decompose Leader runner from the ROSTER (build_role_runners), NOT the
+    --leader-model flag — so the Leader can't run one model on the team lane and
+    another on the chat/verify lane. A --leader-model that disagrees with the
+    roster is IGNORED (the roster is the single source) and the operator is told."""
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    from modulatio import (
+        config,
+        roster,
+        runners as runners_mod,
+        semantic_router,
+        tools,
+        vault,
+    )
+
+    cfg = tmp_path / "config-isolation"
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg)
+    monkeypatch.setattr(config, "DEFAULTS_FILE", cfg / "defaults.json")
+    monkeypatch.setattr(config, "TEAM_TEMPLATE_FILE", cfg / "team_template.json")
+    monkeypatch.setattr(config, "AUTH_ALERTS_FILE", cfg / "auth_alerts.json")
+    config.reload()
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+
+    # An EXISTING project whose roster Leader runs a known model.
+    vault.init_project("EXIST", "EXIST", "obj", exist_ok=True)
+    roster.save(
+        roster.Agent(id="leader", name="Leader", tier="leader",
+                     model="roster-leader-model"),
+        "EXIST",
+    )
+    roster.save(
+        roster.Agent(id="hal", name="Hal", tier="producer", model="roster-prod"),
+        "EXIST",
+    )
+
+    def _fake_runner(model, **kw):
+        r = lambda prompt: ""  # noqa: E731
+        r.model_name = model
+        return r
+
+    monkeypatch.setattr(runners_mod, "litellm_runner", _fake_runner)
+    monkeypatch.setattr(
+        runners_mod, "maybe_build_chat_runner", lambda m, **k: (lambda **kw: None)
+    )
+    monkeypatch.setattr(semantic_router, "FastEmbedder", lambda *a, **k: object())
+    monkeypatch.setattr(semantic_router, "default_matcher", lambda *a, **k: None)
+    monkeypatch.setattr(tools, "build_registry", lambda **k: {})
+
+    captured: dict = {}
+
+    class _FakeOrch:
+        def __init__(self, project, runners, **kw):
+            captured["runners"] = runners
+
+        def kickoff(self, *a, **k):
+            return SimpleNamespace(
+                goals=[], tasks=[], drafts=[], goal_reports=[], errors=[],
+                rendered_deliverables=[], withheld_deliverables=[],
+                product_quality_report=None,
+            )
+
+    monkeypatch.setattr(cli, "Orchestrator", _FakeOrch)
+
+    result = CliRunner().invoke(cli.app, [
+        "kickoff", "--code", "EXIST", "--objective", "o",
+        "--leader-model", "FLAG-DIFFERENT", "--producer-model", "roster-prod",
+    ])
+    assert result.exit_code == 0, result.output
+    # The team Leader runner is the ROSTER model, not the divergent flag.
+    assert captured["runners"]["leader"].model_name == "roster-leader-model"
+    # ...and the ignored flag is surfaced, not silently dropped.
+    assert "ignored" in result.output and "FLAG-DIFFERENT" in result.output
