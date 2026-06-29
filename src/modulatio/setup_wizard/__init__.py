@@ -54,14 +54,12 @@ except ImportError:
 
 from modulatio import config, theme
 from modulatio.setup_wizard import (
-    agent_step,
     budget_step,
     clipboard_step,
     embedded_llm_step,
     finalize,
     first_project_step,
     pandoc_step,
-    provider_step,
     steps,
     vault_path_step,
 )
@@ -76,14 +74,13 @@ _STEP_TITLES = {
     "pandoc": "1. Check pandoc",
     "clipboard": "1a. Check clipboard backend",
     "vault_path": "2. Vault paths",
-    "models": "3. Configure models",
-    "agents": "4. Provision agents (triad + workers)",
-    "budget": "5. Budget defaults (optional)",
-    "first_project": "6. Your first project",
+    # Models + agents are configured in the TUI Config tab now, not here.
+    "budget": "3. Budget defaults (optional)",
+    "first_project": "4. Your first project",
     # re-sweep (finding #348): embedded_llm now runs before confirm so the
     # confirmed save commits immediately — labels follow the new order.
-    "embedded_llm": "7. Prefetch embedded LLM",
-    "confirm": "8. Review and finalize",
+    "embedded_llm": "5. Prefetch embedded LLM",
+    "confirm": "6. Review and finalize",
 }
 
 
@@ -94,10 +91,6 @@ def _dispatch(step_name: str, state: dict) -> Any:
         return clipboard_step.run(state)
     if step_name == "vault_path":
         return vault_path_step.run(state)
-    if step_name == "models":
-        return provider_step.run(state)  # combined-models step lives in provider_step.py
-    if step_name == "agents":
-        return agent_step.run(state)
     if step_name == "budget":
         return budget_step.run(state)
     if step_name == "first_project":
@@ -123,25 +116,6 @@ def _pop_state(step_name: str, state: dict) -> None:
         "pandoc": ["pandoc_installed", "pandoc_skipped"],
         "clipboard": ["clipboard_backend_installed", "clipboard_skipped"],
         "vault_path": ["vault_root", "shared_resources_path"],
-        # re-sweep (Finding 1): do NOT pop 'staged_api_keys' on BACK. The
-        # model_presets that reference these keys are written through to disk
-        # immediately by provider_step.run, so they survive BACK/re-enter; the
-        # pasted key VALUES live only here in memory. Dropping them leaves a
-        # half-configured model (preset on disk, key never written to .env).
-        # 'configured_models' is a list of preset keys, losslessly rebuilt
-        # from disk on re-entry, so it may still be cleared.
-        "models": ["configured_models"],
-        # re-sweep (Finding 1): do NOT pop 'triad_agents'/'worker_agents' on
-        # BACK. _load_existing_state pre-populates these from the saved
-        # team_template.json so the agents step starts on the user's current
-        # team with edit/keep semantics. Popping them on a BACK-out (e.g. the
-        # user enters agents then returns to the models step) discards the
-        # disk-loaded pre-fill the user never touched — and any in-progress
-        # picks — so re-entry restarts on an empty re-provision instead of the
-        # current team. The agents step re-walks every role and overwrites
-        # both keys on re-entry (by_tier/producers rebuild), so keeping the
-        # prior values is lossless: the next entry replaces them.
-        "agents": [],
         "budget": ["budget_caps"],
         "first_project": ["first_project_code", "first_project_objective"],
         "confirm": [],
@@ -344,12 +318,15 @@ def _run_setup_body() -> bool:
     # safe to run ahead of confirm. This closes the long unsaved window where a
     # user could answer Y and then have a multi-minute model download
     # interrupted before anything was persisted.
+    # Models + agents are NO LONGER configured in the wizard — that lives in the
+    # TUI Config tab (it works better, and the roster there is the single source
+    # of every seat's model). The wizard just gets the install bootable; the
+    # operator configures providers, models, and the team in-app. A console
+    # message typed before anything is configured nudges them to the Config tab.
     step_order = [
         "pandoc",
         "clipboard",
         "vault_path",
-        "models",
-        "agents",
         "budget",
         "first_project",
         "embedded_llm",

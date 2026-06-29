@@ -126,11 +126,11 @@ def test_make_dispatch_callback_stub_mode_runs_kickoff(tmp_path):
     )
 
 
-def test_make_dispatch_callback_real_mode_requires_default_models():
-    """Without default_models in defaults.json, real-mode dispatch must
-    fail loudly rather than silently downgrade."""
+def test_make_dispatch_callback_real_mode_requires_roster_leader_model():
+    """With no Leader model in the project roster (the single source of a seat's
+    model), real-mode dispatch must fail loudly rather than silently downgrade."""
     cb = daemon._make_dispatch_callback(stub=False)
-    with pytest.raises(RuntimeError, match="defaults.json"):
+    with pytest.raises(RuntimeError, match="Leader model"):
         cb("DTEST", "anything")
 
 
@@ -165,7 +165,7 @@ def test_make_dispatch_callback_real_mode_builds_and_passes_agent_runners(
     from types import SimpleNamespace
 
     import modulatio.orchestration as orch_mod
-    from modulatio import config, roster, runners, semantic_router, vault
+    from modulatio import roster, runners, semantic_router, vault
 
     # Pre-create the project + a known custom-model producer so the dispatch
     # callback sees net_new=False (no default-roster seeding) and the pool is
@@ -182,11 +182,13 @@ def test_make_dispatch_callback_real_mode_builds_and_passes_agent_runners(
         ),
         project_code="DT2",
     )
-
-    # Real-mode defaults present (leader + specialist are required).
-    monkeypatch.setattr(
-        config, "get_default_models", lambda: {"leader": "L", "specialist": "S"}
+    # The roster is the single source of every seat's model — a Leader agent with
+    # a model must exist for real-mode dispatch (build_role_runners reads it).
+    roster.save(
+        roster.Agent(id="leader", name="Leader", tier="leader", model="L"),
+        project_code="DT2",
     )
+
     # Avoid heavy embedder / real model construction.
     monkeypatch.setattr(semantic_router, "FastEmbedder", lambda *a, **k: object())
     monkeypatch.setattr(semantic_router, "default_matcher", lambda *a, **k: None)

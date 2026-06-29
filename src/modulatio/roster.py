@@ -273,6 +273,23 @@ def list_agents(project_code: str) -> list[Agent]:
     return sorted(agents, key=lambda a: a.id)
 
 
+def model_for_tier(project_code: str, tier: str) -> str | None:
+    """The model of the single roster agent at ``tier`` (e.g. ``"leader"`` /
+    ``"qc"``) — the SOLE source of that seat's model.
+
+    Both lanes of a seat (the conversational/converse runner AND the
+    team/orchestration runner) resolve here, so a leader can only ever carry ONE
+    model: the split-brain where leader-converse and leader-decompose ran on
+    different models is impossible by construction. Returns ``None`` when no agent
+    of that tier carries a model. The ``leader``/``qc`` tiers are singletons; the
+    first id-sorted match wins.
+    """
+    for agent in list_agents(project_code):
+        if agent.tier == tier and agent.model:
+            return agent.model
+    return None
+
+
 def save(agent: Agent, project_code: str) -> Path:
     """Persist an agent profile under the project roster.
 
@@ -723,4 +740,4 @@ def _seed_from_team_template(
     return written
 
 
-__all__ = ["Agent", "list_agents", "load", "save", "seed_default_roster"]
+__all__ = ["Agent", "list_agents", "load", "model_for_tier", "save", "seed_default_roster"]

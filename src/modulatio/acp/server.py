@@ -367,7 +367,7 @@ class ACPServer:
 
     # ── real Orchestrator construction (mirrors the TUI converse path) ───
     def _build_orchestrator(self, session: ACPSession):
-        from modulatio import config, tools, vault
+        from modulatio import tools, vault
         from modulatio.orchestration import Orchestrator
         from modulatio.runners import (
             default_generic_stub_runners, litellm_chat_runner,
@@ -383,15 +383,17 @@ class ACPServer:
             registry: dict = {}
             leader_model = "stub"
         else:
-            from modulatio.cli import _build_runners
-            defaults = config.get_default_models() or {}
-            leader_model = defaults.get("leader")
-            runners = _build_runners(
-                stub=False,
-                leader_model=leader_model,
-                producer_model=defaults.get("producer") or defaults.get("specialist"),
-                qc_model=defaults.get("qc"),
-            )
+            from modulatio import roster
+            from modulatio.runners import build_role_runners
+            # Roster is the single source — runners AND the leader chat model
+            # resolve to the same leader agent (no default_models snapshot).
+            runners = build_role_runners(code)
+            if runners is None:
+                raise RuntimeError(
+                    "ACP real-model session: the project roster has no Leader "
+                    "model. Configure a Leader agent + model in the Config tab."
+                )
+            leader_model = roster.model_for_tier(code, "leader")
             chat_runners = (
                 {"leader": litellm_chat_runner(leader_model)} if leader_model else {})
             chat_runner_models = {"leader": leader_model} if leader_model else {}

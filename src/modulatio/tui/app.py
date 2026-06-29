@@ -31,7 +31,7 @@ from textual.css.query import NoMatches
 
 from modulatio import setup_state, vault
 from modulatio.orchestration import Orchestrator
-from modulatio.runners import default_generic_stub_runners, litellm_runner
+from modulatio.runners import default_generic_stub_runners
 from modulatio.tui import commands as commands_mod
 from modulatio.tui.feng_theme import FENG_THEMES, FENG_THEME_NAMES
 from modulatio.tui.screens.agent_builder import AgentBuilderScreen
@@ -92,7 +92,7 @@ def _build_kickoff_orchestrator(
     ``mode == "stub"`` skips all the above (existing test-stub
     contract preserved).
     """
-    from modulatio import config, tools as _tools_mod, vault as _vault
+    from modulatio import tools as _tools_mod, vault as _vault
     from modulatio.runners import build_agent_runners, build_chat_runners, litellm_runner, maybe_build_chat_runner
 
     tool_registry: dict = {}
@@ -112,9 +112,10 @@ def _build_kickoff_orchestrator(
             artifacts_root=run_workspace / "artifacts",
             tool_calls_dir=run_workspace / "tool_calls",
         )
-        defaults = config.get_default_models() or {}
+        from modulatio import roster
         chat_default_model = (
-            defaults.get("qc") or defaults.get("producer") or defaults.get("specialist")
+            roster.model_for_tier(project.code, "producer")
+            or roster.model_for_tier(project.code, "leader")
         )
         chat_runner = maybe_build_chat_runner(
             chat_default_model,
@@ -741,46 +742,13 @@ class ModulatioApp(App):
         )
 
     def _build_real_runners(self) -> dict | None:
-        """Build the {role: runner} dict for real-model dispatch.
-
-        Reads role → preset_key from defaults.json (written by the wizard's
-        finalize.derive_default_models). Each role gets a litellm_runner
-        bound to its preset key. Returns None when no defaults are set —
-        caller surfaces the "go run setup" hint.
-
-        Mirrors cli._build_runners' real-mode path but reads the role
-        bindings from config (the TUI doesn't take CLI flags)."""
-        from modulatio import config
-        defaults = config.get_default_models()
-        if not defaults:
-            return None
-        leader = defaults.get("leader") or defaults.get("producer") or defaults.get("specialist")
-        # Role-language migration: prefer the "producer" key, fall back to the
-        # legacy "specialist" key, then the leader.
-        producer = defaults.get("producer") or defaults.get("specialist") or defaults.get("leader")
-        # Skills-first (#143): the planner runner uses the "planner" default
-        # model (the Leader's model). Fall back to the legacy "coordinator"
-        # key for pre-defaults.json, then to the leader/producer.
-        planner = (
-            defaults.get("planner")
-            or defaults.get("coordinator")
-            or leader
-            or producer
-        )
-        qc = defaults.get("qc") or producer
-        if not (leader and planner and producer and qc):
-            return None
-        return {
-            # Judgment seats REASON (leader/planner/qc); producers run thinking-OFF.
-            # litellm_runner defaults disable_thinking=True, so the reasoning seats
-            # must pass False explicitly (mirrors daemon._make_runners_for).
-            "leader": litellm_runner(leader, disable_thinking=False),
-            "planner": litellm_runner(planner, disable_thinking=False),
-            "drafter": litellm_runner(producer),
-            "qc": litellm_runner(qc, disable_thinking=False),
-            # Research runner-role, bound to the producer model (Brick A).
-            "researcher": litellm_runner(producer),
-        }
+        """The {role: runner} dict for real-model dispatch — sourced from the
+        ROSTER via the shared ``build_role_runners`` (the single source of every
+        seat's model, same builder the CLI/daemon use). Returns None when the
+        roster has no leader model; the caller nudges the operator to configure a
+        model + agent in the Config tab."""
+        from modulatio.runners import build_role_runners
+        return build_role_runners(self.project_code)
 
     # ── Conversation: the Leader's converse function ────────────────────
 
@@ -806,7 +774,6 @@ class ModulatioApp(App):
             runners = self._build_real_runners()
             if runners is None:
                 return None
-            from modulatio import config
             from modulatio.runners import build_agent_runners, build_chat_runners, maybe_build_chat_runner
             # Wire EVERY agent's chat runner, not just the Leader's. When the
             # Leader runs a job (free-form run_job or a bound job template), he
@@ -819,9 +786,12 @@ class ModulatioApp(App):
             # roster), so converse keeps working.
             agent_runners = build_agent_runners(self.project_code)
             chat_runners, chat_runner_models = build_chat_runners(self.project_code)
-            defaults = config.get_default_models() or {}
+            # Shared fallback chat runner — roster-sourced like everything else
+            # (a producer's model, else the leader's). No default_models snapshot.
+            from modulatio import roster
             chat_default_model = (
-                defaults.get("qc") or defaults.get("producer") or defaults.get("specialist")
+                roster.model_for_tier(self.project_code, "producer")
+                or roster.model_for_tier(self.project_code, "leader")
             )
             chat_runner = maybe_build_chat_runner(chat_default_model)
             registry = _tools.build_registry(
@@ -876,8 +846,9 @@ class ModulatioApp(App):
         orch = self._conversation_orchestrator()
         if orch is None:
             return (
-                "(no models are configured — run `modulatio setup` to wire the "
-                "Leader's model.)"
+                "(No model is configured for the Leader yet. Open the Config tab "
+                "and configure a model and an agent — the Leader needs a model "
+                "before it can respond.)"
             )
         return self._run_converse(orch, text, attachments or [])
 
@@ -1080,7 +1051,8 @@ class ModulatioApp(App):
         orch = self._conversation_orchestrator()
         if orch is None:
             self._set_response(
-                "(no Leader configured — run `modulatio setup` first.)"
+                "(No model is configured for the Leader yet. Open the Config tab "
+                "and configure a model and an agent first.)"
             )
             return
         p = Path(raw_path).expanduser()

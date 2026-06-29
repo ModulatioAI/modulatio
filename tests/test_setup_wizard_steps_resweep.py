@@ -124,15 +124,3 @@ def test_pop_state_models_preserves_staged_api_keys():
     assert state.get("staged_api_keys") == {"OPENAI_API_KEY": "sk-live-value"}
 
 
-def test_pop_state_models_still_clears_configured_models():
-    """The fix is surgical: 'configured_models' (a list of preset KEYS,
-    losslessly rebuilt from disk on re-entry) may still be cleared on BACK;
-    only the irreplaceable 'staged_api_keys' VALUES must be preserved."""
-    state = {
-        "staged_api_keys": {"OPENAI_API_KEY": "sk-live-value"},
-        "configured_models": ["gpt-x"],
-    }
-
-    setup_wizard._pop_state("models", state)
-
-    assert "configured_models" not in state

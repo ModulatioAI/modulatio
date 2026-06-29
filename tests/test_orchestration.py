@@ -133,6 +133,33 @@ def _qc_stub(prompt: str) -> str:
     return f"```json\n{json.dumps(verdict)}\n```"
 
 
+def test_orchestrator_rejects_split_brain_leader_model(project: Project):
+    """Engine guard: a team-lane leader runner on model A while the converse lane
+    is on model B must fail LOUD at construction — both lanes must resolve from
+    the one roster Leader agent (the leader-decompose ≠ leader-converse split the
+    frozen default_models snapshot once caused)."""
+    def _team_leader(prompt: str) -> str:
+        return ""
+    _team_leader.model_name = "codex_gpt_5_5"
+    with pytest.raises(ValueError, match="split-brain leader model"):
+        Orchestrator(
+            project, {"leader": _team_leader},
+            chat_runner_models={"leader": "anthropic/claude-opus-4-8"},
+        )
+
+
+def test_orchestrator_accepts_matching_leader_model(project: Project):
+    """One roster Leader agent → both lanes on the same model → constructs fine."""
+    def _team_leader(prompt: str) -> str:
+        return ""
+    _team_leader.model_name = "codex_gpt_5_5"
+    orch = Orchestrator(
+        project, {"leader": _team_leader},
+        chat_runner_models={"leader": "codex_gpt_5_5"},
+    )
+    assert orch is not None
+
+
 def test_autonomy_status_reads_live_substrate(project: Project, monkeypatch):
     """§2.5: the orch's two-row status reflects the live mode + sandbox — /yolo
     with the sandbox down still shows UNAVAILABLE (mode can't hide the substrate)."""

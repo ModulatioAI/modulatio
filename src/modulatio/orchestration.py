@@ -2156,6 +2156,7 @@ class Orchestrator:
         #: tests that exercise the gate end-to-end. Falls back to
         #: chat_runner_default_model when an agent isn't keyed.
         self.chat_runner_models: dict[str, str] = chat_runner_models or {}
+        self._assert_one_leader_model()
         self.chat_runner_default_model = chat_runner_default_model
         #:  factory for the Layer 1 summarizer
         #: chat runner. ``None`` keeps Layer 1 a no-op (per-project
@@ -2900,6 +2901,29 @@ class Orchestrator:
             # Best-effort priming — vault may not be fully provisioned
             # yet when Orchestrator is constructed in some test paths.
             pass
+
+    def _assert_one_leader_model(self) -> None:
+        """Engine guard for the single-leader-model invariant: the team/
+        orchestration leader runner and the converse leader runner MUST resolve to
+        ONE model.
+
+        Single-sourcing both lanes from the roster Leader agent
+        (``roster.model_for_tier`` → ``build_role_runners`` + ``build_chat_
+        runners``) makes this true by construction; this catches a FUTURE
+        construction site that reintroduces a divergent binding (the
+        leader-decompose-on-X / leader-converse-on-Y split that the frozen
+        ``default_models`` snapshot once caused). Fires only when BOTH lanes carry
+        a concrete model and they differ — stub runs (no ``model_name``) and
+        partially-wired test fixtures pass through untouched."""
+        team = getattr(self.runners.get("leader"), "model_name", None)
+        converse = self.chat_runner_models.get("leader")
+        if team and converse and team != converse:
+            raise ValueError(
+                f"split-brain leader model: the team lane runs {team!r} but the "
+                f"converse lane runs {converse!r}. Both must resolve from the one "
+                f"roster Leader agent — a construction site is binding a second "
+                f"model source (see roster.model_for_tier / build_role_runners)."
+            )
 
     def _emit_call_failed(
         self, role: str, agent_id: "str | None", task_id: "str | None",

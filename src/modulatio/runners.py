@@ -911,6 +911,10 @@ def litellm_runner(
         _record_call_usage(resp, litellm_model)
         return resp.choices[0].message.content  # type: ignore[union-attr]
 
+    # Surface the seat's configured model on the runner so callers can
+    # introspect it (the budget dispatch already reads ``runner.model_name``;
+    # the single-leader-model guard compares the team vs converse leader model).
+    _run.model_name = model  # type: ignore[attr-defined]
     return _run
 
 
@@ -1027,6 +1031,38 @@ def build_chat_runners(
             chat_runners[agent.id] = runner
             chat_runner_models[agent.id] = agent.model
     return chat_runners, chat_runner_models
+
+
+def build_role_runners(project_code: str) -> dict[str, Callable[[str], str]] | None:
+    """The role-keyed team/orchestration runner dict, sourced ENTIRELY from the
+    roster (``roster.model_for_tier``) — the single source of every seat's model.
+
+    The leader's team-lane runner here and its converse runner
+    (``build_chat_runners``, also roster-keyed) therefore resolve to the SAME
+    leader agent, so a leader can only ever run on ONE model (no leader-decompose
+    ≠ leader-converse split-brain). NO ``default_models`` snapshot is read — that
+    frozen second binding was the divergence source.
+
+    Returns ``None`` when the roster has no leader model configured — the caller
+    nudges the operator to configure a model + agent in the Config tab. ``planner``
+    is the Leader's own job (his model); ``qc``/``researcher``/``drafter`` fall
+    back to a producer model, else the leader. The judgment seats (leader/planner/
+    qc) reason (``disable_thinking=False``); producers run thinking-OFF.
+    """
+    from modulatio import roster
+
+    leader = roster.model_for_tier(project_code, "leader")
+    if not leader:
+        return None
+    producer = roster.model_for_tier(project_code, "producer") or leader
+    qc = roster.model_for_tier(project_code, "qc") or producer
+    return {
+        "leader": litellm_runner(leader, disable_thinking=False),
+        "planner": litellm_runner(leader, disable_thinking=False),
+        "drafter": litellm_runner(producer),
+        "qc": litellm_runner(qc, disable_thinking=False),
+        "researcher": litellm_runner(producer),
+    }
 
 
 def _try_refresh_for(model_or_preset_key: str) -> str | None:
@@ -1971,6 +2007,7 @@ __all__ = [
     "default_generic_stub_runners",
     "litellm_chat_runner",
     "litellm_runner",
+    "build_role_runners",
     "maybe_build_chat_runner",
     "run_llm_with_tools",
     "stub_chat_runner",

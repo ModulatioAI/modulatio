@@ -131,25 +131,6 @@ def test_run_accepts_valid_team(monkeypatch):
 # LOW :213 — step header reflects the real wizard position (5 of 9, not 4 of 7)
 # ---------------------------------------------------------------------------
 
-def test_step_header_uses_real_position(monkeypatch):
-    """Every agents-step screen renders 'Step 5 of 9', not the stale 4/7."""
-    headers: list[tuple[int, int]] = []
-    monkeypatch.setattr(agent_step.theme, "step_header", lambda step, total, title: headers.append((step, total)))
-    monkeypatch.setattr(agent_step.theme, "muted", lambda *a, **k: None)
-    monkeypatch.setattr(agent_step, "_pick_template_for_tier", lambda tier, current=None: tier)
-    monkeypatch.setattr(agent_step, "_pick_model", lambda role, dm, **kw: f"model-{role}")
-    monkeypatch.setattr(agent_step, "_build_agent_from_template", _fake_build_template)
-    monkeypatch.setattr(steps, "confirm_yn", lambda *a, **k: False)
-
-    agent_step._provision_triad({}, {})
-    assert headers, "the triad step renders at least one header"
-    assert all(h == (5, 9) for h in headers), headers
-
-    # Cross-check the constants match the wizard's actual step order.
-    from modulatio.setup_wizard import _STEP_TITLES
-    assert agent_step._STEP_TOTAL == len(_STEP_TITLES)
-    assert agent_step._STEP_NUMBER == 5
-
 
 # ---------------------------------------------------------------------------
 # Wizard per-role budgets must track the engine defaults (no stale drift)

@@ -340,8 +340,9 @@ def _make_dispatch_callback(*, stub: bool):
     runs the GSD loop for a heartbeat task.
 
     Stub mode uses ``default_generic_stub_runners`` (offline, canned
-    output). Non-stub mode mirrors ``cli.kickoff``'s real-model wiring,
-    pulling default_models from ``config.get_default_models()``.
+    output). Non-stub mode builds the role runners from the project ROSTER
+    (``build_role_runners`` → ``roster.model_for_tier``), the single source of
+    every seat's model; ``default_models`` is read ONLY to seed a net-new roster.
     """
     def _dispatch(
         project_code: str, objective: str, *,
@@ -350,7 +351,7 @@ def _make_dispatch_callback(*, stub: bool):
     ) -> str:
         from modulatio import roster, semantic_router, tools as _tools_mod, vault
         from modulatio.orchestration import Orchestrator
-        from modulatio.runners import build_agent_runners, build_chat_runners, default_generic_stub_runners, litellm_runner, maybe_build_chat_runner
+        from modulatio.runners import build_agent_runners, build_chat_runners, build_role_runners, default_generic_stub_runners, maybe_build_chat_runner
         from modulatio.types import Project
         from modulatio.vault import project_dir
 
@@ -369,57 +370,34 @@ def _make_dispatch_callback(*, stub: bool):
                     producer_model="stub", qc_model="stub",
                 )
         else:
-            # Read default_models from the wizard-persisted defaults.json.
-            # If a role is missing, fail loudly — daemon shouldn't silently
-            # downgrade to stub for a real-model run.
-            defaults = config.get_default_models()
-            # leader + a producer model are required. Role-language migration:
-            # accept the new "producer" key OR the legacy "specialist" key.
-            if not defaults.get("leader"):
-                raise RuntimeError(
-                    "daemon real-model dispatch requires defaults.json "
-                    "default_models[leader]; run `modulatio setup` to configure."
-                )
-            if not (defaults.get("producer") or defaults.get("specialist")):
-                raise RuntimeError(
-                    "daemon real-model dispatch requires defaults.json "
-                    "default_models[producer]; run `modulatio setup` to configure."
-                )
-            # Skills-first (#143): the planner runner uses the "planner"
-            # default model (the Leader's model). Fall back to the legacy
-            # "coordinator" key for pre-defaults.json, then to leader.
-            planner_model = (
-                defaults.get("planner")
-                or defaults.get("coordinator")
-                or defaults["leader"]
-            )
-            # Role-language migration: the producer runner uses the "producer"
-            # default model; fall back to the legacy "specialist" key, then leader.
-            producer_model = (
-                defaults.get("producer")
-                or defaults.get("specialist")
-                or defaults["leader"]
-            )
-            runners = {
-                # Leader + planner + QC reason (judgment seats); producers thinking-OFF.
-                "leader": litellm_runner(defaults["leader"], disable_thinking=False),
-                "planner": litellm_runner(planner_model, disable_thinking=False),
-                "drafter": litellm_runner(producer_model),
-                "qc": litellm_runner(
-                    defaults.get("qc") or producer_model, disable_thinking=False
-                ),
-                # Research runs on the producer model (Brick A collapse).
-                "researcher": litellm_runner(producer_model),
-            }
             embedder = semantic_router.FastEmbedder()
             matcher = semantic_router.default_matcher(project_code, embedder=embedder)
             if net_new:
+                # Seed a net-new roster from the wizard's team template (or the
+                # default template). ``default_models``, when present, supplies
+                # fallback per-role models for the template path — SEED ONLY,
+                # never a runtime runner binding (the runners below read the
+                # roster, the single source of every seat's model).
+                seed = config.get_default_models()
                 roster.seed_default_roster(
                     project_code,
-                    leader_model=defaults["leader"],
-                    coordinator_model=planner_model,
-                    producer_model=producer_model,
-                    qc_model=defaults.get("qc"),
+                    leader_model=seed.get("leader"),
+                    coordinator_model=(
+                        seed.get("planner") or seed.get("coordinator") or seed.get("leader")
+                    ),
+                    producer_model=(
+                        seed.get("producer") or seed.get("specialist") or seed.get("leader")
+                    ),
+                    qc_model=seed.get("qc"),
+                )
+            # Runtime runners come from the ROSTER (single source) — the leader's
+            # team lane and converse lane resolve to the SAME roster agent.
+            runners = build_role_runners(project_code)
+            if runners is None:
+                raise RuntimeError(
+                    "daemon real-model dispatch: the project roster has no Leader "
+                    "model. Configure a Leader agent + model in the Config tab "
+                    "(or run `modulatio setup`)."
                 )
 
         # Per-kickoff run isolation: each daemon-dispatched kickoff
@@ -432,7 +410,9 @@ def _make_dispatch_callback(*, stub: bool):
             code=project_code,
             name=project_code,
             objective=objective,
-            leader_model=("stub" if stub else defaults["leader"]),
+            leader_model=(
+                "stub" if stub else roster.model_for_tier(project_code, "leader")
+            ),
             wiki_path=str(wiki),
             run_id=run_id,
         )
@@ -444,6 +424,13 @@ def _make_dispatch_callback(*, stub: bool):
         chat_runner = None
         chat_runners: dict = {}
         chat_runner_models: dict = {}
+        # Shared-fallback chat model — roster-sourced like everything else
+        # (a qc/producer model, else the leader). No default_models snapshot.
+        chat_default_model = None if stub else (
+            roster.model_for_tier(project_code, "qc")
+            or roster.model_for_tier(project_code, "producer")
+            or roster.model_for_tier(project_code, "leader")
+        )
         if not stub:
             run_workspace = vault.run_dir(project_code, run_id)
             #  also wire tool_calls_dir so
@@ -458,7 +445,7 @@ def _make_dispatch_callback(*, stub: bool):
             # fallback) — keep thinking ON for the judgment seat. Producers get
             # their own thinking-OFF runners below.
             chat_runner = maybe_build_chat_runner(
-                defaults.get("qc") or producer_model,
+                chat_default_model,
                 on_unavailable=lambda msg: logger.info(msg),
                 disable_thinking=False,
             )
@@ -488,9 +475,7 @@ def _make_dispatch_callback(*, stub: bool):
             chat_runner=chat_runner,
             chat_runners=chat_runners,
             chat_runner_models=chat_runner_models,
-            chat_runner_default_model=(
-                None if stub else (defaults.get("qc") or producer_model)
-            ),
+            chat_runner_default_model=chat_default_model,
             summarizer_chat_runner_factory=(
                 None if stub else _litellm_runner
             ),
@@ -548,13 +533,14 @@ def _make_project_loader(*, stub: bool):
     has a plan persisted and approved. We supply a fresh run_id so
     sub-objective kickoffs get isolated artifact dirs."""
     def _load(project_code: str):
-        from modulatio import config, vault
+        from modulatio import roster, vault
         from modulatio.types import Project
         wiki = vault.project_dir(project_code)
         run_id = vault.generate_run_id()
         vault.init_run(project_code, run_id, "project execution tick")
+        # Roster is the single source of the leader's model (no default_models).
         leader_model = "stub" if stub else (
-            config.get_default_models().get("leader") or "stub"
+            roster.model_for_tier(project_code, "leader") or "stub"
         )
         return Project(
             code=project_code,
@@ -568,47 +554,21 @@ def _make_project_loader(*, stub: bool):
 
 
 def _make_runners_for(*, stub: bool):
-    """Mirror _make_dispatch_callback's runner construction. Stub
-    mode returns canned runners; real-model mode reads default_models
-    from defaults.json (raising if a required role is missing)."""
+    """Mirror _make_dispatch_callback's runner construction. Stub mode returns
+    canned runners; real-model mode builds the role runners from the ROSTER (the
+    single source of every seat's model — no default_models snapshot)."""
     def _runners(_project):
-        from modulatio.runners import (
-            default_generic_stub_runners, litellm_runner,
-        )
+        from modulatio.runners import build_role_runners, default_generic_stub_runners
         if stub:
             return default_generic_stub_runners()
-        defaults = config.get_default_models()
-        if not defaults.get("leader"):
+        runners = build_role_runners(_project.code)
+        if runners is None:
             raise RuntimeError(
-                "daemon real-model project-execution requires defaults.json "
-                "default_models[leader]; run `modulatio setup` to configure."
+                "daemon real-model project-execution: the project roster has no "
+                "Leader model. Configure a Leader agent + model in the Config tab "
+                "(or run `modulatio setup`)."
             )
-        if not (defaults.get("producer") or defaults.get("specialist")):
-            raise RuntimeError(
-                "daemon real-model project-execution requires defaults.json "
-                "default_models[producer]; run `modulatio setup` to configure."
-            )
-        # Skills-first (#143): planner uses the "planner" default model,
-        # falling back to legacy "coordinator" then the Leader's model.
-        planner_model = (
-            defaults.get("planner")
-            or defaults.get("coordinator")
-            or defaults["leader"]
-        )
-        producer_model = (
-            defaults.get("producer")
-            or defaults.get("specialist")
-            or defaults["leader"]
-        )
-        return {
-            # Leader reasons (deliberative seat); others thinking-OFF.
-            "leader": litellm_runner(defaults["leader"], disable_thinking=False),
-            "planner": litellm_runner(planner_model),
-            "drafter": litellm_runner(producer_model),
-            "qc": litellm_runner(defaults.get("qc") or producer_model),
-            # Research runs on the producer model (Brick A collapse).
-            "researcher": litellm_runner(producer_model),
-        }
+        return runners
     return _runners
 
 

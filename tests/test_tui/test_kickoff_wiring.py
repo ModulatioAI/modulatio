@@ -66,12 +66,11 @@ def test_kickoff_orchestrator_threads_model_summarizer_and_tool_calls_dir(
             captured_orch["kwargs"] = kwargs
 
     monkeypatch.setattr(tui_app, "Orchestrator", _FakeOrchestrator)
-    # config.get_default_models comes from setup-wizard output; pin
-    # a deterministic value rather than depending on whatever happens
-    # to live on the dev box.
+    # The fallback chat model is roster-sourced (a producer's model) — the
+    # roster is the single source of every seat's model. Pin it deterministically.
     monkeypatch.setattr(
-        "modulatio.config.get_default_models",
-        lambda: {"qc": "openrouter/test-qc-model"},
+        "modulatio.roster.model_for_tier",
+        lambda code, tier: "openrouter/test-producer-model" if tier == "producer" else None,
     )
     with patch(
         "modulatio.tools.build_registry",
@@ -92,7 +91,7 @@ def test_kickoff_orchestrator_threads_model_summarizer_and_tool_calls_dir(
     assert "tool_calls" in str(captured_registry["tool_calls_dir"])
     # F11 piece: chat_runner_default_model is set (not None).
     kwargs = captured_orch["kwargs"]
-    assert kwargs["chat_runner_default_model"] == "openrouter/test-qc-model"
+    assert kwargs["chat_runner_default_model"] == "openrouter/test-producer-model"
     # F11 / F12 piece: summarizer factory is the real litellm_runner
     # so Layer 1 has somewhere to dispatch the summarizer model
     # when its config opts in.
@@ -138,8 +137,8 @@ def test_conversation_orchestrator_wires_producer_chat_runners(
         "modulatio.runners.maybe_build_chat_runner", lambda *a, **k: _fallback
     )
     monkeypatch.setattr(
-        "modulatio.config.get_default_models",
-        lambda: {"qc": "openrouter/test-qc-model", "leader": "m-leader"},
+        "modulatio.roster.model_for_tier",
+        lambda code, tier: "m-producer" if tier == "producer" else None,
     )
     monkeypatch.setattr(
         "modulatio.tools.build_registry", lambda **k: {"sentinel": "registry"}
@@ -172,7 +171,7 @@ def test_conversation_orchestrator_wires_producer_chat_runners(
     # Shared fallback + per-agent runners + default model all threaded through.
     assert kwargs["chat_runner"] is _fallback
     assert "hal_9000" in kwargs["agent_runners"]
-    assert kwargs["chat_runner_default_model"] == "openrouter/test-qc-model"
+    assert kwargs["chat_runner_default_model"] == "m-producer"
 
 
 def test_kickoff_orchestrator_stub_mode_keeps_pre_v21_no_op_shape(

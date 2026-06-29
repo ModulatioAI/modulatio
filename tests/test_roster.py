@@ -127,6 +127,35 @@ def test_list_agents_empty_when_project_has_no_roster(project_vault):
     assert roster.list_agents(project_code=PROJECT_CODE) == []
 
 
+# ── model_for_tier — the SINGLE source of a seat's model ─────────────────────
+
+def test_model_for_tier_returns_the_single_seat_model(project_vault):
+    """The roster is the SOLE source of a seat's model. Both the conversational
+    lane and the team/orchestration lane resolve here, so a leader can only ever
+    carry one model — no split-brain (leader-converse ≠ leader-decompose)."""
+    roster.save(
+        roster.Agent(id="leader", name="Leader", tier="leader",
+                     model="codex_gpt_5_5"),
+        project_code=PROJECT_CODE,
+    )
+    roster.save(
+        roster.Agent(id="qc", name="QC", tier="qc", model="nvidia/nemotron"),
+        project_code=PROJECT_CODE,
+    )
+    assert roster.model_for_tier(PROJECT_CODE, "leader") == "codex_gpt_5_5"
+    assert roster.model_for_tier(PROJECT_CODE, "qc") == "nvidia/nemotron"
+    # No producer seeded → no model for that tier.
+    assert roster.model_for_tier(PROJECT_CODE, "producer") is None
+
+
+def test_model_for_tier_none_when_seat_has_no_model(project_vault):
+    roster.save(
+        roster.Agent(id="leader", name="Leader", tier="leader", model=None),
+        project_code=PROJECT_CODE,
+    )
+    assert roster.model_for_tier(PROJECT_CODE, "leader") is None
+
+
 # ── routing-surface helpers ────────────────────────────────────────────────
 
 def test_agent_has_skill_checks_skill_membership():

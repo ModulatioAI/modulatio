@@ -52,12 +52,11 @@ def test_pop_state_agents_is_a_noop():
 
 
 def test_pop_state_other_steps_still_clear():
-    """The fix is scoped to 'agents' — sibling steps still clear their keys."""
-    state = {"budget_caps": {"wall": 1}, "configured_models": ["a"]}
+    """Wizard steps clear their own keys on BACK. (The models + agents steps were
+    removed — model/agent config lives in the TUI Config tab now.)"""
+    state = {"budget_caps": {"wall": 1}}
     setup_wizard._pop_state("budget", state)
     assert "budget_caps" not in state
-    setup_wizard._pop_state("models", state)
-    assert "configured_models" not in state
 
 
 # === Finding 2: abort-message lead capitalization ===
