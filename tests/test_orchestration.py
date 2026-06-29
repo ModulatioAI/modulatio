@@ -10811,6 +10811,33 @@ def test_concurrent_wave_workers_inherit_budget_tracker(project: Project, monkey
     )
 
 
+def test_role_call_emits_failure_terminal_on_raise(tmp_path, monkeypatch):
+    """Op C: a role call that RAISES (e.g. an Op-B timed-out LLM call) emits an
+    honest '<role>_call_failed' activity so the TUI clears the stuck 'working'
+    status (set on *_started), then re-raises — no silent stuck-on-*_started and
+    no fake success terminal."""
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("RCF", "x", "o", exist_ok=True)
+    vault.init_run("RCF", "run-1", "o")
+    proj = Project(code="RCF", name="x", objective="o", leader_model="stub",
+                   wiki_path=str(tmp_path / "rcf"), run_id="run-1")
+
+    def boom(_prompt):
+        raise TimeoutError("wedged call")
+
+    orch = Orchestrator(proj, {"leader": boom, "qc": _qc_stub})
+    events: list[dict] = []
+    monkeypatch.setattr(orch, "_emit_activity", lambda **k: events.append(k))
+
+    with pytest.raises(TimeoutError):
+        orch._run("leader", "decompose this")
+
+    phases = [e.get("phase") for e in events]
+    assert "leader_call_failed" in phases, (
+        f"a raised leader call must emit leader_call_failed; got {phases}"
+    )
+
+
 def test_staging_write_artifact_is_recorded_for_merge(project: Project):
     """Nemo R2 HIGH: a producer's write_artifact in a wave worker writes into the
     per-task staging tree; that write must be RECORDED so _merge_wave_artifacts

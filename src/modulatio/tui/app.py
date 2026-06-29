@@ -1255,7 +1255,14 @@ class ModulatioApp(App):
         # than one producer is in flight, surface the parallel count so the
         # operator can SEE the concurrency (invisible parallelism isn't shippable).
         if is_leader_role(event.role):
-            self._set_lane_status("stream-leader-status", event.phase)
+            if event.phase.endswith("_call_failed"):
+                # Op C: a wedged/timed-out leader call — show an HONEST error, not
+                # a perpetual "working" spinner stuck on its last *_started phase.
+                self._set_lane_status_error(
+                    "stream-leader-status", "call timed out — see the feed"
+                )
+            else:
+                self._set_lane_status("stream-leader-status", event.phase)
         elif is_team_role(event.role):
             actor = self._agent_name(event.agent_id or event.role) or _humanize(
                 event.agent_id or event.role
@@ -1673,6 +1680,14 @@ class ModulatioApp(App):
             self.query_one(f"#{status_id}", StreamStatus).set_activity(
                 phase, actor, working=working, working_names=working_names,
             )
+        except Exception:
+            pass
+
+    def _set_lane_status_error(self, status_id: str, message: str) -> None:
+        """Op C: drive a lane status into an HONEST error state (no spinner) when a
+        call wedged/timed out, instead of leaving it stuck on "working"."""
+        try:
+            self.query_one(f"#{status_id}", StreamStatus).set_error(message)
         except Exception:
             pass
 

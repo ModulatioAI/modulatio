@@ -2901,6 +2901,23 @@ class Orchestrator:
             # yet when Orchestrator is constructed in some test paths.
             pass
 
+    def _emit_call_failed(
+        self, role: str, agent_id: "str | None", task_id: "str | None",
+    ) -> None:
+        """Op C: a role/agent call that RAISES (e.g. an Op-B timed-out LLM call)
+        emits an HONEST terminal so the TUI clears the stuck 'working' status —
+        the leader status is set on every ``*_started`` and would otherwise spin
+        on it forever when the matching ``*_ended`` never fires. A distinct
+        ``*_call_failed`` phase (NOT a fake success terminal) so the feed + status
+        read the truth. Raise-safe: observability must never mask the real error."""
+        try:
+            self._emit_activity(
+                role=role, phase=f"{role}_call_failed",
+                agent_id=agent_id or role, task_id=task_id,
+            )
+        except Exception:  # noqa: BLE001 — never let the breadcrumb hide the call's error
+            pass
+
     def _run(
         self,
         role: str,
@@ -2985,7 +3002,14 @@ class Orchestrator:
             with self._seat_context(
                 on_tool_call=self._seat_tool_sink(role, task_id, agent_id)
             ):
-                return runner(prompt)
+                try:
+                    return runner(prompt)
+                except Exception:
+                    # Op C: emit an honest terminal so the TUI clears the stuck
+                    # "working" status (KeyboardInterrupt/SystemExit = teardown,
+                    # excluded by `except Exception`).
+                    self._emit_call_failed(role, agent_id, task_id)
+                    raise
 
     def _run_agent_call(
         self,
@@ -3050,7 +3074,11 @@ class Orchestrator:
                         with self._seat_context(
                             on_tool_call=self._seat_tool_sink(role, task_id, agent_id)
                         ):
-                            return runner(prompt)
+                            try:
+                                return runner(prompt)
+                            except Exception:
+                                self._emit_call_failed(role, agent_id, task_id)
+                                raise
         return self._run(
             role,
             prompt,

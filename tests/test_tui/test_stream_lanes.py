@@ -17,6 +17,7 @@ import pytest
 
 from modulatio import config, setup_state, vault
 from modulatio.tui.app import ModulatioApp
+from modulatio.tui.widgets.stream_status import StreamStatus
 from modulatio.tui.widgets.stream_view import (
     StreamView,
     is_leader_role,
@@ -127,3 +128,26 @@ def test_leader_role_does_not_overcatch_producer_skills():
     # the real leader-* surfaces still route to the Leader lane
     for r in ("leader", "leader-chat", "leader-decompose"):
         assert is_leader_role(r) and not is_team_role(r), r
+
+
+@pytest.mark.asyncio
+async def test_leader_call_failed_drives_status_into_honest_error(_isolate):
+    """Op C: a wedged/timed-out leader call emits ``<role>_call_failed`` — the
+    LEADER lane must show an HONEST error (✗ in the status, ⚠ in the feed), NOT
+    stay stuck on its last working spinner as if the call were still in flight."""
+    app = ModulatioApp(project_code="STRMX", stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        ev = ActivityEvent(
+            agent_id="leader", role="leader", phase="leader_call_failed",
+            task_id=None, timestamp=datetime.now(timezone.utc),
+        )
+        app._record_activity_impl(ev)
+        await pilot.pause()
+        # Status line: honest error, not a perpetual spinner.
+        status = app.query_one("#stream-leader-status", StreamStatus)
+        assert status._error is not None, "leader status stuck working, not errored"
+        assert "timed out" in status._error, status._error
+        # Feed: the LEADER lane renders the failure plainly, not a raw phase string.
+        lv = app.query_one("#stream-leader", StreamView)
+        assert any("timed out" in m for m in lv.messages), lv.messages

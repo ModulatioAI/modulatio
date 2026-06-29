@@ -268,7 +268,13 @@ class StreamView(VerticalScroll):
             marker.append(self.concurrency_label(), style=f"bold {accent}")
             self._append(marker)
         self._last_producer_count = count
-        glyph, verb = _PHASE.get(event.phase, ("·", event.phase))
+        # Op C: any `<role>_call_failed` (a wedged/timed-out call) reads honestly
+        # in the feed, not as a raw phase string — for every role, not an enum.
+        glyph, verb = _PHASE.get(event.phase) or (
+            ("⚠", "call timed out — no response")
+            if event.phase.endswith("_call_failed")
+            else ("·", event.phase)
+        )
         name = self._display_name(event.agent_id, event.role)
         line = Text()
         line.append(f"{event.timestamp:%H:%M:%S} ", style=dim)
