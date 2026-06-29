@@ -878,3 +878,37 @@ def test_litellm_runner_bounds_the_codex_stream_read_with_timeout(monkeypatch):
     monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "120")
     litellm_runner("codex-model")("hi")
     assert seen["timeout"] == 120.0
+
+
+def test_codex_CHAT_runner_bounds_the_stream_with_timeout(monkeypatch):
+    """cadre MED (Wild Bill): the Codex CHAT-loop path (tool-using producer /
+    converse) must bound its stream-consume loop too — Op B's single-shot fix did
+    NOT cover ``_build_codex_chat_runner``, so a trickling converse/tool-loop
+    stream could still wedge. The chat runner must thread its watchdog timeout into
+    ``chat_response_from_codex_stream`` (the loop-level deadline), beside the
+    transport read bound already in kwargs."""
+    import litellm
+    from modulatio import codex_responses
+    from modulatio.runners import ChatResponse, litellm_chat_runner
+
+    seen: dict = {}
+    monkeypatch.setattr(litellm, "responses", lambda **kw: iter([]))
+
+    def _capture_agg(stream, *, timeout=None):
+        seen["timeout"] = timeout
+        return ChatResponse(content="", tool_calls=())
+
+    monkeypatch.setattr(
+        codex_responses, "chat_response_from_codex_stream", _capture_agg
+    )
+    monkeypatch.setattr(
+        "modulatio.runners._resolve_model_call_args", lambda model: (model, {})
+    )
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {"codex-model": {"endpoint": "codex"}},
+    )
+
+    runner = litellm_chat_runner("codex-model", timeout=123.0)
+    runner(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert seen["timeout"] == 123.0

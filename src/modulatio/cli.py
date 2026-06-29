@@ -633,6 +633,12 @@ def kickoff(
             None if stub else _litellm_runner
         ),
         user_budget_overrides=user_budget_overrides or None,
+        # The headless CLI builds the team lane from explicit --leader-model
+        # flags, a DELIBERATE operator override that may differ from the project
+        # roster (the single source for the TUI/daemon/ACP paths). Opt OUT of the
+        # single-leader-model guard explicitly — an explicit skip is a contract;
+        # a silent pass is a hole (cadre HIGH/MED). Stub runs carry no model.
+        skip_leader_model_guard=not stub,
     )
     if _atts:
         names = ", ".join(a.name for a in _atts)

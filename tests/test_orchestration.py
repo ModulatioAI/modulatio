@@ -133,31 +133,76 @@ def _qc_stub(prompt: str) -> str:
     return f"```json\n{json.dumps(verdict)}\n```"
 
 
-def test_orchestrator_rejects_split_brain_leader_model(project: Project):
-    """Engine guard: a team-lane leader runner on model A while the converse lane
-    is on model B must fail LOUD at construction — both lanes must resolve from
-    the one roster Leader agent (the leader-decompose ≠ leader-converse split the
-    frozen default_models snapshot once caused)."""
-    def _team_leader(prompt: str) -> str:
+def _runner_named(model: str):
+    def _r(prompt: str) -> str:
         return ""
-    _team_leader.model_name = "codex_gpt_5_5"
+    _r.model_name = model
+    return _r
+
+
+def test_orchestrator_rejects_split_brain_leader_model(project: Project):
+    """Engine guard: a team-lane leader runner on model A while the ROSTER Leader
+    agent is on model B must fail LOUD at construction. The converse side is read
+    from the roster (model_for_tier), NOT chat_runner_models — so this catches the
+    split even when the Leader agent is renamed away from the literal 'leader'
+    (cadre HIGH: the id-keyed check silently passed)."""
+    roster.save(
+        roster.Agent(id="captain", name="Captain", tier="leader",
+                     model="anthropic/claude-opus-4-8"),
+        PROJECT_CODE,
+    )
     with pytest.raises(ValueError, match="split-brain leader model"):
-        Orchestrator(
-            project, {"leader": _team_leader},
-            chat_runner_models={"leader": "anthropic/claude-opus-4-8"},
-        )
+        Orchestrator(project, {"leader": _runner_named("codex_gpt_5_5")})
 
 
 def test_orchestrator_accepts_matching_leader_model(project: Project):
-    """One roster Leader agent → both lanes on the same model → constructs fine."""
-    def _team_leader(prompt: str) -> str:
-        return ""
-    _team_leader.model_name = "codex_gpt_5_5"
+    """Team runner model == roster Leader-tier model → constructs fine (even with a
+    renamed Leader agent)."""
+    roster.save(
+        roster.Agent(id="captain", name="Captain", tier="leader",
+                     model="codex_gpt_5_5"),
+        PROJECT_CODE,
+    )
+    orch = Orchestrator(project, {"leader": _runner_named("codex_gpt_5_5")})
+    assert orch is not None
+
+
+def test_skip_leader_model_guard_allows_explicit_override(project: Project):
+    """The deliberate headless override (CLI --leader-model ≠ roster) is an EXPLICIT
+    contract: skip_leader_model_guard=True lets it construct without the guard."""
+    roster.save(
+        roster.Agent(id="leader", name="Leader", tier="leader",
+                     model="anthropic/claude-opus-4-8"),
+        PROJECT_CODE,
+    )
     orch = Orchestrator(
-        project, {"leader": _team_leader},
-        chat_runner_models={"leader": "codex_gpt_5_5"},
+        project, {"leader": _runner_named("codex_gpt_5_5")},
+        skip_leader_model_guard=True,
     )
     assert orch is not None
+
+
+def test_resolve_chat_runner_finds_renamed_leader_agent(project: Project):
+    """cadre HIGH (live bug): converse/verify resolve the leader chat runner by the
+    role 'leader', but build_chat_runners keys by agent.id. A Leader agent renamed
+    to 'captain' must still be reached via 'leader' — not silently fall back to the
+    shared producer/QC default."""
+    roster.save(
+        roster.Agent(id="captain", name="Captain", tier="leader",
+                     model="codex_gpt_5_5"),
+        PROJECT_CODE,
+    )
+    leader_runner = _runner_named("codex_gpt_5_5")
+    orch = Orchestrator(
+        project, {"leader": _runner_named("codex_gpt_5_5")},
+        chat_runners={"captain": leader_runner},
+        chat_runner_models={"captain": "codex_gpt_5_5"},
+        chat_runner="SHARED_DEFAULT_WRONG",
+    )
+    # Asked for the leader role → resolves to the renamed agent's runner/model,
+    # NOT the shared default.
+    assert orch._resolve_chat_runner("leader") is leader_runner
+    assert orch._resolve_chat_runner_model("leader") == "codex_gpt_5_5"
 
 
 def test_autonomy_status_reads_live_substrate(project: Project, monkeypatch):

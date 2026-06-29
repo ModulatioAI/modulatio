@@ -2048,9 +2048,13 @@ class Orchestrator:
         fix_window_s: float = 90.0,
         user_budget_overrides: "dict[str, _ctx_budget_module.BudgetOverride] | None" = None,
         deliver_products: bool = False,
+        skip_leader_model_guard: bool = False,
     ):
         self.project = project
         self.runners = runners
+        #: Explicit opt-out of the single-leader-model guard for the deliberate
+        #: headless override (CLI --leader-model differing from the roster).
+        self._skip_leader_model_guard = skip_leader_model_guard
         #: §2 — render finished products (DOCX) to ~/Documents/Modulatio/<proj>/
         #: at the end of EVERY kickoff this orchestrator drives. Default OFF so
         #: stub/test kickoffs never write to the real delivery dir or invoke
@@ -2914,15 +2918,33 @@ class Orchestrator:
         leader-decompose-on-X / leader-converse-on-Y split that the frozen
         ``default_models`` snapshot once caused). Fires only when BOTH lanes carry
         a concrete model and they differ — stub runs (no ``model_name``) and
-        partially-wired test fixtures pass through untouched."""
+        partially-wired test fixtures pass through untouched.
+
+        The converse side is resolved from the ROSTER (``model_for_tier``), NOT
+        from ``chat_runner_models`` keyed by agent id — so a Leader agent renamed
+        away from the literal ``"leader"`` and the headless CLI flag path are BOTH
+        caught (cadre HIGH/MED: the id-keyed check silently passed on those).
+
+        ``skip_leader_model_guard`` is the EXPLICIT opt-out for the deliberate
+        headless override (CLI ``--leader-model`` choosing a model that differs
+        from the project roster): an explicit skip is a contract; a silent pass is
+        a hole."""
+        if getattr(self, "_skip_leader_model_guard", False):
+            return
         team = getattr(self.runners.get("leader"), "model_name", None)
-        converse = self.chat_runner_models.get("leader")
+        from modulatio import roster
+        try:
+            converse = roster.model_for_tier(self.project.code, "leader")
+        except Exception:  # noqa: BLE001 — roster absent in stub/unit paths
+            converse = None
         if team and converse and team != converse:
             raise ValueError(
                 f"split-brain leader model: the team lane runs {team!r} but the "
-                f"converse lane runs {converse!r}. Both must resolve from the one "
-                f"roster Leader agent — a construction site is binding a second "
-                f"model source (see roster.model_for_tier / build_role_runners)."
+                f"roster Leader agent runs {converse!r}. Both must resolve from the "
+                f"one roster Leader agent — a construction site is binding a second "
+                f"model source (see roster.model_for_tier / build_role_runners). A "
+                f"deliberate headless override (CLI --leader-model) must pass "
+                f"skip_leader_model_guard=True."
             )
 
     def _emit_call_failed(
@@ -4839,6 +4861,21 @@ class Orchestrator:
             self.project.leader_model, text=response)
         return path, checksum, token_count
 
+    def _leader_chat_key(self, agent_id: str) -> str:
+        """Map the conceptual leader role to the Leader-tier agent's ACTUAL id.
+
+        ``build_chat_runners`` keys the per-agent chat dicts by ``agent.id``; the
+        Leader agent's id need NOT be the literal ``"leader"`` (a user can rename
+        it in the Config tab). Callers that resolve the leader's chat runner by
+        the string ``"leader"`` would then MISS a renamed Leader and silently fall
+        back to the shared producer/QC default — running converse/verify on the
+        wrong model with no guard trip (cadre HIGH). So when asked for ``"leader"``
+        and there's no literal ``"leader"`` entry, resolve the role to the
+        Leader-tier agent's real id. Any other ``agent_id`` passes through."""
+        if agent_id == "leader" and "leader" not in self.chat_runners:
+            return self._leader_agent_id() or agent_id
+        return agent_id
+
     # ── LLM-with-tools executor (Phase 2A) ───────────────────────────────
     def _resolve_chat_runner(self, agent_id: str) -> "Callable[..., Any] | None":
         """Two-layer chat-runner lookup: per-agent dict first, then the
@@ -4848,8 +4885,11 @@ class Orchestrator:
         Per-agent wins so a project can give the engineer one tool-
         capable model and the QC agent another. The single ``chat_runner``
         param remains the back-compat default for callers (CLI, daemon,
-        TUI, tests) that haven't switched to the dict yet.
+        TUI, tests) that haven't switched to the dict yet. The leader role
+        resolves to its real roster id (``_leader_chat_key``) so a renamed
+        Leader agent's runner is still found.
         """
+        agent_id = self._leader_chat_key(agent_id)
         if agent_id and agent_id in self.chat_runners:
             return self.chat_runners[agent_id]
         return self.chat_runner
@@ -4866,9 +4906,30 @@ class Orchestrator:
         entry matches; ``None`` only when neither is wired (gate
         falls back to no-op, preserving pre-F11 stub-test behavior).
         """
+        agent_id = self._leader_chat_key(agent_id)
         if agent_id and agent_id in self.chat_runner_models:
             return self.chat_runner_models[agent_id]
         return self.chat_runner_default_model
+
+    def _leader_agent_id(self) -> str | None:
+        """The id of the Leader-tier agent in the roster — the key under which the
+        Leader's chat runner is registered. Resolve by TIER (not the literal
+        ``"leader"``) so a renamed Leader is found; ``None`` when the roster is
+        unavailable/unseeded (stub/test paths). Cached per Orchestrator."""
+        cached = getattr(self, "_leader_agent_id_cache", "__unset__")
+        if cached != "__unset__":
+            return cached
+        lid: str | None = None
+        try:
+            from modulatio import roster
+            for a in roster.list_agents(self.project.code):
+                if a.tier == "leader" and a.id:
+                    lid = a.id
+                    break
+        except Exception:  # noqa: BLE001 — roster absent in stub/unit paths
+            lid = None
+        self._leader_agent_id_cache = lid
+        return lid
 
     def _seat_fallback_chain(
         self, agent_id: str, primary_model: "str | None", primary_runner: "Callable[..., Any]",

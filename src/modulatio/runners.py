@@ -1697,7 +1697,13 @@ def _build_codex_chat_runner(
                 model=litellm_model, instructions=instructions, input=inp,
                 store=False, stream=True, **_with_codex_reasoning(ck),
             )
-            return _cr.chat_response_from_codex_stream(stream)
+            # Bound the stream-consume loop too (cadre MED): the transport read
+            # timeout in ``kwargs`` only catches a SILENT socket; a Codex
+            # tool-loop/converse stream that trickles keepalives forever would
+            # otherwise wedge this lane. Mirrors the single-shot ``_codex_call``.
+            return _cr.chat_response_from_codex_stream(
+                stream, timeout=kwargs.get("timeout"),
+            )
 
         try:
             result = _call()
