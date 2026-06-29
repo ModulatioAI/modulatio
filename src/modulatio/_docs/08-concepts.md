@@ -87,7 +87,7 @@ Two structural roles are **mandatory and immutable in name**:
 - **Leader** — your conversational partner. Plans (decomposes sub-objectives into producer + QC tasks), reflects, talks to you in chat.
 - **QC** — reviews every artifact against the standards before it ships.
 
-Everything else is a **producer** (a skill-holder); tasks route to whichever producer's skills match. See [Choosing models by role](/concepts/agents/#choosing-models-by-role).
+Everything else is a **producer**; tasks route to a producer by **capability + load** (e.g. an image task won't go to a text-only model), load-balanced so nobody starves — **never by skill**. Every producer JIT-loads whatever skill a task needs from the shared library. See [Choosing models by role](/concepts/agents/#choosing-models-by-role).
 
 The rest of the roster is **mutable** — you add 1+ producers (drafter, researcher, etc.) and can rename, swap, or remove them. Custom agents can have any name except `manager` (reserved to avoid confusion with planning-role naming; see [Agents](/concepts/agents/) for the rationale).
 
@@ -104,7 +104,7 @@ Skills live in:
 
 A skill is a markdown file with:
 
-- A **name + description** (used for skill-routing — tasks declare `required_skills` and dispatch routes them to a producer that holds the skill, with a semantic-description fallback)
+- A **name + description** — a task names the skill it needs; the assigned producer JIT-loads it from the library. Skills are **not** a routing key (a task routes to a producer by capability + load, then loads its skill), they're the unit of capability a producer composes.
 - A **prompt template** — the actual instructions sent to the agent's LLM when this skill fires
 - An optional **tool loadout** — which tools the skill can use (`http_get`, `read_tool_result`, `run_shell`, etc.)
 

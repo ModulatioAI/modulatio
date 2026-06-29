@@ -4,6 +4,68 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8.6] — 2026-06-29
+
+Single-source leadership, a simpler setup, and a steadier executor — from live test
+runs and a four-reviewer code cadre (Wild Bill's security pass blocked three rounds
+running until the Leader truly ran one model everywhere).
+
+### Changed
+
+- **Models and agents are configured in the TUI Config tab now — not the setup
+  wizard.** The wizard's model-picker and agent-provisioning steps are gone; it
+  just gets the install bootable (system tools, vault, budget, first project,
+  embedder). You build your team — Leader, QC, producers — and add models **in the
+  running TUI's Config tab**, an editable surface that beats a one-shot terminal
+  flow. The roster is the single source of every seat's model.
+- **A kickoff requires the full triad.** A real (non-stub) run **refuses** unless
+  the roster has a **Leader**, a **QC**, and **at least one producer**, each with a
+  model — failing fast with a clear "configure the team in the Config tab" message
+  instead of running a hobbled team. A fresh install (empty roster) refuses until
+  you set the team up. Typing to the Leader before a model is configured nudges you
+  to the Config tab.
+- **One model for the Leader, across every lane.** The Leader now runs a single
+  model for decompose, converse, AND verify — resolved from its roster agent (by
+  tier, so a renamed Leader still resolves) — closing a split where the Leader
+  could decompose on one model and verify on another (or fall back to a producer/QC
+  model). An engine guard fails loud if any construction path ever re-introduces a
+  divergent binding. The frozen `default_models` snapshot is no longer read to build
+  any runner; the roster is authoritative for the TUI, daemon, ACP, and CLI alike.
+- **Continuous-pull is the executor.** The wave-barrier dispatch is gone — a freed
+  producer immediately pulls the next ready task instead of waiting for a whole wave
+  to finish. Producer concurrency is bounded by a global cap, not by wave size.
+- **Task allocation routes by capability + load, never by skill.** Producers are
+  selected by capability (e.g. an image task won't route to a text-only model) and
+  load-balanced across qualifiers; **skills never route a task** — every producer
+  JIT-loads the skill it needs from the shared library. The Leader/QC route by role.
+- **No arbitrary task or goal count caps.** The planner sizes each task to fit a
+  producer's context budget and fans as wide as the work needs (YAGNI-disciplined,
+  not padded); the runtime compression cap bounds an oversized task.
+
+### Added
+
+- **Hang-resilience.** A single hung model call no longer freezes the whole run —
+  the pull loop wakes on a tick to keep dispatching ready work to free producers
+  while one call hangs. The Codex (GPT-5.5) streaming path gets a wall-clock
+  deadline on top of the transport read timeout, on both the single-shot and
+  tool-loop lanes, so a stream that trickles forever can't wedge a seat.
+- **Honest "call timed out" reporting.** A wedged/timed-out leader or producer call
+  emits a distinct terminal so the TUI shows an honest error on that lane instead of
+  a phantom "working…" spinner stuck on its last phase.
+- **Reload-services** button on the Config → Agent tab.
+
+### Fixed
+
+- **Empty Leader reply** on the converse path now renders a clear "I didn't get a
+  reply that time — try again" fallback instead of a silent empty bubble.
+- **Codify (post-run) timeout** is bounded + env-tunable
+  (`MODULATIO_CODIFICATION_TIMEOUT_S`), with a cancellation boundary so a slow
+  codification can't block the run's deliverables or end report.
+- A heavy sourcing task that trips the compression-churn cap on its first pass is
+  decomposed and recovered rather than left blocked.
+- Removed the now-orphaned setup-wizard model/agent modules and dead runner-builder
+  code left behind by the Config-tab move.
+
 ## [0.9.8.5] — 2026-06-27
 
 Reliability + leadership polish, driven by live test runs and cleared by a

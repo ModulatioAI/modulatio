@@ -1,160 +1,100 @@
 # Setup wizard
 
-The setup wizard is Modulatio's first-run flow. It runs on `modulatio setup`, walks you through eight steps, and writes everything to disk in one transaction at the end. After it finishes, the TUI launches on your first project.
+The setup wizard is Modulatio's first-run flow. It runs on `modulatio setup`, walks you through a handful of quick steps, and writes everything to disk in one transaction at the end. After it finishes, the TUI launches on your first project — and **that's where you configure your models and your team.**
 
-You can re-run `modulatio setup` at any time. On re-run, every step is pre-populated with your current values and offers `[Enter] keep / e edit / b back / q quit` semantics. There's no "reset" mode — to start clean, delete `~/.config/modulatio/` and the vault's `defaults.json`.
+> **What changed (0.9.8.6):** the wizard no longer configures models or agents. Model entries and the agent roster (Leader, QC, producers) are now set up **in the TUI's Config tab**, which is a better, editable surface than a one-shot terminal flow. The wizard just gets the install bootable; you build the team in-app. See [Models & agents live in the Config tab](#models--agents-live-in-the-config-tab) below.
+
+You can re-run `modulatio setup` at any time. On re-run, every step is pre-populated with your current values and offers `[Enter] keep / e edit / b back / q quit` semantics. To start clean, delete `~/.config/modulatio/` and the vault's `defaults.json`.
 
 ## What the wizard sets up
 
 End-to-end, after the wizard you'll have:
 
-1. The vault directory configured and writable
-2. At least one model provider authenticated and a curated list of models you can route agents to
-3. A roster of 3–10 agents — the mandatory **Leader** and **QC** structural roles plus 1+ producers (skill-holders) — each pointed at a specific model
-4. Optional default budget caps (wall-clock, tokens, cost) inherited by new plans
-5. A first project initialized with a code and an objective, ready to run
+1. System tools checked (pandoc for export, a clipboard backend)
+2. The vault directory configured and writable
+3. Optional default budget caps (wall-clock, tokens, cost) inherited by new plans
+4. A first project initialized with a code and an objective
+5. The semantic-routing embedder prefetched
+6. The TUI launched on your first project — ready for you to configure models + your team
 
-## The eight steps
+What the wizard does **not** do anymore: pick models, authenticate providers, or provision agents. That's all in the Config tab now (next section).
 
-### 1. Pandoc check + welcome
+## The steps
 
-Confirms whether `pandoc` is available on your system. Pandoc is required for `modulatio export` to render artifacts to DOCX or PDF; it's optional for plain-markdown work.
+### 1. Pandoc + clipboard checks
 
-If pandoc isn't found, the wizard offers to install it via the `[export]` extra (`pip install -e ".[export]"`) which bundles a pandoc binary via `pypandoc_binary`. You can also skip and install later.
-
-This step also prints the welcome / re-config banner — there's no separate "intro" screen.
+Confirms whether `pandoc` and a clipboard backend are available. Pandoc is required for `modulatio export` to render artifacts to DOCX/PDF; it's optional for plain-markdown work. If pandoc isn't found, the wizard offers to install it via the `[export]` extra (`pip install -e ".[export]"`). This step also prints the welcome / re-config banner.
 
 ### 2. Vault path
 
-Picks the vault root + a shared resources path.
+Picks the vault root + a shared resources path. The wizard auto-detects an Obsidian vault if one is present in standard locations (`~/Obsidian/`, `~/Documents/Obsidian/`, etc.). You can accept the detected vault or supply any directory path. The vault is where projects, plans, artifacts, audit trails, standards, and per-team memory live. It needs to be writable, persistent (don't pick `/tmp`), and something you back up. The wizard creates the standard layout inside (`projects/`, `standards/`, `templates/`, etc.).
 
-The wizard auto-detects an Obsidian vault if one is present in standard locations (`~/Obsidian/`, `~/Documents/Obsidian/`, etc.). You can accept the detected vault or supply any directory path.
+### 3. Budget defaults *(optional)*
 
-The vault is where projects, plans, artifacts, audit trails, standards, and per-team memory live. It needs to be:
-
-- Writable
-- Persistent (don't pick `/tmp`)
-- A directory you back up
-
-If you don't have an Obsidian vault, any directory works — `~/modulatio-vault/`, `~/work/`, etc. The wizard will create the standard layout inside (`projects/`, `standards/`, `templates/`, `_runs/`, `.usage.jsonl`).
-
-### 3. Models — combined providers + auth + curated list
-
-This is the step where most setup time is spent. You'll add one or more **model entries** — each entry is a self-contained tuple of `(label, provider URL, auth method, model ID)`.
-
-The step probes for credentials you might already have:
-
-- **Clay — Claude avatar** — if `claude` (Claude Code) is on PATH, offers a quick-add row that runs a Claude seat through your Claude Code subscription (`claude -p`), the TOS-safe way. This replaces the old raw-OAuth Anthropic row, which 401'd a subscription token.
-- **OpenAI Codex (subscription)** — if `~/.codex/auth.json` is present, offers a quick-add for GPT-5.5 through the ChatGPT/Codex backend.
-- **Local services on standard ports** — Ollama (11434), LM Studio (1234), llama.cpp servers — auto-detected and offered as quick-add rows
-
-For each entry you confirm:
-
-- A short label (`grok-fast`, `claude-haiku`, `local-qwen`)
-- The provider's API endpoint URL
-- Auth method: `api_key`, `claude_cli` (Clay), `oauth_openai` (Codex subscription), or `none` (for unauthenticated local services)
-- The model ID as the provider names it (e.g. `xai/grok-4-1-fast`, `openrouter/anthropic/claude-haiku-4-5`, `ollama/qwen3.6-35b-a3b:q8`)
-
-You need **at least one** model entry to proceed. Most setups have 3–5: a fast/cheap model for chat, a capable model for production work, a local model as fallback.
-
-Per-provider details (URLs, auth gotchas, recommended models) live on [Providers & models](/concepts/providers/).
-
-### 4. Agent provisioning — mandatory triad + workers
-
-You add **3 to 10 agents**. Two structural roles are mandatory and immutable in name:
-
-- **Leader** — your conversational partner. Drives the GSD loop, writes plans, decomposes objectives into tasks, reflects between sub-objectives. (Pick a reasoning-class model.)
-- **QC** — reviews every artifact against the standards before it ships. (Pick a smart agentic / non-reasoning model.)
-
-After those two, you add 1+ **producer** agents (skill-holders). The wizard's skills-first flow asks what the team should be able to do, then which model powers each skill — tasks route to the producer holding the matching skill. Pick non-reasoning (or reasoning-OFF) models for producers. Examples: `drafter`, `researcher`, `editor`, `coder`, `auditor`.
-
-Each agent prompt asks: which step-3 model entry should this agent run on? You'll get a short picker; the same model can be reused across multiple agents.
-
-You **cannot** create custom agents named "manager" — the name overlaps confusingly with the planning role and creates ambiguity around tool-using-role assignment. Pick `lead`, `chief`, `director`, or similar instead.
-
-### 5. Budget defaults *(optional)*
-
-A `y/N` gate, then three numeric prompts for the per-plan default caps:
+A `y/N` gate, then three numeric prompts for per-plan default caps:
 
 - **Wall-clock** — max minutes a plan can run before being halted (default unbounded)
 - **Tokens** — max combined input+output tokens across all agent calls (default unbounded)
 - **Cost** — max US dollars (default unbounded)
 
-Each axis is independently `None` (unbounded) or a number. New plans inherit these at draft time; you can override per-plan when you create one.
+Each axis is independently `None` (unbounded) or a number. New plans inherit these at draft time; you can override per-plan. Recommended first-time floors-against-runaways: wall-clock 60min, tokens 500_000, cost $5.
 
-Recommended defaults for first-time users: wall-clock 60min, tokens 500_000, cost $5. These are floors-against-runaways, not real ceilings — bump them when you trust the system on a given workload.
+### 4. First project capture
 
-### 6. First project capture
+Captures a **project code** (short alphanumeric+hyphen identifier — `essays`, `prime-vital`) and a one-sentence **objective**. The code becomes the project's directory name under your vault and the prefix on plan IDs. You can have many projects in one vault; the wizard captures the first so the post-finalize handoff has somewhere to land.
 
-Captures a **project code** and an **objective**.
+### 5. Embedded LLM prefetch
 
-The project code is a short identifier (alphanumeric + hyphen, ~3–20 chars) — `essays`, `prime-vital`, `thesis-q2`. It becomes the directory name under your vault and the prefix on plan IDs.
+Silent if the embedding model cache is already present. If not, downloads the MiniLM embeddings model (~80MB) used for semantic routing and skill discovery. Default-yes if missing — say `n` only if you're on a metered connection and want to defer.
 
-The objective is a one-sentence description of what this project is about — `"Draft and ship weekly Stoicism essays"`, `"Run the PrimeVital compression-socks brand"`, `"Research and write a thesis on cosmic horror in pulp fiction"`.
+### 6. Confirm + finalize
 
-You can have many projects in one vault; the wizard captures only the first so the post-finalize handoff has somewhere to land.
+Shows a summary of every choice, then writes (in one transaction):
 
-### 7. Confirm + finalize
-
-Shows a summary of every choice, then writes:
-
-- `~/.config/modulatio/defaults.json` — global defaults (model preferences, budget caps, vault path)
-- `<vault>/model_presets.json` — your curated model entries from step 3
-- `<vault>/team_template.json` — the agent roster from step 4
+- `~/.config/modulatio/defaults.json` — global defaults (paths, budget caps)
 - `<vault>/projects/<code>/` — the first project's directory tree
-- `<vault>/.env` — auth tokens (gitignored; OAuth refresh writes here too)
 
 This is the only point at which the wizard touches disk. If you quit before confirming, nothing is persisted.
 
-### 8. Embedded LLM prefetch
-
-Silent if the embedding model cache is already present (e.g., from a previous install). If not, downloads the MiniLM embeddings model (~80MB) used for semantic routing and skill discovery.
-
-Default-yes if missing — say `n` only if you're on a metered connection and want to defer.
-
 ## After the wizard
 
-The wizard initializes the captured first project's vault, seeds the roster from the team template, and **launches the TUI on it**. You don't get dropped back at a shell prompt; you land directly in Modulatio, ready to talk to the Leader.
+The wizard initializes the captured first project and **launches the TUI on it**. You land directly in Modulatio. But before the Leader can do anything, you need to configure at least one model and your team — in the Config tab.
 
-To leave the TUI: `Ctrl+C` or `q` (depending on focus). To re-launch later: `modulatio-tui` from any shell where the venv is active.
+## Models & agents live in the Config tab
+
+This is the part the wizard used to do; it now lives in the TUI's **Config tab** (press the Config tab in the running TUI), which is the **only** place to set these up:
+
+- **Models** — add model entries (`label`, provider URL, auth method, model ID). Quick-add rows auto-detect Clay (Claude Code on PATH), OpenAI Codex (`~/.codex/auth.json`), and local services (Ollama/LM Studio/llama.cpp on standard ports). You need at least one model.
+- **Agents** — build your team: the **Leader** (your conversational partner — drives the GSD loop, decomposes objectives), a **QC** (reviews every artifact before it ships), and **one or more producers** (skill-holders that do the work). Each agent is pointed at one of your configured models. The same model can back several agents.
+
+The roster is the single source of every seat's model — set a seat's model once in the Config tab and both the conversational Leader and the orchestration Leader use it (no split). Edits are live: rename an agent, swap its model, add a producer, all without re-running setup.
+
+### A kickoff requires the full triad
+
+A real (non-stub) kickoff **refuses until the roster has all three roles** — a **Leader**, a **QC**, and **at least one producer**, each with a model. On a fresh install (empty roster) or an incomplete team, a kickoff fails fast with a clear message pointing you to the Config tab, rather than running a hobbled team. Configure the triad first, then kick off.
+
+If you type a message to the Leader in the console before a model is configured, Modulatio tells you to set up a model and an agent in the Config tab.
 
 ## Re-running the wizard
 
-`modulatio setup` works as both first-run and re-config. On re-run:
+`modulatio setup` works as both first-run and re-config. On re-run every step pre-populates from your current state; `[Enter]` keeps, `e` edits, `b` backs, `q` quits without saving. Re-runs are safe — but remember that **models and agents are configured in the Config tab, not here.**
 
-- Every step pre-populates from your current state
-- `[Enter]` keeps the current value, `e` edits it, `b` goes back, `q` quits without saving
-- New providers / agents are appended; existing ones can be edited or removed
-- Budget defaults can be re-set without affecting existing plans (those have already inherited)
-
-Re-runs are safe — the wizard is the official re-config path. Editing config files by hand is supported but not the primary workflow.
-
-## Common wizard issues
+## Common issues
 
 ### "No vault detected"
 
-The Obsidian autodetect didn't find a vault. Either supply a path manually (any writable directory) or create an empty directory and point the wizard at it.
+The Obsidian autodetect didn't find a vault. Supply a path manually (any writable directory) or create an empty directory and point the wizard at it.
 
-### Step 3: "Provider rejects the auth"
+### "The Leader won't respond / kickoff refuses"
 
-If the auth probe at step 3 fails (401, 403, or "unable to list models"):
-
-- Double-check the API key — copy/paste errors are common (esp. for keys with `_` and `-` characters)
-- For Anthropic OAuth: the key under `~/.config/anthropic/` is for first-party Claude.ai access; provider settings expecting an `sk-ant-...` key won't accept it
-- For local services: confirm Ollama/LM Studio is running (`curl http://localhost:11434/api/tags`)
-
-Detailed per-provider troubleshooting on [Providers & models](/concepts/providers/).
-
-### Step 4: "minimum 4 agents"
-
-You need Leader + QC + at least one producer. The wizard floors at 3. Add a `drafter` or `researcher` if you don't have a clear specialist need yet — it's easy to rename later via the TUI's roster panel.
+Almost always an unconfigured team. Open the **Config tab** and make sure you have a Leader, a QC, and at least one producer, each pointed at a model. The kickoff/console messages name exactly what's missing.
 
 ### "wizard quit, but I see partial state on disk"
 
-If you crashed mid-step (e.g., Ctrl+C between step 3 and step 7), the in-flight state is in `~/.config/modulatio/setup-state.json`. Re-running `modulatio setup` resumes from where you left off. To start fresh, delete that file.
+If you crashed mid-step, the in-flight state is in `~/.config/modulatio/setup-state.json`. Re-running `modulatio setup` resumes. To start fresh, delete that file.
 
 ## Next steps
 
-- [Providers & models](/concepts/providers/) — deep dive on each provider for step 3
-- [Agents](/concepts/agents/) — what each role does, how to compose custom agents
+- [Agents](/concepts/agents/) — what each role does, how to compose a team in the Config tab
+- [Providers & models](/concepts/providers/) — per-provider auth + recommended models
 - [Quickstart](/getting-started/quickstart/) — your first plan, end to end

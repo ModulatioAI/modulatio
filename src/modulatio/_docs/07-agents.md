@@ -88,7 +88,7 @@ Quality Control reviews every artifact before it ships. The quality gate is firs
 
 Producers are everything else — the agents who actually make things.
 
-You add 1+ of these in the wizard, and you can add / rename / remove them via the TUI's roster panel later. Common producer roles:
+You add 1+ of these in the **TUI Config tab** (the roster — Leader, QC, producers — is built and edited in-app, not in the setup wizard). Common producer roles:
 
 - **`drafter`** — writes long-form prose (essays, articles, chapters)
 - **`researcher`** — gathers + summarizes external information; uses tool loadouts like `http_get`
@@ -124,7 +124,7 @@ This avoids needing a separate "cleanup" or "editor" agent — the same producer
 
 ## Custom agents
 
-You can compose custom agents during the wizard or via the TUI.
+You compose and edit agents in the **TUI Config tab** — add a producer, rename a seat, swap its model. A real kickoff requires the full triad (a Leader, a QC, and at least one producer, each with a model) and refuses with a Config-tab nudge until it's present.
 
 **Required fields:**
 
@@ -181,7 +181,7 @@ You don't usually configure skill loadouts directly — they emerge from the rol
 
 The roster comes from two places:
 
-- `<vault>/team_template.json` — the **default** roster, written by the wizard. Used as the starting point for new projects.
+- `<vault>/team_template.json` — an optional **default** roster reused as the starting point for new projects. Written when you save a team as the default; configured in the Config tab (the setup wizard no longer writes it).
 - `<vault>/projects/<code>/team.json` (optional) — a **project-specific** override. Created if you customize the roster for a single project (e.g., add a `fact-checker` only for the cosmic-horror thesis project).
 
 Per-project overrides inherit from the template; only the deltas are stored.

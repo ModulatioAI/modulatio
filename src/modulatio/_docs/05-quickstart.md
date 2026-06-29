@@ -19,25 +19,32 @@ If both work, continue.
 modulatio setup
 ```
 
-This walks you through 8 steps and writes config to disk. The minimum to proceed:
+This walks you through a few quick steps and writes config to disk. (Models and agents are **not** set up here anymore — you'll do those in the TUI in Step 2.) The minimum to proceed:
 
-1. **Pandoc** — accept the offered install or skip if you don't need DOCX/PDF export.
+1. **Pandoc + clipboard** — accept the offered install or skip if you don't need DOCX/PDF export.
 2. **Vault** — point at any writable directory (Obsidian vault if you have one, otherwise `~/modulatio-vault/`).
-3. **Models** — add at least one provider. Easiest paths:
-    - **OpenRouter** — one API key gets you access to most major models. `https://openrouter.ai/api/v1`, model id like `openrouter/anthropic/claude-haiku-4-5`.
-    - **xAI** — `https://api.x.ai/v1`, model id `xai/grok-4-1-fast`.
-    - **Ollama (local)** — auto-detected on port 11434 if running. Free, slower, no API costs.
-4. **Agents** — accept the default 3-agent template (Leader + QC + a `drafter` producer). Pick a model for each — ideally a reasoning model for Leader and non-reasoning ones for QC + producer, but for a first run putting all three on the same mid-tier model works fine.
-5. **Budget** — say yes; set wall-clock 60 minutes, tokens 500_000, cost $5. These are floors against runaways, not real ceilings.
-6. **First project** — code `essays`, objective `Draft three short essays on stoicism`.
-7. **Confirm** — review, type `y`.
-8. **Embedded LLM** — accept the prefetch.
+3. **Budget** — say yes; set wall-clock 60 minutes, tokens 500_000, cost $5. These are floors against runaways, not real ceilings.
+4. **First project** — code `essays`, objective `Draft three short essays on stoicism`.
+5. **Embedded LLM** — accept the prefetch.
+6. **Confirm** — review, type `y`.
 
-After step 8, the TUI launches automatically on the `essays` project. You're now in Modulatio.
+After confirm, the TUI launches automatically on the `essays` project. You're now in Modulatio.
 
 Full step-by-step: [Setup wizard](/getting-started/wizard/).
 
-## Step 2 — tell the Leader what you want
+## Step 2 — configure a model + your team (Config tab)
+
+In the running TUI, open the **Config tab** — this is where models and agents live now:
+
+1. **Add a model** — at least one. Easiest paths:
+    - **OpenRouter** — one API key gets you most major models. `https://openrouter.ai/api/v1`, model id like `openrouter/anthropic/claude-haiku-4-5`.
+    - **xAI** — `https://api.x.ai/v1`, model id `xai/grok-4-1-fast`.
+    - **Ollama (local)** — auto-detected on port 11434 if running. Free, slower, no API costs.
+2. **Build your team** — a **Leader**, a **QC**, and at least one **producer** (e.g. `drafter`), each pointed at a model. For a first run, putting all three on the same mid-tier model works fine; ideally a reasoning model for Leader, non-reasoning for QC + producer.
+
+A kickoff **refuses until this triad exists** (Leader + QC + ≥1 producer, each with a model) — so set it up before you run. Then talk to the Leader.
+
+## Step 3 — tell the Leader what you want
 
 You'll land in the TUI with the **Leader** focused. You can type to it directly. Try:
 
@@ -65,7 +72,7 @@ Estimated budget: ~80K tokens, ~$1.20, ~25 min
 
 The Leader will ask: **approve this plan?** Type `yes` or `approve` to proceed. Type a comment to revise.
 
-## Step 3 — let the plan run
+## Step 4 — let the plan run
 
 After approval, the plan runs as a daemon-driven async process. You can:
 
@@ -75,7 +82,7 @@ After approval, the plan runs as a daemon-driven async process. You can:
 
 Each artifact lands in `<vault>/projects/essays/runs/<plan-id>/` as it ships. QC verdicts and the Leader's reflection notes go in the same directory.
 
-## Step 4 — read the output
+## Step 5 — read the output
 
 When the plan finishes (status: `done`), the artifacts are in:
 
@@ -95,13 +102,13 @@ When the plan finishes (status: `done`), the artifacts are in:
 
 Open the artifacts directly in Obsidian (or any markdown editor). They're plain `.md` files.
 
-## Step 5 — iterate
+## Step 6 — iterate
 
 If you don't like the output:
 
 - **Tell the Leader** in the TUI: "the virtue essay reads too academic — can we rework it with a warmer voice?" Leader will plan a revision.
 - **Add a standard** to constrain future drafts: `modulatio-standards add essays "Avoid academic register; aim for warm, literary tone."` Future drafts on this project inherit it.
-- **Swap the model** for the drafter: edit the team template via the TUI's roster panel, or re-run the wizard (`modulatio setup`) and edit step 4.
+- **Swap the model** for the drafter: edit the agent's model in the **TUI Config tab** (the roster is the single source of every seat's model).
 
 If you do like the output:
 
