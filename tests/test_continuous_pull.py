@@ -241,3 +241,63 @@ def test_continuous_global_cap_limits_concurrency(tmp_path, monkeypatch):
     runner.join(timeout=10)
     assert observed <= 1, f"global cap=1 violated: {observed} workers ran concurrently"
     assert t1.status == t2.status == TaskStatus.COMPLETED
+
+
+def test_pull_loop_repumps_while_a_call_hangs(tmp_path, monkeypatch):
+    """Op A (loop-wedge): a hung in-flight call must NOT stall the whole loop. A
+    task that only becomes dispatchable on a LATER pump still gets dispatched and
+    completes WHILE another worker hangs — the loop re-pumps on a tick, not only on
+    a future completion. Without the wait() timeout the loop blocks forever on the
+    hung future and the second task never runs."""
+    import types as _types
+
+    from modulatio import orchestration
+    monkeypatch.setattr(orchestration, "_PUMP_TICK_S", 0.1)
+    orch = _orch(tmp_path, monkeypatch)
+    a_hanging = threading.Event()
+    a_release = threading.Event()
+    b_done = threading.Event()
+
+    # schedule_wave assigns A on the first pump; B only from the 2nd pump onward —
+    # so B can ONLY dispatch if the loop re-pumps while A is hung (no future done).
+    calls = {"n": 0}
+
+    def sched(tasks, *a, **k):
+        calls["n"] += 1
+        assigns = {}
+        for t in tasks:
+            if t.id == "CPL-T-A":
+                assigns[t.id] = "p1"
+            elif t.id == "CPL-T-B" and calls["n"] >= 2:
+                assigns[t.id] = "p2"
+        return _types.SimpleNamespace(assignments=assigns, deferred=(), gaps=())
+
+    monkeypatch.setattr(dispatch, "schedule_wave", sched)
+
+    def fake(t, *a, **k):
+        if t.id == "CPL-T-A":
+            a_hanging.set()
+            a_release.wait(timeout=10)
+        t.status = TaskStatus.COMPLETED
+        if t.id == "CPL-T-B":
+            b_done.set()
+        return TaskExecutionResult(task=t)
+
+    monkeypatch.setattr(orch, "_execute_task_isolated", fake)
+    a = _task("CPL-T-A", skills=["drafter"])
+    b = _task("CPL-T-B", skills=["drafter"])
+    for t in (a, b):
+        store.save_task(orch.project.code, t, run_id=orch.project.run_id)
+    summary = RunSummary(project=orch.project)
+    runner = threading.Thread(
+        target=orch._run_task_waves,
+        args=(_goal(), [a, b], summary, {t.id: t for t in (a, b)}),
+    )
+    runner.start()
+    assert a_hanging.wait(timeout=5), "A should start and hang"
+    assert b_done.wait(timeout=5), (
+        "B must dispatch + complete WHILE A hangs — the loop must re-pump on a tick, "
+        "not block forever on the hung A future"
+    )
+    a_release.set()
+    runner.join(timeout=10)

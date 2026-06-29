@@ -5,7 +5,10 @@ streamed Responses result → ChatResponse. Event shapes mirror the live spike.
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
+
+import pytest
 
 from modulatio import codex_responses as cr
 
@@ -100,3 +103,25 @@ def test_stream_malformed_args_degrade_to_empty():
     ]
     resp = cr.chat_response_from_codex_stream(stream)
     assert resp.tool_calls[0].args == {}
+
+
+def test_stream_bounded_by_deadline_when_it_never_terminates():
+    """Op B (uninterruptible CPU-spin): a Codex stream that never sends a terminal
+    event (server trickles keepalives forever) must NOT spin the consume loop
+    indefinitely — it gives up at `timeout`, so a wedged stream can't burn CPU past
+    the per-call watchdog. Without the deadline this loop runs forever at high CPU."""
+    def endless():
+        while True:
+            yield _ev("response.keepalive")
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        cr.chat_response_from_codex_stream(endless(), timeout=0.3)
+    assert time.monotonic() - start < 2.0, "the stream consume must be bounded, not hang"
+
+
+def test_stream_no_timeout_is_unbounded_back_compat():
+    """timeout=None (default) preserves the prior unbounded behavior for a normal,
+    terminating stream — the deadline only fires on a stream that never ends."""
+    stream = [_ev("response.output_text.delta", delta="hi"), _ev("response.completed")]
+    assert cr.chat_response_from_codex_stream(stream).content == "hi"

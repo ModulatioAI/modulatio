@@ -185,6 +185,13 @@ class FixWindowNotice:
 #: Hard ceiling on the window — config can never turn it into an unbounded gate.
 _FIX_WINDOW_MAX_S = 300.0
 
+#: Continuous-pull loop wake interval. The drain loop's ``wait`` returns after at
+#: most this long even if no future completed, so the loop re-pumps and dispatches
+#: ready work to FREE producers while another call hangs — a single wedged call no
+#: longer stalls the whole run (Op A). Small enough to keep the team busy, large
+#: enough not to spin.
+_PUMP_TICK_S = 2.0
+
 #: Duration cap on the best-effort post-run codification phase (Alfred loop). B1
 #: runs it AFTER delivery; this bounds how long it can hold the process if a cloud
 #: leader call stalls — otherwise it rides the full ~600s per-call watchdog. A
@@ -8069,7 +8076,12 @@ class Orchestrator:
             _pump()
             while futures:
                 ready_before = _ready_ids()
-                done_set, _pend = wait(set(futures), return_when=FIRST_COMPLETED)
+                # Op A: wake on a tick even if nothing completed, so the loop
+                # re-pumps and dispatches ready work to FREE producers while another
+                # call hangs — a wedged future must not stall the whole run.
+                done_set, _pend = wait(
+                    set(futures), timeout=_PUMP_TICK_S, return_when=FIRST_COMPLETED,
+                )
                 for fut in done_set:
                     tid = futures.pop(fut)
                     try:

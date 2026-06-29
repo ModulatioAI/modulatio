@@ -770,7 +770,11 @@ def litellm_runner(
                     model=litellm_model, instructions=instructions, input=inp,
                     store=False, stream=True, **_with_codex_reasoning(kw),
                 )
-                return _cr.chat_response_from_codex_stream(stream).content or ""
+                # Op B: bound the stream-consume loop too — the watchdog only bounds
+                # request init, not a stream that trickles keepalives forever.
+                return _cr.chat_response_from_codex_stream(
+                    stream, timeout=timeout
+                ).content or ""
 
             try:
                 out = _codex_call(call_kwargs)

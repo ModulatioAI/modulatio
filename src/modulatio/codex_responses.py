@@ -117,7 +117,7 @@ def codex_tools_from_chat(tools: list[dict] | None) -> list[dict]:
     return out
 
 
-def chat_response_from_codex_stream(stream: Any) -> "Any":
+def chat_response_from_codex_stream(stream: Any, *, timeout: "float | None" = None) -> "Any":
     """Aggregate a streamed Codex Responses result into a ``ChatResponse``.
 
     Collects ``output_text`` deltas into the content, and ``function_call`` items
@@ -125,9 +125,19 @@ def chat_response_from_codex_stream(stream: Any) -> "Any":
     ``function_call_arguments.delta`` events, falling back to the item's final
     ``arguments``). Event types are matched on their string form so a litellm
     enum-rename can't silently break parsing.
+
+    ``timeout`` (Op B): a wall-clock deadline on the stream-consume loop. The
+    per-call watchdog bounds request INITIATION, not stream ITERATION — a server
+    that trickles keepalives forever would otherwise spin this loop indefinitely at
+    high CPU, uncatchable by the watchdog and unkillable (worker thread). With a
+    deadline a wedged stream raises ``TimeoutError`` so the call fails into normal
+    recovery instead of hanging the run. ``None`` keeps the prior unbounded behavior.
     """
+    import time as _time
+
     from modulatio.runners import ChatResponse, ToolCall
 
+    deadline = _time.monotonic() + timeout if timeout else None
     text_parts: list[str] = []
     calls: dict[str, dict] = {}
     order: list[str] = []
@@ -139,6 +149,10 @@ def chat_response_from_codex_stream(stream: Any) -> "Any":
         return calls[iid]
 
     for ev in stream:
+        if deadline is not None and _time.monotonic() > deadline:
+            raise TimeoutError(
+                f"Codex stream exceeded {timeout}s without a terminal event"
+            )
         t = str(getattr(ev, "type", "")).lower()
         if "output_text" in t and "delta" in t:
             text_parts.append(getattr(ev, "delta", "") or "")
