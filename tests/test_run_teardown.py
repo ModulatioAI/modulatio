@@ -86,6 +86,25 @@ def test_teardown_abandons_nonterminal_and_closes_tickets(orch):
     assert all(t.status == TicketStatus.CLOSED for t in store.list_tickets(CODE, run_id=RUN))
 
 
+def test_teardown_spares_other_runs_tickets(orch):
+    """Tickets are project-durable: an F8 kill clears THIS run's residue but
+    must leave a DIFFERENT run's open ticket alone (it persists until resolved
+    or the user deletes it)."""
+    pid = orch.project.id
+    vault.init_run(CODE, "OTHER-RUN", "obj")
+    mine = store.create_ticket(project_id=pid, project_code=CODE,
+                               priority=TicketPriority.CRITICAL,
+                               title="my wedge", run_id=RUN)
+    theirs = store.create_ticket(project_id=pid, project_code=CODE,
+                                 priority=TicketPriority.CRITICAL,
+                                 title="other run's open issue", run_id="OTHER-RUN")
+    orch.abort_event.set()  # F8
+    orch._teardown_run(RunSummary(project=orch.project))
+    by_id = {t.id: t.status for t in store.list_tickets(CODE)}
+    assert by_id[mine.id] == TicketStatus.CLOSED       # this run's residue cleared
+    assert by_id[theirs.id] == TicketStatus.OPEN       # other run's ticket persists
+
+
 def test_teardown_records_the_transition_for_viewing(orch):
     """The run RECORD stays for viewing — the abandon is logged, not erased."""
     store.save_goal(CODE, _goal("TDN-G-001", GoalStatus.BLOCKED), run_id=RUN)

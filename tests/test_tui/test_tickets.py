@@ -351,33 +351,31 @@ def _make_ticket(
 # runs exist.
 
 
-async def test_tickets_tab_shows_latest_run_tickets_when_runs_exist(tui_vault):
-    """A run subfolder with one ticket; the tab lists THAT ticket
-    (not whatever's at project root). The "latest run" rule resolves
-    via ``vault.latest_run`` lex-max."""
+async def test_tickets_tab_shows_all_project_tickets_across_runs(tui_vault):
+    """Tickets are the project's DURABLE record — the tab shows every
+    ticket in the project, whichever run opened it (no "latest run only"
+    filter). A project-level ticket and a run-opened ticket BOTH show."""
     from textual.widgets import DataTable, TabbedContent
     from uuid import uuid4
 
     from modulatio.tui.app import ModulatioApp
 
     project_id = uuid4()
-    # Project root has one OLD ticket — should NOT show.
     store.create_ticket(
         project_id=project_id,
         project_code=PROJECT_CODE,
         priority=TicketPriority.MINOR,
-        title="Legacy ticket at project root",
-        body="legacy",
+        title="Project-level ticket",
+        body="project",
     )
-    # A run with its own ticket — SHOULD show.
     run_id = "20260428T120000Z-rrrr"
     vault.init_run(PROJECT_CODE, run_id, "fixture run")
     store.create_ticket(
         project_id=project_id,
         project_code=PROJECT_CODE,
         priority=TicketPriority.CRITICAL,
-        title="Run-scoped ticket from latest kickoff",
-        body="run-scoped",
+        title="Ticket from a kickoff",
+        body="run-opened",
         run_id=run_id,
     )
 
@@ -387,12 +385,8 @@ async def test_tickets_tab_shows_latest_run_tickets_when_runs_exist(tui_vault):
         app.query_one(TabbedContent).active = "tab-tickets"
         await pilot.pause()
         table = app.query_one("#tickets-table", DataTable)
-        # Only the run-scoped ticket should be in the table.
-        assert table.row_count == 1
-        # Verify by re-loading from store with the same run_id.
-        loaded = store.list_tickets(PROJECT_CODE, run_id=run_id)
-        assert loaded
-        assert "Run-scoped ticket" in loaded[0].title
+        # Both tickets accumulate in the project's durable record.
+        assert table.row_count == 2
 
 
 async def test_tickets_tab_falls_back_to_project_root_when_no_runs(tui_vault):
@@ -421,10 +415,9 @@ async def test_tickets_tab_falls_back_to_project_root_when_no_runs(tui_vault):
         assert table.row_count == 1
 
 
-async def test_tickets_tab_uses_lex_latest_run_when_multiple_exist(tui_vault):
-    """Two runs exist, each with its own ticket. The screen uses
-    ``vault.latest_run`` (lex-max) — the earlier run's ticket is NOT
-    visible."""
+async def test_tickets_tab_accumulates_tickets_from_every_run(tui_vault):
+    """Two runs, each with its own ticket — BOTH render. Tickets accumulate
+    across every run in the project; nothing is hidden by a latest-run filter."""
     from textual.widgets import DataTable, TabbedContent
     from uuid import uuid4
 
@@ -439,7 +432,7 @@ async def test_tickets_tab_uses_lex_latest_run_when_multiple_exist(tui_vault):
         project_id=project_id,
         project_code=PROJECT_CODE,
         priority=TicketPriority.MINOR,
-        title="Early run ticket — should be hidden",
+        title="Early run ticket",
         body="early",
         run_id=early,
     )
@@ -447,7 +440,7 @@ async def test_tickets_tab_uses_lex_latest_run_when_multiple_exist(tui_vault):
         project_id=project_id,
         project_code=PROJECT_CODE,
         priority=TicketPriority.CRITICAL,
-        title="Late run ticket — should show",
+        title="Late run ticket",
         body="late",
         run_id=late,
     )
@@ -458,8 +451,8 @@ async def test_tickets_tab_uses_lex_latest_run_when_multiple_exist(tui_vault):
         app.query_one(TabbedContent).active = "tab-tickets"
         await pilot.pause()
         table = app.query_one("#tickets-table", DataTable)
-        # Only the late run's ticket renders.
-        assert table.row_count == 1
+        # Both runs' tickets render — durable, accumulated.
+        assert table.row_count == 2
 
 
 async def test_tickets_tab_adopts_master_detail():

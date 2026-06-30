@@ -3658,7 +3658,7 @@ class Orchestrator:
         # a plain item, N for an expansion). Deps reference plan
         # indexes; resolution multiplies when the referenced index
         # expanded.
-        artifacts_root = self._scope_root() / "artifacts"
+        artifacts_root = self._shared_artifacts_root()
         index_to_ids: dict[int, list[str]] = {}
         # Per-spec expansion plans. Each entry is a list of
         # (maybe-None output_path, sub_description) tuples — one per
@@ -3887,7 +3887,7 @@ class Orchestrator:
 
         from modulatio import repo_map as _repo_map
         repo_map_block = _repo_map.build_repo_map(
-            self._scope_root() / "artifacts"
+            self._shared_artifacts_root()
         )
 
         # (c10): fetch pending producer / QC candidates so
@@ -4092,7 +4092,12 @@ class Orchestrator:
         blocks on canvas-build issues."""
         from modulatio import team_canvas
         try:
-            artifacts_root = self._artifacts_root()
+            # Read the PROJECT-wide durable artifacts tree (all runs,
+            # run-namespaced), not just this run's — so a producer reuses
+            # grounded work from prior runs of the same project instead of
+            # re-fetching it. build_digest is hard-capped (MAX_DIGEST_CHARS
+            # + per-file byte cap), so spanning runs can't bloat the prompt.
+            artifacts_root = project_dir(self.project.code) / "artifacts"
             return team_canvas.build_digest(artifacts_root)
         except Exception:
             return ""
@@ -7447,7 +7452,7 @@ class Orchestrator:
         # so the producer keeps prior context and QC can run cross-file).
         # The main thread is the ONLY writer of the shared artifacts tree —
         # it merges these out of staging deterministically at wave end.
-        shared_artifacts = self._scope_root() / "artifacts"
+        shared_artifacts = self._shared_artifacts_root()
         staging = self._scope_root() / ".staging" / t.id
         self._seed_staging(shared_artifacts, staging)
         self._tls.deferred_writes = deferred
@@ -7604,6 +7609,19 @@ class Orchestrator:
         return f"drafts/{_draft_fallback_name(task)}"
 
     # ── #151/e2e Blocker 2: per-task artifact staging + deterministic merge ──
+    def _shared_artifacts_root(self) -> Path:
+        """The DURABLE artifacts tree: project-scoped + run-namespaced, so
+        every run's accepted outputs accumulate side-by-side under the
+        project — the project folder is the durable layer; runs are
+        transient. Distinct from the per-task ``.staging`` tree (run-local,
+        merged in here at wave end) and from :meth:`_artifacts_root` (which
+        is staging-aware). With no run_id (legacy / direct-orchestrator
+        callers) it's the project's plain ``artifacts/``."""
+        base = project_dir(self.project.code) / "artifacts"
+        root = base / self.project.run_id if self.project.run_id else base
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
     def _artifacts_root(self) -> Path:
         """The artifacts root the CURRENT context writes into / reads from.
 
@@ -7612,11 +7630,11 @@ class Orchestrator:
         QC's verify-by-execution operate on a task-local tree — never the
         shared artifacts tree. On the sequential path (and on the main
         thread at merge) ``staging_root`` is unset, so this is the shared
-        ``<scope>/artifacts`` — behavior unchanged."""
+        durable artifacts tree — behavior unchanged for the caller."""
         staging = getattr(self._tls, "staging_root", None)
         if staging is not None:
             return staging
-        return self._scope_root() / "artifacts"
+        return self._shared_artifacts_root()
 
     def _active_tool_registry(self) -> "dict[str, tools.Tool]":
         """The tool registry for the current context. In an isolated worker
@@ -7895,7 +7913,7 @@ class Orchestrator:
         task → never conflict), then each staging dir is removed."""
         import shutil
 
-        shared = self._scope_root() / "artifacts"
+        shared = self._shared_artifacts_root()
         claimed: dict[str, str] = {}
 
         def _key(rel: str) -> str:
@@ -9740,7 +9758,7 @@ class Orchestrator:
             # producer output), fall back to the drafts/<task-id>.md
             # convention when output_path is unset.
             if t.status == TaskStatus.COMPLETED:
-                artifacts_root = self._scope_root() / "artifacts"
+                artifacts_root = self._shared_artifacts_root()
                 # #101 Part 0: an engine-assembled deliverable carries a structural
                 # DIGEST + readable text TWIN. Feed THOSE — the verifier's eyes — never
                 # the raw bound bytes (which may be a binary the model can't read; the
@@ -9864,7 +9882,7 @@ class Orchestrator:
                 # without this it judges from the inline digest and hedges. The
                 # verify analog of the converse deliverables block (harder half of B5).
                 leader_prompt = _LEADER_VERIFY_GROUNDING + body
-                artifacts_root = self._scope_root() / "artifacts"
+                artifacts_root = self._shared_artifacts_root()
                 transcript_path = (
                     artifacts_root / "tool_calls"
                     / f"leader_{goal.id.lower()}.jsonl"
@@ -12839,7 +12857,7 @@ class Orchestrator:
         docs = [a for a in attachments if getattr(a, "kind", None) == "document"]
         if not docs or self.project.run_id is None:
             return
-        artifacts_root = self._scope_root() / "artifacts"
+        artifacts_root = self._shared_artifacts_root()
         for a in docs:
             content = a.content
             if content is None:

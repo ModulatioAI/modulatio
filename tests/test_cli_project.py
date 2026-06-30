@@ -78,8 +78,11 @@ def test_show_command_reports_artifact_counts(isolated_cli):
     eyeballing how much output a run produced before deciding to
     clean."""
     _seed_project(isolated_cli, run_ids=["20260428T100000Z-aaaa"])
-    # Drop a couple of fake artifact files into the run dir.
-    art_dir = vault.run_dir("PRJ", "20260428T100000Z-aaaa") / "artifacts"
+    # Artifacts are project-durable + run-namespaced now — seed THIS run's
+    # accepted artifacts under <project>/artifacts/<run_id>/.
+    art_dir = (
+        vault.project_dir("PRJ") / "artifacts" / "20260428T100000Z-aaaa"
+    )
     (art_dir / "drafts").mkdir(parents=True, exist_ok=True)
     (art_dir / "drafts" / "x.md").write_text("draft")
     (art_dir / "drafts" / "y.md").write_text("draft")

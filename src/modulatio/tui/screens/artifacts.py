@@ -157,10 +157,15 @@ class ArtifactsScreen(Vertical):
         listview.clear()
         self._paths: list[Path] = []
         code = self.app.project_code  # type: ignore[attr-defined]
-        root = self._scope_root(code)
+        run_root = self._scope_root(code)
+        proj_root = vault.project_dir(code)
         q = self._query.lower()
         for rel in _ARTIFACT_DIRS:
-            d = root / rel
+            # ``artifacts`` is the project's DURABLE tree (run-namespaced, every
+            # run accumulates); ``reports``/``research`` are this run's transient
+            # record. Root each accordingly so the tab shows the accumulated
+            # artifacts across runs, not just the latest kickoff's.
+            d = (proj_root if rel == "artifacts" else run_root) / rel
             if not d.exists():
                 continue
             # rglob walks the subtree so output_path-nested files

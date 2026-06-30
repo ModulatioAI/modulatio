@@ -71,9 +71,9 @@ def test_generate_run_id_is_sortable_with_uniqueness_suffix():
 
 def test_init_run_creates_run_subfolder_with_run_subdirs(isolated_vault):
     """init_run creates ``runs/<run_id>/`` plus every directory in
-    ``RUN_SUBDIRS``: goals, tasks, decisions, tickets, research,
-    artifacts, reports. PROJECT_SUBDIRS (agents/skills/etc.) are NOT
-    created here — those live at the project root."""
+    ``RUN_SUBDIRS``: goals, tasks, decisions, research, reports.
+    PROJECT_SUBDIRS (agents/skills/artifacts/tickets/logs/etc.) are NOT
+    created here — those live at the project root and accumulate."""
     vault.init_project("FOO", "Foo project", "objective")
     rid = "20260428T143000Z"
     target = vault.init_run("FOO", rid, "fetch BTC price")
@@ -179,6 +179,23 @@ def test_project_subdirs_and_run_subdirs_partition_subdirs(isolated_vault):
     r = set(vault.RUN_SUBDIRS)
     assert p.isdisjoint(r), f"overlap: {p & r}"
     assert p | r == set(vault.SUBDIRS)
+
+
+def test_durable_kinds_are_project_scoped_not_run(isolated_vault):
+    """artifacts, tickets, logs are the project's DURABLE record — they
+    persist + accumulate across every run, so they belong to PROJECT_SUBDIRS,
+    never RUN_SUBDIRS. The run folder holds only this kickoff's transient
+    execution trace (goals/tasks/decisions/research/reports)."""
+    for kind in ("artifacts", "tickets", "logs"):
+        assert kind in vault.PROJECT_SUBDIRS, f"{kind} must be project-durable"
+        assert kind not in vault.RUN_SUBDIRS, f"{kind} must not be run-scoped"
+    # init_project creates them at the project root; init_run does not.
+    vault.init_project("DUR", "Durable", "obj")
+    root = vault.project_dir("DUR")
+    run = vault.init_run("DUR", "20260630T120000Z", "obj")
+    for kind in ("artifacts", "tickets", "logs"):
+        assert (root / kind).is_dir(), f"project missing durable {kind!r}"
+        assert not (run / kind).exists(), f"run folder should not hold {kind!r}"
 
 
 # === list_projects + _is_project_dir (marker-aware enumeration) ===

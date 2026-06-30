@@ -1914,6 +1914,12 @@ def project_show(
         if d.exists():
             count = sum(1 for _ in d.rglob("*") if _.is_file())
             typer.echo(f"  {sub:12s} {count} file(s)")
+    # Artifacts are project-durable + run-namespaced now — surface THIS run's
+    # accepted artifacts from the project tree so `show` still reports them.
+    art_d = vault.project_dir(code) / "artifacts" / run_id
+    if art_d.exists():
+        count = sum(1 for _ in art_d.rglob("*") if _.is_file())
+        typer.echo(f"  {'artifacts':12s} {count} file(s)")
 
 
 @project_app.command("clean")

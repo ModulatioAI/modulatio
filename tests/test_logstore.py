@@ -129,3 +129,19 @@ def test_compose_issue_title_prefix_rescrub_and_truncate(_store_dir: Path):
     assert "sk-LEAKED999" not in body                        # re-scrubbed
     assert "…[truncated]" in body                            # size-capped
     assert len(body) < logstore._MAX_ISSUE_BODY + 200
+
+
+def test_logs_route_to_active_project(tmp_path, monkeypatch):
+    """Logs are the project's durable record: with an active project and no
+    crash-dir override, captured logs land under <project>/logs/ and the
+    listing reads them there (not the global crash dir)."""
+    from modulatio import config, vault
+    monkeypatch.delenv("MODULATIO_CRASH_DIR", raising=False)
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    vault.init_project("LOG", "Logs", "obj")
+    monkeypatch.setattr(config, "get_default_project_code", lambda: "LOG")
+    project_logs = vault.project_dir("LOG") / "logs"
+    assert logstore.log_dir() == project_logs
+    p = logstore.write_error_log("boom")
+    assert p.parent == project_logs
+    assert any(e.path == p for e in logstore.list_logs())

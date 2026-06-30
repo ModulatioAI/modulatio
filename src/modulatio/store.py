@@ -299,12 +299,16 @@ def _write_entity(path: Path, entity: BaseModel, body: str) -> None:
 
 # ─── Ticket store ───────────────────────────────────────────────────────────
 
+# Tickets are part of the project's DURABLE record — they outlive any one run
+# and accumulate + number project-wide. So ticket paths resolve to the PROJECT
+# root regardless of run_id (the kwarg is retained for caller compatibility but
+# no longer scopes the path).
 def _ticket_path(code: str, ticket_id: str, run_id: str | None = None) -> Path:
-    return _scope_dir(code, run_id) / "tickets" / f"{ticket_id}.md"
+    return project_dir(code) / "tickets" / f"{ticket_id}.md"
 
 
 def _next_ticket_number(code: str, run_id: str | None = None) -> int:
-    d = _scope_dir(code, run_id) / "tickets"
+    d = project_dir(code) / "tickets"
     if not d.exists():
         return 1
     highest = 0
@@ -355,6 +359,7 @@ def create_ticket(
             affected_goal_id=affected_goal_id,
             affected_task_id=affected_task_id,
             affected_plan_id=affected_plan_id,
+            run_id=run_id,  # provenance — see Ticket.run_id (project-durable)
             approval_required=approval_required,
             transitions=[
                 StateTransition(
@@ -508,9 +513,16 @@ def close_open_tickets(
     """Close every OPEN / IN_PROGRESS ticket of a run at run-end teardown. The
     ticket RECORD stays on disk for viewing; it just stops reading as ``open`` so a
     finished/killed run can't leave a ticket nagging or blocking the next run.
-    Returns the number closed. Already-RESOLVED/CLOSED tickets are left alone."""
+    Returns the number closed. Already-RESOLVED/CLOSED tickets are left alone.
+
+    Tickets are project-durable, so this clears only tickets OPENED BY ``run_id``
+    (matched on the ticket's provenance) — a kill must not close another run's
+    still-open issue. A ``None`` run_id matches only legacy/project-level tickets
+    that carry no provenance."""
     closed = 0
-    for snap in list_tickets(project_code, run_id=run_id):
+    for snap in list_tickets(project_code):
+        if snap.run_id != run_id:
+            continue
         if snap.status not in (TicketStatus.OPEN, TicketStatus.IN_PROGRESS):
             continue
         with _store_lock:
@@ -598,7 +610,7 @@ def list_tickets(
     status: TicketStatus | None = None,
     run_id: str | None = None,
 ) -> list[Ticket]:
-    d = _scope_dir(project_code, run_id) / "tickets"
+    d = project_dir(project_code) / "tickets"  # project-durable (see _ticket_path)
     if not d.exists():
         return []
     results: list[Ticket] = []

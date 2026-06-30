@@ -291,8 +291,8 @@ def tui_vault_with_export_family_artifacts(tmp_path: Path, monkeypatch):
     vault.init_project(PROJECT_CODE, "Export family fixture", "obj")
     run_id = "20260428T121500Z-ffff"
     vault.init_run(PROJECT_CODE, run_id, "export families")
-    run_root = vault.run_dir(PROJECT_CODE, run_id)
-    art = run_root / "artifacts"
+    art = vault.project_dir(PROJECT_CODE) / "artifacts" / run_id
+    art.mkdir(parents=True, exist_ok=True)
     drafts = art / "drafts"
     drafts.mkdir(parents=True, exist_ok=True)
     (drafts / "code-t-1.txt").write_text("def f():\n    return 42\n")
@@ -374,7 +374,7 @@ def tui_vault_with_run_artifacts(tmp_path: Path, monkeypatch):
     run_id = "20260428T120000Z-rrrr"
     vault.init_run(PROJECT_CODE, run_id, "fixture run")
     run_root = vault.run_dir(PROJECT_CODE, run_id)
-    drafts_dir = run_root / "artifacts" / "drafts"
+    drafts_dir = vault.project_dir(PROJECT_CODE) / "artifacts" / run_id / "drafts"
     drafts_dir.mkdir(parents=True, exist_ok=True)
     (drafts_dir / "art-t-001.md").write_text("# Run draft\n\nbody\n")
     (run_root / "reports" / "ART-G-001.md").write_text(
@@ -402,17 +402,22 @@ async def test_artifacts_tab_reads_from_latest_run(tui_vault_with_run_artifacts)
         assert any("ART-G-001.md" in s for s in items)
 
 
-async def test_artifacts_tab_uses_lex_latest_run(tui_vault_with_run_artifacts):
-    """Two runs, each with its own draft. Latest (lex-max) run's
-    draft shows; earlier run's draft is hidden."""
+async def test_artifacts_tab_accumulates_drafts_from_every_run(
+    tui_vault_with_run_artifacts,
+):
+    """Artifacts are the project's DURABLE, run-namespaced tree — drafts from
+    EVERY run accumulate in the tab (no latest-run filter), so prior runs'
+    grounded work stays visible and reusable."""
     from textual.widgets import ListView, TabbedContent
     from modulatio.tui.app import ModulatioApp
 
     tmp_path, _ = tui_vault_with_run_artifacts
-    # Add a SECOND, later run with a different draft.
+    # A SECOND, later run with a different draft, in the durable tree.
     late_id = "20260428T200000Z-zzzz"
     vault.init_run(PROJECT_CODE, late_id, "later run")
-    late_drafts = vault.run_dir(PROJECT_CODE, late_id) / "artifacts" / "drafts"
+    late_drafts = (
+        vault.project_dir(PROJECT_CODE) / "artifacts" / late_id / "drafts"
+    )
     late_drafts.mkdir(parents=True, exist_ok=True)
     (late_drafts / "late-t-001.md").write_text("# Late draft\n\nlater body\n")
 
@@ -423,9 +428,9 @@ async def test_artifacts_tab_uses_lex_latest_run(tui_vault_with_run_artifacts):
         await pilot.pause()
         listview = app.query_one("#artifacts-list", ListView)
         items = [str(item.children[0].render()) for item in listview.children]
-        # Only the late run's draft renders; early run's hidden.
+        # BOTH runs' drafts render — durable, accumulated.
         assert any("late-t-001.md" in s for s in items)
-        assert not any("art-t-001.md" in s for s in items)
+        assert any("art-t-001.md" in s for s in items)
 
 
 async def test_artifacts_tab_falls_back_to_project_root_when_no_runs(
@@ -467,8 +472,8 @@ def tui_vault_with_diverse_artifacts(tmp_path: Path, monkeypatch):
     vault.init_project(PROJECT_CODE, "Diverse artifacts", "obj")
     run_id = "20260428T130000Z-mmmm"
     vault.init_run(PROJECT_CODE, run_id, "diverse")
-    run_root = vault.run_dir(PROJECT_CODE, run_id)
-    art = run_root / "artifacts"
+    art = vault.project_dir(PROJECT_CODE) / "artifacts" / run_id
+    art.mkdir(parents=True, exist_ok=True)
     # Direct output_path files at artifacts/ root
     (art / "add.py").write_text("def add(a, b): return a + b\n")
     (art / "test_add.py").write_text("def test_one(): assert True\n")
@@ -613,8 +618,8 @@ def tui_vault_with_tricky_preview_artifacts(tmp_path: Path, monkeypatch):
     vault.init_project(PROJECT_CODE, "Tricky preview", "obj")
     run_id = "20260428T140000Z-tttt"
     vault.init_run(PROJECT_CODE, run_id, "tricky")
-    run_root = vault.run_dir(PROJECT_CODE, run_id)
-    art = run_root / "artifacts"
+    art = vault.project_dir(PROJECT_CODE) / "artifacts" / run_id
+    art.mkdir(parents=True, exist_ok=True)
     # Markup-like content (closing tag with nothing to close).
     (art / "bracket.py").write_text(
         "import re\nPATTERN = re.compile(r'[/]')  # bracket [/] tag\n"

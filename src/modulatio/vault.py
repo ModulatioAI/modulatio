@@ -101,10 +101,14 @@ def reload() -> None:
     config.reload()
     VAULT_ROOT = config.get_vault_root()
 
-#: Subdirs that live at the project root and PERSIST across runs.
-#: Hold team config (agents/skills/standards) and learning state
-#: (qc-history, qc-notes; memory + standards-proposals are created
-#: lazily by their modules but conceptually belong here).
+#: Subdirs that live at the project root and PERSIST + accumulate across
+#: runs — the project's DURABLE record. Team config (agents/skills/
+#: standards), learning state (qc-history, qc-notes; memory +
+#: standards-proposals are created lazily by their modules but belong
+#: here), and the cross-run deliverable/operational record: ``artifacts``
+#: (every run's accepted outputs, run-namespaced), ``tickets`` (outlive
+#: any one run), ``logs``. A project folder that didn't accumulate these
+#: would be pointless — the run folder is transient, the project is not.
 PROJECT_SUBDIRS = (
     "agents",
     "skills",
@@ -112,19 +116,20 @@ PROJECT_SUBDIRS = (
     "qc-history",
     "qc-notes",
     "plans",
+    "artifacts",
+    "tickets",
+    "logs",
 )
 
-#: Subdirs created PER kickoff under ``runs/<run_id>/``. Every output
-#: a kickoff produces — goals, tasks, tickets, decisions, artifacts,
-#: reports, research — lands here so consecutive kickoffs of the same
-#: project don't pollute each other. New kickoff = clean workspace.
+#: Subdirs created PER kickoff under ``runs/<run_id>/`` — this run's
+#: TRANSIENT execution trace (its plan + working notes). The durable
+#: outputs (artifacts/tickets/logs) live at the project root and
+#: accumulate; only goals/tasks/decisions/research/reports are per-run.
 RUN_SUBDIRS = (
     "goals",
     "tasks",
     "decisions",
-    "tickets",
     "research",
-    "artifacts",
     "reports",
 )
 

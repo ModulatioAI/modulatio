@@ -328,6 +328,11 @@ class Ticket(BaseModel):
     body: str
     affected_goal_id: str | None = None
     affected_task_id: str | None = None
+    #: Provenance: the run that opened this ticket. Tickets are PROJECT-durable
+    #: (they accumulate + persist across runs), but recording the originating
+    #: run lets the F8 kill-teardown clear only THIS run's residue — and the
+    #: TUI show which run raised it. ``None`` for project-level / legacy tickets.
+    run_id: str | None = None
     #: Phase 3.1b-ii: ticket references a Leader-produced plan
     #: (``<project>/plans/<id>.md``). When the ticket is approved /
     #: denied via :func:`store.update_ticket_approval`, the linked plan's

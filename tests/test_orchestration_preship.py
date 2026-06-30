@@ -135,7 +135,7 @@ def test_pin_attachments_skips_unencodable_without_aborting(tmp_path, monkeypatc
     good = _Att("good.md", "résumé — em–dash ✓")  # non-ASCII, valid UTF-8
     orch._pin_attachments([good])
     assert "good.md" in orch._pinned_files
-    dest = orch._scope_root() / "artifacts" / "good.md"
+    dest = orch._shared_artifacts_root() / "good.md"
     assert dest.read_text(encoding="utf-8") == "résumé — em–dash ✓"
 
 

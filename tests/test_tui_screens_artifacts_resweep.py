@@ -33,8 +33,8 @@ def tui_vault_with_one_artifact(tmp_path: Path, monkeypatch):
     vault.init_project(PROJECT_CODE, "Resweep error-path", "obj")
     run_id = "20260428T150000Z-eeee"
     vault.init_run(PROJECT_CODE, run_id, "resweep")
-    run_root = vault.run_dir(PROJECT_CODE, run_id)
-    art = run_root / "artifacts"
+    art = vault.project_dir(PROJECT_CODE) / "artifacts" / run_id
+    art.mkdir(parents=True, exist_ok=True)
     (art / "report.md").write_text("# report\n\nbody\n")
     return tmp_path
 

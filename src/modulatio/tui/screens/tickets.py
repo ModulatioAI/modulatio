@@ -30,7 +30,7 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import DataTable, Input, Markdown, Static
 
-from modulatio import store, vault
+from modulatio import store
 from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.ticket_row import ticket_row
@@ -91,22 +91,15 @@ class TicketsScreen(Vertical):
         (e.g. stub kickoffs) since the last view."""
         self.refresh_tickets()
 
-    def _scope_run_id(self, code: str) -> str | None:
-        """Resolve which run's tickets to show. Defaults to the most
-        recent run (matches user intent: "show me the latest kickoff's
-        tickets"). Falls back to project root for legacy projects with
-        no run subfolders. Single source of truth for the screen's
-        run scope so list / get / update_approval all agree."""
-        return vault.latest_run(code)
-
     def refresh_tickets(self) -> None:
         table = self.query_one("#tickets-table", DataTable)
         table.clear()
         code = self.app.project_code  # type: ignore[attr-defined]
-        run_id = self._scope_run_id(code)
+        # Tickets are the project's durable record — show every ticket in the
+        # project, across all runs (no latest-run filter).
         q = self._query.lower()
         shown = 0
-        for t in store.list_tickets(code, run_id=run_id):
+        for t in store.list_tickets(code):
             row = ticket_row(t)
             # Client-side search: match the visible row text (id / title / …).
             if q and q not in " ".join(str(c) for c in row).lower():
@@ -158,7 +151,7 @@ class TicketsScreen(Vertical):
 
     def _render_preview(self, ticket_id: str) -> None:
         code = self.app.project_code  # type: ignore[attr-defined]
-        ticket = store.get_ticket(code, ticket_id, run_id=self._scope_run_id(code))
+        ticket = store.get_ticket(code, ticket_id)
         if ticket is None:
             self.preview_source = ""
             return

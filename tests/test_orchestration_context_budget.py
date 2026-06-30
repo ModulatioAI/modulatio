@@ -890,3 +890,30 @@ def test_churn_that_survives_retries_routes_to_decompose(project_with_run, monke
     assert seen["exc"].max_input_tokens == 64_000
     assert seen["exc"].estimated_tokens == 70_000
     assert task.status == TaskStatus.COMPLETED  # decompose handled it, not BLOCKED
+
+
+# ── durable artifacts + cross-run reuse (project-as-durable-layer) ────────
+
+def test_shared_artifacts_root_is_project_scoped_run_namespaced(project_with_run):
+    """Durable artifacts live under the PROJECT, run-namespaced — they
+    accumulate across runs instead of dying in the run folder."""
+    orch = _make_orchestrator(project_with_run)
+    root = orch._shared_artifacts_root()
+    proj_artifacts = vault.project_dir(project_with_run.code) / "artifacts"
+    assert root == proj_artifacts / project_with_run.run_id
+    assert root.is_dir()
+
+
+def test_team_canvas_digest_reads_across_runs(project_with_run):
+    """Reuse: a producer's team-canvas digest sees artifacts from PRIOR
+    runs of the same project (not just this run), so the same brief re-run
+    reuses last time's grounded work instead of re-fetching it."""
+    orch = _make_orchestrator(project_with_run)
+    proj_artifacts = vault.project_dir(project_with_run.code) / "artifacts"
+    prior = proj_artifacts / "run-prior-000"
+    prior.mkdir(parents=True, exist_ok=True)
+    (prior / "iea-ev-2025.md").write_text(
+        "# IEA EV Outlook 2025\nGrounded fact from a prior run.\n"
+    )
+    digest = orch._build_team_canvas_digest()
+    assert "iea-ev-2025.md" in digest

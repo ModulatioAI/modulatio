@@ -100,6 +100,31 @@ def test_ticket_create_roundtrip(project: Path):
     assert len(loaded.transitions) == 1
 
 
+def test_tickets_are_project_durable_across_runs(project: Path):
+    """A ticket outlives the run that opened it: created during run A, it's
+    visible from run B (and project scope) and numbered project-wide. Tickets
+    are part of the project's durable record, not run-transient."""
+    from uuid import uuid4
+    pid = uuid4()
+    vault.init_run(PROJECT_CODE, "run-A", "obj")
+    vault.init_run(PROJECT_CODE, "run-B", "obj")
+    a = store.create_ticket(
+        project_id=pid, project_code=PROJECT_CODE,
+        priority=TicketPriority.CRITICAL, title="from run A", run_id="run-A",
+    )
+    # visible from a DIFFERENT run and from project scope (run_id=None)
+    assert store.get_ticket(PROJECT_CODE, a.id, run_id="run-B") is not None
+    assert any(t.id == a.id for t in store.list_tickets(PROJECT_CODE))
+    # numbering is project-wide: run B's ticket does not reuse A's number
+    b = store.create_ticket(
+        project_id=pid, project_code=PROJECT_CODE,
+        priority=TicketPriority.MINOR, title="from run B", run_id="run-B",
+    )
+    assert b.id == f"{PROJECT_CODE}-2"
+    # lands under the project, not a run folder
+    assert (vault.project_dir(PROJECT_CODE) / "tickets" / f"{a.id}.md").exists()
+
+
 def test_ticket_counter_increments(project: Path):
     from uuid import uuid4
     pid = uuid4()

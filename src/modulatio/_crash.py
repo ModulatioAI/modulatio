@@ -81,7 +81,24 @@ _LABELED_SECRET = re.compile(
 
 def crash_dir() -> Path:
     override = os.environ.get("MODULATIO_CRASH_DIR")
-    return Path(override) if override else _DEFAULT_DIR
+    if override:
+        return Path(override)
+    # Logs are part of a project's DURABLE record — route crash/error/doctor/run
+    # logs to the active project's ``logs/`` so they accumulate per-project and
+    # the TUI/CLI surface them there. Best-effort + lazy import (this can run
+    # inside the crash handler): any failure, or no active project, falls back
+    # to the global dir so a crash outside any project still gets logged.
+    try:
+        from modulatio import config
+        from modulatio.vault import project_dir
+        code = config.get_default_project_code()
+        if code:
+            d = project_dir(code) / "logs"
+            if d.parent.exists():  # the project exists
+                return d
+    except Exception:
+        pass
+    return _DEFAULT_DIR
 
 
 def _scrub_embedded_secrets(value: str) -> str:

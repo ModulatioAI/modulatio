@@ -239,7 +239,11 @@ def test_pin_attachments_copies_into_workspace(tmp_path: Path, monkeypatch):
     orch._pin_attachments([att])
 
     assert orch._pinned_files == ["game.py"]
-    pinned = vault.run_dir(PROJECT_CODE, run_id) / "artifacts" / "game.py"
+    # Durable artifacts are project-scoped + run-namespaced now (the project
+    # is the persistent layer), so the pin lands under <project>/artifacts/<run>.
+    pinned = (
+        vault.project_dir(PROJECT_CODE) / "artifacts" / run_id / "game.py"
+    )
     assert pinned.exists()
     assert pinned.read_text() == "import pygame\nJUMP = -12\n"
     # and the contract now activates

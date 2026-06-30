@@ -143,7 +143,7 @@ def test_merge_wave_namespaces_colliding_tool_results(project: Project):
     orch = _orch(project)
     pid = project.id
 
-    shared = orch._scope_root() / "artifacts"
+    shared = orch._shared_artifacts_root()
     shared.mkdir(parents=True, exist_ok=True)
 
     done: dict[str, TaskExecutionResult] = {}
@@ -176,7 +176,7 @@ def test_merge_wave_identical_tool_result_not_duplicated(project: Project):
     name, the merge must NOT create a spurious namespaced copy."""
     orch = _orch(project)
     pid = project.id
-    shared = orch._scope_root() / "artifacts"
+    shared = orch._shared_artifacts_root()
     shared.mkdir(parents=True, exist_ok=True)
 
     done: dict[str, TaskExecutionResult] = {}
