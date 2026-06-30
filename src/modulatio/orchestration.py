@@ -3389,6 +3389,15 @@ class Orchestrator:
             )
             response = self._run("leader", prompt)
         data = _extract_json(response)
+        # Feature B: the Leader may wrap the goals in an object that also NAMES
+        # this run ({"job_name", "goals"}) — a bare array is still accepted
+        # (back-compat). The name (if any) is stashed for kickoff() to set on
+        # summary.job_slug, which delivery uses to name the output folder.
+        self._decomposed_job_name = None
+        if isinstance(data, dict):
+            jn = data.get("job_name")
+            self._decomposed_job_name = jn.strip() if isinstance(jn, str) else None
+            data = data.get("goals", [])
         if not isinstance(data, list):
             raise ValueError(f"expected list of goals, got {type(data).__name__}")
 
@@ -11672,6 +11681,47 @@ class Orchestrator:
         names = [n for n in names if n != "jt-create"]
         return ("\n".join(lines) or "(none)", names)
 
+    def _post_run_capture_jt(
+        self, summary: RunSummary, objective: str, goals: list
+    ) -> None:
+        """Snapshot THIS ad-hoc run as a reusable, project-local Job Template so
+        the operator can re-kick / cron / delete it. Captures the job text + the
+        Leader's name + a digest of the goal breakdown as a reusable PROMPT — a
+        re-kick re-decomposes against the CURRENT team, so there's no frozen plan
+        to rot. Skipped for a run launched FROM a JT (don't re-capture a re-kick),
+        an unnamed run, or when JT codification is disabled. Best-effort — never
+        raises into the run."""
+        if not self._jt_codification_enabled():
+            return
+        if self._bound_jt is not None or not summary.job_slug:
+            return
+        name = self._slug_skill(summary.job_slug)
+        if not name:
+            return
+        try:
+            digest = "\n".join(
+                f"- {g.description}" for g in goals
+                if getattr(g, "description", None)
+            )
+            body = objective.strip()
+            if digest:
+                body += "\n\nPlan shape from the original run:\n" + digest
+            job_templates.create_job_template(
+                name=name,
+                description=objective.strip()[:200],
+                interview_body=body,
+                project_code=self.project.code,
+            )
+            self._emit_activity(
+                role="leader", phase=f"job_captured:{name}", agent_id="leader",
+            )
+        except FileExistsError:
+            # Same-named job already templated — keep the existing JT (capture is
+            # a snapshot, never an overwrite of an operator-tuned template).
+            pass
+        except Exception:  # noqa: BLE001 — best-effort; never break a run
+            self._jt_codification_skipped("capture_failed")
+
     def _post_run_jt_codification(self, summary: RunSummary) -> None:
         """End-of-run hook — the SETUP-side Alfred loop. When a KIND of job keeps
         coming back, the Leader JUDGES whether to codify a Job Template. The
@@ -12601,7 +12651,7 @@ class Orchestrator:
                     _delivery.deliver_finished_products(
                         grounded, project_code=self.project.code,
                         pinned_names=set(summary.pinned_files),
-                        dest_override=job_out,
+                        dest_override=job_out, job_name=summary.job_slug,
                     )
                 )
             # Surface any graceful-degradation notes (e.g. pandoc absent → shipped
@@ -13014,6 +13064,11 @@ class Orchestrator:
         goals = self._leader_decompose(
             objective, attachments=attachments, chat_completion=chat_completion,
         )
+        # Feature B: name this run's delivery folder from the Leader's job name.
+        # A bound Job Template's name (Feature A) already won if set; delivery
+        # slugifies the value, so the raw kebab name is stored as-is.
+        if not summary.job_slug and getattr(self, "_decomposed_job_name", None):
+            summary.job_slug = self._decomposed_job_name or None
         if _maybe_warn_scope_drift(
             objective=objective, goals=goals, summary=summary,
         ):
@@ -13455,6 +13510,10 @@ class Orchestrator:
         self._emit_activity(
             role="orchestrator", phase="kickoff_ended", agent_id="orchestrator",
         )
+        # Feature B: snapshot this ad-hoc run as a re-kickable project-local JT
+        # (skipped for a re-kick / unnamed run). Best-effort background learning,
+        # like the codification below — never on the user's critical path.
+        self._post_run_capture_jt(summary, objective, goals)
         # Brick 4 + B4: autonomous self-codification (recurring lessons → skills)
         # and JT codification (recurring jobs → Job Templates). Best-effort; runs
         # AFTER delivery + kickoff_ended (B1) so it's pure background learning, never
@@ -13791,8 +13850,13 @@ What you MAY do instead:
   to voice, not to block on.
 
 Decompose this objective into goals, following the standards above. Respond
-with ONLY a JSON array, fenced in ```json ... ```. No prose outside the
-fence.
+with ONLY a JSON object, fenced in ```json ... ```. No prose outside the fence:
+
+    {{"job_name": "<short kebab-case name for THIS run, e.g. ai-ml-cost-research>",
+      "goals": [ ...one object per goal (schema below)... ]}}
+
+`job_name` is your short, human-readable name for the run as a whole — decide it
+AFTER you have the goals in mind; it titles the run's output folder + file.
 
 Each goal has:
 - description: string

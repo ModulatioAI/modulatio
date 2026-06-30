@@ -200,7 +200,13 @@ def human_name_from_markdown(text: str, *, fallback: str) -> str:
         m = re.match(r"#{1,6}\s+(.*)", s)
         title = (m.group(1) if m else s).strip()
         break
-    return _sanitize_filename((title or "").strip() or fallback)
+    raw = (title or "").strip()
+    # A degenerate title — empty, or all separators (e.g. a stray '---'
+    # frontmatter fence taken as the first line) — must not become the filename
+    # ('---.docx'); fall back to the supplied name before sanitizing.
+    if not raw.strip("-_ "):
+        raw = fallback
+    return _sanitize_filename(raw)
 
 
 #: Source extensions that are CODE, not prose. A code deliverable ships as
@@ -416,6 +422,7 @@ def deliver_finished_products(
     fmt: ExportFormat = DEFAULT_DELIVERY_FORMAT,
     pinned_names: "set[str] | None" = None,
     dest_override: Path | None = None,
+    job_name: str | None = None,
 ) -> list[DeliveredProduct]:
     """Deliver every finished product.
 
@@ -449,7 +456,10 @@ def deliver_finished_products(
         out.append(
             deliver_product(
                 src, project_code=project_code, task_id=task_id,
-                fmt=fmt, fallback_name=fallback, pinned_names=pinned_names,
+                # Feature B: the Leader's job name is the preferred fallback when
+                # an artifact has no usable title — a clean `<job>.docx` beats a
+                # junk `---.docx` or the giant sanitized task description.
+                fmt=fmt, fallback_name=(job_name or fallback), pinned_names=pinned_names,
                 verbatim=verbatim, dest_override=dest_override,
             )
         )

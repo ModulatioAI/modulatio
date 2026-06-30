@@ -76,6 +76,25 @@ def _leader_stub(prompt: str) -> str:
     return f"```json\n{json.dumps(goals)}\n```"
 
 
+def _leader_stub_named(job_name: str):
+    """Leader stub whose DECOMPOSE call returns the Feature-B object shape
+    ``{"job_name", "goals"}``; the verify call is unchanged."""
+    def _stub(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return _leader_stub(prompt)
+        goals = [{
+            "description": "Draft 3 essays on the chosen theme",
+            "success_criteria": "3 files, each >= 200 words, QC-passed",
+            "evidence_required": [
+                {"kind": "artifact", "description": "essay file exists"},
+                {"kind": "metric", "description": "word count",
+                 "target": "word_count >= 200"},
+            ],
+        }]
+        return f"```json\n{json.dumps({'job_name': job_name, 'goals': goals})}\n```"
+    return _stub
+
+
 def _leader_with_verdict(verdict: str, recommendations=None):
     """Build a leader stub that returns a specific verdict on the
     verify call while preserving the normal decomposition response.
@@ -231,6 +250,91 @@ def test_resolve_chat_runner_leader_never_uses_shared_producer_qc_default(projec
     # A non-leader producer still gets the shared default (unchanged behavior).
     assert orch._resolve_chat_runner("some-producer") == "SHARED_PRODUCER_QC_RUNNER"
     assert orch._resolve_chat_runner_model("some-producer") == "producer-qc-model"
+
+
+# ── Feature B: the Leader names the job (decompose → summary.job_slug) ───────
+
+def test_kickoff_sets_job_slug_from_leader_job_name(project: Project):
+    """Feature B: when the Leader's decompose returns the {job_name, goals}
+    object, the name flows to summary.job_slug (which delivery uses to name the
+    output folder) — not the project."""
+    runners = {
+        "leader": _leader_stub_named("ai-ml-cost-research"),
+        "planner": _planner_stub, "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    summary = Orchestrator(project, runners).kickoff("Research AI/ML costs")
+    assert summary.job_slug == "ai-ml-cost-research"
+
+
+def test_kickoff_bare_list_decompose_keeps_job_slug_unset(project: Project):
+    """Back-compat: a Leader still emitting the old bare-array decompose still
+    parses, and job_slug stays unset (no name → delivery falls back as before)."""
+    runners = {
+        "leader": _leader_stub, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    summary = Orchestrator(project, runners).kickoff("Draft 3 essays on a theme")
+    assert summary.job_slug is None
+
+
+# ── Auto-capture: every named ad-hoc run becomes a re-kickable JT ────────────
+
+def test_post_run_capture_jt_writes_project_local(project: Project):
+    """A named ad-hoc run is snapshotted as a project-local JT carrying the job
+    text + the goal digest as a reusable prompt (re-kick / cron / delete)."""
+    from types import SimpleNamespace
+
+    from modulatio import job_template_library
+    from modulatio.orchestration import RunSummary
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    summary = RunSummary(project=project)
+    summary.job_slug = "ai-ml-cost-research"
+    orch._post_run_capture_jt(
+        summary, "Research AI/ML costs",
+        [SimpleNamespace(description="Survey vendor pricing")],
+    )
+    jt = job_template_library.checkout("ai-ml-cost-research", PROJECT_CODE)
+    assert jt.name == "ai-ml-cost-research"
+    assert "Research AI/ML costs" in jt.interview_body
+    assert "Survey vendor pricing" in jt.interview_body
+
+
+def test_post_run_capture_jt_skips_for_rekick(project: Project):
+    """A run launched FROM a JT (re-kick) must NOT re-capture itself."""
+    from types import SimpleNamespace
+
+    from modulatio import job_template_library
+    from modulatio.orchestration import RunSummary
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    orch._bound_jt = SimpleNamespace(name="existing-jt")
+    summary = RunSummary(project=project)
+    summary.job_slug = "existing-jt"
+    orch._post_run_capture_jt(summary, "obj", [])
+    assert job_template_library.checkout("existing-jt", PROJECT_CODE).name == ""
+
+
+def test_post_run_capture_jt_skips_without_job_name(project: Project):
+    """No Leader name → nothing to name the JT → skip (not every run templates)."""
+    from modulatio import vault
+    from modulatio.orchestration import RunSummary
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    summary = RunSummary(project=project)  # job_slug stays None
+    orch._post_run_capture_jt(summary, "obj", [])
+    jt_dir = vault.project_dir(PROJECT_CODE) / "job_templates"
+    assert not jt_dir.exists() or not list(jt_dir.glob("*.md"))
+
+
+def test_kickoff_captures_run_as_project_local_jt(project: Project):
+    """Wiring: a full named kickoff leaves behind a re-kickable project-local JT."""
+    from modulatio import job_template_library
+    runners = {
+        "leader": _leader_stub_named("ai-ml-cost-research"),
+        "planner": _planner_stub, "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    Orchestrator(project, runners).kickoff("Research AI/ML costs")
+    jt = job_template_library.checkout("ai-ml-cost-research", PROJECT_CODE)
+    assert jt.name == "ai-ml-cost-research"
+    assert "Research AI/ML costs" in jt.interview_body
 
 
 # ── Stage 0: the CPU-spin watchdog (diagnose + surface a wedged call) ────────

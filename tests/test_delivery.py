@@ -31,6 +31,16 @@ def test_name_empty_uses_fallback():
     assert delivery.human_name_from_markdown("\n\n   \n", fallback="t-009") == "t-009"
 
 
+def test_name_degenerate_title_uses_fallback():
+    # A doc that leads with a stray frontmatter fence ('---') and has no real
+    # H1 — the first non-empty line ('---') sanitizes to all-dashes, which must
+    # NOT become the filename ('---.docx'). Fall back to the supplied name.
+    md = "---\n\n## Section 2: The barriers\n\nbody"
+    assert delivery.human_name_from_markdown(
+        md, fallback="ai-ml-cost-research"
+    ) == "ai-ml-cost-research"
+
+
 def test_name_strips_illegal_chars():
     md = '# Report: Q3/Q4 <draft> "final"?'
     name = delivery.human_name_from_markdown(md, fallback="x")
@@ -88,6 +98,23 @@ def test_deliver_product_names_and_places(monkeypatch, tmp_path, _mock_export):
     assert dp.dest == tmp_path / "ACME" / "Annual Report 2026.docx"
     assert dp.dest.exists()
     assert dp.name == "Annual Report 2026"
+
+
+def test_deliver_finished_products_titleless_uses_job_name(
+    monkeypatch, tmp_path, _mock_export
+):
+    """Feature B: a deliverable with no usable H1 title (leads with a stray
+    '---', long task description) is named from the LEADER'S JOB NAME, not a
+    junk '---.docx' nor the giant sanitized description."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path))
+    src = tmp_path / "briefing.md"
+    src.write_text("---\n\n## Section 2: barriers\n\nbody")  # no H1
+    long_desc = "Assemble the three researched sections into final single doc"
+    out = delivery.deliver_finished_products(
+        [("T-004", src, long_desc, "document")],
+        project_code="ACME", job_name="ai-ml-cost-research",
+    )
+    assert out[0].dest.name == "ai-ml-cost-research.docx"
 
 
 def test_deliver_product_collision_disambiguates(monkeypatch, tmp_path, _mock_export):
