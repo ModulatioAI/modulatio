@@ -435,6 +435,32 @@ async def test_kickoff_ended_settles_team_status(project_with_roster):
         assert leader._done is False
 
 
+async def test_post_run_codification_does_not_restick_leader_lane(project_with_roster):
+    """Post-run skill codification is background learning that runs AFTER
+    kickoff_ended and emits leader-role activity (``skill_codified`` + its leader
+    calls). It must NOT re-activate the finished conversational leader lane —
+    otherwise a run that's actually DONE spins forever on the codification phase
+    with its elapsed counter climbing (the '336s ticker' bug)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_status import StreamStatus
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(_ev("orchestrator", "kickoff_started"))
+        app._record_activity_impl(_ev("leader", "leader_verify_ended", agent_id="leader"))
+        app._record_activity_impl(_ev("orchestrator", "kickoff_ended"))
+        await pilot.pause()
+        leader = app.query_one("#stream-leader-status", StreamStatus)
+        assert leader._verb is None  # run ended → leader lane settled to standby
+        # background codification fires leader-role activity AFTER the run ended
+        app._record_activity_impl(_ev("leader", "skill_codified", agent_id="leader"))
+        await pilot.pause()
+        assert leader._verb is None, (
+            "post-run codification must not re-stick the finished leader lane"
+        )
+
+
 async def test_copy_and_paste_bindings_are_priority(project_with_roster):
     """#2: BOTH Ctrl+C and Ctrl+V must be priority bindings so our pyperclip
     (OS-clipboard) handlers win over a focused TextArea's native copy/paste

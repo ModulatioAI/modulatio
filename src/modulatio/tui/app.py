@@ -1186,6 +1186,7 @@ class ModulatioApp(App):
             self._agent_name_cache = None
             # A fresh run: clean telemetry board — running on, no tickets/mods yet.
             self._run_ticket_count = 0
+            self._run_ended = False  # leader-lane activity is live again
             lamps = self._status_lamps()
             if lamps is not None:
                 lamps.set_lamps(running=True, mods=0, qc=0, tickets=0)
@@ -1222,11 +1223,16 @@ class ModulatioApp(App):
             if lamps is not None:
                 lamps.set_lamps(running=False, mods=0, qc=0)
             self._update_team_rail([], running=False)
+            # Run over: post-run codification (background learning) still emits
+            # leader-role activity — gate it so it can't re-animate the now-idle
+            # conversational leader lane (the "spins forever on skill_codified
+            # with a climbing elapsed counter" bug).
+            self._run_ended = True
         # Live status lines: the leader-lane phase drives the LEADER status;
         # team-lane phases the TEAM status, named by the worker. §5: when more
         # than one producer is in flight, surface the parallel count so the
         # operator can SEE the concurrency (invisible parallelism isn't shippable).
-        if is_leader_role(event.role):
+        if is_leader_role(event.role) and not getattr(self, "_run_ended", False):
             if event.phase.endswith("_call_failed"):
                 # Op C: a wedged/timed-out leader call — show an HONEST error, not
                 # a perpetual "working" spinner stuck on its last *_started phase.
