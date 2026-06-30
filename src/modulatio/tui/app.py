@@ -549,6 +549,14 @@ class ModulatioApp(App):
         """Tick the elapsed-time counter while a kickoff worker is alive."""
         if not hasattr(self, "_kickoff_started_at"):
             return
+        # Once the run has ENDED (kickoff_ended fired), stop repainting: under a
+        # heavy run this 1s re-layout of a huge widget tree saturates the event
+        # loop and STARVES the worker-completion message (_on_kickoff_done) that
+        # posts the verdict + tears this timer down — a self-sustaining storm.
+        # Quieting the render here lets that queued message finally run. The timer
+        # object stays alive (the in-flight launch guard) until _on_kickoff_done.
+        if getattr(self, "_run_finishing", False):
+            return
         import time as _time
         elapsed = int(_time.monotonic() - self._kickoff_started_at)
         mins, secs = divmod(elapsed, 60)
@@ -1187,6 +1195,7 @@ class ModulatioApp(App):
             # A fresh run: clean telemetry board — running on, no tickets/mods yet.
             self._run_ticket_count = 0
             self._run_ended = False  # leader-lane activity is live again
+            self._run_finishing = False  # progress timer may repaint again
             lamps = self._status_lamps()
             if lamps is not None:
                 lamps.set_lamps(running=True, mods=0, qc=0, tickets=0)
@@ -1197,6 +1206,13 @@ class ModulatioApp(App):
         # lane's role set, so this is the only place that fires for BOTH the
         # direct-kickoff and the converse→run_job paths.
         if event.phase == "kickoff_ended":
+            # Quiet the kickoff progress timer's expensive per-tick re-render NOW
+            # (on the reliable run-ended signal) so it can't starve the queued
+            # worker-completion message that posts the verdict + tears the timer
+            # down. Without this, a heavy run loops forever: no verdict, timer
+            # never stops. The timer object lives on (launch guard) until
+            # _on_kickoff_done.
+            self._run_finishing = True
             if getattr(self, "_kickoff_aborted", False):
                 # F8 kill: final clean of the TEAM TV once the run has fully
                 # unwound, so a late event from the in-flight step leaves no

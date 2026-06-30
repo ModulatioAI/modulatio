@@ -435,6 +435,36 @@ async def test_kickoff_ended_settles_team_status(project_with_roster):
         assert leader._done is False
 
 
+async def test_kickoff_ended_stops_progress_render_storm(project_with_roster):
+    """A finished run must stop the kickoff progress timer's per-tick re-render.
+    Otherwise (under a heavy run with a huge widget tree) that 1s re-layout storm
+    saturates the event loop and STARVES the worker-completion message — the only
+    thing that posts the verdict AND tears the timer down — so it loops forever
+    (verdict never shows, timer never stops). The reliable kickoff_ended event
+    must quiet the progress render so the queued completion message can run."""
+    from modulatio.tui.app import ModulatioApp
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._kickoff_started_at = 0.0
+        app._kickoff_mode = "stub"
+        app._record_activity_impl(_ev("orchestrator", "kickoff_started"))
+        await pilot.pause()
+        assert app._run_finishing is False  # progress renders DURING the run
+        # during the run, the progress tick repaints the status line
+        calls: list = []
+        app._set_kickoff_status = lambda s: calls.append(s)
+        app._update_kickoff_progress()
+        assert calls, "progress should repaint while running"
+        # run ends → progress render is quieted so the completion msg isn't starved
+        app._record_activity_impl(_ev("orchestrator", "kickoff_ended"))
+        await pilot.pause()
+        assert app._run_finishing is True
+        calls.clear()
+        app._update_kickoff_progress()
+        assert calls == [], "progress must NOT repaint after the run ended"
+
+
 async def test_post_run_codification_does_not_restick_leader_lane(project_with_roster):
     """Post-run skill codification is background learning that runs AFTER
     kickoff_ended and emits leader-role activity (``skill_codified`` + its leader
