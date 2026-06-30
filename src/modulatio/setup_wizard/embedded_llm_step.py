@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import Any
 
 from modulatio import config, theme
-from modulatio.setup_wizard import steps
 
 
 # Mirror of fastembed.common.utils.define_cache_dir's default when no
@@ -159,7 +158,15 @@ def prefetch(model_id: str | None = None) -> bool:
 def run(state: dict) -> Any:
     """Execute the embedded LLM prefetch step. Mutates state with
     ``embedded_llm_cached`` flag. Silent if already cached for the
-    active model id."""
+    active model id.
+
+    The routing embedder is REQUIRED — skill-routing and qc-history
+    retrieval don't work without it — so this step is NOT skippable:
+    when the cache is cold it always attempts the one-time, CPU-only
+    fetch. A genuine fetch failure (offline / fastembed missing) is
+    surfaced loudly and logged, but doesn't block finishing setup —
+    the first task (and ``modulatio doctor``) will retry the download.
+    """
     active_model = config.get_embedding_model()
     if is_cached(active_model):
         theme.success(f"Embedded LLM ({active_model}) already cached.")
@@ -167,16 +174,10 @@ def run(state: dict) -> Any:
         return "cached"
 
     print()
-    if not steps.confirm_yn(
-        f"Pre-download routing embedder now? ({active_model}, "
-        f"one-time, CPU-only)",
-        default=True,
-    ):
-        theme.muted("Skipped. Will be downloaded on first task.")
-        state["embedded_llm_cached"] = False
-        state["embedded_llm_skipped"] = True
-        return "skipped"
-
+    theme.info(
+        f"The routing embedder ({active_model}) is required — fetching now "
+        f"(one-time, CPU-only). Modulatio can't route tasks without it."
+    )
     success = prefetch(active_model)
     state["embedded_llm_cached"] = success
     state["embedded_llm_skipped"] = not success

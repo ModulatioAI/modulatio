@@ -29,8 +29,9 @@ def _print_welcome_blurb() -> None:
         print(theme.color("  Edit any step; press Enter at confirm to keep what's there.", "muted"))
     else:
         print(f"  {theme.color('Welcome to Modulatio', 'primary', bold=True)} — first-install setup.")
-        print(theme.color("  This wizard checks pandoc + clipboard, then paths, providers, models,", "muted"))
-        print(theme.color("  agents, your first project, confirm, embedded-LLM prefetch. ~5–10 minutes.", "muted"))
+        print(theme.color("  This wizard checks pandoc + clipboard, then your vault path, budget,", "muted"))
+        print(theme.color("  and first project, prefetches the embedded LLM, and confirms. Models", "muted"))
+        print(theme.color("  and agents are configured later in the TUI Config tab. ~5 minutes.", "muted"))
     print()
 
 
@@ -177,7 +178,12 @@ def run(state: dict) -> Any:
             theme.warn("Still not detected. Skip for now or try again.")
             continue
         if choice == "s":
-            theme.muted("Skipped pandoc install. DOCX/PDF export will be unavailable until you install it.")
+            theme.warn(
+                "Skipped pandoc. Your deliverables will stay as Markdown — "
+                "without pandoc, Modulatio can't convert them to DOCX/PDF, so "
+                "you'll need to handle any document-format conversions yourself "
+                "(install pandoc later, or convert the Markdown by hand)."
+            )
             state["pandoc_installed"] = False
             state["pandoc_skipped"] = True
             return "skipped"

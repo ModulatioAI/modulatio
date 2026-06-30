@@ -88,6 +88,25 @@ def test_pandoc_install_commands_data_shape():
     assert any("Windows" in k for k in keys)
 
 
+def test_pandoc_skip_warns_user_handles_conversion_manually(monkeypatch, capsys):
+    """Skipping pandoc stays allowed, but the skip message must make clear
+    the user takes on document-format conversion (DOCX/PDF) manually —
+    deliverables stay Markdown until pandoc is installed."""
+    monkeypatch.setattr(pandoc_step, "is_installed", lambda: False)
+    answers = iter(["s"])
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: next(answers))
+    state: dict = {}
+    result = pandoc_step.run(state)
+    assert result == "skipped"
+    assert state["pandoc_skipped"] is True
+    out = capsys.readouterr().out.lower()
+    # "yourself" is the discriminator — it appears only in the new skip
+    # message, proving the warning lands there (not in incidental earlier
+    # prints that already say "install manually" / "DOCX/PDF/Markdown").
+    assert "yourself" in out
+    assert "markdown" in out
+
+
 # === vault_path_step ===
 
 def test_suggested_paths_no_obsidian(monkeypatch, tmp_path):
@@ -122,6 +141,33 @@ def test_suggested_paths_with_obsidian(monkeypatch, tmp_path):
 
 
 # === embedded_llm_step ===
+
+def test_embedded_llm_run_is_required_no_skip_offer(monkeypatch):
+    """The routing embedder is REQUIRED (skill-routing + qc-history don't
+    work without it), so run() must attempt the fetch when the cache is
+    cold and never offer the user a skip prompt."""
+    monkeypatch.setattr(
+        embedded_llm_step.config, "get_embedding_model", lambda: "some-org/embed-model"
+    )
+    monkeypatch.setattr(embedded_llm_step, "is_cached", lambda *_a, **_k: False)
+    calls = {"prefetch": 0}
+
+    def fake_prefetch(model_id=None):
+        calls["prefetch"] += 1
+        return True
+
+    monkeypatch.setattr(embedded_llm_step, "prefetch", fake_prefetch)
+
+    def boom(*_a, **_k):
+        raise AssertionError("embedded LLM step must not offer a skip prompt")
+
+    monkeypatch.setattr(steps, "confirm_yn", boom)
+    state: dict = {}
+    result = embedded_llm_step.run(state)
+    assert result == "prefetched"
+    assert calls["prefetch"] == 1
+    assert state["embedded_llm_cached"] is True
+
 
 def test_is_cached_false_when_dir_empty(tmp_path, monkeypatch):
     # cache_dir() resolves to fastembed's OWN default root (the dir the
