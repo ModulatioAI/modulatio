@@ -16,6 +16,25 @@ check. Fetch with `http_get`, cite what the page actually said, and be honest
 about what you couldn't confirm. QC holds the work to the research standard — this
 is how you clear it on the FIRST pass instead of after three rejections.
 
+## First, reuse what's already grounded — don't re-fetch it
+
+Before you reach for `http_get`, read the context you were already handed. Your
+prompt carries what the rest of the team and prior work already established:
+
+- **The team canvas** — artifacts other tasks in THIS run have already produced
+  (their research notes, their drafts). A sibling task may have already fetched
+  and grounded the very facts you need.
+- **Recalled project knowledge** — grounded findings carried forward from earlier
+  work on this project.
+
+Mine those FIRST. Any fact already grounded there — with a real, resolvable
+locator — you reuse and cite as-is; you do NOT re-fetch it. Fetching what the
+team already has on hand is wasted budget and bloats your context toward the
+point where the work stalls. Then `http_get` only the GAPS: the facts the
+existing material doesn't already cover or that your operation needs fresher.
+(Reuse is not a license to lower the bar — a reused fact still needs a locator
+that resolves; an ungrounded line in the canvas is not a source.)
+
 ## The bar, by operation — for sourcing
 
 Your runbook named the operation and committed its bar; here is what that bar

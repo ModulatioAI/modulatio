@@ -556,3 +556,17 @@ def test_delete_skill_rejects_path_traversal(tmp_path, monkeypatch):
     import pytest
     with pytest.raises(Exception):
         skills.delete_skill("../escape")
+
+
+def test_rigorous_sourcing_seed_reuses_existing_before_fetch():
+    """The sourcing skill must direct producers to mine the already-injected
+    existing-knowledge — the team canvas (this run's artifacts) + recalled
+    project memory — BEFORE http_get, reusing grounded facts instead of
+    re-fetching them (the research-churn / context-bloat fix). The engine already
+    injects that context into every producer prompt; the skill is what tells the
+    producer to look there first."""
+    from modulatio import skills
+    body = skills.load("rigorous-sourcing").lower()
+    assert "reuse" in body
+    assert "canvas" in body          # this run's existing artifacts
+    assert "http_get" in body        # only fetch the GAPS
