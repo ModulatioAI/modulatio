@@ -395,7 +395,16 @@ def delete_run(code: str, run_id: str) -> bool:
     return True
 
 
-def init_project(code: str, name: str, objective: str, *, exist_ok: bool = False) -> Path:
+#: Project codes reserved for Modulatio's own use — a user can't create a
+#: project with one (it would collide with engine-owned data). ``SYSTEM`` holds
+#: orphaned-cron notices. Internal callers pass ``allow_reserved=True``.
+RESERVED_PROJECT_CODES = frozenset({"system"})
+
+
+def init_project(
+    code: str, name: str, objective: str, *,
+    exist_ok: bool = False, allow_reserved: bool = False,
+) -> Path:
     """Create the canonical folder tree for a new project.
 
     Creates the persistent (project-scoped) subdirs (agents, skills,
@@ -407,7 +416,13 @@ def init_project(code: str, name: str, objective: str, *, exist_ok: bool = False
     folders are created on demand by :func:`init_run`.
 
     Raises FileExistsError if the project folder already exists and exist_ok is False.
+    Raises ValueError if the code is reserved (unless allow_reserved is set).
     """
+    if not allow_reserved and code.lower() in RESERVED_PROJECT_CODES:
+        raise ValueError(
+            f"project code {code!r} is reserved for Modulatio's own use — "
+            "choose a different code."
+        )
     root = project_dir(code)
     if root.exists() and not exist_ok:
         raise FileExistsError(f"Project folder already exists: {root}")

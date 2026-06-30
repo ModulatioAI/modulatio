@@ -176,6 +176,43 @@ def test_cron_fails_closed_when_project_deleted(monkeypatch):
     assert any("GHOST" in t.title for t in store.list_tickets("SYSTEM"))
 
 
+def test_cron_malformed_project_code_fails_closed_without_aborting_sweep(monkeypatch):
+    """Wild Bill BLOCK + Nemo HIGH: a hand-corrupted malformed project_code makes
+    vault.project_dir() raise ValueError — that must NOT crash the whole
+    dispatch_due sweep. It must fail closed (disable) like a missing project, and
+    the sweep must continue to later valid due jobs."""
+    from modulatio import vault
+    enqueued: list = []
+    monkeypatch.setattr(heartbeat, "add_task", lambda **kw: enqueued.append(kw))
+    # bad job FIRST so the sweep must survive it to reach the good one.
+    bad = cron.add(name="bad", schedule="6h", project_code="GOOD", objective="o")
+    cron.update(bad["id"], project_code="../../etc")          # hand-edit corruption
+    vault.init_project("GOOD", "GOOD", "o", exist_ok=True)
+    good = cron.add(name="good", schedule="6h", project_code="GOOD", objective="o")
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+    cron.update(bad["id"], next_run=past)
+    cron.update(good["id"], next_run=past)
+    cron.dispatch_due(now=datetime(2030, 1, 1, tzinfo=timezone.utc))  # must not raise
+    assert cron.get(bad["id"])["enabled"] is False            # malformed → fail-closed
+    assert any(k["project_code"] == "GOOD" for k in enqueued)  # sweep continued; good fired
+
+
+def test_system_project_code_reserved_from_user_creation():
+    """Nemo MED: orphan-cron tickets live in the 'system' project, so a USER
+    must not be able to create a colliding project — but the internal cron path
+    can (allow_reserved). Also the wizard rejects it with a friendly error."""
+    from modulatio import vault
+    from modulatio.setup_wizard import first_project_step
+    with pytest.raises(ValueError, match="reserved"):
+        vault.init_project("system", "x", "o")
+    with pytest.raises(ValueError, match="reserved"):
+        vault.init_project("SYSTEM", "x", "o")  # lowercases to the same code
+    assert first_project_step._validate_code("system") is not None  # wizard rejects
+    # the internal path may create it
+    vault.init_project("SYSTEM", "System", "o", exist_ok=True, allow_reserved=True)
+    assert vault.project_dir("SYSTEM").exists()
+
+
 def test_cron_fires_normally_when_project_exists(monkeypatch):
     """Back-compat: a cron for a project that still exists enqueues as before."""
     from modulatio import vault

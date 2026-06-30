@@ -555,6 +555,7 @@ def _open_orphan_cron_ticket(job: dict) -> None:
         vault.init_project(
             _SYSTEM_PROJECT_CODE, "System",
             "System-level notices (orphaned crons, etc.)", exist_ok=True,
+            allow_reserved=True,
         )
         code = job["project_code"]
         store.create_ticket(
@@ -580,16 +581,25 @@ def _dispatch_one(job: dict, now: datetime) -> bool:
     Returns True if the heartbeat dispatch succeeded. Always called with the
     cross-process dispatch lock held (see ``dispatch_due``).
     """
-    # Fail-closed: if the project this cron belongs to no longer exists, do NOT
-    # fire it — that would resurrect an empty project shell and run on a DEFAULT
-    # team (not the deleted project's own), losing the JT too. Disable the job
-    # (stop the zombie) + open one SYSTEM ticket, and bow out without enqueuing.
+    # Fail-closed: if the project this cron belongs to no longer exists — OR its
+    # code is malformed (a hand-edited cron-config), which makes project_dir
+    # raise ValueError — do NOT fire it. Firing would resurrect an empty project
+    # shell and run on a DEFAULT team (not the deleted project's own), losing the
+    # JT too. The ValueError must be CAUGHT here, not allowed to abort the whole
+    # dispatch_due sweep (Wild Bill) — a single poisoned cron would otherwise
+    # block every later valid due job. Disable FIRST so the job can't be
+    # re-selected next tick even if the ticket write fails (storm guard — Nemo);
+    # the SYSTEM ticket is best-effort.
     from modulatio import vault
-    if not vault.project_dir(job["project_code"]).exists():
-        _open_orphan_cron_ticket(job)
+    try:
+        project_exists = vault.project_dir(job["project_code"]).exists()
+    except (ValueError, OSError):
+        project_exists = False
+    if not project_exists:
         update(job["id"], enabled=False,
                last_run=now.isoformat(timespec="seconds"),
                last_status="error:project-deleted")
+        _open_orphan_cron_ticket(job)
         return False
     dispatch_ok = True
     status = "ok"

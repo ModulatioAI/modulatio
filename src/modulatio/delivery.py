@@ -173,6 +173,7 @@ def _sanitize_filename(name: str) -> str:
     collapses, length is capped."""
     name = name.replace(":", " -")
     name = _ILLEGAL_FILENAME_CHARS.sub("", name)
+    name = _UNICODE_CONTROL_CHARS.sub("", name)  # strip BIDI/RTL overrides (ls-display safety)
     name = re.sub(r"\s+", " ", name).strip(" .")
     if len(name) > _MAX_NAME_LEN:
         name = name[:_MAX_NAME_LEN].rstrip(" .")

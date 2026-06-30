@@ -29,6 +29,8 @@ def _validate_code(code: str) -> str | None:
             "Code must start with a lowercase letter, contain only "
             "lowercase letters / digits / underscores, and be 1–32 chars."
         )
+    if code.lower() in vault.RESERVED_PROJECT_CODES:
+        return f"'{code}' is reserved for Modulatio — pick a different code."
     return None
 
 

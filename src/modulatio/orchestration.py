@@ -3397,7 +3397,10 @@ class Orchestrator:
         if isinstance(data, dict):
             jn = data.get("job_name")
             self._decomposed_job_name = jn.strip() if isinstance(jn, str) else None
-            data = data.get("goals", [])
+            # No default: a dict that OMITS "goals" is malformed → falls through
+            # to the raise below (don't silently run an empty plan — Nemo). An
+            # explicit "goals": [] is the Leader deliberately producing none.
+            data = data.get("goals")
         if not isinstance(data, list):
             raise ValueError(f"expected list of goals, got {type(data).__name__}")
 

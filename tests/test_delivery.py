@@ -100,6 +100,14 @@ def test_deliver_product_names_and_places(monkeypatch, tmp_path, _mock_export):
     assert dp.name == "Annual Report 2026"
 
 
+def test_sanitize_filename_strips_bidi_controls():
+    """Wild Bill LOW: _sanitize_filename must strip Unicode bidi/RTL-override
+    controls (as _job_slug already does), so an LLM-derived job-name fallback
+    can't produce a display-deceptive filename stem."""
+    out = delivery._sanitize_filename("report‮evil‏")
+    assert "‮" not in out and "‏" not in out
+
+
 def test_deliver_finished_products_titleless_uses_job_name(
     monkeypatch, tmp_path, _mock_export
 ):

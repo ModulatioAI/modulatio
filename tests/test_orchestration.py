@@ -266,6 +266,17 @@ def test_kickoff_sets_job_slug_from_leader_job_name(project: Project):
     assert summary.job_slug == "ai-ml-cost-research"
 
 
+def test_decompose_dict_missing_goals_raises(project: Project):
+    """Nemo MED: a decompose object that OMITS 'goals' must not silently run an
+    empty plan — it's malformed and must raise (distinct from an explicit []
+    which is the Leader deliberately producing no goals)."""
+    def _stub(prompt: str) -> str:
+        return '```json\n{"job_name": "x"}\n```'  # no goals key
+    orch = Orchestrator(project, {"leader": _stub})
+    with pytest.raises(ValueError, match="goals"):
+        orch._leader_decompose("do something")
+
+
 def test_kickoff_bare_list_decompose_keeps_job_slug_unset(project: Project):
     """Back-compat: a Leader still emitting the old bare-array decompose still
     parses, and job_slug stays unset (no name → delivery falls back as before)."""
