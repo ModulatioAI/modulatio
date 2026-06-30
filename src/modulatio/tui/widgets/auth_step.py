@@ -152,8 +152,14 @@ class AuthStep(Vertical):
                 widgets.append(Static(f"Need one? {self.provider.signup_url}"))
         elif a.auth_type.startswith("oauth"):
             ready, hint = pc.auth_status(a)
-            widgets.append(Static("✓ signed in — ready." if ready
-                                  else f"Not signed in. {hint}"))
+            if a.beta:
+                # A beta OAuth method can be signed-in yet not actually usable
+                # (e.g. Grok: the CLI token isn't accepted by the xAI API) —
+                # show its caveat, never a misleading "signed in — ready".
+                widgets.append(Static(a.oauth_hint or "Beta — not functional yet."))
+            else:
+                widgets.append(Static("✓ signed in — ready." if ready
+                                      else f"Not signed in. {hint}"))
         elif a.auth_type == "none" and not is_custom:
             widgets.append(Static("No auth needed — local server."))
         async with self._render_lock:

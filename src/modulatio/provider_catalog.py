@@ -176,8 +176,16 @@ XAI = Provider(
         # ~/.grok/auth.json. Beta — pending live validation.
         AuthOption(
             auth_type="oauth_xai",
-            label="Sign in with Grok (OAuth)",
-            oauth_hint="install + log in with the Grok CLI (x.ai/cli)",
+            label="Sign in with Grok (OAuth — not supported yet)",
+            # The Grok CLI's OAuth token is scoped to the CLI's own client, not
+            # the public xAI API — api.x.ai rejects it ("could not be validated"),
+            # so it can't list or run models. Kept as a placeholder; steer users
+            # to the working API-key path (which is what comparable tools use).
+            oauth_hint=(
+                "Not functional yet: the Grok CLI OAuth token isn't accepted by "
+                "the xAI model API, so this can't list or run models. Use the API "
+                "key option above (an XAI_API_KEY) to list and run Grok."
+            ),
             beta=True,
         ),
     ],

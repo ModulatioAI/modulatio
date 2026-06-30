@@ -176,7 +176,10 @@ def read_xai_credentials() -> dict[str, Any] | None:
     """Parse ~/.grok/auth.json → the dict holding the OAuth tokens.
 
     Accepts the tokens at the top level or nested one level under a common
-    wrapper key (``tokens``/``oauth``/``credentials``/``auth``). Returns None on
+    wrapper key (``tokens``/``oauth``/``credentials``/``auth``), OR the real
+    Grok CLI layout: nested under a dynamic ``https://auth.x.ai::<uuid>``
+    namespace key with the access token in a field named ``key`` (normalized
+    to ``access_token`` for the readers below). Returns None on
     missing/malformed/wrong-shape input."""
     if not has_xai_credentials():
         return None
@@ -192,6 +195,18 @@ def read_xai_credentials() -> dict[str, Any] | None:
         inner = data.get(wrapper)
         if isinstance(inner, dict) and isinstance(inner.get("access_token"), str):
             return inner
+    # Real Grok CLI layout: a ``https://auth.x.ai::<uuid>`` namespace key whose
+    # value holds the access token under ``key``. Normalize ``key`` →
+    # ``access_token`` so read_xai_token / _refresh_token resolve unchanged.
+    for top_key, inner in data.items():
+        if (
+            isinstance(top_key, str)
+            and top_key.startswith("https://auth.x.ai")
+            and isinstance(inner, dict)
+            and isinstance(inner.get("key"), str)
+            and inner["key"]
+        ):
+            return {**inner, "access_token": inner["key"]}
     return None
 
 

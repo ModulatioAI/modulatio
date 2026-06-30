@@ -148,3 +148,22 @@ async def test_oauth_not_signed_in_blocks_with_hint(monkeypatch):
         await pilot.click("#auth-continue")
         await pilot.pause()
         assert app.configured == []  # not signed in → blocked
+
+
+async def test_beta_oauth_body_shows_caveat_not_misleading_ready(monkeypatch):
+    """A beta OAuth method (Grok) may be signed-in yet non-functional — the
+    body must show its caveat, never a misleading '✓ signed in — ready'."""
+    from textual.widgets import RadioButton, Static
+
+    # pretend signed in so the old code path would have shown "ready"
+    monkeypatch.setattr(pc, "auth_status", lambda a, **k: (True, ""))
+    app = _Host(pc.XAI)  # options: [api_key, oauth_xai(beta)]
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        list(app.query(RadioButton))[1].value = True  # select the beta OAuth option
+        await pilot.pause()
+        body = " ".join(
+            str(s.render()) for s in app.query("#auth-body").first().query(Static)
+        ).lower()
+        assert "ready" not in body
+        assert "api key" in body  # steers to the working path

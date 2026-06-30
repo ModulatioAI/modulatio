@@ -51,12 +51,14 @@ class ModelPicker(Vertical):
         *,
         env_var: str | None = None,
         base_url: str | None = None,
+        auth_type: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.provider = provider
         self._env_var = env_var
         self._base_url = base_url  # custom override
+        self._auth_type = auth_type
         self._models: list[pc.CatalogModel] = []
 
     @property
@@ -83,9 +85,26 @@ class ModelPicker(Vertical):
 
     # ── fetch (worker thread) ───────────────────────────────────────────
 
+    def _listing_key(self) -> str | None:
+        """Resolve the bearer used to list models. API-key providers read
+        their env var; OAuth providers (e.g. xAI/Grok) fall back to the
+        selected auth strategy's token so the live ``/models`` endpoint is
+        reachable without a separate API key — the Grok OAuth token rides
+        the same ``api.x.ai/v1`` host as the key."""
+        key = os.environ.get(self._env_var) if self._env_var else None
+        if key:
+            return key
+        if self._auth_type and self._auth_type.startswith("oauth_"):
+            from modulatio import auth_strategies
+            try:
+                return auth_strategies.build_strategy(self._auth_type).load_token()
+            except Exception:
+                return None
+        return None
+
     @work(thread=True, exclusive=True)
     def _load(self) -> None:
-        key = os.environ.get(self._env_var) if self._env_var else None
+        key = self._listing_key()
         try:
             models = pc.fetch_models(self.provider, api_key=key)
         except Exception:

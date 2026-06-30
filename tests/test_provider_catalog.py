@@ -231,6 +231,19 @@ def test_xai_offers_both_api_key_and_beta_oauth():
     assert oauth.beta is True  # surfaced as "(beta)" in the picker
 
 
+def test_xai_oauth_option_marked_non_functional():
+    """Grok OAuth can't list or run on api.x.ai — the Grok CLI token is the
+    wrong audience for the public xAI API (verified: 403 'could not be
+    validated'). The option is KEPT but clearly marked non-functional and
+    points users at the working API-key path (which is what Hermes uses)."""
+    p = pc.get_provider("xai")
+    oauth = next(a for a in p.auth_options if a.auth_type == "oauth_xai")
+    blurb = f"{oauth.label} {oauth.oauth_hint or ''}".lower()
+    assert any(w in blurb for w in ("not supported", "not functional", "doesn't work",
+                                    "does not work", "not yet"))
+    assert "api key" in blurb  # steer to the path that works
+
+
 def test_oauth_xai_strategy_is_registered():
     from modulatio import auth_strategies
     assert "oauth_xai" in auth_strategies.registered_auth_types()
@@ -253,6 +266,28 @@ def test_xai_oauth_reads_tokens_nested_under_a_wrapper(tmp_path, monkeypatch):
     cred.write_text('{"tokens": {"access_token": "nested-tok"}}')
     monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
     assert oauth_helpers.read_xai_token() == "nested-tok"
+
+
+def test_xai_oauth_reads_real_grok_cli_format(tmp_path, monkeypatch):
+    """The real Grok CLI auth.json nests creds under a dynamic
+    ``https://auth.x.ai::<uuid>`` namespace key, with the access token in a
+    field named ``key`` (not ``access_token``). Live-validated against an
+    actual login — the spec-guessed layouts above missed this shape."""
+    import json
+
+    from modulatio import oauth_helpers
+    cred = tmp_path / "auth.json"
+    cred.write_text(json.dumps({
+        "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+            "key": "grok-access-tok",
+            "refresh_token": "grok-refresh-tok",
+            "expires_at": "2026-12-31T00:00:00Z",
+            "oidc_issuer": "https://auth.x.ai",
+        }
+    }))
+    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
+    assert oauth_helpers.read_xai_token() == "grok-access-tok"
+    assert oauth_helpers.read_xai_refresh_token() == "grok-refresh-tok"
 
 
 def test_xai_oauth_auth_status_reflects_grok_login(tmp_path, monkeypatch):

@@ -109,3 +109,28 @@ async def test_custom_types_the_model_id():
         await pilot.click("#mp-custom-go")
         await pilot.pause()
         assert app.chosen == [("custom", "my-model-v1")]
+
+
+def test_listing_key_falls_back_to_oauth_token(monkeypatch):
+    """xAI OAuth has no API-key env var, so the picker must reach the live
+    /models list via the selected auth strategy's token (the Grok CLI
+    bearer) — otherwise the picklist comes back empty."""
+    from modulatio import auth_strategies
+
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+
+    class _Strat:
+        def load_token(self):
+            return "grok-oauth-tok"
+
+    monkeypatch.setattr(auth_strategies, "build_strategy", lambda *a, **k: _Strat())
+    mp = ModelPicker(pc.XAI, env_var=None, auth_type="oauth_xai")
+    assert mp._listing_key() == "grok-oauth-tok"
+
+
+def test_listing_key_prefers_env_api_key(monkeypatch):
+    """An API-key provider still reads its env var — OAuth fallback only
+    kicks in when no key is present."""
+    monkeypatch.setenv("XAI_API_KEY", "xai-realkey")
+    mp = ModelPicker(pc.XAI, env_var="XAI_API_KEY", auth_type="api_key")
+    assert mp._listing_key() == "xai-realkey"

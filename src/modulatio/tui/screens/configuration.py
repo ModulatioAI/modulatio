@@ -243,7 +243,7 @@ class ConfigScreen(Vertical):
         if provider is not None:
             await self._swap(ModelPicker(
                 provider, env_var=event.env_var, base_url=event.base_url,
-                id="cfg-mp",
+                auth_type=event.auth_type, id="cfg-mp",
             ))
 
     async def on_model_picker_model_chosen(
