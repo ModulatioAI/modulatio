@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from modulatio import config, cron
+from modulatio import vault
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +30,7 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DEFAULTS_FILE", cfg_dir / "defaults.json")
     config.save_defaults({"vault_root": str(tmp_path / "vault")})
     config.reload()
+    vault.init_project("TEST", "TEST", "o", exist_ok=True)
     yield
 
 
@@ -90,10 +92,12 @@ def _worker(cfg_dir_str, count_file, ready, go):
 
     from modulatio import config as _config
     from modulatio import cron as _cron
+    from modulatio import vault as _vault
 
     _config.CONFIG_DIR = Path(cfg_dir_str)
     _config.DEFAULTS_FILE = Path(cfg_dir_str) / "defaults.json"
     _config.reload()
+    _vault.reload()  # sync VAULT_ROOT (a real daemon process does this at startup)
 
     def fake_add_task(**kwargs):
         # Widen the window between check_due and the advancing update so both
@@ -123,6 +127,8 @@ def test_concurrent_processes_fire_due_job_once(tmp_path):
     config.DEFAULTS_FILE = cfg_dir / "defaults.json"
     config.save_defaults({"vault_root": str(vault_root)})
     config.reload()
+    vault.reload()  # sync VAULT_ROOT to this test's vault (matches the subprocess)
+    vault.init_project("TEST", "TEST", "o", exist_ok=True)  # the cron's project must exist
     _add_overdue_job()
 
     count_file = tmp_path / "fires.txt"

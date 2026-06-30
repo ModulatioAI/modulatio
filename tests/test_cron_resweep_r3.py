@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from modulatio import config, cron
+from modulatio import vault
 from tests._thread_check import run_threads_checked
 
 
@@ -37,6 +38,7 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DEFAULTS_FILE", cfg_dir / "defaults.json")
     config.save_defaults({"vault_root": str(tmp_path / "vault")})
     config.reload()
+    vault.init_project("TEST", "TEST", "o", exist_ok=True)
     yield
 
 

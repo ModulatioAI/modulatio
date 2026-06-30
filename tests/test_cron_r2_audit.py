@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from modulatio import config, cron, heartbeat
+from modulatio import vault
 from modulatio import job_templates as jt
 
 
@@ -26,6 +27,7 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DEFAULTS_FILE", cfg_dir / "defaults.json")
     config.save_defaults({"vault_root": str(tmp_path / "vault")})
     config.reload()
+    vault.init_project("PHI", "PHI", "o", exist_ok=True)
     monkeypatch.setattr(jt, "_JT_ROOT", tmp_path / "shared" / "job_templates")
     monkeypatch.setattr(jt, "_SEED_JT_ROOT", tmp_path / "seed" / "job_templates")
     yield

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from modulatio import config, cron, heartbeat
+from modulatio import config, cron, heartbeat, vault
 
 
 @pytest.fixture(autouse=True)
@@ -159,6 +159,34 @@ def test_list_jobs_filters_by_project():
     assert aaa[0]["project_code"] == "AAA"
 
 
+def test_cron_fails_closed_when_project_deleted(monkeypatch):
+    """Ship-blocker: a cron whose project folder is gone must NOT fire — no
+    resurrect-and-run on a default team. It disables itself + opens ONE ticket
+    in the generic SYSTEM project, and never re-creates the deleted project."""
+    from modulatio import store, vault
+    enqueued: list = []
+    monkeypatch.setattr(heartbeat, "add_task", lambda **kw: enqueued.append(kw))
+    job = cron.add(name="ghost-job", schedule="6h", project_code="GHOST",
+                   objective="do the thing")
+    assert not vault.project_dir("GHOST").exists()
+    cron._dispatch_one(cron.get(job["id"]), datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert enqueued == []                                # never fired
+    assert cron.get(job["id"])["enabled"] is False       # disabled — no zombie
+    assert not vault.project_dir("GHOST").exists()       # NOT resurrected
+    assert any("GHOST" in t.title for t in store.list_tickets("SYSTEM"))
+
+
+def test_cron_fires_normally_when_project_exists(monkeypatch):
+    """Back-compat: a cron for a project that still exists enqueues as before."""
+    from modulatio import vault
+    enqueued: list = []
+    monkeypatch.setattr(heartbeat, "add_task", lambda **kw: enqueued.append(kw))
+    vault.init_project("REAL", "Real", "obj", exist_ok=True)
+    job = cron.add(name="real-job", schedule="6h", project_code="REAL", objective="o")
+    cron._dispatch_one(cron.get(job["id"]), datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert len(enqueued) == 1 and enqueued[0]["project_code"] == "REAL"
+
+
 def test_enable_disable_round_trip():
     j = cron.add(name="x", schedule="6h", project_code="X", objective="o")
     assert cron.disable(j["id"]) is True
@@ -205,6 +233,7 @@ def test_check_due_skips_disabled_jobs():
 
 def test_dispatch_due_adds_heartbeat_task_and_advances_next_run():
     j = cron.add(name="due", schedule="6h", project_code="X", objective="produce x")
+    vault.init_project("X", "X", "o", exist_ok=True)
     past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
     cron.update(j["id"], next_run=past)
     fired = cron.dispatch_due()
@@ -251,6 +280,7 @@ def test_dispatch_due_interval_no_drift_from_scheduled_time():
     """Interval jobs must advance from the SCHEDULED next_run, not the dispatch
     instant — otherwise each coarse-poll fire pushes the schedule later forever."""
     j = cron.add(name="hourly_job", schedule="1h", project_code="X", objective="o")
+    vault.init_project("X", "X", "o", exist_ok=True)
     # Scheduled to run at T; the daemon only notices it 40s late at `now`.
     scheduled = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=40)
     now = scheduled + timedelta(seconds=40)
@@ -270,6 +300,7 @@ def test_dispatch_due_interval_no_cumulative_drift_over_many_fires():
     """Over repeated fires with a constant poll lag, the schedule must stay on
     the original grid rather than accumulate the lag each time."""
     j = cron.add(name="grid", schedule="30m", project_code="X", objective="o")
+    vault.init_project("X", "X", "o", exist_ok=True)
     start = datetime.now(timezone.utc).replace(microsecond=0)
     cron.update(j["id"], next_run=start.isoformat(timespec="seconds"))
 
@@ -287,6 +318,7 @@ def test_dispatch_due_interval_catches_up_past_now_after_downtime():
     """After a long daemon outage, the advanced next_run must be strictly in the
     future (skip missed slots) — not stuck in the past causing immediate refire."""
     j = cron.add(name="catchup", schedule="10m", project_code="X", objective="o")
+    vault.init_project("X", "X", "o", exist_ok=True)
     scheduled = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=3)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     cron.update(j["id"], next_run=scheduled.isoformat(timespec="seconds"))

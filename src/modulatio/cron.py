@@ -538,12 +538,59 @@ def dispatch_due(*, now: Optional[datetime] = None) -> list[dict]:
     return fired
 
 
+#: Generic, project-agnostic home for system notices (e.g. a cron whose project
+#: was deleted). A real project is never resurrected to hold these — they go here.
+_SYSTEM_PROJECT_CODE = "SYSTEM"
+
+
+def _open_orphan_cron_ticket(job: dict) -> None:
+    """Open ONE ticket — in the generic SYSTEM project — recording that a cron's
+    project no longer exists, so the disabled job is visible + actionable.
+    Best-effort: a ticket failure must never wedge the dispatch loop."""
+    try:
+        import uuid
+
+        from modulatio import store, vault
+        from modulatio.types import TicketPriority
+        vault.init_project(
+            _SYSTEM_PROJECT_CODE, "System",
+            "System-level notices (orphaned crons, etc.)", exist_ok=True,
+        )
+        code = job["project_code"]
+        store.create_ticket(
+            project_id=uuid.uuid5(uuid.NAMESPACE_DNS, _SYSTEM_PROJECT_CODE),
+            project_code=_SYSTEM_PROJECT_CODE,
+            priority=TicketPriority.CRITICAL,
+            title=(f"Cron '{job.get('name', job['id'])}' disabled — "
+                   f"project '{code}' does not exist"),
+            body=(f"The scheduled job targeted project '{code}', which no longer "
+                  "exists (its folder was deleted, taking its team and Job Template "
+                  "with it). The job was DISABLED rather than re-creating the project "
+                  "and running on a default team. Re-create the project to resume, or "
+                  "delete this cron job."),
+            actor="cron",
+        )
+    except Exception:  # noqa: BLE001 — best-effort; a ticket failure must not wedge dispatch
+        logger.exception("Cron %s: failed to open orphan-project ticket", job.get("id"))
+
+
 def _dispatch_one(job: dict, now: datetime) -> bool:
     """Add a heartbeat task for one due job and advance its next_run.
 
     Returns True if the heartbeat dispatch succeeded. Always called with the
     cross-process dispatch lock held (see ``dispatch_due``).
     """
+    # Fail-closed: if the project this cron belongs to no longer exists, do NOT
+    # fire it — that would resurrect an empty project shell and run on a DEFAULT
+    # team (not the deleted project's own), losing the JT too. Disable the job
+    # (stop the zombie) + open one SYSTEM ticket, and bow out without enqueuing.
+    from modulatio import vault
+    if not vault.project_dir(job["project_code"]).exists():
+        _open_orphan_cron_ticket(job)
+        update(job["id"], enabled=False,
+               last_run=now.isoformat(timespec="seconds"),
+               last_status="error:project-deleted")
+        return False
     dispatch_ok = True
     status = "ok"
     try:
