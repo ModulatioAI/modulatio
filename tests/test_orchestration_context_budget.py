@@ -694,6 +694,102 @@ def test_attempt_decompose_splits_into_children(project_with_run, monkeypatch, t
     assert children[0].output_path == "drafts/aider.md"
 
 
+def test_attempt_decompose_children_inherit_assigned_agent(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Overflow children run INLINE (not through wave dispatch), so they must
+    inherit the parent's assigned agent — otherwise execution falls back to the
+    ``default_producer_role`` placeholder ("drafter") and the run reports the
+    skill name where the agent's name belongs."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"x.md"},'
+        '{"description":"b","output_path":"y.md"}]')
+    parent = _make_task()
+    parent.assigned_agent_id = "jan"
+    children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert children is not None
+    assert all(c.assigned_agent_id == "jan" for c in children)
+
+
+def test_attempt_decompose_children_inherit_lifetime_budget(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The attempt budget is bound to the TASK's lifetime (keystone #18). A
+    child must carry the parent's consumed ``lifetime_attempts`` forward — else
+    splitting a churn-exhausted task hands each child a fresh full budget,
+    skirting the very cap #18 ties to the task."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"x.md"},'
+        '{"description":"b","output_path":"y.md"}]')
+    parent = _make_task()
+    parent.lifetime_attempts = 4  # parent already burned its budget
+    children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert children is not None
+    assert all(c.lifetime_attempts == 4 for c in children)
+
+
+def test_attempt_decompose_children_inherit_retry_ceiling(
+    project_with_run, monkeypatch, tmp_path
+):
+    """``max_retries`` is the operator-set CEILING (future settings knob). A
+    child must inherit the parent's ceiling — else a knob set BELOW the model
+    default lets a split resurrect the higher default and mint extra tries.
+    Parent retries=2, fully spent → child has zero remaining (→ QC-as-fixer)."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"x.md"},'
+        '{"description":"b","output_path":"y.md"}]')
+    parent = _make_task()
+    parent.max_retries = 2          # operator knob set below the default of 4
+    parent.lifetime_attempts = 3    # spent its full (2 + 1) budget
+    children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert children is not None
+    assert all(c.max_retries == 2 for c in children)
+    # the invariant: zero tries left, no resurrected ceiling
+    assert all(
+        max(0, (c.max_retries + 1) - c.lifetime_attempts) == 0 for c in children
+    )
+
+
+@pytest.mark.parametrize("cap", [2, 3, 4, 9])
+def test_decompose_child_spent_budget_runs_zero_producer_attempts(
+    project_with_run, monkeypatch, tmp_path, cap
+):
+    """End-to-end through the real run path, for ANY operator-set ceiling
+    (retries-per-task is a settings knob: 2-of-3, 3-of-4, 9-of-10, …): a parent
+    that has spent its full lifetime budget splits, and the children — inheriting
+    BOTH the ceiling and the spent count — run ZERO new producer attempts (forced
+    straight to the QC-as-fixer floor). No setting value lets a split mint a try."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the budget mechanics
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"x.md"},'
+        '{"description":"b","output_path":"y.md"}]')
+    calls = {"n": 0}
+
+    def _spy(task, corrective_notes=""):
+        calls["n"] += 1
+        task.lifetime_attempts += 1
+        path = orch._resolve_draft_path(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"draft {calls['n']}")
+        return path, f"sum{calls['n']}", 10
+
+    orch._producer_execute = _spy  # type: ignore[assignment]
+    parent = _make_task()
+    parent.max_retries = cap
+    parent.lifetime_attempts = cap + 1  # fully spent for THIS setting
+    summary = RunSummary(project=project_with_run)
+    handled = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
+    assert handled is True
+    assert calls["n"] == 0, (
+        f"cap={cap}: a spent parent's split children must run ZERO producer "
+        f"attempts, but {calls['n']} ran — the split minted fresh tries"
+    )
+
+
 def test_attempt_decompose_recursion_cap(project_with_run, monkeypatch, tmp_path):
     """At the depth cap, don't split again — escalate (genuine stuck)."""
     orch = _make_orchestrator(project_with_run)

@@ -9405,6 +9405,25 @@ class Orchestrator:
                 required_skills=list(t.required_skills),
                 required_capabilities=list(t.required_capabilities),
                 depends_on=list(t.depends_on),  # children inherit parent's deps
+                # Children run INLINE (not through wave dispatch), so they must
+                # carry the parent's already-routed agent — else execution
+                # falls back to the default_producer_role placeholder and the
+                # run reports the skill name where the agent's name belongs.
+                assigned_agent_id=t.assigned_agent_id,
+                # Keystone #18: the attempt budget is bound to the task's
+                # LIFETIME. A split is the SAME task's work, so the child carries
+                # the parent's whole try budget forward — no door to mint extra
+                # tries:
+                #   • max_retries  — the (operator-settable) CEILING; inheriting
+                #     it stops a split resurrecting the model default when the
+                #     knob is set lower.
+                #   • lifetime_attempts — the consumed count; a churn-exhausted
+                #     parent yields children with zero remaining (→ QC-as-fixer),
+                #     while a parent that overflowed early still has room to work.
+                #   • retry_count — so a child's "after N retries" report is true.
+                max_retries=t.max_retries,
+                lifetime_attempts=t.lifetime_attempts,
+                retry_count=t.retry_count,
                 output_path=(str(raw_path).strip() if raw_path else None),
                 decompose_depth=t.decompose_depth + 1,
                 status=TaskStatus.PENDING,
