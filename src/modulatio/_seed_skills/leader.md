@@ -56,8 +56,13 @@ produces a goal nobody downstream can build. The same rule binds each
 goal's success_criteria: spell out what is required.
 
 Decompose this objective into goals, following the standards above. Respond
-with ONLY a JSON array, fenced in ```json ... ```. No prose outside the
-fence.
+with ONLY a JSON object, fenced in ```json ... ```. No prose outside the fence:
+
+    {{"job_name": "<short kebab-case name for THIS run, e.g. ai-ml-cost-research>",
+      "goals": [ ...one object per goal (schema below)... ]}}
+
+`job_name` is your short, human-readable name for the run as a whole — decide it
+AFTER you have the goals in mind; it titles the run's output folder + file.
 
 Each goal has:
 - description: string

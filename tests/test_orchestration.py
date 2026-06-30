@@ -266,6 +266,20 @@ def test_kickoff_sets_job_slug_from_leader_job_name(project: Project):
     assert summary.job_slug == "ai-ml-cost-research"
 
 
+def test_leader_decompose_seed_prompt_asks_for_job_name():
+    """Feature B wiring the stubbed tests can't see: the REAL decompose prompt
+    is the seed skill 'leader' (``_prompt`` loads it; the Python constant is only
+    a fallback). The model must be ASKED for job_name THERE — otherwise it
+    returns a bare list and Feature B is dead (no naming, no JT capture), which
+    is exactly what the live run showed. Also assert the seed still .format()s
+    with the decompose slots (a stray single brace would break it at runtime)."""
+    from modulatio import skills
+    body = skills.load("leader")
+    assert body.strip(), "seed 'leader' decompose prompt is missing/empty"
+    assert "job_name" in body, "seed decompose prompt must ask the model for job_name"
+    body.format(objective="X", code="C", standards="S", team_capacity="T", attachments="A")
+
+
 def test_decompose_dict_missing_goals_raises(project: Project):
     """Nemo MED: a decompose object that OMITS 'goals' must not silently run an
     empty plan — it's malformed and must raise (distinct from an explicit []
