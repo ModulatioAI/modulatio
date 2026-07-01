@@ -117,6 +117,33 @@ def test_delete_ticket_removes_file(project: Path):
     assert store.delete_ticket(PROJECT_CODE, t.id) is False
 
 
+def test_delete_ticket_rejects_path_traversal(project: Path, tmp_path: Path):
+    """A crafted ticket_id with parent refs must NOT let delete_ticket unlink a
+    file outside tickets/ (Wild Bill BLOCK: '../../target' deleted vault-root
+    siblings). The unsafe id is refused (returns False) and the outside file
+    survives."""
+    from uuid import uuid4
+    # A real ticket in the proper place.
+    store.create_ticket(
+        project_id=uuid4(), project_code=PROJECT_CODE,
+        priority=TicketPriority.MINOR, title="legit",
+    )
+    # Plant a sibling ABOVE tickets/ that a traversal id would target.
+    tickets_dir = vault.project_dir(PROJECT_CODE) / "tickets"
+    outside = tickets_dir.parent / "target.md"      # <project>/target.md
+    outside.write_text("do not delete me")
+    sibling = tickets_dir.parent / "agents.md"
+    sibling.write_text("nor me")
+
+    assert store.delete_ticket(PROJECT_CODE, "../target") is False
+    assert store.delete_ticket(PROJECT_CODE, "../agents") is False
+    assert store.delete_ticket(PROJECT_CODE, "../../target") is False
+    assert store.delete_ticket(PROJECT_CODE, "a/b") is False
+    # Nothing outside tickets/ was touched.
+    assert outside.exists()
+    assert sibling.exists()
+
+
 def test_tickets_are_project_durable_across_runs(project: Path):
     """A ticket outlives the run that opened it: created during run A, it's
     visible from run B (and project scope) and numbered project-wide. Tickets

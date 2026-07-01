@@ -75,8 +75,8 @@ def test_omitted_count_present_and_plausible(tmp_path):
 # ── this-run-first + recency ordering (reuse: producers must see their own
 #    run's work + the most recent prior work, not have it truncated away) ────
 
-def test_digest_priority_prefix_puts_this_run_first(tmp_path):
-    """With a priority_prefix (the current run), this run's artifacts are
+def test_digest_hoist_run_id_puts_this_run_first(tmp_path):
+    """With a hoist_run_id (the current run), this run's artifacts are
     emitted BEFORE any prior run's — even though the prior run sorts earlier
     alphabetically. Fixes the saturated-digest bug where a run couldn't see
     its own freshly-produced sections (they sorted last, got truncated)."""
@@ -86,7 +86,7 @@ def test_digest_priority_prefix_puts_this_run_first(tmp_path):
     (root / "20260701-new").mkdir(parents=True)
     (root / "20260701-new" / "zzz.md").write_text("# new\nnew body\n")
 
-    d = build_digest(root, priority_prefix="20260701-new")
+    d = build_digest(root, hoist_run_id="20260701-new")
     assert d.index("20260701-new/zzz.md") < d.index("20260629-old/aaa.md")
 
 
@@ -98,15 +98,15 @@ def test_digest_prior_runs_ordered_most_recent_first(tmp_path):
     for rid in ("20260601-a", "20260615-b", "20260630-c"):
         (root / rid).mkdir(parents=True)
         (root / rid / "s.md").write_text(f"# {rid}\n")
-    d = build_digest(root, priority_prefix="does-not-exist")
+    d = build_digest(root, hoist_run_id="does-not-exist")
     i_recent = d.index("20260630-c/s.md")
     i_mid = d.index("20260615-b/s.md")
     i_old = d.index("20260601-a/s.md")
     assert i_recent < i_mid < i_old
 
 
-def test_digest_no_priority_prefix_stays_alphabetical(tmp_path):
-    """Back-compat: without priority_prefix, ordering is unchanged
+def test_digest_no_hoist_run_id_stays_alphabetical(tmp_path):
+    """Back-compat: without hoist_run_id, ordering is unchanged
     (alphabetical by relative path)."""
     root = tmp_path / "artifacts"
     root.mkdir()

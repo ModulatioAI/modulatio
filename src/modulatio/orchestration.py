@@ -4083,6 +4083,10 @@ class Orchestrator:
                     project_code=self.project.code,
                     query=topic,
                     freshness_class="semi-stable",
+                    # Stamp the verification time explicitly so the reuse-TTL check
+                    # doesn't depend on file mtime (which a backup/restore or a
+                    # `cp -p` could preserve, stranding a note as stale-on-arrival).
+                    last_verified_at=datetime.now(timezone.utc).isoformat(),
                 )
             chunks.append(f"Topic: {topic}\n\n{body}")
         return "\n\n---\n\n".join(chunks)
@@ -4101,12 +4105,12 @@ class Orchestrator:
             # grounded work from prior runs of the same project instead of
             # re-fetching it. build_digest is hard-capped (MAX_DIGEST_CHARS
             # + per-file byte cap), so spanning runs can't bloat the prompt.
-            # priority_prefix hoists THIS run's own artifacts to the front
+            # hoist_run_id hoists THIS run's own artifacts to the front
             # (never truncated) then orders priors most-recent-first, so the
             # reusable material a producer needs survives the cap.
             artifacts_root = project_dir(self.project.code) / "artifacts"
             return team_canvas.build_digest(
-                artifacts_root, priority_prefix=self.project.run_id
+                artifacts_root, hoist_run_id=self.project.run_id
             )
         except Exception:
             return ""
@@ -9417,14 +9421,31 @@ class Orchestrator:
         except Exception:
             return None
         specs = _parse_redecompose_specs(resp)
+        # Keystone #18 (task-bound, no reset): the split SHARES the parent's
+        # REMAINING budget — the children do NOT each get a fresh copy of it.
+        # Spinning up a child on a subtask counts as ONE try against the
+        # task-bound budget, so only the first ``parent_remaining`` children are
+        # granted a producer attempt; any beyond that fall straight to the forced
+        # QC-as-fixer floor. Total producer attempts across a split therefore never
+        # exceed what the parent had left — a split cannot multiply the budget by
+        # the child count (M1, Nemo hull).
+        retry_budget = max(t.max_retries, 0)
+        parent_remaining = max(0, (retry_budget + 1) - t.lifetime_attempts)
         children: "list[Task]" = []
-        for i, spec in enumerate(specs, 1):
+        for spec in specs:
             desc = str(spec.get("description") or "").strip()
             if not desc:
                 continue
             raw_path = spec.get("output_path")
+            idx = len(children)  # 0-based position among the VALID children
+            # One try per child, drawn from the shared remaining: within budget →
+            # a single producer attempt (lifetime one below the ceiling → remaining
+            # 1); beyond it → zero remaining (lifetime AT the ceiling → QC-as-fixer).
+            child_lifetime = (
+                retry_budget if idx < parent_remaining else retry_budget + 1
+            )
             children.append(Task(
-                id=f"{t.id}-D{i}",
+                id=f"{t.id}-D{idx + 1}",
                 project_id=t.project_id,
                 goal_id=t.goal_id,
                 description=desc,
@@ -9437,19 +9458,15 @@ class Orchestrator:
                 # falls back to the default_producer_role placeholder and the
                 # run reports the skill name where the agent's name belongs.
                 assigned_agent_id=t.assigned_agent_id,
-                # Keystone #18: the attempt budget is bound to the task's
-                # LIFETIME. A split is the SAME task's work, so the child carries
-                # the parent's whole try budget forward — no door to mint extra
-                # tries:
                 #   • max_retries  — the (operator-settable) CEILING; inheriting
                 #     it stops a split resurrecting the model default when the
                 #     knob is set lower.
-                #   • lifetime_attempts — the consumed count; a churn-exhausted
-                #     parent yields children with zero remaining (→ QC-as-fixer),
-                #     while a parent that overflowed early still has room to work.
+                #   • lifetime_attempts — STAGGERED (not copied) so the children
+                #     share the parent's remaining budget: each qualifying child
+                #     gets one try, the rest go straight to QC-as-fixer.
                 #   • retry_count — so a child's "after N retries" report is true.
                 max_retries=t.max_retries,
-                lifetime_attempts=t.lifetime_attempts,
+                lifetime_attempts=child_lifetime,
                 retry_count=t.retry_count,
                 output_path=(str(raw_path).strip() if raw_path else None),
                 decompose_depth=t.decompose_depth + 1,

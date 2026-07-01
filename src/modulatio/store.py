@@ -718,15 +718,31 @@ def delete_ticket(project_code: str, ticket_id: str, run_id: str | None = None) 
     deleted, False if no matching ticket existed — idempotent, so an operator
     double-pressing 'd' is a no-op, never an error.
 
+    ``run_id`` is accepted for signature parity with the other ticket verbs but
+    does NOT scope the delete: tickets are project-durable, so ``_ticket_path``
+    resolves under the project root regardless of run (see its note).
+
     Also clears any quarantined ``<id>.broken*.md`` sibling (see
     :func:`_next_ticket_number`) so a corrupt-but-preserved record is removed
     too, not left lingering invisibly."""
+    # A ticket id must be a bare filename component. A crafted id with path
+    # separators or parent refs (``../../target``) would otherwise steer the
+    # unlink OUTSIDE tickets/ — a destructive misfire. Refuse it outright before
+    # any path/glob construction (belt); resolve-containment below is suspenders.
+    if not ticket_id or Path(ticket_id).name != ticket_id:
+        return False
+    tickets_dir = (project_dir(project_code) / "tickets").resolve()
     with _store_lock:
         path = _ticket_path(project_code, ticket_id, run_id=run_id)
         removed = False
         for p in [path, *path.parent.glob(f"{ticket_id}.broken*.md")]:
             try:
-                p.unlink()
+                resolved = p.resolve()
+                resolved.relative_to(tickets_dir)  # must stay under tickets/
+            except (ValueError, OSError):
+                continue  # traversal escape or unresolvable — never unlink it
+            try:
+                resolved.unlink()
                 removed = True
             except FileNotFoundError:
                 pass

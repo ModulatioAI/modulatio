@@ -716,18 +716,23 @@ def test_attempt_decompose_children_inherit_lifetime_budget(
     project_with_run, monkeypatch, tmp_path
 ):
     """The attempt budget is bound to the TASK's lifetime (keystone #18). A
-    child must carry the parent's consumed ``lifetime_attempts`` forward — else
-    splitting a churn-exhausted task hands each child a fresh full budget,
-    skirting the very cap #18 ties to the task."""
+    churn-exhausted parent (spent its full budget) must yield children with ZERO
+    remaining — every child lands at the ceiling+1 (→ QC-as-fixer), so splitting a
+    spent task hands NO child a fresh budget. (The children SHARE the parent's
+    remaining rather than each copying it — see the partial-remaining test.)"""
     orch = _make_orchestrator(project_with_run)
     _planner_returns(monkeypatch,
         '[{"description":"a","output_path":"x.md"},'
         '{"description":"b","output_path":"y.md"}]')
-    parent = _make_task()
-    parent.lifetime_attempts = 4  # parent already burned its budget
+    parent = _make_task()               # max_retries=3
+    parent.lifetime_attempts = 4        # spent: remaining = (3+1) - 4 = 0
     children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
     assert children is not None
-    assert all(c.lifetime_attempts == 4 for c in children)
+    # Spent parent → every child at ceiling+1 → zero remaining.
+    assert all(c.lifetime_attempts == parent.max_retries + 1 for c in children)
+    assert all(
+        max(0, (c.max_retries + 1) - c.lifetime_attempts) == 0 for c in children
+    )
 
 
 def test_attempt_decompose_children_inherit_retry_ceiling(
@@ -787,6 +792,43 @@ def test_decompose_child_spent_budget_runs_zero_producer_attempts(
     assert calls["n"] == 0, (
         f"cap={cap}: a spent parent's split children must run ZERO producer "
         f"attempts, but {calls['n']} ran — the split minted fresh tries"
+    )
+
+
+def test_decompose_children_share_parent_remaining_not_multiply(
+    project_with_run, monkeypatch, tmp_path
+):
+    """M1 (Nemo hull): a PARTIAL-remaining split must SHARE the parent's remaining
+    budget, not hand each child a fresh copy. Spinning up a child on a subtask is
+    ONE try against the task-bound budget, so a parent with 1 try left split into
+    2 children runs exactly ONE producer attempt total (the 2nd child → QC-as-fixer)
+    — never 2. A split can't multiply the budget by the child count."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the budget mechanics
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"x.md"},'
+        '{"description":"b","output_path":"y.md"}]')
+    calls = {"n": 0}
+
+    def _spy(task, corrective_notes=""):
+        calls["n"] += 1
+        task.lifetime_attempts += 1
+        path = orch._resolve_draft_path(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"draft {calls['n']}")
+        return path, f"sum{calls['n']}", 10
+
+    orch._producer_execute = _spy  # type: ignore[assignment]
+    parent = _make_task()
+    parent.max_retries = 3
+    parent.lifetime_attempts = 3          # remaining = (3+1) - 3 = 1
+    summary = RunSummary(project=project_with_run)
+    handled = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
+    assert handled is True
+    assert calls["n"] == 1, (
+        f"a parent with 1 try left, split into 2 children, must run exactly ONE "
+        f"producer attempt (shared budget) — but {calls['n']} ran; the split "
+        f"multiplied the budget by the child count"
     )
 
 

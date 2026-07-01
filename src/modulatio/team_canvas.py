@@ -77,20 +77,20 @@ def _within_tree(path: Path, root_resolved: Path) -> bool:
     return True
 
 
-def build_digest(artifacts_root: Path, *, priority_prefix: str | None = None) -> str:
+def build_digest(artifacts_root: Path, *, hoist_run_id: str | None = None) -> str:
     """Render a markdown digest of ``artifacts_root``'s contents.
 
     Empty / missing dir → an empty marker line so the prompt slot
     has a consistent shape (producers don't see a blank or missing
     placeholder).
 
-    ``priority_prefix`` (the CURRENT run id, when the root spans multiple
+    ``hoist_run_id`` (the CURRENT run id, when the root spans multiple
     runs — the durable ``<project>/artifacts/`` tree) reorders the digest so
     reuse works under the char cap: this run's OWN artifacts (top-level dir ==
-    ``priority_prefix``) are emitted FIRST — a producer must always see its own
+    ``hoist_run_id``) are emitted FIRST — a producer must always see its own
     freshly-produced siblings, never have them truncated — then PRIOR runs
     most-recent-first (the freshest prior work is the most reusable, so it
-    survives the cap before older runs). Without ``priority_prefix`` (single-run
+    survives the cap before older runs). Without ``hoist_run_id`` (single-run
     root, legacy callers) ordering is plain alphabetical by relative path, so
     output stays stable across runs.
 
@@ -126,14 +126,18 @@ def build_digest(artifacts_root: Path, *, priority_prefix: str | None = None) ->
         parts = p.relative_to(artifacts_root).parts
         return parts[0] if len(parts) > 1 else ""
 
-    if priority_prefix:
+    if hoist_run_id:
         # Stable sort, applied in reverse-priority order: alphabetical within a
         # run, then most-recent run first, then this run's own files hoisted to
         # the very front. So a producer sees its own work first, then the
         # freshest prior work — the reusable material that must survive the cap.
         files.sort(key=lambda p: str(p.relative_to(artifacts_root)))
+        # "Most-recent run first" relies on the INVARIANT that a run id is
+        # timestamp-prefixed (``YYYYMMDDTHHMMSSZ-<hex6>``, see vault.generate_run_id),
+        # so reverse-lexical order == reverse-chronological. If that format ever
+        # changes, sort by mtime instead.
         files.sort(key=_run_component, reverse=True)
-        files.sort(key=lambda p: _run_component(p) != priority_prefix)
+        files.sort(key=lambda p: _run_component(p) != hoist_run_id)
     else:
         files.sort(key=lambda p: str(p.relative_to(artifacts_root)))
 

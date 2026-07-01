@@ -924,3 +924,15 @@ async def test_finished_product_is_flagged_and_hoisted(tui_vault_with_artifacts)
         assert "final.md" in labels[0]            # hoisted to the top
         # a non-deliverable artifact is not flagged
         assert "★" not in next(x for x in labels if "art-t-001.md" in x)
+
+
+def test_is_artifact_file_rejects_symlink(tmp_path):
+    """The artifacts listing must skip symlinks so a planted link can't surface
+    an out-of-tree target for preview/stale/export/delete (Wild Bill MEDIUM)."""
+    from modulatio.tui.screens.artifacts import _is_artifact_file
+    real = tmp_path / "real.md"
+    real.write_text("# real\n")
+    assert _is_artifact_file(real) is True
+    link = tmp_path / "link.md"
+    link.symlink_to(real)
+    assert _is_artifact_file(link) is False

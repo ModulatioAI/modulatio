@@ -89,6 +89,12 @@ def _is_artifact_file(path: Path) -> bool:
     starting with ``.``. Filenames starting with ``.`` (dotfiles)
     are also refused — they typically hold secrets or local state.
     """
+    # Skip symlinks (mirrors team_canvas's guard): a producer could plant
+    # ``research/leak.md -> /etc/passwd`` and, since is_file() follows the link,
+    # the listing would surface it and preview/stale/export would read the
+    # out-of-tree target. Refuse it here — the single gate feeding the listing.
+    if path.is_symlink():
+        return False
     if not path.is_file():
         return False
     if path.suffix.lower() not in _ARTIFACT_EXTENSIONS:
@@ -162,7 +168,11 @@ class ArtifactsScreen(Vertical):
         """Absolute paths of the LATEST run's finished deliverables — the files
         the operator actually asked for. Used to ★-flag + hoist them out of the
         research/draft pile. Best-effort: any failure returns empty (the flag is
-        cosmetic and must never block the listing)."""
+        cosmetic and must never block the listing).
+
+        Scoped to the LATEST run by design: the ★ marks what the operator just
+        produced. Prior runs' deliverables still appear in the durable list, just
+        unstarred (the screen doesn't track per-row run provenance to star them)."""
         try:
             from modulatio import delivery, store
             run_id = vault.latest_run(code)
@@ -224,7 +234,9 @@ class ArtifactsScreen(Vertical):
                 # kept for perusal but the team no longer reuses it for grounding.
                 suffix = ""
                 if rel == "research" and research.is_stale_file(p):
-                    suffix = "  ⚠ STALE (>30d)"
+                    # Interpolate the TTL so the sticker can't drift from the
+                    # actual reuse cutoff if the constant changes.
+                    suffix = f"  ⚠ STALE (>{research.RESEARCH_TTL_DAYS}d)"
                 try:
                     is_product = p.resolve() in products
                 except OSError:

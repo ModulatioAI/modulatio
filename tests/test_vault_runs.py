@@ -71,8 +71,8 @@ def test_generate_run_id_is_sortable_with_uniqueness_suffix():
 
 def test_init_run_creates_run_subfolder_with_run_subdirs(isolated_vault):
     """init_run creates ``runs/<run_id>/`` plus every directory in
-    ``RUN_SUBDIRS``: goals, tasks, decisions, research, reports.
-    PROJECT_SUBDIRS (agents/skills/artifacts/tickets/logs/etc.) are NOT
+    ``RUN_SUBDIRS``: goals, tasks, decisions, reports.
+    PROJECT_SUBDIRS (agents/skills/artifacts/tickets/logs/research/etc.) are NOT
     created here — those live at the project root and accumulate."""
     vault.init_project("FOO", "Foo project", "objective")
     rid = "20260428T143000Z"
@@ -181,11 +181,65 @@ def test_project_subdirs_and_run_subdirs_partition_subdirs(isolated_vault):
     assert p | r == set(vault.SUBDIRS)
 
 
+def test_migrate_legacy_run_layout_lifts_tickets_and_artifacts(isolated_vault):
+    """One-time migration (M4, Nemo hull): pre-durable-layout data kept UNDER a
+    run folder (runs/<id>/{tickets,artifacts}) is lifted to the project-durable
+    locations, without clobbering, and is idempotent (a no-op once done)."""
+    vault.init_project("MIG", "Migrate", "obj")
+    proj = vault.project_dir("MIG")
+    rid = "20260101T000000Z-abc123"
+    # Simulate the OLD layout: durable data nested under the run folder.
+    (proj / "runs" / rid / "tickets").mkdir(parents=True)
+    (proj / "runs" / rid / "tickets" / "MIG-1.md").write_text("old ticket\n")
+    (proj / "runs" / rid / "artifacts" / "drafts").mkdir(parents=True)
+    (proj / "runs" / rid / "artifacts" / "drafts" / "x.md").write_text("# old\n")
+
+    moved = vault.migrate_legacy_run_layout("MIG")
+    assert moved >= 2
+    # Tickets lifted to the project root; artifacts to the run-namespaced tree.
+    assert (proj / "tickets" / "MIG-1.md").exists()
+    assert not (proj / "runs" / rid / "tickets").exists()
+    assert (proj / "artifacts" / rid / "drafts" / "x.md").exists()
+    assert not (proj / "runs" / rid / "artifacts").exists()
+    # Idempotent: nothing left to move.
+    assert vault.migrate_legacy_run_layout("MIG") == 0
+
+
+def test_migrate_legacy_run_layout_no_clobber(isolated_vault):
+    """A legacy file whose name already exists at the destination is left in
+    place (never overwrites the durable copy)."""
+    vault.init_project("MIG2", "Migrate", "obj")
+    proj = vault.project_dir("MIG2")
+    rid = "20260101T000000Z-dad222"
+    (proj / "tickets").mkdir(parents=True, exist_ok=True)
+    (proj / "tickets" / "MIG2-1.md").write_text("DURABLE COPY\n")
+    (proj / "runs" / rid / "tickets").mkdir(parents=True)
+    (proj / "runs" / rid / "tickets" / "MIG2-1.md").write_text("LEGACY COPY\n")
+
+    vault.migrate_legacy_run_layout("MIG2")
+    # Durable copy is untouched; legacy copy was not moved over it.
+    assert (proj / "tickets" / "MIG2-1.md").read_text() == "DURABLE COPY\n"
+
+
+def test_research_is_project_durable_not_run_scoped(isolated_vault):
+    """The research CACHE is a project-durable library (research.py writes it to
+    <project>/research), so ``research`` belongs to PROJECT_SUBDIRS, not
+    RUN_SUBDIRS — otherwise the subdir list contracts a per-run location the
+    research module never uses (cadre: Jenny + Lovecraft MED)."""
+    assert "research" in vault.PROJECT_SUBDIRS
+    assert "research" not in vault.RUN_SUBDIRS
+    vault.init_project("RES", "Research", "obj")
+    root = vault.project_dir("RES")
+    run = vault.init_run("RES", "20260630T120000Z", "obj")
+    assert (root / "research").is_dir()            # project-durable
+    assert not (run / "research").exists()         # not created per-run
+
+
 def test_durable_kinds_are_project_scoped_not_run(isolated_vault):
     """artifacts, tickets, logs are the project's DURABLE record — they
     persist + accumulate across every run, so they belong to PROJECT_SUBDIRS,
     never RUN_SUBDIRS. The run folder holds only this kickoff's transient
-    execution trace (goals/tasks/decisions/research/reports)."""
+    execution trace (goals/tasks/decisions/reports)."""
     for kind in ("artifacts", "tickets", "logs"):
         assert kind in vault.PROJECT_SUBDIRS, f"{kind} must be project-durable"
         assert kind not in vault.RUN_SUBDIRS, f"{kind} must not be run-scoped"

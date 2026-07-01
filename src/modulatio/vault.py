@@ -119,17 +119,20 @@ PROJECT_SUBDIRS = (
     "artifacts",
     "tickets",
     "logs",
+    # The research CACHE is a durable library: research.py reads/writes it at
+    # <project>/research, accumulating across runs. It belongs here, NOT in
+    # RUN_SUBDIRS (which would contract a per-run location the module never uses).
+    "research",
 )
 
 #: Subdirs created PER kickoff under ``runs/<run_id>/`` — this run's
 #: TRANSIENT execution trace (its plan + working notes). The durable
-#: outputs (artifacts/tickets/logs) live at the project root and
-#: accumulate; only goals/tasks/decisions/research/reports are per-run.
+#: outputs (artifacts/tickets/logs/research) live at the project root and
+#: accumulate; only goals/tasks/decisions/reports are per-run.
 RUN_SUBDIRS = (
     "goals",
     "tasks",
     "decisions",
-    "research",
     "reports",
 )
 
@@ -398,6 +401,51 @@ def delete_run(code: str, run_id: str) -> bool:
             f"run path for {run_id!r} (project {code!r}) is not a directory")
     shutil.rmtree(target)  # ephemeral run output — no backup
     return True
+
+
+def migrate_legacy_run_layout(code: str) -> int:
+    """One-time, idempotent migration from the pre-durable-layout versions.
+
+    Older versions kept durable data (tickets / artifacts / logs) UNDER each run
+    folder (``runs/<id>/tickets`` …). The durable-layer refactor moved it to the
+    project root (``<project>/tickets``, ``<project>/artifacts/<id>`` …), so an
+    upgraded operator's prior data would be invisible until it's lifted up. This
+    moves it — never clobbering anything already at the destination — and is a
+    no-op once done (the normal steady state). Returns the number of items moved.
+    """
+    proj = project_dir(code)
+    runs = proj / "runs"
+    if not runs.is_dir():
+        return 0
+    moved = 0
+    for run in sorted(p for p in runs.iterdir() if p.is_dir() and not p.is_symlink()):
+        rid = run.name
+        # tickets / logs are FLAT project dirs — lift the files, keep the durable
+        # copy on a name collision (never overwrite).
+        for kind in ("tickets", "logs"):
+            legacy = run / kind
+            if not legacy.is_dir():
+                continue
+            dest = proj / kind
+            dest.mkdir(parents=True, exist_ok=True)
+            for f in legacy.iterdir():
+                if f.is_file() and not (dest / f.name).exists():
+                    shutil.move(str(f), str(dest / f.name))
+                    moved += 1
+            try:
+                legacy.rmdir()  # remove only if now empty (collisions left behind)
+            except OSError:
+                pass
+        # artifacts move as a whole subtree into the run-namespaced durable tree;
+        # skip if that run's artifacts are already durable.
+        legacy_art = run / "artifacts"
+        if legacy_art.is_dir():
+            dest = proj / "artifacts" / rid
+            if not dest.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(legacy_art), str(dest))
+                moved += 1
+    return moved
 
 
 #: Project codes reserved for Modulatio's own use — a user can't create a

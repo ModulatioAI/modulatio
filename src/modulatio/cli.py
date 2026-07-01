@@ -185,6 +185,24 @@ def _print_auth_banner() -> None:
         pass  # never block CLI on banner failure
 
 
+def _migrate_legacy_layout() -> None:
+    """Silently lift any pre-durable-layout data (``runs/<id>/{tickets,artifacts,
+    logs}`` → project root) for every project, once, at launch — no prompt, and a
+    no-op after the first time (nothing left to move). Best-effort: a migration
+    failure must never block startup."""
+    try:
+        total = sum(
+            vault.migrate_legacy_run_layout(c) for c in vault.list_projects()
+        )
+        if total:
+            typer.echo(
+                f"Lifted {total} item(s) from an earlier layout into the durable "
+                f"project structure.\n"
+            )
+    except Exception:  # noqa: BLE001 — migration must never block launch
+        pass
+
+
 @app.callback()
 def _root(
     ctx: typer.Context,
@@ -208,6 +226,8 @@ def _root(
     _print_auth_banner()
     if ctx.invoked_subcommand is not None:
         return  # a subcommand was supplied; let it run
+
+    _migrate_legacy_layout()
 
     from modulatio import setup_state
 

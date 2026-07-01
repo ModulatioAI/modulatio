@@ -44,6 +44,12 @@ _RESEARCH_ROOT = config.get_shared_resources_path() / "research"
 #: never inline the literal at a call site.
 RESEARCH_TTL_DAYS = 30
 
+#: Clock-skew allowance for the freshness basis. A last_verified_at / mtime up to
+#: this far in the future is tolerated (date-only stamps, tz edges); beyond it the
+#: basis is treated as adversarial (a producer-planted "eternally fresh" stamp)
+#: and the entry is forced stale so the reuse guard can't be defeated.
+_RESEARCH_CLOCK_SKEW = timedelta(days=1)
+
 _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -190,7 +196,13 @@ def is_stale(
     if basis is None:
         return False
     now = now or datetime.now(timezone.utc)
-    return (now - basis) > timedelta(days=ttl_days)
+    age = now - basis
+    # A basis in the FUTURE beyond the clock-skew allowance is a producer-planted
+    # stamp (or skewed mtime) trying to look eternally fresh — treat it as stale
+    # so it gets re-fetched rather than reused forever.
+    if age < -_RESEARCH_CLOCK_SKEW:
+        return True
+    return age > timedelta(days=ttl_days)
 
 
 def is_stale_file(
@@ -203,7 +215,10 @@ def is_stale_file(
     Lets a UI flag a stale note without reaching into the parser. A missing or
     unreadable file is NOT stale (reuse-first)."""
     try:
-        if not path.is_file():
+        # Never read through a symlink (out-of-tree leak): a planted
+        # ``research/leak.md -> /secret`` must not be parsed. Defense-in-depth
+        # alongside the listing gate that already skips symlinks.
+        if path.is_symlink() or not path.is_file():
             return False
         entry = _parse_file(path)
     except OSError:

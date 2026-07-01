@@ -203,3 +203,33 @@ def test_is_stale_undeterminable_age_is_not_stale():
     assert research.is_stale(entry) is False
     # An empty entry is never stale either (it's a cache miss, handled upstream).
     assert research.is_stale(research._EMPTY_ENTRY) is False
+
+
+def test_is_stale_file_skips_symlink(tmp_path):
+    """A planted symlink must not be read through (out-of-tree leak, Wild Bill
+    MEDIUM) — is_stale_file returns False for a symlink instead of parsing its
+    target."""
+    secret = tmp_path / "secret.md"
+    secret.write_text("---\nlast_verified_at: 2020-01-01\n---\nsensitive\n")
+    link = tmp_path / "link.md"
+    link.symlink_to(secret)
+    assert research.is_stale_file(link) is False
+
+
+def test_is_stale_rejects_future_last_verified_at():
+    """A far-future last_verified_at (a producer-controlled file trying to look
+    eternally fresh) must NOT defeat the reuse guard — a beyond-skew-future basis
+    is treated as STALE so it gets re-fetched (Wild Bill MEDIUM)."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    entry = research.ResearchEntry(
+        body="x", query=None, freshness_class=None,
+        last_verified_at="9999-01-01", sources=(), source_path=None,
+    )
+    assert research.is_stale(entry, now=now) is True
+    # A within-skew "just verified" stamp is still fresh (not falsely stale).
+    entry_now = research.ResearchEntry(
+        body="x", query=None, freshness_class=None,
+        last_verified_at="2026-06-01", sources=(), source_path=None,
+    )
+    assert research.is_stale(entry_now, now=now) is False

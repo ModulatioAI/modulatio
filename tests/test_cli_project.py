@@ -42,6 +42,23 @@ def _seed_project(tmp_path: Path, code: str = "PRJ", run_ids: list[str] | None =
         vault.init_run(code, rid, f"run {rid}")
 
 
+def test_migrate_legacy_layout_lifts_across_all_projects(isolated_cli):
+    """The launch-time migration hook runs the durable-layout lift for EVERY
+    project, silently, and never raises (M4 — upgraders skip the wizard, so this
+    fires from the root callback)."""
+    vault.init_project("AAA", "a", "o", exist_ok=True)
+    vault.init_project("BBB", "b", "o", exist_ok=True)
+    proj = vault.project_dir("AAA")
+    rid = "20260101T000000Z-abc123"
+    (proj / "runs" / rid / "tickets").mkdir(parents=True)
+    (proj / "runs" / rid / "tickets" / "AAA-1.md").write_text("legacy\n")
+
+    cli._migrate_legacy_layout()   # must not raise; migrates AAA, no-op for BBB
+
+    assert (proj / "tickets" / "AAA-1.md").exists()
+    assert not (proj / "runs" / rid / "tickets").exists()
+
+
 def test_runs_command_lists_runs_in_chronological_order(isolated_cli):
     _seed_project(isolated_cli, run_ids=[
         "20260428T100000Z-aaaa",
