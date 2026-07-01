@@ -4097,8 +4097,13 @@ class Orchestrator:
             # grounded work from prior runs of the same project instead of
             # re-fetching it. build_digest is hard-capped (MAX_DIGEST_CHARS
             # + per-file byte cap), so spanning runs can't bloat the prompt.
+            # priority_prefix hoists THIS run's own artifacts to the front
+            # (never truncated) then orders priors most-recent-first, so the
+            # reusable material a producer needs survives the cap.
             artifacts_root = project_dir(self.project.code) / "artifacts"
-            return team_canvas.build_digest(artifacts_root)
+            return team_canvas.build_digest(
+                artifacts_root, priority_prefix=self.project.run_id
+            )
         except Exception:
             return ""
 

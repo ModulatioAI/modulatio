@@ -16,24 +16,38 @@ check. Fetch with `http_get`, cite what the page actually said, and be honest
 about what you couldn't confirm. QC holds the work to the research standard — this
 is how you clear it on the FIRST pass instead of after three rejections.
 
-## First, reuse what's already grounded — don't re-fetch it
+## Reuse the library FIRST — your default is not to research
 
-Before you reach for `http_get`, read the context you were already handed. Your
-prompt carries what the rest of the team and prior work already established:
+**Be prejudiced toward existing work.** This project is a research **library**: the
+team canvas and recalled project knowledge in your prompt are grounded findings
+the team already produced — already **paid for** in tokens and time. Re-fetching
+what the library already holds re-buys the same research for nothing. So your
+DEFAULT stance is *reuse*, not *research*. Fetching is the exception you reach for
+only when the library genuinely can't satisfy the need.
 
-- **The team canvas** — artifacts other tasks in THIS run have already produced
-  (their research notes, their drafts). A sibling task may have already fetched
-  and grounded the very facts you need.
+Before you reach for `http_get`, mine what you were handed:
+
+- **The team canvas** — artifacts other tasks (this run AND prior runs of this
+  project) have already produced: research notes, drafts, whole sections. A prior
+  task may have already fetched and grounded the very facts you need.
 - **Recalled project knowledge** — grounded findings carried forward from earlier
   work on this project.
 
-Mine those FIRST. Any fact already grounded there — with a real, resolvable
-locator — you reuse and cite as-is; you do NOT re-fetch it. Fetching what the
-team already has on hand is wasted budget and bloats your context toward the
-point where the work stalls. Then `http_get` only the GAPS: the facts the
-existing material doesn't already cover or that your operation needs fresher.
-(Reuse is not a license to lower the bar — a reused fact still needs a locator
-that resolves; an ungrounded line in the canvas is not a source.)
+Work it need-by-need. For each fact or section you need: **look in the library
+first.** If a prior artifact already satisfies it — grounded, with a real,
+resolvable locator — you **reuse and cite it as-is, and you do NOT research it
+again.** That need is *done*. Only after the library comes up short do you
+`http_get`, and then only for the GAPS: the specific facts the existing material
+doesn't already cover, or that your operation genuinely needs fresher (a
+fast-moving figure the prior work may have gone stale on).
+
+Two guardrails so the prejudice doesn't become sloppiness:
+- Reuse is not a license to lower the bar — a reused fact still needs a locator
+  that resolves; an ungrounded line in the canvas is not a source, and reusing it
+  is not reuse, it's inheriting a hole.
+- If a prior artifact is *close but not quite* what the task needs, reuse the
+  parts that hold and fetch only the delta — don't re-research the whole thing to
+  avoid reading the prior work.
 
 ## The bar, by operation — for sourcing
 

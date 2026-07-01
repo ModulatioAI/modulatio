@@ -570,3 +570,18 @@ def test_rigorous_sourcing_seed_reuses_existing_before_fetch():
     assert "reuse" in body
     assert "canvas" in body          # this run's existing artifacts
     assert "http_get" in body        # only fetch the GAPS
+
+
+def test_rigorous_sourcing_seed_is_prejudiced_toward_the_library():
+    """Reuse is the strong DEFAULT, not a soft nudge (Clif 2026-06-30): the
+    project is a research LIBRARY whose findings are already paid for. If a prior
+    artifact satisfies the need, the producer reuses it and does NOT research
+    again — fetching is reserved for genuine gaps. The skill must frame this as a
+    prejudice toward existing work + the token/time economics of not re-buying it."""
+    from modulatio import skills
+    body = skills.load("rigorous-sourcing").lower()
+    assert "library" in body                         # the project accrues research
+    assert "default" in body                         # reuse is the default stance
+    assert "paid for" in body or "already paid" in body  # economics: don't re-buy
+    # an existing artifact that satisfies the need ends the research for it
+    assert "satisf" in body
