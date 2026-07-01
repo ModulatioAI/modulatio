@@ -137,15 +137,21 @@ def test_template_is_under_post_terse_threshold() -> None:
     deliverable against; orthogonal to artifact_kind) is the most recent budgeted
     component; it is contract (it picks the bar), not prose.
 
+    The SPEED-vs-YAGNI rule (~260 chars, 2026-07-01 — operator-directed: splitting
+    genuinely-independent work into parallel tasks serves speed and is NOT
+    manufacturing tasks, and the SWEEP packing bias is softened so a substantial
+    independent area gets its own task instead of being crammed into one batch)
+    is contract (it changes how the planner decomposes), not prose.
+
     When a future PR applies terse-prose to Leader-reflect / Producer
     / QC, replicate this pattern with their respective baselines.
     """
     char_count = len(orchestration._TASK_PLAN_PROMPT)
-    assert char_count < 10_000, (
+    assert char_count < 10_400, (
         f"_TASK_PLAN_PROMPT is {char_count} chars — should stay under "
-        f"10,000 (terse baseline + sweep + rigorous-sourcing + web-search "
+        f"10,400 (terse baseline + sweep + rigorous-sourcing + web-search "
         f"+ size-floor + parallel-deliverables + assembly + output-format "
-        f"+ operation-axis)."
+        f"+ operation-axis + speed-vs-yagni)."
     )
     # Lower bound too — a vacuous trim that drops the contract is
     # worse than no trim. 2,500 chars is a sanity floor.

@@ -180,6 +180,29 @@ def _sanitize_filename(name: str) -> str:
     return name or "Untitled"
 
 
+#: Openers that mark a first line as the producer THINKING OUT LOUD rather than a
+#: title — first-person / process language. A real title is a noun phrase, never
+#: "I …" / "Let me …" / "Now I'll …". Anchored at the line start, word-bounded.
+_NARRATION_OPENER = re.compile(
+    r"^(i|i'm|i'll|i've|i am|let me|let's|now|okay|ok|first|next|then|"
+    r"here'?s|here is|so|alright|we|we'll|we've|going to)\b[\s,]",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_narration(s: str) -> str | None:
+    """True-ish if ``s`` reads as producer narration (thinking), not a document
+    title: it opens first-person / process-y, OR runs as a full sentence (ends in
+    terminal punctuation and is long). Titles are short noun phrases; narration is
+    prose. Returns a truthy reason string or None."""
+    s = s.strip()
+    if _NARRATION_OPENER.match(s):
+        return "first-person/process opener"
+    if s[-1:] in ".!?" and len(s.split()) > 8:
+        return "full sentence"
+    return None
+
+
 def human_name_from_markdown(text: str, *, fallback: str) -> str:
     """Derive a human-friendly filename stem from a Markdown document's own
     title: the first ATX heading (``# Title``), else the first non-empty
@@ -204,8 +227,11 @@ def human_name_from_markdown(text: str, *, fallback: str) -> str:
     raw = (title or "").strip()
     # A degenerate title — empty, or all separators (e.g. a stray '---'
     # frontmatter fence taken as the first line) — must not become the filename
-    # ('---.docx'); fall back to the supplied name before sanitizing.
-    if not raw.strip("-_ "):
+    # ('---.docx'). Nor may producer NARRATION ("I now have all the citations...
+    # Let me write...") — a thinking-out-loud first line, not a title. In either
+    # case fall back to the supplied name (the Leader's document title) before
+    # sanitizing, so the file is named for WHAT it is, not the producer's process.
+    if not raw.strip("-_ ") or _looks_like_narration(raw):
         raw = fallback
     return _sanitize_filename(raw)
 

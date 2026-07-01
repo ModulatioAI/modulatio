@@ -399,6 +399,43 @@ def test_seed_planning_skills_carry_sweep_bounding_guidance():
     assert "batch" in leader_plan.lower()
 
 
+def test_task_plan_seed_weighs_speed_and_wont_cram_independent_work():
+    """The task-plan seed must weigh SPEED against YAGNI — independent units of the
+    work fan into PARALLEL tasks rather than collapsing into one serial mega-task —
+    and it must NOT tell the planner to cram substantial independent areas into a
+    single batch (the live collapse cause: a broad research brief packed into one
+    task). Splitting real independent work is not manufacturing tasks."""
+    from modulatio.skills import _SEED_SKILLS_ROOT
+
+    body = (_SEED_SKILLS_ROOT / "task-plan.md").read_text()
+    low = body.lower()
+    # speed is named as a first-class factor, alongside YAGNI (no frivolous tasks)
+    assert "speed" in low
+    # the old cram signal is gone (it drowned out the fan-out guidance)
+    assert "pack as many related items as fit" not in body
+    # a substantial independent area earns its OWN task
+    assert "own task" in low
+    # the reframe: splitting real independent work isn't manufacturing tasks
+    assert "not manufacturing" in low or "isn't manufacturing" in low
+
+
+def test_leader_seed_job_name_asks_for_a_title_not_narration():
+    """The Leader's job_name is the deliverable's human-readable TITLE (it names
+    the output folder and is the filename fallback when a producer's heading is
+    unusable). The prompt must frame it as a title and explicitly steer AWAY from
+    the producer's reasoning/process/sentence, so a thinking-leak can't name the
+    file (live bug: 'I now have all the citations...docx')."""
+    from modulatio.skills import _SEED_SKILLS_ROOT
+
+    body = (_SEED_SKILLS_ROOT / "leader.md").read_text()
+    low = body.lower()
+    assert "job_name" in body
+    # framed as the reader's document title
+    assert "readable title" in low or "reader would" in low
+    # explicitly steered away from the producer's reasoning/process
+    assert "reasoning or process" in low
+
+
 def test_load_falls_back_to_seed_when_shared_empty(tmp_path, monkeypatch):
     """Empty shared dir + missing project-local → seed wins. The
     motivating use case: fresh install, user hasn't populated their

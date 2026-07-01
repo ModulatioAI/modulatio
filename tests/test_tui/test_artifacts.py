@@ -926,6 +926,43 @@ async def test_finished_product_is_flagged_and_hoisted(tui_vault_with_artifacts)
         assert "★" not in next(x for x in labels if "art-t-001.md" in x)
 
 
+async def test_finished_products_stay_starred_across_all_runs(tui_vault_with_artifacts):
+    """A finished product stays ★-flagged permanently — every run's deliverable,
+    not just the latest run's. So an operator browsing the durable list always
+    picks their products out of the pile, however many runs accumulate."""
+    from uuid import uuid4
+    from textual.widgets import ListView, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+    from modulatio import store
+    from modulatio.types import Task
+
+    # TWO runs, each with its own finished product; the SECOND is the latest.
+    for rid, fname in (("20260101T000000Z-old111", "old-report.md"),
+                       ("20260202T000000Z-new222", "new-report.md")):
+        vault.init_run(PROJECT_CODE, rid, "obj")
+        art = vault.project_dir(PROJECT_CODE) / "artifacts" / rid / "drafts"
+        art.mkdir(parents=True, exist_ok=True)
+        (art / fname).write_text(f"# {fname}\n")
+        store.save_task(
+            PROJECT_CODE,
+            Task(id=f"T-{rid[-3:]}", project_id=uuid4(), goal_id="G-001",
+                 description="deliverable", deliverable=True,
+                 output_path=f"drafts/{fname}"),
+            run_id=rid,
+        )
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        labels = [str(c.children[0].render())
+                  for c in app.query_one("#artifacts-list", ListView).children]
+        # BOTH the latest AND the prior run's product carry the star.
+        assert "★" in next(x for x in labels if "new-report.md" in x)
+        assert "★" in next(x for x in labels if "old-report.md" in x)
+
+
 def test_is_artifact_file_rejects_symlink(tmp_path):
     """The artifacts listing must skip symlinks so a planted link can't surface
     an out-of-tree target for preview/stale/export/delete (Wild Bill MEDIUM)."""

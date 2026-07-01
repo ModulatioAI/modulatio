@@ -28,15 +28,18 @@ independent research areas (most briefs), FAN the gather into parallel batches +
 not one serial gather (see SWEEP). Do NOT add infrastructure tasks (db setup,
 ingestion, schema versioning, dual-source verification) unless goal explicitly
 asks to BUILD that infra as deliverable. Prefer the smallest plan that keeps the
-team CONCURRENT; team adds follow-ons later if the artifact reveals a gap.
+team CONCURRENT — SPEED counts: splitting genuinely-independent work into parallel
+tasks is NOT manufacturing tasks (the work exists either way), so don't
+over-conserve into one serial task. Team adds follow-ons if the artifact reveals a gap.
 
 SWEEP / GATHER (research, survey, "X for EACH of N items"): FAN the independent
 areas into PARALLEL batch tasks (each sized to a producer's context budget) the team
 researches CONCURRENTLY, then a SYNTHESIS sub-objective (`depends_on` the
 batches) combines them — prefer this fan-out over ONE serial research task.
-SIZE each batch to fit below a producer's compression
-trigger with headroom — pack as many related items as fit, split when a batch
-would exceed the budget (don't overpack: it blows the window and churns). Signals:
+SIZE each batch below a producer's compression trigger with headroom. Pack SMALL
+similar lookups into one batch; a SUBSTANTIAL independent area gets its OWN task
+(split for budget AND speed). Split when a batch would exceed the budget (don't
+overpack: it blows the window and churns). Signals:
 "all/each/every/top N", an
 enumerable list of areas. Unnamed set ("SOTA in X") → a cheap SCOUT enumerates
 first, then the batches build on it. More areas than fit the budget → a bounded

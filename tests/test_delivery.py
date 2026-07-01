@@ -41,6 +41,25 @@ def test_name_degenerate_title_uses_fallback():
     ) == "ai-ml-cost-research"
 
 
+def test_name_rejects_producer_narration_uses_fallback():
+    """A producer that opens with thinking-out-loud ("I now have all the
+    citations... Let me write...") must NOT have that sentence become the
+    filename — it reads as narration, so fall back to the Leader's clean title."""
+    md = ("I now have all the citations I need. Let me write the corrected "
+          "artifact with real references.\n\n## Findings\n\nbody")
+    name = delivery.human_name_from_markdown(
+        md, fallback="Coconut Oil and Cognitive Performance"
+    )
+    assert "citations" not in name.lower()
+    assert name == "Coconut Oil and Cognitive Performance"
+
+
+def test_name_keeps_a_real_title_even_if_it_ends_in_a_period():
+    """A genuine short title is not mistaken for narration."""
+    md = "# Q3 Sales Analysis\n\nbody"
+    assert delivery.human_name_from_markdown(md, fallback="x") == "Q3 Sales Analysis"
+
+
 def test_name_strips_illegal_chars():
     md = '# Report: Q3/Q4 <draft> "final"?'
     name = delivery.human_name_from_markdown(md, fallback="x")

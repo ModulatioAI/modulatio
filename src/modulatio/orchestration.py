@@ -13960,13 +13960,17 @@ goal (list, report, analysis doc, code file) decomposes into the production
 tasks it needs (e.g. gather, then draft). Do NOT add infrastructure tasks (db
 setup, ingestion, schema versioning, dual-source verification) unless
 goal explicitly asks to BUILD that infra as deliverable. Prefer the
-simplest plan that does the job; team adds follow-ons later if artifact reveals gap.
+simplest plan that keeps the team CONCURRENT — SPEED counts: splitting
+genuinely-independent work into parallel tasks is NOT manufacturing tasks (the
+work exists either way), so don't over-conserve into one serial task. Team adds
+follow-ons later if artifact reveals gap.
 
 SWEEP work — bound it at PLAN time to a producer's CONTEXT BUDGET. When
 the goal is "do X for EACH of N items" (survey/catalog/gather/compare
 across a set), don't pile all N into one task that busts the budget. Size
-each gather task to fit comfortably below a producer's compression trigger,
-with headroom — pack as many items as fit, split when a task would exceed
+each gather task below a producer's compression trigger with headroom. Pack SMALL
+similar lookups into one batch; a SUBSTANTIAL independent area gets its OWN task
+(split for budget AND speed). Split when a task would exceed
 the budget (each surveys a batch); a separate draft/synthesis sub-objective
 combines their artifacts. Signals: "all/each/every/top N", "survey/compare across", an
 enumerable list. More items than fit one budget → cover a bounded BATCH

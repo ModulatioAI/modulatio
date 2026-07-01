@@ -165,29 +165,27 @@ class ArtifactsScreen(Vertical):
         return vault.project_dir(code)
 
     def _finished_product_paths(self, code: str) -> set[Path]:
-        """Absolute paths of the LATEST run's finished deliverables — the files
-        the operator actually asked for. Used to ★-flag + hoist them out of the
+        """Absolute paths of EVERY run's finished deliverables — the files the
+        operator actually asked for. Used to ★-flag + hoist them out of the
         research/draft pile. Best-effort: any failure returns empty (the flag is
         cosmetic and must never block the listing).
 
-        Scoped to the LATEST run by design: the ★ marks what the operator just
-        produced. Prior runs' deliverables still appear in the durable list, just
-        unstarred (the screen doesn't track per-row run provenance to star them)."""
+        Spans ALL runs, not just the latest: a finished product stays starred
+        permanently (until deleted), so the operator always picks their products
+        out of the accumulating durable pile."""
         try:
             from modulatio import delivery, store
-            run_id = vault.latest_run(code)
-            if run_id is None:
-                return set()
-            tasks = store.list_tasks(code, run_id=run_id)
-            artifacts_root = vault.project_dir(code) / "artifacts" / run_id
             out: set[Path] = set()
-            for _tid, path, _fallback, _fam in delivery.deliverables_from_tasks(
-                tasks, artifacts_root
-            ):
-                try:
-                    out.add(path.resolve())
-                except OSError:
-                    out.add(path)
+            for run_id in vault.list_runs(code):
+                tasks = store.list_tasks(code, run_id=run_id)
+                artifacts_root = vault.project_dir(code) / "artifacts" / run_id
+                for _tid, path, _fallback, _fam in delivery.deliverables_from_tasks(
+                    tasks, artifacts_root
+                ):
+                    try:
+                        out.add(path.resolve())
+                    except OSError:
+                        out.add(path)
             return out
         except Exception:
             return set()

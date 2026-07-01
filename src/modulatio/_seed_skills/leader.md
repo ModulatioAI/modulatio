@@ -58,11 +58,19 @@ goal's success_criteria: spell out what is required.
 Decompose this objective into goals, following the standards above. Respond
 with ONLY a JSON object, fenced in ```json ... ```. No prose outside the fence:
 
-    {{"job_name": "<short kebab-case name for THIS run, e.g. ai-ml-cost-research>",
+    {{"job_name": "<the deliverable's title, e.g. Coconut Oil and Cognitive Performance>",
       "goals": [ ...one object per goal (schema below)... ]}}
 
-`job_name` is your short, human-readable name for the run as a whole — decide it
-AFTER you have the goals in mind; it titles the run's output folder + file.
+`job_name` is the human-readable TITLE for this run's deliverable — the name a
+reader would put on the finished document. Decide it AFTER you have the goals in
+mind; it titles the run's output folder AND is the filename fallback, so make it a
+concise, specific noun phrase for WHAT the deliverable is and its subject, drawn
+from the objective — Title Case, no trailing punctuation, roughly ≤10 words.
+- DO: "Coconut Oil and Cognitive Performance", "Solid-State EV Battery Market
+  Brief (2026)", "Q3 Sales Analysis".
+- NOT your reasoning or process ("I now have all the citations…", "Let me write
+  the corrected artifact…"), NOT a raw filename, NOT a task id, NOT a full
+  sentence, and never the whole objective pasted in.
 
 Each goal has:
 - description: string
