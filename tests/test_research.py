@@ -145,3 +145,61 @@ def test_topic_slugs_are_filesystem_safe(tmp_path, monkeypatch):
     # Sloppy but equivalent topic string hits the same slug.
     entry = research.load_with_metadata("the red spinning top 2026", project_code="TST")
     assert "Research body" in entry.body
+
+
+# ─── Reuse freshness: research goes stale after RESEARCH_TTL_DAYS ────────────
+
+
+def test_is_stale_uses_last_verified_at():
+    """Age is taken from last_verified_at when present: verified 40 days ago is
+    stale at the 30-day TTL; 5 days ago is fresh."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    old = (now - timedelta(days=40)).date().isoformat()
+    stale_entry = research.ResearchEntry(
+        body="x", query=None, freshness_class=None,
+        last_verified_at=old, sources=(), source_path=None,
+    )
+    assert research.is_stale(stale_entry, now=now) is True
+
+    recent = (now - timedelta(days=5)).date().isoformat()
+    fresh_entry = research.ResearchEntry(
+        body="x", query=None, freshness_class=None,
+        last_verified_at=recent, sources=(), source_path=None,
+    )
+    assert research.is_stale(fresh_entry, now=now) is False
+
+
+def test_is_stale_falls_back_to_file_mtime(tmp_path, monkeypatch):
+    """With no last_verified_at, age comes from the cache file's mtime: a
+    freshly-saved note is fresh; back-dating its mtime past the TTL makes it
+    stale."""
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setattr(research, "_RESEARCH_ROOT", tmp_path / "shared")
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
+    path = research.save("topic x", "body", "TST")
+
+    fresh = research.load_with_metadata("topic x", project_code="TST")
+    assert fresh.last_verified_at is None          # save didn't stamp one
+    assert research.is_stale(fresh) is False
+
+    old = (datetime.now(timezone.utc) - timedelta(days=45)).timestamp()
+    os.utime(path, (old, old))
+    aged = research.load_with_metadata("topic x", project_code="TST")
+    assert research.is_stale(aged) is True
+
+
+def test_is_stale_undeterminable_age_is_not_stale():
+    """Reuse-first: an entry whose age can't be determined (no timestamp, no
+    resolvable file) is NOT treated as stale — don't discard research we can't
+    prove is old."""
+    entry = research.ResearchEntry(
+        body="x", query=None, freshness_class=None,
+        last_verified_at=None, sources=(), source_path=None,
+    )
+    assert research.is_stale(entry) is False
+    # An empty entry is never stale either (it's a cache miss, handled upstream).
+    assert research.is_stale(research._EMPTY_ENTRY) is False

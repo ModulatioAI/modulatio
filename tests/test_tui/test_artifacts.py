@@ -776,3 +776,151 @@ async def test_artifacts_affordance_present(tui_vault_with_artifacts):
         text = str(app.query_one("#artifacts-affordance", Static).render())
         assert "search" in text.lower()
         assert "export" in text.lower()
+
+
+# ─── Delete a selected artifact file (housekeeping — mirrors JOBS/LOGS) ──────
+
+
+async def test_delete_removes_selected_artifact_file(tui_vault_with_artifacts):
+    """'d' on an artifact prompts a confirm; confirming unlinks the file from
+    disk and drops it from the list."""
+    from textual.widgets import ListView, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.artifacts import ArtifactsScreen
+    from modulatio.tui.widgets.confirm_modal import ConfirmModal
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        listview = app.query_one("#artifacts-list", ListView)
+        listview.index = 0
+        await pilot.pause()
+        screen = app.query_one(ArtifactsScreen)
+        target = screen._paths[0]
+        assert target.exists()
+        screen.action_delete()
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmModal)          # confirm first
+        await pilot.click("#confirm-yes")
+        await pilot.pause()
+        assert not target.exists()
+        assert len(app.query_one("#artifacts-list", ListView).children) == 2
+
+
+async def test_delete_cancel_keeps_the_artifact(tui_vault_with_artifacts):
+    """Cancelling the confirm leaves the file on disk."""
+    from textual.widgets import ListView, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.artifacts import ArtifactsScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        listview = app.query_one("#artifacts-list", ListView)
+        listview.index = 0
+        await pilot.pause()
+        screen = app.query_one(ArtifactsScreen)
+        target = screen._paths[0]
+        screen.action_delete()
+        await pilot.pause()
+        await pilot.click("#confirm-no")                     # cancel → keep
+        await pilot.pause()
+        assert target.exists()
+
+
+# ─── Research library: durable across runs + stale sticker ──────────────────
+
+
+async def test_durable_research_shows_even_with_a_run(tui_vault_with_artifacts):
+    """The research LIBRARY lives at <project>/research (durable, via
+    research.py) and must show in the Artifacts tab even once a run exists —
+    it's the accumulating library the operator reuses, not a run-transient."""
+    from textual.widgets import ListView, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+
+    # A run now exists → run scope != project scope.
+    vault.init_run(PROJECT_CODE, "20260101T000000Z-abc123", "obj")
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        listview = app.query_one("#artifacts-list", ListView)
+        labels = " ".join(str(c.children[0].render()) for c in listview.children)
+        assert "ozempic.md" in labels          # durable research still visible
+
+
+async def test_stale_research_gets_sticker(tui_vault_with_artifacts):
+    """A research note past the reuse TTL is flagged STALE in the list (kept for
+    perusal, but the operator sees it's old). Fresh research and non-research
+    artifacts are never flagged."""
+    from textual.widgets import ListView, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+
+    research_dir = vault.project_dir(PROJECT_CODE) / "research"
+    (research_dir / "stale-topic.md").write_text(
+        "---\nlast_verified_at: 2020-01-01\n---\n\nLong-stale body.\n"
+    )
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        listview = app.query_one("#artifacts-list", ListView)
+        labels = [str(c.children[0].render()) for c in listview.children]
+        stale_line = next(x for x in labels if "stale-topic.md" in x)
+        assert "STALE" in stale_line
+        fresh_line = next(x for x in labels if "ozempic.md" in x)   # fresh research
+        assert "STALE" not in fresh_line
+        draft_line = next(x for x in labels if "art-t-001.md" in x)  # non-research
+        assert "STALE" not in draft_line
+
+
+# ─── Finished product is flagged + hoisted out of the research pile ─────────
+
+
+async def test_finished_product_is_flagged_and_hoisted(tui_vault_with_artifacts):
+    """The deliverable the operator asked for is ★-flagged and hoisted to the
+    top of the Artifacts list, so it's pickable out of the mass of research /
+    draft artifacts (Option C)."""
+    from uuid import uuid4
+    from textual.widgets import ListView, TabbedContent
+    from modulatio.tui.app import ModulatioApp
+    from modulatio import store
+    from modulatio.types import Task
+
+    run_id = "20260101T000000Z-abc123"
+    vault.init_run(PROJECT_CODE, run_id, "obj")
+    # The finished product lands in the run-namespaced durable artifacts tree.
+    art = vault.project_dir(PROJECT_CODE) / "artifacts" / run_id / "drafts"
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "final.md").write_text("# Final Report\n\nThe product.\n")
+    # A deliverable-tagged task points at it.
+    store.save_task(
+        PROJECT_CODE,
+        Task(
+            id="T-001", project_id=uuid4(), goal_id="G-001",
+            description="write the final report",
+            deliverable=True, output_path="drafts/final.md",
+        ),
+        run_id=run_id,
+    )
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        listview = app.query_one("#artifacts-list", ListView)
+        labels = [str(c.children[0].render()) for c in listview.children]
+        product_line = next(x for x in labels if "final.md" in x)
+        assert "★" in product_line               # flagged as the finished product
+        assert "final.md" in labels[0]            # hoisted to the top
+        # a non-deliverable artifact is not flagged
+        assert "★" not in next(x for x in labels if "art-t-001.md" in x)

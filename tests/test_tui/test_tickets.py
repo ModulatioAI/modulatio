@@ -191,9 +191,9 @@ async def test_tickets_search_filters_rows_and_marks_filtered(project_with_ticke
         assert "filtered" in counts
 
 
-async def test_tickets_affordance_reads_read_only(project_with_tickets):
-    """The detail affordance states the screen is read-only and points
-    resolution to the LEADER tab (E1)."""
+async def test_tickets_affordance_offers_delete_and_points_to_leader(project_with_tickets):
+    """The detail affordance offers housekeeping delete and still points issue
+    RESOLUTION to the LEADER tab (E1). Delete is housekeeping, not resolution."""
     from textual.widgets import Static
 
     from modulatio.tui.app import ModulatioApp
@@ -202,7 +202,7 @@ async def test_tickets_affordance_reads_read_only(project_with_tickets):
     async with app.run_test() as pilot:
         await pilot.pause()
         text = str(app.query_one("#tickets-affordance", Static).render())
-        assert "read-only" in text
+        assert "delete" in text
         assert "LEADER" in text
 
 
@@ -474,3 +474,46 @@ async def test_tickets_tab_adopts_master_detail():
         assert screen.query_one("#ticket-preview-md") is not None
 
 
+
+
+async def test_delete_confirms_then_removes_ticket(project_with_tickets):
+    """'d' on a ticket prompts a confirm; confirming unlinks it from the
+    durable store (housekeeping — mirrors JOBS/LOGS delete)."""
+    from textual.widgets import TabbedContent
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.tickets import TicketsScreen
+    from modulatio.tui.widgets.confirm_modal import ConfirmModal
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        app.query_one(TabbedContent).active = "tab-tickets"
+        await pilot.pause()
+        screen = app.query_one(TicketsScreen)
+        target = store.list_tickets(PROJECT_CODE)[0].id
+        screen._selected_id = target
+        screen.action_delete()
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmModal)          # confirm first
+        await pilot.click("#confirm-yes")
+        await pilot.pause()
+        assert all(t.id != target for t in store.list_tickets(PROJECT_CODE))
+
+
+async def test_delete_cancel_keeps_the_ticket(project_with_tickets):
+    """Cancelling the confirm leaves the ticket on disk."""
+    from textual.widgets import TabbedContent
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.tickets import TicketsScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        app.query_one(TabbedContent).active = "tab-tickets"
+        await pilot.pause()
+        screen = app.query_one(TicketsScreen)
+        target = store.list_tickets(PROJECT_CODE)[0].id
+        screen._selected_id = target
+        screen.action_delete()
+        await pilot.pause()
+        await pilot.click("#confirm-no")                     # cancel → keep
+        await pilot.pause()
+        assert any(t.id == target for t in store.list_tickets(PROJECT_CODE))

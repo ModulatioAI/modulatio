@@ -17,10 +17,12 @@ from pathlib import Path
 
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Input, Label, ListItem, ListView, Static
 
-from modulatio import families, vault
+from modulatio import families, research, vault
+from modulatio.tui.widgets.confirm_modal import ConfirmModal
 from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.export_dialog import ExportDialog
 from modulatio.tui.widgets.file_picker import FolderPickerModal
@@ -102,6 +104,10 @@ def _is_artifact_file(path: Path) -> bool:
 class ArtifactsScreen(Vertical):
     """Artifacts tab content."""
 
+    BINDINGS = [
+        Binding("d", "delete", "Delete file", show=True),
+    ]
+
     # The split + full-height divider live in MasterDetail; borders are theme-aware.
     DEFAULT_CSS = """
     ArtifactsScreen { padding: 1; }
@@ -126,7 +132,7 @@ class ArtifactsScreen(Vertical):
                 # Affordance last so the export panel never pushes it (and the
                 # export button) off-screen when it expands.
                 yield Static(
-                    "↑↓ move · type to search · Export… to render & save",
+                    "↑↓ move · type to search · d delete · Export… to render & save",
                     id="artifacts-affordance",
                     classes="affordance",
                 )
@@ -152,20 +158,50 @@ class ArtifactsScreen(Vertical):
             return vault.run_dir(code, run_id)
         return vault.project_dir(code)
 
+    def _finished_product_paths(self, code: str) -> set[Path]:
+        """Absolute paths of the LATEST run's finished deliverables — the files
+        the operator actually asked for. Used to ★-flag + hoist them out of the
+        research/draft pile. Best-effort: any failure returns empty (the flag is
+        cosmetic and must never block the listing)."""
+        try:
+            from modulatio import delivery, store
+            run_id = vault.latest_run(code)
+            if run_id is None:
+                return set()
+            tasks = store.list_tasks(code, run_id=run_id)
+            artifacts_root = vault.project_dir(code) / "artifacts" / run_id
+            out: set[Path] = set()
+            for _tid, path, _fallback, _fam in delivery.deliverables_from_tasks(
+                tasks, artifacts_root
+            ):
+                try:
+                    out.add(path.resolve())
+                except OSError:
+                    out.add(path)
+            return out
+        except Exception:
+            return set()
+
     def _load_files(self) -> None:
         listview = self.query_one("#artifacts-list", ListView)
         listview.clear()
-        self._paths: list[Path] = []
+        self._paths = []
         code = self.app.project_code  # type: ignore[attr-defined]
         run_root = self._scope_root(code)
         proj_root = vault.project_dir(code)
+        products = self._finished_product_paths(code)
         q = self._query.lower()
+        # Collect (path, label, is_product) first so finished products can be
+        # hoisted to the top; list.sort is stable, so within each group the
+        # walk order (rel dir, then alphabetical) is preserved.
+        rows: list[tuple[Path, str, bool]] = []
         for rel in _ARTIFACT_DIRS:
-            # ``artifacts`` is the project's DURABLE tree (run-namespaced, every
-            # run accumulates); ``reports``/``research`` are this run's transient
-            # record. Root each accordingly so the tab shows the accumulated
-            # artifacts across runs, not just the latest kickoff's.
-            d = (proj_root if rel == "artifacts" else run_root) / rel
+            # ``artifacts`` and ``research`` are the project's DURABLE trees
+            # (the accumulating research LIBRARY lives at <project>/research via
+            # research.py); ``reports`` is this run's transient record. Root each
+            # accordingly so the tab shows the library across runs, not just the
+            # latest kickoff's.
+            d = (proj_root if rel in ("artifacts", "research") else run_root) / rel
             if not d.exists():
                 continue
             # rglob walks the subtree so output_path-nested files
@@ -179,16 +215,30 @@ class ArtifactsScreen(Vertical):
                 # Client-side search: match the displayed path.
                 if q and q not in display.lower():
                     continue
-                # _paths and the listview rows stay index-aligned so the
-                # preview lookup (by ListView.index) keeps pointing at the
-                # right file after a filter.
-                self._paths.append(p)
                 # Display the path as <rel>/<rest> so the user sees
                 # which artifact subdir AND any nested folders, prefixed with a
                 # family glyph (glyph + name, §10).
                 glyph = _FAMILY_GLYPH.get(
                     families.infer_artifact_family_from_path(p), "·")
-                listview.append(ListItem(Label(f"{glyph} {display}")))
+                # Research past the reuse TTL is flagged (glyph+WORD, §10): it's
+                # kept for perusal but the team no longer reuses it for grounding.
+                suffix = ""
+                if rel == "research" and research.is_stale_file(p):
+                    suffix = "  ⚠ STALE (>30d)"
+                try:
+                    is_product = p.resolve() in products
+                except OSError:
+                    is_product = p in products
+                # ★ marks the finished product — the deliverable the operator
+                # asked for — so it stands out from the research/draft pile (§1).
+                star = "★ " if is_product else ""
+                rows.append((p, f"{star}{glyph} {display}{suffix}", is_product))
+        # Finished products first; _paths stays index-aligned with the rows so
+        # the preview / delete lookups (by ListView.index) keep pointing right.
+        rows.sort(key=lambda r: not r[2])
+        for p, label, _ in rows:
+            self._paths.append(p)
+            listview.append(ListItem(Label(label)))
         self._set_counts(len(self._paths))
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -242,6 +292,36 @@ class ArtifactsScreen(Vertical):
         # ``[/]`` (ubiquitous in code/regex/JSON paths) would otherwise
         # raise MarkupError and crash the preview.
         preview.update(Text(text))
+
+    # ── Delete (housekeeping) ───────────────────────────────────────────
+
+    def action_delete(self) -> None:
+        """Permanently delete the highlighted artifact file (housekeeping —
+        mirrors JOBS/LOGS delete). ConfirmModal-guarded; an artifact has no
+        backup, so removal is deliberate."""
+        listview = self.query_one("#artifacts-list", ListView)
+        idx = listview.index
+        if idx is None or idx < 0 or idx >= len(self._paths):
+            return
+        path = self._paths[idx]
+        self.app.push_screen(
+            ConfirmModal(f"Delete artifact {path.name}?\n\nThis can't be undone."),
+            lambda ok: self._do_delete(path) if ok else None,
+        )
+
+    def _do_delete(self, path: Path) -> None:
+        # Unlink is safe even if a producer holds the file open (POSIX): the
+        # writer's fd stays valid, only the name is removed. It's one file, not
+        # the whole run folder, so no in-flight guard is needed (unlike JOBS).
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.app.notify(f"Couldn't delete: {exc}", severity="error")
+            return
+        self._load_files()
+        self.app.notify(f"Deleted {path.name}.")
 
     # ── Export panel toggle ─────────────────────────────────────────────
 

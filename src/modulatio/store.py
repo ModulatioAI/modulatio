@@ -713,6 +713,26 @@ def update_ticket_status(
         return ticket
 
 
+def delete_ticket(project_code: str, ticket_id: str, run_id: str | None = None) -> bool:
+    """Permanently remove a ticket's file(s). Returns True if anything was
+    deleted, False if no matching ticket existed — idempotent, so an operator
+    double-pressing 'd' is a no-op, never an error.
+
+    Also clears any quarantined ``<id>.broken*.md`` sibling (see
+    :func:`_next_ticket_number`) so a corrupt-but-preserved record is removed
+    too, not left lingering invisibly."""
+    with _store_lock:
+        path = _ticket_path(project_code, ticket_id, run_id=run_id)
+        removed = False
+        for p in [path, *path.parent.glob(f"{ticket_id}.broken*.md")]:
+            try:
+                p.unlink()
+                removed = True
+            except FileNotFoundError:
+                pass
+        return removed
+
+
 # ─── Goal store ─────────────────────────────────────────────────────────────
 
 def _goal_path(code: str, goal_id: str, run_id: str | None = None) -> Path:

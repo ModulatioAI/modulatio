@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,13 @@ from modulatio import config
 from modulatio.vault import project_dir
 
 _RESEARCH_ROOT = config.get_shared_resources_path() / "research"
+
+#: Reuse time-to-live for cached research, in days. Facts go stale, so a note
+#: older than this is no longer reused for grounding (the producer re-fetches
+#: instead) — but it stays on disk for operator reference, flagged stale in the
+#: TUI. Single source of truth, positioned for a future operator settings knob;
+#: never inline the literal at a call site.
+RESEARCH_TTL_DAYS = 30
 
 _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -143,6 +151,66 @@ def load_with_metadata(topic: str, project_code: str | None = None) -> ResearchE
     return _EMPTY_ENTRY
 
 
+def _entry_age(entry: ResearchEntry) -> datetime | None:
+    """When was ``entry`` last verified, as a tz-aware datetime? Prefer the
+    explicit ``last_verified_at`` frontmatter (a date or full ISO timestamp),
+    else the cache file's mtime. ``None`` if neither resolves."""
+    lv = (entry.last_verified_at or "").strip()
+    if lv:
+        try:
+            dt = datetime.fromisoformat(lv)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass  # malformed stamp → fall back to mtime
+    if entry.source_path:
+        try:
+            mtime = Path(entry.source_path).stat().st_mtime
+            return datetime.fromtimestamp(mtime, tz=timezone.utc)
+        except OSError:
+            pass
+    return None
+
+
+def is_stale(
+    entry: ResearchEntry,
+    *,
+    ttl_days: int = RESEARCH_TTL_DAYS,
+    now: datetime | None = None,
+) -> bool:
+    """True iff a cached research entry is older than the reuse TTL and should
+    no longer be reused for grounding.
+
+    Age comes from ``last_verified_at`` (explicit producer intent) or, failing
+    that, the cache file's mtime. Reuse-first bias: an empty entry, or one whose
+    age can't be determined, is NOT stale — we never discard research we can't
+    prove is old."""
+    if not entry.body.strip():
+        return False
+    basis = _entry_age(entry)
+    if basis is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return (now - basis) > timedelta(days=ttl_days)
+
+
+def is_stale_file(
+    path: Path,
+    *,
+    ttl_days: int = RESEARCH_TTL_DAYS,
+    now: datetime | None = None,
+) -> bool:
+    """Path-based staleness check for a research cache file (see :func:`is_stale`).
+    Lets a UI flag a stale note without reaching into the parser. A missing or
+    unreadable file is NOT stale (reuse-first)."""
+    try:
+        if not path.is_file():
+            return False
+        entry = _parse_file(path)
+    except OSError:
+        return False
+    return is_stale(entry, ttl_days=ttl_days, now=now)
+
+
 def load(topic: str, project_code: str | None = None) -> str:
     """Return the research body for a topic (empty string if none cached)."""
     return load_with_metadata(topic, project_code).body
@@ -208,4 +276,12 @@ def save(
     return path
 
 
-__all__ = ["ResearchEntry", "load", "load_with_metadata", "save"]
+__all__ = [
+    "RESEARCH_TTL_DAYS",
+    "ResearchEntry",
+    "is_stale",
+    "is_stale_file",
+    "load",
+    "load_with_metadata",
+    "save",
+]

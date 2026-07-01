@@ -100,6 +100,23 @@ def test_ticket_create_roundtrip(project: Path):
     assert len(loaded.transitions) == 1
 
 
+def test_delete_ticket_removes_file(project: Path):
+    """delete_ticket unlinks the ticket file: it's gone from get + list, and
+    a second delete of the same id is a no-op returning False (idempotent, the
+    operator double-pressing 'd' must not raise)."""
+    from uuid import uuid4
+    pid = uuid4()
+    t = store.create_ticket(
+        project_id=pid, project_code=PROJECT_CODE,
+        priority=TicketPriority.MINOR, title="to delete",
+    )
+    assert store.get_ticket(PROJECT_CODE, t.id) is not None
+    assert store.delete_ticket(PROJECT_CODE, t.id) is True
+    assert store.get_ticket(PROJECT_CODE, t.id) is None
+    assert all(x.id != t.id for x in store.list_tickets(PROJECT_CODE))
+    assert store.delete_ticket(PROJECT_CODE, t.id) is False
+
+
 def test_tickets_are_project_durable_across_runs(project: Path):
     """A ticket outlives the run that opened it: created during run A, it's
     visible from run B (and project scope) and numbered project-wide. Tickets

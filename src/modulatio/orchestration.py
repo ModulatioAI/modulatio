@@ -4042,7 +4042,11 @@ class Orchestrator:
         picked = False
         for topic in task.research_topics:
             entry = research.load_with_metadata(topic, project_code=self.project.code)
-            if entry.body.strip():
+            # Reuse cached research — UNLESS it's past the reuse TTL. Facts go
+            # stale, so a note older than research.RESEARCH_TTL_DAYS is not reused
+            # for grounding; fall through to re-fetch (which re-saves it fresh).
+            # The stale file stays on disk for operator reference.
+            if entry.body.strip() and not research.is_stale(entry):
                 chunks.append(f"Topic: {topic}\n\n{entry.body.strip()}")
                 continue
             if not picked:

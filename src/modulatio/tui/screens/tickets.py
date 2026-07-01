@@ -13,6 +13,7 @@ Layout:
 
 Keybind (when this container has focus):
   r — refresh the list
+  d — delete the highlighted ticket (housekeeping; ConfirmModal-guarded)
 
 Tickets are a LOG: they record what happened (creation, decisions, state
 transitions) for audit. Issues are resolved by talking to the Leader in the
@@ -31,6 +32,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.widgets import DataTable, Input, Markdown, Static
 
 from modulatio import store
+from modulatio.tui.widgets.confirm_modal import ConfirmModal
 from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.ticket_row import ticket_row
@@ -47,6 +49,7 @@ class TicketsScreen(Vertical):
 
     BINDINGS = [
         Binding("r", "refresh", "Refresh", show=True),
+        Binding("d", "delete", "Delete ticket", show=True),
     ]
 
     # The split + full-height divider live in MasterDetail now.
@@ -59,6 +62,8 @@ class TicketsScreen(Vertical):
         super().__init__(*args, **kwargs)
         self.preview_source: str = ""
         self._query: str = ""
+        #: id of the ticket the cursor is on — the delete target.
+        self._selected_id: str | None = None
 
     def compose(self) -> ComposeResult:
         with MasterDetail():
@@ -72,7 +77,7 @@ class TicketsScreen(Vertical):
                 )
                 yield table
                 yield Static(
-                    "↑↓ move · type to search · read-only — issues are resolved "
+                    "↑↓ move · type to search · d delete · issues are resolved "
                     "in the LEADER tab",
                     id="tickets-affordance",
                     classes="affordance",
@@ -125,6 +130,25 @@ class TicketsScreen(Vertical):
     def action_refresh(self) -> None:
         self.refresh_tickets()
 
+    def action_delete(self) -> None:
+        """Permanently delete the highlighted ticket (housekeeping — mirrors the
+        JOBS/LOGS delete). Guarded by a ConfirmModal; a ticket is a record with
+        no backup, so removal is deliberate."""
+        ticket_id = self._selected_id
+        if not ticket_id:
+            return
+        self.app.push_screen(
+            ConfirmModal(f"Delete ticket {ticket_id}?\n\nThis can't be undone."),
+            lambda ok: self._do_delete(ticket_id) if ok else None,
+        )
+
+    def _do_delete(self, ticket_id: str) -> None:
+        code = self.app.project_code  # type: ignore[attr-defined]
+        if store.delete_ticket(code, ticket_id):
+            self._selected_id = None
+            self.refresh_tickets()
+            self.app.notify(f"Deleted ticket {ticket_id}.")
+
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "controls-search":
             self._query = event.value.strip()
@@ -150,6 +174,8 @@ class TicketsScreen(Vertical):
             self._render_preview(ticket_id)
 
     def _render_preview(self, ticket_id: str) -> None:
+        # Single funnel for the highlighted ticket → keep the delete target current.
+        self._selected_id = ticket_id
         code = self.app.project_code  # type: ignore[attr-defined]
         ticket = store.get_ticket(code, ticket_id)
         if ticket is None:

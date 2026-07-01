@@ -1329,6 +1329,52 @@ def test_researcher_not_called_when_cache_hit(project: Project, tmp_path, monkey
     assert "four-elements model" in captured["drafter_prompt"]
 
 
+def test_researcher_recalled_when_cache_is_stale(project: Project, tmp_path, monkeypatch):
+    """A cached note older than the reuse TTL is NOT reused — the researcher is
+    re-invoked to refresh it (facts go stale). The stale file stays on disk for
+    operator reference; only its REUSE is withheld."""
+    from modulatio import research
+
+    monkeypatch.setattr(research, "_RESEARCH_ROOT", tmp_path / "shared_research")
+
+    cache_dir = tmp_path / PROJECT_CODE.lower() / "research"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "alchemy-basics.md"
+    cache_file.write_text(
+        "---\nquery: alchemy basics\nfreshness_class: semi-stable\n"
+        "last_verified_at: 2020-01-01\n---\n\n"
+        "STALE CACHED BODY — must not be reused.\n"
+    )
+
+    researcher_calls: list[str] = []
+
+    def _researcher(prompt: str) -> str:
+        researcher_calls.append(prompt)
+        return "FRESH: refreshed alchemy research grounded in a real source."
+
+    def _coordinator_with_cached_topic(prompt: str) -> str:
+        tasks = [{
+            "description": "Write on alchemy",
+            "assignee_specialist": "drafter",
+            "research_topics": ["alchemy basics"],
+            "evidence_required": [{"kind": "artifact", "description": "file"}],
+        }]
+        return f"```json\n{json.dumps(tasks)}\n```"
+
+    runners = {
+        "leader": _leader_stub,
+        "planner": _coordinator_with_cached_topic,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+        "researcher": _researcher,
+    }
+    orch = Orchestrator(project, runners)
+    orch.kickoff("Write on alchemy")
+
+    assert len(researcher_calls) == 1   # stale → re-fetched, not reused
+    assert cache_file.exists()          # kept on disk for operator perusal
+
+
 def test_research_routes_to_capability_dispatched_agent_model(
     project: Project, tmp_path, monkeypatch
 ):
