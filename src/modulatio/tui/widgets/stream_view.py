@@ -166,6 +166,14 @@ class StreamView(VerticalScroll):
         # Follow the tail like a chat transcript.
         self.call_after_refresh(self.scroll_end, animate=False)
 
+    def on_show(self) -> None:
+        """Re-follow the tail when the lane becomes visible again. Lines appended
+        while the lane was hidden (display:none — e.g. the run verdict landing on
+        LEADER while the console shows the floor) scroll against zero geometry, so
+        the ``_append``-time ``scroll_end`` is lost and the reveal would show a
+        stale position — the operator misses the Leader's report."""
+        self.call_after_refresh(self.scroll_end, animate=False)
+
     def clear(self) -> None:
         """Blow this lane's transcript out of the pipes — remove the rendered lines
         and reset the tracked state. Used by the F8 kill-switch to clean the TEAM TV

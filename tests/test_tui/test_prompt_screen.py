@@ -1217,3 +1217,38 @@ async def test_trailing_end_in_multi_message_capture_launches(
             await pilot.pause()
         assert screen._kickoff_capture is None       # launched, capture closed
         assert launched == ["first line\nfinal line"]  # /end stripped, no literal
+
+
+# ─── Tail-follow on reveal (the invisible-verdict bug, 2026-07-01) ──────────
+
+
+async def test_leader_lane_follows_tail_when_revealed(project_with_roster):
+    """A message appended while the LEADER lane is hidden (console flipped to
+    the floor — display:none, zero geometry) scrolls against nothing, so the
+    _append-time scroll_end is lost. Flipping back must land on the TAIL —
+    the run verdict posted mid-run was invisible until a manual scroll."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        tv = app.query_one("#stream-leader", StreamView)
+        # Kickoff flips the console to the floor; the LEADER lane goes hidden.
+        screen.show_team()
+        await pilot.pause()
+        # The verdict (and more than a viewport of lines) lands while hidden.
+        for i in range(40):
+            tv.add_leader_message(f"line {i}")
+        tv.add_leader_message("Job's done — the verdict.")
+        await pilot.pause()
+        # Operator flips back to LEADER: the lane must show the tail.
+        screen.show_leader()
+        await pilot.pause()
+        await pilot.pause()
+        assert tv.scroll_y >= tv.max_scroll_y - 1, (
+            f"leader lane not at tail after reveal: scroll_y={tv.scroll_y} "
+            f"max={tv.max_scroll_y}"
+        )
