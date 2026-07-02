@@ -1026,6 +1026,10 @@ class ModulatioApp(App):
         if side_effect == "open_editor":
             self._compose_in_editor()
             return
+        if side_effect == "reload_services":
+            ok, msg = self.reload_services()
+            self.notify(msg, severity="information" if ok else "warning")
+            return
         if side_effect == "restart_tui":
             self.exit(return_code=42)
             return

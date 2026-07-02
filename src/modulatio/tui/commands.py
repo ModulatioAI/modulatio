@@ -139,6 +139,14 @@ def _handle_refresh(args: list[str]) -> CommandResult:
     )
 
 
+def _handle_reload(args: list[str]) -> CommandResult:
+    """Apply model/config changes to the live services without a restart."""
+    return CommandResult(
+        output="Reloading services from config...",
+        side_effect="reload_services",
+    )
+
+
 def _handle_restart(args: list[str]) -> CommandResult:
     """Signal to the app to restart (re-exec)."""
     return CommandResult(
@@ -321,6 +329,13 @@ COMMANDS: tuple[Command, ...] = (
         description="Re-read all tab data from disk.",
         category="System",
         handler=_handle_refresh,
+    ),
+    Command(
+        shortcut="/reload",
+        name="Reload services",
+        description="Apply model/config changes to live services — no restart.",
+        category="System",
+        handler=_handle_reload,
     ),
     Command(
         shortcut="/restart",

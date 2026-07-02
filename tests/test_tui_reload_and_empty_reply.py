@@ -99,3 +99,34 @@ async def test_reload_services_refused_while_busy_leaves_orchestrator_intact():
             "a refused reload must NOT invalidate the live orchestrator mid-job"
         )
         assert msg
+
+
+# ── /reload surface wiring (arc #3 close-out, 2026-07-02) ───────────────────
+# ``reload_services`` existed with no user-facing surface — nothing outside
+# tests called it. ``/reload`` in the prompt (F1: "Reload services") now
+# routes to it via the side-effect dispatcher and toasts the outcome.
+
+
+def test_reload_command_dispatches_reload_services_side_effect():
+    from modulatio.tui import commands
+
+    result = commands.dispatch("/reload")
+    assert result.handled and result.ok
+    assert result.side_effect == "reload_services"
+
+
+@pytest.mark.asyncio
+async def test_reload_side_effect_calls_reload_services_and_notifies():
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        calls: list[str] = []
+        app.reload_services = lambda: (calls.append("hit") or (True, "reloaded"))  # type: ignore
+        toasts: list[str] = []
+        app.notify = lambda msg, **kw: toasts.append(str(msg))  # type: ignore
+
+        app._apply_side_effect("reload_services")
+        await pilot.pause()
+
+        assert calls == ["hit"]
+        assert toasts and "reloaded" in toasts[0]
