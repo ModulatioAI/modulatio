@@ -74,10 +74,16 @@ _MAX_TOTAL_BYTES = 32 * 1024 * 1024
 
 _DEFAULT_SEPARATOR = "\n\n---\n\n"
 
-#: Producer-runbook markers that identify a leaked reply preamble sitting above
-#: a unit's first heading. Matched case-insensitively against the pre-heading
-#: region only — marker text after the heading is content, not scaffold.
-_SCAFFOLD_MARKERS = ("operation:", "definition of done:")
+#: Producer-runbook marker LINES that identify a leaked reply preamble sitting
+#: above a unit's first heading. Runbook-SHAPED means line-leading (optionally
+#: bolded/emphasised) — a mid-sentence mention ("discusses Operation: market
+#: entry") is business prose, not scaffold, and stripping it is silent data
+#: loss (Wild Bill, code review 2026-07-02). BOTH markers must appear as lines
+#: in the pre-heading region: the runbook always emits the pair together.
+_SCAFFOLD_MARKER_PATTERNS = (
+    re.compile(r"^\s*[*_>]*\s*operation[*_]{0,2}\s*:", re.IGNORECASE),
+    re.compile(r"^\s*[*_>]*\s*definition of done[*_]{0,2}\s*:", re.IGNORECASE),
+)
 #: A leaked preamble sits within the first few lines; a heading deeper than this
 #: is a document-shaped unit whose long intro must never be treated as scaffold.
 _SCAFFOLD_SCAN_LINES = 30
@@ -88,14 +94,19 @@ def _strip_unit_scaffolding(body: str) -> str:
 
     Producers prefix replies with an ``**Operation:** / **Definition of Done:**``
     runbook block; when one leaks into a written unit it sits ABOVE the unit's
-    first markdown heading. Strip the pre-heading region ONLY when it carries a
-    runbook marker — a plain prose intro is kept, and a unit with no heading in
-    scan range is returned untouched (no seam to cut on)."""
+    first markdown heading. Strip the pre-heading region ONLY when it carries
+    BOTH runbook markers as line-leading (runbook-SHAPED) lines — a prose intro
+    that merely mentions the terms mid-sentence is content and is kept, and a
+    unit with no heading in scan range is returned untouched (no seam to cut
+    on)."""
     lines = body.split("\n")
     for i, line in enumerate(lines[:_SCAFFOLD_SCAN_LINES]):
         if re.match(r"#{1,6}\s", line.lstrip()):
-            head = "\n".join(lines[:i]).lower()
-            if any(m in head for m in _SCAFFOLD_MARKERS):
+            head_lines = lines[:i]
+            if all(
+                any(pat.match(ln) for ln in head_lines)
+                for pat in _SCAFFOLD_MARKER_PATTERNS
+            ):
                 return "\n".join(lines[i:])
             break
     return body

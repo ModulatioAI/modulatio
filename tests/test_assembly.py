@@ -958,3 +958,37 @@ def test_deep_first_heading_beyond_scan_range_is_kept(tmp_path):
     _units(tmp_path, **{"a.md": body})
     r = assembly.assemble({"units": ["a.md"]}, tmp_path)
     assert "Operation: mentioned in ordinary prose" in r.content
+
+
+def test_business_prose_mentioning_markers_is_not_stripped(tmp_path):
+    """Wild Bill MEDIUM (code review 2026-07-02): substring matching deleted a
+    legitimate executive summary that used "Operation:" and "Definition of
+    Done:" as business terms mid-sentence. The predicate must require
+    runbook-SHAPED marker lines (line-leading, optionally bolded), not mere
+    mention — and assembly has no QC after the join, so a false strip is
+    silent data loss."""
+    body = (
+        "Executive summary\n\n"
+        "This report discusses Operation: market entry and the Definition of "
+        "Done: measurable adoption.\n"
+        "These are business terms, not producer scaffolding.\n\n"
+        "# Market Entry Plan\n\n"
+        "Actual content begins here.\n"
+    )
+    _units(tmp_path, **{"a.md": body})
+    r = assembly.assemble({"units": ["a.md"]}, tmp_path)
+    assert "Executive summary" in r.content
+    assert "business terms" in r.content
+
+
+def test_line_leading_runbook_block_is_still_stripped(tmp_path):
+    """The real leak shape — line-leading (bolded) Operation/DoD lines —
+    must still strip, with or without the chatter line."""
+    plain = (
+        "Operation: Produce Research Note\n"
+        "Definition of Done: A concise note.\n\n"
+        "# Note\n\nBody.\n"
+    )
+    _units(tmp_path, **{"a.md": plain})
+    r = assembly.assemble({"units": ["a.md"]}, tmp_path)
+    assert r.content.startswith("# Note")

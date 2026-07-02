@@ -1364,6 +1364,25 @@ def _measured_size_line(body: str) -> str:
     )
 
 
+def _normalize_output_path_sugar(candidate: str) -> str:
+    """The pure path-sugar normalization :func:`_validate_output_path` applies
+    before validation: whitespace, backslash separators, leading ``./``, and
+    ONE planner-echoed leading ``artifacts/`` segment (the root's own name,
+    not intent — run-2 nesting bug; a bare ``artifacts`` filename is kept).
+
+    Shared with the size-split plan-time duplicate invariant so a sugared
+    duplicate (``artifacts/drafts/x.md`` vs ``drafts/x.md``) cannot slip past
+    a raw-string comparison and canonicalize into a collision at task
+    creation (Wild Bill BLOCK, code review 2026-07-02)."""
+    s = (candidate or "").strip().replace("\\", "/")
+    while s.startswith("./"):
+        s = s[2:]
+    parts = s.split("/")
+    if len(parts) > 1 and parts[0] == "artifacts":
+        parts = parts[1:]
+    return "/".join(parts)
+
+
 def _validate_output_path(candidate: str, artifacts_root: Path) -> str:
     """Resolve ``candidate`` under ``artifacts_root`` and return the
     normalized relative path. Raises :class:`_PlanError` if the path
@@ -1388,15 +1407,8 @@ def _validate_output_path(candidate: str, artifacts_root: Path) -> str:
     # writing a dotfile inside the vault still surfaces it where
     # tooling that copies/syncs/archives the artifacts dir might land
     # it where it executes (e.g. shell rc files in $HOME).
-    parts = stripped.replace("\\", "/").split("/")
-    # Planner-echo of the root: prompts describe "the artifacts tree", so a
-    # planner sometimes emits "artifacts/brief.md" — resolving that under the
-    # artifacts root nests the deliverable one level deeper than every other
-    # run's (run-2 nesting bug). ONE leading "artifacts" segment is the root's
-    # own name, not intent; a bare "artifacts" filename is kept.
-    if len(parts) > 1 and parts[0] == "artifacts":
-        parts = parts[1:]
-        stripped = "/".join(parts)
+    stripped = _normalize_output_path_sugar(stripped)
+    parts = stripped.split("/")
     for p in parts:
         if not p or p == ".." or p.startswith("."):
             raise _PlanError(
@@ -3711,10 +3723,10 @@ class Orchestrator:
                 paths: list[str] = []
                 raw = spec.get("output_path")
                 if isinstance(raw, str) and raw.strip():
-                    paths.append(raw.strip().lstrip("./"))
+                    paths.append(_normalize_output_path_sugar(raw))
                 for entry in spec.get("artifacts") or []:
                     if isinstance(entry, dict) and isinstance(entry.get("path"), str):
-                        paths.append(entry["path"].strip().lstrip("./"))
+                        paths.append(_normalize_output_path_sugar(entry["path"]))
                 for p in paths:
                     if p in seen:
                         raise _PlanError(

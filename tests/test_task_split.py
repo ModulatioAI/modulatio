@@ -209,3 +209,37 @@ def test_chunk_count_is_logged_prominently(make_orch, caplog):
         orch._split_oversized_gathers([_gather()])
     assert any("4" in r.message and "chunk" in r.message.lower()
                for r in caplog.records)
+
+
+def test_sugared_duplicate_path_cannot_bypass_the_invariant(make_orch):
+    """Wild Bill BLOCK (code review 2026-07-02): the invariant compared RAW
+    strings, but _validate_output_path later strips one leading "artifacts/"
+    — so "artifacts/drafts/<chunk>.md" slipped past the comparison and
+    canonicalized into a collision at task creation. Paths must be normalized
+    with the SAME sugar rules before comparison."""
+    orch = make_orch(lambda p: _split_reply("A", "B"))
+    data = [
+        _gather(),
+        {"description": "sugared twin",
+         "output_path": "artifacts/drafts/0-research-every-degradation-mechanism_chunk_00.md",
+         "artifact_kind": "text", "operation": "construct",
+         "required_skills": [], "deliverable": False, "depends_on": []},
+    ]
+    with pytest.raises(orchestration._PlanError):
+        orch._split_oversized_gathers(data)
+
+
+@pytest.mark.parametrize("sugar", ["./{p}", "{p}", "././{p}"])
+def test_dot_slash_sugar_cannot_bypass_the_invariant(make_orch, sugar):
+    """Leading "./" is sugar the normalizer strips; a malformed ".//x" is NOT
+    sugar — it still fails closed at _validate_output_path (empty component)."""
+    p = "drafts/0-research-every-degradation-mechanism_chunk_01.md"
+    orch = make_orch(lambda p_: _split_reply("A", "B"))
+    data = [
+        _gather(),
+        {"description": "dot twin", "output_path": sugar.format(p=p),
+         "artifact_kind": "text", "operation": "construct",
+         "required_skills": [], "deliverable": False, "depends_on": []},
+    ]
+    with pytest.raises(orchestration._PlanError):
+        orch._split_oversized_gathers(data)
