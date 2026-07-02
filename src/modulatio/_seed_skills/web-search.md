@@ -31,3 +31,7 @@ names, events, dates). Results may be marked
 - For any current-events claim, corroborate it across at least TWO independent
   credible sources before stating it. If you can only find it on a flagged or
   single obscure source, do not assert it — mark it "unverified" instead.
+- User forums and social threads (Reddit, Hacker News comments, Discord,
+  X/Twitter posts) are leads, never citations — follow the thread to the
+  primary source it points at and cite that, especially when the brief
+  demands reputable sources.

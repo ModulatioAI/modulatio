@@ -205,3 +205,30 @@ def test_find_claude_binary_missing(monkeypatch):
     monkeypatch.delenv("MODULATIO_CLAUDE_BIN", raising=False)
     monkeypatch.setattr(oauth_helpers.shutil, "which", lambda n: None)
     assert oauth_helpers.find_claude_binary() is None
+
+
+# ── empty-reply fallback guard (arc #3, 2026-07-02) ─────────────────────────
+# A `claude -p` runtime hiccup can exit 0 with NO assistant text (observed
+# live post-B5: Clay's converse returned an empty message). An empty reply is
+# a failed call, not a completion — reason it, retry it, and let run_claude's
+# out-of-retries path raise ClaudeUnavailable into the model-fallback chain
+# instead of propagating "" downstream.
+
+
+def test_empty_reply_on_clean_exit_is_an_error_reason():
+    reason = claude_cli._claude_error_reason(0, "")
+    assert reason is not None
+    assert "empty reply" in reason
+
+
+def test_whitespace_only_reply_is_an_error_reason():
+    assert claude_cli._claude_error_reason(0, "  \n\t ") is not None
+
+
+def test_empty_reply_is_retriable():
+    reason = claude_cli._claude_error_reason(0, "")
+    assert claude_cli._claude_error_retriable(reason)
+
+
+def test_real_text_on_clean_exit_is_not_an_error():
+    assert claude_cli._claude_error_reason(0, "Here is the plan.") is None

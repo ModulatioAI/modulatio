@@ -109,6 +109,11 @@ Confident prose over thin evidence is a defect, not thoroughness.
   is a lead, never a citation. A current-events claim needs corroboration from ≥2
   independent credible sources; if it appears only on a flagged or single obscure
   site, mark it "unverified" rather than assert it.
+- **User forums and social threads (Reddit, Hacker News comments, Discord,
+  X/Twitter posts) are leads, never citations.** When the brief calls for
+  reputable sources — industry press, official publications, research reports —
+  a forum thread in the References section is a defect. Chase the thread to the
+  primary source it points at and cite THAT, or drop the claim.
 - A URL that returns 404/non-2xx says so in the body — **don't cite a page you
   couldn't fetch.** Mis-attribution (real source, wrong content) is a critical
   defect: only cite what the page you fetched actually supports.

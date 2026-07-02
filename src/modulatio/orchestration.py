@@ -1352,6 +1352,18 @@ def _parse_redecompose_specs(resp: "str | None") -> "list[dict]":
     return [d for d in data if isinstance(d, dict)]
 
 
+def _measured_size_line(body: str) -> str:
+    """Engine-measured size facts for a verify-prompt artifact block. The
+    Leader's rationale must ground quantitative claims (length, pages, size)
+    in THESE numbers, never in an estimate off the (possibly truncated)
+    snippet — run-1 shipped a "20-page" claim for a ~4.4K-word file."""
+    words = len(body.split())
+    return (
+        f"MEASURED SIZE (engine): {len(body.encode('utf-8'))} bytes, "
+        f"{words} words, ≈{round(words * 4 / 3)} tokens"
+    )
+
+
 def _validate_output_path(candidate: str, artifacts_root: Path) -> str:
     """Resolve ``candidate`` under ``artifacts_root`` and return the
     normalized relative path. Raises :class:`_PlanError` if the path
@@ -1377,6 +1389,14 @@ def _validate_output_path(candidate: str, artifacts_root: Path) -> str:
     # tooling that copies/syncs/archives the artifacts dir might land
     # it where it executes (e.g. shell rc files in $HOME).
     parts = stripped.replace("\\", "/").split("/")
+    # Planner-echo of the root: prompts describe "the artifacts tree", so a
+    # planner sometimes emits "artifacts/brief.md" — resolving that under the
+    # artifacts root nests the deliverable one level deeper than every other
+    # run's (run-2 nesting bug). ONE leading "artifacts" segment is the root's
+    # own name, not intent; a bare "artifacts" filename is kept.
+    if len(parts) > 1 and parts[0] == "artifacts":
+        parts = parts[1:]
+        stripped = "/".join(parts)
     for p in parts:
         if not p or p == ".." or p.startswith("."):
             raise _PlanError(
@@ -4233,11 +4253,44 @@ class Orchestrator:
             # (never truncated) then orders priors most-recent-first, so the
             # reusable material a producer needs survives the cap.
             artifacts_root = project_dir(self.project.code) / "artifacts"
-            return team_canvas.build_digest(
+            digest = team_canvas.build_digest(
                 artifacts_root, hoist_run_id=self.project.run_id
             )
         except Exception:
             return ""
+        # Reuse observability (run-arc fix 2026-07-02): one audit row per digest
+        # build, so cross-run reuse is a MEASURED fact (runs 1→2 of the live
+        # test halved fetches, but nothing on disk proved prior-run material
+        # reached the producers). File entries are parsed from the digest's own
+        # engine-rendered "- `path`" lines — no team_canvas seam change; the
+        # current run's files carry a "<run_id>/" path prefix under the durable
+        # tree. Best-effort: an audit hiccup never blocks the dispatch.
+        try:
+            entries = re.findall(r"^- `([^`]+)`", digest, flags=re.MULTILINE)
+            if entries:
+                own = sum(
+                    1 for e in entries
+                    if self.project.run_id
+                    and e.startswith(f"{self.project.run_id}/")
+                )
+                from modulatio import inboxes as _inboxes
+                _inboxes._append_jsonl_row(
+                    self._scope_root() / "audit.jsonl",
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "actor": "team_canvas",
+                        "event": "digest_injected",
+                        "project_code": self.project.code,
+                        "run_id": self.project.run_id,
+                        "digest_chars": len(digest),
+                        "files_total": len(entries),
+                        "files_own_run": own,
+                        "files_prior_runs": len(entries) - own,
+                    },
+                )
+        except Exception:  # noqa: BLE001 — observability must not block dispatch
+            pass
+        return digest
 
     def _recall_team_memory(self, task: Task) -> str:
         """Targeted pre-task team memory recall. Returns pre-rendered string
@@ -7149,6 +7202,40 @@ class Orchestrator:
                 f"does this when the toolchain is present) or correct the declared "
                 f"output format — do not ship text under a binary extension."
             ), "environmental"
+        # Deterministic scaffolding gate (run-arc fix 2026-07-02): a
+        # document-family draft whose pre-heading head carries the
+        # producer-runbook markers is leaked reply scaffolding, not content —
+        # run-1 shipped one past FIVE LLM QC passes. Prose bends; the engine
+        # binds the reject, classified mechanical so QC-as-fixer EDITS it out.
+        # Document family only: '#'-comment lines look like headings, so code
+        # (which may legitimately quote the runbook) must never hit this.
+        if _effective_assembly_family(
+            task.artifact_kind or "text",
+            task.required_skills or [],
+            self.project.code,
+        ) == "document":
+            from modulatio import assembly as _assembly_mod
+            try:
+                draft_body = draft_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                draft_body = ""
+            if draft_body and _assembly_mod._strip_unit_scaffolding(
+                draft_body
+            ) != draft_body:
+                verdict = AssertionEvidence(
+                    producer="qc", primary=True,
+                    check=(
+                        "scaffolding gate: leaked producer-runbook preamble "
+                        "above the first heading"
+                    ),
+                    passed=False,
+                )
+                return verdict, (
+                    "The draft opens with leaked reply scaffolding (chatter "
+                    "and an Operation:/Definition of Done: block) above its "
+                    "first heading. Delete everything before the first real "
+                    "heading; the content below it is otherwise untouched."
+                ), "mechanical"
         # Part A / review-ledger: if the exact bytes in front of QC already
         # passed QC this run (checksum == the task's content-addressed mark),
         # don't re-review them — re-spending QC on already-verified content is the
@@ -9941,7 +10028,10 @@ class Orchestrator:
                                 twin_body[:4000]
                                 + f"\n\n... [truncated; full readable twin at {twin_path}]"
                             )
-                            block += f"\n\nreadable content (twin):\n{snip}"
+                            block += (
+                                f"\n\n{_measured_size_line(twin_body)}"
+                                f"\n\nreadable content (twin):\n{snip}"
+                            )
                     block += self._operation_bar_directive(t)
                     artifact_blocks.append(
                         f"### Deliverable for {t.id} (engine-assembled)\n\n{block}"
@@ -9971,7 +10061,8 @@ class Orchestrator:
                         f"{len(body)} bytes total]"
                     )
                     artifact_blocks.append(
-                        f"### Artifact for {t.id} — `{candidate}`\n\n"
+                        f"### Artifact for {t.id} — `{candidate}`\n"
+                        f"{_measured_size_line(body)}\n\n"
                         f"```\n{snippet}\n```"
                         + self._operation_bar_directive(t)
                     )
@@ -13972,6 +14063,12 @@ separate (advisory notes), may be empty []. The Product Quality Report and the
 recommendations are the Leader's contribution to the report that ships to the
 human beside the deliverables — be specific about what was delivered, what you
 stand behind, and what you'd have the human double-check.
+
+Any quantitative claim about a deliverable (word count, page count, length,
+size) MUST come from that artifact's "MEASURED SIZE (engine)" line — never
+estimated from the content snippet, which may be truncated. If the measured
+size falls short of a size the goal demanded, say so plainly; do not round a
+deliverable up to the goal's number.
 """
 
 

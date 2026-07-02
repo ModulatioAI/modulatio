@@ -328,6 +328,11 @@ def _claude_error_reason(returncode: int, result: str) -> "str | None":
     if returncode != 0:
         first = head.splitlines()[0][:160] if head else "(no output)"
         return f"claude -p exited {returncode}: {first}"
+    if not head:
+        # Empty-reply guard (arc #3): a runtime hiccup can exit 0 with no
+        # assistant text (observed live post-B5). An empty reply is a failed
+        # call, not a completion — never hand "" downstream as a message.
+        return "empty reply (exit 0, no assistant text)"
     return None
 
 
@@ -340,6 +345,7 @@ def _claude_error_retriable(reason: str) -> bool:
         s in r for s in (
             "529", "overload", "503", "502", "500", "504", "rate limit",
             "rate_limit", "timeout", "timed out", "temporarily", "unavailable",
+            "empty reply",
         )
     )
 

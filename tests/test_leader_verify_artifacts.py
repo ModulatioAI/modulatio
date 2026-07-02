@@ -150,6 +150,36 @@ def test_leader_verify_includes_artifact_content_in_prompt(project: Project, tmp
     )
 
 
+def test_leader_verify_prompt_carries_measured_artifact_size(project: Project, tmp_path: Path):
+    """Run-1 gaming report: the Leader called a ~4.4K-word file a "20-page
+    report" — a size claim invented from a truncated snippet. The verify
+    prompt must carry an engine-MEASURED size line per artifact so the
+    rationale grounds quantitative claims in measured numbers."""
+    artifacts_root = tmp_path / PROJECT_CODE.lower() / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    body = "word " * 1000  # exactly 1000 words
+    (artifacts_root / "sized.md").write_text(body)
+
+    goal = Goal(
+        id="LVA-G-005", project_id=project.id, description="d",
+        success_criteria="s", status=GoalStatus.IN_PROGRESS,
+    )
+    store.save_goal(project.code, goal)
+    task = Task(
+        id="LVA-T-005", project_id=project.id, goal_id=goal.id,
+        description="Draft", output_path="sized.md",
+        status=TaskStatus.COMPLETED,
+    )
+    store.save_task(project.code, task)
+
+    orch, captured = _capturing_orch(project)
+    orch._leader_verify_goal(goal, [task], RunSummary(project=project))
+
+    prompt = captured[0]
+    assert "MEASURED SIZE" in prompt
+    assert "1000 words" in prompt
+
+
 def test_leader_verify_falls_back_to_drafts_convention(project: Project, tmp_path: Path):
     """When a task has no output_path, the legacy drafts/ convention
     still works (back-compat for older roster fixtures)."""

@@ -31,8 +31,14 @@ def test_run_claude_never_binds_home_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "build_sandboxed_argv",
                         lambda argv, root, **kw: (captured.update(kw) or (list(argv), {"PATH": "/bin"})))
     import types
-    monkeypatch.setattr(claude_cli.subprocess, "run",
-                        lambda *a, **k: types.SimpleNamespace(stdout='{"result":"ok"}', returncode=0))
+    monkeypatch.setattr(
+        claude_cli.subprocess, "run",
+        # stream-json result shape — the legacy '{"result":"ok"}' stub parsed
+        # to an empty reply, which the arc-#3 guard now (correctly) retries.
+        lambda *a, **k: types.SimpleNamespace(
+            stdout='{"type":"result","subtype":"success","result":"ok"}',
+            returncode=0),
+    )
     claude_cli.run_claude(claude_bin=str(Path.home() / "claude"), model="m", prompt="hi",
                           workspace=tmp_path, add_dirs=[], timeout=1)
     binds = [str(p) for p in captured["extra_binds"]]

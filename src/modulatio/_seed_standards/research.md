@@ -20,6 +20,13 @@ and from human feedback. Team/project standards override anything here.
 - No fabricated sources, quotes, figures, or statistics. If a claim can't be
   grounded, omit it or mark it explicitly as the author's inference.
 
+## Source quality
+- Match source class to what the brief demands. When it asks for reputable
+  sources (industry press, official publications, research reports), a user
+  forum or social thread (Reddit, Hacker News comments, Discord, X/Twitter
+  posts) cited as a source is a defect — such threads are leads to primary
+  sources, not citations. Reject the citation, not necessarily the claim.
+
 ## Coverage
 - Cover the scope the task actually asked for. A "survey of X" that silently
   omits major, well-known instances of X is incomplete — name what is covered,

@@ -129,3 +129,9 @@ Respond in TWO parts, in this order:
 recommendations are the Leader's contribution to the report that ships to the
 human beside the deliverables — be specific about what was delivered, what you
 stand behind, and what you'd have the human double-check.
+
+Any quantitative claim about a deliverable (word count, page count, length,
+size) MUST come from that artifact's "MEASURED SIZE (engine)" line — never
+estimated from the content snippet, which may be truncated. If the measured
+size falls short of a size the goal demanded, say so plainly; do not round a
+deliverable up to the goal's number.

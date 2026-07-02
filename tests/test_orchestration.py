@@ -6750,6 +6750,23 @@ class TestValidateOutputPath:
         root = self._root(tmp_path)
         assert _validate_output_path("src/foo.py", root) == "src/foo.py"
 
+    def test_strips_planner_echoed_artifacts_prefix(self, tmp_path):
+        """Run-2 nesting bug: the planner echoes the artifacts ROOT into the
+        relative path ("artifacts/brief.md") and the deliverable lands one
+        level deeper than every other run's. One leading "artifacts/" segment
+        is the root's own name, not intent — strip it."""
+        from modulatio.orchestration import _validate_output_path
+        root = self._root(tmp_path)
+        assert _validate_output_path("artifacts/brief.md", root) == "brief.md"
+        # only ONE leading segment is echo; a nested dir named artifacts
+        # after the strip is kept verbatim
+        assert (
+            _validate_output_path("artifacts/artifacts/x.md", root)
+            == "artifacts/x.md"
+        )
+        # a bare "artifacts" filename is not an echo — kept
+        assert _validate_output_path("artifacts", root) == "artifacts"
+
     def test_rejects_empty(self, tmp_path):
         from modulatio.orchestration import _validate_output_path, _PlanError
         with pytest.raises(_PlanError):
