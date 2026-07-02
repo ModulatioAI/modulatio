@@ -1111,6 +1111,13 @@ def _run_doctor_checks() -> None:
         f"between-task reflection (continue / revise-task / drop-task) "
         f"fires after each task in a multi-task goal."
     )
+    cap_pct = _os.environ.get("MODULATIO_TASK_CONTEXT_CAP_PCT", "").strip()
+    if cap_pct:
+        typer.echo(
+            f"  [SET] MODULATIO_TASK_CONTEXT_CAP_PCT={cap_pct} — prudent "
+            f"context-cap fraction for the size-driven task fan "
+            f"(default 0.20 of the task's own window)."
+        )
     crash_dir = _os.environ.get("MODULATIO_CRASH_DIR")
     if crash_dir:
         typer.echo(

@@ -129,6 +129,39 @@ CUSTOM_WORKER_DEFAULT = 48_000
 #: project/admin configuration change.
 HARD_GLOBAL_CEILING = 64_000
 
+#: Prudent fraction of a task's OWN window that its projected working context
+#: should stay under before the engine fans it into size-bounded chunks. At 0.20
+#: a task uses at most a fifth of its window, leaving ~80% free to gather AND
+#: draft — far clear of the soft-warn (70%) / compress (80%) bands. Deliberately
+#: generous headroom (a 32K scope in a 64K window was already "too tight"): the
+#: split trigger fires at 20% of the task's context allowance. Env-tunable.
+TASK_CONTEXT_CAP_PCT_DEFAULT = 0.20
+
+
+def _task_context_cap_pct() -> float:
+    """Resolve the prudent-cap fraction from the env, guarding a degenerate
+    value back to the default (mirrors the codification-timeout parser — a bad
+    knob can never raise or zero the cap)."""
+    raw = (os.environ.get("MODULATIO_TASK_CONTEXT_CAP_PCT") or "").strip()
+    if not raw:
+        return TASK_CONTEXT_CAP_PCT_DEFAULT
+    try:
+        val = float(raw)
+    except ValueError:
+        return TASK_CONTEXT_CAP_PCT_DEFAULT
+    return val if 0.0 < val <= 1.0 else TASK_CONTEXT_CAP_PCT_DEFAULT
+
+
+def prudent_context_cap(budget_role: str, *, pct: float | None = None) -> int:
+    """The token ceiling a task's projected working context should stay under
+    before the engine fans it — a fraction (``pct``, default the env-tunable
+    :func:`_task_context_cap_pct`) of that role's OWN window. Different roles
+    have different windows, so each gets its own token cap for the same
+    fraction. Unknown roles fall back to the producer default window."""
+    window = EXPERIMENTAL_DEFAULTS.get(budget_role, CUSTOM_WORKER_DEFAULT)
+    fraction = pct if pct is not None else _task_context_cap_pct()
+    return round(fraction * window)
+
 #: UX threshold ladder. Below MIN refuses; CONFIRM prompts interactively;
 #: WARN demands a reason; above CEILING refuses outright.
 CTX_BUDGET_MIN_TOKENS = 1_000

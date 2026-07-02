@@ -892,3 +892,38 @@ def test_runner_works_alongside_slice2_summarization(tmp_path: Path) -> None:
     assert (tmp_path / "tool_calls" / "c-big.txt").exists()
     tool_msg = [m for m in chat.calls[1]["messages"] if m["role"] == "tool"][0]
     assert "[summarized: call_id=c-big]" in tool_msg["content"]
+
+
+# ── Prudent per-task context cap (size-driven fan primitive) ───────────────
+
+
+def test_prudent_context_cap_is_a_fraction_of_the_role_window() -> None:
+    """The cap a task's projected context must stay under = pct × the role's
+    OWN window, so different roles (different windows) get different token
+    caps automatically. Default pct leaves the producer ample working room."""
+    research_cap = context_budget.prudent_context_cap("research")
+    # research window is the largest (64K); at the 0.20 default that's ~12.8K,
+    # well under the 70% soft-warn / 80% compress bands.
+    assert research_cap == round(0.20 * context_budget.EXPERIMENTAL_DEFAULTS["research"])
+    # qc has a smaller window (32K) -> a smaller token cap, same fraction.
+    qc_cap = context_budget.prudent_context_cap("qc")
+    assert qc_cap == round(0.20 * context_budget.EXPERIMENTAL_DEFAULTS["qc"])
+    assert qc_cap < research_cap
+
+
+def test_prudent_context_cap_unknown_role_uses_worker_default() -> None:
+    cap = context_budget.prudent_context_cap("some-custom-agent-role")
+    assert cap == round(0.20 * context_budget.CUSTOM_WORKER_DEFAULT)
+
+
+def test_prudent_context_cap_pct_is_env_tunable(monkeypatch) -> None:
+    """MODULATIO_TASK_CONTEXT_CAP_PCT overrides the fraction; a degenerate
+    value falls back to the prudent default (never raises, never 0)."""
+    monkeypatch.setenv("MODULATIO_TASK_CONTEXT_CAP_PCT", "0.25")
+    assert context_budget.prudent_context_cap("research") == round(
+        0.25 * context_budget.EXPERIMENTAL_DEFAULTS["research"]
+    )
+    monkeypatch.setenv("MODULATIO_TASK_CONTEXT_CAP_PCT", "garbage")
+    assert context_budget.prudent_context_cap("research") == round(
+        0.20 * context_budget.EXPERIMENTAL_DEFAULTS["research"]
+    )

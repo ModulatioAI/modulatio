@@ -3587,6 +3587,123 @@ class Orchestrator:
             spec["depends_on"] = remapped
         return new_data
 
+    def _split_oversized_gathers(self, data: "list") -> "list":
+        """Context-size-driven fan (design 2026-07-01) — the inverse twin of
+        :meth:`_bind_wide_artifacts`, run right after it.
+
+        A gather-class spec (operation ∈ research/comprehend/evaluate — the ops
+        that pull heavy external context) whose projected working context would
+        exceed the prudent cap (:func:`context_budget.prudent_context_cap`, a
+        fraction of that task's OWN window) is REPLACED with an ``artifacts:[]``
+        fan of the FEWEST size-bounded chunks — the existing expansion then
+        materializes N parallel sub-tasks and multiplies downstream deps onto
+        all of them. Size decides whether to cut; a focused per-spec LLM call
+        picks the cut lines and supplies chunk DESCRIPTIONS ONLY. Paths are
+        engine-derived, unique by construction via the spec-index prefix
+        (``drafts/<spec-index>-<spec-slug>_chunk_NN.md``) — never LLM strings.
+
+        Conservative by construction: skips ``deliverable=True`` (its size-floor
+        metric is computed for ONE artifact — H-4), specs already carrying an
+        ``artifacts`` fan (someone already sized the pieces), and non-gather
+        operations (bounded by their inputs). A ``{{fits}}``/single-chunk/
+        malformed reply leaves the spec unchanged — fail-open; the runtime
+        ``RecoverableContextError → decompose`` keystone backstops an estimate
+        that ran low. The engine LOGS the chunk count prominently (Wild Bill F2
+        condition) and never gates on it — no count limiter.
+        """
+        if not isinstance(data, list) or not data:
+            return data
+        from modulatio.operation_bars import normalize_operation
+
+        def _candidate(spec) -> bool:
+            return (
+                isinstance(spec, dict)
+                and not spec.get("artifacts")
+                and not bool(spec.get("deliverable", False))
+                and normalize_operation(spec.get("operation")) in _GATHER_OPERATIONS
+                and bool(str(spec.get("description") or "").strip())
+            )
+
+        out: list = []
+        split_any = False
+        for i, spec in enumerate(data):
+            if not _candidate(spec):
+                out.append(spec)
+                continue
+            # Same window the dispatch will grant the task (research-artifact
+            # work routes to the larger research pool — _producer_budget_role).
+            cap_role = (
+                "research"
+                if str(spec.get("artifact_kind") or "text") == "research"
+                else "producer"
+            )
+            cap = _ctx_budget_module.prudent_context_cap(cap_role)
+            window = _ctx_budget_module.EXPERIMENTAL_DEFAULTS.get(
+                cap_role, _ctx_budget_module.CUSTOM_WORKER_DEFAULT
+            )
+            prompt = self._prompt("task-split", _TASK_SPLIT_PROMPT).format(
+                scope=str(spec.get("description") or ""),
+                window=window,
+                cap=cap,
+            )
+            try:
+                verdict = _extract_json(self._run("planner", prompt))
+            except Exception as exc:  # noqa: BLE001 — fail-open: unsplit spec; runtime keystone backstops
+                _logger.warning(
+                    "task-split call failed for spec %d (%s); left unsplit", i, exc
+                )
+                out.append(spec)
+                continue
+            chunks = (
+                [str(c).strip() for c in (verdict.get("chunks") or []) if str(c).strip()]
+                if isinstance(verdict, dict)
+                else []
+            )
+            if not isinstance(verdict, dict) or verdict.get("fits") or len(chunks) < 2:
+                out.append(spec)
+                continue
+            slug = (
+                re.sub(r"[^a-z0-9]+", "-", str(spec["description"]).lower()).strip("-")[:40]
+                or "gather"
+            )
+            new_spec = {k: v for k, v in spec.items() if k != "output_path"}
+            new_spec["artifacts"] = [
+                {"path": f"drafts/{i}-{slug}_chunk_{j:02d}.md", "description": c}
+                for j, c in enumerate(chunks)
+            ]
+            split_any = True
+            _logger.info(
+                "SIZE-FAN: split spec %d (%s) into %d size-bounded chunks "
+                "(cap ~%d tokens, model estimate %s)",
+                i, slug, len(chunks), cap, verdict.get("estimated_tokens"),
+            )
+            out.append(new_spec)
+
+        if split_any:
+            # Plan-time invariant (belt b): no duplicate output path across the
+            # WHOLE plan — pre-existing planner outputs + all generated chunks.
+            # Duplicate → fail-closed BEFORE task creation; a caught runtime
+            # collision would only block legitimate research later.
+            seen: dict[str, int] = {}
+            for i, spec in enumerate(out):
+                if not isinstance(spec, dict):
+                    continue
+                paths: list[str] = []
+                raw = spec.get("output_path")
+                if isinstance(raw, str) and raw.strip():
+                    paths.append(raw.strip().lstrip("./"))
+                for entry in spec.get("artifacts") or []:
+                    if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                        paths.append(entry["path"].strip().lstrip("./"))
+                for p in paths:
+                    if p in seen:
+                        raise _PlanError(
+                            f"duplicate output path {p!r} across plan specs "
+                            f"{seen[p]} and {i} after size-split"
+                        )
+                    seen[p] = i
+        return out
+
     # ── Task planning: goal → tasks ──────────────────────────────────────
     def _plan_tasks(self, goal: Goal) -> list[Task]:
         # Step 0 M3 (audit): the LLM call below
@@ -3644,6 +3761,13 @@ class Orchestrator:
         # the goal collapse: prose steers the planner to use `artifacts`; the engine
         # binds it. (The old per-goal count cap was removed 2026-06-26.)
         data = self._bind_wide_artifacts(data)
+
+        # Context-size-driven fan (2026-07-01): the inverse transform — one
+        # OVERSIZED gather spec splits into an artifacts-fan of size-bounded
+        # chunks, because the planner structures the fan only ~50% of the time
+        # even when it enumerates the pieces in prose. Size decides the cut;
+        # the engine binds the fan.
+        data = self._split_oversized_gathers(data)
 
         # (The fixed work-task count cap was removed 2026-06-26 — task count
         # follows the work + the per-task context budget, not a magic number.
@@ -13936,6 +14060,35 @@ STRICT: `kind` MUST be exactly one of these four literal strings, nothing else:
     "report"     — a structured summary
 
 Any other value for `kind` is invalid.
+"""
+
+#: The gather-class operations — the ops that pull heavy EXTERNAL context into
+#: the working window (produce/construct/debug are bounded by their inputs).
+#: Only these are candidates for the context-size-driven fan.
+_GATHER_OPERATIONS = frozenset({"research", "comprehend", "evaluate"})
+
+_TASK_SPLIT_PROMPT = """\
+You size ONE planned gather task against its context budget. Do not plan new
+work — judge only whether THIS scope fits, and cut it if it cannot.
+
+TASK SCOPE:
+{scope}
+
+The producer running this task has a ~{window}-token context window, but its
+projected WORKING context (instructions + gathered sources + draft) should stay
+under ~{cap} tokens so it has room to gather AND draft.
+
+- If the full scope's working context fits under ~{cap} tokens, it stays whole.
+- Otherwise split it into the FEWEST self-contained chunks that EACH fit under
+  ~{cap} tokens. Cut along the scope's natural lines (mechanisms, dimensions,
+  sections, subtopics). YAGNI: do NOT invent extra pieces — if 5 chunks each
+  fit, make 5, never 10. Each chunk gets a one-sentence description that stands
+  alone; do NOT assign file paths.
+
+Respond with ONLY a JSON object, no prose:
+{{"fits": true, "estimated_tokens": <your size estimate for the whole scope>}}
+or
+{{"fits": false, "estimated_tokens": <estimate>, "chunks": ["<chunk description>", ...]}}
 """
 
 _TASK_PLAN_PROMPT = """\

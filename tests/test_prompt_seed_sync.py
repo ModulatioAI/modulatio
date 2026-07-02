@@ -52,6 +52,7 @@ _RAW_PAIRS = [
     ("researcher", orchestration._RESEARCHER_FETCH_PROMPT),
     ("skill-create", orchestration._SKILL_CREATE_PROMPT),
     ("task-plan", orchestration._TASK_PLAN_PROMPT),
+    ("task-split", orchestration._TASK_SPLIT_PROMPT),
     ("win-codify", orchestration._WIN_CODIFY_PROMPT),
 ]
 
