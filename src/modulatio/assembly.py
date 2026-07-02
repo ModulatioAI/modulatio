@@ -74,6 +74,32 @@ _MAX_TOTAL_BYTES = 32 * 1024 * 1024
 
 _DEFAULT_SEPARATOR = "\n\n---\n\n"
 
+#: Producer-runbook markers that identify a leaked reply preamble sitting above
+#: a unit's first heading. Matched case-insensitively against the pre-heading
+#: region only — marker text after the heading is content, not scaffold.
+_SCAFFOLD_MARKERS = ("operation:", "definition of done:")
+#: A leaked preamble sits within the first few lines; a heading deeper than this
+#: is a document-shaped unit whose long intro must never be treated as scaffold.
+_SCAFFOLD_SCAN_LINES = 30
+
+
+def _strip_unit_scaffolding(body: str) -> str:
+    """Drop a leaked producer-runbook preamble from the head of a unit body.
+
+    Producers prefix replies with an ``**Operation:** / **Definition of Done:**``
+    runbook block; when one leaks into a written unit it sits ABOVE the unit's
+    first markdown heading. Strip the pre-heading region ONLY when it carries a
+    runbook marker — a plain prose intro is kept, and a unit with no heading in
+    scan range is returned untouched (no seam to cut on)."""
+    lines = body.split("\n")
+    for i, line in enumerate(lines[:_SCAFFOLD_SCAN_LINES]):
+        if re.match(r"#{1,6}\s", line.lstrip()):
+            head = "\n".join(lines[:i]).lower()
+            if any(m in head for m in _SCAFFOLD_MARKERS):
+                return "\n".join(lines[i:])
+            break
+    return body
+
 #: ``csv.field_size_limit`` is process-GLOBAL parser state. With concurrent wave
 #: workers (default-on), two parallel CSV merges racing the save/restore idiom can
 #: leak our raised ceiling onto unrelated CSV parsing (A saves orig, B saves A's
@@ -857,7 +883,7 @@ def _assemble_document(
             errors.append(f"read failed for {name!r}: {exc}")
             missing.append(name)
             continue
-        blocks.append(body.strip("\n"))
+        blocks.append(_strip_unit_scaffolding(body).strip("\n"))
         used.append(name)
         total += added
 

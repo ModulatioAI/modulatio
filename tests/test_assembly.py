@@ -907,3 +907,54 @@ def test_check_deliverable_is_product_agnostic_rows():
         part_size_unit="rows")
     issues = assembly.check_deliverable(d, part_floor=10)
     assert any("under the 10-rows floor" in i and "orders" in i for i in issues)
+
+
+# ── leading producer-scaffold strip (run-1 gaming-report leak) ──────────────
+
+
+def test_strips_runbook_preamble_before_first_heading(tmp_path):
+    leaked = (
+        "I now have all the data I need. Let me write the corrected artifact.\n\n"
+        "**Operation:** Produce Research Note\n"
+        "**Definition of Done:** A concise research note.\n\n"
+        "# Research Note: Pricing\n\nBody stays.\n"
+    )
+    _units(tmp_path, **{"a.md": leaked, "b.md": "# Clean\n\nAlso stays."})
+    r = assembly.assemble({"units": ["a.md", "b.md"], "separator": "|"}, tmp_path)
+    assert r.content.startswith("# Research Note: Pricing")
+    assert "Operation:" not in r.content
+    assert "Definition of Done" not in r.content
+    assert "all the data I need" not in r.content
+    assert "Body stays." in r.content and "Also stays." in r.content
+
+
+def test_plain_prose_intro_before_heading_is_kept(tmp_path):
+    body = "A real opening paragraph, no scaffold here.\n\n# Section\n\nContent.\n"
+    _units(tmp_path, **{"a.md": body})
+    r = assembly.assemble({"units": ["a.md"]}, tmp_path)
+    assert "A real opening paragraph" in r.content
+
+
+def test_runbook_text_after_first_heading_is_kept(tmp_path):
+    body = "# Producer Guide\n\nReplies carry an **Operation:** line up front.\n"
+    _units(tmp_path, **{"a.md": body})
+    r = assembly.assemble({"units": ["a.md"]}, tmp_path)
+    assert "**Operation:**" in r.content
+
+
+def test_no_heading_leaves_body_untouched(tmp_path):
+    body = "**Operation:** Do a thing\n\nJust prose, never a heading.\n"
+    _units(tmp_path, **{"a.md": body})
+    r = assembly.assemble({"units": ["a.md"]}, tmp_path)
+    assert r.content == body.strip("\n")
+
+
+def test_deep_first_heading_beyond_scan_range_is_kept(tmp_path):
+    body = (
+        "Operation: mentioned in ordinary prose\n"
+        + "filler line\n" * 40
+        + "# Late heading\n\nBody.\n"
+    )
+    _units(tmp_path, **{"a.md": body})
+    r = assembly.assemble({"units": ["a.md"]}, tmp_path)
+    assert "Operation: mentioned in ordinary prose" in r.content
