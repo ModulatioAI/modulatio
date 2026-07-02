@@ -18,8 +18,12 @@ import logging
 
 import pytest
 
-from modulatio import vault
-from modulatio.orchestration import Orchestrator, _PlanError
+# NOTE: orchestration members are resolved at test runtime via attribute
+# access (orchestration.Orchestrator / orchestration._PlanError), never
+# from-imported at module top — test_orchestration_resweep.py reloads the
+# module mid-suite, and a collection-time class reference goes stale
+# (pytest.raises on the old exception class misses the reloaded one).
+from modulatio import orchestration, vault
 from modulatio.types import Project
 
 
@@ -34,7 +38,7 @@ def make_orch(tmp_path, monkeypatch):
             run_id="20260702T210000Z-bbb222",
             wiki_path=str(vault.project_dir("SPL")),
         )
-        return Orchestrator(pr, {"leader": lambda p: "", "planner": planner,
+        return orchestration.Orchestrator(pr, {"leader": lambda p: "", "planner": planner,
                                  "drafter": lambda p: "", "qc": lambda p: ""})
 
     return _make
@@ -156,7 +160,7 @@ def test_planner_path_collision_with_chunk_path_fails_closed(make_orch):
          "artifact_kind": "text", "operation": "construct",
          "required_skills": [], "deliverable": False, "depends_on": []},
     ]
-    with pytest.raises(_PlanError):
+    with pytest.raises(orchestration._PlanError):
         orch._split_oversized_gathers(data)
 
 
