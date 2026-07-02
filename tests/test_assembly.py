@@ -982,8 +982,10 @@ def test_business_prose_mentioning_markers_is_not_stripped(tmp_path):
 
 
 def test_line_leading_runbook_block_is_still_stripped(tmp_path):
-    """The real leak shape — line-leading (bolded) Operation/DoD lines —
-    must still strip, with or without the chatter line."""
+    """A PLAIN (unbolded, no chatter) line-leading Operation/DoD pair must
+    still strip. The bolded-plus-chatter live shape is pinned by
+    test_strips_runbook_preamble_before_first_heading above (Wild Bill
+    close-out polish note: docstring now matches what the body covers)."""
     plain = (
         "Operation: Produce Research Note\n"
         "Definition of Done: A concise note.\n\n"
