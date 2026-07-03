@@ -243,3 +243,84 @@ def test_dot_slash_sugar_cannot_bypass_the_invariant(make_orch, sugar):
     ]
     with pytest.raises(orchestration._PlanError):
         orch._split_oversized_gathers(data)
+
+
+# ── end-to-end wiring through _plan_tasks (Nemo MEDIUM, code review) ─────────
+# Unit tests prove the part, not the wiring: nothing above drives
+# _plan_tasks → _bind_wide_artifacts → _split_oversized_gathers → artifacts
+# expansion → _validate_output_path → dep multiplication. These do, so a
+# refactor that disconnects the seam (drops the split call, reorders it)
+# fails HERE instead of silently.
+
+
+def _e2e_planner(plan_specs):
+    """A planner runner serving BOTH calls: the task-plan (returns the spec
+    list) and the task-split (returns a two-chunk split for the gather)."""
+    import json as _json
+
+    def _run(prompt: str) -> str:
+        if "TASK SCOPE:" in prompt:  # the task-split call
+            return _split_reply("Mechanism A", "Mechanism B")
+        return "```json\n" + _json.dumps(plan_specs) + "\n```"
+
+    return _run
+
+
+def _e2e_goal(orch):
+    from modulatio import store
+    from modulatio.types import Goal, GoalStatus
+
+    goal = Goal(id="SPL-G-001", project_id=orch.project.id, description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    store.save_goal("SPL", goal)
+    return goal
+
+
+def test_split_wires_end_to_end_through_plan_tasks(make_orch):
+    specs = [
+        {"description": "Research every degradation mechanism",
+         "output_path": "drafts/notes.md", "artifact_kind": "research",
+         "operation": "research", "required_skills": ["web-search"],
+         "deliverable": False, "depends_on": []},
+        {"description": "Synthesize the brief",
+         # sugared on purpose: proves _validate_output_path ran on the seam
+         "output_path": "artifacts/brief.md", "artifact_kind": "text",
+         "operation": "produce", "required_skills": [],
+         "deliverable": True, "depends_on": [0]},
+    ]
+    orch = make_orch(_e2e_planner(specs))
+    tasks = orch._plan_tasks(_e2e_goal(orch))
+
+    research = [t for t in tasks if t.artifact_kind == "research"]
+    synth = [t for t in tasks if t.artifact_kind == "text"]
+    assert len(research) == 2 and len(synth) == 1
+    # (a) the Task objects carry the engine-derived, validated chunk paths
+    assert sorted(t.output_path for t in research) == [
+        "drafts/0-research-every-degradation-mechanism_chunk_00.md",
+        "drafts/0-research-every-degradation-mechanism_chunk_01.md",
+    ]
+    assert sorted(t.description for t in research) == ["Mechanism A", "Mechanism B"]
+    # (b) the synthesis dep on spec 0 multiplied onto BOTH chunk tasks
+    assert sorted(synth[0].depends_on) == sorted(t.id for t in research)
+    # (c) _validate_output_path ran at this seam: the sugared plan path
+    # came out normalized
+    assert synth[0].output_path == "brief.md"
+
+
+def test_plan_tasks_fails_closed_on_sugared_chunk_collision(make_orch):
+    """The unit-level collision scenario, driven through the REAL seam: a
+    planner path that canonicalizes onto an engine chunk path must kill the
+    plan at _plan_tasks time, not dispatch."""
+    specs = [
+        {"description": "Research every degradation mechanism",
+         "output_path": "drafts/notes.md", "artifact_kind": "research",
+         "operation": "research", "required_skills": ["web-search"],
+         "deliverable": False, "depends_on": []},
+        {"description": "sneaky twin",
+         "output_path": "artifacts/drafts/0-research-every-degradation-mechanism_chunk_00.md",
+         "artifact_kind": "text", "operation": "construct",
+         "required_skills": [], "deliverable": False, "depends_on": []},
+    ]
+    orch = make_orch(_e2e_planner(specs))
+    with pytest.raises(orchestration._PlanError):
+        orch._plan_tasks(_e2e_goal(orch))

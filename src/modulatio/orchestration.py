@@ -3716,6 +3716,10 @@ class Orchestrator:
             # WHOLE plan — pre-existing planner outputs + all generated chunks.
             # Duplicate → fail-closed BEFORE task creation; a caught runtime
             # collision would only block legitimate research later.
+            # Scoped to split_any deliberately: no split → no new chunk paths
+            # to collide with planner paths, and planner-vs-planner duplicates
+            # stay covered by the existing per-spec validator + dispatch guard
+            # (_block_same_path / _block_wave_path_conflict).
             seen: dict[str, int] = {}
             for i, spec in enumerate(out):
                 if not isinstance(spec, dict):
