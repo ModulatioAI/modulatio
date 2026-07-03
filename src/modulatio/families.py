@@ -185,6 +185,20 @@ def draft_fallback_name(task) -> str:
     return f"{str(getattr(task, 'id')).lower()}.{ext}"
 
 
+def task_output_rel_path(task) -> str:
+    """The artifacts-RELATIVE path where ``task``'s output actually lands: its
+    declared ``output_path``, else ``drafts/<fallback name>``. THE one
+    definition of "dependency output" — shared by the assembly manifest
+    builder, the ``_apply_assembly_manifest`` allowlist, and the review-ledger
+    verifier. Wild Bill BLOCK (assembler arc, 2026-07-03): resolving the
+    fallback in ONE of those three consumers re-created the very content
+    defect the arc fixed — the other two kept filtering the unit out."""
+    op = str(getattr(task, "output_path", None) or "").strip()
+    while op.startswith("./"):
+        op = op[2:]
+    return op if op else f"drafts/{draft_fallback_name(task)}"
+
+
 def infer_artifact_family_from_path(path: Path) -> str:
     """Best-effort family for a path-only artifact UI surface.
 

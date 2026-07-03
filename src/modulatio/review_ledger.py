@@ -199,11 +199,15 @@ def verify_unit(task: "Task", artifacts_root: Path) -> UnitVerdict:
     """
     tid = task.id
     expected = qc_passed_checksum(task)
-    out_path = task.output_path
+    # Wild Bill BLOCK (assembler arc, 2026-07-03): a null-output_path dep is
+    # NOT unverifiable — its artifact lives at the drafts fallback convention.
+    # ONE resolver (families.task_output_rel_path), shared with the manifest
+    # builder and the assembly allowlist, so the cheap path can pass the
+    # run-4 shape instead of fail-closing to the byte-read.
+    from modulatio.families import task_output_rel_path
+    out_path = task_output_rel_path(task)
     if not expected:
         return UnitVerdict(tid, out_path, None, None, False, "unit never passed QC")
-    if not out_path:
-        return UnitVerdict(tid, None, expected, None, False, "unit has no output_path")
     path = (artifacts_root / out_path).resolve()
     try:
         path.relative_to(artifacts_root.resolve())
@@ -330,7 +334,10 @@ def verify_assembly(
         v = verify_unit(dep, artifacts_root)
         if not v.ok:
             return False, f"unit {dep_id} ({dep.output_path}): {v.reason}", ""
-        expected.append(_norm_unit(dep.output_path or ""))
+        # Same resolver as verify_unit / the manifest builder / the allowlist:
+        # a null-path dep's expected unit is its drafts fallback path.
+        from modulatio.families import task_output_rel_path
+        expected.append(_norm_unit(task_output_rel_path(dep)))
 
     manifest_units = [_norm_unit(u) for u in record.manifest.get("units", [])]
     if len(manifest_units) != len(set(manifest_units)):

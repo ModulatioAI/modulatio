@@ -1011,3 +1011,35 @@ def test_manifest_from_deps_includes_fallback_path_units(project_with_run):
     manifest = orch._assembly_manifest_from_deps(asm)
     assert manifest is not None
     assert manifest["units"] == ["sections/one.md", "drafts/ctx-t-102.md"]
+
+
+def test_apply_assembly_manifest_joins_fallback_path_units(project_with_run):
+    """Wild Bill BLOCK #1 (assembler arc 2026-07-03): the manifest builder
+    resolved fallback units but the _apply_assembly_manifest allowlist still
+    filtered them before the join — the content defect survived half-fixed.
+    Every authoritative dep-output consumer shares ONE resolver."""
+    from modulatio import store as _store
+
+    orch = _make_orchestrator(project_with_run)
+    project = orch.project
+    root = orch._artifacts_root()
+    (root / "sections").mkdir(parents=True, exist_ok=True)
+    (root / "drafts").mkdir(parents=True, exist_ok=True)
+    (root / "sections" / "one.md").write_text("EXPLICIT UNIT")
+    (root / "drafts" / "ctx-t-202.md").write_text("FALLBACK UNIT")
+    d1 = _make_task()
+    d1.id = "CTX-T-201"
+    d1.output_path = "sections/one.md"
+    d2 = _make_task()
+    d2.id = "CTX-T-202"
+    d2.output_path = None
+    _store.save_task(project.code, d1, run_id=project.run_id)
+    _store.save_task(project.code, d2, run_id=project.run_id)
+    asm = _make_task()
+    asm.id = "CTX-T-203"
+    asm.required_skills = ["document-assembly"]
+    asm.depends_on = ["CTX-T-201", "CTX-T-202"]
+
+    body = orch._apply_assembly_manifest(asm, "")
+    assert body is not None
+    assert "EXPLICIT UNIT" in body and "FALLBACK UNIT" in body

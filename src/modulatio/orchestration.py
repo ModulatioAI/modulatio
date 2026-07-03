@@ -41,6 +41,7 @@ from modulatio.families import (
     _ASSEMBLER_STRATEGY,
     draft_fallback_name as _draft_fallback_name,
     effective_assembly_family as _effective_assembly_family,
+    task_output_rel_path as _task_output_rel_path,
 )
 from modulatio.types import (
     ActivityEvent,
@@ -6904,17 +6905,14 @@ class Orchestrator:
             dep = by_id.get(dep_id)
             if dep is None:
                 continue
-            if dep.output_path:
-                units.append(dep.output_path.strip().lstrip("./"))
-            else:
-                # Run-4 root cause (2026-07-03): a dep with no declared
-                # output_path (a fits-whole gather) writes to the drafts
-                # fallback convention — dropping it here omitted its content
-                # from the join AND made the #85 recipe-verify's unit set
-                # mismatch the authoritative deps, fail-closing QC to the
-                # byte-read that overflowed. Same two-tier discovery the
-                # leader-verify surface uses.
-                units.append(f"drafts/{_draft_fallback_name(dep)}")
+            # Run-4 root cause (2026-07-03): a dep with no declared output_path
+            # (a fits-whole gather) writes to the drafts fallback convention —
+            # dropping it here omitted its content from the join AND made the
+            # #85 recipe-verify's unit set mismatch the authoritative deps,
+            # fail-closing QC to the byte-read that overflowed. ONE resolver
+            # (families.task_output_rel_path) shared with the allowlist and
+            # the ledger verifier — Wild Bill's close-out condition.
+            units.append(_task_output_rel_path(dep))
         if not units:
             return None
         return {"units": units}
@@ -6982,12 +6980,15 @@ class Orchestrator:
             # undeclared in-root dotfile collide with a declared `config.json` and
             # sneak past the allowlist — exactly the pre-QC exposure hull #8 closes.
             # Share ONE definition of unit identity with verify_assembly.
+            # Wild Bill BLOCK (assembler arc): the allowlist must resolve the
+            # SAME fallback path the manifest builder emits for a null-path
+            # dep, or the unit is added upstream then filtered out here.
             allowed = {
-                _review_ledger._norm_unit(d.output_path)
+                _review_ledger._norm_unit(_task_output_rel_path(d))
                 for d in (
                     store.list_tasks(self.project.code, run_id=self.project.run_id)
                 )
-                if d.id in task.depends_on and d.output_path
+                if d.id in task.depends_on
             }
             kept_units = []
             for u in manifest.get("units", []):

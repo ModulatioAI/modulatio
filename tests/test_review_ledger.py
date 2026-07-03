@@ -63,10 +63,19 @@ def test_verify_unit_never_passed(tmp_path):
     assert not v.ok and "never passed" in v.reason
 
 
-def test_verify_unit_no_output_path(tmp_path):
+def test_verify_unit_no_output_path_resolves_drafts_fallback(tmp_path):
+    """A null-output_path unit is NOT unverifiable (assembler arc close-out):
+    it verifies against its drafts/<id>.<ext> fallback — absent file → the
+    ordinary missing-on-disk failure, present+matching file → ok."""
     t = _task(qc_passed_checksum="sha256:abc")  # no output_path
     v = review_ledger.verify_unit(t, tmp_path)
-    assert not v.ok and "no output_path" in v.reason
+    assert not v.ok and "missing on disk" in v.reason
+    (tmp_path / "drafts").mkdir()
+    body = "FALLBACK BODY"
+    (tmp_path / "drafts" / f"{t.id.lower()}.md").write_text(body)
+    t.qc_passed_checksum = _engine_checksum(body)
+    v2 = review_ledger.verify_unit(t, tmp_path)
+    assert v2.ok, v2.reason
 
 
 def test_verify_unit_missing_on_disk(tmp_path):
@@ -427,3 +436,25 @@ def test_verify_declared_format_media_family(tmp_path):
     real_mp3 = tmp_path / "song.mp3"
     real_mp3.write_bytes(b"ID3\x03\x00\x00\x00...")
     assert review_ledger.verify_declared_format(real_mp3)[0] is True
+
+
+def test_verify_assembly_accepts_fallback_path_units(tmp_path):
+    """Wild Bill BLOCK #2 (assembler arc 2026-07-03): a null-output_path dep
+    (fits-whole gather) writes to drafts/<task-id>.<ext>; the verifier must
+    resolve the SAME fallback path the manifest builder and writer use — not
+    call the unit unverifiable and fall back to the byte-read the arc kills."""
+    body = "BODY OF FALLBACK"
+    (tmp_path / "drafts").mkdir()
+    (tmp_path / "drafts" / "u-9.md").write_text(body)
+    d = _task(id="U-9", output_path=None, status=TaskStatus.COMPLETED,
+              qc_passed_checksum=_engine_checksum(body))
+    asm_body = "T\n--\n" + body
+    (tmp_path / "Book.md").write_text(asm_body)
+    asm = _task(id="A-9", output_path="Book.md", depends_on=["U-9"])
+    rec = AssemblyRecord(
+        manifest={"units": ["drafts/u-9.md"], "title_page": "T",
+                  "separator": "\n--\n", "trailer": ""},
+        final_checksum=_engine_checksum(asm_body), complete=True)
+    ok, reason, _ = review_ledger.verify_assembly(
+        rec, asm, {"U-9": d, "A-9": asm}, tmp_path)
+    assert ok, reason
