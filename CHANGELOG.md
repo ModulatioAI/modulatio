@@ -4,6 +4,77 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8.7] — 2026-07-03
+
+A research **library** the team reuses instead of re-buying, research tasks that
+**fan by context size** so no one producer drowns, and an assembly path that stays
+calm under a wide fan — plus a batch of live-test-driven reliability fixes. Driven
+by four live test runs and a code cadre across the span.
+
+### Added
+
+- **A research library the team reuses, not re-buys.** The project folder is now the
+  **durable layer** — research notes, drafts, and finished products persist across
+  runs while a run's scratch is transient. Producers are **prejudiced toward reuse**:
+  before fetching, a producer mines the team canvas and prior-run artifacts, and
+  reuses a grounded, still-fresh note as-is rather than re-fetching the same sources.
+  Research notes carry a **30-day freshness TTL** — a note past it is re-fetched (and
+  re-stamped), a fresher one is reused. Cross-run reuse is now **measured**: the engine
+  writes an audit row each time the team-canvas digest is injected (how many prior-run
+  files reached the producers).
+- **Context-size-driven task fan-out.** A capable planner only structures a wide
+  research goal into parallel tasks about half the time; when it collapses, one
+  producer inherits the whole scope and rides the compression bands. The engine now
+  **binds the fan**: an oversized gather task is split into the fewest size-bounded
+  chunks — each comfortably inside a producer's window — that together cover the same
+  scope. Size decides whether to cut; the model only picks the cut lines. A task that
+  fits stays whole (no invented work). Tunable via `MODULATIO_TASK_CONTEXT_CAP_PCT`.
+- **Finished products are starred across runs**, deliverables are **named by their
+  title** (no more `---.docx`), and the Leader **names the job** — each named ad-hoc
+  run is captured as a re-kickable, project-local job template.
+- **`/reload`** applies model and config changes to the live services without a TUI
+  restart (surfaced on the command palette).
+
+### Changed
+
+- **QC reviews with a 64K window** (was 32K) — the reviewer's context now matches the
+  largest producer tier, so a big single deliverable no longer forces a compressed,
+  partial-view judgment.
+- **An assembler never decomposes, and its cheap verify sees every unit.** Assembling
+  a multi-piece deliverable is a mechanical join, so an over-budget assembler now falls
+  back to the engine join (never a recursive split into partial assemblies), and the
+  content-addressed cheap-verify resolves **every** dependency's output — including the
+  units that write to the drafts fallback convention — so a wide fan's assembly passes
+  QC by its marks instead of re-reading the whole thing into a blown budget.
+- **Producers won't leak their scaffolding into the product.** A leaked reply preamble
+  (an `Operation:` / `Definition of Done:` runbook block above the first heading) is
+  stripped at the assembly join and rejected by a deterministic QC gate — precisely,
+  by runbook-*shaped* marker lines, so ordinary prose that mentions those terms is left
+  untouched.
+- **The Leader grounds its size claims in measured numbers.** A deliverable's verify
+  block now carries an engine-measured size (bytes / words / ≈tokens), and the Leader's
+  rationale must cite it — no more rounding a 9-page draft up to the goal's "20 pages".
+- **Source-quality bar for briefs.** When a brief asks for reputable sources, a user
+  forum or social thread is treated as a lead to a primary source, never a citation.
+
+### Fixed
+
+- **Cron fails closed when its project was deleted** — a scheduled job whose project
+  folder is gone disables itself and opens one ticket in a reserved system project,
+  instead of resurrecting an empty shell and running on a default team.
+- **A wedged model call is diagnosed and surfaced** by a CPU-spin watchdog, rather than
+  silently hanging the run.
+- The kickoff **progress render-storm at run end** (which could starve the final
+  verdict relay) is quieted; the finished Leader lane no longer re-animates during
+  post-run codification; and a hidden stream lane **re-follows the tail** when revealed,
+  so a verdict written while the lane was off-screen is no longer invisible.
+- A Clay (`claude -p`) seat that returns an **empty reply** on a runtime hiccup is
+  retried and, if still empty, surfaced as a failure that routes to the model fallback —
+  never propagated downstream as a blank message.
+- **xAI token parsing** reads the real Grok CLI credential shape; OAuth is marked
+  not-yet-supported (use the API-key path). The setup wizard **requires the routing
+  embedder** and is honest about a skipped document-conversion toolchain.
+
 ## [0.9.8.6] — 2026-06-29
 
 Single-source leadership, a simpler setup, and a steadier executor — from live test
