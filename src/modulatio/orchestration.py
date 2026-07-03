@@ -6902,8 +6902,19 @@ class Orchestrator:
         units: list[str] = []
         for dep_id in task.depends_on:
             dep = by_id.get(dep_id)
-            if dep is not None and dep.output_path:
+            if dep is None:
+                continue
+            if dep.output_path:
                 units.append(dep.output_path.strip().lstrip("./"))
+            else:
+                # Run-4 root cause (2026-07-03): a dep with no declared
+                # output_path (a fits-whole gather) writes to the drafts
+                # fallback convention — dropping it here omitted its content
+                # from the join AND made the #85 recipe-verify's unit set
+                # mismatch the authoritative deps, fail-closing QC to the
+                # byte-read that overflowed. Same two-tier discovery the
+                # leader-verify surface uses.
+                units.append(f"drafts/{_draft_fallback_name(dep)}")
         if not units:
             return None
         return {"units": units}
@@ -9637,6 +9648,15 @@ class Orchestrator:
         smaller children, or ``None`` when it can't/shouldn't split (recursion
         cap reached, planner errored, or fewer than 2 usable children). ``None``
         falls through to the genuine-stuck ticket."""
+        if _is_assembler_task(t):
+            # Run-4 T-016 cascade (2026-07-03): decomposing a MECHANICAL JOIN
+            # yields partial assemblies — children inherit the assembly skill +
+            # the full dep set, each re-attempts a smaller hand-join of the same
+            # units, and re-overflows (14 children over 2 recursion levels,
+            # 15 QC reads). The do-not-decompose twin of the size-fan's
+            # do-not-split rule: an assembler overflow falls to the stuck
+            # ticket — bounded and human-visible, never a cascade.
+            return None
         if t.decompose_depth >= self._MAX_DECOMPOSE_DEPTH:
             return None  # recursion exhausted — genuine stuck, escalate
         prompt = self._build_redecompose_prompt(t, ctx_exc)

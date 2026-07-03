@@ -905,10 +905,13 @@ def test_prudent_context_cap_is_a_fraction_of_the_role_window() -> None:
     # research window is the largest (64K); at the 0.20 default that's ~12.8K,
     # well under the 70% soft-warn / 80% compress bands.
     assert research_cap == round(0.20 * context_budget.EXPERIMENTAL_DEFAULTS["research"])
-    # qc has a smaller window (32K) -> a smaller token cap, same fraction.
-    qc_cap = context_budget.prudent_context_cap("qc")
-    assert qc_cap == round(0.20 * context_budget.EXPERIMENTAL_DEFAULTS["qc"])
-    assert qc_cap < research_cap
+    # planner has a smaller window (32K) -> a smaller token cap, same fraction.
+    # (qc moved to 64K on 2026-07-03, so it no longer illustrates "smaller".)
+    planner_cap = context_budget.prudent_context_cap("planner")
+    assert planner_cap == round(
+        0.20 * context_budget.EXPERIMENTAL_DEFAULTS["planner"]
+    )
+    assert planner_cap < research_cap
 
 
 def test_prudent_context_cap_unknown_role_uses_worker_default() -> None:

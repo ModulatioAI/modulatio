@@ -959,3 +959,55 @@ def test_team_canvas_digest_reads_across_runs(project_with_run):
     )
     digest = orch._build_team_canvas_digest()
     assert "iea-ev-2025.md" in digest
+
+
+# ── assembler-overflow arc (2026-07-03, run-4 T-016 cascade) ─────────────────
+
+
+def test_attempt_decompose_refuses_assembler_tasks(project_with_run, monkeypatch, tmp_path):
+    """Run-4 T-016: decomposing a mechanical join yields partial assemblies —
+    children inherit the assembly skill + full dep set and re-overflow (the
+    observed 14-child recursive cascade). An assembler NEVER decomposes; the
+    overflow falls to the stuck ticket instead. The planner must not even be
+    consulted."""
+    orch = _make_orchestrator(project_with_run)
+    calls = []
+
+    def _record(self, role, prompt, **kw):
+        calls.append(role)
+        return ('[{"description":"half one","output_path":"drafts/a.md"},'
+                '{"description":"half two","output_path":"drafts/b.md"}]')
+
+    monkeypatch.setattr(Orchestrator, "_run", _record)
+    parent = _make_task()
+    parent.required_skills = ["document-assembly"]
+    assert orch._attempt_decompose(parent, _ctx_err(tmp_path)) is None
+    assert calls == []  # not consulted, not swallowed-by-exception
+
+
+def test_manifest_from_deps_includes_fallback_path_units(project_with_run):
+    """Run-4 root cause: deps with output_path=None (fits-whole gathers) were
+    SILENTLY DROPPED from the manifest — the join omitted their content and
+    the #85 recipe-verify saw a unit set that mismatched the authoritative
+    deps, fail-closing QC to the byte-read that overflowed. A null-path dep
+    contributes its drafts/<task-id>.<ext> fallback unit instead."""
+    from modulatio import store as _store
+
+    orch = _make_orchestrator(project_with_run)
+    project = orch.project
+    d1 = _make_task()
+    d1.id = "CTX-T-101"
+    d1.output_path = "sections/one.md"
+    d2 = _make_task()
+    d2.id = "CTX-T-102"
+    d2.output_path = None  # fits-whole gather: writes to the drafts fallback
+    _store.save_task(project.code, d1, run_id=project.run_id)
+    _store.save_task(project.code, d2, run_id=project.run_id)
+    asm = _make_task()
+    asm.id = "CTX-T-103"
+    asm.required_skills = ["document-assembly"]
+    asm.depends_on = ["CTX-T-101", "CTX-T-102"]
+
+    manifest = orch._assembly_manifest_from_deps(asm)
+    assert manifest is not None
+    assert manifest["units"] == ["sections/one.md", "drafts/ctx-t-102.md"]

@@ -105,7 +105,12 @@ _WARNED_UNBOUND_GATE_FIRE: list[bool] = []
 # persists. Same compress/operate behavior, just more room. Reversible.
 EXPERIMENTAL_DEFAULTS: dict[str, int] = {
     "producer":        48_000,
-    "qc":              32_000,
+    # 32K→64K (Clif, 2026-07-03, run-4 evidence): the reviewer's window now
+    # matches the largest producer tier + the hard ceiling — a reviewer
+    # squeezed below the producer's canvas forces compressed partial-view
+    # judgments (the #85 scar's origin). The assembly cheap-path stays the
+    # primary economics; this is headroom for legitimate big single reads.
+    "qc":              64_000,
     "planner":         32_000,
     "leader-decompose": 48_000,
     "leader-iterate":  32_000,

@@ -127,7 +127,7 @@ def test_02_default_table_distinct_per_role():
     # compression churn (the models' real windows have the room).
     for role, expected in [
         ("producer", 48_000),
-        ("qc", 32_000),
+        ("qc", 64_000),
         ("planner", 32_000),
         ("leader-decompose", 48_000),
         ("leader-iterate", 32_000),
