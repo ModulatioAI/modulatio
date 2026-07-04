@@ -2116,6 +2116,12 @@ class Orchestrator:
         #: identical output the Leader still rejects → futile, bow out. Keyed by
         #: goal id; lives for the run.
         self._goal_redo_fingerprints: dict[str, str] = {}
+        #: Goals that already got their ONE-shot goal-end QC last-resort
+        #: sweep this run (the producer-of-last-resort doctrine: QC produces
+        #: the missing pieces before a goal may ship "disappointed over a
+        #: hole"). One sweep + at most one sweep-triggered re-verify per
+        #: goal — bounded by construction.
+        self._goal_qc_swept: set[str] = set()
         #: Embedding-fallback matcher (slice #6e). None → dispatch runs
         #: deterministic-only and opens ROSTER_GAP tickets on no-cover
         #: (the #6d behavior). Supply a matcher to get the semantic
@@ -9296,10 +9302,16 @@ class Orchestrator:
         breaker_abort: Exception | None = None,
         last_error: Exception | None = None,
         defect_type: "str | None" = None,
+        dep_context: str = "",
     ) -> bool:
         """Try a QC-authored rescue. Returns True when it reached a terminal
         (caller must NOT settle its own), False to fall through to the
         caller's normal QC_REJECTED / breaker terminal.
+
+        ``dep_context`` (goal-end sweep only): bounded excerpts of the task's
+        COMPLETED dependency artifacts, so a QC-BUILT assembler assembles the
+        real pieces instead of fabricating them — the build prompt otherwise
+        sees only the task contract.
 
         Gated by ``MODULATIO_QC_FIXER`` — **ON by default**; opt out with
         ``MODULATIO_QC_FIXER=0``. Requires a non-trivial committed draft to
@@ -9346,6 +9358,11 @@ class Orchestrator:
             defects = (
                 f"The producer could not converge ({reason}). Make the "
                 f"existing draft coherent, complete, and on-contract."
+            )
+        if dep_context:
+            defects = (
+                f"{defects}\n\nCompleted dependency artifacts this task "
+                f"builds on (excerpts):\n{dep_context}"
             )
 
         # PATCH the existing body if there is one; otherwise BUILD it from the
@@ -9538,6 +9555,118 @@ class Orchestrator:
             role=self.default_producer_role, phase="task_completed",
             task_id=t.id, agent_id=t.assigned_agent_id,
         )
+
+    def _qc_last_resort_sweep(
+        self, goal: Goal, tasks: "list[Task]", summary: RunSummary,
+    ) -> bool:
+        """QC produces the goal's missing pieces before it may ship
+        "disappointed over a hole" — the producer-of-last-resort doctrine
+        applied at GOAL END (Clif 2026-07-04: "the main thing is the QC
+        repairs non-passing tasks and produces the missing tasks").
+
+        Drives the existing ``_attempt_qc_fix_forward`` (BUILD rung authors
+        from the contract when no draft exists) over the goal's unfinished
+        tasks via a FIXPOINT loop: each pass attempts every task whose deps
+        are all COMPLETED; stop when a pass completes nothing. That yields
+        dependency order (a missing sibling builds before the assembler that
+        needs it) and skips dependents of failed builds, in one mechanism.
+        Each build is fed bounded excerpts of its completed deps' artifacts
+        so an assembler assembles the REAL pieces.
+
+        Stays down: environmental blocks (QC authoring can't install a
+        linter — completing one would launder an unverifiable artifact past
+        the CRITICAL-ticket contract) and path-conflict blocks (rebuilding
+        both colliders recreates the overwrite hazard). Binary/multi-file
+        shapes are declined by ``_attempt_qc_fix_forward`` itself. Aborts
+        after two consecutive authoring failures (QC's own model is down),
+        keeping partial progress. Spends QC calls ONLY — producer budgets
+        (#18) are never touched. Returns True when ≥1 task completed."""
+        if self.abort_event.is_set() or not _qc_fixer_enabled():
+            return False
+        cross_goal = self._cross_goal_dep_status(tasks)
+        in_goal = {t.id: t for t in tasks}
+
+        def _sweepable(t: Task) -> bool:
+            if t.status is TaskStatus.COMPLETED:
+                return False
+            if t.transitions:
+                last = t.transitions[-1]
+                if last.actor == "qc" and last.rationale.startswith(
+                        "environmental defect:"):
+                    return False
+                if "artifact-path conflict" in last.rationale:
+                    return False
+            return True
+
+        def _deps_ready(t: Task) -> bool:
+            for dep_id in t.depends_on:
+                dep = in_goal.get(dep_id)
+                if dep is not None:
+                    if dep.status is not TaskStatus.COMPLETED:
+                        return False
+                    continue
+                status = cross_goal.get(dep_id)
+                if status is not None and status is not TaskStatus.COMPLETED:
+                    return False
+            return True
+
+        def _dep_excerpts(t: Task) -> str:
+            parts: list[str] = []
+            for dep_id in t.depends_on:
+                dep = in_goal.get(dep_id)
+                if dep is None or dep.status is not TaskStatus.COMPLETED:
+                    continue
+                path = self._task_artifact_path(dep)
+                if path is None:
+                    continue
+                try:
+                    body = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                parts.append(
+                    f"--- dependency {dep_id} ({path.name}) ---\n{body[:4000]}"
+                )
+            return "\n\n".join(parts)
+
+        self._emit_activity(role="qc", phase="qc_sweep_started")
+        completed_any = False
+        consecutive_failures = 0
+        progressed = True
+        while progressed and not self.abort_event.is_set():
+            progressed = False
+            for t in sorted(tasks, key=lambda x: x.id):
+                if self.abort_event.is_set():
+                    break
+                if not _sweepable(t) or not _deps_ready(t):
+                    continue
+                errors_before = len(summary.errors)
+                ok = self._attempt_qc_fix_forward(
+                    t, self._resolve_draft_path(t), None, summary,
+                    last_error=RuntimeError(
+                        "task never produced its artifact — blocked or "
+                        "unfinished at goal end"
+                    ),
+                    defect_type="runtime",
+                    dep_context=_dep_excerpts(t),
+                )
+                if ok:
+                    completed_any = True
+                    progressed = True
+                    consecutive_failures = 0
+                    store.save_task(
+                        self.project.code, t, run_id=self.project.run_id)
+                elif len(summary.errors) > errors_before:
+                    # A real authoring failure (not a shape decline) — QC's
+                    # own model may be down; two in a row ends the sweep.
+                    consecutive_failures += 1
+                    if consecutive_failures >= 2:
+                        progressed = False
+                        break
+            else:
+                continue
+            break  # inner break (dead QC) ends the fixpoint loop too
+        self._emit_activity(role="qc", phase="qc_sweep_ended")
+        return completed_any
 
     def _ticket_for_failed_task(self, t: Task, reason: str) -> None:
         """Open an operator ticket when a task terminates FAILED (BLOCKED /
@@ -10461,6 +10590,27 @@ class Orchestrator:
                     or remediation.action is RemediationAction.REVISE_IN_PLACE
                 )
             )
+            # Goal-end QC last-resort sweep: redo is off the table (budget
+            # spent / stalled / deadlocked) and the goal is about to ship
+            # "disappointed over a hole" — QC, the producer of last resort,
+            # produces the missing pieces first. One shot per goal per run;
+            # the WITHHOLD (measured HARD violation) and DEFER (operator-
+            # named reservation) exits are POLICY verdicts, not holes, and
+            # are deliberately not swept. Progress → exactly ONE re-verify.
+            if (
+                not can_redo
+                and not goal_spec_issues
+                and remediation.action is not RemediationAction.DEFER
+                and goal.id not in self._goal_qc_swept
+            ):
+                self._goal_qc_swept.add(goal.id)
+                if self._qc_last_resort_sweep(goal, tasks, summary):
+                    self._emit_activity(
+                        role="leader", phase="leader_verify_ended",
+                        agent_id="leader",
+                    )
+                    self._leader_verify_goal(goal, tasks, summary)
+                    return
             if can_redo:
                 # #80 slice 11: the rare bounded fix window. The model requests it
                 # (window_requested) and it only opens when an operator is present; the
@@ -11079,11 +11229,20 @@ class Orchestrator:
         # budget-exhausted-BLOCKER.
         if any(t.status == TaskStatus.COMPLETED for t in tasks):
             self._leader_verify_goal(goal, tasks, summary)
+            return
+        # The redo produced ZERO completed tasks. Before settling a
+        # reservation over a hole, give the goal its one-shot QC last-resort
+        # sweep — QC (the producer of last resort) may PRODUCE the missing
+        # pieces, in which case there is real work to judge after all.
+        swept_progress = False
+        if goal.id not in self._goal_qc_swept:
+            self._goal_qc_swept.add(goal.id)
+            swept_progress = self._qc_last_resort_sweep(goal, tasks, summary)
+        if swept_progress:
+            self._leader_verify_goal(goal, tasks, summary)
         else:
-            # The redo produced ZERO completed tasks (every task landed
-            # QC_REJECTED/BLOCKED again). Re-verify is skipped — there is nothing
-            # for the Leader to judge — but the goal must STILL reach a terminal
-            # state (shared settle, used by all three redo lanes).
+            # Nothing for the Leader to judge — the goal must STILL reach a
+            # terminal state (shared settle, used by all three redo lanes).
             self._settle_zero_completed(
                 goal, summary,
                 concern=(
