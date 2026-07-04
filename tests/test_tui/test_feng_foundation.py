@@ -39,10 +39,16 @@ async def test_theme_cycle_reresolves_accent_live():
         assert app.get_css_variables()["accent"].lower() == "#7dff9c"
         # …and the frame chrome tracks the accent.
         assert app.get_css_variables()["frame"].lower() == "#7dff9c"
-        # cycle wraps amber → green → cyan → amber
+        # cycle wraps amber → green → cyan → red → purple → amber (W1)
         app.action_cycle_theme()
         await pilot.pause()
         assert app.theme == "feng-cyan"
+        app.action_cycle_theme()
+        await pilot.pause()
+        assert app.theme == "feng-red"
+        app.action_cycle_theme()
+        await pilot.pause()
+        assert app.theme == "feng-purple"
         app.action_cycle_theme()
         await pilot.pause()
         assert app.theme == "feng-amber"
@@ -130,3 +136,30 @@ async def test_header_surfaces_active_variant():
         await pilot.press("f2")
         await pilot.pause()
         assert "feng-tui · green" in app.sub_title
+
+
+# ── neon red + purple variants (Feng-Tui refinement arc, W1) ─────────────────
+
+
+def test_five_variants_in_cycle_order():
+    from modulatio.tui.feng_theme import FENG_THEME_NAMES
+    assert FENG_THEME_NAMES == [
+        "feng-amber", "feng-green", "feng-cyan", "feng-red", "feng-purple",
+    ]
+
+
+def test_red_variant_overrides_error_away_from_the_accent():
+    """A red accent would swallow #FF5555 error text — the red variant carries
+    an amber-alarm error so failures still jump out of a red screen."""
+    from modulatio.tui.feng_theme import FENG_PURPLE, FENG_RED
+    assert FENG_RED.error == "#FFB000"
+    assert FENG_RED.error != FENG_RED.primary
+    # non-red variants keep the terminal-red error
+    assert FENG_PURPLE.error == "#FF5555"
+
+
+def test_new_variants_carry_the_frame_variables():
+    from modulatio.tui.feng_theme import FENG_PURPLE, FENG_RED
+    for theme in (FENG_RED, FENG_PURPLE):
+        assert theme.variables["frame"] == theme.primary
+        assert theme.variables["frame-dim"] == theme.secondary
