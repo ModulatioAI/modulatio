@@ -425,8 +425,8 @@ class ModulatioApp(App):
         self._audit_tally: tuple[int, int, int] = (0, 0, 0)
         #: task_ids that reached a terminal event this run (task_completed /
         #: task_settled; a redo's re-dispatch un-settles). The tasks gauge
-        #: counts THESE — run-scope task files don't reliably persist
-        #: terminal state mid-run, but the feed never lies.
+        #: counts THESE — the feed is instant, where the store's terminal
+        #: save lands at each task's merge (and costs a full rescan to read).
         self._floor_settled: set[str] = set()
         #: cumulative [qc passes, qc rejects] off qc_verdict detail.
         self._floor_qc: list[int] = [0, 0]
@@ -1800,9 +1800,9 @@ class ModulatioApp(App):
     def _push_run_telemetry(self) -> None:
         """Compute + paint the floor rail's run gauges (the 1s tick's
         read-side path): the plan's SIZE from the run's task store, settled +
-        QC tallies from the activity-feed counters (the store doesn't
-        reliably persist terminal state mid-run), token/compression totals
-        from the run's audit.jsonl, elapsed from the kickoff clock."""
+        QC tallies from the activity-feed counters (instant, and no per-tick
+        store rescan/parse), token/compression totals from the run's
+        audit.jsonl, elapsed from the kickoff clock."""
         orch = getattr(self, "_kickoff_orch", None)
         project = getattr(orch, "project", None)
         run_id = getattr(project, "run_id", None)

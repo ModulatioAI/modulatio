@@ -232,8 +232,8 @@ def test_callback_events_are_time_ordered(project: Project):
 
 def test_qc_verdict_carries_passed_detail(project: Project):
     """The qc_verdict event NAMES its outcome — ``detail={"passed": bool}`` —
-    so the TUI telemetry rail can tally ✓/✗ live off the feed (the run-scope
-    task files don't reliably carry terminal state mid-run)."""
+    so the TUI telemetry rail can tally ✓/✗ live off the feed without
+    rescanning the task store."""
     events: list[ActivityEvent] = []
     runners = {
         "leader": _leader_stub,

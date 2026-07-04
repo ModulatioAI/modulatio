@@ -1396,9 +1396,9 @@ async def test_activity_events_feed_the_rail_verbs(project_with_roster):
 
 
 async def test_event_counters_drive_the_task_and_qc_gauges(project_with_roster):
-    """Settled tasks + QC tallies count off the ACTIVITY FEED (the run-scope
-    task files don't reliably persist terminal state mid-run) — a completed
-    task settles, a re-dispatched one un-settles, qc_verdict detail tallies."""
+    """Settled tasks + QC tallies count off the ACTIVITY FEED (instant, no
+    per-tick store rescan) — a completed task settles, a re-dispatched one
+    un-settles, qc_verdict detail tallies."""
     from modulatio.tui.app import ModulatioApp
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)

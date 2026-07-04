@@ -8901,8 +8901,8 @@ class Orchestrator:
                     phase="qc_verdict",
                     task_id=t.id,
                     agent_id=t.qc_agent_id,
-                    # The rail's ✓/✗ tally rides the feed — run-scope task
-                    # files don't reliably carry terminal state mid-run.
+                    # The TUI's ✓/✗ tally rides the feed: the event names its
+                    # outcome so no subscriber has to rescan the task store.
                     detail={"passed": bool(qc_verdict.passed)},
                 )
 
