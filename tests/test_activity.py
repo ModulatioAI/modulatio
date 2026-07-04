@@ -228,3 +228,24 @@ def test_callback_events_are_time_ordered(project: Project):
     assert timestamps == sorted(timestamps), (
         "events should be emitted in timestamp-monotonic order"
     )
+
+
+def test_qc_verdict_carries_passed_detail(project: Project):
+    """The qc_verdict event NAMES its outcome — ``detail={"passed": bool}`` —
+    so the TUI telemetry rail can tally ✓/✗ live off the feed (the run-scope
+    task files don't reliably carry terminal state mid-run)."""
+    events: list[ActivityEvent] = []
+    runners = {
+        "leader": _leader_stub,
+        "planner": _planner_stub,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    orch = Orchestrator(project, runners, activity_callback=events.append)
+    orch.kickoff("one piece")
+
+    verdicts = [e for e in events if e.phase == "qc_verdict"]
+    assert verdicts
+    for e in verdicts:
+        assert isinstance(e.detail, dict), f"qc_verdict without detail: {e}"
+        assert isinstance(e.detail.get("passed"), bool)

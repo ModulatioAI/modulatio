@@ -45,6 +45,25 @@ from modulatio.tui.widgets.stream_view import StreamView
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
+def _tasks_bar(done: int, total: int) -> str:
+    """The 10-segment tasks gauge — ``▰▰▰▱▱▱▱▱▱▱ 30%``. An honest empty bar
+    with ``—`` until the run actually has tasks (no fake 0%)."""
+    if total <= 0:
+        return "▱" * 10 + " —"
+    pct = round(done / total * 100)
+    filled = min(10, round(pct / 10))
+    return "▰" * filled + "▱" * (10 - filled) + f" {pct}%"
+
+
+def _fmt_tokens(n: int) -> str:
+    """Human token count for the ctx gauge: ``950`` → ``128.4K`` → ``2.1M``."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
 class PromptScreen(Vertical):
     """Console tab — status lamps + LEADER (TV+chat) / TEAM (full TV) flip."""
 
@@ -53,6 +72,14 @@ class PromptScreen(Vertical):
         "⏎ send   ·   /kickoff <objective> /end run a job   ·   "
         "📎 paste to attach   ·   F4 Leader/Team view"
     )
+
+    #: The rail gauges' between-runs faces (also the compose-time text).
+    _RAIL_IDLE = {
+        "#rail-elapsed": "⏱ —",
+        "#rail-tasks": "tasks ▱▱▱▱▱▱▱▱▱▱ —",
+        "#rail-qc": "qc    ✓ — · ✗ —",
+        "#rail-ctx": "ctx   — tok · — compress",
+    }
 
     DEFAULT_CSS = """
     /* The console matches console_mockup.py: a single framed screen with a
@@ -71,13 +98,15 @@ class PromptScreen(Vertical):
         color: $primary;
     }
     PromptScreen #status-lamps { padding: 0 1; }
-    /* The LEADER ╶╴ mod squad flip indicator, set off above the body. */
+    /* The LEADER ╶╴ MOD SQUAD tabs, set off above the body — each side is a
+       real click target (F4 still cycles). */
     PromptScreen #flip-tab {
         height: 1;
         margin: 1 0;
         padding: 0 1;
         color: $text-muted;
     }
+    PromptScreen #flip-tab Static { width: auto; }
     /* The body holds both views; only the active one is shown (the inactive
        lane stays mounted so its stream keeps receiving events). */
     PromptScreen #console-body { height: 1fr; }
@@ -90,9 +119,10 @@ class PromptScreen(Vertical):
         height: 1fr;
         padding: 0 1;
     }
-    /* MOD SQUAD: the run-telemetry rail left, the floor TV right. */
+    /* MOD SQUAD: the run-telemetry rail left, the floor TV right. Wide enough
+       for the ctx gauge + a producer's name-and-verb line. */
     PromptScreen #team-rail {
-        width: 24;
+        width: 32;
         border-right: solid $frame-dim;
         padding: 1 1;
     }
@@ -144,8 +174,12 @@ class PromptScreen(Vertical):
         yield Static("", id="console-header")
         # The telemetry lamp row, visible on both views.
         yield StatusLampRow(id="status-lamps")
-        # The flip INDICATOR (F4) — `LEADER ╶╴ mod squad`, active side bright.
-        yield Static("", id="flip-tab")
+        # The LEADER / MOD SQUAD tabs — real click targets (F4 still cycles),
+        # active side bright.
+        with Horizontal(id="flip-tab"):
+            yield Static("", id="flip-leader")
+            yield Static("", id="flip-divider")
+            yield Static("", id="flip-team")
         # The body holds BOTH views; only the active one is shown so the
         # inactive lane's StreamView keeps receiving its events.
         with Container(id="console-body"):
@@ -158,15 +192,12 @@ class PromptScreen(Vertical):
             with Horizontal(id="team-view"):
                 with Vertical(id="team-rail"):
                     yield Static("RUN TELEMETRY", classes="rail-head")
-                    # Progress + spend aren't on the activity stream yet (the
-                    # v1.0 live-telemetry rail) — shown dim with — until wired.
-                    yield Static("goal  ▱▱▱▱ —", classes="rail-dim", id="rail-goal")
-                    yield Static("tasks ▱▱▱▱ —", classes="rail-dim", id="rail-tasks")
-                    yield Static("qc    ▱▱▱▱ —", classes="rail-dim", id="rail-qc")
+                    # The live run gauges — painted by update_team_telemetry on
+                    # the app's 1s tick, back to dashes between runs.
+                    for wid, text in self._RAIL_IDLE.items():
+                        yield Static(text, classes="rail-dim", id=wid.lstrip("#"))
                     yield Static("")
-                    yield Static("⛁ — tok · $ —", classes="rail-dim", id="rail-spend")
-                    yield Static("")
-                    yield Static("─ producers ─", classes="rail-head")
+                    yield Static("─ on the floor ─", classes="rail-head")
                     yield Static("(idle)", classes="rail-dim", id="rail-producers")
                 with Vertical(id="team-tv-col"):
                     yield StreamView(lane="team", id="stream-team", classes="tv")
@@ -272,19 +303,28 @@ class PromptScreen(Vertical):
             accent, dim, _b, _e = theme_tiers(self.app)
         except Exception:
             accent, dim = "white", "grey50"
-        t = Text()
-        if self._view == "leader":
-            t.append("LEADER", style=f"bold {accent}")
-            t.append("  ╶╴  ", style=dim)
-            t.append("mod squad", style=dim)
-        else:
-            t.append("leader", style=dim)
-            t.append("  ╶╴  ", style=dim)
-            t.append("MOD SQUAD", style=f"bold {accent}")
+        leader = self._view == "leader"
+        sides = (
+            ("#flip-leader", "LEADER" if leader else "leader", leader),
+            ("#flip-team", "MOD SQUAD" if not leader else "mod squad",
+             not leader),
+        )
         try:
-            self.query_one("#flip-tab", Static).update(t)
+            for wid, label, active in sides:
+                self.query_one(wid, Static).update(Text(
+                    label, style=f"bold {accent}" if active else dim))
+            self.query_one("#flip-divider", Static).update(
+                Text("  ╶╴  ", style=dim))
         except Exception:
             pass
+
+    def on_click(self, event) -> None:
+        """The LEADER / MOD SQUAD tabs are click targets (F4 still cycles)."""
+        wid = getattr(getattr(event, "widget", None), "id", None)
+        if wid == "flip-leader":
+            self.show_leader()
+        elif wid == "flip-team":
+            self.show_team()
 
     # ── Chatbox attachments (docs + images for the Leader conversation) ──
 
@@ -487,19 +527,71 @@ class PromptScreen(Vertical):
 
     # ── the MOD SQUAD run-telemetry rail ────────────────────────────────
 
-    def update_team_rail(self, producers: list[str], *, running: bool) -> None:
-        """Refresh the floor rail's producer roster from the live activity feed
-        (the only rail data on the stream today; progress/spend stay dim until
-        the v1.0 telemetry rail wires them)."""
+    def update_team_rail(
+        self,
+        producers: list[str],
+        *,
+        running: bool,
+        verbs: dict[str, tuple[str, str]] | None = None,
+    ) -> None:
+        """Refresh the floor roster — who's on the floor and what each one is
+        DOING right now (the live icon+verb tracked off the activity feed)."""
         try:
             roster_line = self.query_one("#rail-producers", Static)
         except Exception:
             return
         if producers:
-            roster_line.update(
-                "\n".join(f"◆ {escape(name)}" for name in producers))
+            lines = []
+            for name in producers:
+                pair = (verbs or {}).get(name)
+                if pair:
+                    glyph, verb = pair
+                    # the rail reads as a roster, not a sentence — drop "is "
+                    verb = verb[3:] if verb.startswith("is ") else verb
+                    lines.append(f"◆◆ {escape(name)}  {glyph} {escape(verb)}")
+                else:
+                    lines.append(f"◆◆ {escape(name)}")
+            roster_line.update("\n".join(lines))
         else:
             roster_line.update("· idle" if not running else "· starting…")
+
+    def update_team_telemetry(
+        self,
+        *,
+        elapsed: int,
+        tasks_done: int,
+        tasks_total: int,
+        qc_pass: int,
+        qc_fail: int,
+        tokens: int,
+        compressions: int,
+    ) -> None:
+        """Paint the live run gauges (fed by the app's 1s tick, read-side)."""
+        mins, secs = divmod(max(0, int(elapsed)), 60)
+        lines = {
+            "#rail-elapsed": f"⏱ {mins}:{secs:02d}",
+            "#rail-tasks": f"tasks {_tasks_bar(tasks_done, tasks_total)}",
+            "#rail-qc": f"qc    ✓ {qc_pass} · ✗ {qc_fail}",
+            "#rail-ctx": (
+                f"ctx   {_fmt_tokens(tokens)} tok · {compressions} compress"),
+        }
+        for wid, text in lines.items():
+            try:
+                gauge = self.query_one(wid, Static)
+            except Exception:
+                return
+            gauge.update(text)
+            gauge.remove_class("rail-dim")
+
+    def reset_team_telemetry(self) -> None:
+        """Rest the gauges to their between-runs dashes."""
+        for wid, text in self._RAIL_IDLE.items():
+            try:
+                gauge = self.query_one(wid, Static)
+            except Exception:
+                return
+            gauge.update(text)
+            gauge.add_class("rail-dim")
 
 
 def build_prompt_panel() -> PromptScreen:

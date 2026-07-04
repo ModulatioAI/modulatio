@@ -794,7 +794,7 @@ async def test_oneshot_kickoff_end_launches_a_job(project_with_roster):
         screen._send_message()
         await pilot.pause()
         assert app.last_summary_text.startswith(("Running", "Completed"))
-        assert screen.view == "team"   # launching flips to the floor
+        assert screen.view == "leader"  # launching never yanks you to the floor
 
 
 async def test_bare_kickoff_starts_capture_not_a_job(project_with_roster):
@@ -1252,3 +1252,369 @@ async def test_leader_lane_follows_tail_when_revealed(project_with_roster):
             f"leader lane not at tail after reveal: scroll_y={tv.scroll_y} "
             f"max={tv.max_scroll_y}"
         )
+
+
+# ─── The run-telemetry gauges (the revamped MOD SQUAD rail) ──────────────────
+
+
+def _static_text(widget) -> str:
+    rendered = widget.render()
+    return rendered.plain if hasattr(rendered, "plain") else str(rendered)
+
+
+def test_tasks_bar_ten_segments_and_percent():
+    from modulatio.tui.screens.prompt import _tasks_bar
+
+    assert _tasks_bar(3, 10) == "▰▰▰▱▱▱▱▱▱▱ 30%"
+    assert _tasks_bar(0, 8) == "▱▱▱▱▱▱▱▱▱▱ 0%"
+    assert _tasks_bar(5, 5) == "▰▰▰▰▰▰▰▰▰▰ 100%"
+    assert _tasks_bar(1, 3) == "▰▰▰▱▱▱▱▱▱▱ 33%"
+    # no tasks yet → an honest empty bar, no fake 0%
+    assert _tasks_bar(0, 0) == "▱▱▱▱▱▱▱▱▱▱ —"
+
+
+def test_fmt_tokens_scales():
+    from modulatio.tui.screens.prompt import _fmt_tokens
+
+    assert _fmt_tokens(0) == "0"
+    assert _fmt_tokens(950) == "950"
+    assert _fmt_tokens(128_400) == "128.4K"
+    assert _fmt_tokens(2_100_000) == "2.1M"
+
+
+async def test_rail_composes_the_gauges_not_the_facade(project_with_roster):
+    """The rail holds the live gauges (elapsed / tasks / qc / ctx); the dead
+    goal bar and the unknowable $ spend line are gone."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        assert screen.query("#rail-elapsed")
+        assert screen.query("#rail-tasks")
+        assert screen.query("#rail-qc")
+        assert screen.query("#rail-ctx")
+        assert not screen.query("#rail-goal")
+        assert not screen.query("#rail-spend")
+
+
+async def test_update_team_telemetry_paints_the_gauges(project_with_roster):
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        screen.update_team_telemetry(
+            elapsed=125, tasks_done=3, tasks_total=10,
+            qc_pass=4, qc_fail=1, tokens=128_400, compressions=1,
+        )
+        assert _static_text(screen.query_one("#rail-elapsed", Static)) == "⏱ 2:05"
+        assert _static_text(screen.query_one("#rail-tasks", Static)) == (
+            "tasks ▰▰▰▱▱▱▱▱▱▱ 30%")
+        assert _static_text(screen.query_one("#rail-qc", Static)) == (
+            "qc    ✓ 4 · ✗ 1")
+        assert _static_text(screen.query_one("#rail-ctx", Static)) == (
+            "ctx   128.4K tok · 1 compress")
+        # live gauges shed the placeholder dimming
+        assert not screen.query_one("#rail-tasks", Static).has_class("rail-dim")
+
+
+async def test_reset_team_telemetry_returns_to_dashes(project_with_roster):
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        screen.update_team_telemetry(
+            elapsed=5, tasks_done=1, tasks_total=2,
+            qc_pass=1, qc_fail=0, tokens=10, compressions=0,
+        )
+        screen.reset_team_telemetry()
+        assert "—" in _static_text(screen.query_one("#rail-tasks", Static))
+        assert "—" in _static_text(screen.query_one("#rail-qc", Static))
+        assert "—" in _static_text(screen.query_one("#rail-ctx", Static))
+        assert screen.query_one("#rail-tasks", Static).has_class("rail-dim")
+
+
+async def test_rail_roster_carries_live_verbs(project_with_roster):
+    """A producer on the floor shows what it's DOING — the per-tool/phase
+    icon + verb next to its name."""
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        screen.update_team_rail(
+            ["Randy"], running=True,
+            verbs={"Randy": ("▼▼", "is reading a page")},
+        )
+        line = _static_text(screen.query_one("#rail-producers", Static))
+        assert "◆◆ Randy" in line
+        assert "▼▼ reading a page" in line  # the "is " prefix drops in the rail
+        # a producer with no verb yet still shows on the floor
+        screen.update_team_rail(["Randy"], running=True, verbs={})
+        assert "◆◆ Randy" in _static_text(
+            screen.query_one("#rail-producers", Static))
+
+
+async def test_activity_events_feed_the_rail_verbs(project_with_roster):
+    """Team-lane activity (tool calls + phases) lands on the rail as the
+    producer's live verb — wired through _record_activity_impl."""
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="t1"))
+        app._record_activity_impl(ActivityEvent(
+            agent_id="writer", role="drafter", phase="tool_call_ended",
+            task_id="t1", timestamp=datetime.now(timezone.utc),
+            detail={"tool": "http_get"},
+        ))
+        screen = app.query_one(PromptScreen)
+        line = _static_text(screen.query_one("#rail-producers", Static))
+        assert "Marlow" in line          # roster name, never the raw id
+        assert "▼▼ reading a page" in line
+
+
+async def test_event_counters_drive_the_task_and_qc_gauges(project_with_roster):
+    """Settled tasks + QC tallies count off the ACTIVITY FEED (the run-scope
+    task files don't reliably persist terminal state mid-run) — a completed
+    task settles, a re-dispatched one un-settles, qc_verdict detail tallies."""
+    from modulatio.tui.app import ModulatioApp
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._record_activity_impl(_ev("orchestrator", "kickoff_started"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="t1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_completed", agent_id="writer", task_id="t1"))
+        app._record_activity_impl(
+            _ev("drafter", "task_settled", agent_id="writer", task_id="t2"))
+        for passed in (True, False, True):
+            app._record_activity_impl(ActivityEvent(
+                agent_id="qc", role="qc", phase="qc_verdict", task_id="t1",
+                timestamp=datetime.now(timezone.utc),
+                detail={"passed": passed},
+            ))
+        assert app._floor_settled == {"t1", "t2"}
+        assert app._floor_qc == [2, 1]
+        # a redo re-dispatches t1 — it comes OFF the settled count
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="t1"))
+        assert app._floor_settled == {"t2"}
+        # a fresh run starts clean
+        app._record_activity_impl(_ev("orchestrator", "kickoff_started"))
+        assert app._floor_settled == set()
+        assert app._floor_qc == [0, 0]
+
+
+def test_tally_audit_offset_reads_only_new_rows(tmp_path):
+    import json
+
+    from modulatio.tui.app import _tally_audit
+
+    audit = tmp_path / "audit.jsonl"
+
+    def _row(actor, tokens, fired):
+        return json.dumps({
+            "actor": actor,
+            "pre_compression_tokens": tokens,
+            "compression_fired": fired,
+        })
+
+    audit.write_text(
+        _row("context_budget", 1000, False) + "\n"
+        + _row("team_canvas", 999_999, True) + "\n"    # other actors don't count
+        + _row("context_budget", 2500, True) + "\n"
+    )
+    offset, tokens, compressions = _tally_audit(audit, 0, 0, 0)
+    assert (tokens, compressions) == (3500, 1)
+
+    # append one row; the next tick reads ONLY the delta
+    with audit.open("a") as fh:
+        fh.write(_row("context_budget", 500, False) + "\n")
+    offset2, tokens2, compressions2 = _tally_audit(
+        audit, offset, tokens, compressions)
+    assert offset2 > offset
+    assert (tokens2, compressions2) == (4000, 1)
+
+    # a missing file is a quiet no-op (run folder not created yet)
+    off3, tok3, comp3 = _tally_audit(tmp_path / "nope.jsonl", 0, 7, 2)
+    assert (off3, tok3, comp3) == (0, 7, 2)
+
+
+async def test_push_run_telemetry_reads_the_run_state(
+    project_with_roster, monkeypatch,
+):
+    """The 1s tick's data path: task store + audit.jsonl → the gauges."""
+    import json
+    from uuid import uuid4
+
+    from textual.widgets import Static
+
+    from modulatio import store
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.types import Task, TaskStatus
+
+    run_id = vault.generate_run_id()
+    vault.init_run(PROJECT_CODE, run_id, "obj")
+    pid = uuid4()
+    store.save_task(
+        PROJECT_CODE,
+        Task(id="T-1", project_id=pid, goal_id="G-1", description="d",
+             status=TaskStatus.COMPLETED),
+        run_id=run_id)
+    store.save_task(
+        PROJECT_CODE,
+        Task(id="T-2", project_id=pid, goal_id="G-1", description="d",
+             status=TaskStatus.DISPATCHED),
+        run_id=run_id)
+    audit = vault.run_dir(PROJECT_CODE, run_id) / "audit.jsonl"
+    audit.write_text(json.dumps({
+        "actor": "context_budget",
+        "pre_compression_tokens": 42_000,
+        "compression_fired": True,
+    }) + "\n")
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        class _FakeProject:
+            code = PROJECT_CODE
+        _FakeProject.run_id = run_id
+
+        class _FakeOrch:
+            project = _FakeProject()
+
+        app._kickoff_orch = _FakeOrch()
+        import time as _time
+        app._kickoff_started_at = _time.monotonic() - 65
+        # the feed supplies settled + qc; the disk supplies total + ctx
+        app._record_activity_impl(
+            _ev("drafter", "task_completed", agent_id="writer", task_id="T-1"))
+        app._record_activity_impl(ActivityEvent(
+            agent_id="qc", role="qc", phase="qc_verdict", task_id="T-1",
+            timestamp=datetime.now(timezone.utc), detail={"passed": True},
+        ))
+        app._push_run_telemetry()
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        assert "50%" in _static_text(screen.query_one("#rail-tasks", Static))
+        assert _static_text(screen.query_one("#rail-qc", Static)) == (
+            "qc    ✓ 1 · ✗ 0")
+        ctx = _static_text(screen.query_one("#rail-ctx", Static))
+        assert "42.0K tok" in ctx
+        assert "1 compress" in ctx
+        assert _static_text(
+            screen.query_one("#rail-elapsed", Static)).startswith("⏱ 1:0")
+
+
+async def test_kickoff_ended_resets_the_gauges(project_with_roster):
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        screen.update_team_telemetry(
+            elapsed=5, tasks_done=1, tasks_total=2,
+            qc_pass=1, qc_fail=0, tokens=10, compressions=0,
+        )
+        app._floor_verbs["Marlow"] = ("✎✎", "is writing")
+        app._record_activity_impl(_ev("orchestrator", "kickoff_ended"))
+        await pilot.pause()
+        assert "—" in _static_text(screen.query_one("#rail-tasks", Static))
+        assert app._floor_verbs == {}
+
+
+async def test_kickoff_stays_on_leader_view(project_with_roster, monkeypatch):
+    """Launching a job does NOT yank you to the factory floor — you flip
+    when you want to watch (F4 / the flip control)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(
+            app, "_kickoff_worker",
+            lambda project, runners, objective, mode, attachments: None)
+        assert app._run_kickoff("write the haiku") is True
+        await pilot.pause()
+        assert app.query_one(PromptScreen).view == "leader"
+
+
+async def test_console_has_leader_and_mod_squad_tabs(project_with_roster):
+    """Under CONSOLE the flip row is two real TABS — click MOD SQUAD to reach
+    the floor, click LEADER to come home. F4 still cycles (kept)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        assert screen.query("#flip-leader")
+        assert screen.query("#flip-team")
+        assert screen.view == "leader"
+        await pilot.click("#flip-team")
+        await pilot.pause()
+        assert screen.view == "team"
+        await pilot.click("#flip-leader")
+        await pilot.pause()
+        assert screen.view == "leader"
+        # clicking the already-active tab is a no-op, not a toggle
+        await pilot.click("#flip-leader")
+        await pilot.pause()
+        assert screen.view == "leader"
+        # F4 keeps working alongside the tabs
+        await pilot.press("f4")
+        await pilot.pause()
+        assert screen.view == "team"
+
+
+async def test_qc_joins_the_floor_while_reviewing(project_with_roster):
+    """QC steps onto the floor when it starts reviewing (the sketch's
+    ``○○ qc reviewing`` line) and steps off once the verdict lands."""
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        app._record_activity_impl(_ev("qc", "qc_started", agent_id="qc"))
+        line = _static_text(screen.query_one("#rail-producers", Static))
+        assert "Quality Control" in line
+        assert "○○ reviewing" in line
+        app._record_activity_impl(_ev("qc", "qc_verdict", agent_id="qc"))
+        line = _static_text(screen.query_one("#rail-producers", Static))
+        assert "Quality Control" not in line

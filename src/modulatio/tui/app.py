@@ -57,6 +57,8 @@ from modulatio.tui.widgets.stream_view import (
     is_leader_role,
     is_team_role,
     _humanize,
+    _PHASE,
+    _tool_glyph_verb,
 )
 from modulatio.types import ActivityEvent, Project, ProjectState
 
@@ -143,6 +145,43 @@ def _build_kickoff_orchestrator(
             None if mode == "stub" else litellm_runner
         ),
     )
+
+
+def _tally_audit(
+    path, offset: int, tokens: int, compressions: int,
+) -> tuple[int, int, int]:
+    """Fold the run audit log's NEW rows into the ctx tally — offset-tracked
+    so the 1s tick reads only what appended since last tick. Only complete
+    lines count (a partial tail row reads next tick); only ``context_budget``
+    rows carry the token/compression telemetry."""
+    import json
+
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            chunk = fh.read()
+    except OSError:
+        return offset, tokens, compressions
+    end = chunk.rfind(b"\n")
+    if end < 0:
+        return offset, tokens, compressions
+    for line in chunk[:end].splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("actor") != "context_budget":
+            continue
+        try:
+            tokens += int(row.get("pre_compression_tokens") or 0)
+        except (TypeError, ValueError):
+            pass
+        if row.get("compression_fired"):
+            compressions += 1
+    return offset + end + 1, tokens, compressions
 
 
 class ModulatioApp(App):
@@ -356,6 +395,19 @@ class ModulatioApp(App):
         #: Latest kickoff summary text. Exposed for tests + for future
         #: Status-tab widgets (slice #21) that might mirror it.
         self.last_summary_text: str = ""
+        #: agent display-name → (glyph, verb) — each floor producer's live
+        #: doing-what, tracked off the activity feed for the telemetry rail.
+        self._floor_verbs: dict[str, tuple[str, str]] = {}
+        #: (byte offset, tokens, compressions) — the running audit.jsonl
+        #: tally behind the rail's ctx gauge; offset-read on the 1s tick.
+        self._audit_tally: tuple[int, int, int] = (0, 0, 0)
+        #: task_ids that reached a terminal event this run (task_completed /
+        #: task_settled; a redo's re-dispatch un-settles). The tasks gauge
+        #: counts THESE — run-scope task files don't reliably persist
+        #: terminal state mid-run, but the feed never lies.
+        self._floor_settled: set[str] = set()
+        #: cumulative [qc passes, qc rejects] off qc_verdict detail.
+        self._floor_qc: list[int] = [0, 0]
 
     def get_css_variables(self) -> dict[str, str]:
         """Register Modulatio's custom CSS variables globally so they resolve in
@@ -452,8 +504,8 @@ class ModulatioApp(App):
                 return False
             mode = "real"
 
-        # Flip to the factory floor so the launch and the work are on one tab.
-        self._show_team_floor()
+        # Stay on LEADER — launching a job doesn't yank you to the floor; flip
+        # when you want to watch (F4 / the MOD SQUAD tab).
 
         # Track elapsed time so the status line shows progress instead of
         # staying frozen. ``set_interval`` repaints once per second from the
@@ -571,6 +623,9 @@ class ModulatioApp(App):
             f"Running ({self._kickoff_mode} mode)... {elapsed_str} elapsed. "
             "Watch the floor, or flip to LEADER — he'll report back there when done."
         )
+        # The floor rail's run gauges ride the same tick (and the same
+        # _run_finishing guard above — no repaint once the run has ended).
+        self._push_run_telemetry()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Handle kickoff worker completion / failure. Re-enables the
@@ -1209,6 +1264,10 @@ class ModulatioApp(App):
             self._run_ticket_count = 0
             self._run_ended = False  # leader-lane activity is live again
             self._run_finishing = False  # progress timer may repaint again
+            self._floor_verbs.clear()   # nobody's on the floor yet
+            self._audit_tally = (0, 0, 0)  # fresh ctx tally for this run
+            self._floor_settled.clear()
+            self._floor_qc = [0, 0]
             lamps = self._status_lamps()
             if lamps is not None:
                 lamps.set_lamps(running=True, mods=0, qc=0, tickets=0)
@@ -1251,7 +1310,14 @@ class ModulatioApp(App):
             lamps = self._status_lamps()
             if lamps is not None:
                 lamps.set_lamps(running=False, mods=0, qc=0)
+            self._floor_verbs.clear()
             self._update_team_rail([], running=False)
+            # Rest the run gauges to their between-runs dashes.
+            from modulatio.tui.screens.prompt import PromptScreen
+            try:
+                self.query_one(PromptScreen).reset_team_telemetry()
+            except Exception:
+                pass
             # Run over: post-run codification (background learning) still emits
             # leader-role activity — gate it so it can't re-animate the now-idle
             # conversational leader lane (the "spins forever on skill_codified
@@ -1274,6 +1340,27 @@ class ModulatioApp(App):
             actor = self._agent_name(event.agent_id or event.role) or _humanize(
                 event.agent_id or event.role
             )
+            # Track this producer's live doing-what for the telemetry rail —
+            # the same icon+verb vocabulary the floor TV speaks.
+            if event.phase == "tool_call_ended":
+                self._floor_verbs[actor] = _tool_glyph_verb(event)
+            elif event.phase in ("task_completed", "task_settled", "qc_verdict"):
+                self._floor_verbs.pop(actor, None)  # off the floor
+            elif event.phase in _PHASE:
+                self._floor_verbs[actor] = _PHASE[event.phase]
+            # The tasks + qc gauges count off the feed too.
+            if event.task_id:
+                if event.phase in ("task_completed", "task_settled"):
+                    self._floor_settled.add(event.task_id)
+                elif event.phase == "task_dispatched":
+                    # a redo re-dispatches a settled task — back in flight
+                    self._floor_settled.discard(event.task_id)
+            if event.phase == "qc_verdict" and isinstance(event.detail, dict):
+                passed = event.detail.get("passed")
+                if passed is True:
+                    self._floor_qc[0] += 1
+                elif passed is False:
+                    self._floor_qc[1] += 1
             names = (
                 team_stream.active_producer_names()
                 if team_stream is not None else []
@@ -1303,14 +1390,6 @@ class ModulatioApp(App):
         running state — so this just keeps last_summary_text (the banner / test
         source of truth)."""
         self.last_summary_text = text
-
-    def _show_team_floor(self) -> None:
-        """Flip the console to the TEAM factory floor."""
-        from modulatio.tui.screens.prompt import PromptScreen
-        try:
-            self.query_one(PromptScreen).show_team()
-        except Exception:
-            pass
 
     def _ensure_project(self) -> Project:
         if self._project is None:
@@ -1678,10 +1757,59 @@ class ModulatioApp(App):
             return None
 
     def _update_team_rail(self, producers: "list[str]", *, running: bool) -> None:
-        """Push the live producer roster onto the MOD SQUAD floor rail."""
+        """Push the live producer roster (+ each one's doing-what verb) onto
+        the MOD SQUAD floor rail. Actors with a live verb but no task in
+        flight — QC mid-review — join the floor too, and leave when their
+        verb is popped (verdict landed)."""
+        from modulatio.tui.screens.prompt import PromptScreen
+        extras = [a for a in self._floor_verbs if a not in producers]
+        try:
+            self.query_one(PromptScreen).update_team_rail(
+                list(producers) + extras, running=running,
+                verbs=self._floor_verbs)
+        except Exception:
+            pass
+
+    def _push_run_telemetry(self) -> None:
+        """Compute + paint the floor rail's run gauges (the 1s tick's
+        read-side path): the plan's SIZE from the run's task store, settled +
+        QC tallies from the activity-feed counters (the store doesn't
+        reliably persist terminal state mid-run), token/compression totals
+        from the run's audit.jsonl, elapsed from the kickoff clock."""
+        orch = getattr(self, "_kickoff_orch", None)
+        project = getattr(orch, "project", None)
+        run_id = getattr(project, "run_id", None)
+        if not run_id:
+            return
+        from modulatio import store
+        try:
+            tasks = store.list_tasks(project.code, run_id=run_id)
+        except Exception:
+            tasks = []
+        # Every dispatched task has a file; the feed can briefly know MORE
+        # than the store (a settle racing the save) — never report >100%.
+        total = max(len(tasks), len(self._floor_settled))
+        settled = len(self._floor_settled)
+        qc_pass, qc_fail = self._floor_qc
+        try:
+            audit = vault.run_dir(project.code, run_id) / "audit.jsonl"
+            offset, tokens, compressions = self._audit_tally
+            self._audit_tally = _tally_audit(audit, offset, tokens, compressions)
+        except Exception:
+            pass
+        _offset, tokens, compressions = self._audit_tally
+        started = getattr(self, "_kickoff_started_at", None)
+        if started is not None:
+            import time as _time
+            elapsed = int(_time.monotonic() - started)
+        else:
+            elapsed = 0
         from modulatio.tui.screens.prompt import PromptScreen
         try:
-            self.query_one(PromptScreen).update_team_rail(producers, running=running)
+            self.query_one(PromptScreen).update_team_telemetry(
+                elapsed=elapsed, tasks_done=settled, tasks_total=total,
+                qc_pass=qc_pass, qc_fail=qc_fail,
+                tokens=tokens, compressions=compressions)
         except Exception:
             pass
 
