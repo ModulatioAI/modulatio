@@ -104,3 +104,12 @@ async def test_shell_owned_key_is_read_only(monkeypatch):
         assert screen._source_of("MODULATIO_QC_FIXER") == "shell/.env"
         assert not screen._save_value("MODULATIO_QC_FIXER", "1")
         assert os.environ["MODULATIO_QC_FIXER"] == "0"
+
+
+def test_every_settings_knob_is_backend_allowlisted():
+    """The SETTINGS tab and apply_env_overrides share ONE allowlist (Wild
+    Bill's close-out condition) — a knob added to the screen without the
+    backend allowlist would save but silently never apply."""
+    from modulatio.tui.screens.settings import KNOBS
+    missing = {k.key for k in KNOBS} - config.ENV_OVERRIDE_ALLOWLIST
+    assert not missing, f"knobs not allowlisted: {missing}"

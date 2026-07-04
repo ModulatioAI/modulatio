@@ -8739,10 +8739,21 @@ class Orchestrator:
         try:
             self._run_task_with_redo_inner(t, summary, initial_corrective_notes)
         finally:
+            # All FOUR terminal states — incl. ABANDONED (a Leader-iterate
+            # drop): the producer still worked the task and remembers it
+            # (Jenny MED, arc cadre). Best-effort: a memory-write failure
+            # must never change a settled task's outcome or crash the run
+            # (Wild Bill BLOCK #1) — same posture as the team-memory
+            # proposal side-channel.
             if t.status in (
-                TaskStatus.COMPLETED, TaskStatus.QC_REJECTED, TaskStatus.BLOCKED
+                TaskStatus.COMPLETED, TaskStatus.QC_REJECTED,
+                TaskStatus.BLOCKED, TaskStatus.ABANDONED,
             ):
-                self._record_task_episode(t)
+                try:
+                    self._record_task_episode(t)
+                except Exception as exc:  # noqa: BLE001 — side-channel, never load-bearing
+                    _logger.warning(
+                        "episodic memory skipped for %s: %s", t.id, exc)
 
     def _record_task_episode(self, t: Task) -> None:
         """Synthesize one episodic memory line per party from task fields —
@@ -8756,6 +8767,22 @@ class Orchestrator:
         # operation == "research", which doubled the tag list (live wart).
         tags = list(dict.fromkeys(x for x in (t.artifact_kind, t.operation) if x))
         code = self.project.code
+        task_id = t.id
+
+        def _best_effort_episode(agent_id: str, body: str, entry_type: str) -> None:
+            # Best-effort on BOTH paths — immediate AND the deferred-merge
+            # execution (Wild Bill BLOCK #1): a memory failure logs, never
+            # raises into the run.
+            try:
+                agent_memory.add_episodic(
+                    agent_id, body, project_code=code,
+                    entry_type=entry_type, tags=list(tags),
+                )
+            except Exception as exc:  # noqa: BLE001 — side-channel, never load-bearing
+                _logger.warning(
+                    "episodic memory skipped for %s/%s: %s",
+                    task_id, agent_id, exc)
+
         if t.assigned_agent_id:
             fixed = " (QC-authored fix)" if getattr(t, "qc_authored_fix", False) else ""
             body = (
@@ -8763,16 +8790,12 @@ class Orchestrator:
                 f"{t.lifetime_attempts} producer attempt(s){fixed}"
             )
             self._store_write_deferrable(
-                lambda a=t.assigned_agent_id, b=body, tg=list(tags): agent_memory.add_episodic(
-                    a, b, project_code=code, entry_type="task", tags=tg
-                )
+                lambda a=t.assigned_agent_id, b=body: _best_effort_episode(a, b, "task")
             )
         if t.qc_agent_id:
             qc_body = f"reviewed {t.id}: {t.status.value} — {t.description[:100]}"
             self._store_write_deferrable(
-                lambda a=t.qc_agent_id, b=qc_body, tg=list(tags): agent_memory.add_episodic(
-                    a, b, project_code=code, entry_type="review", tags=tg
-                )
+                lambda a=t.qc_agent_id, b=qc_body: _best_effort_episode(a, b, "review")
             )
 
     def _run_task_with_redo_inner(

@@ -483,3 +483,26 @@ def test_absent_env_overrides_is_a_noop():
     before = dict(os.environ)
     config.apply_env_overrides()
     assert dict(os.environ) == before
+
+
+def test_env_overrides_refuse_non_allowlisted_keys(monkeypatch):
+    """Wild Bill BLOCK #2 (arc cadre): the backend enforces the SAME curated
+    allowlist as the SETTINGS tab — a hand-edited defaults.json cannot
+    persistently kill the sandbox or hijack the loader."""
+    for k in ("MODULATIO_RUN_SHELL_UNSAFE", "MODULATIO_SANDBOX_PROFILE",
+              "LD_PRELOAD", "PYTHONPATH"):
+        monkeypatch.delenv(k, raising=False)
+    _save_overrides({
+        "MODULATIO_RUN_SHELL_UNSAFE": "1",
+        "MODULATIO_SANDBOX_PROFILE": "off",
+        "LD_PRELOAD": "/tmp/evil.so",
+        "PYTHONPATH": "/tmp/evil",
+        "MODULATIO_QC_FIXER": "0",  # allowlisted — still applies
+    })
+    monkeypatch.delenv("MODULATIO_QC_FIXER", raising=False)
+    config.apply_env_overrides()
+    assert "MODULATIO_RUN_SHELL_UNSAFE" not in os.environ
+    assert "MODULATIO_SANDBOX_PROFILE" not in os.environ
+    assert "LD_PRELOAD" not in os.environ
+    assert "PYTHONPATH" not in os.environ
+    assert os.environ["MODULATIO_QC_FIXER"] == "0"

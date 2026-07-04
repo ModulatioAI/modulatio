@@ -38,11 +38,14 @@ that explicitly rather than silently picking a model.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("modulatio.config")
 
 # === Locations ===
 
@@ -332,6 +335,32 @@ def load_modulatio_env() -> None:
         pass  # never block startup on a malformed overrides block
 
 
+#: The ONLY keys apply_env_overrides will inject — the same curated set the
+#: SETTINGS tab exposes, enforced at the BACKEND so a hand-edited
+#: defaults.json can't become a persistent environment injector (Wild Bill
+#: BLOCK, arc cadre 2026-07-04: an unrestricted block could set
+#: MODULATIO_RUN_SHELL_UNSAFE / MODULATIO_SANDBOX_PROFILE / LD_PRELOAD
+#: forever). Widening this list is a deliberate, reviewed act.
+ENV_OVERRIDE_ALLOWLIST: frozenset[str] = frozenset({
+    "MODULATIO_TASK_MAX_RETRIES",
+    "MODULATIO_GOAL_MAX_RETRIES",
+    "MODULATIO_TASK_CONTEXT_CAP_PCT",
+    "MODULATIO_QC_FIXER",
+    "MODULATIO_SKILL_CODIFICATION",
+    "MODULATIO_JT_CODIFICATION",
+    "MODULATIO_CONCURRENT_WAVES",
+    "MODULATIO_WAVE_POOL_CEILING",
+    "MODULATIO_SIZE_TOLERANCE",
+    "MODULATIO_CTX_BUDGET_PRODUCER",
+    "MODULATIO_CTX_BUDGET_QC",
+    "MODULATIO_CTX_BUDGET_PLANNER",
+    "MODULATIO_CTX_BUDGET_LEADER_DECOMPOSE",
+    "MODULATIO_CTX_BUDGET_LEADER_ITERATE",
+    "MODULATIO_CTX_BUDGET_LEADER_REFLECT",
+    "MODULATIO_CTX_BUDGET_LEADER_CHAT",
+    "MODULATIO_CTX_BUDGET_RESEARCH",
+})
+
 #: Keys apply_env_overrides has set — so a later save can update or unset
 #: them live, while never touching a key the shell/.env owns.
 _ENV_OVERRIDES_SET: set[str] = set()
@@ -356,6 +385,12 @@ def apply_env_overrides() -> None:
             _ENV_OVERRIDES_SET.discard(key)
     for key, value in overrides.items():
         key = str(key)
+        if key not in ENV_OVERRIDE_ALLOWLIST:
+            # Backend allowlist (Wild Bill BLOCK): unknown keys are refused
+            # loudly, not injected — never a persistent sandbox/loader hijack.
+            logger.warning(
+                "env_overrides: refusing non-allowlisted key %r", key)
+            continue
         if key in os.environ and key not in _ENV_OVERRIDES_SET:
             continue  # shell/.env owns it — the tab renders it read-only
         os.environ[key] = str(value)
