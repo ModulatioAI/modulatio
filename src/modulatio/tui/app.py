@@ -147,23 +147,45 @@ def _build_kickoff_orchestrator(
     )
 
 
+#: Per-tick byte cap on the audit read (WB gauges-arc BLOCK #2a): the tally
+#: runs on the 1s UI tick, so a huge append must never stall the event loop —
+#: anything past the cap is picked up by subsequent ticks.
+_AUDIT_READ_CAP = 8 * 1024 * 1024
+
+
 def _tally_audit(
     path, offset: int, tokens: int, compressions: int,
 ) -> tuple[int, int, int]:
     """Fold the run audit log's NEW rows into the ctx tally — offset-tracked
-    so the 1s tick reads only what appended since last tick. Only complete
-    lines count (a partial tail row reads next tick); only ``context_budget``
-    rows carry the token/compression telemetry."""
+    so the 1s tick reads only what appended since last tick, capped at
+    ``_AUDIT_READ_CAP`` bytes per call. Only complete lines count (a partial
+    tail row reads next tick; a cap-sized line with no newline is SKIPPED —
+    no sane audit row is that big, and rereading it forever would stall the
+    tick). A file that SHRANK (rotation/truncation) restarts the offset at 0
+    and folds the new stream on top of the running tally — the old rows
+    already happened. Only ``context_budget`` rows carry the telemetry."""
     import json
+    import os
 
+    try:
+        size = os.stat(path).st_size
+    except OSError:
+        return offset, tokens, compressions
+    if size < offset:
+        offset = 0  # the file shrank — treat what's there as a new stream
     try:
         with open(path, "rb") as fh:
             fh.seek(offset)
-            chunk = fh.read()
+            chunk = fh.read(_AUDIT_READ_CAP)
     except OSError:
         return offset, tokens, compressions
     end = chunk.rfind(b"\n")
     if end < 0:
+        if len(chunk) >= _AUDIT_READ_CAP:
+            # An oversized unterminated line: advance past the window rather
+            # than rereading it every tick. Its later fragments parse-fail
+            # (or aren't dict rows) and are skipped harmlessly.
+            return offset + len(chunk), tokens, compressions
         return offset, tokens, compressions
     for line in chunk[:end].splitlines():
         line = line.strip()
@@ -173,7 +195,7 @@ def _tally_audit(
             row = json.loads(line)
         except ValueError:
             continue
-        if row.get("actor") != "context_budget":
+        if not isinstance(row, dict) or row.get("actor") != "context_budget":
             continue
         try:
             tokens += int(row.get("pre_compression_tokens") or 0)
@@ -1336,7 +1358,12 @@ class ModulatioApp(App):
                 )
             else:
                 self._set_lane_status("stream-leader-status", event.phase)
-        elif is_team_role(event.role):
+        elif is_team_role(event.role) and not getattr(self, "_run_ended", False):
+            # The _run_ended gate mirrors the leader branch (WB gauges-arc
+            # BLOCK #1): a straggler team event after kickoff_ended must not
+            # repopulate the floor verbs/counters, re-light the lamps, or
+            # flip the rested rail back to running. The event still reaches
+            # the streams above — only the run telemetry stays down.
             actor = self._agent_name(event.agent_id or event.role) or _humanize(
                 event.agent_id or event.role
             )

@@ -1618,3 +1618,105 @@ async def test_qc_joins_the_floor_while_reviewing(project_with_roster):
         app._record_activity_impl(_ev("qc", "qc_verdict", agent_id="qc"))
         line = _static_text(screen.query_one("#rail-producers", Static))
         assert "Quality Control" not in line
+
+
+async def test_late_team_events_cannot_reanimate_the_idle_rail(
+    project_with_roster,
+):
+    """Wild Bill BLOCK #1 (gauges arc): a straggler team event arriving AFTER
+    kickoff_ended must not repopulate the floor verbs, move the counters, or
+    flip the rail back to running."""
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        app._record_activity_impl(_ev("orchestrator", "kickoff_started"))
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="t1"))
+        app._record_activity_impl(_ev("orchestrator", "kickoff_ended"))
+        assert app._floor_verbs == {}
+        # the stragglers — a late dispatch, tool call, and verdict
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="t2"))
+        app._record_activity_impl(ActivityEvent(
+            agent_id="writer", role="drafter", phase="tool_call_ended",
+            task_id="t2", timestamp=datetime.now(timezone.utc),
+            detail={"tool": "http_get"},
+        ))
+        app._record_activity_impl(ActivityEvent(
+            agent_id="qc", role="qc", phase="qc_verdict", task_id="t2",
+            timestamp=datetime.now(timezone.utc), detail={"passed": True},
+        ))
+        assert app._floor_verbs == {}
+        assert app._floor_qc == [0, 0]
+        assert "idle" in _static_text(
+            screen.query_one("#rail-producers", Static))
+
+
+def test_tally_audit_recovers_from_truncation(tmp_path):
+    """Wild Bill BLOCK #2b: a shrunk (rotated/rewritten) audit file must not
+    wedge the offset — the new stream's rows still count."""
+    import json
+
+    from modulatio.tui.app import _tally_audit
+
+    audit = tmp_path / "audit.jsonl"
+
+    def _row(tokens, fired):
+        return json.dumps({
+            "actor": "context_budget",
+            "pre_compression_tokens": tokens,
+            "compression_fired": fired,
+        }) + "\n"
+
+    audit.write_text(_row(100, False) + _row(200, False))
+    offset, tokens, comps = _tally_audit(audit, 0, 0, 0)
+    assert tokens == 300
+    # rotation: the file is rewritten SMALLER, with one fresh row
+    audit.write_text(_row(50, True))
+    offset, tokens, comps = _tally_audit(audit, offset, tokens, comps)
+    assert tokens == 350          # the new stream's row was counted
+    assert comps == 1
+    assert offset == len(_row(50, True).encode())
+
+
+def test_tally_audit_bounds_the_per_tick_read(tmp_path, monkeypatch):
+    """Wild Bill BLOCK #2a: the 1s tick must never slurp an unbounded
+    remainder — reads are capped, and a cap-sized line with no newline is
+    skipped instead of rereading forever."""
+    import json
+
+    from modulatio.tui import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_AUDIT_READ_CAP", 96)
+    audit = tmp_path / "audit.jsonl"
+
+    # an oversized unterminated tail (no newline, > cap): offset must ADVANCE
+    # so the same bytes aren't reread every tick
+    audit.write_bytes(b"x" * 200)
+    offset, tokens, comps = _tally_audit_via(app_mod, audit, 0, 0, 0)
+    assert offset > 0
+    offset2, _t, _c = _tally_audit_via(app_mod, audit, offset, tokens, comps)
+    assert offset2 > offset       # keeps moving, never wedges
+
+    # rows beyond the cap window are picked up by SUBSEQUENT ticks
+    row = json.dumps({
+        "actor": "context_budget",
+        "pre_compression_tokens": 10,
+        "compression_fired": False,
+    }) + "\n"
+    audit2 = tmp_path / "audit2.jsonl"
+    audit2.write_text(row * 5)    # each row ~79 bytes; cap 96 → ~1 row/tick
+    off = toks = comps = 0
+    for _ in range(20):
+        off, toks, comps = _tally_audit_via(app_mod, audit2, off, toks, comps)
+    assert toks == 50             # all five rows landed across ticks
+
+
+def _tally_audit_via(app_mod, path, offset, tokens, comps):
+    return app_mod._tally_audit(path, offset, tokens, comps)
