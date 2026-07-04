@@ -490,6 +490,34 @@ def _fallback_error_types() -> tuple[type[BaseException], ...]:
     )
 
 
+#: Availability-SHAPED 400 texts. LM Studio (and kin) report a dead/unloaded
+#: LOCAL model as HTTP 400 ("The model has crashed…", "No models loaded…"),
+#: dodging the type-based tuple above — matched case-insensitively against the
+#: exception text, the ``claude_cli._claude_error_retriable`` idiom.
+_AVAILABILITY_400_MARKERS = (
+    "model has crashed",
+    "no models loaded",
+    "model is not loaded",
+    "error loading model",
+)
+
+
+def is_availability_error(exc: BaseException) -> bool:
+    """True when ``exc`` means the MODEL/PROVIDER is unavailable — the failure
+    class that advances a fallback chain, earns a retry backoff, and cools a
+    seat. Type-based for the litellm tuple; string-based for
+    availability-shaped 400s (a crashed local model), so a GENUINE request-bug
+    400 still classifies False and surfaces immediately."""
+    if isinstance(exc, _fallback_error_types()):
+        return True
+    from litellm.exceptions import BadRequestError
+
+    if isinstance(exc, BadRequestError):
+        text = str(exc).lower()
+        return any(marker in text for marker in _AVAILABILITY_400_MARKERS)
+    return False
+
+
 def run_with_model_fallbacks(
     chain: "list[tuple[str, Any]]",
     run_one: "Callable[[str, Any], Any]",
@@ -507,16 +535,19 @@ def run_with_model_fallbacks(
     on the next model — so one model does one task start-to-finish and a result
     is never a mid-task mix of models. ``on_fallback(failed_label, next_label,
     exc)`` fires first so the operator is warned. A non-availability error (a
-    real request/logic bug) propagates immediately, never masked. If every model
-    is unavailable, the last error re-raises. A single-entry chain is just
+    real request/logic bug) propagates immediately, never masked — including a
+    genuine 400; only an availability-SHAPED 400 (a crashed/unloaded local
+    model) advances, via ``is_availability_error``. If every model is
+    unavailable, the last error re-raises. A single-entry chain is just
     ``run_one`` with negligible overhead.
     """
-    errors = _fallback_error_types()
     last_exc: BaseException | None = None
     for idx, (label, runner) in enumerate(chain):
         try:
             return run_one(label, runner)
-        except errors as exc:
+        except Exception as exc:
+            if not is_availability_error(exc):
+                raise
             last_exc = exc
             nxt = chain[idx + 1][0] if idx + 1 < len(chain) else None
             if nxt is not None:
@@ -526,7 +557,7 @@ def run_with_model_fallbacks(
                     "seat model %r unavailable (%s) — restarting task on %r.",
                     label, type(exc).__name__, nxt,
                 )
-    assert last_exc is not None  # loop ran ≥1 iteration and only `errors` caught
+    assert last_exc is not None  # loop ran ≥1 iteration; only availability caught
     raise last_exc
 
 

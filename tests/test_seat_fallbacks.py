@@ -257,3 +257,67 @@ def test_eligible_fallback_models_excludes_self_chain_and_routing(monkeypatch):
     assert "inchain" not in out    # already in the chain
     assert "or" not in out         # routing violation (protected → OpenRouter)
     assert "fb1" in out
+
+
+# ── is_availability_error: LM Studio's crash-400s count as UNAVAILABLE ────────
+
+def _bad_request(msg: str):
+    from litellm.exceptions import BadRequestError
+    return BadRequestError(message=msg, model="m", llm_provider="openai")
+
+
+def test_is_availability_error_truth_table():
+    """A dead LOCAL model surfaces as HTTP 400 (LM Studio: 'model has
+    crashed' / 'No models loaded') — availability-shaped 400s classify as
+    unavailable; a genuine request-bug 400 still does not."""
+    from litellm.exceptions import InternalServerError
+
+    from modulatio.claude_cli import ClaudeUnavailable
+
+    for marker in (
+        "Error code: 400 - {'error': 'The model has crashed without "
+        "additional information. (Exit code: null)'}",
+        "No models loaded. Please load a model in the developer page or "
+        "use the 'lms load' command.",
+        "Model is not loaded",
+        "error loading model: vocab mismatch",
+    ):
+        assert runners.is_availability_error(_bad_request(marker)) is True, marker
+    # a REAL request bug stays a request bug — never advances the chain
+    assert runners.is_availability_error(
+        _bad_request("invalid request: unknown parameter 'foo'")) is False
+    # the existing type-based tuple still classifies
+    assert runners.is_availability_error(InternalServerError(
+        message="Connection error.", llm_provider="openai", model="m")) is True
+    assert runners.is_availability_error(ClaudeUnavailable("529")) is True
+    assert runners.is_availability_error(ValueError("boom")) is False
+
+
+def test_lmstudio_crash_400_advances_the_chain():
+    """The live-run failure shape: primary dies with the LM Studio crash-400 →
+    the seat's fallback model gets the task; on_fallback warns the operator."""
+    hops: list[tuple[str, str]] = []
+
+    def run_one(label, r):
+        if label == "A":
+            raise _bad_request("The model has crashed without additional information.")
+        return f"ok:{r}"
+
+    out = runners.run_with_model_fallbacks(
+        [("A", "rA"), ("B", "rB")], run_one,
+        on_fallback=lambda failed, nxt, exc: hops.append((failed, nxt)),
+    )
+    assert out == "ok:rB"
+    assert hops == [("A", "B")]
+
+
+def test_plain_400_request_bug_still_propagates():
+    """A genuine 400 (request bug) must NOT be masked by the chain — it would
+    fail on every model; surface it immediately."""
+    from litellm.exceptions import BadRequestError
+
+    def run_one(label, r):
+        raise _bad_request("invalid request: messages[0] role missing")
+
+    with pytest.raises(BadRequestError):
+        runners.run_with_model_fallbacks([("A", "rA"), ("B", "rB")], run_one)

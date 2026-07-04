@@ -194,6 +194,17 @@ _FIX_WINDOW_MAX_S = 300.0
 #: enough not to spin.
 _PUMP_TICK_S = 2.0
 
+#: Bounded backoff between redo attempts when the failure is AVAILABILITY-class
+#: (provider down / model crashed) — without it a dead endpoint burns a task's
+#: whole retry budget in ~1s (live run 2026-07-04). The ``claude_cli.
+#: _CLAUDE_RETRY_BACKOFF_S`` idiom; waited on ``abort_event`` so F8 stays live.
+_AVAILABILITY_RETRY_BACKOFF_S = (2.0, 8.0, 20.0)
+
+#: How long a seat sits out of the dispatch pool after an availability-class
+#: exhaustion. A dead seat is otherwise a task MAGNET — always idle, always
+#: ranked "best-available" — and every task it attracts burns its budget.
+_SEAT_COOLDOWN_S = 180.0
+
 #: Grace added to the per-call network timeout to set the CPU-spin watchdog
 #: deadline. The watchdog fires only AFTER litellm's own timeout has had its
 #: chance, so an I/O hang raises + recovers normally there and the watchdog is the
@@ -2122,6 +2133,11 @@ class Orchestrator:
         #: hole"). One sweep + at most one sweep-triggered re-verify per
         #: goal — bounded by construction.
         self._goal_qc_swept: set[str] = set()
+        #: agent_id → monotonic deadline while the seat sits OUT of the
+        #: dispatch pool after an availability-class exhaustion (its model
+        #: crashed/unloaded). Per-run, in-memory — a cooldown, not a health
+        #: record; expiry is the half-open probe.
+        self._seat_unavailable_until: dict[str, float] = {}
         #: Embedding-fallback matcher (slice #6e). None → dispatch runs
         #: deterministic-only and opens ROSTER_GAP tickets on no-cover
         #: (the #6d behavior). Supply a matcher to get the semantic
@@ -8466,6 +8482,31 @@ class Orchestrator:
                 safe.extend(group)
         return safe
 
+    # ── Seat availability (the dead-seat cooldown) ────────────────────────
+
+    def _note_seat_unavailable(self, agent_id: "str | None") -> None:
+        """The seat's model proved UNAVAILABLE (availability-class failure in
+        the producer phase) — sit it out of dispatch for the cooldown."""
+        if agent_id:
+            import time as _time
+            self._seat_unavailable_until[agent_id] = (
+                _time.monotonic() + _SEAT_COOLDOWN_S
+            )
+
+    def _seat_in_cooldown(self, agent_id: str) -> bool:
+        import time as _time
+        return _time.monotonic() < self._seat_unavailable_until.get(agent_id, 0.0)
+
+    def _dispatch_pool(self, agents: "list") -> "list":
+        """The roster minus cooling seats — with a floor: if EVERY producer is
+        cooling, offer the full roster (a cooling seat beats the
+        saturated-roster guard blocking every task). Cooldown expiry is the
+        half-open probe: the seat simply reappears next pump."""
+        pool = [a for a in agents if not self._seat_in_cooldown(a.id)]
+        if not any(a.tier == "producer" for a in pool):
+            return agents
+        return pool
+
     def _run_task_waves(
         self, g: Goal, tasks: list[Task], summary: RunSummary,
         task_map: dict[str, Task], initial_corrective_notes: str = "",
@@ -8536,7 +8577,10 @@ class Orchestrator:
                         busy[agent] = busy.get(agent, 0) + 1
                 free = None if global_cap is None else max(0, global_cap - len(in_flight))
                 sched = dispatch.schedule_wave(
-                    selectable, project_agents,
+                    # Cooling seats (availability-exhausted model) sit out of
+                    # the pool — a dead seat is otherwise ALWAYS idle, hence
+                    # always "best-available", hence a task magnet.
+                    selectable, self._dispatch_pool(project_agents),
                     global_in_flight_cap=free, occupied_by_agent=busy,
                     skill_floor_for=self._skill_floor_for,
                     domain_floor_for=self._domain_floor_for,
@@ -8873,6 +8917,10 @@ class Orchestrator:
                 )
                 t.status = TaskStatus.DISPATCHED
 
+            # Attribution guard for the seat cooldown below: only a failure in
+            # the PRODUCER phase may cool the producer's seat — a QC-seat
+            # outage mid-review must not poison the producer's health.
+            in_qc_phase = False
             try:
                 draft_path, checksum, token_count = self._producer_execute(
                     t, corrective_notes=corrective_notes
@@ -8900,6 +8948,7 @@ class Orchestrator:
                     task_id=t.id,
                     agent_id=t.qc_agent_id,
                 )
+                in_qc_phase = True
                 qc_verdict, qc_notes, defect_type = self._qc_review(t, draft_path, checksum)
                 t.evidence_provided.append(qc_verdict.id)
                 self._emit_activity(
@@ -9037,6 +9086,22 @@ class Orchestrator:
                 corrective_notes = (
                     f"Previous attempt raised {type(exc).__name__}: {exc}"
                 )
+                # Availability-class failure (provider down / model crashed):
+                # cool the seat so dispatch stops feeding the dead endpoint,
+                # and back off before the next attempt instead of burning the
+                # whole retry budget in ~1s while the model process is still
+                # mid-crash. Event-wait keeps F8 responsive (and the wave slot
+                # held — a sleeping worker is not a task magnet). No wait
+                # after the FINAL attempt (the QC backstop shouldn't queue
+                # behind a dead sleep).
+                from modulatio import runners as _runners
+                if _runners.is_availability_error(exc):
+                    if not in_qc_phase:
+                        self._note_seat_unavailable(t.assigned_agent_id)
+                    if attempt + 1 < remaining:
+                        self.abort_event.wait(_AVAILABILITY_RETRY_BACKOFF_S[
+                            min(attempt, len(_AVAILABILITY_RETRY_BACKOFF_S) - 1)
+                        ])
 
         # Retry budget exhausted — settle on terminal state from last failure.
         if last_exc is not None:
@@ -9051,7 +9116,14 @@ class Orchestrator:
             from modulatio import claude_cli as _clay
             from modulatio import runners as _runners
             recoverable_exhaustion = (_runners.MaxItersExhausted, _clay.ClaudeUnavailable)
-            if isinstance(last_exc, recoverable_exhaustion) and self._attempt_qc_fix_forward(
+            # Any AVAILABILITY-class exhaustion is the same shape as a Clay
+            # provider failure — the producer's model is unavailable (a dead
+            # LM Studio seat's crash-400s included), which QC re-authoring CAN
+            # recover. A genuine runtime crash still goes BLOCKED below.
+            if (
+                isinstance(last_exc, recoverable_exhaustion)
+                or _runners.is_availability_error(last_exc)
+            ) and self._attempt_qc_fix_forward(
                 t, self._resolve_draft_path(t), None, summary,
                 last_error=last_exc, defect_type="runtime",
             ):
