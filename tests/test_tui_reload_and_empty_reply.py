@@ -130,3 +130,34 @@ async def test_reload_side_effect_calls_reload_services_and_notifies():
 
         assert calls == ["hit"]
         assert toasts and "reloaded" in toasts[0]
+
+
+# ── /cls + Ctrl+L: clear the active TV (Feng-Tui refinement arc, W4) ─────────
+
+
+@pytest.mark.asyncio
+async def test_clear_tv_clears_the_active_view_only():
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        leader = app.query_one("#stream-leader", StreamView)
+        team = app.query_one("#stream-team", StreamView)
+        leader.add_leader_message("a verdict rides here")
+        team.add_operator_message("team chatter")
+        await pilot.pause()
+        assert leader.messages and team.messages
+
+        # LEADER view is active by default → Ctrl+L clears the leader TV only
+        app.action_clear_tv()
+        await pilot.pause()
+        assert not leader.messages
+        assert team.messages  # untouched
+
+        # flip to TEAM (F4) → clear hits the team TV
+        app.action_flip_stream()
+        await pilot.pause()
+        app.action_clear_tv()
+        await pilot.pause()
+        assert not team.messages

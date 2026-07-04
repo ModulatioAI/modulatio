@@ -315,6 +315,9 @@ class ModulatioApp(App):
         ("f2", "cycle_theme", "THEME"),
         ("f3", "focus_jobdrop", "COMPOSE"),
         ("f4", "flip_stream", "LEADER/TEAM"),
+        # Ctrl+L — the classic terminal clear, aimed at the ACTIVE console TV
+        # (display-only; the conversation thread + transcripts stay). W4.
+        ("ctrl+l", "clear_tv", "CLS"),
         # STOP the running job — the operator's kill-switch (Fix C). Cooperative:
         # the run halts at the next safe point, finishing the current step.
         ("f8", "stop_job", "STOP"),
@@ -1029,6 +1032,9 @@ class ModulatioApp(App):
         if side_effect == "open_editor":
             self._compose_in_editor()
             return
+        if side_effect == "clear_active_tv":
+            self.action_clear_tv()
+            return
         if side_effect == "reload_services":
             ok, msg = self.reload_services()
             self.notify(msg, severity="information" if ok else "warning")
@@ -1418,6 +1424,28 @@ class ModulatioApp(App):
             pass
 
     # ── Console keymap actions ──────────────────────────────────────────
+
+    def action_clear_tv(self) -> None:
+        """Ctrl+L / ``/cls`` — clear the ACTIVE console TV (F4-aware).
+
+        Display-only: the LEADER clear wipes the lane's rendered lines but
+        keeps the conversation thread (archiving is ``/new``'s job), and the
+        TEAM clear reuses the F8 kill-switch's reset. Nothing on disk moves."""
+        from modulatio.tui.screens.prompt import PromptScreen
+        from modulatio.tui.widgets.stream_view import StreamView
+        try:
+            screen = self.query_one(PromptScreen)
+        except Exception:
+            return  # console not mounted — nothing to clear
+        if getattr(screen, "_view", "leader") == "team":
+            self._clear_team_tv()
+            self.notify("Team TV cleared.")
+            return
+        try:
+            self.query_one("#stream-leader", StreamView).clear()
+            self.notify("Leader TV cleared — the conversation thread is kept.")
+        except Exception:
+            pass
 
     def action_flip_stream(self) -> None:
         """F4 → flip the Console's LEADER ↔ TEAM stream tabs."""

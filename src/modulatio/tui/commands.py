@@ -139,6 +139,15 @@ def _handle_refresh(args: list[str]) -> CommandResult:
     )
 
 
+def _handle_cls(args: list[str]) -> CommandResult:
+    """Clear the ACTIVE console TV (F4-aware) — display-only, keeps the
+    conversation thread and all transcripts."""
+    return CommandResult(
+        output="",
+        side_effect="clear_active_tv",
+    )
+
+
 def _handle_reload(args: list[str]) -> CommandResult:
     """Apply model/config changes to the live services without a restart."""
     return CommandResult(
@@ -329,6 +338,13 @@ COMMANDS: tuple[Command, ...] = (
         description="Re-read all tab data from disk.",
         category="System",
         handler=_handle_refresh,
+    ),
+    Command(
+        shortcut="/cls",
+        name="Clear this TV",
+        description="Clear the active console view (Ctrl+L) — display only.",
+        category="System",
+        handler=_handle_cls,
     ),
     Command(
         shortcut="/reload",

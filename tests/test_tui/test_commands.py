@@ -239,3 +239,11 @@ def test_open_trims_surrounding_whitespace_on_path():
     result = cmd_mod.dispatch("/open   notes/leader.md  ")
     assert result.ok is True
     assert result.side_effect == "open_file:notes/leader.md"
+
+
+def test_cls_dispatches_clear_active_tv():
+    """W4: /cls clears the ACTIVE console TV (F4-aware) — display-only."""
+    from modulatio.tui import commands
+    result = commands.dispatch("/cls")
+    assert result.handled and result.ok
+    assert result.side_effect == "clear_active_tv"
