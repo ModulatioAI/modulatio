@@ -1089,3 +1089,49 @@ def test_run_tolerates_renamed_planner_role(project):
     assert calls == ["leader"]
     with pytest.raises(KeyError):
         o._run("totally-unknown-role", "x")       # unrelated role still fails closed
+
+
+# ── default_window: env-overridable per-role windows (SETTINGS tab, W6) ──────
+
+
+def test_default_window_matches_table_without_env(monkeypatch):
+    monkeypatch.delenv("MODULATIO_CTX_BUDGET_QC", raising=False)
+    assert cb.default_window("qc") == cb.EXPERIMENTAL_DEFAULTS["qc"]
+    assert cb.default_window("nonesuch") == cb.CUSTOM_WORKER_DEFAULT
+
+
+def test_default_window_env_override_and_clamps(monkeypatch):
+    monkeypatch.setenv("MODULATIO_CTX_BUDGET_QC", "48000")
+    assert cb.default_window("qc") == 48_000
+    monkeypatch.setenv("MODULATIO_CTX_BUDGET_QC", "999999")  # above hard ceiling
+    assert cb.default_window("qc") == cb.HARD_GLOBAL_CEILING
+    monkeypatch.setenv("MODULATIO_CTX_BUDGET_QC", "10")  # below floor
+    assert cb.default_window("qc") == cb.CTX_BUDGET_MIN_TOKENS
+    monkeypatch.setenv("MODULATIO_CTX_BUDGET_QC", "not-a-number")
+    assert cb.default_window("qc") == cb.EXPERIMENTAL_DEFAULTS["qc"]
+
+
+def test_default_window_hyphenated_role_key(monkeypatch):
+    monkeypatch.setenv("MODULATIO_CTX_BUDGET_LEADER_DECOMPOSE", "32000")
+    assert cb.default_window("leader-decompose") == 32_000
+
+
+def test_task_and_goal_retry_defaults_follow_env(monkeypatch):
+    from modulatio.types import Goal, Task
+    import uuid
+    monkeypatch.delenv("MODULATIO_TASK_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("MODULATIO_GOAL_MAX_RETRIES", raising=False)
+    t = Task(id="X-T-1", project_id=uuid.uuid4(), goal_id="g", description="d")
+    g = Goal(id="X-G-1", project_id=uuid.uuid4(), description="d", success_criteria="s")
+    assert t.max_retries == 3 and g.max_retries == 4  # byte-identical defaults
+    monkeypatch.setenv("MODULATIO_TASK_MAX_RETRIES", "1")
+    monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "2")
+    t2 = Task(id="X-T-2", project_id=uuid.uuid4(), goal_id="g", description="d")
+    g2 = Goal(id="X-G-2", project_id=uuid.uuid4(), description="d", success_criteria="s")
+    assert t2.max_retries == 1 and g2.max_retries == 2
+    # stored JSON round-trips keep their explicit value (no default rewrite)
+    t3 = Task(**{**t.model_dump(), "id": "X-T-3"})
+    assert t3.max_retries == 3
+    monkeypatch.setenv("MODULATIO_TASK_MAX_RETRIES", "-4")  # bad → default
+    t4 = Task(id="X-T-4", project_id=uuid.uuid4(), goal_id="g", description="d")
+    assert t4.max_retries == 3

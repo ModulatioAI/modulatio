@@ -157,13 +157,34 @@ def _task_context_cap_pct() -> float:
     return val if 0.0 < val <= 1.0 else TASK_CONTEXT_CAP_PCT_DEFAULT
 
 
+def default_window(budget_role: str) -> int:
+    """The role's default context window, env-overridable per role via
+    ``MODULATIO_CTX_BUDGET_<ROLE>`` (upper-cased, ``-``→``_``) — the SETTINGS
+    tab's per-role budget knob. Clamped to
+    [:data:`CTX_BUDGET_MIN_TOKENS`, :data:`HARD_GLOBAL_CEILING`]; unset or
+    unparseable → the :data:`EXPERIMENTAL_DEFAULTS` table (unknown role →
+    :data:`CUSTOM_WORKER_DEFAULT`). Sits at the BOTTOM of the resolution
+    chain — user override, ``Agent.context_budget``, and the project
+    ``context_budgets`` block all still win."""
+    table = EXPERIMENTAL_DEFAULTS.get(budget_role, CUSTOM_WORKER_DEFAULT)
+    key = "MODULATIO_CTX_BUDGET_" + budget_role.upper().replace("-", "_")
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return table
+    try:
+        value = int(raw)
+    except ValueError:
+        return table
+    return min(max(value, CTX_BUDGET_MIN_TOKENS), HARD_GLOBAL_CEILING)
+
+
 def prudent_context_cap(budget_role: str, *, pct: float | None = None) -> int:
     """The token ceiling a task's projected working context should stay under
     before the engine fans it — a fraction (``pct``, default the env-tunable
     :func:`_task_context_cap_pct`) of that role's OWN window. Different roles
     have different windows, so each gets its own token cap for the same
     fraction. Unknown roles fall back to the producer default window."""
-    window = EXPERIMENTAL_DEFAULTS.get(budget_role, CUSTOM_WORKER_DEFAULT)
+    window = default_window(budget_role)
     fraction = pct if pct is not None else _task_context_cap_pct()
     return round(fraction * window)
 
@@ -965,9 +986,7 @@ def resolve_for_dispatch(
             resolved_budget_tokens=project_overrides[budget_role],
             budget_source="project",
         )
-    default_tokens = EXPERIMENTAL_DEFAULTS.get(
-        budget_role, CUSTOM_WORKER_DEFAULT,
-    )
+    default_tokens = default_window(budget_role)
     return BudgetResolution(
         budget_role=budget_role,
         runner_role=runner_role,

@@ -3671,9 +3671,7 @@ class Orchestrator:
                 else "producer"
             )
             cap = _ctx_budget_module.prudent_context_cap(cap_role)
-            window = _ctx_budget_module.EXPERIMENTAL_DEFAULTS.get(
-                cap_role, _ctx_budget_module.CUSTOM_WORKER_DEFAULT
-            )
+            window = _ctx_budget_module.default_window(cap_role)
             prompt = self._prompt("task-split", _TASK_SPLIT_PROMPT).format(
                 scope=str(spec.get("description") or ""),
                 window=window,

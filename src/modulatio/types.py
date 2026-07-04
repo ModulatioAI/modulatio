@@ -23,6 +23,22 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _env_int(name: str, default: int) -> int:
+    """Guarded env-int for construction-time model defaults (the SETTINGS
+    tab's retry knobs): unset/bad/negative → ``default``, never raises.
+    Evaluated per construction via ``default_factory`` so a saved override
+    applies to every NEW task/goal (stored JSON keeps its explicit value)."""
+    import os
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
 # ─── Enums ──────────────────────────────────────────────────────────────────
 
 class GoalStatus(str, Enum):
@@ -159,7 +175,8 @@ class Goal(BaseModel):
     #: reservation (never an infinite loop). retry_count only climbs within a
     #: run — it is NOT reset mid-run by a date roll; the daily refresh applies
     #: only to RESUMING a parked goal in a later run (the Alfred loop).
-    max_retries: int = 4
+    max_retries: int = Field(
+        default_factory=lambda: _env_int("MODULATIO_GOAL_MAX_RETRIES", 4))
     retry_count_date: date | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
@@ -280,7 +297,8 @@ class Task(BaseModel):
     status: TaskStatus = TaskStatus.PENDING
     transitions: list[StateTransition] = Field(default_factory=list)
     retry_count: int = 0
-    max_retries: int = 3
+    max_retries: int = Field(
+        default_factory=lambda: _env_int("MODULATIO_TASK_MAX_RETRIES", 3))
     #: #18 keystone: LIFETIME producer-attempt counter — monotonic, incremented on
     #: every ``_producer_execute`` regardless of which model holds the task or which
     #: path re-entered the redo loop (goal-redo, declined-ticket re-dispatch,

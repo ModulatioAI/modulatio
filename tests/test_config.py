@@ -6,6 +6,7 @@ Covers defaults.json load/save/reload + path accessors with fallbacks
 
 from __future__ import annotations
 
+import os
 import json
 
 import pytest
@@ -438,3 +439,47 @@ def test_set_env_secret_no_duplicate_keys_on_repeated_set(tmp_path):
     lines = (vault / ".env").read_text().splitlines()
     assert lines.count("K=v2") == 1
     assert "K=v1" not in lines
+
+
+# ── env_overrides: the SETTINGS tab's persistence mechanism (W6) ─────────────
+
+
+def _save_overrides(overrides):
+    d = dict(config._load_defaults())
+    d["env_overrides"] = overrides
+    config.save_defaults(d)
+
+
+def test_apply_env_overrides_sets_environ(monkeypatch):
+    monkeypatch.delenv("MODULATIO_TASK_MAX_RETRIES", raising=False)
+    _save_overrides({"MODULATIO_TASK_MAX_RETRIES": "5"})
+    config.apply_env_overrides()
+    assert os.environ["MODULATIO_TASK_MAX_RETRIES"] == "5"
+    config.apply_env_overrides()  # idempotent
+    assert os.environ["MODULATIO_TASK_MAX_RETRIES"] == "5"
+
+
+def test_shell_exported_key_wins_over_override(monkeypatch):
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # operator's shell export
+    _save_overrides({"MODULATIO_QC_FIXER": "1"})
+    config.apply_env_overrides()
+    assert os.environ["MODULATIO_QC_FIXER"] == "0"  # shell wins, honestly
+
+
+def test_override_update_and_removal_reapply_live(monkeypatch):
+    monkeypatch.delenv("MODULATIO_SIZE_TOLERANCE", raising=False)
+    _save_overrides({"MODULATIO_SIZE_TOLERANCE": "0.2"})
+    config.apply_env_overrides()
+    assert os.environ["MODULATIO_SIZE_TOLERANCE"] == "0.2"
+    _save_overrides({"MODULATIO_SIZE_TOLERANCE": "0.3"})
+    config.apply_env_overrides()
+    assert os.environ["MODULATIO_SIZE_TOLERANCE"] == "0.3"  # update applies
+    _save_overrides({})
+    config.apply_env_overrides()
+    assert "MODULATIO_SIZE_TOLERANCE" not in os.environ  # removal unsets
+
+
+def test_absent_env_overrides_is_a_noop():
+    before = dict(os.environ)
+    config.apply_env_overrides()
+    assert dict(os.environ) == before

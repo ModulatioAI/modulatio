@@ -324,6 +324,42 @@ def load_modulatio_env() -> None:
     except Exception:
         pass  # never block startup on env-load failure
     _DOTENV_LOADED = True
+    # SETTINGS-tab overrides layer AFTER the dotenv layers, same
+    # shell-wins contract (see apply_env_overrides).
+    try:
+        apply_env_overrides()
+    except Exception:
+        pass  # never block startup on a malformed overrides block
+
+
+#: Keys apply_env_overrides has set — so a later save can update or unset
+#: them live, while never touching a key the shell/.env owns.
+_ENV_OVERRIDES_SET: set[str] = set()
+
+
+def apply_env_overrides() -> None:
+    """Push ``defaults.json["env_overrides"]`` into ``os.environ``.
+
+    The SETTINGS tab's persistence mechanism: every per-call env knob
+    becomes persistent through this one seam, with zero changes at the
+    read sites. Precedence is honest — a key already present in the
+    environment that we did NOT set (shell export, .env file) wins and
+    is never overwritten. Re-callable for live apply: updates re-set,
+    and keys removed from the block are unset (only ours). Absent or
+    malformed block → no-op (byte-identical default behavior)."""
+    overrides = _load_defaults().get("env_overrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    for key in list(_ENV_OVERRIDES_SET):
+        if key not in overrides:
+            os.environ.pop(key, None)
+            _ENV_OVERRIDES_SET.discard(key)
+    for key, value in overrides.items():
+        key = str(key)
+        if key in os.environ and key not in _ENV_OVERRIDES_SET:
+            continue  # shell/.env owns it — the tab renders it read-only
+        os.environ[key] = str(value)
+        _ENV_OVERRIDES_SET.add(key)
 
 
 def get_shared_resources_path() -> Path:
