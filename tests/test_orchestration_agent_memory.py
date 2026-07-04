@@ -66,7 +66,7 @@ def test_completed_task_writes_producer_and_qc_episodes(orch, monkeypatch):
     assert "completed" in prod[0].content
     assert "Research the sports betting" in prod[0].content
     assert "2 producer attempt(s)" in prod[0].content
-    assert "research" in (prod[0].tags or [])
+    assert prod[0].tags == ["research"]  # artifact_kind == operation → deduped, not doubled
 
     qc = agent_memory.get_episodic("qc-1", project_code="MEM")
     assert len(qc) == 1

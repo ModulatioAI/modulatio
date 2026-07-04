@@ -8752,7 +8752,9 @@ class Orchestrator:
         same deferral ``team_memory.propose`` rides)."""
         from modulatio.memory import agent_memory
 
-        tags = [x for x in (t.artifact_kind, t.operation) if x]
+        # Deduped preserving order — a research task has artifact_kind ==
+        # operation == "research", which doubled the tag list (live wart).
+        tags = list(dict.fromkeys(x for x in (t.artifact_kind, t.operation) if x))
         code = self.project.code
         if t.assigned_agent_id:
             fixed = " (QC-authored fix)" if getattr(t, "qc_authored_fix", False) else ""
