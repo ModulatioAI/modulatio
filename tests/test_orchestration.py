@@ -772,9 +772,13 @@ def test_orchestrator_marks_task_rejected_when_qc_fails(project: Project, monkey
     assert all(t.status == TaskStatus.QC_REJECTED for t in tasks)
     assert len(summary.errors) == 3
 
-    # Goal should NOT be marked completed if tasks didn't pass
+    # The goal reaches a TERMINAL state with the failure surfaced — a
+    # zero-completed goal settles with a reservation instead of stranding
+    # IN_PROGRESS (the shared settle; the reservation is the surfacing).
     goals = store.list_goals(PROJECT_CODE)
-    assert goals[0].status == GoalStatus.IN_PROGRESS
+    assert goals[0].status == GoalStatus.COMPLETED
+    assert any("no completed work" in r.get("concern", "")
+               for r in summary.recommendations)
 
 
 def test_strip_thinking_survives_embedded_close_tag_mention():
@@ -1638,6 +1642,7 @@ def test_orchestrator_opens_critical_ticket_on_invalid_skill(
     (hallucination), the orchestrator opens a CRITICAL ticket, marks
     the task BLOCKED, and skips the producer run. Summary.errors
     reports the ticket id."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the no-backstop terminal
     from modulatio import skills as skills_mod
     from modulatio.types import TicketPriority, TicketStatus
 
@@ -1705,6 +1710,7 @@ def test_orchestrator_opens_critical_ticket_on_roster_gap(
     reserved for exhausted budgets that auto-resume via refresh_at —
     capability gaps require manual human resolution and belong at
     CRITICAL ("might need intervention, other goals keep moving")."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the no-backstop terminal
     from modulatio import skills as skills_mod
     from modulatio.types import TicketPriority
 
@@ -2829,11 +2835,12 @@ def test_orchestrator_runs_tasks_in_dependency_order(project: Project):
     assert execution_order[-1] == "TST-T-001"
 
 
-def test_orchestrator_blocks_task_when_dependency_fails(project: Project):
+def test_orchestrator_blocks_task_when_dependency_fails(project: Project, monkeypatch):
     """If a predecessor lands in terminal-fail state (BLOCKED or
     QC_REJECTED), the successor is marked BLOCKED with an explanatory
     rationale. Successor doesn't execute — no producer call on a task
     whose prerequisite didn't ship."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the no-backstop terminal
     drafter_calls = {"n": 0}
 
     def _drafter_fails_always(prompt: str) -> str:
@@ -3134,12 +3141,13 @@ def test_leader_verify_writes_report_to_vault_reports_dir(project: Project):
     assert f"goal_id: {goals[0].id}" in body
 
 
-def test_leader_verify_skipped_when_no_task_completed(project: Project):
+def test_leader_verify_skipped_when_no_task_completed(project: Project, monkeypatch):
     """When every task in the goal fails (all BLOCKED/QC_REJECTED),
     don't spend an LLM call on Leader verify — the capability tickets
     and QC reject-path already tell the human the goal didn't ship.
     Skip saves cost and avoids a redundant Leader verdict on an
     obviously-failed goal."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the no-backstop terminal
 
     def _drafter_always_fails(prompt):
         raise RuntimeError("stub failure")
@@ -3838,12 +3846,14 @@ def test_orchestrator_semantic_matcher_not_called_for_deterministic_match(projec
     assert called["n"] == 0
 
 
-def test_orchestrator_goal_stays_in_progress_when_task_capability_blocked(
+def test_orchestrator_goal_settles_when_task_capability_blocked(
     project: Project, tmp_path, monkeypatch
 ):
-    """Goal completion requires every task COMPLETED. A capability-ticket
-    BLOCKED task keeps the goal in_progress — goal only completes when
-    the human resolves the ticket and the task eventually runs."""
+    """A capability-ticket BLOCKED task can't complete its goal — but the
+    goal must still reach a TERMINAL state (the shared zero-completed
+    settle) with the failure surfaced, never strand IN_PROGRESS. The
+    CRITICAL ticket remains the human's handle on the gap."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the no-backstop terminal
     from modulatio import skills as skills_mod
 
     shared_skills = tmp_path / "shared_skills"
@@ -3868,10 +3878,12 @@ def test_orchestrator_goal_stays_in_progress_when_task_capability_blocked(
         "qc": _qc_stub,
     }
     orch = Orchestrator(project, runners)
-    orch.kickoff("anything")
+    summary = orch.kickoff("anything")
 
     goals = store.list_goals(PROJECT_CODE)
-    assert goals[0].status == GoalStatus.IN_PROGRESS
+    assert goals[0].status == GoalStatus.COMPLETED
+    assert any("no completed work" in r.get("concern", "")
+               for r in summary.recommendations)
 
 
 def test_drafter_prompt_injects_selected_agent_identity(project: Project, tmp_path, monkeypatch):
@@ -4667,9 +4679,10 @@ def test_redo_loop_recovers_from_transient_drafter_exception(project: Project):
     assert drafter_calls["n"] == 2
 
 
-def test_redo_loop_exhausts_max_retries_on_persistent_drafter_failure(project: Project):
+def test_redo_loop_exhausts_max_retries_on_persistent_drafter_failure(project: Project, monkeypatch):
     """Drafter raises on every attempt → task lands BLOCKED terminal after
     max_retries. Last exception message surfaces in summary.errors."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the no-backstop terminal
     drafter_calls = {"n": 0}
 
     def _drafter_always_fails(prompt: str) -> str:
@@ -5333,6 +5346,7 @@ def test_escalation_not_triggered_on_exception_exhaustion(
     is a QC-reject remedy, not an exception remedy. A tier bump can't
     help a broken runtime; the right response is a capability ticket,
     not a retry with a different model."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the no-backstop terminal
     _seed_producer_skill(tmp_path, monkeypatch)
     from modulatio import roster as roster_mod
 
@@ -5813,6 +5827,7 @@ def test_llm_with_tools_skill_without_chat_runner_blocks_task(
     chat_runner. This is a wiring error — the producer raises, the redo
     loop exhausts, the task lands BLOCKED. Same shape as the slice-#9e
     unregistered-tool path."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the no-backstop terminal
     from modulatio import roster as roster_mod
     from modulatio import skills as skills_mod
 
