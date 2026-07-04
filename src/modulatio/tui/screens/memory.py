@@ -60,6 +60,7 @@ class MemoryScreen(Vertical):
         Binding("a", "add", "Add", show=True),
         Binding("e", "edit", "Edit", show=True),
         Binding("d", "delete", "Delete", show=True),
+        Binding("p", "approve", "Approve", show=True),
         Binding("x", "export", "Export md", show=True),
     ]
 
@@ -83,7 +84,7 @@ class MemoryScreen(Vertical):
     """
 
     #: Glyph per memory LAYER — paired with the WORD (Feng-Tui §10).
-    _LAYER_GLYPH = {"episodic": "◷", "semantic": "◆", "team": "⚑"}
+    _LAYER_GLYPH = {"episodic": "◷", "semantic": "◆", "team": "⚑", "pending": "◇"}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -136,8 +137,9 @@ class MemoryScreen(Vertical):
                 table.add_columns("Layer", "When", "Kind", "Content")
                 yield table
                 yield Static(
-                    "↑↓ move · type to search · a add · e edit · d delete · x "
-                    "export — team entries are QC-curated (edits propose→approve)",
+                    "↑↓ move · type to search · a add · e edit · d delete · "
+                    "p approve pending · x export — team entries are QC-curated "
+                    "(edits propose→approve)",
                     id="memory-affordance",
                     classes="affordance",
                 )
@@ -259,6 +261,23 @@ class MemoryScreen(Vertical):
                 _format_team_entry(entry),
             )
         counts.append(f"{len(team_entries)} team")
+
+        # Pending QC proposals — staged in _proposals/, NOT yet team memory.
+        # Surfacing them here (with one-keypress approve/reject) is what makes
+        # the propose→approve ACL livable; the old surface was a CLI nobody
+        # ran, so proposals accumulated invisibly (W5a, 2026-07-03).
+        try:
+            proposals = team_memory.list_proposals(self._project_code)
+        except Exception:
+            proposals = []
+        for p in proposals[-50:]:
+            self._add_row(
+                table, "pending", "", p.proposal_id, p.timestamp,
+                p.artifact_kind or "?", p.body,
+                _format_proposal(p),
+            )
+        if proposals:
+            counts.append(f"{len(proposals)} pending")
         self._set_counts(len(self._rows))
 
         if not self._rows:
@@ -344,6 +363,11 @@ class MemoryScreen(Vertical):
             return
         layer, agent_id, entry_id = self._rows[key]
         initial = self._raw.get(key, "")
+        if layer == "pending":
+            self.app.notify(
+                "A pending proposal isn't editable — approve it (p) or "
+                "reject it (d).")
+            return
         if layer == "team":
             self.app.push_screen(
                 TextEntryModal(
@@ -384,11 +408,56 @@ class MemoryScreen(Vertical):
             return
         self.app.notify("Proposed a revision — QC will review it before it lands.")
 
+    def action_approve(self) -> None:
+        """`p` — approve the selected PENDING proposal into team memory."""
+        key = self._selected_key()
+        if not key or key not in self._rows:
+            self.app.notify("Select a ◇ pending proposal to approve.")
+            return
+        layer, _agent_id, entry_id = self._rows[key]
+        if layer != "pending":
+            self.app.notify("Only ◇ pending proposals are approvable.")
+            return
+        self.app.push_screen(
+            ConfirmModal("Approve this QC proposal into team memory?"),
+            lambda ok: self._do_approve(entry_id) if ok else None,
+        )
+
+    def _do_approve(self, proposal_id: str) -> None:
+        try:
+            # Same authority the CLI's human-review path uses: the operator
+            # approves with leader tier; provenance keeps the QC proposer name
+            # so the entry announces its non-independent origin (qc → operator).
+            team_memory.approve_proposal(
+                proposal_id, project_code=self._project_code,
+                approver_id="operator", approver_tier="leader")
+        except Exception as exc:  # noqa: BLE001
+            self.app.notify(f"Couldn't approve: {exc}", severity="error")
+            return
+        self.app.notify("Approved — it's team memory now.")
+        self._refresh_views()
+
+    def _do_reject(self, proposal_id: str) -> None:
+        try:
+            gone = team_memory.reject_proposal(
+                proposal_id, project_code=self._project_code)
+        except Exception as exc:  # noqa: BLE001
+            self.app.notify(f"Couldn't reject: {exc}", severity="error")
+            return
+        self.app.notify("Rejected." if gone else "Proposal not found.")
+        self._refresh_views()
+
     def action_delete(self) -> None:
         key = self._selected_key()
         if not key or key not in self._rows:
             return
         layer, agent_id, entry_id = self._rows[key]
+        if layer == "pending":
+            self.app.push_screen(
+                ConfirmModal("Reject this pending proposal? (It is discarded.)"),
+                lambda ok: self._do_reject(entry_id) if ok else None,
+            )
+            return
         if layer == "team":
             self.app.notify(
                 "Team memory is QC-curated — it's revised through the "
@@ -440,6 +509,23 @@ def _format_agent_entry(layer: str, agent_id: str, e) -> str:
     ]
     if e.tags:
         lines += ["", "**tags:** " + ", ".join(escape(t) for t in e.tags)]
+    return "\n".join(lines)
+
+
+def _format_proposal(p) -> str:
+    """Markdown detail card for a PENDING team-memory proposal — the loud
+    announce surface for the non-independent path (QC proposing what QC
+    learned): pending is unmistakably not-yet-memory."""
+    lines = [
+        f"# ◇ pending · {escape(p.artifact_kind or '?')}", "",
+        "**PENDING — QC-proposed, not yet in team memory.**", "",
+        f"**proposed by** {escape(p.proposer_id or '?')}", "",
+        f"_{escape((p.timestamp or '')[:19])}_", "",
+    ]
+    if p.rationale:
+        lines += [f"**why:** {escape(p.rationale)}", ""]
+    lines += ["---", "", escape(p.body or "_(empty)_"), "",
+              "_p approve · d reject_"]
     return "\n".join(lines)
 
 

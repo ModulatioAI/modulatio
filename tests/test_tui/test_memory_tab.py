@@ -270,3 +270,85 @@ async def test_memory_has_controls_row_and_search_filters(monkeypatch):
         assert screen.query_one("#memory-table", DataTable).row_count == 1
         counts = str(screen.query_one("#controls-counts", Static).render())
         assert "filtered" in counts
+
+
+# ── pending proposals (Feng-Tui refinement arc, W5a) ─────────────────────────
+# QC's team-memory proposals were invisible: staged in _proposals/ awaiting a
+# CLI nobody runs, while the tab read only the approved pool. The tab now
+# lists pending proposals (◇ layer), approves on `p`, rejects on `d`.
+
+
+def _propose(body="QC finds sourcing improves with primary docs."):
+    return team_memory.propose(
+        proposer_id="qc-1", body=body, project_code=PROJECT_CODE,
+        artifact_kind="research", rationale="recurring win",
+    )
+
+
+async def _open_memory_tab(app, pilot):
+    from textual.widgets import TabbedContent
+    tabbed = app.query_one(TabbedContent)
+    tabbed.active = "tab-memory"
+    await pilot.pause()
+    from modulatio.tui.screens.memory import MemoryScreen
+    return app.query_one(MemoryScreen)
+
+
+@pytest.mark.asyncio
+async def test_pending_proposals_render_with_count():
+    _propose()
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        screen = await _open_memory_tab(app, pilot)
+        layers = [layer for (layer, _a, _e) in screen._rows.values()]
+        assert "pending" in layers
+        from textual.widgets import Static
+        stats = screen.query_one("#memory-stats", Static)
+        assert "1 pending" in str(stats.render())
+
+
+@pytest.mark.asyncio
+async def test_approve_moves_proposal_into_team_pool():
+    p = _propose()
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        screen = await _open_memory_tab(app, pilot)
+        pending_key = next(
+            k for k, (layer, _a, _e) in screen._rows.items() if layer == "pending")
+        # act directly on the do-method (the `p` binding routes here through
+        # ConfirmModal; the modal flow is exercised by the delete tests)
+        screen._do_approve(p.proposal_id)
+        await pilot.pause()
+        entries = team_memory.list_entries(PROJECT_CODE)
+        assert any("primary docs" in e.body for e in entries)
+        assert team_memory.list_proposals(PROJECT_CODE) == []
+        approved = [e for e in entries if "primary docs" in e.body][0]
+        assert approved.proposed_by == "qc-1"  # provenance announces
+        del pending_key
+
+
+@pytest.mark.asyncio
+async def test_reject_removes_proposal_without_write():
+    p = _propose("Weak claim not worth keeping.")
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        screen = await _open_memory_tab(app, pilot)
+        screen._do_reject(p.proposal_id)
+        await pilot.pause()
+        assert team_memory.list_proposals(PROJECT_CODE) == []
+        assert not any(
+            "Weak claim" in e.body for e in team_memory.list_entries(PROJECT_CODE))
+
+
+@pytest.mark.asyncio
+async def test_approve_on_non_pending_row_notifies():
+    team_memory.write(
+        writer_id="qc-1", writer_tier="qc", body="approved already",
+        project_code=PROJECT_CODE, artifact_kind="report")
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        screen = await _open_memory_tab(app, pilot)
+        # only team rows exist; `p` should no-op with a notice, not raise
+        screen.action_approve()
+        await pilot.pause()
+        assert team_memory.list_proposals(PROJECT_CODE) == []
