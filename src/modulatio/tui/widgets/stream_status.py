@@ -56,6 +56,7 @@ _VERB: dict[str, str] = {
     "task_completed": "finished",
     # ── Team detail (lights up with enriched events) ──
     "tool_call": "running a tool",
+    "tool_call_ended": "running a tool",
     "web_fetch": "fetching web content",
     "drafting": "writing",
     "analyzing": "analyzing",

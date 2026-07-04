@@ -86,6 +86,21 @@ _PHASE: dict[str, tuple[str, str]] = {
     "task_settled": ("■", "wrapped up a task"),
     "ticket_opened": ("!", "opened a ticket"),
     "scope_drift_warning": ("!", "flagged scope drift"),
+    # W3 (2026-07-03): richer vocabulary so the feed reads as work, not raw
+    # phase strings. Planning/thinking wear the ◆ "mind" mark.
+    "leader_thinking": ("◆", "is thinking"),
+    "leader_answered": ("◆", "answered"),
+    "task_planning_started": ("◆", "is planning the work"),
+    "task_planning_ended": ("◆", "planned the work"),
+    "qc_review": ("○", "is reviewing"),
+    "qc_authored_fix": ("✚", "authored the fix"),
+    "qc_fix_failed": ("⚠", "couldn't author a fix"),
+    "task_decomposed": ("⑃", "split the task"),
+    "model_fallback": ("⇄", "fell back to a backup model"),
+    "skill_codified": ("✦", "codified a skill"),
+    "jt_codified": ("✦", "codified a job template"),
+    "leader_self_fix": ("✚", "fixed it directly"),
+    "dispatch_aborted": ("⚠", "attempt stopped by the breaker"),
 }
 
 
@@ -93,6 +108,37 @@ def _humanize(token: str) -> str:
     """Last-resort display label when no roster name is found — never a bare
     id or number. Turns ``prod-kimi`` → ``Prod Kimi``, ``leader`` → ``Leader``."""
     return token.replace("-", " ").replace("_", " ").strip().title() or token
+
+
+#: Per-TOOL glyph + verb for ``tool_call_ended`` events (the tool name rides
+#: in ``event.detail["tool"]``). Themed glyphs, never color emoji — the mark
+#: tints in the active phosphor accent like every other line (W3).
+_TOOL: dict[str, tuple[str, str]] = {
+    "web_search": ("⌕", "is searching the web"),
+    "http_get": ("⇣", "is reading a page"),
+    "write_artifact": ("✎", "is writing"),
+    "edit_file": ("✎", "is revising"),
+    "read_file": ("▤", "is reading"),
+    "run_shell": ("⚒", "is building"),
+    "search_skills": ("✦", "is browsing skills"),
+    "load_skill": ("✦", "picked up a skill"),
+    "drop_skill": ("✦", "set a skill down"),
+    "read_tool_result": ("▤", "is re-reading a result"),
+}
+
+
+def _tool_glyph_verb(event) -> tuple[str, str]:
+    """Resolve a ``tool_call_ended`` event to its per-tool (glyph, verb) —
+    unknown tools and detail-less events still read honestly."""
+    tool = ""
+    if isinstance(getattr(event, "detail", None), dict):
+        tool = str(event.detail.get("tool") or "")
+    if not tool:
+        return ("·", "ran a tool")
+    known = _TOOL.get(tool)
+    if known:
+        return known
+    return ("·", f"ran {_humanize(tool).lower()}")
 
 
 class StreamView(VerticalScroll):
@@ -278,11 +324,14 @@ class StreamView(VerticalScroll):
         self._last_producer_count = count
         # Op C: any `<role>_call_failed` (a wedged/timed-out call) reads honestly
         # in the feed, not as a raw phase string — for every role, not an enum.
-        glyph, verb = _PHASE.get(event.phase) or (
-            ("⚠", "call timed out — no response")
-            if event.phase.endswith("_call_failed")
-            else ("·", event.phase)
-        )
+        if event.phase == "tool_call_ended":
+            glyph, verb = _tool_glyph_verb(event)  # per-tool icon + verb (W3)
+        else:
+            glyph, verb = _PHASE.get(event.phase) or (
+                ("⚠", "call timed out — no response")
+                if event.phase.endswith("_call_failed")
+                else ("·", event.phase)
+            )
         name = self._display_name(event.agent_id, event.role)
         line = Text()
         line.append(f"{event.timestamp:%H:%M:%S} ", style=dim)

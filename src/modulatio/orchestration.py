@@ -5332,6 +5332,9 @@ class Orchestrator:
                 phase="tool_call_ended",
                 task_id=task_id,
                 agent_id=agent_id,
+                # W3 parity: the seat sink already attaches the tool name;
+                # the TUI's per-tool icon map reads it from detail["tool"].
+                detail={"tool": name},
             )
             try:
                 with transcript_path.open("a", encoding="utf-8") as f:

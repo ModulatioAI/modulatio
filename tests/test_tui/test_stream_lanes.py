@@ -151,3 +151,39 @@ async def test_leader_call_failed_drives_status_into_honest_error(_isolate):
         # Feed: the LEADER lane renders the failure plainly, not a raw phase string.
         lv = app.query_one("#stream-leader", StreamView)
         assert any("timed out" in m for m in lv.messages), lv.messages
+
+
+# ── per-tool activity icons + verbs (Feng-Tui refinement arc, W3) ────────────
+# A tool_call_ended event carries detail={"tool": name}; the feed renders a
+# themed glyph + verb per tool ("⌕ searching the web"), never the raw phase.
+
+
+def _tool_event(tool: str | None):
+    return ActivityEvent(
+        agent_id="prod-1", role="drafter", phase="tool_call_ended",
+        task_id="T-1", timestamp=datetime.now(timezone.utc),
+        detail={"tool": tool} if tool else None,
+    )
+
+
+def test_tool_glyph_and_verb_resolve_from_detail():
+    from modulatio.tui.widgets.stream_view import _tool_glyph_verb
+    assert _tool_glyph_verb(_tool_event("web_search")) == ("⌕", "is searching the web")
+    assert _tool_glyph_verb(_tool_event("write_artifact")) == ("✎", "is writing")
+    assert _tool_glyph_verb(_tool_event("run_shell")) == ("⚒", "is building")
+    g, v = _tool_glyph_verb(_tool_event("mystery_tool"))
+    assert "mystery tool" in v  # unknown tool still reads honestly
+
+
+def test_tool_event_without_detail_still_reads_honestly():
+    from modulatio.tui.widgets.stream_view import _tool_glyph_verb
+    g, v = _tool_glyph_verb(_tool_event(None))
+    assert v == "ran a tool"
+
+
+def test_richer_phases_have_glyph_rows():
+    from modulatio.tui.widgets.stream_view import _PHASE
+    for phase in ("leader_thinking", "task_planning_started",
+                  "qc_authored_fix", "skill_codified", "model_fallback",
+                  "task_decomposed"):
+        assert phase in _PHASE, phase
