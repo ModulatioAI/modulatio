@@ -74,6 +74,9 @@ by four live test runs and a code cadre across the span.
 - **xAI token parsing** reads the real Grok CLI credential shape; OAuth is marked
   not-yet-supported (use the API-key path). The setup wizard **requires the routing
   embedder** and is honest about a skipped document-conversion toolchain.
+- **`typer` is now a declared dependency.** The CLI has always needed it; it was
+  previously satisfied only transitively, so a clean `pip install` on the current
+  dependency set could land without it. Declared explicitly.
 
 ## [0.9.8.6] — 2026-06-29
 
