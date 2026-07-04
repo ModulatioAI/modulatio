@@ -1720,3 +1720,30 @@ def test_tally_audit_bounds_the_per_tick_read(tmp_path, monkeypatch):
 
 def _tally_audit_via(app_mod, path, offset, tokens, comps):
     return app_mod._tally_audit(path, offset, tokens, comps)
+
+
+async def test_flip_tabs_wear_the_tab_chrome(project_with_roster):
+    """The LEADER / MOD SQUAD tabs read as TABS — both labels always in caps,
+    the active one bright with the underline bar, the inactive one dim and
+    bare (the same visual language as the app's main tab bar)."""
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        leader = _static_text(screen.query_one("#flip-leader", Static))
+        team = _static_text(screen.query_one("#flip-team", Static))
+        assert "LEADER" in leader
+        assert "MOD SQUAD" in team      # caps even when inactive — it's a TAB
+        assert "▔" in leader            # active side wears the underline bar
+        assert "▔" not in team
+        await pilot.click("#flip-team")
+        await pilot.pause()
+        leader = _static_text(screen.query_one("#flip-leader", Static))
+        team = _static_text(screen.query_one("#flip-team", Static))
+        assert "▔" in team              # the bar follows the active tab
+        assert "▔" not in leader

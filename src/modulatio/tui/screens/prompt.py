@@ -98,11 +98,12 @@ class PromptScreen(Vertical):
         color: $primary;
     }
     PromptScreen #status-lamps { padding: 0 1; }
-    /* The LEADER ╶╴ MOD SQUAD tabs, set off above the body — each side is a
-       real click target (F4 still cycles). */
+    /* The LEADER / MOD SQUAD tabs, set off above the body — each side is a
+       real click target (F4 still cycles), rendered in the main tab bar's
+       language: caps label + the underline bar under the active tab. */
     PromptScreen #flip-tab {
-        height: 1;
-        margin: 1 0;
+        height: 2;
+        margin: 1 0 0 0;
         padding: 0 1;
         color: $text-muted;
     }
@@ -299,22 +300,30 @@ class PromptScreen(Vertical):
             pass
 
     def _render_flip_tab(self) -> None:
+        """Render the two sides as TABS in the app's own tab language: caps
+        labels, the active one bright wearing the underline bar, the
+        inactive one dim and bare (mirrors the main tab bar's Tab.-active)."""
         try:
             accent, dim, _b, _e = theme_tiers(self.app)
         except Exception:
             accent, dim = "white", "grey50"
         leader = self._view == "leader"
         sides = (
-            ("#flip-leader", "LEADER" if leader else "leader", leader),
-            ("#flip-team", "MOD SQUAD" if not leader else "mod squad",
-             not leader),
+            ("#flip-leader", "LEADER", leader),
+            ("#flip-team", "MOD SQUAD", not leader),
         )
         try:
             for wid, label, active in sides:
-                self.query_one(wid, Static).update(Text(
-                    label, style=f"bold {accent}" if active else dim))
-            self.query_one("#flip-divider", Static).update(
-                Text("  ╶╴  ", style=dim))
+                pad = f" {label} "
+                t = Text()
+                t.append(pad, style=f"bold {accent}" if active else dim)
+                t.append("\n")
+                t.append(
+                    "▔" * len(pad) if active else " " * len(pad),
+                    style=f"bold {accent}" if active else dim,
+                )
+                self.query_one(wid, Static).update(t)
+            self.query_one("#flip-divider", Static).update(Text("  "))
         except Exception:
             pass
 
