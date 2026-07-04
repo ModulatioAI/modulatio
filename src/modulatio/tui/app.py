@@ -782,10 +782,12 @@ class ModulatioApp(App):
         delivered = result.get("drafts", 0)
         blocked = result.get("blocked_tasks", 0)
         incomplete = result.get("incomplete_goals", 0)
-        # No hollow success: only call it done-with-deliverables when something
-        # ACTUALLY landed and nothing blocked / stayed unfinished. A run that
-        # returned but produced nothing is a FAILURE the operator must hear plainly.
-        if delivered == 0 or blocked > 0 or incomplete > 0:
+        # No hollow success — and no hollow FAILURE either: "Nothing usable
+        # landed" over a satisfied goal with real deliverables contradicts the
+        # sign-off two lines below it. Three honest shapes: nothing landed
+        # (blunt failure), something landed with reservations (own both), and
+        # clean (unchanged).
+        if delivered == 0:
             msg = (
                 f"That job did NOT finish cleanly — {result['goals']} goal(s), "
                 f"{result['tasks']} task(s), but only {delivered} deliverable(s)"
@@ -794,6 +796,17 @@ class ModulatioApp(App):
                 + (f", {result['errors']} error(s)" if result.get("errors") else "")
                 + ". Nothing usable landed — tell me to dig into what went wrong, "
                 "or F8 and we adjust."
+            )
+        elif blocked > 0 or incomplete > 0:
+            msg = (
+                f"Job finished with reservations — {delivered} deliverable(s) "
+                f"landed across {result['goals']} goal(s), but "
+                + " and ".join(
+                    ([f"{blocked} task(s) stayed blocked"] if blocked else [])
+                    + ([f"{incomplete} goal(s) fell short"] if incomplete else [])
+                )
+                + ". My sign-off below has the split — tell me to dig into "
+                "what went wrong."
             )
         else:
             msg = (

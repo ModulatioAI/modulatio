@@ -226,3 +226,50 @@ def test_format_verdict_signoff_dedups_to_last_per_goal_and_empty():
     ])
     assert "satisfied" in out and "redone, good now" in out
     assert "disappointed" not in out and "first try" not in out
+
+
+# ─── The Leader's headline is honest about partial runs ─────────────────────
+
+
+def _verdict_result(**kw) -> dict:
+    base = dict(goals=2, tasks=21, drafts=0, errors=0,
+                blocked_tasks=0, incomplete_goals=0, verdicts=[])
+    base.update(kw)
+    return base
+
+
+async def _headline_for(result: dict, tui_vault) -> str:
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code="HDL", stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._post_leader_verdict(result, None)
+        await pilot.pause()
+        tv = app.query_one("#stream-leader", StreamView)
+        return tv.messages[-1]
+
+
+async def test_partial_run_headline_owns_what_landed(tui_vault):
+    """20 deliverables + 1 satisfied goal must NEVER read as 'Nothing usable
+    landed' — the headline owns the reservations without erasing the wins."""
+    msg = await _headline_for(_verdict_result(
+        drafts=20, blocked_tasks=2, errors=15,
+        verdicts=[{"goal_id": "G-2", "verdict": "satisfied",
+                   "report_body": "delivered"}],
+    ), tui_vault)
+    assert "Nothing usable" not in msg
+    assert "20 deliverable(s)" in msg
+    assert "2 task(s) stayed blocked" in msg
+
+
+async def test_zero_delivered_headline_stays_blunt(tui_vault):
+    msg = await _headline_for(_verdict_result(drafts=0, blocked_tasks=1),
+                              tui_vault)
+    assert "Nothing usable landed" in msg
+
+
+async def test_clean_run_headline_unchanged(tui_vault):
+    msg = await _headline_for(_verdict_result(drafts=3), tui_vault)
+    assert "Job's done" in msg
