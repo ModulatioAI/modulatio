@@ -152,7 +152,7 @@ class ModulatioApp(App):
     # ``::`` double-colon separator. Subtitle filled in __init__ once the
     # project_code is known so the breadcrumb reads
     # ``MODULATIO :: PROJECT <CODE> :: <MODE>``.
-    TITLE = "MODULATIO"
+    TITLE = "µ MODULATIO"  # the µ mark — the modulatio icon, compact (W2)
 
     # Feng-Tui aesthetic — pure-black phosphor, thin frames, a single monochrome
     # accent (amber / green / cyan) in brightness tiers. Colours come from the

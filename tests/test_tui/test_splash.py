@@ -89,3 +89,14 @@ async def test_splash_retints_on_f2():
         art = app.screen.query_one("#splash-art", Static).render()
         text = art.plain if hasattr(art, "plain") else str(art)
         assert "green" in text  # the variant name credit updated
+
+
+def test_mu_mark_rides_beside_the_wordmark():
+    """W2: the µ icon (block-art mu, descender curl) renders in the splash art
+    and its 2-row descender hangs below the wordmark's 5 rows."""
+    from modulatio.tui.screens.splash import _MU_ART, _wordmark
+    assert len(_MU_ART) == 7
+    assert all(len(r) == 5 for r in _MU_ART)
+    assert len(_wordmark("MODULATIO")) == 5
+    assert _MU_ART[4] == "█▄▄▄█"  # the rounded bowl joins the bars
+    assert _MU_ART[6].startswith("▀▄")  # the descender tail-curl

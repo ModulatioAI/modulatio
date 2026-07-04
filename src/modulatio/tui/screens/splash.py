@@ -57,6 +57,20 @@ _WAVE = [
 # A halftone gradient bar — the dither texture as a phosphor glow line.
 _DITHER_BAR = "░░▒▒▓▓████▓▓▒▒░░"
 
+# The µ mark — the modulatio.ai icon (a lowercase mu) in phosphor block art:
+# two verticals joined by a rounded bottom bowl, the LEFT bar running past the
+# baseline into a small rightward tail-curl, the right bar plain. Two rows
+# taller than the wordmark: the descender hangs below the baseline (W2).
+_MU_ART = [
+    "█   █",
+    "█   █",
+    "█   █",
+    "█   █",
+    "█▄▄▄█",
+    "█    ",
+    "▀▄   ",
+]
+
 _TAGLINE = "the harmonious terminal interface"
 
 # Auto-advance so an unattended launch still reaches the TUI — a generous beat
@@ -146,8 +160,14 @@ class SplashScreen(ModalScreen):
         for line in _WAVE:
             out.append(line + "\n", style=dim)
         out.append("\n")
-        for line in _wordmark("MODULATIO"):
-            out.append(line + "\n", style=f"{accent} bold")
+        # The µ mark rides LEFT of the wordmark; its 2-row descender hangs
+        # below the wordmark's baseline (rows past the wordmark stand alone).
+        word_rows = _wordmark("MODULATIO")
+        for r, mu_row in enumerate(_MU_ART):
+            out.append(mu_row, style=f"{accent} bold")
+            if r < len(word_rows):
+                out.append("   " + word_rows[r], style=f"{accent} bold")
+            out.append("\n")
         out.append("\n")
         out.append(_TAGLINE + "\n", style=accent)
         out.append("\n")

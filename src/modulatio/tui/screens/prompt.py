@@ -263,7 +263,7 @@ class PromptScreen(Vertical):
         suffix = f"   feng-tui · {variant}" if variant else ""
         try:
             self.query_one("#console-header", Static).update(
-                f"MODULATIO   {escape(code)} · console{suffix}")
+                f"µ MODULATIO   {escape(code)} · console{suffix}")
         except Exception:
             pass
 
