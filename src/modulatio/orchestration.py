@@ -14072,10 +14072,39 @@ class Orchestrator:
             # Fix C: also skipped when the operator stopped the run — verify can
             # render "disappointed" and trigger a from-scratch REDO (more
             # producer calls), which would defeat the kill-switch.
+            completed_any = any(
+                t.status == TaskStatus.COMPLETED for t in tasks
+            )
             if (
-                any(t.status == TaskStatus.COMPLETED for t in tasks)
+                not completed_any
                 and not self.abort_event.is_set()
+                and g.id not in self._goal_qc_swept
             ):
+                # ZERO completed on the FIRST pass — the same hole the redo
+                # lanes guard: before leaving the goal unverified, give it
+                # its one-shot QC last-resort sweep (QC produces the missing
+                # pieces, then the Leader judges real work). If even the
+                # sweep can't produce (QC's model down too), drive the goal
+                # to the same shared terminal the redo lanes use — a goal
+                # must never strand IN_PROGRESS (#8592 lineage); the PQR
+                # reservation is the surfacing.
+                self._goal_qc_swept.add(g.id)
+                completed_any = self._qc_last_resort_sweep(g, tasks, summary)
+                if not completed_any and not self.abort_event.is_set():
+                    self._settle_zero_completed(
+                        g, summary,
+                        concern=(
+                            "The goal produced no completed work (every task "
+                            "failed) and the QC last-resort sweep could not "
+                            "produce the pieces either. Settled as-is — see "
+                            "the run's tickets for the failures."
+                        ),
+                        rationale=(
+                            "zero-completed goal settled after a failed QC "
+                            "last-resort sweep"
+                        ),
+                    )
+            if completed_any and not self.abort_event.is_set():
                 self._leader_verify_goal(g, tasks, summary)
             store.save_goal(self.project.code, g, run_id=self.project.run_id)
 
