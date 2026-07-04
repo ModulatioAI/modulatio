@@ -8727,6 +8727,57 @@ class Orchestrator:
         summary: RunSummary,
         initial_corrective_notes: str = "",
     ) -> None:
+        """Run a task to settlement, then record the parties' episodic memory.
+
+        Thin wrapper over :meth:`_run_task_with_redo_inner` (the real redo
+        loop — unchanged) so that EVERY path a task can travel (sequential,
+        concurrent worker, decompose children, goal-redo) records one
+        deterministic episodic entry per party when the task reaches a
+        terminal status. Agents accrue memory from the jobs they actually
+        work — the MEMORY tab's standing promise (W5b, 2026-07-03)."""
+        try:
+            self._run_task_with_redo_inner(t, summary, initial_corrective_notes)
+        finally:
+            if t.status in (
+                TaskStatus.COMPLETED, TaskStatus.QC_REJECTED, TaskStatus.BLOCKED
+            ):
+                self._record_task_episode(t)
+
+    def _record_task_episode(self, t: Task) -> None:
+        """Synthesize one episodic memory line per party from task fields —
+        deterministic, no LLM call, bounded by episodic auto-prune. Routed
+        through ``_store_write_deferrable`` so isolated workers buffer the
+        write for the main-thread merge (the no-worker-store-writes contract,
+        same deferral ``team_memory.propose`` rides)."""
+        from modulatio.memory import agent_memory
+
+        tags = [x for x in (t.artifact_kind, t.operation) if x]
+        code = self.project.code
+        if t.assigned_agent_id:
+            fixed = " (QC-authored fix)" if getattr(t, "qc_authored_fix", False) else ""
+            body = (
+                f"{t.status.value}: {t.description[:140]} — "
+                f"{t.lifetime_attempts} producer attempt(s){fixed}"
+            )
+            self._store_write_deferrable(
+                lambda a=t.assigned_agent_id, b=body, tg=list(tags): agent_memory.add_episodic(
+                    a, b, project_code=code, entry_type="task", tags=tg
+                )
+            )
+        if t.qc_agent_id:
+            qc_body = f"reviewed {t.id}: {t.status.value} — {t.description[:100]}"
+            self._store_write_deferrable(
+                lambda a=t.qc_agent_id, b=qc_body, tg=list(tags): agent_memory.add_episodic(
+                    a, b, project_code=code, entry_type="review", tags=tg
+                )
+            )
+
+    def _run_task_with_redo_inner(
+        self,
+        t: Task,
+        summary: RunSummary,
+        initial_corrective_notes: str = "",
+    ) -> None:
         """Drive one task through up to `max_retries` redo attempts.
 
         Per `quality-architecture.md` §8: a task that didn't ship (QC
