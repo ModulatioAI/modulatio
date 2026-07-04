@@ -73,34 +73,34 @@ def is_team_role(role: str) -> bool:
 # phase → (glyph, human verb). Falls back to the raw phase when unmapped, so
 # new engine phases still render (just less prettily) until added here.
 _PHASE: dict[str, tuple[str, str]] = {
-    "kickoff_started": ("▸", "kicked off the run"),
-    "kickoff_ended": ("■", "run complete"),
-    "leader_decompose_started": ("◆", "is decomposing the objective"),
-    "leader_decompose_ended": ("◆", "decomposed it into goals"),
-    "leader_verify_started": ("◇", "is verifying the goal"),
-    "leader_verify_ended": ("✓", "rendered a verdict"),
-    "task_dispatched": ("▸", "picked up a task"),
-    "qc_started": ("○", "is reviewing"),
-    "qc_verdict": ("✓", "returned a QC verdict"),
-    "task_completed": ("✓", "finished a task"),
-    "task_settled": ("■", "wrapped up a task"),
-    "ticket_opened": ("!", "opened a ticket"),
-    "scope_drift_warning": ("!", "flagged scope drift"),
+    "kickoff_started": ("▸▸", "kicked off the run"),
+    "kickoff_ended": ("■■", "run complete"),
+    "leader_decompose_started": ("◆◆", "is decomposing the objective"),
+    "leader_decompose_ended": ("◆◆", "decomposed it into goals"),
+    "leader_verify_started": ("◇◇", "is verifying the goal"),
+    "leader_verify_ended": ("✓✓", "rendered a verdict"),
+    "task_dispatched": ("▸▸", "picked up a task"),
+    "qc_started": ("○○", "is reviewing"),
+    "qc_verdict": ("✓✓", "returned a QC verdict"),
+    "task_completed": ("✓✓", "finished a task"),
+    "task_settled": ("■■", "wrapped up a task"),
+    "ticket_opened": ("!!", "opened a ticket"),
+    "scope_drift_warning": ("!!", "flagged scope drift"),
     # W3 (2026-07-03): richer vocabulary so the feed reads as work, not raw
     # phase strings. Planning/thinking wear the ◆ "mind" mark.
-    "leader_thinking": ("◆", "is thinking"),
-    "leader_answered": ("◆", "answered"),
-    "task_planning_started": ("◆", "is planning the work"),
-    "task_planning_ended": ("◆", "planned the work"),
-    "qc_review": ("○", "is reviewing"),
-    "qc_authored_fix": ("✚", "authored the fix"),
-    "qc_fix_failed": ("⚠", "couldn't author a fix"),
-    "task_decomposed": ("⑃", "split the task"),
-    "model_fallback": ("⇄", "fell back to a backup model"),
-    "skill_codified": ("✦", "codified a skill"),
-    "jt_codified": ("✦", "codified a job template"),
-    "leader_self_fix": ("✚", "fixed it directly"),
-    "dispatch_aborted": ("⚠", "attempt stopped by the breaker"),
+    "leader_thinking": ("◆◆", "is thinking"),
+    "leader_answered": ("◆◆", "answered"),
+    "task_planning_started": ("◆◆", "is planning the work"),
+    "task_planning_ended": ("◆◆", "planned the work"),
+    "qc_review": ("○○", "is reviewing"),
+    "qc_authored_fix": ("✚✚", "authored the fix"),
+    "qc_fix_failed": ("!!", "couldn't author a fix"),
+    "task_decomposed": ("»»", "split the task"),
+    "model_fallback": ("◄►", "fell back to a backup model"),
+    "skill_codified": ("★★", "codified a skill"),
+    "jt_codified": ("★★", "codified a job template"),
+    "leader_self_fix": ("✚✚", "fixed it directly"),
+    "dispatch_aborted": ("!!", "attempt stopped by the breaker"),
 }
 
 
@@ -114,16 +114,16 @@ def _humanize(token: str) -> str:
 #: in ``event.detail["tool"]``). Themed glyphs, never color emoji — the mark
 #: tints in the active phosphor accent like every other line (W3).
 _TOOL: dict[str, tuple[str, str]] = {
-    "web_search": ("⌕", "is searching the web"),
-    "http_get": ("⇣", "is reading a page"),
-    "write_artifact": ("✎", "is writing"),
-    "edit_file": ("✎", "is revising"),
-    "read_file": ("▤", "is reading"),
-    "run_shell": ("⚒", "is building"),
-    "search_skills": ("✦", "is browsing skills"),
-    "load_skill": ("✦", "picked up a skill"),
-    "drop_skill": ("✦", "set a skill down"),
-    "read_tool_result": ("▤", "is re-reading a result"),
+    "web_search": ("◉◉", "is searching the web"),
+    "http_get": ("▼▼", "is reading a page"),
+    "write_artifact": ("✎✎", "is writing"),
+    "edit_file": ("✎✎", "is revising"),
+    "read_file": ("□□", "is reading"),
+    "run_shell": ("▲▲", "is building"),
+    "search_skills": ("★★", "is browsing skills"),
+    "load_skill": ("★★", "picked up a skill"),
+    "drop_skill": ("★★", "set a skill down"),
+    "read_tool_result": ("□□", "is re-reading a result"),
 }
 
 
@@ -134,11 +134,11 @@ def _tool_glyph_verb(event) -> tuple[str, str]:
     if isinstance(getattr(event, "detail", None), dict):
         tool = str(event.detail.get("tool") or "")
     if not tool:
-        return ("·", "ran a tool")
+        return ("●●", "ran a tool")
     known = _TOOL.get(tool)
     if known:
         return known
-    return ("·", f"ran {_humanize(tool).lower()}")
+    return ("●●", f"ran {_humanize(tool).lower()}")
 
 
 class StreamView(VerticalScroll):
@@ -195,12 +195,20 @@ class StreamView(VerticalScroll):
         #: working: …" wave marker into the feed (concurrency the operator would
         #: otherwise read as fast-serial). Reset with the board.
         self._last_producer_count = 0
+        #: W3b repeat-coalescing: (agent, glyph, verb, task) of the last event
+        #: line, its base Text and widget, and the live (×N) counter. Any
+        #: non-event append (message, wave marker) breaks the chain in _append.
+        self._coalesce_sig: tuple | None = None
+        self._coalesce_base: Text | None = None
+        self._coalesce_widget: Static | None = None
+        self._coalesce_count: int = 1
 
     # ── line plumbing ───────────────────────────────────────────────────
 
     def _append(self, line: Text) -> None:
         """Mount one transcript line as a selectable Static and follow to the
         bottom; prune the oldest lines past ``max_lines``."""
+        self._coalesce_sig = None  # a fresh line always breaks a repeat chain
         self.messages.append(line.plain)
         static = Static(line, markup=False, classes="stream-line")
         self.mount(static)
@@ -232,6 +240,10 @@ class StreamView(VerticalScroll):
         self.active_tasks.clear()
         self._last_producer_count = 0
         self.last_leader_text = ""
+        self._coalesce_sig = None
+        self._coalesce_base = None
+        self._coalesce_widget = None
+        self._coalesce_count = 1
 
     def _display_name(self, agent_id: str | None, role: str) -> str:
         token = agent_id or role
@@ -328,19 +340,37 @@ class StreamView(VerticalScroll):
             glyph, verb = _tool_glyph_verb(event)  # per-tool icon + verb (W3)
         else:
             glyph, verb = _PHASE.get(event.phase) or (
-                ("⚠", "call timed out — no response")
+                ("!!", "call timed out — no response")
                 if event.phase.endswith("_call_failed")
                 else ("·", event.phase)
             )
         name = self._display_name(event.agent_id, event.role)
+        # Coalesce a repeat: the same agent doing the same thing again updates
+        # the previous line's (×N) counter instead of stacking a wall of
+        # identical lines — every CHANGE of icon stays a visible event (W3b).
+        sig = (event.agent_id, glyph, verb, event.task_id)
+        if sig == self._coalesce_sig and self._coalesce_widget is not None:
+            self._coalesce_count += 1
+            merged = self._coalesce_base.copy()
+            merged.append(f" (×{self._coalesce_count})", style=f"bold {accent}")
+            try:
+                self._coalesce_widget.update(merged)
+                return
+            except Exception:
+                pass  # widget pruned/unmounted — fall through to a fresh line
         line = Text()
         line.append(f"{event.timestamp:%H:%M:%S} ", style=dim)
-        line.append(f"{glyph} ", style=accent)
+        # The icon is the line's anchor — doubled mark, bold bright accent.
+        line.append(f"{glyph} ", style=f"bold {accent}")
         line.append(name, style=f"bold {accent}")
         line.append(f" {verb}", style=base)
         if event.task_id:
             line.append(f"  ·{event.task_id}", style=dim)
         self._append(line)
+        self._coalesce_sig = sig
+        self._coalesce_base = line
+        self._coalesce_count = 1
+        self._coalesce_widget = self.query(".stream-line").last()
 
 
 __all__ = [

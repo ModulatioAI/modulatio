@@ -168,9 +168,10 @@ def _tool_event(tool: str | None):
 
 def test_tool_glyph_and_verb_resolve_from_detail():
     from modulatio.tui.widgets.stream_view import _tool_glyph_verb
-    assert _tool_glyph_verb(_tool_event("web_search")) == ("⌕", "is searching the web")
-    assert _tool_glyph_verb(_tool_event("write_artifact")) == ("✎", "is writing")
-    assert _tool_glyph_verb(_tool_event("run_shell")) == ("⚒", "is building")
+    # W3b: doubled heavy phosphor marks — a two-cell icon, not a doot.
+    assert _tool_glyph_verb(_tool_event("web_search")) == ("◉◉", "is searching the web")
+    assert _tool_glyph_verb(_tool_event("write_artifact")) == ("✎✎", "is writing")
+    assert _tool_glyph_verb(_tool_event("run_shell")) == ("▲▲", "is building")
     g, v = _tool_glyph_verb(_tool_event("mystery_tool"))
     assert "mystery tool" in v  # unknown tool still reads honestly
 
@@ -187,3 +188,30 @@ def test_richer_phases_have_glyph_rows():
                   "qc_authored_fix", "skill_codified", "model_fallback",
                   "task_decomposed"):
         assert phase in _PHASE, phase
+
+
+@pytest.mark.asyncio
+async def test_repeat_events_coalesce_into_a_counter(_isolate):
+    """W3b: the same agent doing the same thing again updates one line's (×N)
+    counter instead of stacking a wall; a different verb starts a fresh line."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    app = ModulatioApp(project_code="LANES", stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        view = app.query_one("#stream-team", StreamView)
+        for _ in range(3):
+            view.add_event(_tool_event("http_get"))
+        await pilot.pause()
+        lines = [str(w.render()) for w in view.query(".stream-line")]
+        page_lines = [ln for ln in lines if "is reading a page" in ln]
+        assert len(page_lines) == 1
+        assert "(×3)" in page_lines[0]
+
+        view.add_event(_tool_event("web_search"))  # different verb → new line
+        view.add_event(_tool_event("http_get"))    # chain broken → fresh line
+        await pilot.pause()
+        lines = [str(w.render()) for w in view.query(".stream-line")]
+        assert sum("is reading a page" in ln for ln in lines) == 2
+        assert sum("is searching the web" in ln for ln in lines) == 1
