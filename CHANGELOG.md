@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.8.9] — 2026-07-05
+
 ### Added
 
 - **The hard kill-boundary — no seat call outlives its wall-clock.** A model call
