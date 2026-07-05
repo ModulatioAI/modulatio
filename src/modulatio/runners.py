@@ -461,6 +461,117 @@ def _record_call_usage(resp, model: str) -> None:
     )
 
 
+class SeatCallHardTimeout(Exception):
+    """The hard kill-boundary fired: a seat's model call outlived its
+    wall-clock deadline — a spin or C-stall no transport timeout reached
+    (the cb6c0d shape: 17 minutes of silence at ~32% CPU). The guarded
+    call's thread is ABANDONED (CPython can't kill a thread); the caller is
+    released with this availability-class failure so the recovery train
+    (fallback chain → backoff → seat cooldown → QC backstop) takes over."""
+
+
+#: Grace on top of the transport timeout before the hard boundary fires —
+#: the transport timeout gets first chance at a clean, classified error; the
+#: thread boundary is strictly the backstop for wait shapes it can't reach.
+#: (Inherited from the Stage-0 spin-watchdog arithmetic it supersedes.)
+_HARD_DEADLINE_GRACE_S = 30.0
+
+#: Abandoned (still-running) guarded-call threads — the zombie ledger. An
+#: abandoned thread burns until its transport releases; the seat cooldown
+#: stops feeding it new work, so accumulation is bounded. Pruned of finished
+#: threads on every new abandonment; surfaced in the expiry warning so the
+#: operator can see accumulation.
+_ABANDONED_CALL_THREADS: list = []
+
+
+def _dump_all_thread_stacks() -> str:
+    """Every live thread's Python stack as one readable block — the wedge
+    evidence Stage 0 existed to capture, now taken at the moment of release.
+    (``sys._current_frames`` + ``traceback.format_stack``, with thread names;
+    a plain-string sibling of faulthandler's fd dump so it can ride the
+    scrubbed, pruned crash-log store and surface in the LOGS tab.)"""
+    import sys
+    import threading
+    import traceback
+
+    names = {t.ident: t.name for t in threading.enumerate()}
+    parts: list[str] = []
+    for ident, frame in sys._current_frames().items():
+        parts.append(f"Thread {names.get(ident, '?')} (ident {ident}):")
+        parts.append("".join(traceback.format_stack(frame)))
+    return "\n".join(parts)
+
+
+def _hard_deadline(fn, *, timeout_s: float, describe: str):
+    """Wrap ``fn`` so no invocation outlives ``timeout_s`` + grace — the hard
+    kill-boundary. The call runs in a disposable daemon thread under a COPY
+    of the caller's context (ContextVars — budget tracker, context-budget
+    bindings — don't propagate to threads on their own); result or exception
+    passes through transparently when it finishes in time. On expiry: dump
+    all-thread stacks to the crash log (LOGS tab), account the abandoned
+    zombie, and raise ``SeatCallHardTimeout``.
+
+    The deadline spans an invocation's WHOLE retry dance (key-pool rotation,
+    auth refresh) — a pathologically slow retry sequence expires into the
+    recovery train rather than earning a fresh budget. The operator's F8
+    abort stays cooperative (iteration boundaries); this bound is what keeps
+    even that wait finite. NEVER wraps Clay — its subprocess lane already
+    has a true hard kill (claude_cli subprocess timeout)."""
+    import contextvars
+    import threading
+
+    def wrapper(*args, **kwargs):
+        box: list = []
+
+        ctx = contextvars.copy_context()
+
+        def _target() -> None:
+            try:
+                box.append(("ok", ctx.run(fn, *args, **kwargs)))
+            except BaseException as exc:  # noqa: BLE001 — transported to the caller
+                box.append(("err", exc))
+
+        thread = threading.Thread(
+            target=_target, name=f"seat-call:{describe}"[:60], daemon=True)
+        thread.start()
+        thread.join(timeout_s + _HARD_DEADLINE_GRACE_S)
+        if box:
+            kind, payload = box[0]
+            if kind == "ok":
+                return payload
+            raise payload
+        # Expired: capture the evidence, account the zombie, release the seat.
+        try:
+            from modulatio import logstore
+
+            logstore.write_error_log(
+                f"seat call hard-timeout: {describe}",
+                detail=_dump_all_thread_stacks(),
+                context={"describe": describe, "timeout_s": timeout_s,
+                         "grace_s": _HARD_DEADLINE_GRACE_S},
+            )
+        except Exception:  # noqa: BLE001 — the release must never fail on a log write
+            pass
+        _ABANDONED_CALL_THREADS[:] = [
+            t for t in _ABANDONED_CALL_THREADS if t.is_alive()]
+        _ABANDONED_CALL_THREADS.append(thread)
+        _log.warning(
+            "seat call hard-timeout: %s exceeded %.0fs (+%.0fs grace) — "
+            "releasing the seat; the wedged call's thread is abandoned "
+            "(%d live zombie(s) in this process). Stack dump in the LOGS tab.",
+            describe, timeout_s, _HARD_DEADLINE_GRACE_S,
+            len(_ABANDONED_CALL_THREADS),
+        )
+        raise SeatCallHardTimeout(
+            f"{describe}: no result within {timeout_s}s "
+            f"(+{_HARD_DEADLINE_GRACE_S}s grace) — seat released, "
+            f"call thread abandoned"
+        )
+
+    wrapper._hard_deadline_s = timeout_s
+    return wrapper
+
+
 def _fallback_error_types() -> tuple[type[BaseException], ...]:
     """LiteLLM exceptions that mean the model/provider is UNAVAILABLE — the only
     failures that should advance to a fallback model. Deliberately excludes the
@@ -487,6 +598,10 @@ def _fallback_error_types() -> tuple[type[BaseException], ...]:
         # A Clay (`claude -p`) seat's provider error (529/overload/5xx/auth) —
         # same "model unavailable" class, so it advances to a fallback model too.
         ClaudeUnavailable,
+        # The hard kill-boundary fired: the seat's call outlived its wall-clock
+        # deadline (a spin/stall no transport timeout reached). Same class —
+        # the seat is unresponsive; advance the chain, back off, cool the seat.
+        SeatCallHardTimeout,
     )
 
 
