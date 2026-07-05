@@ -1069,7 +1069,14 @@ def litellm_runner(
     # introspect it (the budget dispatch already reads ``runner.model_name``;
     # the single-leader-model guard compares the team vs converse leader model).
     _run.model_name = model  # type: ignore[attr-defined]
-    return _run
+    if endpoint == "claude_cli":
+        # Clay's subprocess lane already carries a true hard kill
+        # (claude_cli subprocess timeout) — never double-bind it.
+        return _run
+    guarded = _hard_deadline(
+        _run, timeout_s=timeout, describe=f"single-shot {model}")
+    guarded.model_name = model  # type: ignore[attr-defined]
+    return guarded
 
 
 def build_agent_runners(
@@ -2102,8 +2109,11 @@ def litellm_chat_runner(
         # litellm usage object, so this seat is OUTSIDE the per-token budget
         # meter (see the single-shot branch note); stream-usage wiring is a
         # tracked follow-up before hard budget enforcement on a Codex seat.
-        return _build_codex_chat_runner(
-            litellm_model, kwargs, model, provider_id_for_alerts, pool_base,
+        return _hard_deadline(
+            _build_codex_chat_runner(
+                litellm_model, kwargs, model, provider_id_for_alerts, pool_base,
+            ),
+            timeout_s=timeout, describe=f"codex chat {model}",
         )
     if endpoint == "responses":
         raise NotImplementedError(
@@ -2230,7 +2240,12 @@ def litellm_chat_runner(
         content = getattr(msg, "content", None) or ""
         return ChatResponse(content=content, tool_calls=tuple(parsed))
 
-    return run
+    # The hard kill-boundary: the WEDGE seam (cb6c0d — a tool-loop completion
+    # spun 17 minutes with nothing bounding it). Wrapping the factory return
+    # covers the completion + its retry dance in the deadline thread while
+    # tool dispatch and the compression preflight stay on the caller thread
+    # (the orchestrator's threading.local state must not move).
+    return _hard_deadline(run, timeout_s=timeout, describe=f"chat {model}")
 
 
 def maybe_build_chat_runner(
