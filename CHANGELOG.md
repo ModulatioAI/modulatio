@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The wedge stack dump names each thread's native TID + the C-level
+  escalation.** A Python dump stops at the C boundary — it shows which call
+  wedged but not a C-extension stall's native frames (neither `sys._current_frames`
+  nor faulthandler can). The hard-timeout dump and warning now tag every thread
+  with its OS native thread id and point at `py-spy --native` / `gdb`, the
+  out-of-process tools that *can* read the native stack of an ongoing stall.
+
 ## [0.9.8.9] — 2026-07-05
 
 ### Added

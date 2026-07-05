@@ -93,6 +93,18 @@ def test_expiry_dumps_all_thread_stacks_to_the_crash_log(zero_grace, crash_dir):
     assert "time.sleep" in body or "sleep" in body  # the wedged frame
 
 
+def test_dump_carries_native_tid_and_the_native_stack_escalation():
+    """Jenny's Finding 2 close: an in-process Python dump can't show a C-level
+    stall's native frames — so the dump names each thread's OS-level native TID
+    and points at the out-of-process tool (py-spy/gdb) that CAN read them."""
+    import threading
+    from modulatio.runners import _dump_all_thread_stacks
+
+    body = _dump_all_thread_stacks()
+    assert f"native TID {threading.get_native_id()}" in body   # this thread, by OS id
+    assert "py-spy" in body                                    # the C-level escalation
+
+
 def test_expiry_warning_carries_zombie_count(zero_grace, crash_dir, caplog):
     import logging
 

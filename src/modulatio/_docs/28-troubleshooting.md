@@ -134,13 +134,22 @@ backoff, seat cooldown, and the QC backstop if it stays down. The wedged call's
 (`seat call hard-timeout: …`) and send it to the team if it recurs. Clay
 (`claude -p`) seats are bounded separately by their subprocess timeout.
 
+A Python stack dump stops at the C boundary — it shows *which* call wedged but
+not a C-extension stall's native frames (neither `sys._current_frames` nor
+faulthandler can — both dump Python only). So the dump and the warning name the
+wedged thread's OS **native TID**; to read the native stack of an *ongoing*
+stall, attach an out-of-process tool to that TID:
+
+```bash
+py-spy dump --pid <modulatio-pid> --native   # or: gdb -p <pid>, then `thread apply all bt`
+```
+
 Two honest limits: the released call's thread is *abandoned*, not killed
 (CPython can't kill a thread) — it burns quietly until the transport lets go,
 and the log line counts live zombies so accumulation is visible; and a stall
 that holds the GIL inside a C extension freezes the whole process (nothing
-in-process can run, including this boundary) — that shape has never been
-observed live, and the dump from any future wedge is exactly what would prove
-it.
+in-process can run, including this boundary) — the native TID above plus
+`py-spy`/`gdb` is how you'd capture that shape if it ever appears live.
 
 ### Plan stuck in `awaiting-approval`
 

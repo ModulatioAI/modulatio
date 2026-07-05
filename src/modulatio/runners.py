@@ -489,15 +489,31 @@ def _dump_all_thread_stacks() -> str:
     evidence Stage 0 existed to capture, now taken at the moment of release.
     (``sys._current_frames`` + ``traceback.format_stack``, with thread names;
     a plain-string sibling of faulthandler's fd dump so it can ride the
-    scrubbed, pruned crash-log store and surface in the LOGS tab.)"""
+    scrubbed, pruned crash-log store and surface in the LOGS tab.)
+
+    An in-process Python dump shows each thread's stack UP TO the point it
+    called into C — it cannot see a C-extension stall's native frames (nor can
+    faulthandler; both dump Python only). So each thread is tagged with its OS
+    **native TID**, and the header names the out-of-process tool that CAN read
+    the native stack — the honest bridge to a true C-level wedge."""
+    import os
     import sys
     import threading
     import traceback
 
+    tids = {t.ident: t.native_id for t in threading.enumerate()}
     names = {t.ident: t.name for t in threading.enumerate()}
-    parts: list[str] = []
+    parts: list[str] = [
+        f"# native stack of an ongoing C-level stall (not shown below — a "
+        f"Python dump stops at the C boundary): py-spy dump --pid {os.getpid()} "
+        f"--native  (or gdb), targeting the wedged thread's native TID.",
+    ]
     for ident, frame in sys._current_frames().items():
-        parts.append(f"Thread {names.get(ident, '?')} (ident {ident}):")
+        tid = tids.get(ident)
+        parts.append(
+            f"Thread {names.get(ident, '?')} "
+            f"(ident {ident}, native TID {tid}):"
+        )
         parts.append("".join(traceback.format_stack(frame)))
     return "\n".join(parts)
 
@@ -558,9 +574,10 @@ def _hard_deadline(fn, *, timeout_s: float, describe: str):
         _log.warning(
             "seat call hard-timeout: %s exceeded %.0fs (+%.0fs grace) — "
             "releasing the seat; the wedged call's thread is abandoned "
-            "(%d live zombie(s) in this process). Stack dump in the LOGS tab.",
+            "(native TID %s, %d live zombie(s) in this process). Stack dump in "
+            "the LOGS tab; py-spy/gdb that TID for a C-level stall.",
             describe, timeout_s, _HARD_DEADLINE_GRACE_S,
-            len(_ABANDONED_CALL_THREADS),
+            thread.native_id, len(_ABANDONED_CALL_THREADS),
         )
         raise SeatCallHardTimeout(
             f"{describe}: no result within {timeout_s}s "
