@@ -3129,10 +3129,9 @@ class Orchestrator:
                 on_tool_call=self._seat_tool_sink(role, task_id, agent_id)
             ):
                 try:
-                    # Stage 0: run under the CPU-spin watchdog so a call that
-                    # wedges past the network timeout (a spin litellm + the
-                    # cooperative abort can't catch) is dumped + surfaced, not
-                    # silently burning (the 68-min leader wedge lived here).
+                    # The runner carries its own hard kill-boundary (runners.
+                    # _hard_deadline, wrapped at the factory): a call that wedges
+                    # past the transport timeout is released + stack-dumped there.
                     return runner(prompt)
                 except Exception:
                     # Op C: emit an honest terminal so the TUI clears the stuck
@@ -3205,7 +3204,7 @@ class Orchestrator:
                             on_tool_call=self._seat_tool_sink(role, task_id, agent_id)
                         ):
                             try:
-                                # Stage 0: CPU-spin watchdog (see _run).
+                                # Hard kill-boundary rides the runner (see _run).
                                 return runner(prompt)
                             except Exception:
                                 self._emit_call_failed(role, agent_id, task_id)
