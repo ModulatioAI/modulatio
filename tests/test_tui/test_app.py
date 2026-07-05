@@ -251,6 +251,27 @@ async def _headline_for(result: dict, tui_vault) -> str:
         return tv.messages[-1]
 
 
+def test_blocked_reservations_excludes_superseded_tasks_of_completed_goals():
+    """Escalation-orphan prune (TUI side): a blocked task under a COMPLETED goal
+    was superseded — the goal's objective was met another way (e.g. the Leader
+    re-planned around stuck work). It must NOT inflate the run's 'reservations'
+    count and turn a satisfied run into 'finished with reservations'. Only a
+    blocked task whose goal did NOT complete is a real reservation."""
+    from types import SimpleNamespace as NS
+    from modulatio.tui.app import _blocked_reservations
+    from modulatio.types import GoalStatus, TaskStatus
+
+    summary = NS(
+        goals=[NS(id="G-1", status=GoalStatus.COMPLETED),
+               NS(id="G-2", status=GoalStatus.BLOCKED)],
+        tasks=[NS(status=TaskStatus.BLOCKED, goal_id="G-1"),    # superseded → excluded
+               NS(status=TaskStatus.BLOCKED, goal_id="G-1"),    # superseded → excluded
+               NS(status=TaskStatus.BLOCKED, goal_id="G-2"),    # real reservation
+               NS(status=TaskStatus.COMPLETED, goal_id="G-1")],
+    )
+    assert _blocked_reservations(summary) == 1
+
+
 async def test_partial_run_headline_owns_what_landed(tui_vault):
     """20 deliverables + 1 satisfied goal must NEVER read as 'Nothing usable
     landed' — the headline owns the reservations without erasing the wins."""

@@ -206,6 +206,24 @@ def _tally_audit(
     return offset + end + 1, tokens, compressions
 
 
+def _blocked_reservations(summary) -> int:
+    """Count blocked tasks that are genuine run-level *reservations* — NOT
+    superseded orphans. A task left BLOCKED under a goal that ended COMPLETED was
+    superseded: the goal's objective was met another way (e.g. the Leader
+    re-planned around stuck work), so it must not turn a satisfied run into
+    "finished with reservations". Only a blocked task whose goal did NOT complete
+    is a real reservation the operator should see in the headline."""
+    from modulatio.types import GoalStatus, TaskStatus
+
+    completed_goal_ids = {
+        g.id for g in summary.goals if g.status == GoalStatus.COMPLETED
+    }
+    return sum(
+        1 for t in summary.tasks
+        if t.status == TaskStatus.BLOCKED and t.goal_id not in completed_goal_ids
+    )
+
+
 class ModulatioApp(App):
     """Prompt-first Textual shell for the Modulatio business harness."""
 
@@ -604,10 +622,12 @@ class ModulatioApp(App):
         # a run that DELIVERED. Count what actually landed vs what blocked / never
         # finished, so the verdict can't claim "deliverables are in" over a blocked,
         # empty run (HRWT 2026-06-05).
-        from modulatio.types import GoalStatus, TaskStatus
-        blocked_tasks = sum(
-            1 for t in summary.tasks if t.status == TaskStatus.BLOCKED
-        )
+        from modulatio.types import GoalStatus
+        # A blocked task under a COMPLETED goal was superseded (the goal shipped
+        # its objective another way) — it isn't a run-level reservation, so a
+        # satisfied run doesn't read "finished with reservations" over vestigial
+        # orphans. See _blocked_reservations.
+        blocked_tasks = _blocked_reservations(summary)
         incomplete_goals = sum(
             1 for g in summary.goals if g.status != GoalStatus.COMPLETED
         )
