@@ -228,6 +228,15 @@ class StreamView(VerticalScroll):
         stale position — the operator misses the Leader's report."""
         self.call_after_refresh(self.scroll_end, animate=False)
 
+    def on_resize(self) -> None:
+        """The reveal is a geometry change: the lane goes from display:none (zero
+        size, unknown ``max_scroll_y``) to a real region, and ONLY then are the
+        revealed children re-measured. ``on_show`` alone can fire its
+        ``scroll_end`` before that settles (a load-induced race — the tail was
+        lost when the machine was busy). Re-following on Resize makes landing on
+        the tail geometry-driven, not frame-timing-driven."""
+        self.call_after_refresh(self.scroll_end, animate=False)
+
     def clear(self) -> None:
         """Blow this lane's transcript out of the pipes — remove the rendered lines
         and reset the tracked state. Used by the F8 kill-switch to clean the TEAM TV
