@@ -1068,3 +1068,48 @@ def test_build_chat_runners_warns_on_unquietable_producer_seat(
     warnings = [r.message for r in caplog.records if "thinking" in r.message.lower()]
     assert len(warnings) == 1                 # jan only — not the leader, not randy
     assert "jan" in warnings[0].lower() or "Jan" in warnings[0]
+
+
+def test_thinking_toggle_matches_token_boundaries_not_substrings():
+    """WB cadre MED: 'notqwen-model' must not read as Qwen — the family must
+    start the id or follow a separator. A genuine derivative ('my-qwen-
+    distill') still matches."""
+    from modulatio.runners import _thinking_toggle_for
+
+    assert _thinking_toggle_for("notqwen-model") is None
+    assert _thinking_toggle_for("openai/biglmx") is None
+    assert _thinking_toggle_for("my-qwen-distill") == "/no_think"
+    assert _thinking_toggle_for("openrouter/qwen-3.5") == "/no_think"
+    assert _thinking_toggle_for("GLM-4.5") == "/nothink"
+    assert _thinking_toggle_for("ollama/glm-5.2") == "/nothink"
+
+
+def test_build_chat_runners_unquietable_warning_fires_once_per_seat(
+    monkeypatch, caplog, tmp_path,
+):
+    """WB cadre LOW: repeated runner builds in a long-lived process must not
+    re-warn the same seat — once per (project, agent, model)."""
+    import logging
+
+    from modulatio import roster, vault
+    from modulatio.runners import build_chat_runners
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("THW", "warn-once fixture", "obj")
+    roster.save(roster.Agent(
+        id="jan", name="Jan", identity="Jan id",
+        model="glmshim", tier="producer"), "THW")
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {"glmshim": {"model": "glm-5.2",
+                             "base_url": "https://ollama.com/v1",
+                             "api_format": "openai"}},
+    )
+    with caplog.at_level(logging.WARNING, logger="modulatio.runners"):
+        for _ in range(3):
+            build_chat_runners(
+                "THW",
+                builder=lambda model, disable_thinking=None: lambda **k: None)
+
+    warnings = [r for r in caplog.records if "thinking" in r.message.lower()]
+    assert len(warnings) == 1

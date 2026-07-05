@@ -1067,9 +1067,16 @@ def build_chat_runners(
         )
         # Honesty at build time (#16): a thinking-off seat whose lane can't
         # actually be quieted (reasoning-heavy family on an opaque shim) gets
-        # one WARNING so headless runs learn the truth — reasoning bloat will
-        # ride this seat's tool loop until the operator reseats it.
-        if disable_thinking and not seat_thinking_off_effective(agent.model):
+        # ONE warning per (project, seat, model) — repeated runner builds in
+        # a long-lived process must not re-warn (WB cadre) — so headless runs
+        # learn the truth without log noise.
+        warn_key = (project_code, agent.id, agent.model)
+        if (
+            disable_thinking
+            and warn_key not in _WARNED_UNQUIETABLE_SEATS
+            and not seat_thinking_off_effective(agent.model)
+        ):
+            _WARNED_UNQUIETABLE_SEATS.add(warn_key)
             _log.warning(
                 "Producer seat %s wears %r on a lane where thinking-off has "
                 "no effect — reasoning tokens will bloat its context. Swap "
@@ -1840,11 +1847,17 @@ _THINKING_TOGGLE_BY_FAMILY = (
 
 def _thinking_toggle_for(model: str) -> "str | None":
     """The family's in-band thinking-off token for a litellm model string,
-    or None when the family has no known toggle (substring match on the
-    lowercased string — the ``model_capabilities._FAMILY_TABLE`` idiom)."""
+    or None when the family has no known toggle. The family name must be a
+    TOKEN — starting the id or following a separator — not a bare substring
+    (WB cadre: ``notqwen-model`` must not read as Qwen and earn a false
+    "quietable" verdict; a genuine derivative like ``my-qwen-distill``
+    still matches). The token-boundary posture mirrors
+    ``model_capabilities._OPENAI_O_SERIES``."""
+    import re
+
     name = model.lower()
     for family, toggle in _THINKING_TOGGLE_BY_FAMILY:
-        if family in name:
+        if re.search(rf"(^|[/_\-.:\s]){re.escape(family)}", name):
             return toggle
     return None
 
@@ -1882,6 +1895,12 @@ def thinking_off_effective(
     return _accepts_reasoning_disable(probe_model)
 
 
+#: (project_code, agent_id, model) triples already warned about an
+#: unquietable thinking-off seat this process — the build warning is
+#: once-per-seat, not once-per-build (WB cadre).
+_WARNED_UNQUIETABLE_SEATS: set[tuple[str, str, str]] = set()
+
+
 def seat_thinking_off_effective(model_ref: str) -> bool:
     """``thinking_off_effective`` for a ROSTER model reference — a preset key
     resolves to its preset's model/base_url/api_format; a raw provider/model
@@ -1899,7 +1918,7 @@ def seat_thinking_off_effective(model_ref: str) -> bool:
     return thinking_off_effective(model_ref)
 
 
-def _prepend_no_think(messages: list[dict], toggle: str) -> list[dict]:
+def _prepend_thinking_toggle(messages: list[dict], toggle: str) -> list[dict]:
     """Return a copy of ``messages`` with the family's in-band thinking-off
     ``toggle`` prefixed to the first message's text content — the chat-path
     analog of ``litellm_runner``'s single-shot prefix. No-op (returns the
@@ -1991,7 +2010,7 @@ def litellm_chat_runner(
         # messages. The Leader's seat overrides with disable_thinking=False.
         _toggle = _thinking_toggle_for(litellm_model)
         if disable_thinking and _toggle:
-            messages = _prepend_no_think(messages, _toggle)
+            messages = _prepend_thinking_toggle(messages, _toggle)
 
         def _call(api_key_override: str | None = None):
             ck = dict(kwargs)
