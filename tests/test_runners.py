@@ -1113,3 +1113,71 @@ def test_build_chat_runners_unquietable_warning_fires_once_per_seat(
 
     warnings = [r for r in caplog.records if "thinking" in r.message.lower()]
     assert len(warnings) == 1
+
+
+# ── Hard kill-boundary Slice 0: the tool-loop transport timeout aligns ──────
+
+
+def test_chat_runner_default_timeout_is_the_call_timeout(monkeypatch):
+    """The chat/tool-loop runner's transport timeout must resolve through
+    _default_call_timeout() like the single-shot path — the cb6c0d wedge ran
+    under a hardcoded 1800s default no production site ever overrode, so the
+    600s idle-stall bound never applied to the seam that wedged."""
+    import litellm
+
+    from modulatio.runners import _default_call_timeout, litellm_chat_runner
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        litellm, "completion",
+        lambda **k: seen.update(k)
+        or _fake_chat_completion_response(content="ok", prompt_tokens=1, completion_tokens=1),
+    )
+    monkeypatch.setattr(litellm, "completion_cost", lambda **k: 0.0)
+    monkeypatch.setattr("modulatio.runners._resolve_model_call_args", lambda m: (m, {}))
+    monkeypatch.setattr("modulatio.model_presets.load_presets", lambda: {})
+
+    runner = litellm_chat_runner("openrouter/test")
+    runner(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert seen["timeout"] == _default_call_timeout() == 600.0
+
+
+def test_chat_runner_timeout_honors_env_knob(monkeypatch):
+    import litellm
+
+    from modulatio.runners import litellm_chat_runner
+
+    monkeypatch.setenv("MODULATIO_CALL_TIMEOUT", "42.5")
+    seen: dict = {}
+    monkeypatch.setattr(
+        litellm, "completion",
+        lambda **k: seen.update(k)
+        or _fake_chat_completion_response(content="ok", prompt_tokens=1, completion_tokens=1),
+    )
+    monkeypatch.setattr(litellm, "completion_cost", lambda **k: 0.0)
+    monkeypatch.setattr("modulatio.runners._resolve_model_call_args", lambda m: (m, {}))
+    monkeypatch.setattr("modulatio.model_presets.load_presets", lambda: {})
+
+    runner = litellm_chat_runner("openrouter/test")
+    runner(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert seen["timeout"] == 42.5
+
+
+def test_chat_runner_explicit_timeout_still_wins(monkeypatch):
+    import litellm
+
+    from modulatio.runners import litellm_chat_runner
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        litellm, "completion",
+        lambda **k: seen.update(k)
+        or _fake_chat_completion_response(content="ok", prompt_tokens=1, completion_tokens=1),
+    )
+    monkeypatch.setattr(litellm, "completion_cost", lambda **k: 0.0)
+    monkeypatch.setattr("modulatio.runners._resolve_model_call_args", lambda m: (m, {}))
+    monkeypatch.setattr("modulatio.model_presets.load_presets", lambda: {})
+
+    runner = litellm_chat_runner("openrouter/test", timeout=900.0)
+    runner(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert seen["timeout"] == 900.0

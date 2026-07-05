@@ -1932,7 +1932,7 @@ def _prepend_thinking_toggle(messages: list[dict], toggle: str) -> list[dict]:
 def litellm_chat_runner(
     model: str,
     *,
-    timeout: float = 1800.0,
+    timeout: "float | None" = None,
     api_base: str | None = None,
     api_key: str | None = None,
     disable_thinking: bool = True,
@@ -1943,12 +1943,20 @@ def litellm_chat_runner(
     but speaks the chat-style protocol: takes ``messages`` and ``tools``,
     returns a ``ChatResponse`` with either content or tool_calls.
 
+    ``timeout=None`` resolves through ``_default_call_timeout()`` (the
+    ``MODULATIO_CALL_TIMEOUT`` knob) exactly like the single-shot path —
+    this used to default to a hardcoded 1800s that no production site
+    overrode, so the idle-stall bound never applied to the tool-loop seam
+    (the cb6c0d wedge sat under it for 17 minutes).
+
     Note: this runner only supports the chat-completions endpoint. The
     Responses API (xAI multi-agent, etc.) doesn't yet have tool-calling
     plumbing here — falls through with a clear error if a preset
     declares ``endpoint: responses``. Wiring tool-calling for the
     Responses API is out of scope for Phase 2A.
     """
+    if timeout is None:
+        timeout = _default_call_timeout()
     litellm_model, resolved_kwargs = _resolve_model_call_args(model)
     kwargs: dict = {"timeout": timeout, **resolved_kwargs}
     if api_base is not None:
