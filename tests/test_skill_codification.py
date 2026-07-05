@@ -412,7 +412,8 @@ def test_recovery_log_failure_never_reverses_completion(proj, monkeypatch):
     from modulatio.types import AssertionEvidence, Task, TaskStatus
 
     o, pr = _orch(proj, {"codifications": []})
-    draft = vault.project_dir(proj) / "draft.py"
+    draft = vault.project_dir(proj) / "artifacts" / "draft.py"
+    draft.parent.mkdir(parents=True, exist_ok=True)  # rescues only write under artifacts/
     draft.write_text("def f(x):\n    return x + 1  # a real non-trivial committed draft\n")
     t = Task(id="T-rec", project_id=uuid4(), goal_id="G", description="fix it",
              artifact_kind="python_code", qc_agent_id="qc")
@@ -488,7 +489,8 @@ def test_recovery_records_real_defect_type_from_tuple(proj, monkeypatch):
     from modulatio.types import AssertionEvidence, Task
 
     o, pr = _orch(proj, {"codifications": []})
-    draft = vault.project_dir(proj) / "draft.py"
+    draft = vault.project_dir(proj) / "artifacts" / "draft.py"
+    draft.parent.mkdir(parents=True, exist_ok=True)  # rescues only write under artifacts/
     draft.write_text("def f(x):\n    return x + 1  # a real non-trivial committed draft\n")
     t = Task(id="T-dt", project_id=uuid4(), goal_id="G", description="d",
              artifact_kind="python_code", qc_agent_id="qc")
