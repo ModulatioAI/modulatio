@@ -362,54 +362,26 @@ def test_kickoff_captures_run_as_project_local_jt(project: Project):
     assert "Research AI/ML costs" in jt.interview_body
 
 
-# ── Stage 0: the CPU-spin watchdog (diagnose + surface a wedged call) ────────
+# ── The hard kill-boundary supersedes the Stage-0 spin watchdog ─────────────
 
-def test_spin_watchdog_dumps_stack_and_surfaces_wedged_call(
-    project: Project, tmp_path, monkeypatch
-):
-    """Stage-0 CPU-spin watchdog: a call that runs past the spin-deadline WITHOUT
-    the network timeout raising (a CPU-bound spin — invisible to litellm's I/O
-    timeout, the cooperative abort, and unkillable in-thread: the 68-min wedge)
-    gets the wedged thread's stack dumped + an honest terminal surfaced, so the
-    spin is diagnosable instead of silently burning."""
-    import time as _time
+def test_hard_timeout_from_runner_surfaces_honest_terminal(project: Project):
+    """A runner that raises SeatCallHardTimeout (the kill-boundary firing at
+    the factory seam) gets the Op-C honest terminal: leader_call_failed is
+    emitted so the TUI clears the stuck "working" status, and the exception
+    propagates for the caller's recovery machinery. (Stage-0's separate
+    diagnostic Timer is gone — the boundary itself releases AND dumps.)"""
+    from modulatio.runners import SeatCallHardTimeout
 
     events: list = []
-    orch = Orchestrator(project, {"leader": _leader_stub},
+
+    def _wedged_runner(prompt: str) -> str:
+        raise SeatCallHardTimeout("single-shot test-model: no result within 0.1s")
+
+    orch = Orchestrator(project, {"leader": _wedged_runner},
                         activity_callback=events.append)
-    monkeypatch.setattr(orch, "_scope_root", lambda: tmp_path)
-    monkeypatch.setattr(orch, "_spin_watchdog_timeout", lambda: 0.1)
-
-    def _wedged() -> str:
-        _time.sleep(0.35)  # outlasts the 0.1s deadline; returns so the test can't hang
-        return "done"
-
-    result = orch._run_with_spin_watchdog(_wedged, "leader", "leader", "T-1")
-    assert result == "done"
-    dump = tmp_path / "wedged-calls.txt"
-    assert dump.exists(), "spin-watchdog must dump the wedged thread's stack"
-    body = dump.read_text()
-    assert "WEDGED CALL" in body and "leader" in body
-    assert "leader_call_failed" in [e.phase for e in events], (
-        "spin-watchdog must surface an honest terminal on the lane"
-    )
-
-
-def test_spin_watchdog_silent_on_call_that_returns_in_time(
-    project: Project, tmp_path, monkeypatch
-):
-    """A normal call that returns within the deadline never trips the watchdog —
-    no stack dump, no false terminal."""
-    events: list = []
-    orch = Orchestrator(project, {"leader": _leader_stub},
-                        activity_callback=events.append)
-    monkeypatch.setattr(orch, "_scope_root", lambda: tmp_path)
-    monkeypatch.setattr(orch, "_spin_watchdog_timeout", lambda: 5.0)
-
-    result = orch._run_with_spin_watchdog(lambda: "fast", "leader", "leader", "T-1")
-    assert result == "fast"
-    assert not (tmp_path / "wedged-calls.txt").exists()
-    assert "leader_call_failed" not in [e.phase for e in events]
+    with pytest.raises(SeatCallHardTimeout):
+        orch._run("leader", "prompt")
+    assert "leader_call_failed" in [e.phase for e in events]
 
 
 def test_autonomy_status_reads_live_substrate(project: Project, monkeypatch):
