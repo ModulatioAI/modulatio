@@ -205,6 +205,12 @@ _AVAILABILITY_RETRY_BACKOFF_S = (2.0, 8.0, 20.0)
 #: ranked "best-available" — and every task it attracts burns its budget.
 _SEAT_COOLDOWN_S = 180.0
 
+#: Block-reason markers shared by the BLOCK writers and the QC-sweep
+#: discriminator (Jenny cadre MED: a discriminator must bind on a constant
+#: both sides reference, never on free-form rationale prose that can drift).
+_ENV_BLOCK_RATIONALE_PREFIX = "environmental defect:"
+_PATH_CONFLICT_MARKER = "artifact-path conflict"
+
 #: Grace added to the per-call network timeout to set the CPU-spin watchdog
 #: deadline. The watchdog fires only AFTER litellm's own timeout has had its
 #: chance, so an I/O hang raises + recovers normally there and the watchdog is the
@@ -8326,7 +8332,7 @@ class Orchestrator:
                 to_state=TaskStatus.BLOCKED.value,
                 actor="planner",
                 rationale=(
-                    f"wave artifact-path conflict on '{path_key}' with "
+                    f"wave {_PATH_CONFLICT_MARKER} on '{path_key}' with "
                     f"{[i for i in ids if i != t.id]}; not run concurrently"
                 ),
             ))
@@ -9408,6 +9414,22 @@ class Orchestrator:
             if _draft_is_multifile(t, draft_path):
                 return False  # cross-file: single-file patch/build would partial-pass
         target_path = draft_path if draft_path is not None else self._resolve_draft_path(t)
+        # WB cadre (self-heal arc): the planner path validates model-produced
+        # output_path, but this LOWER-LEVEL recovery path trusts the persisted
+        # Task record — a hostile/stale/hand-edited absolute or traversal path
+        # would let a QC-authored write land OUTSIDE the artifacts root.
+        # Engine-bind the confinement at this seam (covers every rescue call
+        # site); an unsafe path declines the rescue, never re-aims it.
+        try:
+            root = self._artifacts_root().resolve()
+            if not target_path.resolve().is_relative_to(root):
+                summary.errors.append(
+                    f"{t.id}: QC-fix declined — task output path escapes the "
+                    f"artifacts root"
+                )
+                return False
+        except OSError:
+            return False
 
         # Assemble the defects the QC fixer should target. ``last_qc`` is the 2-tuple
         # ``(verdict, notes)``; the real QC ``defect_type`` (Hero code BLOCKER 2) rides
@@ -9661,12 +9683,16 @@ class Orchestrator:
         def _sweepable(t: Task) -> bool:
             if t.status is TaskStatus.COMPLETED:
                 return False
-            if t.transitions:
-                last = t.transitions[-1]
-                if last.actor == "qc" and last.rationale.startswith(
-                        "environmental defect:"):
+            # WB cadre: scan the WHOLE history, not transitions[-1] — an
+            # environmental/path-conflict block earlier in the history must
+            # not be laundered by a later transition (e.g. a subsequent
+            # cascade block). Markers are the shared constants the writers
+            # stamp (Jenny MED: bind on constants, not rationale prose).
+            for tr in t.transitions:
+                if tr.actor == "qc" and tr.rationale.startswith(
+                        _ENV_BLOCK_RATIONALE_PREFIX):
                     return False
-                if "artifact-path conflict" in last.rationale:
+                if _PATH_CONFLICT_MARKER in tr.rationale:
                     return False
             return True
 
@@ -9864,7 +9890,7 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — ticket failure must not crash run
             pass
 
-        rationale = f"environmental defect: {qc_verdict.check}"
+        rationale = f"{_ENV_BLOCK_RATIONALE_PREFIX} {qc_verdict.check}"
         if notes_section:
             rationale += f" | {notes_section[:120]}"
         # Step 0 M4: environmental gap is QC-classified — actor="qc".
