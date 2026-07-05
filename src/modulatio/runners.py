@@ -1838,6 +1838,39 @@ def _thinking_toggle_for(model: str) -> "str | None":
     return None
 
 
+def thinking_off_effective(
+    model: str, *, base_url: str = "", api_format: str = "",
+) -> bool:
+    """True when a thinking-OFF seat on this model/lane is ACTUALLY quieted —
+    the single source every warning surface reads (doctor, agent builder,
+    runner-build log). Three ways to be True:
+
+    - nothing to quiet: the family isn't reasoning-heavy;
+    - a PROVEN in-band toggle: Qwen's ``/no_think`` is implemented by the
+      model's own chat template, so it survives any shim (0.9.8.5 live
+      validation). GLM's ``/nothink`` is NOT counted — hosted shims don't
+      re-implement Zhipu's template (spike 2026-07-05: ollama.com's GLM
+      reasons straight through it);
+    - a litellm-TRANSLATED provider control on a first-party lane (the
+      ``_accepts_reasoning_disable`` probe — gemini → thinking-budget 0 …).
+
+    A reasoning-heavy family on an opaque OpenAI-compat shim
+    (``api_format=="openai"`` with a ``base_url``) is False: request params
+    are dropped or rejected there (ollama.com 400s ``reasoning_effort``),
+    and serialization ≠ destination honor."""
+    from modulatio import model_capabilities
+
+    tier, _cost, caps = model_capabilities.infer(model, base_url=base_url)
+    if tier != "reasoning-heavy" and "reasoning-heavy" not in caps:
+        return True
+    if _thinking_toggle_for(model) == "/no_think":
+        return True
+    if api_format == "openai" and base_url:
+        return False
+    probe_model = f"{api_format}/{model}" if api_format else model
+    return _accepts_reasoning_disable(probe_model)
+
+
 def _prepend_no_think(messages: list[dict], toggle: str) -> list[dict]:
     """Return a copy of ``messages`` with the family's in-band thinking-off
     ``toggle`` prefixed to the first message's text content — the chat-path

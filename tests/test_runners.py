@@ -995,3 +995,36 @@ def test_single_shot_glm_gets_nothink_dialect(monkeypatch):
 
     litellm_runner("openai/glm-5.2")("do the task")
     assert seen["messages"][0]["content"].startswith("/nothink")
+
+
+# ── Fix #16: the honesty predicate — does thinking-off actually BITE? ────────
+
+
+def test_thinking_off_effective_truth_table():
+    """One source of truth for every warning surface: True only when a
+    thinking-off seat on this model/lane is ACTUALLY quieted — a proven
+    in-band toggle, a litellm-translated provider control, or nothing to
+    quiet. A reasoning-heavy family on an opaque OpenAI-compat shim is
+    False (spike 2026-07-05: params dropped/400, GLM toggles ignored)."""
+    from modulatio.runners import thinking_off_effective
+
+    # non-reasoners: nothing to quiet — trivially effective
+    assert thinking_off_effective("gemma-4-31b-it") is True
+    assert thinking_off_effective(
+        "gemma-4-31b-it", base_url="http://localhost:1234/v1",
+        api_format="openai") is True
+    # qwen: in-band toggle is template-implemented — proven through any shim
+    assert thinking_off_effective(
+        "qwen3.6-27b", base_url="http://localhost:1234/v1",
+        api_format="openai") is True
+    # glm on an openai-compat shim: unquietable (the jan case)
+    assert thinking_off_effective(
+        "glm-5.2", base_url="https://ollama.com/v1",
+        api_format="openai") is False
+    # any reasoning-heavy family on an opaque shim: False
+    assert thinking_off_effective(
+        "deepseek-r1", base_url="https://ollama.com/v1",
+        api_format="openai") is False
+    # a litellm-translated first-party lane: the probe decides (gemini → True)
+    assert thinking_off_effective(
+        "gemini-2.5-flash", api_format="gemini") is True
