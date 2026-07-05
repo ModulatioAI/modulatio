@@ -115,6 +115,8 @@ modulatio doctor
 
 Checks: Python version, dependency imports, vault detection, provider auth profiles, daemon socket, embedding cache, Telegram credentials, …
 
+A **Seats** section flags a producer wearing a **reasoning model that can't be quieted** through its endpoint — a heavy reasoner behind an OpenAI-compatible shim (an Ollama/LM Studio `/v1` that drops reasoning-control params) will bloat its context with reasoning tokens, so `doctor` names the seat with a remedy (swap to a non-reasoning model or a toggle-able family, or accept the cost). A clean floor reads `✓ all producer seats quietable (or non-reasoning)`.
+
 Output format: `[✓]`, `[!]`, or `[✗]` per check, with remediation hints for failures.
 
 Run this first whenever something feels off.

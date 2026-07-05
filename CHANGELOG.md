@@ -4,6 +4,84 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8.8] — 2026-07-05
+
+**Watch the run, and trust the team to finish it.** The factory floor's telemetry
+rail is now **live** — a run's progress, QC tally, context load, and every producer's
+current move, ticking in real time. The team **finishes the job even when a seat
+dies**: a crashed local model is caught, backed off, and routed around, and QC — the
+producer of last resort — **authors the missing pieces** rather than shipping a goal
+with a hole in it. And the seats now **tell the truth about themselves**: a producer
+wearing a reasoning model that can't be quieted is flagged, so runaway reasoning
+tokens stop being a surprise you find in the compression logs. Four cadre-cleared
+arcs, one live kill-test (a model killed mid-run — the team healed and shipped).
+
+### Added
+
+- **Live run telemetry on the floor.** The MOD SQUAD rail's *Run Telemetry* block is
+  no longer a mockup — it shows elapsed time, a **10-segment tasks bar with a real
+  percentage**, the QC pass/reject tally, and the context load (tokens + compressions),
+  all painted live as the run moves. Each producer on the floor shows **what it's
+  doing right now** (the same icon + verb vocabulary as the stream), and **QC steps
+  onto the floor while it reviews**. Everything rests to dashes between runs.
+- **QC produces the missing pieces (the goal-end last-resort sweep).** A goal can no
+  longer ship "disappointed over a hole" while QC sits idle. When a goal's work is
+  incomplete and the retry budget is spent, QC — the producer of last resort — **builds
+  the missing artifacts** from each task's brief, in dependency order, feeding each
+  build the real content of the pieces it depends on (an assembler assembles the actual
+  parts, never a fabrication). It stays out of blocks it genuinely can't fix (a missing
+  linter, a path conflict) and spends only QC's budget — never a producer's.
+- **Producer-seat honesty for thinking-off (#16).** A reasoning model in a producer
+  seat bloats its own context with reasoning tokens; the fix is to quiet it, but a
+  **request parameter can't reach a model through an OpenAI-compatible shim** (an
+  Ollama/LM Studio `/v1` endpoint drops or rejects it). The engine now sends each model
+  family's **in-band toggle** where one is proven (Qwen's `/no_think` rides the message
+  text, which no shim can drop), and — crucially — it **tells you honestly** when a
+  producer seat *can't* be quieted: `modulatio doctor` grows a **Seats** section that
+  flags the seat with a remedy, the agent builder warns at seat time, and the run log
+  warns at team build. Save the heavy reasoners for the Leader and QC, the judgment
+  seats.
+- **Agents accrue episodic memory** from the jobs they run — a per-agent record of what
+  each one worked on, surfaced in the MEMORY tab, where **pending QC memory proposals**
+  can now be approved (`p`) or rejected (`d`).
+- **A SETTINGS tab** (CONFIG → SETTINGS) — adjust the engine's knobs (persistent env
+  overrides, retry budgets, per-role context windows) from the TUI, applied without an
+  edit-the-config-file detour.
+- **Two more Feng-Tui variants** — neon phosphor **red** and **purple** join amber /
+  green / cyan on the F2 cycle — and the **µ mark**, Modulatio's icon, rendered in the
+  active phosphor.
+
+### Changed
+
+- **The CONSOLE flip is now two real tabs** — **LEADER** and **MOD SQUAD**, each a
+  click target with the app's own tab chrome (F4 still cycles). Launching a job **no
+  longer yanks you to the factory floor**; you flip to watch when you want to.
+- **The post-run headline is honest about partial runs.** A run that landed real
+  deliverables but left a task blocked no longer reads "Nothing usable landed" — it
+  owns both the wins and the reservations, matching the Leader's own per-goal sign-off.
+- **The activity feed speaks in icons.** Each tool call and phase renders as a bold
+  phosphor glyph + a plain-language verb (`▼▼ reading a page`, `✎✎ writing`,
+  `○○ reviewing`), and a repeated action **coalesces** into one line with a counter
+  instead of a wall of identical rows. `/cls` (or Ctrl+L) clears the active stream.
+- **Producer thinking-off is family-aware.** The universal `/no_think` prefix (inert
+  on any model that isn't Qwen-class) is replaced by a per-family toggle map; a model
+  family with no known toggle gets clean messages instead of ignored prose.
+
+### Fixed
+
+- **The router catches a dead seat.** A crashed local model (LM Studio reports it as an
+  HTTP 400) is now recognized as an **availability failure**: the seat's fallback chain
+  engages, retries **back off** (2 / 8 / 20s) instead of burning a whole budget in a
+  second against a dead endpoint, and the seat is **cooled out of the dispatch pool** so
+  it stops attracting tasks while it's down. When the seat stays dead, its tasks route
+  to the QC backstop instead of dead-ending as blocked. (Proven by a live kill-test: a
+  model killed mid-run, the team healed and shipped satisfied with zero human touches.)
+- **A zero-completed goal reaches a terminal state** with a surfaced reservation instead
+  of stranding in progress — the same invariant every retry lane already carried, now on
+  the first-pass and primary paths too.
+- The recovery-witness path is **confined to the artifacts root** — a QC-authored rescue
+  can't be steered outside it by a hostile or stale task output path.
+
 ## [0.9.8.7] — 2026-07-03
 
 A research **library** the team reuses instead of re-buying, research tasks that
