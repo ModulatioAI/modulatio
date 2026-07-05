@@ -9594,11 +9594,13 @@ class Orchestrator:
         # task_completed so the producer leaves the TV board ("N working"
         # decrements) and downstream deps unblock — the wedge clears. Without
         # this, a QC-recovered task stayed on the board (only qc_authored_fix,
-        # an info line, fired). agent_id is the task's PRODUCER (the seat being
-        # freed), not the QC that authored the fix.
+        # an info line, fired). Attribute the completion to QC — it authored the
+        # fix, so the feed must not read "<producer> finished a task" over work
+        # the producer couldn't clear. The seat still leaves the board (that's
+        # keyed by task_id in the TV, not this agent_id).
         self._emit_activity(
-            role=self.default_producer_role, phase="task_completed",
-            task_id=t.id, agent_id=t.assigned_agent_id,
+            role="qc", phase="task_completed",
+            task_id=t.id, agent_id=t.qc_agent_id or t.assigned_agent_id,
         )
 
     def _qc_last_resort_sweep(

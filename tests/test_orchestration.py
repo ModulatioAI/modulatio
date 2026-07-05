@@ -7911,13 +7911,21 @@ def test_qc_authored_fix_emits_task_completed(project, monkeypatch):
     events: list = []
     orch.activity_callback = events.append
     task = _qcfix_task(project_id=project.id)
+    task.assigned_agent_id = "james"   # the producer that couldn't clear QC
+    task.qc_agent_id = "quinn"         # the QC mind that authored the fix
     draft = orch._resolve_draft_path(task)
     draft.parent.mkdir(parents=True, exist_ok=True)
     draft.write_text("a real but flawed body, long enough to patch")
     summary = RunSummary(project=project)
 
     orch._attempt_qc_fix_forward(task, draft, (_rejected_verdict(), "fix it"), summary)
-    assert any(getattr(e, "phase", None) == "task_completed" for e in events)
+    completed = [e for e in events if getattr(e, "phase", None) == "task_completed"]
+    assert completed
+    # The completion is QC's work — the feed must NOT read "james finished a task"
+    # when QC authored the fix. Attribute the completion to QC (the seat still
+    # leaves the board; that's keyed by task_id, not this agent_id).
+    assert completed[-1].agent_id == "quinn"
+    assert completed[-1].agent_id != task.assigned_agent_id
 
 
 def test_qc_fix_forward_completes_on_qc_patch(project, monkeypatch):
