@@ -211,3 +211,51 @@ def test_qc_down_too_ships_with_reservations_not_a_hang(project: Project):
         "the goal reaches a terminal state even with every model down")
     assert summary.recommendations or summary.errors, (
         "the failure is surfaced, not swallowed")
+
+
+def test_wedged_seat_releases_at_the_deadline_and_the_run_heals(
+    project: Project, monkeypatch,
+):
+    """ACCEPTANCE (the cb6c0d shape): a producer whose completion NEVER
+    returns — a spin no transport timeout reaches — is released by the hard
+    kill-boundary at the deadline instead of 17 minutes, the recovery train
+    lands the work, the run ends SATISFIED, and the wedge leaves a stack
+    dump in the crash log (the evidence Stage 0 existed to capture)."""
+    import time as _time
+
+    from modulatio import logstore
+    from modulatio.runners import _hard_deadline
+
+    monkeypatch.setenv("MODULATIO_CRASH_DIR", str(
+        Path(vault.VAULT_ROOT) / "crashes"))
+    monkeypatch.setattr("modulatio.runners._HARD_DEADLINE_GRACE_S", 0.0)
+    monkeypatch.setattr(
+        orch_mod, "_AVAILABILITY_RETRY_BACKOFF_S", (0.0, 0.0, 0.0))
+    _seed_seats()
+
+    def _spinning_forever(prompt: str) -> str:
+        _time.sleep(120)          # far past the test deadline — "never" returns
+        return "too late"
+
+    wedged = _hard_deadline(
+        _spinning_forever, timeout_s=0.2, describe="chat lmstudio/dead")
+
+    orch = Orchestrator(
+        project,
+        {"leader": _leader, "planner": _planner,
+         "drafter": _drafter, "qc": _qc},
+        agent_runners={"lmstudio/dead": wedged},
+    )
+    start = _time.monotonic()
+    summary = orch.kickoff("research two topics, assemble the report")
+    elapsed = _time.monotonic() - start
+
+    tasks = store.list_tasks(PROJECT_CODE, run_id=project.run_id)
+    assert all(t.status is TaskStatus.COMPLETED for t in tasks), (
+        [(t.id, t.status) for t in tasks])
+    assert summary.verdicts[-1]["verdict"] == "satisfied"
+    assert elapsed < 60, f"the wedge must not hold the run ({elapsed:.0f}s)"
+    # the wedge left its evidence
+    dumps = [e for e in logstore.list_logs() if "hard-timeout" in e.summary]
+    assert dumps, "the kill-boundary must dump the wedged stacks"
+    assert "lmstudio/dead" in dumps[0].path.read_text()

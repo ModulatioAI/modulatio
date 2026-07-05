@@ -321,3 +321,24 @@ def test_plain_400_request_bug_still_propagates():
 
     with pytest.raises(BadRequestError):
         runners.run_with_model_fallbacks([("A", "rA"), ("B", "rB")], run_one)
+
+
+def test_hard_timeout_advances_the_chain_with_the_real_tuple():
+    """SeatCallHardTimeout advances a seat's fallback chain through the REAL
+    availability tuple (no monkeypatch) — the kill-boundary plugs straight
+    into the #8 machinery."""
+    from modulatio.runners import SeatCallHardTimeout
+
+    hops: list[tuple[str, str]] = []
+
+    def run_one(label, r):
+        if label == "A":
+            raise SeatCallHardTimeout("chat A: no result within 0.1s")
+        return f"ok:{r}"
+
+    out = runners.run_with_model_fallbacks(
+        [("A", "rA"), ("B", "rB")], run_one,
+        on_fallback=lambda failed, nxt, exc: hops.append((failed, nxt)),
+    )
+    assert out == "ok:rB"
+    assert hops == [("A", "B")]

@@ -182,3 +182,49 @@ def test_dispatch_pool_excludes_cooling_seats(project: Project, monkeypatch):
     assert not orch._seat_in_cooldown("james")
     assert {a.id for a in orch._dispatch_pool(agents)} == {
         "james", "olivia", "qc", "leader"}
+
+
+def test_hard_timeout_backs_off_and_cools_the_seat(project: Project):
+    """The kill-boundary's SeatCallHardTimeout is availability-class: the
+    redo loop backs off and the seat cools, same as a crashed model."""
+    from modulatio.runners import SeatCallHardTimeout
+
+    orch = Orchestrator(project, _runners())
+    waits: list[float] = []
+    orch.abort_event.wait = lambda s: waits.append(s) or False  # type: ignore[method-assign]
+
+    def _wedged_producer(task, corrective_notes=""):
+        raise SeatCallHardTimeout("chat test-model: no result within 0.1s")
+
+    orch._producer_execute = _wedged_producer  # type: ignore[assignment]
+    orch._attempt_qc_fix_forward = lambda *a, **k: False  # type: ignore[assignment]
+    t = _task(project.id)
+    orch._run_task_with_redo(t, RunSummary(project=project))
+
+    assert len(waits) >= 2 and waits[0] == _AVAILABILITY_RETRY_BACKOFF_S[0]
+    assert orch._seat_in_cooldown("james")
+
+
+def test_hard_timeout_exhaustion_routes_to_qc_backstop(project: Project):
+    from modulatio.runners import SeatCallHardTimeout
+
+    orch = Orchestrator(project, _runners())
+    orch.abort_event.wait = lambda s: False  # type: ignore[method-assign]
+
+    def _wedged_producer(task, corrective_notes=""):
+        raise SeatCallHardTimeout("chat test-model: no result within 0.1s")
+
+    rescued: list[str] = []
+
+    def _qc_rescue(task, draft_path, last_qc, summary, **kw):
+        rescued.append(task.id)
+        task.status = TaskStatus.COMPLETED
+        return True
+
+    orch._producer_execute = _wedged_producer  # type: ignore[assignment]
+    orch._attempt_qc_fix_forward = _qc_rescue  # type: ignore[assignment]
+    t = _task(project.id)
+    orch._run_task_with_redo(t, RunSummary(project=project))
+
+    assert rescued == ["SAV-T-001"]
+    assert t.status is TaskStatus.COMPLETED
