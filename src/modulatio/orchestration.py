@@ -525,6 +525,24 @@ def _assembly_strategy_for_task(task: "Task") -> str:
     return "document"
 
 
+def _assembler_fallback_title(task: "Task") -> "str | None":
+    """A document title derived from the assembler deliverable's declared
+    ``output_path`` stem — the framing fallback for ad-hoc runs whose (empty)
+    DeliverableSpec declares no title. The stem is the PLANNER'S own name for the
+    deliverable, so stamping it imposes nothing the plan didn't declare; without
+    it a joined report opens with its first unit's heading, and delivery then
+    exports under that name too (run-4 polish). Explicit framing — a producer
+    title_page or a spec title — wins at the call site; no declared output_path
+    (drafts-fallback deliverable) → None, untitled as today."""
+    name = (task.output_path or "").strip().rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    words = [w for w in re.split(r"[-_\s]+", stem) if w]
+    if not words:
+        return None
+    # Capitalize only all-lowercase words so declared casing (TSM, US) survives.
+    return " ".join(w.capitalize() if w.islower() else w for w in words)
+
+
 def _select_assembler_skill(tasks: "list[Task]", project_code: str | None) -> None:
     """Engine bind (Part B / B2): route each assembler task to its artifact_kind's
     ``assembler_skill`` (declared in the standards file), so a code/media/data
@@ -6965,10 +6983,13 @@ class Orchestrator:
         # structure from the bound DeliverableSpec); the family's head renderer builds
         # its own head (document → title+TOC; other families no-op until they grow one).
         # Augment BEFORE both assemble and digest so each sees the same framed manifest.
+        # Ad-hoc runs (empty spec) fall back to a title humanized from the task's
+        # declared output_path stem; _document_head keeps producer framing sovereign.
         _spec = self._deliverable_spec
         manifest = _assembly.apply_framing(
             manifest, self._artifacts_root(), strategy,
-            title=_spec.title, required_structure=_spec.required_structure,
+            title=_spec.title or _assembler_fallback_title(task),
+            required_structure=_spec.required_structure,
         )
         # P4: for a DOCUMENT assembly, render the concatenated body into the
         # deliverable's DECLARED binary format (artifact-agnostic — driven by the

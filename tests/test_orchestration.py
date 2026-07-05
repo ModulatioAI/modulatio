@@ -9873,6 +9873,78 @@ def test_apply_assembly_manifest_engine_frames_from_spec(project, tmp_path):
     assert "# My Anthology" in orch._assembly_records[task.id].manifest["title_page"]
 
 
+def test_apply_assembly_manifest_falls_back_to_output_path_title(project, tmp_path):
+    """Run-4 polish: an AD-HOC run (no JT → empty DeliverableSpec, title None) with a
+    bare producer manifest still gets a document title — humanized from the assembler
+    task's planner-declared ``output_path`` stem. Without it the joined report opens
+    with the first unit's heading, and delivery then exports under THAT name too."""
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.md").write_text("# Research Note: TSM\n\nalpha")
+    (artifacts / "s2.md").write_text("# Research Note: Fabs\n\nbeta")
+    orch = _assembly_orch(project, tmp_path, artifacts)   # default (empty) spec
+    task = Task(id="FBT-T-001", project_id=uuid4(), goal_id="FBT-G-001",
+                description="assemble", summary_for_state_doc="",
+                output_path="retro-hardware-research-report.md")
+    body = '```assembly\n{"units": ["s1.md", "s2.md"]}\n```\n'   # BARE
+    orch._apply_assembly_manifest(task, body)
+
+    rec = orch._assembly_records[task.id]
+    assert rec.digest.structure["title"] is True
+    assert "# Retro Hardware Research Report" in rec.manifest["title_page"]
+
+
+def test_output_path_title_fallback_defers_to_explicit_framing(project, tmp_path):
+    """Precedence: the stem-derived title is a FALLBACK only — a producer-authored
+    title_page stands untouched, and a JT-declared spec title beats the stem."""
+    from uuid import uuid4
+    from modulatio import job_templates as _jt
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.md").write_text("# One\n\nalpha")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+
+    # Producer framing wins over the stem.
+    t1 = Task(id="FBT-T-002", project_id=uuid4(), goal_id="FBT-G-001",
+              description="assemble", summary_for_state_doc="",
+              output_path="ignored-stem.md")
+    orch._apply_assembly_manifest(
+        t1, '```assembly\n{"units": ["s1.md"], "title_page": "PRODUCER SAID"}\n```\n')
+    assert orch._assembly_records[t1.id].manifest["title_page"] == "PRODUCER SAID"
+
+    # JT spec title wins over the stem.
+    orch._deliverable_spec = _jt.DeliverableSpec(title="Declared Title")
+    t2 = Task(id="FBT-T-003", project_id=uuid4(), goal_id="FBT-G-001",
+              description="assemble", summary_for_state_doc="",
+              output_path="ignored-stem.md")
+    orch._apply_assembly_manifest(t2, '```assembly\n{"units": ["s1.md"]}\n```\n')
+    assert "# Declared Title" in orch._assembly_records[t2.id].manifest["title_page"]
+
+
+def test_no_output_path_means_no_fallback_title(project, tmp_path):
+    """A task with no declared output_path (drafts-fallback deliverable) has no stem
+    to derive from — no title is stamped (today's behavior, pinned)."""
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "s1.md").write_text("# One\n\nalpha")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    task = Task(id="FBT-T-004", project_id=uuid4(), goal_id="FBT-G-001",
+                description="assemble", summary_for_state_doc="", output_path=None)
+    orch._apply_assembly_manifest(task, '```assembly\n{"units": ["s1.md"]}\n```\n')
+
+    rec = orch._assembly_records[task.id]
+    assert rec.digest.structure["title"] is False
+    assert not rec.manifest.get("title_page")
+
+
 def test_leader_verify_feeds_digest_and_twin_not_binary(tmp_path, monkeypatch):
     """#101 Part 0 (0.3): a deliverable with an engine assembly digest feeds
     Leader-verify the STRUCTURAL DIGEST + readable twin — never "(could not read)" on

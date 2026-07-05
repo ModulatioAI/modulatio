@@ -17,6 +17,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Clay (`claude -p`) seats keep their own subprocess bound. The released call's
   thread is abandoned, not killed (CPython can't kill a thread); the warning line
   counts live zombies so accumulation stays visible.
+- **Assembled reports get a real title in ad-hoc runs.** A fan-out deliverable with
+  no Job-Template-declared title now opens with a document title humanized from the
+  plan's own `output_path` name (e.g. `retro-hardware-research-report.md` → "Retro
+  Hardware Research Report") instead of the first unit's heading — which delivery
+  was also inheriting as the export name. Producer-authored framing and a declared
+  spec title still win; a deliverable with no declared path stays untitled.
 
 ### Changed
 
