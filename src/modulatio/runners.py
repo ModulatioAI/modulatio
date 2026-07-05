@@ -590,13 +590,19 @@ _REASONING_DISABLE_CACHE: dict[str, bool] = {}
 
 
 def _accepts_reasoning_disable(model: str) -> bool:
-    """True if ``model``'s provider accepts ``reasoning_effort="disable"`` — the
-    second producer thinking-OFF mechanism, on top of the ``/no_think`` prefix.
-    litellm maps it per-provider: Gemini → thinking-budget 0, Ollama → think
-    False; o1/o3 ignore it harmlessly. False when litellm would RAISE on it
-    (non-reasoning models; Anthropic's low/medium/high-only enum) — drop_params
-    is off, so the caller must skip the param rather than crash the call. Probed
-    once per model via ``get_optional_params`` and cached."""
+    """True if litellm will SERIALIZE ``reasoning_effort="disable"`` for
+    ``model``'s provider — the second producer thinking-OFF mechanism, on top
+    of the family toggle prefix. litellm maps it per-provider: Gemini →
+    thinking-budget 0, Ollama-native → think False; o1/o3 ignore it
+    harmlessly. False when litellm would RAISE on it (non-reasoning models;
+    Anthropic's low/medium/high-only enum; ``openai/*`` shim strings) —
+    drop_params is off, so the caller must skip the param rather than crash.
+
+    HONESTY NOTE (spike 2026-07-05): this probes SERIALIZATION, not whether
+    the DESTINATION honors the param — an OpenAI-compat shim can drop or
+    reject it (ollama.com/v1 → 400). Destination efficacy is what
+    ``model_capabilities.thinking_off_effective`` judges. Probed once per
+    model via ``get_optional_params`` and cached."""
     cached = _REASONING_DISABLE_CACHE.get(model)
     if cached is not None:
         return cached
@@ -683,14 +689,16 @@ def litellm_runner(
         from litellm.exceptions import AuthenticationError, RateLimitError
         from modulatio import context_budget as _ctx_budget
 
-        # ``/no_think`` disables the inner monologue on reasoning-toggle models
-        # (Qwen-class) that honor it in the prompt. NEVER prepend it for Clay
-        # (claude_cli): the Claude CLI reads a leading ``/`` as a slash command,
-        # so ``/no_think`` comes back as "Unknown command: /no_think" and every
-        # single-shot Clay call (planner, decompose, QC, reflect) returns garbage.
+        # The family's in-band thinking-off toggle (Qwen /no_think, GLM
+        # /nothink; None for families with no known toggle — see
+        # _THINKING_TOGGLE_BY_FAMILY). NEVER prepend for Clay (claude_cli):
+        # the Claude CLI reads a leading ``/`` as a slash command, so a
+        # toggle comes back as "Unknown command" and every single-shot Clay
+        # call (planner, decompose, QC, reflect) returns garbage.
+        toggle = _thinking_toggle_for(litellm_model)
         body = (
-            f"/no_think\n\n{prompt}"
-            if disable_thinking and endpoint != "claude_cli"
+            f"{toggle}\n\n{prompt}"
+            if disable_thinking and toggle and endpoint != "claude_cli"
             else prompt
         )
 
@@ -1803,15 +1811,41 @@ def _build_claude_cli_chat_runner(
     return run
 
 
-def _prepend_no_think(messages: list[dict]) -> list[dict]:
-    """Return a copy of ``messages`` with ``/no_think`` prefixed to the first
-    message's text content — the chat-path analog of ``litellm_runner``'s
-    single-shot prefix. Reasoning-toggle models (Qwen-class) honor it and skip
-    the inner monologue; others read it as inert text. No-op (returns the input)
-    when the first message has no string content (nothing to prefix)."""
+#: In-band thinking-off toggles by model FAMILY. The prefix rides the message
+#: TEXT, so no OpenAI-compat shim can drop it — unlike request params, which
+#: ollama.com's /v1 rejects (reasoning_effort → 400) or ignores
+#: (chat_template_kwargs; spike 2026-07-05, scripts/smoke/thinking-off/).
+#: Only families whose chat templates implement a toggle are listed; unknown
+#: families get NO prefix — inert toggle prose in every producer prompt was
+#: noise pretending to be a control. Qwen is live-proven (0.9.8.5 validation);
+#: GLM is best-effort — Zhipu's own template honors /nothink, but a hosted
+#: shim may not re-implement it (ollama.com's GLM ignores it — the
+#: ``thinking_off_effective`` predicate stays honest there).
+_THINKING_TOGGLE_BY_FAMILY = (
+    ("qwen", "/no_think"),
+    ("glm", "/nothink"),
+)
+
+
+def _thinking_toggle_for(model: str) -> "str | None":
+    """The family's in-band thinking-off token for a litellm model string,
+    or None when the family has no known toggle (substring match on the
+    lowercased string — the ``model_capabilities._FAMILY_TABLE`` idiom)."""
+    name = model.lower()
+    for family, toggle in _THINKING_TOGGLE_BY_FAMILY:
+        if family in name:
+            return toggle
+    return None
+
+
+def _prepend_no_think(messages: list[dict], toggle: str) -> list[dict]:
+    """Return a copy of ``messages`` with the family's in-band thinking-off
+    ``toggle`` prefixed to the first message's text content — the chat-path
+    analog of ``litellm_runner``'s single-shot prefix. No-op (returns the
+    input) when the first message has no string content (nothing to prefix)."""
     if not messages or not isinstance(messages[0].get("content"), str):
         return messages
-    first = {**messages[0], "content": f"/no_think\n\n{messages[0]['content']}"}
+    first = {**messages[0], "content": f"{toggle}\n\n{messages[0]['content']}"}
     return [first, *messages[1:]]
 
 
@@ -1890,11 +1924,13 @@ def litellm_chat_runner(
         from litellm import completion
         from litellm.exceptions import AuthenticationError, RateLimitError
 
-        # Thinking-OFF default for the tool-loop (producers/QC): prefix /no_think
-        # so reasoning tokens don't accumulate as unprunable context. The Leader's
-        # seat overrides with disable_thinking=False (built that way in cli/daemon).
-        if disable_thinking:
-            messages = _prepend_no_think(messages)
+        # Thinking-OFF default for the tool-loop (producers): prefix the
+        # FAMILY's in-band toggle so reasoning tokens don't accumulate as
+        # unprunable context; families with no known toggle get clean
+        # messages. The Leader's seat overrides with disable_thinking=False.
+        _toggle = _thinking_toggle_for(litellm_model)
+        if disable_thinking and _toggle:
+            messages = _prepend_no_think(messages, _toggle)
 
         def _call(api_key_override: str | None = None):
             ck = dict(kwargs)

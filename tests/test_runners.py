@@ -176,20 +176,22 @@ def _chat_runner_capturing_messages(monkeypatch, model: str, **kw):
 
 
 def test_chat_runner_disables_thinking_by_default(monkeypatch):
-    """The tool-loop producer path defaults thinking-OFF: ``/no_think`` is
-    prefixed so reasoning-toggle models act instead of deliberate (the producer
-    context-churn fix — reasoning tokens are the unprunable bloat)."""
-    runner, seen = _chat_runner_capturing_messages(monkeypatch, "openrouter/test")
+    """The tool-loop producer path defaults thinking-OFF: the family toggle
+    (Qwen's ``/no_think`` here) is prefixed so reasoning-toggle models act
+    instead of deliberate (the producer context-churn fix — reasoning tokens
+    are the unprunable bloat)."""
+    runner, seen = _chat_runner_capturing_messages(
+        monkeypatch, "openrouter/qwen-3.5-72b")
     runner(messages=[{"role": "system", "content": "do the task"}], tools=[])
     assert seen["messages"][0]["content"].startswith("/no_think")
     assert "do the task" in seen["messages"][0]["content"]
 
 
 def test_chat_runner_leader_keeps_thinking_when_overridden(monkeypatch):
-    """disable_thinking=False (the Leader's reasoning seat, the override) leaves
-    the messages untouched — no ``/no_think`` prefix."""
+    """disable_thinking=False (the Leader's reasoning seat, the override)
+    leaves the messages untouched even for a toggle-family model."""
     runner, seen = _chat_runner_capturing_messages(
-        monkeypatch, "openrouter/test", disable_thinking=False
+        monkeypatch, "openrouter/qwen-3.5-72b", disable_thinking=False
     )
     runner(messages=[{"role": "system", "content": "judge the work"}], tools=[])
     assert seen["messages"][0]["content"] == "judge the work"
@@ -939,3 +941,57 @@ def test_build_role_runners_requires_full_triad(tmp_path, monkeypatch):
     runners = runners_mod.build_role_runners("TRIAD")  # complete triad
     assert runners is not None
     assert set(runners) >= {"leader", "qc", "drafter", "planner"}
+
+
+# ── Fix #16: the thinking toggle is FAMILY-AWARE, not a Qwen-ism for all ─────
+
+
+def test_thinking_toggle_for_resolves_by_family():
+    """`/no_think` is Qwen dialect; GLM documents `/nothink`; every other
+    family gets NO prefix — an unknown model reading inert toggle text was
+    noise, not quieting (the 2026-07-04 jan run: GLM read /no_think as prose
+    and reasoned through 5 compressions)."""
+    from modulatio.runners import _thinking_toggle_for
+
+    assert _thinking_toggle_for("openrouter/qwen-3.5-72b") == "/no_think"
+    assert _thinking_toggle_for("openai/qwen3.6-27b") == "/no_think"
+    assert _thinking_toggle_for("openai/glm-5.2") == "/nothink"
+    assert _thinking_toggle_for("ollama/GLM-4.5") == "/nothink"
+    assert _thinking_toggle_for("openai/gemma-4-31b-it") is None
+    assert _thinking_toggle_for("openrouter/test") is None
+    assert _thinking_toggle_for("gemini/gemini-2.5-flash") is None
+
+
+def test_chat_runner_glm_gets_nothink_dialect(monkeypatch):
+    runner, seen = _chat_runner_capturing_messages(monkeypatch, "openai/glm-5.2")
+    runner(messages=[{"role": "system", "content": "do the task"}], tools=[])
+    assert seen["messages"][0]["content"].startswith("/nothink")
+    assert "/no_think" not in seen["messages"][0]["content"]
+
+
+def test_chat_runner_unknown_family_gets_no_inert_prefix(monkeypatch):
+    """A family with no known toggle gets clean messages — inert toggle text
+    in every producer prompt was transcript noise pretending to be a control."""
+    runner, seen = _chat_runner_capturing_messages(monkeypatch, "openrouter/test")
+    runner(messages=[{"role": "system", "content": "do the task"}], tools=[])
+    assert seen["messages"][0]["content"] == "do the task"
+
+
+def test_single_shot_glm_gets_nothink_dialect(monkeypatch):
+    """The single-shot path resolves the same family map."""
+    import litellm
+
+    from modulatio.runners import litellm_runner
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        litellm, "completion",
+        lambda **k: seen.update(messages=k["messages"])
+        or _fake_chat_completion_response(content="ok", prompt_tokens=1, completion_tokens=1),
+    )
+    monkeypatch.setattr(litellm, "completion_cost", lambda **k: 0.0)
+    monkeypatch.setattr("modulatio.runners._resolve_model_call_args", lambda m: (m, {}))
+    monkeypatch.setattr("modulatio.model_presets.load_presets", lambda: {})
+
+    litellm_runner("openai/glm-5.2")("do the task")
+    assert seen["messages"][0]["content"].startswith("/nothink")
