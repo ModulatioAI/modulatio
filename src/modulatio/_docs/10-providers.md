@@ -297,6 +297,10 @@ Configure via the `fallbacks` field on a model entry, or globally in `defaults.j
 
 The watchdog catches a known failure pattern where a fallback "wins" and the session sticks on the fallback model permanently — don't be surprised if you see a fallback warning in your audit trail; it's the system working as designed.
 
+## Call timeouts and the hard kill-boundary
+
+**`MODULATIO_CALL_TIMEOUT`** (seconds, default `600`) bounds every seat model-call — the single-shot path AND the tool-loop chat path share it as their transport timeout, and an explicit `timeout=` on a runner still wins. On top of it sits the **hard kill-boundary**: a call that outlives the transport timeout by 30s (a CPU spin or C-level stall the network timeout can't see) is force-released with an availability-class failure — the seat's fallback chain, retry backoff, cooldown, and the QC backstop take it from there, and the wedged call's all-threads stack dump lands in the LOGS tab. Raise the knob if your models legitimately need longer than 10 minutes per completion; both bounds scale with it. Clay (`claude -p`) seats are bounded by their own subprocess timeout instead.
+
 ## Common provider issues
 
 ### "401 Unauthorized" on a key you just created

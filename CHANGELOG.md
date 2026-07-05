@@ -4,6 +4,38 @@ All notable changes to Modulatio are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The hard kill-boundary — no seat call outlives its wall-clock.** A model call
+  that spins or stalls in a way no network timeout can see (the live 17-minute wedge:
+  a tool-loop completion burning CPU in silence) is now force-released 30s past its
+  transport timeout. The seat fails with an availability-class error — fallback
+  chain, retry backoff, seat cooldown, and the QC backstop take it from there — and
+  the wedged call's **all-threads stack dump** lands in the crash log (LOGS tab).
+  Clay (`claude -p`) seats keep their own subprocess bound. The released call's
+  thread is abandoned, not killed (CPython can't kill a thread); the warning line
+  counts live zombies so accumulation stays visible.
+
+### Changed
+
+- **The tool-loop transport timeout joins `MODULATIO_CALL_TIMEOUT`** (default 600s).
+  It was a hardcoded 1800s that nothing overrode, so the idle-stall bound never
+  applied to the chat/tool-loop seam — the exact seam that wedged. Long-running
+  completions past 10 minutes now raise a clean, recoverable timeout; raise the knob
+  if your models legitimately need longer.
+- **The Stage-0 spin watchdog is superseded** by the kill-boundary (which releases
+  AND captures, and covers the tool-loop seam the diagnostic never reached). The
+  wedge dump moves from the run folder's `wedged-calls.txt` to the crash log /
+  LOGS tab.
+
+### Fixed
+
+- The **µ block-art is removed from the boot splash** — it rendered as a stray "U"
+  glued to the wordmark with a misplaced tail. The console header's inline µ is
+  unchanged.
+
 ## [0.9.8.8] — 2026-07-05
 
 **Watch the run, and trust the team to finish it.** The factory floor's telemetry

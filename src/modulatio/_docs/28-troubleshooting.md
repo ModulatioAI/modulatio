@@ -121,6 +121,27 @@ Fix:
 
 ## Plan execution
 
+### A seat's call never returns / the run seems wedged
+
+No seat model-call can outlive its wall-clock anymore. Every in-process call
+(litellm chat + single-shot + Codex) carries a **hard kill-boundary**: the
+transport timeout (`MODULATIO_CALL_TIMEOUT`, default 600s) gets first chance at
+a clean error, and a call that outlives it by 30s — a CPU spin or C-level stall
+no network timeout can see — is force-released. The seat fails with an
+availability-class error, so the normal recovery runs: fallback model, retry
+backoff, seat cooldown, and the QC backstop if it stays down. The wedged call's
+**all-threads stack dump** lands in the crash log — read it in the **LOGS** tab
+(`seat call hard-timeout: …`) and send it to the team if it recurs. Clay
+(`claude -p`) seats are bounded separately by their subprocess timeout.
+
+Two honest limits: the released call's thread is *abandoned*, not killed
+(CPython can't kill a thread) — it burns quietly until the transport lets go,
+and the log line counts live zombies so accumulation is visible; and a stall
+that holds the GIL inside a C extension freezes the whole process (nothing
+in-process can run, including this boundary) — that shape has never been
+observed live, and the dump from any future wedge is exactly what would prove
+it.
+
 ### Plan stuck in `awaiting-approval`
 
 You haven't approved or rejected. Approve via:
