@@ -1065,6 +1065,17 @@ def build_chat_runners(
             override if override is not None
             else getattr(agent, "tier", "producer") == "producer"
         )
+        # Honesty at build time (#16): a thinking-off seat whose lane can't
+        # actually be quieted (reasoning-heavy family on an opaque shim) gets
+        # one WARNING so headless runs learn the truth — reasoning bloat will
+        # ride this seat's tool loop until the operator reseats it.
+        if disable_thinking and not seat_thinking_off_effective(agent.model):
+            _log.warning(
+                "Producer seat %s wears %r on a lane where thinking-off has "
+                "no effect — reasoning tokens will bloat its context. Swap "
+                "the seat's model (see `modulatio doctor`) or accept the cost.",
+                _agent_label(agent), agent.model,
+            )
         runner = build(agent.model, disable_thinking=disable_thinking)
         if runner is not None:
             chat_runners[agent.id] = runner
@@ -1869,6 +1880,23 @@ def thinking_off_effective(
         return False
     probe_model = f"{api_format}/{model}" if api_format else model
     return _accepts_reasoning_disable(probe_model)
+
+
+def seat_thinking_off_effective(model_ref: str) -> bool:
+    """``thinking_off_effective`` for a ROSTER model reference — a preset key
+    resolves to its preset's model/base_url/api_format; a raw provider/model
+    id is judged directly. The one resolver the doctor, the agent builder,
+    and the runner-build warning all share."""
+    from modulatio import model_presets
+
+    preset = model_presets.load_presets().get(model_ref)
+    if preset:
+        return thinking_off_effective(
+            preset.get("model", "") or "",
+            base_url=preset.get("base_url", "") or "",
+            api_format=preset.get("api_format", "") or "",
+        )
+    return thinking_off_effective(model_ref)
 
 
 def _prepend_no_think(messages: list[dict], toggle: str) -> list[dict]:

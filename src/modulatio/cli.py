@@ -979,6 +979,37 @@ def _run_doctor_checks() -> None:
                 f"missing: {proj}  (run `modulatio setup`)"
             )
 
+    # Seats (#16): a producer wearing a reasoning-heavy model on a lane where
+    # thinking-off has no effect will bloat its tool-loop context with
+    # reasoning tokens — surface it with a remedy instead of letting the
+    # operator discover it as compressions mid-run.
+    if code:
+        try:
+            from modulatio import roster as _roster
+            from modulatio import runners as _runners
+
+            seats = _roster.list_agents(code)
+        except Exception:
+            seats = []
+        if seats:
+            typer.echo("\nSeats:")
+            noisy = 0
+            for ag in seats:
+                if getattr(ag, "tier", "producer") != "producer" or not ag.model:
+                    continue
+                if getattr(ag, "disable_thinking", None) is False:
+                    continue  # operator chose thinking-ON — their call
+                if not _runners.seat_thinking_off_effective(ag.model):
+                    noisy += 1
+                    typer.echo(
+                        f"  ⚠ {ag.name or ag.id} (producer) wears {ag.model!r} "
+                        "on a lane where thinking-off has no effect — "
+                        "reasoning bloat will ride its tool loop. Swap the "
+                        "seat's model, or accept the cost."
+                    )
+            if not noisy:
+                typer.echo("  ✓ all producer seats quietable (or non-reasoning)")
+
     # Token expiry
     typer.echo("\nOAuth tokens:")
     if oauth_helpers.has_anthropic_credentials():

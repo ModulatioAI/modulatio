@@ -1028,3 +1028,43 @@ def test_thinking_off_effective_truth_table():
     # a litellm-translated first-party lane: the probe decides (gemini → True)
     assert thinking_off_effective(
         "gemini-2.5-flash", api_format="gemini") is True
+
+
+def test_build_chat_runners_warns_on_unquietable_producer_seat(
+    monkeypatch, caplog, tmp_path,
+):
+    """A producer seat whose lane can't be quieted gets ONE honest log
+    warning at runner build — headless runs learn the truth without a TUI."""
+    import logging
+
+    from modulatio import roster, vault
+    from modulatio.runners import build_chat_runners
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("THK", "thinking fixture", "obj")
+    roster.save(roster.Agent(
+        id="jan", name="Jan", identity="Jan id",
+        model="glmshim", tier="producer"), "THK")
+    roster.save(roster.Agent(
+        id="lead", name="Lead", identity="Lead id",
+        model="glmshim", tier="leader"), "THK")
+    roster.save(roster.Agent(
+        id="randy", name="Randy", identity="Randy id",
+        model="qwenshim", tier="producer"), "THK")
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {
+            "glmshim": {"model": "glm-5.2", "base_url": "https://ollama.com/v1",
+                        "api_format": "openai"},
+            "qwenshim": {"model": "qwen3.6-27b",
+                         "base_url": "http://localhost:1234/v1",
+                         "api_format": "openai"},
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger="modulatio.runners"):
+        build_chat_runners(
+            "THK", builder=lambda model, disable_thinking=None: lambda **k: None)
+
+    warnings = [r.message for r in caplog.records if "thinking" in r.message.lower()]
+    assert len(warnings) == 1                 # jan only — not the leader, not randy
+    assert "jan" in warnings[0].lower() or "Jan" in warnings[0]

@@ -315,3 +315,39 @@ def test_kickoff_existing_project_team_lane_is_roster_sourced(tmp_path, monkeypa
     assert captured["runners"]["leader"].model_name == "roster-leader-model"
     # ...and the ignored flag is surfaced, not silently dropped.
     assert "ignored" in result.output and "FLAG-DIFFERENT" in result.output
+
+
+def test_doctor_flags_unquietable_producer_seat(capsys, tmp_path, monkeypatch):
+    """doctor's Seats lines: a producer wearing a reasoning-heavy model on a
+    lane where thinking-off has no effect gets a ⚠ with a remedy; a quietable
+    producer does not."""
+    from modulatio import config, roster, vault
+    vroot = tmp_path / "vault"
+    vroot.mkdir()
+    config.save_defaults({"vault_root": str(vroot), "default_project_code": "proj1"})
+    vault.reload()
+    vault.init_project("proj1", "Proj1", "", exist_ok=True)
+    roster.save(roster.Agent(
+        id="jan", name="Jan", identity="Jan id",
+        model="glmshim", tier="producer"), "proj1")
+    roster.save(roster.Agent(
+        id="randy", name="Randy", identity="Randy id",
+        model="qwenshim", tier="producer"), "proj1")
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {
+            "glmshim": {"model": "glm-5.2", "base_url": "https://ollama.com/v1",
+                        "api_format": "openai", "auth_type": "api_key"},
+            "qwenshim": {"model": "qwen3.6-27b",
+                         "base_url": "http://localhost:1234/v1",
+                         "api_format": "openai", "auth_type": "none"},
+        },
+    )
+
+    cli._run_doctor_checks()
+
+    out = capsys.readouterr().out
+    assert "Seats" in out
+    warn_lines = [ln for ln in out.splitlines() if "⚠" in ln]
+    assert any("Jan" in ln for ln in warn_lines)
+    assert not any("Randy" in ln for ln in warn_lines)

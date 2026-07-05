@@ -280,7 +280,7 @@ Reasoning-toggle models can be run thinking-OFF by adding provider params to the
 }
 ```
 
-`default_params` is applied as a base and the dedicated auth/endpoint fields stay authoritative, so a stray `api_base`/`api_key` in it can't override your real auth. (ollama's `/v1` openai-compat endpoint ignores reasoning-control kwargs — use OpenRouter for thinking-off, or an inherently non-reasoning model.)
+`default_params` is applied as a base and the dedicated auth/endpoint fields stay authoritative, so a stray `api_base`/`api_key` in it can't override your real auth. (ollama's `/v1` openai-compat endpoint ignores reasoning-control kwargs — and rejects `reasoning_effort` outright — so request params can't quiet a reasoning-heavy model through it. The engine sends each family's in-band toggle where one is proven (Qwen's `/no_think` rides the message text, which no shim can drop), and it tells you honestly when a producer seat can't be quieted: `modulatio doctor` flags the seat, the agent builder warns at seat time, and the run log warns at team build. For producer seats prefer a non-reasoning model or a toggle-able family; save the heavy reasoners for the Leader and QC — the judgment seats.)
 
 Live findings worth knowing:
 

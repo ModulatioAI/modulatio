@@ -197,3 +197,38 @@ async def test_on_show_refreshes_roster_after_project_switch(project, tmp_path):
         await screen.on_show()            # the tab is revealed again
         await pilot.pause()
         assert screen.query_one("#agt-table", DataTable).row_count == 1  # project B
+
+
+async def test_seating_unquietable_reasoner_on_producer_warns(project, monkeypatch):
+    """#16: assigning a reasoning-heavy model that can't be quieted to a
+    PRODUCER seat fires a warning toast at seat time — not a mid-run
+    compression surprise. A leader seat gets no such warning."""
+    from types import SimpleNamespace
+
+    model_presets.add_preset(
+        "glm_shim", label="glm-5.2", base_url="https://ollama.com/v1",
+        api_format="openai", auth_type="api_key", model="glm-5.2",
+        auth_config={"env_var": "OLLAMA_API_KEY"},
+    )
+    app = _Host(project)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        toasts: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            app, "notify",
+            lambda msg, severity="information", **k: toasts.append((severity, msg)))
+        screen = app.query_one(AgentBuilderScreen)
+
+        screen._flow = "change"
+        screen._target_agent = "marlow"          # producer
+        await screen.on_option_list_option_selected(
+            SimpleNamespace(option=SimpleNamespace(id="glm_shim")))
+        assert any(sev == "warning" and "glm_shim" in msg
+                   for sev, msg in toasts), toasts
+
+        toasts.clear()
+        screen._flow = "change"
+        screen._target_agent = "leader"          # judgment seat — no warning
+        await screen.on_option_list_option_selected(
+            SimpleNamespace(option=SimpleNamespace(id="glm_shim")))
+        assert not any(sev == "warning" for sev, _ in toasts), toasts

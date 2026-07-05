@@ -397,6 +397,13 @@ class AgentBuilderScreen(Vertical):
             except Exception as exc:  # noqa: BLE001 — surface via status, never crash the screen
                 await self.show_list(f"Couldn't assign '{preset}': {exc}")
                 return
+            target = next(
+                (a for a in roster.list_agents(self.project_code)
+                 if a.id == self._target_agent), None)
+            self._warn_if_unquietable_producer(
+                getattr(target, "tier", "producer") if target else "producer",
+                self._target_agent, preset,
+            )
             await self.show_list(f"Assigned '{preset}' to {self._target_agent}.")
         elif self._flow == "add":
             await self._add_agent(preset)
@@ -435,7 +442,31 @@ class AgentBuilderScreen(Vertical):
             project_code=self.project_code, agent_id=agent_id, name=name,
             identity=identity, skills=[], model=preset, tier=tier,
         )
+        self._warn_if_unquietable_producer(tier, name, preset)
         await self.show_list(f"Added {tier} '{name}'.")
+
+    def _warn_if_unquietable_producer(
+        self, tier: str, who: str, preset: str,
+    ) -> None:
+        """#16: seating a reasoning-heavy model that can't be quieted on a
+        PRODUCER deserves a heads-up at seat time — reasoning bloat otherwise
+        surfaces later as mid-run compressions. Judgment seats reason on
+        purpose; no warning there."""
+        if tier != "producer":
+            return
+        from modulatio import runners as _runners
+
+        try:
+            quiet_ok = _runners.seat_thinking_off_effective(preset)
+        except Exception:  # noqa: BLE001 — a probe hiccup must not break seating
+            return
+        if not quiet_ok:
+            self.app.notify(
+                f"{who}: thinking-off has no effect for '{preset}' on this "
+                "lane — reasoning bloat will ride this producer's context. "
+                "Consider a non-reasoning model for this seat.",
+                severity="warning",
+            )
 
     async def _remove_selected(self) -> None:
         # Any agent is removable (Leader/QC included — remove + re-add). All
