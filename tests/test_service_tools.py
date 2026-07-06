@@ -138,3 +138,134 @@ def test_api_call_http_error_reported_not_raised(monkeypatch):
     monkeypatch.setattr(service_tools, "_urlopen", fake_urlopen)
     out = service_tools.api_call(service="myapi", path="/x")
     assert "402" in out and "quota" in out
+
+
+def _wire_capability(monkeypatch, capability, service_id, env_var,
+                     base_url, auth_shape="bearer"):
+    services.add_service(Service(
+        id=service_id, name=service_id, kind="catalog",
+        capabilities=(capability,), env_var=env_var, base_url=base_url,
+        auth_shape=auth_shape))
+    monkeypatch.setenv(env_var, "sk-test-xyz")
+
+
+def test_generate_image_openai_saves_binary(tmp_path, monkeypatch):
+    _wire_capability(monkeypatch, "image", "openai-images",
+                     "OPENAI_API_KEY", "https://api.openai.com")
+    import base64
+    png = b"\x89PNG-fake-bytes"
+    resp = json.dumps(
+        {"data": [{"b64_json": base64.b64encode(png).decode()}]}
+    ).encode()
+    monkeypatch.setattr(service_tools, "_urlopen",
+                        lambda req, timeout=None: _FakeResponse(resp))
+    written = []
+    gen = service_tools.make_generate_image(
+        artifacts_root=tmp_path, on_artifact_write=written.append)
+    out = gen(prompt="a lighthouse", filename="light.png")
+    saved = tmp_path / "light.png"
+    assert saved.read_bytes() == png
+    assert written == [saved]
+    assert "light.png" in out and "sk-test" not in out
+
+
+def test_generate_image_no_service_configured(tmp_path):
+    gen = service_tools.make_generate_image(
+        artifacts_root=tmp_path, on_artifact_write=None)
+    assert "SERVICES" in gen(prompt="x")
+
+
+def test_generate_image_flattens_filename_to_basename(tmp_path, monkeypatch):
+    _wire_capability(monkeypatch, "image", "openai-images",
+                     "OPENAI_API_KEY", "https://api.openai.com")
+    import base64
+    resp = json.dumps({"data": [{"b64_json":
+                                 base64.b64encode(b"x").decode()}]}).encode()
+    monkeypatch.setattr(service_tools, "_urlopen",
+                        lambda req, timeout=None: _FakeResponse(resp))
+    gen = service_tools.make_generate_image(
+        artifacts_root=tmp_path, on_artifact_write=None)
+    gen(prompt="x", filename="../escape.png")
+    assert not (tmp_path.parent / "escape.png").exists()
+    assert (tmp_path / "escape.png").exists()
+
+
+def test_research_search_tavily_formats_results(monkeypatch):
+    _wire_capability(monkeypatch, "research", "tavily",
+                     "TAVILY_API_KEY", "https://api.tavily.com")
+    resp = json.dumps({"results": [
+        {"title": "T1", "url": "https://a.example", "content": "alpha"},
+        {"title": "T2", "url": "https://b.example", "content": "beta"},
+    ]}).encode()
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["body"] = json.loads(req.data)
+        return _FakeResponse(resp)
+
+    monkeypatch.setattr(service_tools, "_urlopen", fake_urlopen)
+    out = service_tools.research_search(query="modulatio")
+    assert seen["url"].endswith("/search")
+    assert seen["body"]["query"] == "modulatio"
+    assert "T1" in out and "https://b.example" in out
+
+
+def test_generate_speech_elevenlabs_saves_mp3(tmp_path, monkeypatch):
+    _wire_capability(monkeypatch, "speech", "elevenlabs",
+                     "ELEVENLABS_API_KEY", "https://api.elevenlabs.io",
+                     auth_shape="header:xi-api-key")
+    mp3 = b"ID3-fake-audio"
+    monkeypatch.setattr(
+        service_tools, "_urlopen",
+        lambda req, timeout=None: _FakeResponse(mp3, "audio/mpeg"))
+    gen = service_tools.make_generate_speech(
+        artifacts_root=tmp_path, on_artifact_write=None)
+    out = gen(text="howdy", filename="howdy.mp3")
+    assert (tmp_path / "howdy.mp3").read_bytes() == mp3
+    assert "howdy.mp3" in out
+
+
+def test_generate_video_luma_polls_then_downloads(tmp_path, monkeypatch):
+    _wire_capability(monkeypatch, "video", "luma",
+                     "LUMAAI_API_KEY", "https://api.lumalabs.ai")
+    calls = []
+    vid = b"fake-mp4-bytes"
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        if req.get_method() == "POST":
+            return _FakeResponse(b'{"id": "gen-1", "state": "queued"}')
+        if "gen-1" in req.full_url and "cdn" not in req.full_url:
+            state = "completed" if len(calls) >= 3 else "dreaming"
+            return _FakeResponse(json.dumps({
+                "id": "gen-1", "state": state,
+                "assets": {"video": "https://cdn.lumalabs.ai/v/gen-1.mp4"},
+            }).encode())
+        return _FakeResponse(vid, "video/mp4")
+
+    monkeypatch.setattr(service_tools, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(service_tools, "_POLL_INTERVAL_SECONDS", 0.0)
+    gen = service_tools.make_generate_video(
+        artifacts_root=tmp_path, on_artifact_write=None)
+    out = gen(prompt="a storm", filename="storm.mp4")
+    assert (tmp_path / "storm.mp4").read_bytes() == vid
+    assert "storm.mp4" in out
+
+
+def test_generate_video_poll_timeout_names_job(tmp_path, monkeypatch):
+    _wire_capability(monkeypatch, "video", "luma",
+                     "LUMAAI_API_KEY", "https://api.lumalabs.ai")
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "POST":
+            return _FakeResponse(b'{"id": "gen-9", "state": "queued"}')
+        return _FakeResponse(b'{"id": "gen-9", "state": "dreaming"}')
+
+    monkeypatch.setattr(service_tools, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(service_tools, "_POLL_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(service_tools, "_POLL_WALL_CAP_SECONDS", 0.0)
+    gen = service_tools.make_generate_video(
+        artifacts_root=tmp_path, on_artifact_write=None)
+    out = gen(prompt="x", filename="x.mp4")
+    assert "gen-9" in out and "timed out" in out
