@@ -189,14 +189,10 @@ class FoldersScreen(Vertical):
                 f"[bold red]{escape(str(p))} is not a reachable directory — "
                 "mount the share / create the folder first.[/]")
             return
-        from modulatio import delivery, vault
-        from modulatio.leader_gate import dangerous_widen_root
-
-        reason = dangerous_widen_root(
-            str(p),
-            blocked_subtrees=[str(vault.VAULT_ROOT),
-                              str(delivery.delivery_root())],
-        )
+        # The SAME safety floor the grant classifier + output pick use (one
+        # source of truth — no drift): dotfile/secrets dir, broad/system/home
+        # root, or vault/delivery overlap → refused.
+        reason = config.folder_root_refusal(str(p))
         if reason is not None:
             self._set_new_status(f"[bold red]{escape(reason)}[/]")
             return

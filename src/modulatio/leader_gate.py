@@ -287,6 +287,13 @@ def dangerous_widen_root(root: str, blocked_subtrees=()) -> "str | None":
     rs = str(r)
     if rs in _BROAD_ROOTS or r == Path.home():
         return f"{rs} is a broad system/home directory — too broad to widen into"
+    # The secret floor extends to the ROOT itself: a dot-directory (~/.ssh,
+    # ~/.aws, an .envdir) is a secrets store, and the per-file dotfile guard in
+    # the tools only checks components BELOW the matched root — so a root whose
+    # own path has a dotfile component would expose its contents (Wild Bill
+    # BLOCK). Refuse it here, where every grant/widen path is classified.
+    if any(part.startswith(".") for part in r.parts):
+        return f"{rs} has a dotfile path component (a secrets dir) — refused"
     for sub in blocked_subtrees:
         s = Path(sub).resolve()
         # Refuse overlap in EITHER direction: widening OVER the tree (r is an

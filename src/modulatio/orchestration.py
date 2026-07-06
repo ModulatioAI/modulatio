@@ -7983,6 +7983,16 @@ class Orchestrator:
             (r for r in _config.list_folders() if r["name"] == name), None)
         if rec is None:
             return None
+        # The pick runs the SAME safety floor as seat grants (Wild Bill MED): a
+        # hand-edited defaults.json can't make the engine deliver into the vault
+        # or a secrets dir just because the pick skips the grant classifier.
+        if _config.folder_root_refusal(rec["path"]) is not None:
+            if summary is not None:
+                summary.errors.append(
+                    f"output folder '{name}' is not a safe delivery location — "
+                    "delivered to the default location"
+                )
+            return None
         if not _config.probe_folder(rec["path"]):
             if summary is not None:
                 summary.errors.append(

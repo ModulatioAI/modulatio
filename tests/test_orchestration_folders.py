@@ -250,6 +250,23 @@ def test_delivery_lands_in_the_picked_output_folder(orch, tmp_path):
     assert any(p.is_file() for p in delivered), f"nothing landed in {drop}"
 
 
+def test_picked_output_base_refuses_dangerous_root(orch, tmp_path):
+    """Wild Bill MED: a hand-edited output pick inside the vault (or any
+    refused tree) must NOT be delivered into — the pick runs the SAME floor as
+    seat grants, falling back to the default location with a summary note."""
+    from modulatio.orchestration import RunSummary
+
+    inside_vault = tmp_path / "vault" / "fld" / "unsafe-output"
+    inside_vault.mkdir(parents=True)
+    config.save_folders([{"name": "badout", "path": str(inside_vault),
+                          "mode": "output", "kind": "path"}])
+    config.set_job_output_folder("badout")
+
+    summary = RunSummary(project=orch.project)
+    assert orch._picked_output_base(summary) is None
+    assert any("badout" in e for e in summary.errors)
+
+
 def test_unreachable_pick_falls_back_with_note(orch, tmp_path, monkeypatch):
     """A picked folder that vanished delivers to the default location and
     says so in summary.errors — the run never raises."""

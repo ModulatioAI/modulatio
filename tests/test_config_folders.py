@@ -130,6 +130,34 @@ def test_folder_grant_roots_skips_missing_dirs(tmp_path):
     assert rw == () and read == ()
 
 
+def test_folder_grant_roots_refuses_dotdir_root(tmp_path):
+    """Wild Bill BLOCK: a registered dot-directory (e.g. /.../.ssh) must never
+    become a grant — the secret floor extends to the ROOT itself, not just
+    dotfiles below it (read_file's floor only checks components below the root)."""
+    d = tmp_path / ".ssh"
+    d.mkdir()
+    (d / "id_rsa").write_text("PRIVATE", encoding="utf-8")
+    config.save_folders(
+        [{"name": "ssh", "path": str(d), "mode": "ro", "kind": "path"}])
+    rw, read = config.folder_grant_roots()
+    assert rw == () and read == ()
+
+
+def test_folder_root_refusal_is_the_shared_floor(tmp_path, monkeypatch):
+    """One floor for all three sites (tab ADD, grant USE, output pick): a
+    dotfile path component, a broad/system root, or a vault/delivery overlap
+    is refused; a plain reachable dir passes."""
+    from modulatio import vault
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    (tmp_path / ".ssh").mkdir()
+    assert config.folder_root_refusal(str(tmp_path / ".ssh")) is not None
+    assert config.folder_root_refusal("/etc") is not None
+    ok = tmp_path / "docs"
+    ok.mkdir()
+    assert config.folder_root_refusal(str(ok)) is None
+
+
 def test_folder_grant_roots_refuses_broad_and_vault_roots(tmp_path, monkeypatch):
     """USE-time re-validation: a hand-edited defaults.json can't inject a
     system root, $HOME itself, or a path inside the vault/delivery trees."""

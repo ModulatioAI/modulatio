@@ -651,28 +651,37 @@ def probe_folder(path: str, timeout_s: float = 2.0) -> bool:
     return bool(box and box[0])
 
 
+def folder_root_refusal(path: str) -> "str | None":
+    """The single safety floor for a registered-folder root — shared by the
+    FOLDERS tab (ADD time), the grant classifier (USE time), and the
+    output-pick resolver, so the three sites can't drift. Returns a reason
+    string if ``path`` is unsafe to use as a folder root (a dotfile path
+    component / secrets dir, a broad system dir, $HOME itself, or an overlap
+    with the vault or delivery trees), else ``None``. Reachability is checked
+    separately (``probe_folder``) — it's handled differently per site (the tab
+    errors, grants skip, the pick falls back)."""
+    from modulatio import delivery, vault  # lazy — vault imports config
+    from modulatio.leader_gate import dangerous_widen_root
+
+    blocked = [str(vault.VAULT_ROOT), str(delivery.delivery_root())]
+    return dangerous_widen_root(path, blocked_subtrees=blocked)
+
+
 def folder_grant_roots() -> tuple[tuple[str, ...], tuple[str, ...]]:
     """The registered folders as seat-grant roots: ``(rw_roots, read_roots)``
     — rw-mode folders in the first tuple, ro/output in the second.
 
     USE-time re-validation (defense in depth with the tab's ADD-time check):
-    every root must be reachable and pass the widen safety floor
-    (``dangerous_widen_root`` — no broad system dirs, not $HOME itself, no
-    overlap with the vault or delivery trees in either direction), so a
-    hand-edited defaults.json can't grant the team /etc or the swarm's own
-    work tree."""
-    from modulatio import delivery, vault  # lazy — vault imports config
-
-    blocked = [str(vault.VAULT_ROOT), str(delivery.delivery_root())]
-    from modulatio.leader_gate import dangerous_widen_root
-
+    every root must be reachable (``probe_folder``) and pass
+    ``folder_root_refusal`` — so a hand-edited defaults.json can't grant the
+    team /etc, a secrets dot-dir, or the swarm's own work tree."""
     rw: list[str] = []
     read: list[str] = []
     for rec in list_folders():
         path = rec["path"]
         if not probe_folder(path):
             continue
-        if dangerous_widen_root(path, blocked_subtrees=blocked) is not None:
+        if folder_root_refusal(path) is not None:
             continue
         (rw if rec["mode"] == "rw" else read).append(path)
     return tuple(rw), tuple(read)
