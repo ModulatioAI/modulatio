@@ -434,3 +434,68 @@ def test_build_registry_no_services_no_service_tools(tmp_path):
     reg = tools.build_registry(artifacts_root=tmp_path)
     assert "api_call" not in reg
     assert "generate_image" not in reg
+
+
+# ── S11: redaction + sandbox verification (spec §9) ────────────────────────
+# Observed-reality pins: service keys follow the ``*_API_KEY`` shape
+# (incl. ``_2``/``_3`` numbered slots), so the logstore scrub and the
+# run_shell env allowlist/deny-list must cover them. Fake keys only.
+
+
+def test_logstore_scrubs_service_key_assignment_forms(monkeypatch):
+    """``NAME=value`` forms — base, numbered slot, custom slug — never
+    survive the logstore scrub (the write path calls it before disk)."""
+    from modulatio.logstore import scrub_secrets
+    monkeypatch.setenv("TAVILY_API_KEY", "sk-test-secret-value")
+    monkeypatch.setenv("TAVILY_API_KEY_2", "sk-test-numbered-value")
+    text = (
+        "request failed; env TAVILY_API_KEY=sk-test-secret-value and "
+        "TAVILY_API_KEY_2=sk-test-numbered-value plus "
+        "MYCUSTOM_API_KEY_3=sk-test-custom-slot were set"
+    )
+    out = scrub_secrets(text)
+    assert "sk-test-secret-value" not in out
+    assert "sk-test-numbered-value" not in out
+    assert "sk-test-custom-slot" not in out
+
+
+def test_logstore_scrubs_service_key_spaced_label_forms(monkeypatch):
+    """``NAME: value`` / ``NAME = value`` prose forms (doctor output, error
+    messages) — the slug prefix (``TAVILY_``) and numbered suffix (``_2``)
+    must not defeat the labeled-secret pattern."""
+    from modulatio.logstore import scrub_secrets
+    monkeypatch.setenv("TAVILY_API_KEY", "sk-test-spaced-value")
+    monkeypatch.setenv("TAVILY_API_KEY_2", "sk-test-spaced-numbered")
+    text = (
+        "doctor: TAVILY_API_KEY: sk-test-spaced-value\n"
+        "doctor: TAVILY_API_KEY_2 = sk-test-spaced-numbered\n"
+    )
+    out = scrub_secrets(text)
+    assert "sk-test-spaced-value" not in out
+    assert "sk-test-spaced-numbered" not in out
+
+
+def test_sandbox_denies_service_key_env_names():
+    """The pattern deny-list catches the service-key shape, base and
+    numbered, so even an explicit ``pass_env`` opt-in cannot leak one."""
+    from modulatio import sandbox
+    for name in ("TAVILY_API_KEY", "TAVILY_API_KEY_2",
+                 "ELEVENLABS_API_KEY", "MYCUSTOM_API_KEY_3"):
+        assert sandbox._is_safe_env_name(name) is False, name
+
+
+def test_sandbox_child_env_excludes_service_keys(monkeypatch):
+    """A set service key never reaches the run_shell child env: absent from
+    the allowlist by default, and stripped even when pass_env requests it.
+    (Pins ``_build_env`` directly — the bwrap layer needs the binary.)"""
+    from modulatio import sandbox
+    monkeypatch.setenv("TAVILY_API_KEY", "sk-test-secret-value")
+    monkeypatch.setenv("TAVILY_API_KEY_2", "sk-test-numbered-value")
+    env = sandbox._build_env(())
+    assert "TAVILY_API_KEY" not in env
+    assert "TAVILY_API_KEY_2" not in env
+    env = sandbox._build_env(("TAVILY_API_KEY", "TAVILY_API_KEY_2"))
+    assert "TAVILY_API_KEY" not in env
+    assert "TAVILY_API_KEY_2" not in env
+    assert "sk-test-secret-value" not in env.values()
+    assert "sk-test-numbered-value" not in env.values()

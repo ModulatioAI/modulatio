@@ -72,9 +72,15 @@ _BEARER_TOKEN = re.compile(
 # Deliberately EXCLUDES `auth`/`bearer` labels — those are handled by
 # `_BEARER_TOKEN` above, and including them here would consume the scheme word
 # (`Bearer`) as the "value" and re-expose the real credential.
+# Service-pool S11: `\b` never fires after an underscore (`_` is a word char),
+# so an env-var-shaped label with a slug prefix (`TAVILY_API_KEY: sk-...`)
+# escaped the pattern; the lookbehind allows a `_`/`-` before the label word.
+# The optional `_<n>` suffix covers the provider_keys numbered slots
+# (`TAVILY_API_KEY_2 = sk-...`), which otherwise block the separator match.
 _LABELED_SECRET = re.compile(
-    r"(?P<lbl>\b(?:api[ _-]?key|access[ _-]?token|client[ _-]?secret|"
-    r"secret[ _-]?key|secret|password|passwd|token))\s*(?P<sep>[:=])\s*(?P<val>[^\s&]+)",
+    r"(?P<lbl>(?<![A-Za-z0-9])(?:api[ _-]?key|access[ _-]?token|client[ _-]?secret|"
+    r"secret[ _-]?key|secret|password|passwd|token)(?:_\d+)?)"
+    r"\s*(?P<sep>[:=])\s*(?P<val>[^\s&]+)",
     re.IGNORECASE,
 )
 
