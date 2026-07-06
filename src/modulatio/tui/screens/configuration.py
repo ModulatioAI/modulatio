@@ -634,9 +634,11 @@ class ConfigScreen(Vertical):
             id=sid,
             name=_val("#cfg-csvc-name") or sid,
             kind="custom",
-            capabilities=tuple(
-                c.strip() for c in _val("#cfg-csvc-caps").split(",")
-                if c.strip()),
+            # dict.fromkeys: dedupe (a repeated capability would offer a
+            # phantom Default choice) while keeping the operator's order.
+            capabilities=tuple(dict.fromkeys(
+                c.strip().lower() for c in _val("#cfg-csvc-caps").split(",")
+                if c.strip())),
             env_var=f"{env_base}_API_KEY" if env_base else "",
             base_url=_val("#cfg-csvc-url"),
             auth_shape=_val("#cfg-csvc-auth") or "bearer",
