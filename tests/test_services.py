@@ -70,6 +70,36 @@ def test_resolve_for_capability_default_wins():
     assert services.resolve_for_capability("research").id == "other"
 
 
+def test_remove_service_drops_its_capability_default():
+    services.add_service(_svc())
+    services.add_service(_svc(id="other", name="Other",
+                              env_var="OTHER_API_KEY"))
+    services.set_capability_default("research", "other")
+    assert services.remove_service("other") is True
+    assert services.capability_default("research") is None
+    # the survivor is the only backer again → resolution recovers
+    assert services.resolve_for_capability("research").id == "tavily"
+
+
+def test_set_capability_default_rejects_non_backing_service():
+    services.add_service(_svc())  # backs research only
+    with pytest.raises(ValueError):
+        services.set_capability_default("image", "tavily")
+    with pytest.raises(ValueError):
+        services.set_capability_default("research", "never-added")
+    assert services.capability_default("image") is None
+
+
+def test_capability_default_round_trip_and_clear():
+    services.add_service(_svc())
+    assert services.capability_default("research") is None
+    services.set_capability_default("research", "tavily")
+    assert services.capability_default("research") == "tavily"
+    services.clear_capability_default("research")
+    assert services.capability_default("research") is None
+    services.clear_capability_default("research")  # idempotent — no raise
+
+
 def test_checkout_key_first_set_slot(monkeypatch):
     services.add_service(_svc())
     monkeypatch.setenv("TAVILY_API_KEY_2", "sk-test-slot2")

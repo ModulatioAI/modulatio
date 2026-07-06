@@ -135,10 +135,29 @@ def remove_service(service_id: str) -> bool:
 
 def set_capability_default(capability: str, service_id: str) -> None:
     data = _load_raw()
-    if service_id not in data.get("services", {}):
+    entry = data.get("services", {}).get(service_id)
+    if not isinstance(entry, dict):
         raise ValueError(f"no service {service_id!r} configured")
+    if capability not in (entry.get("capabilities") or ()):
+        raise ValueError(
+            f"service {service_id!r} does not back capability {capability!r}"
+        )
     data.setdefault("capability_defaults", {})[capability] = service_id
     _save_raw(data)
+
+
+def capability_default(capability: str) -> Optional[str]:
+    """The operator's default service id for a capability (or None) — the
+    public read so callers (the TUI) never reach into ``_load_raw``."""
+    return _load_raw().get("capability_defaults", {}).get(capability)
+
+
+def clear_capability_default(capability: str) -> None:
+    data = _load_raw()
+    defaults = data.get("capability_defaults", {})
+    if capability in defaults:
+        del defaults[capability]
+        _save_raw(data)
 
 
 def resolve_for_capability(capability: str) -> Optional[Service]:
