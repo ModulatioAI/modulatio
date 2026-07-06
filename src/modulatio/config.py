@@ -564,3 +564,115 @@ def save_team_template(agents: list[dict]) -> None:
     ``write_text`` + ``chmod`` pattern this helper exists to replace would
     leave the roster briefly world-readable on a multi-user host."""
     write_secret_file(TEAM_TEMPLATE_FILE, json.dumps(agents, indent=2))
+
+
+# ── The FOLDERS registry — named operator folders for job runs ─────────────
+#
+# Install-wide, in defaults.json. A record is {"name", "path", "mode",
+# "kind"}: mode "ro" (seats read) | "output" (seats read; the ENGINE may
+# deliver the finished product there) | "rw" (seats read/write live mid-run).
+# kind is "path" today (an already-mounted location — local dir, mapped
+# drive, or a mounted smb/cifs/nfs share); unknown kinds are skipped so a
+# future in-app-mount kind can land without breaking older installs.
+
+_FOLDER_MODES = ("ro", "output", "rw")
+
+
+def list_folders() -> list[dict]:
+    """The registered folders, shape-checked. Malformed entries (bad mode,
+    relative path, missing/empty fields, unknown kind) are dropped — a
+    hand-edited defaults.json can't inject a bad record downstream."""
+    raw = _load_defaults().get("folders")
+    if not isinstance(raw, list):
+        return []
+    folders: list[dict] = []
+    for rec in raw:
+        if not isinstance(rec, dict):
+            continue
+        name = rec.get("name")
+        path = rec.get("path")
+        if not (isinstance(name, str) and name.strip()):
+            continue
+        if not (isinstance(path, str) and Path(path).is_absolute()):
+            continue
+        if rec.get("mode") not in _FOLDER_MODES or rec.get("kind") != "path":
+            continue
+        folders.append(rec)
+    return folders
+
+
+def save_folders(folders: list[dict]) -> None:
+    """Persist the folder registry (overwrites)."""
+    defaults = dict(_load_defaults())
+    defaults["folders"] = folders
+    save_defaults(defaults)
+
+
+def get_job_output_folder() -> Optional[str]:
+    """The name of the picked job-output folder — only if it names a
+    registered ``output``-mode folder (the accessor is the floor: a stale
+    pick after a delete/mode-change reads as no pick)."""
+    name = _load_defaults().get("job_output_folder")
+    if not (isinstance(name, str) and name):
+        return None
+    for rec in list_folders():
+        if rec["name"] == name and rec["mode"] == "output":
+            return name
+    return None
+
+
+def set_job_output_folder(name: "str | None") -> None:
+    """Record (or clear, with None) the picked job-output folder."""
+    defaults = dict(_load_defaults())
+    if name:
+        defaults["job_output_folder"] = name
+    else:
+        defaults.pop("job_output_folder", None)
+    save_defaults(defaults)
+
+
+def probe_folder(path: str, timeout_s: float = 2.0) -> bool:
+    """True if ``path`` is a reachable directory. The stat runs in a daemon
+    thread with a join timeout so a dead network mount (a hung NFS/CIFS
+    stat can block indefinitely) never wedges the TUI or the engine."""
+    import threading
+
+    box: list[bool] = []
+
+    def _check() -> None:
+        try:
+            box.append(Path(path).is_dir())
+        except OSError:
+            box.append(False)
+
+    t = threading.Thread(target=_check, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    return bool(box and box[0])
+
+
+def folder_grant_roots() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The registered folders as seat-grant roots: ``(rw_roots, read_roots)``
+    — rw-mode folders in the first tuple, ro/output in the second.
+
+    USE-time re-validation (defense in depth with the tab's ADD-time check):
+    every root must be reachable and pass the widen safety floor
+    (``dangerous_widen_root`` — no broad system dirs, not $HOME itself, no
+    overlap with the vault or delivery trees in either direction), so a
+    hand-edited defaults.json can't grant the team /etc or the swarm's own
+    work tree."""
+    from modulatio import delivery, vault  # lazy — vault imports config
+
+    blocked = [str(vault.VAULT_ROOT), str(delivery.delivery_root())]
+    from modulatio.leader_gate import dangerous_widen_root
+
+    rw: list[str] = []
+    read: list[str] = []
+    for rec in list_folders():
+        path = rec["path"]
+        if not probe_folder(path):
+            continue
+        if dangerous_widen_root(path, blocked_subtrees=blocked) is not None:
+            continue
+        (rw if rec["mode"] == "rw" else read).append(path)
+    return tuple(rw), tuple(read)
