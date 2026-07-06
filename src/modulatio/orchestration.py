@@ -5292,6 +5292,58 @@ class Orchestrator:
                 chain.append((key, runner))
         return chain
 
+    def _build_metered_authorizers(
+        self,
+        tool_loadout: "tuple[str, ...]",
+        *,
+        task_id: str,
+        agent_id: str,
+    ) -> "Callable[[str, dict], tuple] | None":
+        """One fail-closed spend authorizer per metered tool in the loadout
+        (metered.py's name guard demands one per tool), dispatched by
+        called-name. None when the loadout has no metered tool — the runner
+        then denies any metered call outright (unchanged fail-closed floor)."""
+        from modulatio import metered as _metered
+        from modulatio import services as _services
+        registry = self._active_tool_registry()
+        per_tool: "dict[str, Callable[[str, dict], tuple]]" = {}
+        for name in tool_loadout:
+            tool = registry.get(name)
+            if getattr(tool, "cost_class", None) not in (
+                "paid-cloud", "premium-cloud"
+            ):
+                continue
+            # allowed_keys = the tool's own params_schema properties (an
+            # engine-authored allowlist), minus URL-SHAPED names — a schema
+            # must never be able to forgive a network-target key. Token
+            # match (not the full FORBIDDEN_ARG_KEYS) so api_call's needed
+            # method/path/params/json stay forgivable.
+            props = tuple(
+                k for k in ((tool.params_schema or {}).get("properties") or {})
+                if not any(t in k.lower() for t in _metered._FORBIDDEN_KEY_TOKENS)
+            )
+            per_tool[name] = _metered.build_metered_authorizer(
+                project_code=self.project.code,
+                cost_class=tool.cost_class,
+                tool_name=name,
+                task_id=task_id,
+                agent_id=agent_id,
+                pinned_units=[],
+                artifacts_root=self._artifacts_root(),
+                per_task_cap=_services.per_task_cap_for_tool(name),
+                allowed_keys=props,
+            )
+        if not per_tool:
+            return None
+
+        def _dispatch(name: str, args: dict):
+            auth = per_tool.get(name)
+            if auth is None:
+                return (False, f"metered tool {name!r}: no authorizer wired")
+            return auth(name, args)
+
+        return _dispatch
+
     def _run_chat_loop(
         self,
         *,
@@ -5417,6 +5469,15 @@ class Orchestrator:
             # tests that exercise the gates set it explicitly.
             primary_model = self._resolve_chat_runner_model(agent_id)
 
+            # Service-API pool (spec 2026-07-05): metered tools in this
+            # loadout get a fail-closed spend authorizer. One authorizer per
+            # metered tool (the name guard's contract), dispatched by name.
+            # pinned_units is empty: generation-class calls have no artifact
+            # inputs; the idempotency key covers tool + options.
+            metered_authorizer = self._build_metered_authorizers(
+                tool_loadout, task_id=task_id, agent_id=agent_id
+            )
+
             def _run_one(_model: "str | None", _runner: "Callable[..., Any]") -> str:
                 return _runners.run_llm_with_tools(
                     chat_runner=_runner,
@@ -5431,6 +5492,7 @@ class Orchestrator:
                     ),
                     permission_callback=permission_callback,
                     permission_broker=permission_broker,
+                    metered_authorizer=metered_authorizer,
                     # Operator ESC interrupt: the tool-loop checks this each
                     # iteration and bails with a clean note. Same abort_event F8
                     # uses, so a kickoff's producer/QC tool-loops stop too.

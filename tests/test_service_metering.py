@@ -1,10 +1,17 @@
 """Metered-tier behavior for service tools (allowed_keys + wiring)."""
 from __future__ import annotations
 
-from modulatio import metered
+from pathlib import Path
+
+import pytest
+
+from modulatio import metered, services, tools, vault
+from modulatio.orchestration import Orchestrator
+from modulatio.runners import ChatResponse, ToolCall, stub_chat_runner
+from modulatio.types import Project
 
 
-def _authorize(args: dict, allowed: tuple[str, ...], monkeypatch=None):
+def _authorize(args: dict, allowed: tuple[str, ...]):
     fn = metered.build_metered_authorizer(
         project_code="SVC", cost_class="paid-cloud", tool_name="api_call",
         task_id="T-1", agent_id="a1", pinned_units=[],
@@ -43,9 +50,170 @@ def test_allowed_keys_never_forgives_nested_hits():
          "params": {"callback_url": "later"}},
         allowed=("service", "method", "path", "params"),
     )
-    assert not ok
+    assert not ok and "forbidden network param" in reason
 
 
 def test_no_allowed_keys_keeps_old_behavior():
     ok, reason = _authorize({"method": "GET"}, allowed=())
-    assert not ok
+    assert not ok and "forbidden network param" in reason
+
+
+# ── S7: chat-loop wiring — _run_chat_loop builds per-tool authorizers ──────
+
+PROJECT_CODE = "SVCM"
+
+
+@pytest.fixture
+def project_with_run(tmp_path: Path, monkeypatch) -> Project:
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    monkeypatch.setattr(services, "SERVICES_FILE", tmp_path / "services.json")
+    vault.init_project(PROJECT_CODE, "svc metering", "wire the spend gate")
+    run_id = "run-svcm-001"
+    vault.init_run(PROJECT_CODE, run_id, "wire the spend gate")
+    return Project(
+        code=PROJECT_CODE,
+        name="svc metering",
+        objective="wire the spend gate",
+        leader_model="stub",
+        wiki_path=str(tmp_path / PROJECT_CODE.lower()),
+        run_id=run_id,
+    )
+
+
+def _metered_tool(name: str, calls: list, props: dict) -> tools.Tool:
+    def _call(**kwargs) -> str:
+        calls.append(kwargs)
+        return "results"
+
+    return tools.Tool(
+        name=name,
+        description=f"test metered tool {name}",
+        call=_call,
+        params_schema={"type": "object", "properties": props,
+                       "required": list(props)[:1]},
+        cost_class="paid-cloud",
+    )
+
+
+def _make_orchestrator(project: Project, registry: dict,
+                       scripted: list) -> Orchestrator:
+    runner = lambda prompt: "stub"  # noqa: E731 — test stub
+    return Orchestrator(
+        project,
+        runners={"leader": runner, "drafter": runner, "qc": runner},
+        tool_registry=registry,
+        chat_runner=stub_chat_runner(scripted),
+        chat_runner_models={"writer": "gpt-4o-mini"},
+    )
+
+
+def _run_loop(orch: Orchestrator, tmp_path: Path) -> str:
+    return orch._run_chat_loop(
+        prompt="search for modulatio",
+        tool_loadout=("research_search",),
+        role="writer",
+        agent_id="writer",
+        task_id="SVCM-T-001",
+        transcript_path=tmp_path / "transcript.jsonl",
+        skill_name="test",
+    )
+
+
+def test_chat_loop_authorizes_metered_service_tool(
+    project_with_run, tmp_path, monkeypatch,
+):
+    """The arc's key integration: _run_chat_loop must BUILD the per-tool
+    spend authorizer and thread it into run_llm_with_tools. Without the
+    wiring, the runner fail-closes ('no spend authorizer is wired') and
+    the tool never executes."""
+    monkeypatch.setattr(
+        metered.comptroller, "authorize_metered_tool",
+        lambda *a, **k: metered.comptroller.Authorization(
+            allowed=True, refresh_at=None, reason="ok"),
+    )
+    calls: list = []
+    registry = {"research_search": _metered_tool(
+        "research_search", calls,
+        {"query": {"type": "string"}, "max_results": {"type": "integer"}},
+    )}
+    scripted = [
+        ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c1", name="research_search",
+                     args={"query": "modulatio"}),
+        )),
+        ChatResponse(content="found it", tool_calls=()),
+    ]
+    orch = _make_orchestrator(project_with_run, registry, scripted)
+    out = _run_loop(orch, tmp_path)
+    assert out == "found it"
+    assert calls == [{"query": "modulatio"}], (
+        "metered tool did not execute — the chat loop never wired a "
+        "spend authorizer into run_llm_with_tools"
+    )
+
+
+def test_chat_loop_denies_metered_without_budget(
+    project_with_run, tmp_path,
+):
+    """Fail-closed floor holds THROUGH the new wiring: with no budget
+    configured (real comptroller), the metered tool must not run and the
+    model sees a DENIED (metered) tool result."""
+    calls: list = []
+    registry = {"research_search": _metered_tool(
+        "research_search", calls, {"query": {"type": "string"}},
+    )}
+    scripted = [
+        ChatResponse(content=None, tool_calls=(
+            ToolCall(id="c1", name="research_search",
+                     args={"query": "modulatio"}),
+        )),
+        ChatResponse(content="could not search", tool_calls=()),
+    ]
+    orch = _make_orchestrator(project_with_run, registry, scripted)
+    _run_loop(orch, tmp_path)
+    assert calls == [], "metered tool must not execute without budget"
+    transcript = (tmp_path / "transcript.jsonl").read_text(encoding="utf-8")
+    assert "DENIED (metered)" in transcript
+
+
+def test_build_metered_authorizers_belt_drops_url_shaped_schema_keys(
+    project_with_run, monkeypatch,
+):
+    """The T3 belt: a schema-DECLARED url-shaped property (callback_url)
+    must never enter allowed_keys — an engine-authored schema cannot
+    forgive a network-target key."""
+    monkeypatch.setattr(
+        metered.comptroller, "authorize_metered_tool",
+        lambda *a, **k: metered.comptroller.Authorization(
+            allowed=True, refresh_at=None, reason="ok"),
+    )
+    calls: list = []
+    registry = {"svc_tool": _metered_tool(
+        "svc_tool", calls,
+        {"query": {"type": "string"}, "callback_url": {"type": "string"}},
+    )}
+    orch = _make_orchestrator(project_with_run, registry, scripted=[])
+    auth = orch._build_metered_authorizers(
+        ("svc_tool",), task_id="T-1", agent_id="a1",
+    )
+    assert auth is not None
+    ok, reason = auth("svc_tool", {"callback_url": "x"})
+    assert not ok and "forbidden network param" in reason
+    # The non-url-shaped declared option stays usable.
+    ok, reason = auth("svc_tool", {"query": "hi"})
+    assert ok, reason
+
+
+def test_build_metered_authorizers_none_when_no_metered_tool(
+    project_with_run,
+):
+    """No metered tool in the loadout → None, preserving the runner's
+    unchanged fail-closed floor (deny any metered call outright)."""
+    registry = {"free_tool": tools.Tool(
+        name="free_tool", description="free", call=lambda **k: "ok",
+        params_schema={"type": "object", "properties": {}},
+    )}
+    orch = _make_orchestrator(project_with_run, registry, scripted=[])
+    assert orch._build_metered_authorizers(
+        ("free_tool",), task_id="T-1", agent_id="a1",
+    ) is None

@@ -169,3 +169,27 @@ def checkout_key(svc: Service) -> Optional[str]:
 def cost_class_for(svc: Service) -> Optional[str]:
     """Metered by default; ``free_tier`` opts out (spec Decision 3)."""
     return None if svc.free_tier else "paid-cloud"
+
+
+#: Capability tool name → capability class (mirrors service_tools'
+#: build_service_tools mapping) for per-task spend caps.
+_CAPABILITY_TOOLS = {
+    "generate_image": "image",
+    "generate_video": "video",
+    "generate_speech": "speech",
+    "research_search": "research",
+}
+
+
+def per_task_cap_for_tool(tool_name: str) -> int:
+    """The per-task metered-call cap for a service tool: the backing
+    service's ``per_task_cap`` for a capability tool; for ``api_call``
+    the max across ALL configured services (any could be the target).
+    Unknown tool or unresolvable capability → 1 (the tight floor)."""
+    capability = _CAPABILITY_TOOLS.get(tool_name)
+    if capability is not None:
+        svc = resolve_for_capability(capability)
+        return max(1, svc.per_task_cap) if svc is not None else 1
+    if tool_name == "api_call":
+        return max([1, *(s.per_task_cap for s in load_services().values())])
+    return 1

@@ -87,6 +87,25 @@ def test_corrupt_services_json_degrades_to_empty(tmp_path: Path):
     assert services.load_services() == {}
 
 
+def test_per_task_cap_for_capability_tool():
+    services.add_service(_svc(per_task_cap=3))
+    assert services.per_task_cap_for_tool("research_search") == 3
+
+
+def test_per_task_cap_for_api_call_is_max_across_services():
+    services.add_service(_svc(per_task_cap=3))
+    services.add_service(_svc(id="luma", name="Luma",
+                              capabilities=("video",),
+                              env_var="LUMA_API_KEY", per_task_cap=5))
+    assert services.per_task_cap_for_tool("api_call") == 5
+
+
+def test_per_task_cap_unknown_or_unresolvable_is_one():
+    assert services.per_task_cap_for_tool("mystery_tool") == 1
+    # No service backs "image" → tight floor.
+    assert services.per_task_cap_for_tool("generate_image") == 1
+
+
 def test_one_corrupt_entry_does_not_hide_the_rest():
     services.add_service(_svc())
     data = json.loads(services.SERVICES_FILE.read_text(encoding="utf-8"))
