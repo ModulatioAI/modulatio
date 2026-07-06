@@ -190,6 +190,34 @@ def cost_class_for(svc: Service) -> Optional[str]:
     return None if svc.free_tier else "paid-cloud"
 
 
+def doctor_report(project_code: str) -> list[str]:
+    """Doctor lines for the service pool — empty list = healthy. Flags the
+    three spec conditions: invalid/corrupt raw entries, keyless services,
+    and metered services with no paid-cloud budget."""
+    from modulatio import comptroller
+    lines: list[str] = []
+    svcs = load_services()
+    raw = _load_raw().get("services", {})
+    for sid in raw:
+        if sid not in svcs:
+            lines.append(f"service {sid!r}: entry invalid/corrupt — re-add it")
+    if not svcs:
+        return lines
+    budget = comptroller.load_budget(project_code)
+    for svc in svcs.values():
+        if checkout_key(svc) is None:
+            lines.append(
+                f"service {svc.id!r}: no API key in any {svc.env_var} slot"
+            )
+        if not svc.free_tier and budget.paid_cloud_per_day is None:
+            lines.append(
+                f"service {svc.id!r}: metered but no paid-cloud budget for "
+                f"project {project_code!r} — every call will be denied "
+                "(set paid_cloud_escalations_per_day)"
+            )
+    return lines
+
+
 #: Capability tool name → capability class (mirrors service_tools'
 #: build_service_tools mapping) for per-task spend caps.
 _CAPABILITY_TOOLS = {

@@ -168,6 +168,30 @@ def load_budget(project_code: str) -> Budget:
     )
 
 
+def set_budget_field(project_code: str, field: str, value: int) -> None:
+    """Write ONE budget frontmatter field into the project's comptroller
+    config (the SERVICES tab / doctor's budget surface). Creates the file
+    with a bare frontmatter block when missing."""
+    path = _config_path(project_code)
+    line = f"{field}: {int(value)}"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\n{line}\n---\n", encoding="utf-8")
+        return
+    text = path.read_text(encoding="utf-8", errors="replace")
+    m = _OWN_FRONTMATTER_RE.match(text)
+    if not m:
+        path.write_text(f"---\n{line}\n---\n{text}", encoding="utf-8")
+        return
+    lines = m.group(1).splitlines()
+    lines = [ln for ln in lines
+             if ln.partition(":")[0].strip() != field] + [line]
+    new_front = "\n".join(lines)
+    path.write_text(
+        text[:m.start(1)] + new_front + text[m.end(1):], encoding="utf-8"
+    )
+
+
 def _tomorrow_utc_midnight() -> datetime:
     """When the daily bucket next refreshes. Same cadence as #7e's
     retry budget so the auto-resume pattern doesn't have to juggle

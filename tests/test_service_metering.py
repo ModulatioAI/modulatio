@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from modulatio import metered, services, tools, vault
+from modulatio import comptroller, metered, services, tools, vault
 from modulatio.orchestration import Orchestrator
 from modulatio.runners import ChatResponse, ToolCall, stub_chat_runner
 from modulatio.types import Project
@@ -202,6 +202,58 @@ def test_build_metered_authorizers_belt_drops_url_shaped_schema_keys(
     # The non-url-shaped declared option stays usable.
     ok, reason = auth("svc_tool", {"query": "hi"})
     assert ok, reason
+
+
+# ── S10: set_budget_field — the budget writer ──────────────────────────────
+
+BUDGET_CODE = "BGT"
+
+
+@pytest.fixture
+def budget_vault(tmp_path: Path, monkeypatch) -> Path:
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(BUDGET_CODE, "Budget", "budget writer tests")
+    return tmp_path / BUDGET_CODE.lower()
+
+
+def test_set_budget_field_round_trips(budget_vault):
+    """Missing file → created and readable; set twice → updated, not
+    duplicated."""
+    cfg = budget_vault / "comptroller.md"
+    cfg.unlink()  # exercise the create-from-missing path
+    comptroller.set_budget_field(
+        BUDGET_CODE, "paid_cloud_escalations_per_day", 5
+    )
+    assert comptroller.load_budget(BUDGET_CODE).paid_cloud_per_day == 5
+    comptroller.set_budget_field(
+        BUDGET_CODE, "paid_cloud_escalations_per_day", 9
+    )
+    assert comptroller.load_budget(BUDGET_CODE).paid_cloud_per_day == 9
+    text = cfg.read_text(encoding="utf-8")
+    assert text.count("paid_cloud_escalations_per_day") == 1
+
+
+def test_set_budget_field_preserves_other_fields_and_body(budget_vault):
+    cfg = budget_vault / "comptroller.md"
+    cfg.write_text(
+        "---\n"
+        "premium_cloud_escalations_per_day: 3\n"
+        "tags: [modulatio, comptroller]\n"
+        "---\n"
+        "# Comptroller notes\n"
+        "body text survives\n",
+        encoding="utf-8",
+    )
+    comptroller.set_budget_field(
+        BUDGET_CODE, "paid_cloud_escalations_per_day", 7
+    )
+    budget = comptroller.load_budget(BUDGET_CODE)
+    assert budget.paid_cloud_per_day == 7
+    assert budget.premium_cloud_per_day == 3
+    text = cfg.read_text(encoding="utf-8")
+    assert "tags: [modulatio, comptroller]" in text
+    assert "# Comptroller notes" in text
+    assert "body text survives" in text
 
 
 def test_build_metered_authorizers_none_when_no_metered_tool(

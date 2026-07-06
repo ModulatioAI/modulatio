@@ -144,6 +144,55 @@ def test_one_corrupt_entry_does_not_hide_the_rest():
     assert list(services.load_services()) == ["tavily"]
 
 
+# ── S10: doctor_report — pool health surfaced before a run hits it ──────────
+
+DOCTOR_CODE = "SVD"
+
+
+@pytest.fixture
+def _project(tmp_path: Path, monkeypatch) -> None:
+    from modulatio import vault
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    vault.init_project(DOCTOR_CODE, "svc doctor", "doctor report tests")
+
+
+def test_doctor_report_flags_metered_without_budget(_project, monkeypatch):
+    services.add_service(_svc())  # free_tier=False → metered
+    monkeypatch.setenv("TAVILY_API_KEY", "sk-test")
+    lines = services.doctor_report(DOCTOR_CODE)
+    assert any("no paid-cloud budget" in ln for ln in lines)
+    assert not any("no API key" in ln for ln in lines)
+
+
+def test_doctor_report_flags_missing_key(_project, monkeypatch):
+    from modulatio import comptroller
+    services.add_service(_svc())
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    comptroller.set_budget_field(
+        DOCTOR_CODE, "paid_cloud_escalations_per_day", 5
+    )
+    lines = services.doctor_report(DOCTOR_CODE)
+    assert any("no API key" in ln for ln in lines)
+    assert not any("no paid-cloud budget" in ln for ln in lines)
+
+
+def test_doctor_report_healthy_is_empty(_project, monkeypatch):
+    services.add_service(_svc(free_tier=True))
+    monkeypatch.setenv("TAVILY_API_KEY", "sk-test")
+    assert services.doctor_report(DOCTOR_CODE) == []
+
+
+def test_doctor_report_flags_corrupt_raw_entry(_project, monkeypatch):
+    services.add_service(_svc(free_tier=True))
+    monkeypatch.setenv("TAVILY_API_KEY", "sk-test")
+    data = json.loads(services.SERVICES_FILE.read_text(encoding="utf-8"))
+    data["services"]["bogus"] = "not-a-dict"
+    services.SERVICES_FILE.write_text(json.dumps(data), encoding="utf-8")
+    lines = services.doctor_report(DOCTOR_CODE)
+    assert any("invalid/corrupt" in ln and "bogus" in ln for ln in lines)
+    assert len(lines) == 1  # the healthy service adds no noise
+
+
 def test_seed_service_skills_load_and_declare_loadouts():
     from modulatio import skills
     expected = {
