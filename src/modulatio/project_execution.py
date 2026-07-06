@@ -1808,10 +1808,17 @@ def _make_default_kickoff(
         # ``read_tool_result`` is in the registry. Without it, once
         # Layer 1 summarization fires the conversation tells the
         # model to recover by call_id and the tool isn't there.
+        from modulatio import config as _folders_cfg
+        _folder_rw, _folder_read = _folders_cfg.folder_grant_roots()
         tool_registry = _tools.build_registry(
             artifacts_root=artifacts_root,
             tool_calls_dir=run_dir / "tool_calls",
             project_code=project.code,
+            # Registered FOLDERS (sequential path): rw folders read/edit/shell,
+            # ro/output read-only. No prompt — the FOLDERS tab decided.
+            extra_roots=_folder_rw,
+            run_shell_extra_roots=_folder_rw,
+            extra_read_roots=_folder_read,
         )
 
         orch = Orchestrator(

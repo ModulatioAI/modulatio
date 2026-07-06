@@ -111,9 +111,16 @@ def _build_kickoff_orchestrator(
     )
     if mode != "stub":
         run_workspace = _vault.run_dir(project.code, project.run_id)
+        from modulatio import config as _folders_cfg
+        _folder_rw, _folder_read = _folders_cfg.folder_grant_roots()
         tool_registry = _tools_mod.build_registry(
             artifacts_root=run_workspace / "artifacts",
             tool_calls_dir=run_workspace / "tool_calls",
+            # Registered FOLDERS (sequential path): rw folders read/edit/shell,
+            # ro/output read-only. No prompt — the FOLDERS tab decided.
+            extra_roots=_folder_rw,
+            run_shell_extra_roots=_folder_rw,
+            extra_read_roots=_folder_read,
         )
         from modulatio import roster
         chat_default_model = (

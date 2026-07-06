@@ -570,10 +570,17 @@ def kickoff(
         # ``read_tool_result`` is in the registry. Layer 1
         # summarization tells the model to recover raw tool output
         # by call_id; without the recovery tool the loop fails.
+        from modulatio import config as _folders_cfg
+        _folder_rw, _folder_read = _folders_cfg.folder_grant_roots()
         tool_registry = _tools_mod.build_registry(
             artifacts_root=artifacts_root,
             tool_calls_dir=run_workspace / "tool_calls",
             project_code=code,
+            # Registered FOLDERS (sequential path): rw folders read/edit/shell,
+            # ro/output read-only. No prompt — the FOLDERS tab decided.
+            extra_roots=_folder_rw,
+            run_shell_extra_roots=_folder_rw,
+            extra_read_roots=_folder_read,
         )
         # Shared FALLBACK chat runner for agents with no per-agent runner — it does
         # NOT back the Leader: _resolve_chat_runner("leader") never falls through to

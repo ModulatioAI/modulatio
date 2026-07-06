@@ -7913,9 +7913,19 @@ class Orchestrator:
         else:
             staging.mkdir(parents=True, exist_ok=True)
 
+    def _folder_roots(self) -> "tuple[tuple[str, ...], tuple[str, ...]]":
+        """The registered FOLDERS as ``(rw_roots, read_roots)`` — the one seam
+        every seat wiring reads (and tests monkeypatch). Delegates to
+        ``config.folder_grant_roots()``, which re-validates each root (probe +
+        widen safety floor) at use time."""
+        from modulatio import config as _config
+
+        return _config.folder_grant_roots()
+
     def _staging_tool_registry(self, staging: Path) -> "dict[str, tools.Tool]":
         """Re-bind the path-bound builtins to ``staging`` while preserving
         any custom tools the caller merged into ``self.tool_registry``."""
+        folder_rw, folder_read = self._folder_roots()
         rebound = tools.build_registry(
             artifacts_root=staging,
             tool_calls_dir=staging / "tool_calls",
@@ -7924,6 +7934,12 @@ class Orchestrator:
             # tool-written file in staging passes QC there, then is deleted with
             # staging and never copied to the shared tree (Nemo R2 HIGH).
             on_artifact_write=self._record_artifact_write,
+            # Registered FOLDERS: rw folders are read/edit/shell-reachable;
+            # ro/output folders are READ-only (never a writable bwrap bind).
+            # No permission prompt — the FOLDERS tab is the standing decision.
+            extra_roots=folder_rw,
+            run_shell_extra_roots=folder_rw,
+            extra_read_roots=folder_read,
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # staging-bound builtins win over shared ones
@@ -7997,7 +8013,12 @@ class Orchestrator:
         is needed (e.g. parallel producers that must not share a write root)."""
         from modulatio import claude_cli as _clay
         ws = workspace if workspace is not None else self._leader_workspace()
+        # Registered FOLDERS join every Clay seat here — rw folders as writable
+        # grants, ro/output as --ro-bind visibility. NO permission prompt fires
+        # for them: the FOLDERS tab is the operator's standing decision.
+        folder_rw, folder_read = self._folder_roots()
         grants = tuple(str(r) for r in self.leader_gate().granted_roots())
+        grants = grants + tuple(r for r in folder_rw if r not in grants)
         # A seat path may temporarily widen its own visibility via a thread-local
         # hint: leader-verify/converse grant the whole run dir so a Clay-backed
         # reviewer SEES the harness (artifacts, reports, logs, tickets) like any
@@ -8006,6 +8027,7 @@ class Orchestrator:
         # deliverables it was meant to inspect). Writes stay in the operator-widen
         # gate's rw ``grants``. Unset (and thus a no-op) on every other seat path.
         extra = tuple(getattr(self._tls, "seat_extra_grants", ()) or ())
+        extra = extra + tuple(r for r in folder_read if r not in extra)
         return _clay.seat_context(
             ws, grants, read_only_roots=extra,
             on_tool_call=on_tool_call, confined=confined,
@@ -8071,15 +8093,21 @@ class Orchestrator:
         Mirrors ``_staging_tool_registry``'s rebind; non-path tools preserved."""
         workspace = self._leader_workspace()
         gate = self.leader_gate()
+        folder_rw, folder_read = self._folder_roots()
         rebound = tools.build_registry(
             artifacts_root=workspace,
             tool_calls_dir=workspace / "tool_calls",
             project_code=self.project.code,
             # PATH-granted roots reach the file tools (read/edit/write); EXEC-
             # granted roots reach run_shell (a separate, sharper grant class —
-            # a folder widen never confers exec, Wild Bill HIGH-2).
-            extra_roots=gate.granted_roots(),
-            run_shell_extra_roots=gate.granted_roots("exec"),
+            # a folder widen never confers exec, Wild Bill HIGH-2). Registered
+            # rw FOLDERS join both: a registered read-write folder is the
+            # operator's standing write grant (the FOLDERS tab is the
+            # permission decision — no prompt); ro/output folders are
+            # read-class only.
+            extra_roots=(*gate.granted_roots(), *folder_rw),
+            run_shell_extra_roots=(*gate.granted_roots("exec"), *folder_rw),
+            extra_read_roots=folder_read,
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # workspace-bound builtins win over shared ones
@@ -8098,10 +8126,15 @@ class Orchestrator:
         Only the READ-class path tools are widened; the write-class builtins and
         any caller-registered tools (http_get, web_search, custom) are kept."""
         root = self._scope_root()
+        folder_rw, folder_read = self._folder_roots()
         rebound = tools.build_registry(
             artifacts_root=root,
             tool_calls_dir=root / "artifacts" / "tool_calls",
             project_code=self.project.code,
+            # Registered FOLDERS are read-visible to the verifying Leader like
+            # any seat (requirement: Leader/QC access == producers) — READ
+            # class only here; this registry never writes.
+            extra_read_roots=(*folder_rw, *folder_read),
         )
         # Widen ONLY the read-class path builtins to the run dir. The write-class
         # tools (write_artifact / edit_file) keep the caller's artifacts-bound
