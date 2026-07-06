@@ -20,7 +20,7 @@ from typing import Callable
 
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Button, Checkbox, DataTable, Input, OptionList, Select, Static,
 )
@@ -118,7 +118,9 @@ class ConfigScreen(Vertical):
         yield Static("CONFIGURATION · Models", classes="cfg-title")
         with Configurator():
             yield Vertical(id="cfg-list")
-            yield Vertical(id="cfg-companion")
+            # Scrollable: a tall flow (the custom-service form, a long key list)
+            # must never clip its bottom buttons on a short terminal.
+            yield VerticalScroll(id="cfg-companion")
 
     async def on_mount(self) -> None:
         await self.show_list()

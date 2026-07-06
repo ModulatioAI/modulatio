@@ -357,3 +357,24 @@ async def test_custom_service_key_companion_hides_the_opaque_handle():
         head = " ".join(str(s.content) for s in app.query(Static))
         assert "OCR.space" in head          # the note IS shown
         assert "SVCKEY_" not in head         # the opaque handle is NOT
+
+
+async def test_custom_form_save_reachable_on_a_short_terminal():
+    """The tall custom form must not clip its Save button on a short window —
+    the companion pane scrolls (Clif hit this: Save was below the fold until
+    full-screen)."""
+    from textual.widgets import Button
+    app = _Host()
+    async with app.run_test(size=(120, 24)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        await screen._show_custom_service_form()
+        await pilot.pause()
+        pane = app.query_one("#cfg-companion")
+        assert pane.max_scroll_y > 0            # content overflows → scrolls
+        pane.scroll_end(animate=False)
+        await pilot.pause()
+        save = app.query_one("#cfg-csvc-save", Button)
+        top, bot = pane.region.y, pane.region.y + pane.region.height
+        assert top <= save.region.y and \
+            save.region.y + save.region.height <= bot  # reachable via scroll
