@@ -2160,6 +2160,15 @@ def build_registry(
                 "required": ["call_id"],
             },
         )
+    # Service-API pool (spec 2026-07-05): capability tools + api_call for
+    # operator-configured outside services. Lazy import — service_tools
+    # imports tools at module level (Tool/_urlopen), so the reverse edge
+    # must stay inside the function body.
+    from modulatio import service_tools as _service_tools
+    registry.update(_service_tools.build_service_tools(
+        artifacts_root=artifacts_root,
+        on_artifact_write=on_artifact_write,
+    ))
     return registry
 
 

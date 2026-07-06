@@ -117,6 +117,8 @@ Checks: Python version, dependency imports, vault detection, provider auth profi
 
 A **Seats** section flags a producer wearing a **reasoning model that can't be quieted** through its endpoint — a heavy reasoner behind an OpenAI-compatible shim (an Ollama/LM Studio `/v1` that drops reasoning-control params) will bloat its context with reasoning tokens, so `doctor` names the seat with a remedy (swap to a non-reasoning model or a toggle-able family, or accept the cost). A clean floor reads `✓ all producer seats quietable (or non-reasoning)`.
 
+A **Services** section checks the outside-service pool (Config → SERVICES): a service with **no API key** in any of its slots, a **metered service with no paid-cloud budget** for the active project (every call would be denied — set `paid_cloud_escalations_per_day`), and a **corrupt registry entry** each get a `⚠` line, so a misconfiguration surfaces here instead of as a mid-run denial. A clean floor reads `✓ OK (<n> configured)` or `✓ none configured`.
+
 Output format: `[✓]`, `[!]`, or `[✗]` per check, with remediation hints for failures.
 
 Run this first whenever something feels off.

@@ -1,6 +1,6 @@
 # Skill system
 
-Modulatio's skill system is the answer to a simple question: how do you compose **what** a team can do without locking the team into fixed roles? Modulatio ships seventeen seed skills covering the multi-piece deliverable shape end-to-end.
+Modulatio's skill system is the answer to a simple question: how do you compose **what** a team can do without locking the team into fixed roles? Modulatio ships a library of seed skills covering the multi-piece deliverable shape end-to-end.
 
 This page is the architectural deep-dive. If you want the user-facing walkthrough — how to author a new skill — see [Skill catalog](/reference/skills/) for the shipped skills and [Concepts](/concepts/concepts/) for the role of skills in the broader mental model.
 
@@ -45,9 +45,9 @@ Three resolution layers, in priority order:
 
 ---
 
-## The seventeen seed skills
+## The seed skills
 
-Modulatio ships seventeen seed skills under `src/modulatio/_seed_skills/`:
+Modulatio ships its seed skills under `src/modulatio/_seed_skills/`. The core set:
 
 | Skill | Role family | What it does |
 | --- | --- | --- |
@@ -70,6 +70,8 @@ Modulatio ships seventeen seed skills under `src/modulatio/_seed_skills/`:
 | `consolidation.md` | Producer | Assemble N units into one deliverable (now the back-compat alias for `document-assembly`). |
 
 Since v0.8, assembly is a **family** — `document-assembly`, `code-assembly`, `data-assembly`, and `media-assembly` — each declaring a manifest the engine joins mechanically, on a content-addressed review-ledger. See [Assembly + the review-ledger](/architecture/assembly/) for the deep-dive and the [Skill catalog](/reference/skills/) for the family list.
+
+The **service-capability skills** — `generate-images`, `generate-video`, `generate-speech`, `research-via-api`, and `service-api-call` — front the operator's configured outside services (Config → SERVICES), each a thin discipline wrapper around one [service tool](/reference/tools/#the-services-pool). See the [Skill catalog](/reference/skills/) for their contracts.
 
 Every seed skill is artifact-class agnostic — drift-gate tests in `tests/test_skills_are_artifact_class_agnostic.py` enforce that no seed skill bakes domain-specific vocabulary (no "chapter," "protagonist," "leitmotif," "slide" in the strict tier; minimal list across all skills).
 

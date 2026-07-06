@@ -1017,6 +1017,32 @@ def _run_doctor_checks() -> None:
             if not noisy:
                 typer.echo("  ✓ all producer seats quietable (or non-reasoning)")
 
+    # Services (S10): surface pool problems — keyless services, metered
+    # services with no paid-cloud budget, corrupt registry entries — here
+    # instead of as mid-run denials.
+    from modulatio import services as _services
+    typer.echo("\nServices:")
+    _svc_count = len(_services.load_services())
+    if code:
+        try:
+            _svc_lines = _services.doctor_report(code)
+        except Exception as e:  # doctor diagnoses; it must not crash
+            _svc_lines = [f"services check failed: {e}"]
+        for _ln in _svc_lines:
+            typer.echo(f"  ⚠ {_ln}")
+        if not _svc_lines:
+            typer.echo(
+                f"  ✓ OK ({_svc_count} configured)" if _svc_count
+                else "  ✓ none configured"
+            )
+    elif _svc_count:
+        typer.echo(
+            f"  ! {_svc_count} configured — no default project recorded, "
+            "budget check skipped"
+        )
+    else:
+        typer.echo("  ✓ none configured")
+
     # Token expiry
     typer.echo("\nOAuth tokens:")
     if oauth_helpers.has_anthropic_credentials():

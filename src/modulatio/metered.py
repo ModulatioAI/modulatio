@@ -149,11 +149,15 @@ def build_metered_authorizer(
     agent_id: str,
     pinned_units: "list[Task]",
     artifacts_root: "Path",
-    per_task_cap: int = 1,
+    per_task_cap: int | None = 1,
+    allowed_keys: tuple[str, ...] = (),
 ) -> "Callable[[str, dict], tuple[bool, str]]":
     """Return the ``(tool_name, args) -> (allowed, reason)`` callback the producer
     tool-loop calls before a metered tool spends. Enforces the full contract above,
     then defers the go/no-go to ``comptroller.authorize_metered_tool`` (fail-closed).
+    ``allowed_keys`` lets a service tool forgive its schema-declared TOP-LEVEL option
+    key NAMES in the narrow-param scan; URL-like values, nested hits, and over-depth
+    stay denied.
     """
 
     def authorize(called_name: str, args: dict) -> "tuple[bool, str]":
@@ -169,6 +173,16 @@ def build_metered_authorizer(
         # 1. Narrow-param contract (Nemo B4 #4) — no arbitrary network target/payload,
         # checked recursively + by token + by URL-like value (not just top-level keys).
         bad = _scan_for_network_params(args)
+        if allowed_keys and bad:
+            # A service tool allowlists its options BY SCHEMA (the denial
+            # reason below has always asked for exactly this): forgive
+            # TOP-LEVEL declared key NAMES only. URL-like values, nested
+            # hits, and over-depth stay denied — fail-closed backstop.
+            allowed = {k.lower() for k in allowed_keys}
+            bad = [
+                p for p in bad
+                if "." in p or "<" in p or p.lower() not in allowed
+            ]
         if bad:
             return (
                 False,

@@ -105,12 +105,14 @@ _WARNED_UNBOUND_GATE_FIRE: list[bool] = []
 # persists. Same compress/operate behavior, just more room. Reversible.
 EXPERIMENTAL_DEFAULTS: dict[str, int] = {
     "producer":        48_000,
-    # 32K→64K (Clif, 2026-07-03, run-4 evidence): the reviewer's window now
-    # matches the largest producer tier + the hard ceiling — a reviewer
-    # squeezed below the producer's canvas forces compressed partial-view
-    # judgments (the #85 scar's origin). The assembly cheap-path stays the
-    # primary economics; this is headroom for legitimate big single reads.
-    "qc":              64_000,
+    # 32K→64K (Clif, 2026-07-03, run-4 evidence): a reviewer squeezed below
+    # the producer's canvas forces compressed partial-view judgments (the
+    # #85 scar's origin). 64K→96K (Clif, 2026-07-06): QC must sit GENEROUSLY
+    # above the producers — 2x the producer tier — to read the whole canvas
+    # + standards + its own tool results without churn. Tracks the hard
+    # ceiling (raised with it). The assembly cheap-path stays the primary
+    # economics; this is headroom for legitimate big single reads.
+    "qc":              96_000,
     "planner":         32_000,
     "leader-decompose": 48_000,
     "leader-iterate":  32_000,
@@ -131,8 +133,10 @@ CUSTOM_WORKER_DEFAULT = 48_000
 
 #: Hard ceiling for ANY single LLM call's resolved budget. Discipline
 #: lever, not a model-capability claim — raising it requires an explicit
-#: project/admin configuration change.
-HARD_GLOBAL_CEILING = 64_000
+#: project/admin configuration change. 64K→96K (Clif, 2026-07-06): raised
+#: with the QC tier so the reviewer's 2x-producer window isn't silently
+#: clamped back to the producer's size.
+HARD_GLOBAL_CEILING = 96_000
 
 #: Prudent fraction of a task's OWN window that its projected working context
 #: should stay under before the engine fans it into size-bounded chunks. At 0.20

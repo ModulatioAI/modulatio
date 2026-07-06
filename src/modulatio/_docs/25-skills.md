@@ -263,6 +263,26 @@ Assembling a multi-piece deliverable — joining N already-produced units into O
 
 ---
 
+## Service-capability skills (familial)
+
+Five seed skills front the [service-API pool](/reference/tools/#the-services-pool) — outside SaaS services the operator configures under Config → SERVICES. Each is a thin discipline wrapper around exactly one service tool: how to call it, that binary results come back as **artifact filenames** (never bytes), and that a metered denial (`DENIED (metered)`) is a budget stop to *report*, not retry. The API key is checked out of the pool and injected by the engine — the skill body says so explicitly, so a model never goes looking for one.
+
+| Skill | Tool loadout | What it does |
+|---|---|---|
+| **`generate-images`** | `generate_image` | Image from a text prompt; saved into the artifacts tree. |
+| **`generate-video`** | `generate_video` | Short video; submit-then-poll under a wall cap — a timeout returns the vendor job id to report, never a blind retry. |
+| **`generate-speech`** | `generate_speech` | Spoken audio from text; vendor voice id optional. |
+| **`research-via-api`** | `research_search` | Ranked sources with snippets — a discovery step, not a full-page fetch. |
+| **`service-api-call`** | `api_call` | The custom-service generic: any configured service, paths relative to its pinned base URL (the model can never choose a host). |
+
+**Capability tags:** `tool-using` plus the capability (`image-generation` / `video-generation` / `speech-generation` / `research` / `api-integration`).
+
+**Producer mode:** GENERATE.
+
+**Critical contract:** metered spend — each call may cost the operator real money and is gated before it fires (see [the metered-tool tier](/reference/tools/#the-metered-tool-tier)). For a custom service, the Leader may author a service-named skill documenting its endpoints; `service-api-call` tells the model to `search_skills` for one before guessing request shapes.
+
+---
+
 ## Skill freshness classes
 
 The `freshness_class` frontmatter field signals maturity:

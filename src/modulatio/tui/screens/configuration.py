@@ -19,18 +19,34 @@ import re
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Input, OptionList, Static
+from textual.widgets import Button, Checkbox, DataTable, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from modulatio import model_presets
 from modulatio import provider_catalog as pc
 from modulatio import provider_keys
+from modulatio import service_catalog
+from modulatio import services
 from modulatio.tui.widgets.auth_step import AuthStep
 from modulatio.tui.widgets.confirm_modal import ConfirmModal
 from modulatio.tui.widgets.configurator import Configurator
 from modulatio.tui.widgets.effort_picker import EffortPicker
 from modulatio.tui.widgets.model_picker import ModelPicker
 from modulatio.tui.widgets.provider_picker import ProviderPicker
+
+
+def _multi_backed_capabilities() -> dict[str, list[services.Service]]:
+    """Capabilities backed by MORE than one configured service — the only
+    ones where a per-capability default choice means anything (a single
+    backer already resolves; see ``services.resolve_for_capability``)."""
+    by_cap: dict[str, list[services.Service]] = {}
+    for svc in services.load_services().values():
+        for cap in svc.capabilities:
+            by_cap.setdefault(cap, []).append(svc)
+    return {
+        cap: sorted(backers, key=lambda s: s.id)
+        for cap, backers in sorted(by_cap.items()) if len(backers) > 1
+    }
 
 
 class ConfigScreen(Vertical):
@@ -43,9 +59,11 @@ class ConfigScreen(Vertical):
     ConfigScreen Configurator { height: 1fr; }
     ConfigScreen #cfg-models { height: 2fr; border: round $frame-dim; }
     ConfigScreen #cfg-provlist, ConfigScreen #cfg-provkeylist,
-    ConfigScreen #cfg-pinlist {
+    ConfigScreen #cfg-pinlist, ConfigScreen #cfg-svc-catalog,
+    ConfigScreen #cfg-svc-caplist, ConfigScreen #cfg-svc-deflist {
         height: 1fr; border: round $frame-dim;
     }
+    ConfigScreen #cfg-services { height: 1fr; border: round $frame-dim; }
     ConfigScreen #cfg-status, ConfigScreen #cfg-list-status {
         color: $text-muted; height: auto;
     }
@@ -69,6 +87,8 @@ class ConfigScreen(Vertical):
         self._prov_id: str | None = None
         self._prov_base: str | None = None
         self._prov_selected_key: str | None = None
+        # Service default-picker state (which capability is being defaulted)
+        self._svc_default_cap: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("CONFIGURATION · Models", classes="cfg-title")
@@ -91,6 +111,7 @@ class ConfigScreen(Vertical):
         self._pending_model_id = None
         self._km_model = self._km_base = self._km_selected_key = None
         self._prov_id = self._prov_base = self._prov_selected_key = None
+        self._svc_default_cap = None
 
     async def _rest_companion(self) -> None:
         """Return the companion pane to its resting hint (no flow active) and
@@ -139,6 +160,21 @@ class ConfigScreen(Vertical):
             provlist.add_option(Option(
                 f"{prov.name:20}  {n} key(s)", id=prov.id))
         await lst.mount(provlist)
+        # ── SERVICES: the outside-service API pool (spec 2026-07-05) ──────
+        await lst.mount(Static(
+            "SERVICES — outside APIs (image, video, speech, research, "
+            "custom); keys pool like provider keys", classes="cfg-section"))
+        svc_table = DataTable(id="cfg-services", cursor_type="row")
+        svc_table.add_columns("Service", "Capabilities", "Keys", "Tier")
+        self._fill_services_table(svc_table)
+        await lst.mount(svc_table)
+        await lst.mount(Horizontal(
+            Button("+ Add service", id="cfg-svc-add", variant="primary"),
+            Button("Keys", id="cfg-svc-keys"),
+            Button("Default", id="cfg-svc-default"),
+            Button("Remove", id="cfg-svc-remove", variant="warning"),
+            id="cfg-svc-buttons",
+        ))
         await self._rest_companion()
 
     def _fill_table(self, table: DataTable) -> None:
@@ -223,6 +259,33 @@ class ConfigScreen(Vertical):
             await self._add_provider_key()
         elif event.button.id == "cfg-rmkey":
             await self._remove_provider_key()
+        elif event.button.id == "cfg-svc-add":
+            self._reset_flow_state()
+            await self._show_service_catalog()
+        elif event.button.id == "cfg-svc-keys":
+            sid = self._selected_service_id()
+            if not sid:
+                self._set_list_status("Select a service row first, then Keys.")
+                return
+            await self._show_provider_keys(f"svc:{sid}")
+        elif event.button.id == "cfg-svc-default":
+            await self._show_capability_picker()
+        elif event.button.id == "cfg-svc-remove":
+            sid = self._selected_service_id()
+            if not sid:
+                self._set_list_status(
+                    "Select a service row first, then Remove.")
+                return
+            # Guard the delete (standardised destructive-op idiom). Keys are
+            # NOT touched — they stay in the vault .env until removed under Keys.
+            self.app.push_screen(
+                ConfirmModal(
+                    f"Remove service '{sid}'?\n\nIts keys stay in the vault "
+                    ".env until you remove them under Keys."),
+                lambda ok: self._do_remove_service(sid) if ok else None,
+            )
+        elif event.button.id == "cfg-csvc-save":
+            await self._save_custom_service()
 
     async def on_provider_picker_provider_chosen(
         self, event: ProviderPicker.ProviderChosen
@@ -378,20 +441,34 @@ class ConfigScreen(Vertical):
 
     # ── provider key manager (no model needed — add / remove keys) ──────
 
-    async def _show_provider_keys(self, provider_id: str, message: str = "") -> None:
-        prov = pc.get_provider(provider_id)
+    def _key_owner(self, owner_id: str) -> tuple[str, str] | None:
+        """Resolve a key-manager owner id → (base env var, display name).
+        Providers by catalog id; services via the ``svc:<id>`` prefix — the
+        smallest seam letting the ONE key companion serve both pools (a
+        service's keys live in the same numbered-slot pool as a provider's)."""
+        if owner_id.startswith("svc:"):
+            svc = services.get_service(owner_id[len("svc:"):])
+            return (svc.env_var, svc.name) if svc else None
+        prov = pc.get_provider(owner_id)
         base = self._provider_base(prov) if prov else None
-        if prov is None or base is None:
+        return (base, prov.name) if prov is not None and base else None
+
+    async def _show_provider_keys(self, owner_id: str, message: str = "") -> None:
+        owner = self._key_owner(owner_id)
+        if owner is None:
             await self._rest_companion()
             return
-        self._prov_id = provider_id
+        base, display_name = owner
+        self._prov_id = owner_id
         self._prov_base = base
         self._prov_selected_key = None
         keylist = OptionList(id="cfg-provkeylist")
         for slot in provider_keys.list_keys(base):
             keylist.add_option(Option(self._key_row_label(slot), id=slot["env_var"]))
         await self.query_one(Configurator).swap_companion(
-            Static(f"Keys · {prov.name}  ({base}) — labels only, never the value:"),
+            # escape() — a custom SERVICE name is operator-authored markup risk.
+            Static(f"Keys · {escape(display_name)}  ({base}) — labels only, "
+                   "never the value:"),
             keylist,
             Input(password=True, placeholder="paste a NEW key", id="cfg-newkey"),
             Input(placeholder="label (optional), e.g. backup", id="cfg-newkeylabel"),
@@ -453,6 +530,189 @@ class ConfigScreen(Vertical):
         self.run_worker(self._show_provider_keys(
             self._prov_id, message=f"Removed {ev} from Modulatio."))
 
+    # ── SERVICES (the outside-service API pool — spec 2026-07-05) ────────
+
+    def _fill_services_table(self, table: DataTable) -> None:
+        """(Re)populate the service rows — row key = the service id. Painted
+        cells are operator-authored for CUSTOM services (name, capabilities)
+        so they're escaped, same MarkupError guard as the models table."""
+        for sid, svc in sorted(services.load_services().items()):
+            n = len([s for s in provider_keys.list_keys(svc.env_var)
+                     if s["is_set"]])
+            table.add_row(
+                escape(svc.name), escape(", ".join(svc.capabilities)),
+                f"{n} key(s)",
+                "free" if svc.free_tier else "metered",
+                key=sid,
+            )
+
+    def _refresh_services_table(self) -> None:
+        """Reuse the existing table (clear + refill) — avoids a remount race."""
+        try:
+            table = self.query_one("#cfg-services", DataTable)
+        except Exception:
+            self.run_worker(self.show_list())
+            return
+        table.clear()
+        self._fill_services_table(table)
+
+    def _selected_service_id(self) -> str | None:
+        try:
+            table = self.query_one("#cfg-services", DataTable)
+            if table.row_count == 0:
+                return None
+            return table.coordinate_to_cell_key(
+                table.cursor_coordinate
+            ).row_key.value
+        except Exception:
+            return None
+
+    async def _show_service_catalog(self) -> None:
+        """Add-service step 1: cataloged vendors not yet configured, plus the
+        custom lane (any API within reason — the long tail)."""
+        configured = set(services.load_services())
+        cat = OptionList(id="cfg-svc-catalog")
+        for e in service_catalog.catalog():
+            if e.service.id in configured:
+                continue
+            cat.add_option(Option(
+                f"{e.service.name:24} {', '.join(e.service.capabilities)}"
+                f"{'  (beta)' if e.beta else ''}",
+                id=e.service.id))
+        cat.add_option(Option("Custom service…", id="__custom__"))
+        await self.query_one(Configurator).swap_companion(
+            Static("Add a service — pick a cataloged vendor, or define a "
+                   "custom API:"),
+            cat,
+            Static("", id="cfg-status"),
+            Button("Cancel", id="cfg-cancel"),
+        )
+
+    async def _add_catalog_service(self, service_id: str) -> None:
+        if service_id == "__custom__":
+            await self._show_custom_service_form()
+            return
+        entry = service_catalog.entry(service_id)
+        if entry is None:
+            return
+        try:
+            services.add_service(entry.service)
+        except ValueError as exc:
+            self._set_status(escape(str(exc)))
+            return
+        self._refresh_services_table()
+        self._set_list_status(f"Added service '{service_id}'.")
+        # Land the operator on "add a key" for the new service immediately.
+        await self._show_provider_keys(f"svc:{service_id}")
+
+    async def _show_custom_service_form(self) -> None:
+        await self.query_one(Configurator).swap_companion(
+            Static("Custom service — the base URL is pinned at add time "
+                   "(the pin IS the authorization):"),
+            Input(placeholder="id (slug, e.g. my-api)", id="cfg-csvc-id"),
+            Input(placeholder="name", id="cfg-csvc-name"),
+            Input(placeholder="base URL (https://…)", id="cfg-csvc-url"),
+            Input(placeholder="auth shape: bearer | header:<Name> | "
+                              "query:<name>", id="cfg-csvc-auth"),
+            Input(placeholder="capabilities (CSV, e.g. image,research)",
+                  id="cfg-csvc-caps"),
+            Input(placeholder="docs URL (optional)", id="cfg-csvc-docs"),
+            Checkbox("free tier (not metered)", id="cfg-csvc-free"),
+            Button("Save", id="cfg-csvc-save", variant="primary"),
+            Static("", id="cfg-status"),
+            Button("Cancel", id="cfg-cancel"),
+        )
+
+    async def _save_custom_service(self) -> None:
+        def _val(selector: str) -> str:
+            return self.query_one(selector, Input).value.strip()
+
+        sid = _val("#cfg-csvc-id")
+        # Key slots pool under a service-derived env var (slug → SHOUT_CASE).
+        env_base = re.sub(r"[^A-Za-z0-9]+", "_", sid).upper().strip("_")
+        svc = services.Service(
+            id=sid,
+            name=_val("#cfg-csvc-name") or sid,
+            kind="custom",
+            # dict.fromkeys: dedupe (a repeated capability would offer a
+            # phantom Default choice) while keeping the operator's order.
+            capabilities=tuple(dict.fromkeys(
+                c.strip().lower() for c in _val("#cfg-csvc-caps").split(",")
+                if c.strip())),
+            env_var=f"{env_base}_API_KEY" if env_base else "",
+            base_url=_val("#cfg-csvc-url"),
+            auth_shape=_val("#cfg-csvc-auth") or "bearer",
+            free_tier=self.query_one("#cfg-csvc-free", Checkbox).value,
+            docs_url=_val("#cfg-csvc-docs"),
+        )
+        try:
+            services.add_service(svc)
+        except ValueError as exc:
+            # Paint the rejection on the form (escaped — it echoes operator
+            # input) so the half-typed fields survive for a correction.
+            self._set_status(escape(str(exc)))
+            return
+        await self.show_list(f"Added service '{escape(sid)}'.")
+
+    async def _show_capability_picker(self) -> None:
+        """Default step 1: only capabilities with MORE than one backing
+        service (a single backer already resolves without a default)."""
+        multi = _multi_backed_capabilities()
+        if not multi:
+            self._set_list_status(
+                "No capability has more than one backing service — "
+                "nothing to choose.")
+            return
+        caps = OptionList(id="cfg-svc-caplist")
+        for cap, backers in multi.items():
+            current = services.capability_default(cap)
+            suffix = f"  (default: {current})" if current else ""
+            caps.add_option(Option(
+                f"{escape(cap)}  — {len(backers)} services{escape(suffix)}",
+                id=cap))
+        await self.query_one(Configurator).swap_companion(
+            Static("Default service — pick a capability that has more than "
+                   "one backer:"),
+            caps,
+            Static("", id="cfg-status"),
+            Button("Cancel", id="cfg-cancel"),
+        )
+
+    async def _show_default_picker(self, capability: str) -> None:
+        """Default step 2: the capability's backing services, current default
+        marked."""
+        self._svc_default_cap = capability
+        current = services.capability_default(capability)
+        backers = _multi_backed_capabilities().get(capability, [])
+        deflist = OptionList(id="cfg-svc-deflist")
+        for svc in backers:
+            mark = "  ◀ current default" if svc.id == current else ""
+            deflist.add_option(Option(f"{escape(svc.name)}{mark}", id=svc.id))
+        await self.query_one(Configurator).swap_companion(
+            Static(f"Default for '{escape(capability)}' — the service that "
+                   "answers when a task needs it:"),
+            deflist,
+            Static("", id="cfg-status"),
+            Button("Cancel", id="cfg-cancel"),
+        )
+
+    async def _set_service_default(self, service_id: str) -> None:
+        capability = self._svc_default_cap
+        if not capability:
+            return
+        try:
+            services.set_capability_default(capability, service_id)
+        except ValueError as exc:
+            self._set_status(escape(str(exc)))
+            return
+        await self.show_list(
+            f"Default for '{escape(capability)}' → '{escape(service_id)}'.")
+
+    def _do_remove_service(self, service_id: str) -> None:
+        services.remove_service(service_id)
+        self._refresh_services_table()
+        self._set_list_status(f"Removed service '{service_id}'.")
+
     async def on_option_list_option_selected(
         self, event: OptionList.OptionSelected
     ) -> None:
@@ -464,6 +724,12 @@ class ConfigScreen(Vertical):
             self._km_selected_key = event.option.id
         elif lid == "cfg-provkeylist":     # provider-manager key selection
             self._prov_selected_key = event.option.id
+        elif lid == "cfg-svc-catalog":     # add-service pick (or custom lane)
+            await self._add_catalog_service(event.option.id)
+        elif lid == "cfg-svc-caplist":     # default: capability picked
+            await self._show_default_picker(event.option.id)
+        elif lid == "cfg-svc-deflist":     # default: backing service picked
+            await self._set_service_default(event.option.id)
 
     # ── register → the existing model_presets backend ───────────────────
 

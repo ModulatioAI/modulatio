@@ -210,6 +210,20 @@ _SEAT_COOLDOWN_S = 180.0
 _ENV_BLOCK_RATIONALE_PREFIX = "environmental defect:"
 _PATH_CONFLICT_MARKER = "artifact-path conflict"
 
+#: The Leader-converse chat loop's task_id. Bound as a constant because two
+#: sides reference it: the converse call site, and the metered-authorizer
+#: builder that grants converse a wide-open per-task allowance (the operator
+#: is present; the daily budget is the only wall).
+_CONVERSE_TASK_ID = "conversation"
+
+#: QC's metered ceiling relative to the service's per-task cap. QC shares
+#: the producer's task-scoped spend counter, so on a cap-1 service the
+#: producer's own call starves QC (and QC-as-fixer, the shipping default)
+#: to zero. 5x-with-a-floor-of-5 leaves room for verify + fix + re-verify
+#: with the producer's spend already counted (operator call, 2026-07-06).
+_QC_METERED_CAP_MULTIPLIER = 5
+_QC_METERED_CAP_FLOOR = 5
+
 
 #: Duration cap on the best-effort post-run codification phase (Alfred loop). B1
 #: runs it AFTER delivery; this bounds how long it can hold the process if a cloud
@@ -5292,6 +5306,104 @@ class Orchestrator:
                 chain.append((key, runner))
         return chain
 
+    def _metered_lane_cap(
+        self,
+        tool_name: str,
+        *,
+        task_id: str,
+        budget_role: "str | None",
+    ) -> "int | None":
+        """The per-task metered ceiling for one tool in one lane: converse →
+        None (wide open, operator present), QC → generous multiple of the
+        service cap, anything else → the service cap as-is.
+
+        Lanes not explicitly named here (converse / qc) fall through to the
+        service cap — the producer default. That is the correct default (a
+        new lane is a producer lane until proven otherwise); add an explicit
+        case if a future lane needs different headroom (Jenny F2)."""
+        from modulatio import services as _services
+        if task_id == _CONVERSE_TASK_ID:
+            return None
+        cap = _services.per_task_cap_for_tool(tool_name)
+        if budget_role == "qc":
+            return max(_QC_METERED_CAP_FLOOR,
+                       cap * _QC_METERED_CAP_MULTIPLIER)
+        return cap
+
+    def _build_metered_authorizers(
+        self,
+        tool_loadout: "tuple[str, ...]",
+        *,
+        task_id: str,
+        agent_id: str,
+        budget_role: "str | None" = None,
+    ) -> "Callable[[str, dict], tuple] | None":
+        """One fail-closed spend authorizer per metered tool in the loadout
+        (metered.py's name guard demands one per tool), dispatched by
+        called-name. None when the loadout has no metered tool — the runner
+        then denies any metered call outright (unchanged fail-closed floor).
+
+        ``budget_role`` widens the per-task ceiling for the QC lane: QC
+        shares the producer's task-scoped spend counter, so without headroom
+        the producer's own spend starves QC (and QC-as-fixer) to zero."""
+        from modulatio import metered as _metered
+        registry = self._active_tool_registry()
+        per_tool: "dict[str, Callable[[str, dict], tuple]]" = {}
+        for name in tool_loadout:
+            tool = registry.get(name)
+            if getattr(tool, "cost_class", None) not in (
+                "paid-cloud", "premium-cloud"
+            ):
+                continue
+            # allowed_keys = the tool's own params_schema properties (an
+            # engine-authored allowlist), minus URL-SHAPED names — a schema
+            # must never be able to forgive a network-target key. Token
+            # match (not the full FORBIDDEN_ARG_KEYS) so api_call's needed
+            # method/path/params/json stay forgivable.
+            props = tuple(
+                k for k in ((tool.params_schema or {}).get("properties") or {})
+                if not any(t in k.lower() for t in _metered._FORBIDDEN_KEY_TOKENS)
+            )
+            per_tool[name] = _metered.build_metered_authorizer(
+                project_code=self.project.code,
+                cost_class=tool.cost_class,
+                tool_name=name,
+                task_id=task_id,
+                agent_id=agent_id,
+                pinned_units=[],
+                artifacts_root=self._artifacts_root(),
+                # Converse lane = no per-task allowance (the operator is
+                # sitting right there); QC = generous headroom above the
+                # producer's spend on the shared task counter; task lanes
+                # keep the per-service cap. The daily budget stays the wall
+                # for all three.
+                per_task_cap=self._metered_lane_cap(
+                    name, task_id=task_id, budget_role=budget_role,
+                ),
+                allowed_keys=props,
+            )
+        if not per_tool:
+            return None
+
+        def _dispatch(name: str, args: dict):
+            auth = per_tool.get(name)
+            if auth is None:
+                return (False, f"metered tool {name!r}: no authorizer wired")
+            # api_call is ONE metered tool over many services, so its
+            # cost_class is fixed paid-cloud at build time when any service
+            # is paid. A call TARGETING a free_tier service must not be gated
+            # by the paid-cloud budget (Jenny F1) — resolve the named service
+            # and skip the meter when it's free. api_call reaches only the
+            # service it names, so a free target can never mask a paid host.
+            if name == "api_call":
+                from modulatio import services as _services
+                svc = _services.get_service(str(args.get("service", "")))
+                if svc is not None and svc.free_tier:
+                    return (True, f"service {svc.id!r} is free_tier — not metered")
+            return auth(name, args)
+
+        return _dispatch
+
     def _run_chat_loop(
         self,
         *,
@@ -5417,6 +5529,16 @@ class Orchestrator:
             # tests that exercise the gates set it explicitly.
             primary_model = self._resolve_chat_runner_model(agent_id)
 
+            # Service-API pool (spec 2026-07-05): metered tools in this
+            # loadout get a fail-closed spend authorizer. One authorizer per
+            # metered tool (the name guard's contract), dispatched by name.
+            # pinned_units is empty: generation-class calls have no artifact
+            # inputs; the idempotency key covers tool + options.
+            metered_authorizer = self._build_metered_authorizers(
+                tool_loadout, task_id=task_id, agent_id=agent_id,
+                budget_role=budget_role,
+            )
+
             def _run_one(_model: "str | None", _runner: "Callable[..., Any]") -> str:
                 return _runners.run_llm_with_tools(
                     chat_runner=_runner,
@@ -5431,6 +5553,7 @@ class Orchestrator:
                     ),
                     permission_callback=permission_callback,
                     permission_broker=permission_broker,
+                    metered_authorizer=metered_authorizer,
                     # Operator ESC interrupt: the tool-loop checks this each
                     # iteration and bails with a clean note. Same abort_event F8
                     # uses, so a kickoff's producer/QC tool-loops stop too.
@@ -6453,7 +6576,7 @@ class Orchestrator:
                             tool_loadout=tuple(augmented.keys()),
                             role="leader",
                             agent_id="leader",
-                            task_id="conversation",
+                            task_id=_CONVERSE_TASK_ID,
                             transcript_path=transcript,
                             skill_name="leader-converse",
                             needs_network=True,
