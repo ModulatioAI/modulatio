@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from dataclasses import asdict, dataclass
 from typing import Optional
 
@@ -108,6 +109,19 @@ def load_services() -> dict[str, Service]:
 
 def get_service(service_id: str) -> Optional[Service]:
     return load_services().get(service_id)
+
+
+def new_key_handle() -> str:
+    """A generic, opaque env-var handle for a CUSTOM service's key —
+    ``SVCKEY_<hex>``, carrying no service name or slug. The vault ``.env``
+    must never read a service-named key (``OCRSPACE_API_KEY``); the human
+    label is the service's ``name``, shown in the UI. Collision-checked
+    against configured services so the key pool never crosses wires."""
+    taken = {s.env_var for s in load_services().values()}
+    while True:
+        handle = f"SVCKEY_{secrets.token_hex(3).upper()}"
+        if handle not in taken:
+            return handle
 
 
 def add_service(svc: Service) -> None:

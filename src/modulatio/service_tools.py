@@ -82,6 +82,82 @@ def _redact_key(text: str, key: str) -> str:
     return text
 
 
+def _valid_auth_shape(shape: str) -> bool:
+    return shape == "bearer" or (
+        shape.startswith(("header:", "query:")) and bool(shape.split(":", 1)[1])
+    )
+
+
+_AUTH_DETECT_PROMPT = (
+    "An operator is adding an HTTP API to a tool. From the probe of its base "
+    "URL below, say how the API takes its key. Answer with EXACTLY ONE line, "
+    "one of: `bearer` | `header:<HeaderName>` | `query:<paramName>` | "
+    "`unknown`. No prose.\n\nHTTP status: {status}\n"
+    "WWW-Authenticate: {www}\nResponse body (truncated): {body}\n"
+)
+
+
+def classify_auth_signals(
+    signals: dict, runner: "Callable[[str], str] | None" = None
+) -> "tuple[str | None, str]":
+    """Best-effort auth-shape guess from a base-URL probe. Returns
+    ``(shape, reason)`` or ``(None, reason)`` — never a false-confident guess.
+
+    The one reliable heuristic is the standard ``WWW-Authenticate: Bearer``
+    header. Everything else is interpretation (an error body naming a header),
+    which a model reads better than a regex — so the signals go to ``runner``
+    when the header didn't settle it. If neither resolves it, we say so plainly
+    and the form keeps its default; the operator picks from the docs."""
+    www = str(signals.get("www_authenticate", "")).strip()
+    if www.lower().startswith("bearer"):
+        return ("bearer", "endpoint advertises Bearer auth (WWW-Authenticate)")
+    if runner is not None:
+        prompt = _AUTH_DETECT_PROMPT.format(
+            status=signals.get("status", "?"),
+            www=www or "(none)",
+            body=str(signals.get("body", ""))[:800],
+        )
+        try:
+            lines = (runner(prompt) or "").strip().splitlines()
+            line = lines[0].strip() if lines else ""
+        except Exception:  # noqa: BLE001 — a flaky model must not crash the
+            line = ""      # form; fall through to the honest "couldn't detect"
+        if _valid_auth_shape(line):
+            return (line, "detected from the endpoint's response")
+    return (None, "couldn't detect the auth type — pick how your API takes "
+                  "its key (see its docs)")
+
+
+def probe_auth(base_url: str, timeout: float = 6.0) -> dict:
+    """Unauthenticated probe of a service base URL for auth signals. SSRF-safe
+    (the shared no-redirect opener); an error becomes a signal, never a raise.
+    Returns ``{status, www_authenticate, body}`` or ``{error}``."""
+    if not str(base_url).startswith(("https://", "http://")):
+        return {"error": "base URL must be absolute http(s)"}
+    req = urllib.request.Request(str(base_url), method="GET")
+    try:
+        with _urlopen(req, timeout=min(float(timeout), _MAX_TIMEOUT)) as resp:
+            return {
+                "status": int(getattr(resp, "status", 200)),
+                "www_authenticate": resp.headers.get("WWW-Authenticate", ""),
+                "body": resp.read(2048).decode("utf-8", "replace"),
+            }
+    except urllib.error.HTTPError as exc:
+        body = b""
+        try:
+            body = exc.read(2048)
+        except OSError:
+            pass
+        return {
+            "status": int(exc.code),
+            "www_authenticate": exc.headers.get("WWW-Authenticate", "")
+            if exc.headers else "",
+            "body": body.decode("utf-8", "replace"),
+        }
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def _no_service_msg(capability: str) -> str:
     return (
         f"No {capability} service configured (or several with no default) — "
