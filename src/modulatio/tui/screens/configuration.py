@@ -14,12 +14,16 @@ status. The AGENTS side (assign Leader/QC, producers) is a sibling screen.
 """
 from __future__ import annotations
 
+import asyncio
 import re
+from typing import Callable
 
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Checkbox, DataTable, Input, OptionList, Static
+from textual.widgets import (
+    Button, Checkbox, DataTable, Input, OptionList, Select, Static,
+)
 from textual.widgets.option_list import Option
 
 from modulatio import model_presets
@@ -47,6 +51,26 @@ def _multi_backed_capabilities() -> dict[str, list[services.Service]]:
         cap: sorted(backers, key=lambda s: s.id)
         for cap, backers in sorted(by_cap.items()) if len(backers) > 1
     }
+
+
+#: The common capability classes an outside API might serve an agent — the
+#: custom-service dropdown (a "Custom…" entry rides on top for anything else).
+#: (value, label) pairs; value is the stored capability tag.
+_SERVICE_CAPABILITIES: tuple[tuple[str, str], ...] = (
+    ("research", "Web search / research"),
+    ("image", "Image generation"),
+    ("video", "Video generation"),
+    ("speech", "Speech (text-to-speech)"),
+    ("transcription", "Transcription (speech-to-text)"),
+    ("ocr", "OCR / document text"),
+    ("translation", "Translation"),
+    ("document-conversion", "Document conversion"),
+    ("scraping", "Web scraping / extraction"),
+    ("embeddings", "Embeddings"),
+    ("messaging", "Email / messaging"),
+    ("geocoding", "Maps / geocoding"),
+    ("market-data", "Financial / market data"),
+)
 
 
 class ConfigScreen(Vertical):
@@ -284,6 +308,8 @@ class ConfigScreen(Vertical):
                     ".env until you remove them under Keys."),
                 lambda ok: self._do_remove_service(sid) if ok else None,
             )
+        elif event.button.id == "cfg-csvc-detect":
+            await self._detect_custom_auth()
         elif event.button.id == "cfg-csvc-save":
             await self._save_custom_service()
 
@@ -465,9 +491,13 @@ class ConfigScreen(Vertical):
         keylist = OptionList(id="cfg-provkeylist")
         for slot in provider_keys.list_keys(base):
             keylist.add_option(Option(self._key_row_label(slot), id=slot["env_var"]))
+        # An opaque SVCKEY_ handle is meaningless to the operator (and #4 says
+        # never surface it) — show the note alone; a real provider env var
+        # (OPENAI_API_KEY) is meaningful, so keep it.
+        where = "" if base.startswith("SVCKEY_") else f"  ({base})"
         await self.query_one(Configurator).swap_companion(
             # escape() — a custom SERVICE name is operator-authored markup risk.
-            Static(f"Keys · {escape(display_name)}  ({base}) — labels only, "
+            Static(f"Keys · {escape(display_name)}{where} — labels only, "
                    "never the value:"),
             keylist,
             Input(password=True, placeholder="paste a NEW key", id="cfg-newkey"),
@@ -606,42 +636,85 @@ class ConfigScreen(Vertical):
         await self._show_provider_keys(f"svc:{service_id}")
 
     async def _show_custom_service_form(self) -> None:
+        auth_opts = [
+            ("Bearer token  (Authorization: Bearer <key>)", "bearer"),
+            ("Custom header  (name it, e.g. apikey, X-API-Key)", "header"),
+            ("Query parameter  (?name=<key>)", "query"),
+        ]
+        cap_opts = [("Custom… (type your own)", "__custom__")] + [
+            (label, value) for value, label in _SERVICE_CAPABILITIES
+        ]
         await self.query_one(Configurator).swap_companion(
-            Static("Custom service — the base URL is pinned at add time "
-                   "(the pin IS the authorization):"),
-            Input(placeholder="id (slug, e.g. my-api)", id="cfg-csvc-id"),
-            Input(placeholder="name", id="cfg-csvc-name"),
+            Static("Create the service first — base URL + how it takes its "
+                   "key. Then SELECT it in the list to add its API key.",
+                   id="cfg-csvc-head"),
+            Input(placeholder="name (e.g. OCR.space)", id="cfg-csvc-name"),
             Input(placeholder="base URL (https://…)", id="cfg-csvc-url"),
-            Input(placeholder="auth shape: bearer | header:<Name> | "
-                              "query:<name>", id="cfg-csvc-auth"),
-            Input(placeholder="capabilities (CSV, e.g. image,research)",
-                  id="cfg-csvc-caps"),
-            Input(placeholder="docs URL (optional)", id="cfg-csvc-docs"),
+            Button("Detect auth from endpoint", id="cfg-csvc-detect"),
+            Select(auth_opts, value="bearer", allow_blank=False,
+                   id="cfg-csvc-authkind"),
+            Input(placeholder="header / param name (for the two above)",
+                  id="cfg-csvc-authname"),
+            Select(cap_opts, value="__custom__", allow_blank=False,
+                   id="cfg-csvc-capkind"),
+            Input(placeholder="capability (comma-separated if several)",
+                  id="cfg-csvc-capcustom"),
             Checkbox("free tier (not metered)", id="cfg-csvc-free"),
+            Input(placeholder="docs URL (optional)", id="cfg-csvc-docs"),
             Button("Save", id="cfg-csvc-save", variant="primary"),
             Static("", id="cfg-status"),
             Button("Cancel", id="cfg-cancel"),
         )
+        self._sync_custom_form_reveal()
+
+    def _sync_custom_form_reveal(self) -> None:
+        """Show the auth-name box only for header/query, and the custom-cap
+        box only for Custom… — so the form asks for exactly what's needed."""
+        try:
+            kind = self.query_one("#cfg-csvc-authkind", Select).value
+            self.query_one("#cfg-csvc-authname", Input).display = (
+                kind != "bearer")
+            cap = self.query_one("#cfg-csvc-capkind", Select).value
+            self.query_one("#cfg-csvc-capcustom", Input).display = (
+                cap == "__custom__")
+        except Exception:  # noqa: BLE001 — form not mounted yet; no-op
+            pass
+
+    async def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id in ("cfg-csvc-authkind", "cfg-csvc-capkind"):
+            self._sync_custom_form_reveal()
 
     async def _save_custom_service(self) -> None:
         def _val(selector: str) -> str:
             return self.query_one(selector, Input).value.strip()
 
-        sid = _val("#cfg-csvc-id")
-        # Key slots pool under a service-derived env var (slug → SHOUT_CASE).
-        env_base = re.sub(r"[^A-Za-z0-9]+", "_", sid).upper().strip("_")
+        # One human field — the name — drives the agent-facing id (slug).
+        name = _val("#cfg-csvc-name")
+        sid = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+        if not sid:
+            self._set_status("Give the service a name.")
+            return
+        # Auth: picker + name box → the engine's shape string (no magic string
+        # for the operator to know).
+        kind = self.query_one("#cfg-csvc-authkind", Select).value
+        auth_name = _val("#cfg-csvc-authname")
+        auth_shape = "bearer" if kind == "bearer" else f"{kind}:{auth_name}"
+        # Capability: the dropdown value, or the Custom… free-text (CSV).
+        cap_kind = self.query_one("#cfg-csvc-capkind", Select).value
+        cap_src = (_val("#cfg-csvc-capcustom") if cap_kind == "__custom__"
+                   else cap_kind)
+        capabilities = tuple(dict.fromkeys(
+            c.strip().lower() for c in cap_src.split(",") if c.strip()))
         svc = services.Service(
             id=sid,
-            name=_val("#cfg-csvc-name") or sid,
+            name=name,
             kind="custom",
-            # dict.fromkeys: dedupe (a repeated capability would offer a
-            # phantom Default choice) while keeping the operator's order.
-            capabilities=tuple(dict.fromkeys(
-                c.strip().lower() for c in _val("#cfg-csvc-caps").split(",")
-                if c.strip())),
-            env_var=f"{env_base}_API_KEY" if env_base else "",
+            capabilities=capabilities,
+            # #4: an OPAQUE, generated handle — the vault .env never carries a
+            # service-named key, and the operator never sees or types it.
+            env_var=services.new_key_handle(),
             base_url=_val("#cfg-csvc-url"),
-            auth_shape=_val("#cfg-csvc-auth") or "bearer",
+            auth_shape=auth_shape,
             free_tier=self.query_one("#cfg-csvc-free", Checkbox).value,
             docs_url=_val("#cfg-csvc-docs"),
         )
@@ -652,7 +725,51 @@ class ConfigScreen(Vertical):
             # input) so the half-typed fields survive for a correction.
             self._set_status(escape(str(exc)))
             return
-        await self.show_list(f"Added service '{escape(sid)}'.")
+        # #2: two-step by design — land back on the list and tell them to
+        # select the new row to add its key.
+        await self.show_list(
+            f"Added '{escape(name)}'. Select it below and press Keys to add "
+            "its API key.")
+
+    async def _detect_custom_auth(self) -> None:
+        """Best-effort: probe the base URL and (via the leader model) guess how
+        the API takes its key, pre-filling the picker. Honest-fail otherwise —
+        the operator still has the picker + the API's own docs."""
+        from modulatio import service_tools as _st
+        base = self.query_one("#cfg-csvc-url", Input).value.strip()
+        if not base:
+            self._set_status("Enter the base URL first, then Detect.")
+            return
+        self._set_status("Probing the endpoint…")
+        signals = await asyncio.to_thread(_st.probe_auth, base)
+        if "error" in signals:
+            self._set_status(
+                f"Couldn't reach {escape(base)} — pick the auth type by hand.")
+            return
+        shape, why = await asyncio.to_thread(
+            _st.classify_auth_signals, signals, self._leader_oneshot_runner())
+        if shape is None:
+            self._set_status(escape(why))
+            return
+        kind, _, auth_name = shape.partition(":")
+        self.query_one("#cfg-csvc-authkind", Select).value = kind
+        if auth_name:
+            self.query_one("#cfg-csvc-authname", Input).value = auth_name
+        self._sync_custom_form_reveal()
+        self._set_status(f"Detected: {escape(shape)} ({escape(why)}).")
+
+    def _leader_oneshot_runner(self) -> "Callable[[str], str] | None":
+        """A one-shot text runner on the configured leader model for the auth
+        guess, or None if no model is set (→ heuristic-only, honest-fail)."""
+        from modulatio import config as _config
+        from modulatio import runners as _runners
+        model = _config.get_default_model("leader")
+        if not model:
+            return None
+        try:
+            return _runners.litellm_runner(model)
+        except Exception:  # noqa: BLE001 — no model wired → heuristic only
+            return None
 
     async def _show_capability_picker(self) -> None:
         """Default step 1: only capabilities with MORE than one backing

@@ -108,6 +108,33 @@ async def test_catalog_pick_adds_service_and_jumps_to_its_keys():
 
 # ── add service: the custom lane ──────────────────────────────────────────
 
+def _fill_custom(app, *, name="My API", url="https://api.mine.dev",
+                 authkind="header", authname="X-Key", capkind="__custom__",
+                 capcustom="image, speech", docs="https://docs.mine.dev",
+                 free=True):
+    from textual.widgets import Checkbox, Select
+    app.query_one("#cfg-csvc-name", Input).value = name
+    app.query_one("#cfg-csvc-url", Input).value = url
+    app.query_one("#cfg-csvc-authkind", Select).value = authkind
+    app.query_one("#cfg-csvc-authname", Input).value = authname
+    app.query_one("#cfg-csvc-capkind", Select).value = capkind
+    app.query_one("#cfg-csvc-capcustom", Input).value = capcustom
+    app.query_one("#cfg-csvc-docs", Input).value = docs
+    app.query_one("#cfg-csvc-free", Checkbox).value = free
+
+
+async def test_custom_form_shows_the_two_step_header():
+    """#2: the form tells the user up front it's create-then-add-key."""
+    app = _Host()
+    async with app.run_test(size=(120, 60)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        await screen._show_custom_service_form()
+        await pilot.pause()
+        head = " ".join(str(s.content) for s in app.query(Static))
+        assert "add its API key" in head and "select" in head.lower()
+
+
 async def test_custom_form_empty_base_url_paints_error_and_persists_nothing():
     app = _Host()
     async with app.run_test(size=(120, 60)) as pilot:
@@ -115,13 +142,11 @@ async def test_custom_form_empty_base_url_paints_error_and_persists_nothing():
         screen = app.query_one(ConfigScreen)
         await screen._show_custom_service_form()
         await pilot.pause()
-        app.query_one("#cfg-csvc-id", Input).value = "mine"
-        app.query_one("#cfg-csvc-name", Input).value = "Mine"
-        app.query_one("#cfg-csvc-caps", Input).value = "image"
+        _fill_custom(app, url="")
         await _press(app, screen, "cfg-csvc-save")
         await pilot.pause()
         assert services.load_services() == {}          # nothing persisted
-        assert app.query("#cfg-csvc-id")               # the form survives
+        assert app.query("#cfg-csvc-name")             # the form survives
         status = str(app.query_one("#cfg-status", Static).content)
         assert "base_url" in status                    # rejection painted
 
@@ -133,28 +158,63 @@ async def test_custom_form_happy_path_persists_the_entered_fields():
         screen = app.query_one(ConfigScreen)
         await screen._show_custom_service_form()
         await pilot.pause()
-        app.query_one("#cfg-csvc-id", Input).value = "my-api"
-        app.query_one("#cfg-csvc-name", Input).value = "My API"
-        app.query_one("#cfg-csvc-url", Input).value = "https://api.mine.dev"
-        app.query_one("#cfg-csvc-auth", Input).value = "header:X-Key"
-        app.query_one("#cfg-csvc-caps", Input).value = "image, speech"
-        app.query_one("#cfg-csvc-docs", Input).value = "https://docs.mine.dev"
-        from textual.widgets import Checkbox
-        app.query_one("#cfg-csvc-free", Checkbox).value = True
+        _fill_custom(app)
         await _press(app, screen, "cfg-csvc-save")
         await pilot.pause()
+        # #4: id is DERIVED from the name (one human field), not typed.
         svc = services.get_service("my-api")
         assert svc is not None
         assert svc.name == "My API"
         assert svc.kind == "custom"
         assert svc.base_url == "https://api.mine.dev"
-        assert svc.auth_shape == "header:X-Key"
+        assert svc.auth_shape == "header:X-Key"        # kind + name composed
         assert svc.capabilities == ("image", "speech")
         assert svc.docs_url == "https://docs.mine.dev"
         assert svc.free_tier is True
-        assert svc.env_var == "MY_API_API_KEY"  # slug-derived key pool var
-        # back on the refreshed list
+        # #4: key handle is OPAQUE — no service name on file, ever.
+        assert svc.env_var.startswith("SVCKEY_")
+        assert "MY" not in svc.env_var and "API_KEY" not in svc.env_var
         assert app.query_one("#cfg-services", DataTable).row_count == 1
+
+
+async def test_custom_form_bearer_ignores_the_name_field():
+    app = _Host()
+    async with app.run_test(size=(120, 60)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        await screen._show_custom_service_form()
+        await pilot.pause()
+        _fill_custom(app, name="Plain", authkind="bearer", authname="ignored")
+        await _press(app, screen, "cfg-csvc-save")
+        await pilot.pause()
+        assert services.get_service("plain").auth_shape == "bearer"
+
+
+async def test_custom_form_capability_from_dropdown():
+    app = _Host()
+    async with app.run_test(size=(120, 60)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        await screen._show_custom_service_form()
+        await pilot.pause()
+        _fill_custom(app, name="Rsch", capkind="research", capcustom="")
+        await _press(app, screen, "cfg-csvc-save")
+        await pilot.pause()
+        assert services.get_service("rsch").capabilities == ("research",)
+
+
+async def test_custom_form_capability_dropdown_has_custom_on_top():
+    app = _Host()
+    async with app.run_test(size=(120, 60)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        await screen._show_custom_service_form()
+        await pilot.pause()
+        from textual.widgets import Select
+        sel = app.query_one("#cfg-csvc-capkind", Select)
+        values = [v for _, v in sel._options]  # (label, value) pairs
+        assert values[0] == "__custom__"
+        assert len(values) >= 14  # custom + 13
 
 
 # ── keys: the reused provider key-slot companion ──────────────────────────
@@ -280,3 +340,20 @@ def test_services_table_escapes_a_markup_bearing_custom_name():
         assert rendered is not None
     # the literal brackets survive (escaped, not parsed away as markup)
     assert "[/]boom" in str(default_cell_formatter(table.rows[0][0]))
+
+
+async def test_custom_service_key_companion_hides_the_opaque_handle():
+    """#4: the operator sees the service NAME, never the SVCKEY_ handle."""
+    services.add_service(Service(
+        id="ocrspace", name="OCR.space", kind="custom", capabilities=("ocr",),
+        env_var="SVCKEY_ABC123", base_url="https://api.ocr.space",
+        auth_shape="header:apikey"))
+    app = _Host()
+    async with app.run_test(size=(120, 60)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        await screen._show_provider_keys("svc:ocrspace")
+        await pilot.pause()
+        head = " ".join(str(s.content) for s in app.query(Static))
+        assert "OCR.space" in head          # the note IS shown
+        assert "SVCKEY_" not in head         # the opaque handle is NOT

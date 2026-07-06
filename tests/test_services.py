@@ -207,3 +207,23 @@ def test_seed_service_skills_load_and_declare_loadouts():
         assert sk is not None, f"seed skill {name} must resolve"
         assert tool in sk.tool_loadout
         assert sk.executor == "llm"
+
+
+# ── custom-service opaque key handle (form UX #4) ──────────────────────────
+
+def test_new_key_handle_is_opaque_and_prefixed():
+    """A custom service's key handle carries NO service name/slug — the vault
+    .env must never read a service-named key. Generic SVCKEY_<hex>."""
+    h = services.new_key_handle()
+    assert h.startswith("SVCKEY_")
+    assert h.isidentifier()  # usable as an env var name
+    assert "OCR" not in h and "API_KEY" not in h
+
+
+def test_new_key_handle_avoids_collision_with_existing():
+    services.add_service(_svc(
+        id="a", name="A", kind="custom", env_var="SVCKEY_AAAAAA",
+        base_url="https://a.example"))
+    # 200 draws must never reuse the taken handle.
+    for _ in range(200):
+        assert services.new_key_handle() != "SVCKEY_AAAAAA"

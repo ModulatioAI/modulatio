@@ -546,3 +546,45 @@ def test_sandbox_child_env_excludes_service_keys(monkeypatch):
     assert "TAVILY_API_KEY_2" not in env
     assert "sk-test-secret-value" not in env.values()
     assert "sk-test-numbered-value" not in env.values()
+
+
+# ── auth detection for the custom-service form (#1, best-effort) ───────────
+
+def test_classify_auth_bearer_from_www_authenticate():
+    shape, why = service_tools.classify_auth_signals(
+        {"status": 401, "www_authenticate": "Bearer realm=x", "body": ""})
+    assert shape == "bearer" and "bearer" in why.lower()
+
+
+def test_classify_auth_uses_model_when_heuristic_blank():
+    # OCR.space-shaped: no WWW-Authenticate, error body names the header.
+    def fake_runner(prompt: str) -> str:
+        assert "apikey" in prompt  # signals reached the model
+        return "header:apikey"
+    shape, why = service_tools.classify_auth_signals(
+        {"status": 200, "www_authenticate": "",
+         "body": '{"error":"E572: Missing apikey (add to message header)"}'},
+        runner=fake_runner)
+    assert shape == "header:apikey"
+
+
+def test_classify_auth_honest_fail_when_nothing_detects():
+    shape, why = service_tools.classify_auth_signals(
+        {"status": 200, "www_authenticate": "", "body": "hello"},
+        runner=None)
+    assert shape is None and "couldn't" in why.lower()
+
+
+def test_classify_auth_model_unknown_is_honest_fail():
+    shape, why = service_tools.classify_auth_signals(
+        {"status": 200, "www_authenticate": "", "body": "x"},
+        runner=lambda p: "unknown")
+    assert shape is None
+
+
+def test_classify_auth_rejects_malformed_model_output():
+    # model returns garbage / an unsupported shape → honest fail, never crash
+    shape, why = service_tools.classify_auth_signals(
+        {"status": 200, "www_authenticate": "", "body": "x"},
+        runner=lambda p: "use OAuth2 with a dance")
+    assert shape is None
