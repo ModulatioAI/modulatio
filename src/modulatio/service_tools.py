@@ -58,6 +58,14 @@ def _no_service_msg(capability: str) -> str:
     )
 
 
+def _no_key_msg(svc: Service) -> str:
+    return (
+        f"Service {svc.id!r} has no API key set (no API key in any "
+        f"{svc.env_var} slot) — the operator adds one under Config → "
+        "SERVICES → Manage keys."
+    )
+
+
 def _apply_auth(
     svc: Service, key: str, url: str, headers: dict[str, str]
 ) -> str:
@@ -132,11 +140,7 @@ def api_call(
         )
     key = services.checkout_key(svc)
     if key is None:
-        return (
-            f"Service {svc.id!r} has no API key set (no API key in any "
-            f"{svc.env_var} slot) — the operator adds one under Config → "
-            "SERVICES → Manage keys."
-        )
+        return _no_key_msg(svc)
     url = svc.base_url.rstrip("/") + "/" + p.lstrip("/")
     if params:
         sep = "&" if "?" in url else "?"
@@ -167,7 +171,9 @@ def _save_media(
 ) -> Path:
     """Write binary bytes under the artifacts root. Filename is flattened to
     its basename — a tool result must never place a file outside the tree."""
-    safe = Path(str(filename)).name or "service-output.bin"
+    safe = Path(str(filename)).name
+    if safe in ("", ".", ".."):
+        safe = "service-output.bin"
     artifacts_root.mkdir(parents=True, exist_ok=True)
     path = artifacts_root / safe
     path.write_bytes(data)
@@ -183,11 +189,7 @@ def _resolve(capability: str) -> "tuple[Service, str] | str":
         return _no_service_msg(capability)
     key = services.checkout_key(svc)
     if key is None:
-        return (
-            f"Service {svc.id!r} has no API key set (no API key in any "
-            f"{svc.env_var} slot) — the operator adds one under Config → "
-            "SERVICES → Manage keys."
-        )
+        return _no_key_msg(svc)
     return (svc, key)
 
 
@@ -207,7 +209,7 @@ def _openai_image(svc, key, prompt, size, timeout):
     try:
         b64 = _json.loads(body)["data"][0]["b64_json"]
         return base64.b64decode(b64), ""
-    except (KeyError, IndexError, ValueError) as exc:
+    except (KeyError, IndexError, ValueError, TypeError) as exc:
         return None, f"unexpected response shape: {exc}"
 
 
@@ -236,7 +238,7 @@ def make_generate_image(
                 "with its documented endpoint (see the service's skill)."
             )
         data, err = adapter(svc, key, str(prompt), str(size),
-                            min(float(timeout), _MAX_TIMEOUT))
+                            min(max(float(timeout), 1.0), _MAX_TIMEOUT))
         if data is None:
             return f"generate_image ({svc.id}) failed — {err}"
         path = _save_media(artifacts_root, filename, data, on_artifact_write)
@@ -287,7 +289,7 @@ def research_search(
         )
     n = max(1, min(int(max_results), 12))
     out = adapter(svc, key, str(query), n,
-                  min(float(timeout), _MAX_TIMEOUT))
+                  min(max(float(timeout), 1.0), _MAX_TIMEOUT))
     return _cap_http_body(_redact_key(out, key), over_read=False)
 
 
@@ -329,7 +331,7 @@ def make_generate_speech(
                 f"Service {svc.id!r} has no speech adapter — use api_call."
             )
         data, err = adapter(svc, key, str(text), str(voice),
-                            min(float(timeout), _MAX_TIMEOUT))
+                            min(max(float(timeout), 1.0), _MAX_TIMEOUT))
         if data is None:
             return f"generate_speech ({svc.id}) failed — {err}"
         path = _save_media(artifacts_root, filename, data, on_artifact_write)
@@ -359,7 +361,7 @@ def _luma_video(svc, key, prompt, timeout):
     try:
         job = _json.loads(body)
         job_id = str(job["id"])
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, TypeError) as exc:
         return None, f"unexpected submit response: {exc}"
     deadline = time.monotonic() + _POLL_WALL_CAP_SECONDS
     while True:
@@ -386,13 +388,23 @@ def _luma_video(svc, key, prompt, timeout):
                 f"job {job_id} — it may still complete vendor-side"
             )
         time.sleep(_POLL_INTERVAL_SECONDS)
-    asset = str(job.get("assets", {}).get("video", ""))
+    try:
+        asset = str(job.get("assets", {}).get("video", ""))
+    except (TypeError, AttributeError):
+        return None, f"unexpected completed-job shape (job {job_id})"
     if not asset.startswith("https://"):
         return None, f"no video asset on completed job {job_id}"
-    status, data, _ = _service_request(svc, key, "GET", asset, None, timeout)
-    if status >= 400:
-        return None, f"asset download HTTP {status} (job {job_id})"
-    return data, ""
+    # Pre-signed CDN URL — fetch BARE, no auth: the asset host is off the
+    # pinned base, and a tampered vendor response must never ship the key
+    # wherever assets.video points.
+    req = urllib.request.Request(
+        asset, headers={"Accept": "*/*"}, method="GET"
+    )
+    try:
+        with _urlopen(req, timeout=timeout) as resp:
+            return resp.read(), ""
+    except urllib.error.HTTPError as exc:
+        return None, f"asset download HTTP {exc.code} (job {job_id})"
 
 
 _VIDEO_ADAPTERS = {"luma": _luma_video}
@@ -416,7 +428,7 @@ def make_generate_video(
         if adapter is None:
             return f"Service {svc.id!r} has no video adapter — use api_call."
         data, err = adapter(svc, key, str(prompt),
-                            min(float(timeout), _MAX_TIMEOUT))
+                            min(max(float(timeout), 1.0), _MAX_TIMEOUT))
         if data is None:
             return f"generate_video ({svc.id}) failed — {err}"
         path = _save_media(artifacts_root, filename, data, on_artifact_write)

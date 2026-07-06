@@ -312,6 +312,83 @@ def test_generate_video_poll_timeout_names_job(tmp_path, monkeypatch):
     assert "gen-9" in out and "timed out" in out
 
 
+def test_generate_video_cdn_fetch_carries_no_auth(tmp_path, monkeypatch):
+    """The pre-signed CDN asset URL is off the pinned base — the key must
+    never ride along (a tampered vendor response would ship it anywhere)."""
+    _wire_capability(monkeypatch, "video", "luma",
+                     "LUMAAI_API_KEY", "https://api.lumalabs.ai")
+    auth_by_url = {}
+    cdn = "https://cdn.lumalabs.ai/v/gen-1.mp4"
+
+    def fake_urlopen(req, timeout=None):
+        auth_by_url[req.full_url] = req.get_header("Authorization")
+        if req.get_method() == "POST":
+            return _FakeResponse(b'{"id": "gen-1", "state": "queued"}')
+        if "cdn" not in req.full_url:
+            return _FakeResponse(json.dumps({
+                "id": "gen-1", "state": "completed",
+                "assets": {"video": cdn},
+            }).encode())
+        return _FakeResponse(b"fake-mp4", "video/mp4")
+
+    monkeypatch.setattr(service_tools, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(service_tools, "_POLL_INTERVAL_SECONDS", 0.0)
+    gen = service_tools.make_generate_video(
+        artifacts_root=tmp_path, on_artifact_write=None)
+    gen(prompt="x", filename="x.mp4")
+    assert auth_by_url[cdn] is None
+    api_urls = [u for u in auth_by_url if u != cdn]
+    assert api_urls and all(
+        auth_by_url[u] == "Bearer sk-test-xyz" for u in api_urls)
+
+
+@pytest.mark.parametrize("payload", [
+    {"data": "oops-a-string"},
+    {"data": [{"b64_json": {"nested": True}}]},
+])
+def test_generate_image_type_drift_returns_error(
+        tmp_path, monkeypatch, payload):
+    _wire_capability(monkeypatch, "image", "openai-images",
+                     "OPENAI_API_KEY", "https://api.openai.com")
+    monkeypatch.setattr(
+        service_tools, "_urlopen",
+        lambda req, timeout=None: _FakeResponse(
+            json.dumps(payload).encode()))
+    gen = service_tools.make_generate_image(
+        artifacts_root=tmp_path, on_artifact_write=None)
+    out = gen(prompt="x")
+    assert "unexpected" in out
+
+
+@pytest.mark.parametrize("submit,poll", [
+    ([1, 2, 3], None),  # submit body drifts to a JSON list
+    ({"id": "g1", "state": "queued"},
+     {"id": "g1", "state": "completed",
+      "assets": ["not-a-dict"]}),  # assets drifts to a list
+])
+def test_generate_video_type_drift_returns_error(
+        tmp_path, monkeypatch, submit, poll):
+    _wire_capability(monkeypatch, "video", "luma",
+                     "LUMAAI_API_KEY", "https://api.lumalabs.ai")
+
+    def fake_urlopen(req, timeout=None):
+        body = submit if req.get_method() == "POST" else poll
+        return _FakeResponse(json.dumps(body).encode())
+
+    monkeypatch.setattr(service_tools, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(service_tools, "_POLL_INTERVAL_SECONDS", 0.0)
+    gen = service_tools.make_generate_video(
+        artifacts_root=tmp_path, on_artifact_write=None)
+    out = gen(prompt="x")
+    assert "unexpected" in out
+
+
+def test_save_media_dotdot_filename_falls_back(tmp_path):
+    p = service_tools._save_media(tmp_path, "..", b"x", None)
+    assert p == tmp_path / "service-output.bin"
+    assert p.read_bytes() == b"x"
+
+
 def test_build_registry_includes_service_tools_when_configured(
         tmp_path, monkeypatch):
     from modulatio import tools
