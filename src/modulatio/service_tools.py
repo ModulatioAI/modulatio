@@ -201,7 +201,8 @@ def _openai_image(svc, key, prompt, size, timeout):
         timeout,
     )
     if status >= 400:
-        return None, f"HTTP {status}: {body.decode('utf-8', 'replace')[:500]}"
+        return None, f"HTTP {status}: " + _redact_key(
+            body.decode("utf-8", "replace"), key)[:500]
     import base64
     try:
         b64 = _json.loads(body)["data"][0]["b64_json"]
@@ -299,7 +300,8 @@ def _elevenlabs_speech(svc, key, text, voice, timeout):
         {"text": text, "model_id": "eleven_multilingual_v2"}, timeout,
     )
     if status >= 400:
-        return None, f"HTTP {status}: {body.decode('utf-8', 'replace')[:500]}"
+        return None, f"HTTP {status}: " + _redact_key(
+            body.decode("utf-8", "replace"), key)[:500]
     return body, ""
 
 
@@ -352,9 +354,8 @@ def _luma_video(svc, key, prompt, timeout):
         {"prompt": prompt}, timeout,
     )
     if status >= 400:
-        return None, (
-            f"submit HTTP {status}: {body.decode('utf-8', 'replace')[:500]}"
-        )
+        return None, f"submit HTTP {status}: " + _redact_key(
+            body.decode("utf-8", "replace"), key)[:500]
     try:
         job = _json.loads(body)
         job_id = str(job["id"])

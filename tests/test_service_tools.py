@@ -271,6 +271,29 @@ def test_generate_video_luma_polls_then_downloads(tmp_path, monkeypatch):
     assert "storm.mp4" in out
 
 
+def test_generate_image_error_body_redacts_query_key(tmp_path, monkeypatch):
+    import urllib.error
+    services.add_service(Service(
+        id="openai-images", name="openai-images", kind="catalog",
+        capabilities=("image",), env_var="QIMG_API_KEY",
+        base_url="https://api.example.com", auth_shape="query:key"))
+    monkeypatch.setenv("QIMG_API_KEY", "ab+cd/ef=gh")
+
+    def fake_urlopen(req, timeout=None):
+        body = json.dumps(
+            {"error": f"bad request to {req.full_url}"}).encode()
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {},
+                                     io.BytesIO(body))
+
+    monkeypatch.setattr(service_tools, "_urlopen", fake_urlopen)
+    gen = service_tools.make_generate_image(
+        artifacts_root=tmp_path, on_artifact_write=None)
+    out = gen(prompt="x")
+    assert "HTTP 400" in out
+    assert "ab+cd/ef=gh" not in out
+    assert "ab%2Bcd%2Fef%3Dgh" not in out
+
+
 def test_generate_video_poll_timeout_names_job(tmp_path, monkeypatch):
     _wire_capability(monkeypatch, "video", "luma",
                      "LUMAAI_API_KEY", "https://api.lumalabs.ai")
