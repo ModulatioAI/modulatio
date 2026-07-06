@@ -59,6 +59,7 @@ def _isolate_modulatio_config(tmp_path, monkeypatch):
         config,
         preferences,
         provider_keys,
+        services,
         setup_state,
         model_presets,
         telegram_notify,
@@ -87,6 +88,11 @@ def _isolate_modulatio_config(tmp_path, monkeypatch):
     monkeypatch.setattr(telegram_notify, "CONFIG_FILE", cfg / "telegram-config.json")
     monkeypatch.setattr(provider_keys, "LABELS_FILE", cfg / "key_labels.json")
     monkeypatch.setattr(provider_keys, "PINS_FILE", cfg / "key_pins.json")
+    # SERVICES_FILE is frozen at import from the real CONFIG_DIR — and
+    # build_registry now reads it on EVERY call, so without this re-point a
+    # developer's live services.json would inject api_call/generate_* into
+    # unrelated registry tests.
+    monkeypatch.setattr(services, "SERVICES_FILE", cfg / "services.json")
     # The crash/log store has its OWN hardcoded ~/.config/modulatio/crashes
     # (``_crash._DEFAULT_DIR``), NOT derived from CONFIG_DIR — so the CONFIG_DIR
     # redirect alone left crash/error/doctor logs leaking into the live config

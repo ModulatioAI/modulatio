@@ -26,7 +26,7 @@ from typing import Optional
 
 from modulatio import services
 from modulatio.services import Service
-from modulatio.tools import _cap_http_body, _no_redirect_opener
+from modulatio.tools import Tool, _cap_http_body, _no_redirect_opener
 
 _DEFAULT_TIMEOUT = 30.0
 _MAX_TIMEOUT = 120.0
@@ -425,3 +425,107 @@ def make_generate_video(
             f"({len(data)} bytes)."
         )
     return generate_video
+
+
+# ── registry merge ─────────────────────────────────────────────────────────
+
+def build_service_tools(
+    artifacts_root: "Path | None",
+    on_artifact_write: "Callable[[Path], None] | None" = None,
+) -> dict[str, Tool]:
+    """Service tools for ``tools.build_registry`` — one Tool per capability
+    that has a resolvable service, plus ``api_call`` when ANY service is
+    configured. Nothing configured → empty dict (the run_shell opt-in shape).
+    cost_class comes from the backing service (metered by default,
+    ``free_tier`` opts out)."""
+    out: dict[str, Tool] = {}
+    all_svcs = services.load_services()
+    if not all_svcs:
+        return out
+    out["api_call"] = Tool(
+        name="api_call",
+        description=(
+            "Call a configured outside service's API, relative to its "
+            "operator-pinned base URL. Use the service's skill for its "
+            "endpoint shapes. Args: service (id), method, path (relative), "
+            "params (query dict), json (body dict)."
+        ),
+        call=api_call,
+        params_schema={
+            "type": "object",
+            "properties": {
+                "service": {"type": "string",
+                            "description": "Configured service id."},
+                "method": {"type": "string",
+                           "description": "GET|POST|PUT|PATCH|DELETE."},
+                "path": {"type": "string",
+                         "description": "Path relative to the pinned base."},
+                "params": {"type": "object",
+                           "description": "Query parameters."},
+                "json": {"type": "object",
+                         "description": "JSON request body."},
+                "timeout": {"type": "number"},
+            },
+            "required": ["service", "path"],
+        },
+        cost_class=(
+            None
+            if all(s.free_tier for s in all_svcs.values())
+            else "paid-cloud"
+        ),
+    )
+    caps: "dict[str, tuple[str, str | None, Callable[..., str], dict]]" = {}
+    root = artifacts_root if artifacts_root is not None else Path(".")
+    img = services.resolve_for_capability("image")
+    if img is not None:
+        caps["generate_image"] = (
+            img.id, services.cost_class_for(img),
+            make_generate_image(root, on_artifact_write),
+            {"type": "object", "properties": {
+                "prompt": {"type": "string",
+                           "description": "What to depict."},
+                "size": {"type": "string",
+                         "description": "e.g. 1024x1024."},
+                "filename": {"type": "string",
+                             "description": "Artifact filename (basename)."},
+            }, "required": ["prompt"]})
+    res = services.resolve_for_capability("research")
+    if res is not None:
+        caps["research_search"] = (
+            res.id, services.cost_class_for(res),
+            research_search,
+            {"type": "object", "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer",
+                                "description": "1-12, default 5."},
+            }, "required": ["query"]})
+    spc = services.resolve_for_capability("speech")
+    if spc is not None:
+        caps["generate_speech"] = (
+            spc.id, services.cost_class_for(spc),
+            make_generate_speech(root, on_artifact_write),
+            {"type": "object", "properties": {
+                "text": {"type": "string"},
+                "voice": {"type": "string"},
+                "filename": {"type": "string"},
+            }, "required": ["text"]})
+    vid = services.resolve_for_capability("video")
+    if vid is not None:
+        caps["generate_video"] = (
+            vid.id, services.cost_class_for(vid),
+            make_generate_video(root, on_artifact_write),
+            {"type": "object", "properties": {
+                "prompt": {"type": "string"},
+                "filename": {"type": "string"},
+            }, "required": ["prompt"]})
+    for name, (svc_id, cost, fn, schema) in caps.items():
+        out[name] = Tool(
+            name=name,
+            description=(
+                f"{name.replace('_', ' ').capitalize()} via the configured "
+                f"{svc_id!r} service. Binary results are saved into the "
+                "artifacts tree and returned as a filename."
+            ),
+            call=fn, params_schema=schema, cost_class=cost,
+        )
+    return out

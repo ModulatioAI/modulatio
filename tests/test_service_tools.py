@@ -310,3 +310,50 @@ def test_generate_video_poll_timeout_names_job(tmp_path, monkeypatch):
         artifacts_root=tmp_path, on_artifact_write=None)
     out = gen(prompt="x", filename="x.mp4")
     assert "gen-9" in out and "timed out" in out
+
+
+def test_build_registry_includes_service_tools_when_configured(
+        tmp_path, monkeypatch):
+    from modulatio import tools
+    _wire_capability(monkeypatch, "image", "openai-images",
+                     "OPENAI_API_KEY", "https://api.openai.com")
+    reg = tools.build_registry(artifacts_root=tmp_path)
+    assert "generate_image" in reg
+    assert "api_call" in reg
+    assert reg["generate_image"].cost_class == "paid-cloud"
+    # capabilities with no configured service stay OUT (opt-in shape)
+    assert "generate_video" not in reg
+
+
+def test_build_registry_free_tier_service_unmetered(tmp_path, monkeypatch):
+    from modulatio import tools
+    services.add_service(Service(
+        id="tavily", name="Tavily", kind="catalog",
+        capabilities=("research",), env_var="TAVILY_API_KEY",
+        base_url="https://api.tavily.com", auth_shape="bearer",
+        free_tier=True))
+    monkeypatch.setenv("TAVILY_API_KEY", "sk-test-x")
+    reg = tools.build_registry(artifacts_root=tmp_path)
+    assert reg["research_search"].cost_class is None
+    assert reg["api_call"].cost_class is None  # ALL configured are free
+
+
+def test_build_registry_api_call_metered_if_any_service_paid(
+        tmp_path, monkeypatch):
+    from modulatio import tools
+    _wire_capability(monkeypatch, "image", "openai-images",
+                     "OPENAI_API_KEY", "https://api.openai.com")
+    services.add_service(Service(
+        id="freebie", name="Freebie", kind="custom",
+        capabilities=("research",), env_var="FREEBIE_API_KEY",
+        base_url="https://api.freebie.example", auth_shape="bearer",
+        free_tier=True))
+    reg = tools.build_registry(artifacts_root=tmp_path)
+    assert reg["api_call"].cost_class == "paid-cloud"
+
+
+def test_build_registry_no_services_no_service_tools(tmp_path):
+    from modulatio import tools
+    reg = tools.build_registry(artifacts_root=tmp_path)
+    assert "api_call" not in reg
+    assert "generate_image" not in reg
