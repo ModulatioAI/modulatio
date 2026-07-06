@@ -557,7 +557,9 @@ def test_solo_leader_can_jit_load_coding_skill(project: Project):
 def test_leader_registry_honors_gate_granted_root(project: Project, tmp_path):
     """End-to-end: a store grant flows through the gate into the Leader's
     registry as an extra_root, so a deliberately-widened folder becomes
-    reachable — while an un-granted sibling stays refused."""
+    reachable — while an un-granted path OUTSIDE the harness stays refused.
+    (The vault itself is the Leader's standing home now — the un-granted
+    probe must live outside it.)"""
     from modulatio import leader_permissions as lp
 
     orch = Orchestrator(project, {"leader": _leader_stub})
@@ -568,7 +570,7 @@ def test_leader_registry_honors_gate_granted_root(project: Project, tmp_path):
                  actions=lp.PATH_ACTIONS)
     reg = orch._leader_tool_registry()
     assert "hello" in reg["read_file"].call(path=str(granted / "x.py"))  # granted → reachable
-    other = tmp_path / "secret"
+    other = tmp_path.parent / f"{tmp_path.name}-outside-harness"
     other.mkdir()
     (other / "s.py").write_text("nope\n", encoding="utf-8")
     with pytest.raises(ValueError):
@@ -624,26 +626,13 @@ def test_leader_registry_does_not_disturb_run_registry(project: Project):
     assert "run_shell" not in orch.tool_registry
 
 
-def test_leader_gate_refuses_widen_over_run_tree(project: Project):
-    """Wild Bill BLOCK-1, wired: the gate is fed the project's real deliverable
-    roots (runs/ + artifacts), so the operator cannot widen the Leader onto the
-    swarm's output tree — the cheat-guard is engine-enforced, not advisory."""
-    from modulatio import leader_gate as lg, leader_permissions as lp, vault
-
-    orch = Orchestrator(project, {"leader": _leader_stub})
-    gate = orch.leader_gate()
-    runs = vault.runs_dir(project.code)
-    req = lg.SecurityRequest(action="edit", resource=str(runs / "r1" / "out.md"),
-                             request_class=lp.REQUEST_CLASS_PATH, why="t")
-    d = gate.decide(req, prompt_fn=lambda r: lg.ScopedDecision(scope=lp.SCOPE_ALWAYS))
-    assert d.scope == lp.SCOPE_DENY          # refused even though prompt said ALWAYS
-    assert lp.load_grants(project.code, "path") == []
-
-
-def test_leader_gate_refuses_widen_over_delivery_tree(project: Project, tmp_path, monkeypatch):
-    """Wild Bill r2 follow-up: the cheat-guard also covers the final DELIVERY
-    folder, not just runs/+artifacts — the operator can't widen the Leader onto
-    finished products either."""
+def test_leader_gate_widen_honors_operator_choice_on_delivery(
+    project: Project, tmp_path, monkeypatch
+):
+    """Two-lane option 3 (2026-07-06): the BLOCK-1 auto-deny subtrees are
+    retired — the harness is the Leader's standing home, and for what lies
+    outside it (e.g. the delivery folder) the OPERATOR's decision is final:
+    a widen granted ALWAYS is granted, not vetoed by a fence."""
     from modulatio import leader_gate as lg, leader_permissions as lp, delivery
 
     monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "delivered"))
@@ -653,8 +642,8 @@ def test_leader_gate_refuses_widen_over_delivery_tree(project: Project, tmp_path
     req = lg.SecurityRequest(action="edit", resource=str(deliv / "final.docx"),
                              request_class=lp.REQUEST_CLASS_PATH, why="t")
     d = gate.decide(req, prompt_fn=lambda r: lg.ScopedDecision(scope=lp.SCOPE_ALWAYS))
-    assert d.scope == lp.SCOPE_DENY
-    assert lp.load_grants(project.code, "path") == []
+    assert d.scope == lp.SCOPE_ALWAYS
+    assert lp.load_grants(project.code, "path") != []
 
 
 def test_orchestrator_runs_end_to_end(project: Project):

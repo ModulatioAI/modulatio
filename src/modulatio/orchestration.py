@@ -5916,10 +5916,26 @@ class Orchestrator:
                 f"{spec.artifact_kind}) for this project."
             )
 
+        def _names_tuple(raw: object) -> "tuple[str, ...]":
+            """Coerce a tool_loadout/capability_tags arg (JSON array, or a
+            comma string from a looser model) to a clean tuple of names."""
+            if isinstance(raw, str):
+                parts = raw.split(",")
+            elif isinstance(raw, (list, tuple)):
+                parts = [str(p) for p in raw]
+            else:
+                return ()
+            return tuple(p.strip() for p in parts if p.strip())
+
         def create_skill(
-            name: str, description: str, prompt: str, **_: object
+            name: str, description: str, prompt: str,
+            tool_loadout: object = (), capability_tags: object = (),
+            **_: object,
         ) -> str:
-            """Teach the team a new durable skill (shared library)."""
+            """Teach the team a new durable skill (shared library) — the FULL
+            contract: the loadout (what a producer gets granted at checkout)
+            and the tags (what routes it) travel too, so a Leader-authored
+            skill is born routable and armed, not bare frontmatter."""
             from modulatio import skills as _skills
             # Slug the Leader-supplied name to a safe registry slug (belt); the
             # library re-validates (suspenders) so traversal is impossible
@@ -5928,7 +5944,10 @@ class Orchestrator:
             try:
                 _skills.create_skill(
                     name=slug, description=str(description),
-                    prompt_template=str(prompt), project_code=None,
+                    prompt_template=str(prompt),
+                    tool_loadout=_names_tuple(tool_loadout),
+                    capability_tags=_names_tuple(capability_tags),
+                    project_code=None,
                 )
             except FileExistsError:
                 return (f"A skill named {slug!r} already exists — use improve_skill "
@@ -5937,9 +5956,15 @@ class Orchestrator:
                 return f"Couldn't create the skill: {type(exc).__name__}: {exc}"
             return f"Created skill {slug!r} in the shared library."
 
-        def improve_skill(name: str, guidance: str, **_: object) -> str:
+        def improve_skill(
+            name: str, guidance: str,
+            tool_loadout: object = (), capability_tags: object = (),
+            **_: object,
+        ) -> str:
             """Refine an existing skill by appending learned guidance + bumping
-            its version (the same shape the self-codification loop uses)."""
+            its version (the same shape the self-codification loop uses).
+            ``tool_loadout``/``capability_tags``, when given, REPLACE the
+            skill's — so the Leader can repair a skill born bare."""
             from modulatio import skills as _skills
             try:
                 base = _skills.load_with_metadata(str(name))
@@ -5955,9 +5980,10 @@ class Orchestrator:
                 name=base.name, description=base.description,
                 prompt_template=base.prompt_template.rstrip()
                 + f"\n\n## Learned\n\n{guidance}\n",
-                tool_loadout=base.tool_loadout,
+                tool_loadout=_names_tuple(tool_loadout) or base.tool_loadout,
                 standards_domain=base.standards_domain, model_tier=base.model_tier,
-                cost_class=base.cost_class, capability_tags=base.capability_tags,
+                cost_class=base.cost_class,
+                capability_tags=_names_tuple(capability_tags) or base.capability_tags,
                 required_capabilities=base.required_capabilities,
                 executor=base.executor, version=next_v,
             )
@@ -6240,7 +6266,15 @@ class Orchestrator:
                 description=(
                     "Teach the team a new durable skill (shared library). Pass a "
                     "'name' (hyphen-case), a one-line 'description', and the "
-                    "'prompt' (the instruction template the skill runs)."
+                    "'prompt' (the instruction template the skill runs). A "
+                    "COMPLETE skill also carries: 'tool_loadout' — the tool "
+                    "names granted to the producer at checkout (a skill that "
+                    "calls anything MUST name its tool here; an outside service "
+                    "is reached via its capability tool or the generic "
+                    "'api_call' — API keys are engine-injected, so never "
+                    "mention keys in the prompt); and 'capability_tags' — the "
+                    "general capabilities that route the skill to matching "
+                    "tasks (untagged skills can't be routed)."
                 ),
                 call=create_skill,
                 params_schema={
@@ -6249,6 +6283,21 @@ class Orchestrator:
                         "name": {"type": "string"},
                         "description": {"type": "string"},
                         "prompt": {"type": "string"},
+                        "tool_loadout": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": (
+                                "Tool names this skill grants at checkout, "
+                                "e.g. [\"api_call\"] for an outside-service "
+                                "skill."
+                            ),
+                        },
+                        "capability_tags": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": (
+                                "Capability tags that route this skill to "
+                                "matching tasks, e.g. [\"ocr\"]."
+                            ),
+                        },
                     },
                     "required": ["name", "description", "prompt"],
                 },
@@ -6257,7 +6306,10 @@ class Orchestrator:
                 name="improve_skill",
                 description=(
                     "Refine an existing skill by appending learned 'guidance' "
-                    "(bumps its version). Pass the skill 'name' and the guidance."
+                    "(bumps its version). Pass the skill 'name' and the "
+                    "guidance. Optionally pass 'tool_loadout' / "
+                    "'capability_tags' to SET those on the skill — the repair "
+                    "path for a skill missing its loadout or tags."
                 ),
                 call=improve_skill,
                 params_schema={
@@ -6265,6 +6317,12 @@ class Orchestrator:
                     "properties": {
                         "name": {"type": "string"},
                         "guidance": {"type": "string"},
+                        "tool_loadout": {
+                            "type": "array", "items": {"type": "string"},
+                        },
+                        "capability_tags": {
+                            "type": "array", "items": {"type": "string"},
+                        },
                     },
                     "required": ["name", "guidance"],
                 },
@@ -6559,17 +6617,13 @@ class Orchestrator:
                     augmented = dict(self._leader_tool_registry())
                     augmented.update(self._leader_function_tools())
                     self._tls.tool_registry_override = augmented
-                    # B5 (converse): grant a Clay leader the latest run's dir so its
-                    # native file tools reach the deliverables (team_status /
-                    # read_deliverable aren't callable from claude -p; its tools
-                    # otherwise see only the empty leader_workspace). READ widens;
-                    # writes stay governed by the operator-widen gate. A litellm
-                    # leader ignores the hint and uses the function tools.
-                    _conv_run = self._converse_run_scope()
-                    if _conv_run:
-                        self._tls.seat_extra_grants = (
-                            str(_vault_run_dir(self.project.code, _conv_run)),
-                        )
+                    # B5 (converse): grant a Clay leader the harness roots so its
+                    # native file tools see what the litellm leader's rebound
+                    # builtins see — the whole harness is home (covers every
+                    # run's deliverables; team_status / read_deliverable aren't
+                    # callable from claude -p). A litellm leader ignores the
+                    # hint and uses the function tools.
+                    self._tls.seat_extra_grants = self._harness_roots()
                     try:
                         reply = self._run_chat_loop(
                             prompt=prompt,
@@ -8155,21 +8209,23 @@ class Orchestrator:
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
-    def _leader_blocked_subtrees(self) -> "list[str]":
-        """The swarm deliverable/run trees the Leader may never be widened over
-        or into (Wild Bill BLOCK-1): the per-project runs root (every kickoff's
-        output) and the persistent artifacts root. Fed to the gate so the
-        cheat-guard is engine-enforced with REAL roots, not left advisory."""
+    def _harness_roots(self) -> "tuple[str, ...]":
+        """The modulatio harness as the converse Leader's standing home
+        (two-lane resolution, 2026-07-06): the vault, the shared resources
+        (skills/standards/templates), and the config dir — his to read and
+        change directly, Claude-Code-like, no gate. This retired the old
+        blocked-subtrees fence (runs/artifacts/delivery): the operator chose
+        a fully-trusted Leader over the self-grading fence. Only the converse
+        lane gets these roots; the swarm lanes keep their sandboxes, and the
+        tools-layer secret floor still refuses dotfiles (``.env``) below
+        every root."""
+        from modulatio import config as _config
         from modulatio import vault as _vault
-        from modulatio import delivery as _delivery
-        return [
-            str(_vault.runs_dir(self.project.code)),
-            str(_vault.project_dir(self.project.code) / "artifacts"),
-            # the final delivery tree too (Wild Bill r2 follow-up) — adding the
-            # per-project dir also refuses its ~/Documents/Modulatio ancestor via
-            # the bidirectional overlap check.
-            str(_delivery.project_delivery_dir(self.project.code)),
-        ]
+        return (
+            str(_vault.VAULT_ROOT),
+            str(_config.get_shared_resources_path()),
+            str(_config.CONFIG_DIR),
+        )
 
     def leader_gate(self):
         """The per-project cross-cutting permission gate (cached so in-memory
@@ -8179,7 +8235,6 @@ class Orchestrator:
             from modulatio import leader_gate as _lg
             cached = _lg.LeaderPermissionGate(
                 self.project.code, workspace=self._leader_workspace(),
-                blocked_subtrees=self._leader_blocked_subtrees(),
             )
             self._leader_gate_cache = cached
         return cached
@@ -8297,6 +8352,7 @@ class Orchestrator:
         workspace = self._leader_workspace()
         gate = self.leader_gate()
         folder_rw, folder_read = self._folder_roots()
+        harness = self._harness_roots()
         rebound = tools.build_registry(
             artifacts_root=workspace,
             tool_calls_dir=workspace / "tool_calls",
@@ -8307,9 +8363,13 @@ class Orchestrator:
             # rw FOLDERS join both: a registered read-write folder is the
             # operator's standing write grant (the FOLDERS tab is the
             # permission decision — no prompt); ro/output folders are
-            # read-class only.
-            extra_roots=(*gate.granted_roots(), *folder_rw),
-            run_shell_extra_roots=(*gate.granted_roots("exec"), *folder_rw),
+            # read-class only. The HARNESS roots are the Leader's standing
+            # home (see _harness_roots) — file tools get all of them; the
+            # config dir stays out of run_shell's roots (they double as
+            # writable bwrap binds, and shell work belongs in the vault).
+            extra_roots=(*gate.granted_roots(), *folder_rw, *harness),
+            run_shell_extra_roots=(
+                *gate.granted_roots("exec"), *folder_rw, *harness[:2]),
             extra_read_roots=folder_read,
         )
         merged = dict(self.tool_registry)

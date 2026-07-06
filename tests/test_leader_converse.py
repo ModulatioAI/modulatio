@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from modulatio import vault
+from modulatio import skills, vault
 from modulatio.orchestration import Orchestrator
 from modulatio.runners import ChatResponse
 from modulatio.types import Project, ProjectState
@@ -104,11 +104,12 @@ def test_converse_runs_the_tool_loop_with_a_chat_runner(project: Project):
     assert "only run jobs" not in reply.lower()
 
 
-def test_converse_grants_run_dir_to_clay_seat(project: Project, monkeypatch):
-    """B5 (converse): the converse path grants the latest run's dir as a seat
-    extra-grant so a Clay leader's NATIVE file tools reach the deliverables (the
-    team_status/read_deliverable function tools aren't callable from claude -p).
-    A litellm leader ignores the hint. The grant is restored after the loop."""
+def test_converse_grants_harness_to_clay_seat(project: Project, monkeypatch):
+    """B5 (converse): the converse path grants the HARNESS roots as seat
+    extra-grants so a Clay leader's NATIVE file tools see what the litellm
+    leader's rebound builtins see — the vault (covering every run's
+    deliverables) is home. A litellm leader ignores the hint. The grant is
+    restored after the loop."""
     project.run_id = "run-1"
     orch = Orchestrator(
         project, _runners(),
@@ -124,9 +125,8 @@ def test_converse_grants_run_dir_to_clay_seat(project: Project, monkeypatch):
     monkeypatch.setattr(orch, "_run_chat_loop", _fake_loop)
     orch.converse("what did the team produce?")
 
-    run = vault.run_dir(project.code, "run-1")
-    assert seen.get("grants") and str(run) in seen["grants"], (
-        "converse must grant the latest run dir so Clay's tools can reach it"
+    assert seen.get("grants") and str(vault.VAULT_ROOT) in seen["grants"], (
+        "converse must grant the vault root so Clay's tools can reach the runs"
     )
     assert getattr(orch._tls, "seat_extra_grants", None) is None, "grant must restore"
 
@@ -354,3 +354,86 @@ def test_leader_does_not_self_start_jobs(project: Project):
     lft = orch._leader_function_tools()
     assert "run_job" not in lft
     assert "list_job_templates" in lft
+
+
+# --- Two-lane resolution, option 3 (2026-07-06): converse home = the harness ---
+# The conversational Leader is Claude-Code-like over the modulatio harness:
+# standing read AND write over the vault, the shared resources, and the config
+# dir — no gate, no blocked subtrees. The swarm lanes (decompose/producers)
+# keep their sandboxes; the tools-layer secret floor still hides dotfiles
+# (.env) below every root.
+
+
+def test_converse_leader_home_is_the_whole_harness(
+    project: Project, tmp_path: Path, monkeypatch
+):
+    from modulatio import config
+
+    shared = tmp_path / "shared-res"
+    (shared / "skills").mkdir(parents=True)
+    skill_md = shared / "skills" / "some-skill.md"
+    skill_md.write_text("---\nname: some-skill\n---\nold body\n", encoding="utf-8")
+    monkeypatch.setattr(config, "get_shared_resources_path", lambda: shared)
+
+    deliverable = vault.runs_dir(PROJECT_CODE) / "r1" / "artifacts" / "draft.md"
+    deliverable.parent.mkdir(parents=True)
+    deliverable.write_text("swarm draft", encoding="utf-8")
+
+    orch = Orchestrator(project, _runners())
+    reg = orch._leader_tool_registry()
+
+    # EYES: standing read over the runs tree and the shared library — no gate.
+    assert "swarm draft" in reg["read_file"].call(path=str(deliverable))
+    assert "old body" in reg["read_file"].call(path=str(skill_md))
+    # HANDS: standing write over the harness — the library AND the runs tree.
+    reg["edit_file"].call(path=str(skill_md), old="old body", new="new body")
+    assert "new body" in skill_md.read_text(encoding="utf-8")
+    reg["edit_file"].call(path=str(deliverable), old="swarm draft", new="leader touch")
+    assert "leader touch" in deliverable.read_text(encoding="utf-8")
+
+
+def test_converse_leader_gate_has_no_blocked_subtrees(project: Project):
+    """The BLOCK-1 runs/artifacts/delivery fence is retired for the Leader's
+    gate: inside modulatio he doesn't need a widen at all, and a widen he does
+    request (outside world) has no harness subtree to refuse."""
+    orch = Orchestrator(project, _runners())
+    assert orch.leader_gate()._blocked_subtrees == ()
+
+
+def test_create_skill_tool_carries_the_full_contract(
+    project: Project, tmp_path: Path, monkeypatch
+):
+    """The Leader can author a COMPLETE skill: tool_loadout (what the producer
+    gets granted at checkout) and capability_tags (what routes it) reach the
+    library — not silently swallowed (the incomplete-ocr-space bug)."""
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", tmp_path / "lib")
+    orch = Orchestrator(project, _runners())
+    out = orch._leader_function_tools()["create_skill"].call(
+        name="ocr-space", description="OCR via the OCR.space service",
+        prompt="Call the service through api_call.",
+        tool_loadout=["api_call"], capability_tags=["ocr"],
+    )
+    assert "Created" in out
+    skill = skills.load_with_metadata("ocr-space")
+    assert skill.tool_loadout == ("api_call",)
+    assert skill.capability_tags == ("ocr",)
+
+
+def test_improve_skill_tool_can_repair_frontmatter(
+    project: Project, tmp_path: Path, monkeypatch
+):
+    """improve_skill can SET tool_loadout/capability_tags on an existing skill —
+    so the Leader can repair a skill born bare, not only append prose."""
+    monkeypatch.setattr(skills, "_SKILLS_ROOT", tmp_path / "lib")
+    orch = Orchestrator(project, _runners())
+    tools_d = orch._leader_function_tools()
+    tools_d["create_skill"].call(name="ocr-space", description="d", prompt="p")
+    out = tools_d["improve_skill"].call(
+        name="ocr-space", guidance="Name the tool in the loadout.",
+        tool_loadout=["api_call"], capability_tags=["ocr"],
+    )
+    assert "v2" in out
+    skill = skills.load_with_metadata("ocr-space")
+    assert skill.tool_loadout == ("api_call",)
+    assert skill.capability_tags == ("ocr",)
+    assert "Name the tool in the loadout." in skill.prompt_template

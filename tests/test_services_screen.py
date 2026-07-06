@@ -401,6 +401,11 @@ async def test_adding_a_key_updates_the_services_count(tmp_path, monkeypatch):
         await pilot.pause()
         app.query_one("#cfg-newkey", Input).value = "sk-test-live"
         await screen._add_provider_key()
-        await pilot.pause()
+        # bounded wait (the _wait_options idiom): under a loaded full-suite
+        # run one pause isn't always enough for the table rebuild to land.
         table = app.query_one("#cfg-services", DataTable)
+        for _ in range(60):
+            await pilot.pause(0.05)
+            if "1 key" in table.get_row_at(0)[2]:
+                break
         assert "1 key" in table.get_row_at(0)[2]          # after — updated
