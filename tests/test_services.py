@@ -112,3 +112,19 @@ def test_one_corrupt_entry_does_not_hide_the_rest():
     data["services"]["junk"] = "garbage"  # non-dict entry
     services.SERVICES_FILE.write_text(json.dumps(data), encoding="utf-8")
     assert list(services.load_services()) == ["tavily"]
+
+
+def test_seed_service_skills_load_and_declare_loadouts():
+    from modulatio import skills
+    expected = {
+        "generate-images": "generate_image",
+        "generate-video": "generate_video",
+        "generate-speech": "generate_speech",
+        "research-via-api": "research_search",
+        "service-api-call": "api_call",
+    }
+    for name, tool in expected.items():
+        sk = skills.load_with_metadata(name)
+        assert sk is not None, f"seed skill {name} must resolve"
+        assert tool in sk.tool_loadout
+        assert sk.executor == "llm"
