@@ -6309,7 +6309,10 @@ class Orchestrator:
                     "(bumps its version). Pass the skill 'name' and the "
                     "guidance. Optionally pass 'tool_loadout' / "
                     "'capability_tags' to SET those on the skill — the repair "
-                    "path for a skill missing its loadout or tags."
+                    "path for a skill missing its loadout or tags. APPEND-ONLY "
+                    "for the body: a WRONG body is fixed in place with your "
+                    "file tools (the library is in your home), never by "
+                    "appending a corrected copy that contradicts the original."
                 ),
                 call=improve_skill,
                 params_schema={

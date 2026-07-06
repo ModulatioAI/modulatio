@@ -75,6 +75,13 @@ Never mention API keys in a skill: the engine checks keys out of the pool and
 injects them — the producer neither sees nor supplies one. If you find a skill
 born bare (no loadout, no tags), repair it with `improve_skill`.
 
+Know which repair is which. `improve_skill` APPENDS a lesson (and can set the
+loadout/tags) — it never rewrites the body, so appending a "corrected" copy
+leaves the flawed original standing above it and the skill contradicts itself.
+A WRONG body is fixed IN PLACE: the shared library is in your home — open the
+skill file with your file tools and edit the flawed lines directly. Learned
+sections add lessons; they never argue with the body.
+
 When the operator asks where things stand, whether the deliverables landed, or
 whether the work is any good — SEE FOR YOURSELF first. Pull `team_status`, and
 `read_deliverable` to actually read what the team produced, before you answer.
