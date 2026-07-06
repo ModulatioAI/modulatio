@@ -5315,7 +5315,12 @@ class Orchestrator:
     ) -> "int | None":
         """The per-task metered ceiling for one tool in one lane: converse →
         None (wide open, operator present), QC → generous multiple of the
-        service cap, anything else → the service cap as-is."""
+        service cap, anything else → the service cap as-is.
+
+        Lanes not explicitly named here (converse / qc) fall through to the
+        service cap — the producer default. That is the correct default (a
+        new lane is a producer lane until proven otherwise); add an explicit
+        case if a future lane needs different headroom (Jenny F2)."""
         from modulatio import services as _services
         if task_id == _CONVERSE_TASK_ID:
             return None
@@ -5384,6 +5389,17 @@ class Orchestrator:
             auth = per_tool.get(name)
             if auth is None:
                 return (False, f"metered tool {name!r}: no authorizer wired")
+            # api_call is ONE metered tool over many services, so its
+            # cost_class is fixed paid-cloud at build time when any service
+            # is paid. A call TARGETING a free_tier service must not be gated
+            # by the paid-cloud budget (Jenny F1) — resolve the named service
+            # and skip the meter when it's free. api_call reaches only the
+            # service it names, so a free target can never mask a paid host.
+            if name == "api_call":
+                from modulatio import services as _services
+                svc = _services.get_service(str(args.get("service", "")))
+                if svc is not None and svc.free_tier:
+                    return (True, f"service {svc.id!r} is free_tier — not metered")
             return auth(name, args)
 
         return _dispatch

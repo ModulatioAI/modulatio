@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from modulatio import comptroller, metered, services, tools, vault
+from modulatio.services import Service
 from modulatio.orchestration import Orchestrator
 from modulatio.runners import ChatResponse, ToolCall, stub_chat_runner
 from modulatio.types import Project
@@ -364,3 +365,34 @@ def test_qc_token_budget_is_generously_above_producer():
     results — its context budget must be at least 2x the producer's."""
     from modulatio import context_budget as cb
     assert cb.EXPERIMENTAL_DEFAULTS["qc"] >= 2 * cb.EXPERIMENTAL_DEFAULTS["producer"]
+
+
+# ── Jenny F1: api_call targeting a free_tier service is not metered ────────
+
+def test_api_call_to_free_service_skips_the_meter(project_with_run):
+    """api_call is ONE metered tool over many services; its cost_class is
+    fixed paid-cloud when any configured service is paid. A call TARGETING a
+    free_tier service must not be gated by the paid-cloud budget (Jenny F1).
+    No budget is set here, so a metered call would be denied — the free
+    target must authorize anyway."""
+    services.add_service(Service(
+        id="paid-svc", name="Paid", kind="custom", capabilities=("research",),
+        env_var="PAID_API_KEY", base_url="https://paid.example",
+        auth_shape="bearer", free_tier=False))
+    services.add_service(Service(
+        id="free-svc", name="Free", kind="custom", capabilities=("image",),
+        env_var="FREE_API_KEY", base_url="https://free.example",
+        auth_shape="bearer", free_tier=True))
+    registry = tools.build_registry(artifacts_root=None)
+    assert registry["api_call"].cost_class == "paid-cloud"  # a paid svc exists
+    orch = _make_orchestrator(project_with_run, registry, scripted=[])
+    auth = orch._build_metered_authorizers(
+        ("api_call",), task_id="T-1", agent_id="a1",
+    )
+    # No budget configured → a paid target is denied...
+    ok, _ = auth("api_call", {"service": "paid-svc", "path": "/x"})
+    assert not ok
+    # ...but a free target authorizes without touching the budget.
+    ok, reason = auth("api_call", {"service": "free-svc", "path": "/x"})
+    assert ok, reason
+    assert "free" in reason.lower()
