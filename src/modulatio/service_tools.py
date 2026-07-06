@@ -41,13 +41,19 @@ def _urlopen(req: urllib.request.Request, timeout=None):
 
 
 def _redact_key(text: str, key: str) -> str:
-    """Strip the key AND its urlencoded form from agent-visible text — a
-    query-auth server may echo the request URL, where the key rides
-    percent/plus-escaped (quote_plus is the exact encoding urlencode uses)."""
-    text = text.replace(key, "[REDACTED]")
-    encoded = urllib.parse.quote_plus(key)
-    if encoded != key:
-        text = text.replace(encoded, "[REDACTED]")
+    """Strip the key and EVERY encoding a service might echo it back in — a
+    query-auth server can reflect the request URL, where the key rides
+    escaped. Three canonical forms: raw, form-encoded (``quote_plus`` — spaces
+    as ``+``, the exact encoding ``urlencode`` uses), and percent-encoded
+    (``quote(safe="")`` — spaces as ``%20``). Wild Bill's BLOCK: the ``%20``
+    form is reversible and was surviving a plus-only belt."""
+    for form in {
+        key,
+        urllib.parse.quote_plus(key),
+        urllib.parse.quote(key, safe=""),
+    }:
+        if form:  # never replace("") — that would inject [REDACTED] everywhere
+            text = text.replace(form, "[REDACTED]")
     return text
 
 

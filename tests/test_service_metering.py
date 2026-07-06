@@ -396,3 +396,48 @@ def test_api_call_to_free_service_skips_the_meter(project_with_run):
     ok, reason = auth("api_call", {"service": "free-svc", "path": "/x"})
     assert ok, reason
     assert "free" in reason.lower()
+
+
+# ── Wild Bill F2 check: does the REAL qc chat-loop path get the qc cap? ─────
+
+def test_qc_chat_loop_path_resolves_qc_budget_role(
+    project_with_run, tmp_path, monkeypatch,
+):
+    """Wild Bill F2 claims the QC _run_chat_loop call (role='qc', no explicit
+    budget_role) leaves budget_role=None, so QC gets the producer cap not the
+    5x. Drive the REAL path and spy on _metered_lane_cap: role='qc' must
+    resolve to budget_role='qc' BEFORE the authorizer is built (the
+    resolution block ahead of _build_metered_authorizers), so QC gets its
+    headroom on the live loop, not just in the helper's unit test."""
+    monkeypatch.setattr(
+        metered.comptroller, "authorize_metered_tool",
+        lambda *a, **k: metered.comptroller.Authorization(
+            allowed=True, refresh_at=None, reason="ok"),
+    )
+    seen: list = []
+    registry = {"research_search": _metered_tool(
+        "research_search", [], {"query": {"type": "string"}})}
+    orch = _make_orchestrator(project_with_run, registry, scripted=[
+        ChatResponse(content="done", tool_calls=()),
+    ])
+    real_lane_cap = orch._metered_lane_cap
+
+    def _spy(tool_name, *, task_id, budget_role):
+        seen.append(budget_role)
+        return real_lane_cap(tool_name, task_id=task_id, budget_role=budget_role)
+
+    monkeypatch.setattr(orch, "_metered_lane_cap", _spy)
+    # role="qc", NO explicit budget_role — exactly the real QC call site shape.
+    orch._run_chat_loop(
+        prompt="verify the artifact",
+        tool_loadout=("research_search",),
+        role="qc",
+        agent_id="qc",
+        task_id="SVCM-T-QC",
+        transcript_path=tmp_path / "qc.jsonl",
+        skill_name="code-review",
+    )
+    assert seen == ["qc"], (
+        f"QC lane resolved budget_role={seen!r}, expected ['qc'] — the "
+        "role->budget_role resolution must reach the metered authorizer"
+    )

@@ -158,6 +158,35 @@ def test_api_call_redacts_urlencoded_query_key_echo(monkeypatch):
     assert "ab%2Bcd%2Fef%3Dgh" not in out
 
 
+def test_api_call_redacts_percent20_space_key_echo(monkeypatch):
+    """Wild Bill BLOCK: a query-auth key WITH SPACES rides the request URL as
+    `+` (quote_plus) — but a server can echo the same URL with spaces as
+    `%20` (quote), which is reversible and was surviving the belt. All echo
+    forms (raw / `+` / `%20`) must be scrubbed."""
+    _wire_service(monkeypatch, id="q20", env_var="Q20_API_KEY",
+                  auth_shape="query:key")
+    monkeypatch.setenv("Q20_API_KEY", "sk has space")
+
+    def fake_urlopen(req, timeout=None):
+        # server reflects the request URL with %20 instead of +
+        return _FakeResponse(json.dumps(
+            {"echo": req.full_url.replace("+", "%20")}).encode())
+
+    monkeypatch.setattr(service_tools, "_urlopen", fake_urlopen)
+    out = service_tools.api_call(service="q20", path="/echo")
+    assert "sk has space" not in out          # raw
+    assert "sk+has+space" not in out           # quote_plus / +
+    assert "sk%20has%20space" not in out       # quote / %20 (Wild Bill's leak)
+
+
+def test_redact_key_matrix():
+    """_redact_key scrubs every canonical echo encoding of a key."""
+    key = "a b/c=d"
+    for form in (key, "a+b%2Fc%3Dd", "a%20b%2Fc%3Dd"):
+        redacted = service_tools._redact_key(f"prefix {form} suffix", key)
+        assert form not in redacted, form
+
+
 def _wire_capability(monkeypatch, capability, service_id, env_var,
                      base_url, auth_shape="bearer"):
     services.add_service(Service(
