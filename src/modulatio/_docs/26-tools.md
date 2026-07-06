@@ -260,7 +260,7 @@ A metered call is authorized by `comptroller.authorize_metered_tool`, which **fa
 
 - **No declared budget → denied.** A missing `comptroller.md` field is *not* "unlimited" for metered SaaS; it requires explicit opt-in — the project's `paid_cloud_escalations_per_day` / `premium_cloud_escalations_per_day` (settable via `comptroller.set_budget_field`).
 - **Unknown / missing `cost_class` → denied.** So is a metered tool with **no spend authorizer** wired.
-- **Capped.** A per-task call cap bounds a runaway tool-loop — for a service tool it comes from the backing service's `per_task_cap` (default 1; `api_call` uses the max across all configured services, since any could be the target). A daily cap bounds total spend (refreshes at UTC midnight).
+- **Capped.** A per-task call cap bounds a runaway tool-loop — for a service tool it comes from the backing service's `per_task_cap` (default 1; `api_call` uses the max across all configured services, since any could be the target). A daily cap bounds total spend (refreshes at UTC midnight). Exception: the **Leader-converse lane carries no per-task cap** — the operator is present and driving, so only the daily cap bounds interactive chat.
 - **Idempotent.** The same pinned inputs + options, scoped to the task, are authorized once and re-served free — a retry of the identical call replays the cached result instead of paying again.
 
 The engine-side contract (`metered.build_metered_authorizer`) additionally enforces:

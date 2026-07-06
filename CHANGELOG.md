@@ -31,7 +31,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one, so every metered call was denied and the tier sat dormant. Budgets are
   per project (`paid_cloud_escalations_per_day` in `comptroller.md`; a missing
   budget is a denial, not "unlimited"), each service carries a **per-task call
-  cap**, and a tool's schema-declared option names pass the narrow-param scan
+  cap** (the Leader-converse lane is exempt — the operator is present, so only
+  the daily budget bounds interactive chat), and a tool's
+  schema-declared option names pass the narrow-param scan
   while URL-shaped names and URL-like values never do. `modulatio doctor` grows
   a **Services** section (keyless services, metered services with no budget,
   corrupt entries) so a misconfiguration surfaces before the run, not as a

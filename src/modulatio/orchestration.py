@@ -210,6 +210,12 @@ _SEAT_COOLDOWN_S = 180.0
 _ENV_BLOCK_RATIONALE_PREFIX = "environmental defect:"
 _PATH_CONFLICT_MARKER = "artifact-path conflict"
 
+#: The Leader-converse chat loop's task_id. Bound as a constant because two
+#: sides reference it: the converse call site, and the metered-authorizer
+#: builder that grants converse a wide-open per-task allowance (the operator
+#: is present; the daily budget is the only wall).
+_CONVERSE_TASK_ID = "conversation"
+
 
 #: Duration cap on the best-effort post-run codification phase (Alfred loop). B1
 #: runs it AFTER delivery; this bounds how long it can hold the process if a cloud
@@ -5330,7 +5336,13 @@ class Orchestrator:
                 agent_id=agent_id,
                 pinned_units=[],
                 artifacts_root=self._artifacts_root(),
-                per_task_cap=_services.per_task_cap_for_tool(name),
+                # Converse lane = no per-task allowance (the operator is
+                # sitting right there); the daily budget stays the wall.
+                # Task lanes keep the per-service cap.
+                per_task_cap=(
+                    None if task_id == _CONVERSE_TASK_ID
+                    else _services.per_task_cap_for_tool(name)
+                ),
                 allowed_keys=props,
             )
         if not per_tool:
@@ -6515,7 +6527,7 @@ class Orchestrator:
                             tool_loadout=tuple(augmented.keys()),
                             role="leader",
                             agent_id="leader",
-                            task_id="conversation",
+                            task_id=_CONVERSE_TASK_ID,
                             transcript_path=transcript,
                             skill_name="leader-converse",
                             needs_network=True,

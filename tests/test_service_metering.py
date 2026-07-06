@@ -269,3 +269,58 @@ def test_build_metered_authorizers_none_when_no_metered_tool(
     assert orch._build_metered_authorizers(
         ("free_tool",), task_id="T-1", agent_id="a1",
     ) is None
+
+
+# ── converse lane: wide-open per-task allowance (operator call, 2026-07-06) ─
+
+def test_converse_lane_has_no_per_task_cap(project_with_run, monkeypatch):
+    """task_id="conversation" (the Leader converse lane) carries NO per-task
+    allowance — the operator is sitting right there; the daily budget is the
+    only wall. Distinct calls beyond any service cap must all authorize
+    while budget remains."""
+    comptroller.set_budget_field(
+        PROJECT_CODE, "paid_cloud_escalations_per_day", 50)
+    calls: list = []
+    registry = {"svc_tool": _metered_tool(
+        "svc_tool", calls, {"query": {"type": "string"}})}
+    orch = _make_orchestrator(project_with_run, registry, scripted=[])
+    auth = orch._build_metered_authorizers(
+        ("svc_tool",), task_id="conversation", agent_id="leader",
+    )
+    for i in range(5):  # a task-lane cap would deny after 1
+        ok, reason = auth("svc_tool", {"query": f"q{i}"})
+        assert ok, f"call {i}: {reason}"
+
+
+def test_converse_lane_still_bounded_by_daily_budget(project_with_run):
+    """Wide open is not bottomless: the daily cap is the wall that never
+    moves — converse calls beyond it are denied."""
+    comptroller.set_budget_field(
+        PROJECT_CODE, "paid_cloud_escalations_per_day", 2)
+    calls: list = []
+    registry = {"svc_tool": _metered_tool(
+        "svc_tool", calls, {"query": {"type": "string"}})}
+    orch = _make_orchestrator(project_with_run, registry, scripted=[])
+    auth = orch._build_metered_authorizers(
+        ("svc_tool",), task_id="conversation", agent_id="leader",
+    )
+    assert auth("svc_tool", {"query": "a"})[0]
+    assert auth("svc_tool", {"query": "b"})[0]
+    ok, reason = auth("svc_tool", {"query": "c"})
+    assert not ok and "daily" in reason.lower()
+
+
+def test_task_lane_per_task_cap_unchanged(project_with_run):
+    """The swarm task lane keeps its per-chore allowance exactly as before."""
+    comptroller.set_budget_field(
+        PROJECT_CODE, "paid_cloud_escalations_per_day", 50)
+    calls: list = []
+    registry = {"svc_tool": _metered_tool(
+        "svc_tool", calls, {"query": {"type": "string"}})}
+    orch = _make_orchestrator(project_with_run, registry, scripted=[])
+    auth = orch._build_metered_authorizers(
+        ("svc_tool",), task_id="T-1", agent_id="a1",
+    )
+    assert auth("svc_tool", {"query": "a"})[0]
+    ok, reason = auth("svc_tool", {"query": "b"})
+    assert not ok and "per-task" in reason

@@ -149,7 +149,7 @@ def build_metered_authorizer(
     agent_id: str,
     pinned_units: "list[Task]",
     artifacts_root: "Path",
-    per_task_cap: int = 1,
+    per_task_cap: int | None = 1,
     allowed_keys: tuple[str, ...] = (),
 ) -> "Callable[[str, dict], tuple[bool, str]]":
     """Return the ``(tool_name, args) -> (allowed, reason)`` callback the producer

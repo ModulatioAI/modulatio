@@ -507,7 +507,7 @@ def authorize_metered_tool(
     task_id: str,
     idempotency_key: str,
     agent_id: str,
-    per_task_cap: int = 1,
+    per_task_cap: int | None = 1,
 ) -> Authorization:
     """Gate ONE metered (paid-cloud / premium-cloud) tool call before it spends.
 
@@ -583,7 +583,10 @@ def authorize_metered_tool(
                 reason=f"metered tool {tool_name!r}: idempotent re-use (not re-charged)",
                 idempotent_reuse=True,
             )
-        if task_count >= per_task_cap:
+        # ``per_task_cap=None`` = no per-task allowance (the Leader-converse
+        # lane, where the operator is present); the daily cap below still
+        # bounds it — wide open is not bottomless.
+        if per_task_cap is not None and task_count >= per_task_cap:
             return Authorization(
                 allowed=False,
                 refresh_at=None,
