@@ -12,7 +12,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import Button, DataTable, Input, OptionList, Static
 from textual.widgets._data_table import default_cell_formatter
 
-from modulatio import service_catalog, services
+from modulatio import service_catalog, services, vault
 from modulatio.services import Service
 from modulatio.tui.screens.configuration import (
     ConfigScreen,
@@ -378,3 +378,29 @@ async def test_custom_form_save_reachable_on_a_short_terminal():
         top, bot = pane.region.y, pane.region.y + pane.region.height
         assert top <= save.region.y and \
             save.region.y + save.region.height <= bot  # reachable via scroll
+
+
+async def test_adding_a_key_updates_the_services_count(tmp_path, monkeypatch):
+    """Clif live-test: adding a key showed 0 key(s) on the SERVICES table
+    even after a tab flip — the count wasn't re-read on key add. It must
+    reflect immediately, in place."""
+    from textual.widgets import Input
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
+    services.add_service(Service(
+        id="ocr-space", name="OCR.space", kind="custom", capabilities=("ocr",),
+        env_var="SVCKEY_C30D01", base_url="https://api.ocr.space",
+        auth_shape="header:apikey"))
+    app = _Host()
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(ConfigScreen)
+        table = app.query_one("#cfg-services", DataTable)
+        assert "0 key" in table.get_row_at(0)[2]          # before
+        await screen._show_provider_keys("svc:ocr-space")
+        await pilot.pause()
+        app.query_one("#cfg-newkey", Input).value = "sk-test-live"
+        await screen._add_provider_key()
+        await pilot.pause()
+        table = app.query_one("#cfg-services", DataTable)
+        assert "1 key" in table.get_row_at(0)[2]          # after — updated

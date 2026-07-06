@@ -524,6 +524,9 @@ class ConfigScreen(Vertical):
             return
         label = self.query_one("#cfg-newkeylabel", Input).value.strip()
         provider_keys.add_key(self._prov_base, val, label or None)
+        # The left-list count is stale until we re-read it (a tab flip won't
+        # rebuild the cached screen) — refresh SERVICES/PROVIDERS in place.
+        self._refresh_key_counts()
         # Status into the remount (the old #cfg-status is discarded — Wild Bill L3).
         await self._show_provider_keys(
             self._prov_id, message="Added a key to the shared pool.")
@@ -558,6 +561,7 @@ class ConfigScreen(Vertical):
                 model_presets.update_preset(
                     model_key, auth_config={"env_var": base, "pool": True})
         provider_keys.remove_key(ev)
+        self._refresh_key_counts()  # left-list count is stale until re-read
         # Pass the status into the remount so it lands on the fresh widget.
         self.run_worker(self._show_provider_keys(
             self._prov_id, message=f"Removed {ev} from Modulatio."))
@@ -587,6 +591,29 @@ class ConfigScreen(Vertical):
             return
         table.clear()
         self._fill_services_table(table)
+
+    def _refresh_key_counts(self) -> None:
+        """Re-read the SERVICES and PROVIDERS key counts in place — a key
+        add/remove must update the left-list counts without rebuilding the
+        whole list (the operator is still in the key companion). Guarded: a
+        pane not mounted is a silent no-op."""
+        try:
+            table = self.query_one("#cfg-services", DataTable)
+            table.clear()
+            self._fill_services_table(table)
+        except Exception:  # noqa: BLE001 — table not mounted; skip
+            pass
+        try:
+            provlist = self.query_one("#cfg-provlist", OptionList)
+            provlist.clear_options()
+            for prov in self._api_key_providers():
+                base = self._provider_base(prov)
+                n = len([s for s in provider_keys.list_keys(base)
+                         if s["is_set"]])
+                provlist.add_option(Option(
+                    f"{prov.name:20}  {n} key(s)", id=prov.id))
+        except Exception:  # noqa: BLE001 — list not mounted; skip
+            pass
 
     def _selected_service_id(self) -> str | None:
         try:
