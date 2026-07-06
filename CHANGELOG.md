@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **FOLDERS — named operator folders for job runs** (CONFIG → FOLDERS). Register
+  folder locations — local paths, mapped drives, already-mounted smb/cifs/nfs
+  shares — that the whole team (Leader, QC, producers) can use during a run, and
+  reference them **by name** in kickoff directions ("process the document files
+  in folder contracts one at a time"). Three modes per folder: **read-only**
+  (items to process), **output** (pick one as the job-output destination —
+  finished products deliver there instead of `~/Documents/Modulatio`; precedence
+  pick > `MODULATIO_DELIVERY_DIR` > default), and **read-write** (files may be
+  created/modified live mid-run). The tab **is** the permission decision — a
+  registered folder never fires a runtime prompt; guardrails stay on (system/home
+  /vault roots refused at registration AND re-checked at use time; the dotfile
+  secret floor holds inside registered folders; ro/output folders are physically
+  unwritable by seats). Dead network mounts never hang the app (bounded
+  reachability probes) and an unreachable output pick falls back to the default
+  location with a note in the run report.
+
 ### Changed
 
 - **The wedge stack dump names each thread's native TID + the C-level

@@ -43,6 +43,7 @@ from modulatio.tui.screens.jobs import build_jobs_panel
 from modulatio.tui.screens.memory import build_memory_panel
 from modulatio.tui.screens.projects import ProjectsScreen
 from modulatio.tui.screens.settings import SettingsScreen
+from modulatio.tui.screens.folders import FoldersScreen
 from modulatio.tui.screens.prompt import build_prompt_panel
 from modulatio.tui.screens.skills import build_skills_panel
 from modulatio.tui.screens.jt_library import build_jt_library_panel
@@ -486,6 +487,8 @@ class ModulatioApp(App):
                         yield ProjectsScreen(id="config-projects-screen")
                     with TabPane("SETTINGS", id="config-settings"):
                         yield SettingsScreen(id="config-settings-screen")
+                    with TabPane("FOLDERS", id="config-folders"):
+                        yield FoldersScreen(id="config-folders-screen")
             with TabPane("JT LIBRARY", id="tab-jt-library"):
                 yield build_jt_library_panel()
             with TabPane("TICKETS", id="tab-tickets"):
