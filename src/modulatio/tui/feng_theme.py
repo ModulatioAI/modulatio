@@ -23,6 +23,13 @@ _BG = "#000000"
 _BASE = "#E0E0E0"
 _ERROR = "#FF5555"
 
+#: The Leader's speech block in the converse TV: a NEUTRAL dark highlight
+#: behind his reply lines so they read apart from the operator's at a glance
+#: (Clif, 2026-07-06). Neutral gray, not an accent fill — it must sit calm
+#: under all four variants and keep the near-white base text at high contrast
+#: (#E0E0E0 on #262626 ≈ 11:1); same subtle-dark register as the block cursor.
+LEADER_HIGHLIGHT_BG = "#262626"
+
 
 def _feng(name: str, accent: str, dim: str, error: str = _ERROR) -> Theme:
     """One Feng-Tui variant: a single accent hue in two brightness tiers on black.

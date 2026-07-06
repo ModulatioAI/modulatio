@@ -32,7 +32,7 @@ from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
-from modulatio.tui.feng_theme import theme_tiers
+from modulatio.tui.feng_theme import LEADER_HIGHLIGHT_BG, theme_tiers
 from modulatio.types import ActivityEvent
 
 # Lane membership by the event ``role`` the orchestrator emits. AGENT-AGNOSTIC by
@@ -274,12 +274,14 @@ class StreamView(VerticalScroll):
         self._append(line)
 
     def add_leader_message(self, text: str) -> None:
-        """Render the Leader's reply in the conversation transcript. (Phase B
-        will stream this token-by-token; Phase A writes the whole reply.)"""
+        """Render the Leader's reply in the conversation transcript, on the
+        dark highlight block that sets his speech apart from the operator's
+        lines. (Phase B will stream this token-by-token; Phase A writes the
+        whole reply.)"""
         accent, _dim, base, _err = theme_tiers(self.app)
         line = Text()
-        line.append("◆ Leader  ", style=f"bold {accent}")
-        line.append(text, style=base)
+        line.append("◆ Leader  ", style=f"bold {accent} on {LEADER_HIGHLIGHT_BG}")
+        line.append(text, style=f"{base} on {LEADER_HIGHLIGHT_BG}")
         self._append(line)
         self.last_leader_text = text
 

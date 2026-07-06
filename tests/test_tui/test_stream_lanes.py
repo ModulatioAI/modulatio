@@ -215,3 +215,29 @@ async def test_repeat_events_coalesce_into_a_counter(_isolate):
         lines = [str(w.render()) for w in view.query(".stream-line")]
         assert sum("is reading a page" in ln for ln in lines) == 2
         assert sum("is searching the web" in ln for ln in lines) == 1
+
+
+@pytest.mark.asyncio
+async def test_leader_reply_carries_highlight_operator_does_not(_isolate):
+    """Clif live-test (2026-07-06): the Leader's replies sit on a dark
+    highlight block so they read apart from the operator's lines — strong
+    contrast with the near-white letters, theme-agnostic (neutral, not an
+    accent fill). The operator's own lines stay on the bare phosphor black."""
+    from modulatio.tui.feng_theme import LEADER_HIGHLIGHT_BG
+
+    app = ModulatioApp(project_code="STRMH", stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        tv = app.query_one("#stream-leader", StreamView)
+        tv.add_operator_message("me talking")
+        tv.add_leader_message("the Leader talking")
+        await pilot.pause()
+        lines = list(tv.query(".stream-line"))
+        op_styles = " ".join(str(s.style) for s in lines[-2].render().spans)
+        ld_styles = " ".join(str(s.style) for s in lines[-1].render().spans)
+        # styles normalize hex → rgb(...) in the rendered spans
+        from rich.color import Color
+        r, g, b = Color.parse(LEADER_HIGHLIGHT_BG).get_truecolor()
+        mark = f"on rgb({r},{g},{b})"
+        assert mark in ld_styles      # the Leader's block is highlighted
+        assert mark not in op_styles  # the operator stays on bare black
