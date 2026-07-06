@@ -8,6 +8,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **SERVICES — outside APIs on the team** (CONFIG → SERVICES). Configure outside
+  SaaS services — image, video, speech, research, or any custom API — from a
+  shipped catalog (OpenAI Images, Tavily, ElevenLabs, Luma Dream Machine —
+  beta-flagged) or as a **custom service with an operator-pinned base URL**. Keys
+  ride the same numbered-slot pool provider keys use (vault `.env`, values never
+  shown); pick a per-capability **default** when more than one service backs a
+  capability — ambiguity never guesses with your money. Producers get capability
+  tools — `generate_image`, `generate_speech`, `generate_video` (submit-then-poll
+  under a hard wall-clock cap; a timeout returns the vendor **job id** instead of
+  a file), `research_search`, and the generic `api_call` for custom services
+  (paths are **relative to the pinned base**, host re-checked after joining, no
+  redirects — the model can never choose a host) — plus five seed skills that
+  teach the discipline. Binary results are saved into the artifacts tree and
+  returned as **filenames**, never bytes; the API key is injected at the adapter
+  layer and never enters agent context, results, or errors (raw **and**
+  urlencoded forms scrubbed from responses).
+- **The metered-tool tier is live** — the service tools are its first real
+  consumers. A service tool is `paid-cloud` by default (a `free_tier` service
+  opts out), and the producer tool-loop now builds a **fail-closed spend
+  authorizer per metered tool** in the task's loadout — previously nothing wired
+  one, so every metered call was denied and the tier sat dormant. Budgets are
+  per project (`paid_cloud_escalations_per_day` in `comptroller.md`; a missing
+  budget is a denial, not "unlimited"), each service carries a **per-task call
+  cap**, and a tool's schema-declared option names pass the narrow-param scan
+  while URL-shaped names and URL-like values never do. `modulatio doctor` grows
+  a **Services** section (keyless services, metered services with no budget,
+  corrupt entries) so a misconfiguration surfaces before the run, not as a
+  mid-run denial.
 - **FOLDERS — named operator folders for job runs** (CONFIG → FOLDERS). Register
   folder locations — local paths, mapped drives, already-mounted smb/cifs/nfs
   shares — that the whole team (Leader, QC, producers) can use during a run, and
@@ -32,6 +60,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nor faulthandler can). The hard-timeout dump and warning now tag every thread
   with its OS native thread id and point at `py-spy --native` / `gdb`, the
   out-of-process tools that *can* read the native stack of an ongoing stall.
+
+### Fixed
+
+- **Env-var-shaped secret labels now scrub in logs and crash reports.** The
+  labeled-secret redaction pattern used a word boundary that never fires after
+  an underscore, so a slug-prefixed label (`TAVILY_API_KEY: sk-...`) — exactly
+  the shape service and provider env vars take — escaped redaction; numbered
+  key slots (`..._2 = ...`) blocked the match too. Both forms now redact.
 
 ## [0.9.8.9] — 2026-07-05
 

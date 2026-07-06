@@ -22,6 +22,11 @@ model on it draws from (rotate + failover); **pin** a key to a model when you
 want its spend isolated for a budget. The CLI commands below remain available and
 edit the same `model_presets.json`.
 
+Below PROVIDERS & KEYS sits a **SERVICES** section for outside (non-LLM) APIs —
+image, video, speech, research, or any custom service — whose keys ride the same
+numbered-slot pool. Those aren't model providers; see
+[The SERVICES pool](/reference/tools/#the-services-pool).
+
 ## How model entries work
 
 A **model entry** in Modulatio is a self-contained tuple stored in `<vault>/model_presets.json`:
