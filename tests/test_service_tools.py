@@ -140,6 +140,24 @@ def test_api_call_http_error_reported_not_raised(monkeypatch):
     assert "402" in out and "quota" in out
 
 
+def test_api_call_redacts_urlencoded_query_key_echo(monkeypatch):
+    import urllib.error
+    _wire_service(monkeypatch, id="qecho", env_var="QECHO_API_KEY",
+                  auth_shape="query:key")
+    monkeypatch.setenv("QECHO_API_KEY", "ab+cd/ef=gh")
+
+    def fake_urlopen(req, timeout=None):
+        body = json.dumps(
+            {"error": f"bad request to {req.full_url}"}).encode()
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {},
+                                     io.BytesIO(body))
+
+    monkeypatch.setattr(service_tools, "_urlopen", fake_urlopen)
+    out = service_tools.api_call(service="qecho", path="/x")
+    assert "ab+cd/ef=gh" not in out
+    assert "ab%2Bcd%2Fef%3Dgh" not in out
+
+
 def _wire_capability(monkeypatch, capability, service_id, env_var,
                      base_url, auth_shape="bearer"):
     services.add_service(Service(

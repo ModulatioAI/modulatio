@@ -40,6 +40,17 @@ def _urlopen(req: urllib.request.Request, timeout=None):
     return _no_redirect_opener.open(req, timeout=timeout)
 
 
+def _redact_key(text: str, key: str) -> str:
+    """Strip the key AND its urlencoded form from agent-visible text — a
+    query-auth server may echo the request URL, where the key rides
+    percent/plus-escaped (quote_plus is the exact encoding urlencode uses)."""
+    text = text.replace(key, "[REDACTED]")
+    encoded = urllib.parse.quote_plus(key)
+    if encoded != key:
+        text = text.replace(encoded, "[REDACTED]")
+    return text
+
+
 def _no_service_msg(capability: str) -> str:
     return (
         f"No {capability} service configured (or several with no default) — "
@@ -139,7 +150,7 @@ def api_call(
         svc, key, str(method), url, json, timeout
     )
     text = body.decode("utf-8", errors="replace")
-    text = text.replace(key, "[REDACTED]")  # belt: key can never echo back
+    text = _redact_key(text, key)  # belt: key can never echo back
     head = f"HTTP {status}\n" if status >= 400 else ""
     return head + _cap_http_body(text, over_read=False)
 
@@ -276,7 +287,7 @@ def research_search(
     n = max(1, min(int(max_results), 12))
     out = adapter(svc, key, str(query), n,
                   min(float(timeout), _MAX_TIMEOUT))
-    return _cap_http_body(out.replace(key, "[REDACTED]"), over_read=False)
+    return _cap_http_body(_redact_key(out, key), over_read=False)
 
 
 # ── speech ─────────────────────────────────────────────────────────────────
