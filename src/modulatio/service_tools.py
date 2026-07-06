@@ -196,6 +196,7 @@ def _service_request(
     url: str,
     json_body: Optional[dict],
     timeout: float,
+    form_body: Optional[dict] = None,
 ) -> "tuple[int, bytes, str]":
     """One authenticated HTTP round-trip. Returns (status, body, content_type).
     HTTPError is caught and returned as its status + body — an API error is a
@@ -206,6 +207,10 @@ def _service_request(
     if json_body is not None:
         data = _json.dumps(json_body).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    elif form_body is not None:
+        # The other common POST dialect (OCR.space et al.): form fields.
+        data = urllib.parse.urlencode(form_body).encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
     req = urllib.request.Request(
         url, data=data, headers=headers, method=method.upper()
     )
@@ -228,10 +233,13 @@ def api_call(
     path: str = "",
     params: Optional[dict] = None,
     json: Optional[dict] = None,
+    form: Optional[dict] = None,
     timeout: float = _DEFAULT_TIMEOUT,
     **_: object,
 ) -> str:
     """Call a configured service's API, relative to its pinned base URL."""
+    if json is not None and form is not None:
+        return "api_call takes one body — json OR form, not both."
     svc = services.get_service(str(service))
     if svc is None:
         have = ", ".join(sorted(services.load_services())) or "(none)"
@@ -258,7 +266,7 @@ def api_call(
         return "api_call path escaped the pinned base URL host — refused."
     timeout = min(max(float(timeout), 1.0), _MAX_TIMEOUT)
     status, body, _ctype = _service_request(
-        svc, key, str(method), url, json, timeout
+        svc, key, str(method), url, json, timeout, form_body=form
     )
     text = body.decode("utf-8", errors="replace")
     text = _redact_key(text, key)  # belt: key can never echo back
@@ -583,6 +591,10 @@ def build_service_tools(
                            "description": "Query parameters."},
                 "json": {"type": "object",
                          "description": "JSON request body."},
+                "form": {"type": "object",
+                         "description": "Form-encoded request body "
+                                        "(x-www-form-urlencoded) — use json "
+                                        "OR form, not both."},
                 "timeout": {"type": "number"},
             },
             "required": ["service", "path"],

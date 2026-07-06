@@ -588,3 +588,34 @@ def test_classify_auth_rejects_malformed_model_output():
         {"status": 200, "www_authenticate": "", "body": "x"},
         runner=lambda p: "use OAuth2 with a dance")
     assert shape is None
+
+
+# ── api_call form-encoded body (live-test finding: OCR.space needs it) ─────
+
+def test_api_call_sends_form_encoded_body(monkeypatch):
+    """Many simple HTTP APIs (OCR.space was the live case) take POST fields
+    as application/x-www-form-urlencoded, not JSON or query params."""
+    _wire_service(monkeypatch)
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["body"] = req.data
+        seen["ctype"] = req.get_header("Content-type")
+        seen["method"] = req.get_method()
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(service_tools, "_urlopen", fake_urlopen)
+    service_tools.api_call(service="myapi", method="POST", path="/x",
+                           form={"url": "https://img.example/a.jpg",
+                                 "filetype": "JPG"})
+    assert seen["method"] == "POST"
+    assert seen["ctype"] == "application/x-www-form-urlencoded"
+    assert b"filetype=JPG" in seen["body"]
+    assert b"url=https%3A%2F%2Fimg.example%2Fa.jpg" in seen["body"]
+
+
+def test_api_call_rejects_form_and_json_together(monkeypatch):
+    _wire_service(monkeypatch)
+    out = service_tools.api_call(service="myapi", method="POST", path="/x",
+                                 json={"a": 1}, form={"b": 2})
+    assert "one body" in out and "not both" in out

@@ -17,7 +17,9 @@ Auth is injected by the engine — you never handle keys.
   configured ones).
 - `path` — RELATIVE to the service's pinned base URL (`v1/things`). Absolute
   URLs are refused by design; you cannot choose the host.
-- `method`, `params` (query dict), `json` (body dict) as the API requires.
+- `method`, `params` (query dict), and ONE body as the API requires:
+  `json` (JSON dict) or `form` (form-encoded dict — older/simple APIs
+  like OCR services usually want this), never both.
 
 ## Discipline
 
