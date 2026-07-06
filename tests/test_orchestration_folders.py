@@ -177,6 +177,7 @@ def test_producer_prompt_carries_folders_block(orch, tmp_path):
         return ('```json\n{"check": "ok", "passed": true, "notes": "", '
                 '"defect_type": null}\n```')
 
+    _seed_producers(orch.project.code)
     orch.runners.update(
         {"leader": _leader, "planner": _planner, "drafter": _drafter,
          "qc": _qc})
@@ -189,6 +190,80 @@ def test_converse_prompt_carries_folders_block(orch, tmp_path):
     docs = _register(tmp_path, "docs", "ro")
     prompt = orch._build_converse_prompt([], "hello")
     assert str(docs) in prompt
+
+
+def _seed_producers(code: str, n: int = 2) -> None:
+    from modulatio import roster
+
+    for i in range(n):
+        roster.save(
+            roster.Agent(id=f"prod-{i}", name=f"prod-{i}",
+                         identity=f"prod-{i} id", model="stub",
+                         tier="producer", capacity_cap=1),
+            code,
+        )
+
+
+def _stub_runners(prompts_sink=None):
+    import json as _json
+
+    def _leader(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return ('```json\n{"verdict": "satisfied", "rationale": "ok", '
+                    '"report_body": "r"}\n```')
+        return ('```json\n[{"description": "one thing", "success_criteria": '
+                '"a file", "evidence_required": [{"kind": "artifact", '
+                '"description": "f"}]}]\n```')
+
+    def _planner(prompt: str) -> str:
+        tasks = [{"description": "Draft it", "assignee_specialist": "drafter",
+                  "deliverable": True, "output_path": "one-thing.md",
+                  "evidence_required": [{"kind": "artifact",
+                                         "description": "file"}]}]
+        return f"```json\n{_json.dumps(tasks)}\n```"
+
+    def _drafter(prompt: str) -> str:
+        if prompts_sink is not None:
+            prompts_sink.append(prompt)
+        return "A draft body long enough to count as real work output here."
+
+    def _qc(prompt: str) -> str:
+        return ('```json\n{"check": "ok", "passed": true, "notes": "", '
+                '"defect_type": null}\n```')
+
+    return {"leader": _leader, "planner": _planner, "drafter": _drafter,
+            "qc": _qc}
+
+
+def test_delivery_lands_in_the_picked_output_folder(orch, tmp_path):
+    """End-to-end: a picked output-mode folder receives the finished product
+    (pick > MODULATIO_DELIVERY_DIR > ~/Documents/Modulatio)."""
+    drop = _register(tmp_path, "drop", "output")
+    config.set_job_output_folder("drop")
+    _seed_producers(orch.project.code)
+    orch.runners.update(_stub_runners())
+    orch._deliver_products = True   # the real run paths construct with it on
+
+    orch.kickoff("Draft one thing")
+
+    delivered = list(drop.rglob("*"))
+    assert any(p.is_file() for p in delivered), f"nothing landed in {drop}"
+
+
+def test_unreachable_pick_falls_back_with_note(orch, tmp_path, monkeypatch):
+    """A picked folder that vanished delivers to the default location and
+    says so in summary.errors — the run never raises."""
+    drop = _register(tmp_path, "drop", "output")
+    config.set_job_output_folder("drop")
+    import shutil
+
+    shutil.rmtree(drop)
+    _seed_producers(orch.project.code)
+    orch.runners.update(_stub_runners())
+    orch._deliver_products = True
+
+    summary = orch.kickoff("Draft one thing")
+    assert any("drop" in e and "unreachable" in e for e in summary.errors)
 
 
 def test_unreachable_folder_absent_from_all_grants(orch, tmp_path, monkeypatch):

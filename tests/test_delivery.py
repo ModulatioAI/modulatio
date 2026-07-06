@@ -641,6 +641,19 @@ def test_job_dir_collision_appends_run_hex(monkeypatch, tmp_path):
     assert d == tmp_path / "ABC" / "Daily Philosophy 20260531 (ab12cd)"
 
 
+def test_job_dir_base_kwarg_overrides_project_delivery_dir(monkeypatch, tmp_path):
+    """The FOLDERS output pick: a base overrides project_delivery_dir — even
+    when MODULATIO_DELIVERY_DIR is also set (pick > env > default)."""
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "env-root"))
+    picked = tmp_path / "picked"
+    d = delivery.job_dir("ABC", "Daily Philosophy", run_id=_RUN_ID,
+                         fallback="obj", base=picked)
+    assert d == picked / "Daily Philosophy 20260531"
+    # Nothing names it → the flat picked base itself.
+    assert delivery.job_dir("ABC", None, run_id=_RUN_ID, fallback="",
+                            base=picked) == picked
+
+
 def test_job_slug_strips_unicode_bidi_controls():
     # Nemo hull advisory A3: BIDI override / isolates / NEL survive the ASCII
     # regex but scramble an `ls` listing -- strip them (slug is Leader JSON in B2).

@@ -5925,6 +5925,7 @@ class Orchestrator:
             job_out = _delivery.job_dir(
                 self.project.code, run_id=run_id,
                 fallback=self.project.name or self.project.objective or "",
+                base=self._picked_output_base(),
             )
             lines.append("")
             lines.append(f"Delivery folder: {job_out}")
@@ -5955,6 +5956,7 @@ class Orchestrator:
             job_out = _delivery.job_dir(
                 self.project.code, run_id=run_id,
                 fallback=self.project.name or self.project.objective or "",
+                base=self._picked_output_base(),
             )
             roots = [self._run_artifacts_root(run_id)]
             # Only add the delivery folder when it's a RUN-scoped subfolder; when
@@ -7965,6 +7967,30 @@ class Orchestrator:
         from modulatio import config as _config
 
         return _config.folder_grant_roots()
+
+    def _picked_output_base(self, summary: "RunSummary | None" = None) -> "Path | None":
+        """The FOLDERS output pick as a delivery base, or None for the default
+        root. The accessor floor already treats a deleted/mode-changed pick as
+        no pick; a pick that exists but is UNREACHABLE (unmounted share) falls
+        back to the default root and — when a summary is given — says so in
+        ``summary.errors`` rather than silently rerouting or raising."""
+        from modulatio import config as _config
+
+        name = _config.get_job_output_folder()
+        if not name:
+            return None
+        rec = next(
+            (r for r in _config.list_folders() if r["name"] == name), None)
+        if rec is None:
+            return None
+        if not _config.probe_folder(rec["path"]):
+            if summary is not None:
+                summary.errors.append(
+                    f"output folder '{name}' unreachable — delivered to the "
+                    "default location"
+                )
+            return None
+        return Path(rec["path"])
 
     def _staging_tool_registry(self, staging: Path) -> "dict[str, tools.Tool]":
         """Re-bind the path-bound builtins to ``staging`` while preserving
@@ -13269,6 +13295,7 @@ class Orchestrator:
                 self.project.code, summary.job_slug,
                 run_id=self.project.run_id,
                 fallback=self.project.name or self.project.objective or "",
+                base=self._picked_output_base(summary),
             )
             all_delivs = _delivery.deliverables_from_tasks(summary.tasks, artifacts_root)
             blocked = set(_delivery.blocked_task_ids(summary.tasks))

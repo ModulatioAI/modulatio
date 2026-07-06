@@ -139,6 +139,7 @@ def job_dir(
     *,
     run_id: str | None = None,
     fallback: str = "",
+    base: Path | None = None,
 ) -> Path:
     """Per-job delivery folder: ``<project_delivery_dir>/<job-folder>``.
 
@@ -149,13 +150,19 @@ def job_dir(
     before. On a name collision with a DIFFERENT run's folder (two same-named
     jobs the same day), the run hex is appended as a tiebreaker.
 
+    ``base`` replaces ``project_delivery_dir`` entirely — the FOLDERS output
+    pick. Precedence: picked output folder (base) > MODULATIO_DELIVERY_DIR >
+    ``~/Documents/Modulatio`` — the in-app pick is the operator's newer, more
+    specific intent; the env var stays the install-level default.
+
     Concurrency (Nemo's Feature-A hull advisory A1): the ``exists()`` check is
     not atomic with the later ``mkdir``, so two *simultaneous* runs of the same
     project + same slug + same day could both resolve to the bare name and share
     a folder. Per-file disambiguation inside :func:`deliver_product` (``name
     (task_id).ext``) still prevents data loss; the products would merely
     cohabitate. Extreme edge for a single-user CLI; not guarded here."""
-    base = project_delivery_dir(project_code)
+    if base is None:
+        base = project_delivery_dir(project_code)
     name = job_folder_name(job_slug, fallback=fallback, run_id=run_id)
     if not name:
         return base
