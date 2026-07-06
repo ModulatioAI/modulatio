@@ -814,6 +814,45 @@ def _maybe_warn_scope_drift(
     return True
 
 
+def _format_registered_folders() -> str:
+    """Render the operator's registered FOLDERS for a prompt: one line per
+    folder — name, mode in plain language, absolute path, and a best-effort
+    top-level entry count (never a recursive listing) — plus the usage hint.
+    Kickoff directions reference folders BY NAME ("process the files in
+    folder docs one at a time"); this block is how every planning/producer
+    prompt resolves that name to a real path and knows what's allowed there.
+    Empty registry → "" so prompts without folders are byte-identical to
+    before the feature."""
+    from modulatio import config as _config
+
+    folders = _config.list_folders()
+    if not folders:
+        return ""
+    mode_words = {
+        "ro": "read-only",
+        "output": "read-only to the team; the finished product may be "
+                  "delivered here (output)",
+        "rw": "read-write (files here may be created/modified during the run)",
+    }
+    lines = ["", "", "# Registered folders (operator-configured)"]
+    for rec in folders:
+        entry = ""
+        try:
+            entry = f", {len(os.listdir(rec['path']))} top-level entries"
+        except OSError:
+            entry = ", currently unreachable"
+        lines.append(
+            f"- folder \"{rec['name']}\" — {mode_words[rec['mode']]} — "
+            f"path: {rec['path']}{entry}"
+        )
+    lines.append(
+        "Read files in a registered folder with read_file using the absolute "
+        "path. Only read-write folders accept edits or shell commands; never "
+        "attempt to modify a read-only or output folder."
+    )
+    return "\n".join(lines)
+
+
 def _format_kickoff_attachments(attachments: list) -> str:
     """Render kickoff-time attachments into the Leader's decompose
     prompt. Documents quoted inline so the Leader can read them when
@@ -3377,6 +3416,7 @@ class Orchestrator:
                 attachments=_format_kickoff_attachments(doc_only)
                 + "\n\n(Image attachments are included as content blocks "
                 "below — examine them for visual context.)"
+                + _format_registered_folders()
                 + self._iteration_contract_block()
                 + self._job_template_block(),
             )
@@ -3393,6 +3433,7 @@ class Orchestrator:
                     roster.list_agents(self.project.code)
                 ),
                 attachments=_format_kickoff_attachments(atts)
+                + _format_registered_folders()
                 + self._iteration_contract_block()
                 + self._job_template_block(),
             )
@@ -4469,6 +4510,7 @@ class Orchestrator:
         design_intent_block = (
             self._iteration_contract_block()
             + _design_intent.render_for_prompt(self.project.code)
+            + _format_registered_folders()
         )
         # Slice 1 (#88): per-objective inter-task carry. Producers
         # see Current Focus + Open Blockers + Recent Activity from the
@@ -5632,7 +5674,8 @@ class Orchestrator:
         deliverables_section = ("\n\n---\n\n" + deliverables) if deliverables else ""
         return (
             runbook.rstrip() + "\n\n---\n\n" + formatted
-            + deliverables_section + self._autonomy_block()
+            + deliverables_section + _format_registered_folders()
+            + self._autonomy_block()
         )
 
     def _with_producer_runbook(self, prompt: str) -> str:
@@ -6569,6 +6612,7 @@ class Orchestrator:
         design_intent_block = (
             self._iteration_contract_block()
             + _design_intent.render_for_prompt(self.project.code)
+            + _format_registered_folders()
         )
         from modulatio import team_state as _team_state
         team_state_block = _team_state.render_for_prompt(

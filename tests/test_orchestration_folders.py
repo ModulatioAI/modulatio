@@ -114,6 +114,83 @@ def test_registered_folder_access_never_prompts(orch, tmp_path):
     assert decisions == []
 
 
+def test_format_registered_folders_renders_and_empties(orch, tmp_path):
+    """The prompt block: one line per folder — name, plain-language mode,
+    path, top-level entry count — plus the usage hint. Empty registry → ""
+    (the block simply doesn't appear)."""
+    from modulatio.orchestration import _format_registered_folders
+
+    assert _format_registered_folders() == ""
+    docs = _register(tmp_path, "docs", "ro")
+    (docs / "a.txt").write_text("x", encoding="utf-8")
+    live = _register(tmp_path, "live", "rw")
+    _register(tmp_path, "drop", "output")
+
+    block = _format_registered_folders()
+    assert "docs" in block and str(docs) in block
+    assert "read-only" in block
+    assert "read-write" in block
+    assert "output" in block
+    assert "read_file" in block          # the usage hint
+    assert str(live) in block
+
+
+def test_planner_decompose_prompt_carries_folders_block(orch, tmp_path):
+    docs = _register(tmp_path, "docs", "ro")
+    seen: dict = {}
+
+    def _leader(prompt: str) -> str:
+        seen["prompt"] = prompt
+        return '```json\n[]\n```'
+
+    orch.runners["leader"] = _leader
+    orch._leader_decompose("objective")
+    assert str(docs) in seen["prompt"]
+    assert "read-only" in seen["prompt"]
+
+
+def test_producer_prompt_carries_folders_block(orch, tmp_path):
+    import json as _json
+
+    docs = _register(tmp_path, "docs", "ro")
+    prompts: list[str] = []
+
+    def _leader(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            return ('```json\n{"verdict": "satisfied", "rationale": "ok", '
+                    '"report_body": "r"}\n```')
+        return ('```json\n[{"description": "one thing", "success_criteria": '
+                '"a file", "evidence_required": [{"kind": "artifact", '
+                '"description": "f"}]}]\n```')
+
+    def _planner(prompt: str) -> str:
+        tasks = [{"description": "Draft it", "assignee_specialist": "drafter",
+                  "evidence_required": [{"kind": "artifact",
+                                         "description": "file"}]}]
+        return f"```json\n{_json.dumps(tasks)}\n```"
+
+    def _drafter(prompt: str) -> str:
+        prompts.append(prompt)
+        return "A draft body long enough to count as real work output here."
+
+    def _qc(prompt: str) -> str:
+        return ('```json\n{"check": "ok", "passed": true, "notes": "", '
+                '"defect_type": null}\n```')
+
+    orch.runners.update(
+        {"leader": _leader, "planner": _planner, "drafter": _drafter,
+         "qc": _qc})
+    orch.kickoff("Draft one thing")
+    assert prompts, "drafter never ran"
+    assert any(str(docs) in p and "read-only" in p for p in prompts)
+
+
+def test_converse_prompt_carries_folders_block(orch, tmp_path):
+    docs = _register(tmp_path, "docs", "ro")
+    prompt = orch._build_converse_prompt([], "hello")
+    assert str(docs) in prompt
+
+
 def test_unreachable_folder_absent_from_all_grants(orch, tmp_path, monkeypatch):
     docs = _register(tmp_path, "docs", "ro")
     (docs / "a.txt").write_text("alpha", encoding="utf-8")
