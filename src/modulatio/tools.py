@@ -1788,10 +1788,16 @@ def build_registry(
     on_artifact_write: "Callable[[Path], None] | None" = None,
     extra_roots=(),
     run_shell_extra_roots=(),
+    extra_read_roots=(),
 ) -> dict[str, Tool]:
     """Return a fresh dict of builtin tools. Callers (CLI / tests)
     merge their own tools in and pass the result into the
     :class:`Orchestrator`.
+
+    ``extra_read_roots`` (the FOLDERS ro split) widens READ-class access
+    only: read_file resolves under it, but edit_file keeps ``extra_roots``
+    and run_shell never sees it (run_shell's extra_roots double as its
+    writable bwrap binds — a ro folder must never become one).
 
     When ``artifacts_root`` is supplied, the registry includes
     ``run_shell`` bound to that root. Without a root, ``run_shell`` is
@@ -2085,7 +2091,7 @@ def build_registry(
                 "``..`` traversal, and dotfiles are refused. Read a file "
                 "before you edit it."
             ),
-            call=make_read_file(artifacts_root, extra_roots),
+            call=make_read_file(artifacts_root, (*extra_roots, *extra_read_roots)),
             params_schema={
                 "type": "object",
                 "properties": {

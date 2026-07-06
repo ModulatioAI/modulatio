@@ -148,6 +148,41 @@ def test_file_tools_without_grants_still_refuse_absolute(tmp_path):
         reg["read_file"].call(path="/etc/passwd")
 
 
+def test_extra_read_roots_reach_read_file_but_not_edit_file(tmp_path):
+    """The FOLDERS ro split: a read-root (a registered ro/output folder) is
+    readable through read_file but NOT editable — edit_file keeps only the
+    rw extra_roots. One registry kwarg, no new confinement mechanism."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (docs / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    reg = tools.build_registry(artifacts_root=ws, extra_read_roots=[docs])
+    assert "alpha" in reg["read_file"].call(path=str(docs / "a.txt"))
+    with pytest.raises(ValueError):
+        reg["edit_file"].call(path=str(docs / "a.txt"), old="alpha", new="beta")
+    # dotfile secret floor holds inside a read-root too
+    with pytest.raises(ValueError):
+        reg["read_file"].call(path=str(docs / ".env"))
+
+
+def test_run_shell_never_receives_read_roots(tmp_path, monkeypatch):
+    """A ro folder must never become a writable bwrap bind: run_shell's file-arg
+    confinement refuses a path under a read-root (read roots don't join
+    run_shell's extra_roots, which double as its rw bind list)."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "s.py").write_text("print('x')\n", encoding="utf-8")
+    reg = tools.build_registry(artifacts_root=ws, extra_read_roots=[docs])
+    if "run_shell" not in reg:
+        pytest.skip("run_shell omitted (no sandbox on this box)")
+    with pytest.raises(ValueError, match="not allowed|outside"):
+        reg["run_shell"].call(cmd=f"python {docs / 's.py'}")
+
+
 # ── http_get ───────────────────────────────────────────────────────────────
 
 class _FakeResponse:
