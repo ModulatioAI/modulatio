@@ -216,6 +216,14 @@ _PATH_CONFLICT_MARKER = "artifact-path conflict"
 #: is present; the daily budget is the only wall).
 _CONVERSE_TASK_ID = "conversation"
 
+#: QC's metered ceiling relative to the service's per-task cap. QC shares
+#: the producer's task-scoped spend counter, so on a cap-1 service the
+#: producer's own call starves QC (and QC-as-fixer, the shipping default)
+#: to zero. 5x-with-a-floor-of-5 leaves room for verify + fix + re-verify
+#: with the producer's spend already counted (operator call, 2026-07-06).
+_QC_METERED_CAP_MULTIPLIER = 5
+_QC_METERED_CAP_FLOOR = 5
+
 
 #: Duration cap on the best-effort post-run codification phase (Alfred loop). B1
 #: runs it AFTER delivery; this bounds how long it can hold the process if a cloud
@@ -5298,19 +5306,42 @@ class Orchestrator:
                 chain.append((key, runner))
         return chain
 
+    def _metered_lane_cap(
+        self,
+        tool_name: str,
+        *,
+        task_id: str,
+        budget_role: "str | None",
+    ) -> "int | None":
+        """The per-task metered ceiling for one tool in one lane: converse →
+        None (wide open, operator present), QC → generous multiple of the
+        service cap, anything else → the service cap as-is."""
+        from modulatio import services as _services
+        if task_id == _CONVERSE_TASK_ID:
+            return None
+        cap = _services.per_task_cap_for_tool(tool_name)
+        if budget_role == "qc":
+            return max(_QC_METERED_CAP_FLOOR,
+                       cap * _QC_METERED_CAP_MULTIPLIER)
+        return cap
+
     def _build_metered_authorizers(
         self,
         tool_loadout: "tuple[str, ...]",
         *,
         task_id: str,
         agent_id: str,
+        budget_role: "str | None" = None,
     ) -> "Callable[[str, dict], tuple] | None":
         """One fail-closed spend authorizer per metered tool in the loadout
         (metered.py's name guard demands one per tool), dispatched by
         called-name. None when the loadout has no metered tool — the runner
-        then denies any metered call outright (unchanged fail-closed floor)."""
+        then denies any metered call outright (unchanged fail-closed floor).
+
+        ``budget_role`` widens the per-task ceiling for the QC lane: QC
+        shares the producer's task-scoped spend counter, so without headroom
+        the producer's own spend starves QC (and QC-as-fixer) to zero."""
         from modulatio import metered as _metered
-        from modulatio import services as _services
         registry = self._active_tool_registry()
         per_tool: "dict[str, Callable[[str, dict], tuple]]" = {}
         for name in tool_loadout:
@@ -5337,11 +5368,12 @@ class Orchestrator:
                 pinned_units=[],
                 artifacts_root=self._artifacts_root(),
                 # Converse lane = no per-task allowance (the operator is
-                # sitting right there); the daily budget stays the wall.
-                # Task lanes keep the per-service cap.
-                per_task_cap=(
-                    None if task_id == _CONVERSE_TASK_ID
-                    else _services.per_task_cap_for_tool(name)
+                # sitting right there); QC = generous headroom above the
+                # producer's spend on the shared task counter; task lanes
+                # keep the per-service cap. The daily budget stays the wall
+                # for all three.
+                per_task_cap=self._metered_lane_cap(
+                    name, task_id=task_id, budget_role=budget_role,
                 ),
                 allowed_keys=props,
             )
@@ -5487,7 +5519,8 @@ class Orchestrator:
             # pinned_units is empty: generation-class calls have no artifact
             # inputs; the idempotency key covers tool + options.
             metered_authorizer = self._build_metered_authorizers(
-                tool_loadout, task_id=task_id, agent_id=agent_id
+                tool_loadout, task_id=task_id, agent_id=agent_id,
+                budget_role=budget_role,
             )
 
             def _run_one(_model: "str | None", _runner: "Callable[..., Any]") -> str:

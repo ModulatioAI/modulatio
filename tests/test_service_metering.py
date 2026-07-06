@@ -324,3 +324,43 @@ def test_task_lane_per_task_cap_unchanged(project_with_run):
     assert auth("svc_tool", {"query": "a"})[0]
     ok, reason = auth("svc_tool", {"query": "b"})
     assert not ok and "per-task" in reason
+
+
+# ── QC lane: generous metered headroom above the producer (2026-07-06) ─────
+
+def test_qc_lane_metered_cap_is_generous(project_with_run):
+    """QC shares the producer's task-scoped spend counter, so on a cap-1
+    service the producer's own call would starve QC to zero. Operator call
+    (2026-07-06): QC's ceiling = 5x the service cap, floor 5 — verify, fix,
+    re-verify all fit, with the producer's spend already counted."""
+    comptroller.set_budget_field(
+        PROJECT_CODE, "paid_cloud_escalations_per_day", 50)
+    calls: list = []
+    registry = {"svc_tool": _metered_tool(
+        "svc_tool", calls, {"query": {"type": "string"}})}
+    orch = _make_orchestrator(project_with_run, registry, scripted=[])
+
+    # The producer spends the task's whole cap (default 1) first.
+    producer_auth = orch._build_metered_authorizers(
+        ("svc_tool",), task_id="T-9", agent_id="prod-1",
+    )
+    assert producer_auth("svc_tool", {"query": "produce"})[0]
+    ok, reason = producer_auth("svc_tool", {"query": "again"})
+    assert not ok and "per-task" in reason  # producer lane: capped as ever
+
+    # QC arrives on the SAME task: 4 more calls fit under its ceiling of 5.
+    qc_auth = orch._build_metered_authorizers(
+        ("svc_tool",), task_id="T-9", agent_id="qc", budget_role="qc",
+    )
+    for i in range(4):
+        ok, reason = qc_auth("svc_tool", {"query": f"verify{i}"})
+        assert ok, f"qc call {i}: {reason}"
+    ok, reason = qc_auth("svc_tool", {"query": "one-too-many"})
+    assert not ok and "per-task" in reason  # generous, not bottomless
+
+
+def test_qc_token_budget_is_generously_above_producer():
+    """QC reads the producer's whole canvas + standards + its own tool
+    results — its context budget must be at least 2x the producer's."""
+    from modulatio import context_budget as cb
+    assert cb.EXPERIMENTAL_DEFAULTS["qc"] >= 2 * cb.EXPERIMENTAL_DEFAULTS["producer"]

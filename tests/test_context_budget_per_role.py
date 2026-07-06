@@ -127,7 +127,7 @@ def test_02_default_table_distinct_per_role():
     # compression churn (the models' real windows have the room).
     for role, expected in [
         ("producer", 48_000),
-        ("qc", 64_000),
+        ("qc", 96_000),   # 2026-07-06: 2x producer + ceiling raised with it
         ("planner", 32_000),
         ("leader-decompose", 48_000),
         ("leader-iterate", 32_000),
@@ -346,7 +346,8 @@ def test_13_cli_refuse_above_ceiling(monkeypatch):
     from modulatio import cli as cli_mod
     import typer as typer_mod
     with pytest.raises(typer_mod.Exit):
-        cli_mod._resolve_ctx_budget_overrides(["producer=70000"])
+        cli_mod._resolve_ctx_budget_overrides(
+            [f"producer={cb.HARD_GLOBAL_CEILING + 1000}"])
 
 
 # ─── 14. CLI duplicate flag → last-wins + warning ──────────────────────────
@@ -738,7 +739,7 @@ def test_30_cli_parser_rejects_invalid_flags(flag):
     ("producer=16_000", 16_000),
     ("producer=16,000", 16_000),
     ("  producer = 16000  ", 16_000),
-    ("producer=64000", 64_000),  # exactly at ceiling
+    ("producer=64000", 64_000),  # below the (raised) ceiling, still valid
 ])
 def test_31_cli_parser_accepts_well_formed_flags(flag, want):
     specs, warns = cb.parse_cli_override_specs([flag])
@@ -795,7 +796,7 @@ def test_33_project_budgets_above_ceiling_rejected_at_load(tmp_path):
             objective="y",
             leader_model="stub",
             wiki_path=str(tmp_path),
-            context_budgets={"producer": 70_000},
+            context_budgets={"producer": cb.HARD_GLOBAL_CEILING + 1_000},
         )
 
 
@@ -881,7 +882,7 @@ def test_35_agent_context_budget_above_ceiling_refused(tmp_path, monkeypatch):
     vault.init_project("CAP", "x", "y")
     bad = roster.Agent(
         id="writer", name="Writer", tier="producer",
-        model="grok-4", context_budget=70_000,
+        model="grok-4", context_budget=cb.HARD_GLOBAL_CEILING + 1_000,
     )
     roster.save(bad, "CAP")
     with pytest.raises(ValueError):

@@ -31,13 +31,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one, so every metered call was denied and the tier sat dormant. Budgets are
   per project (`paid_cloud_escalations_per_day` in `comptroller.md`; a missing
   budget is a denial, not "unlimited"), each service carries a **per-task call
-  cap** (the Leader-converse lane is exempt — the operator is present, so only
-  the daily budget bounds interactive chat), and a tool's
+  cap** (two lane exceptions: Leader-converse is exempt — the operator is
+  present, so only the daily budget bounds interactive chat — and QC gets 5×
+  the service cap so the producer's spend on the shared task counter can't
+  starve verification or QC-as-fixer), and a tool's
   schema-declared option names pass the narrow-param scan
   while URL-shaped names and URL-like values never do. `modulatio doctor` grows
   a **Services** section (keyless services, metered services with no budget,
   corrupt entries) so a misconfiguration surfaces before the run, not as a
   mid-run denial.
+- **QC context budget raised to 96K** (2× the producer tier; the hard global
+  ceiling moves with it) — a reviewer squeezed near the producer's window
+  forces compressed partial-view judgments, and QC-as-fixer needs room to
+  hold the canvas, the standards, and its own tool results at once.
 - **FOLDERS — named operator folders for job runs** (CONFIG → FOLDERS). Register
   folder locations — local paths, mapped drives, already-mounted smb/cifs/nfs
   shares — that the whole team (Leader, QC, producers) can use during a run, and
