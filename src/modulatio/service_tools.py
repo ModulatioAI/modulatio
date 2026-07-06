@@ -16,6 +16,7 @@ model can never choose a host (the http_get discipline, service-shaped).
 from __future__ import annotations
 
 import json as _json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -40,20 +41,44 @@ def _urlopen(req: urllib.request.Request, timeout=None):
     return _no_redirect_opener.open(req, timeout=timeout)
 
 
+_PCT_HEX = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def _ci_percent_pattern(encoded: str) -> "re.Pattern[str]":
+    """A regex matching ``encoded`` with literals exact but each ``%XX`` hex
+    escape matched case-INSENSITIVELY. Percent hex is case-insensitive per
+    RFC 3986, so a service can echo ``%2f`` where ``quote`` emitted ``%2F`` —
+    both must scrub. Only the two hex digits flex; the key's own literal
+    characters stay exact, so no unrelated text is over-redacted."""
+    parts: list[str] = []
+    last = 0
+    for m in _PCT_HEX.finditer(encoded):
+        parts.append(re.escape(encoded[last:m.start()]))
+        parts.append("%" + "".join(
+            f"[{c.lower()}{c.upper()}]" if c.isalpha() else c
+            for c in m.group()[1:]
+        ))
+        last = m.end()
+    parts.append(re.escape(encoded[last:]))
+    return re.compile("".join(parts))
+
+
 def _redact_key(text: str, key: str) -> str:
     """Strip the key and EVERY encoding a service might echo it back in — a
     query-auth server can reflect the request URL, where the key rides
-    escaped. Three canonical forms: raw, form-encoded (``quote_plus`` — spaces
-    as ``+``, the exact encoding ``urlencode`` uses), and percent-encoded
-    (``quote(safe="")`` — spaces as ``%20``). Wild Bill's BLOCK: the ``%20``
-    form is reversible and was surviving a plus-only belt."""
-    for form in {
-        key,
+    escaped. Raw (exact), form-encoded (``quote_plus`` — spaces as ``+``), and
+    percent-encoded (``quote(safe="")`` — spaces as ``%20``); the two encoded
+    forms are scrubbed with case-insensitive percent hex (Wild Bill BLOCK: a
+    lower/mixed-case ``%2f`` echo is reversible and survived an exact match)."""
+    if not key:  # never replace("") — that would inject [REDACTED] everywhere
+        return text
+    text = text.replace(key, "[REDACTED]")  # raw is case-sensitive
+    for encoded in {
         urllib.parse.quote_plus(key),
         urllib.parse.quote(key, safe=""),
     }:
-        if form:  # never replace("") — that would inject [REDACTED] everywhere
-            text = text.replace(form, "[REDACTED]")
+        if encoded and encoded != key:
+            text = _ci_percent_pattern(encoded).sub("[REDACTED]", text)
     return text
 
 

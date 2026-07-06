@@ -180,11 +180,29 @@ def test_api_call_redacts_percent20_space_key_echo(monkeypatch):
 
 
 def test_redact_key_matrix():
-    """_redact_key scrubs every canonical echo encoding of a key."""
+    """_redact_key scrubs every echo encoding of a key — raw, form-encoded,
+    percent-encoded, AND case-variant percent hex (Wild Bill closeout BLOCK:
+    percent hex is case-insensitive per RFC 3986, so a server can echo a
+    lower/mixed-case form that is still reversible)."""
     key = "a b/c=d"
-    for form in (key, "a+b%2Fc%3Dd", "a%20b%2Fc%3Dd"):
+    forms = (
+        key,               # raw
+        "a+b%2Fc%3Dd",     # quote_plus, upper hex
+        "a%20b%2Fc%3Dd",   # quote, upper hex
+        "a%20b%2fc%3dd",   # quote, LOWER hex (WB's leak)
+        "a+b%2fc%3Dd",     # MIXED hex
+    )
+    for form in forms:
         redacted = service_tools._redact_key(f"prefix {form} suffix", key)
         assert form not in redacted, form
+
+
+def test_redact_key_no_false_positive_on_unrelated_hex():
+    """The case-insensitive hex match must not over-redact unrelated text
+    that merely contains percent sequences."""
+    key = "a b/c=d"
+    innocent = "see https://x.example/path%2Fother?q=zzz for details"
+    assert service_tools._redact_key(innocent, key) == innocent
 
 
 def _wire_capability(monkeypatch, capability, service_id, env_var,
