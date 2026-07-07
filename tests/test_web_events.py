@@ -90,7 +90,7 @@ def client():
 
     from modulatio.web.app import create_app
 
-    return TestClient(create_app())
+    return TestClient(create_app(), base_url="http://localhost")
 
 
 async def test_sse_stream_emits_hello_then_published_frames():

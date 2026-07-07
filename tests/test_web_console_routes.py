@@ -31,7 +31,7 @@ def client():
     from modulatio.web.app import create_app
 
     vault.init_project("web", "Web", "o")
-    return TestClient(create_app(stub=True))
+    return TestClient(create_app(stub=True), base_url="http://localhost")
 
 
 def test_converse_replies_and_history_shows_the_turns(client):

@@ -22,7 +22,7 @@ def client():
 
     from modulatio.web.app import create_app
 
-    return TestClient(create_app())
+    return TestClient(create_app(), base_url="http://localhost")
 
 
 # ── entry-point guard ─────────────────────────────────────────────────
@@ -71,7 +71,7 @@ def test_api_requires_bearer_token_when_configured():
 
     from modulatio.web.app import create_app
 
-    client = TestClient(create_app(bearer_token="s3cret"))
+    client = TestClient(create_app(bearer_token="s3cret"), base_url="http://localhost")
 
     assert client.get("/api/projects").status_code == 401
     ok = client.get("/api/projects", headers={"Authorization": "Bearer s3cret"})
@@ -85,8 +85,36 @@ def test_static_shell_not_token_gated():
 
     from modulatio.web.app import create_app
 
-    client = TestClient(create_app(bearer_token="s3cret"))
+    client = TestClient(create_app(bearer_token="s3cret"), base_url="http://localhost")
     assert client.get("/").status_code == 200
+
+
+# ── DNS-rebinding guard ───────────────────────────────────────────────
+
+
+def test_unknown_host_header_rejected():
+    """A rebound hostname resolving to 127.0.0.1 must not reach the API:
+    only loopback names (and an explicitly allowed host) are served."""
+    from fastapi.testclient import TestClient
+
+    from modulatio.web.app import create_app
+
+    client = TestClient(create_app(), base_url="http://localhost")
+    bad = client.get("/api/projects", headers={"Host": "evil.example.com"})
+    assert bad.status_code == 400
+
+    ok = client.get("/api/projects", headers={"Host": "localhost:8787"})
+    assert ok.status_code == 200
+
+
+def test_extra_allowed_host_is_served():
+    from fastapi.testclient import TestClient
+
+    from modulatio.web.app import create_app
+
+    client = TestClient(create_app(allowed_hosts=["nautilus.lan"]))
+    ok = client.get("/api/projects", headers={"Host": "nautilus.lan:8787"})
+    assert ok.status_code == 200
 
 
 # ── static SPA serving ────────────────────────────────────────────────

@@ -67,8 +67,12 @@ def run(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     token: str | None = None
+    allowed_hosts: list[str] = []
     if not _is_loopback(args.host):
         token = _ensure_web_token()
+        # The bound name itself joins the Host allowlist (the rebinding
+        # fence otherwise serves loopback names only).
+        allowed_hosts.append(args.host)
         print(
             f"Non-loopback bind ({args.host}) — API calls require the bearer "
             f"token from <config>/web_token. Pair the browser with:\n"
@@ -79,4 +83,7 @@ def run(argv: list[str] | None = None) -> None:
 
     from modulatio.web.app import create_app
 
-    uvicorn.run(create_app(bearer_token=token), host=args.host, port=args.port)
+    uvicorn.run(
+        create_app(bearer_token=token, allowed_hosts=allowed_hosts),
+        host=args.host, port=args.port,
+    )

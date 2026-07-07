@@ -18,18 +18,43 @@ from fastapi.staticfiles import StaticFiles
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(*, bearer_token: str | None = None, stub: bool = False) -> FastAPI:
+#: Host headers always served — the loopback names. A browser page from a
+#: hostile origin whose DNS rebinds to 127.0.0.1 arrives with ITS hostname
+#: here, so an allowlist is the rebinding fence (the token only guards
+#: non-loopback binds).
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
+
+
+def create_app(
+    *,
+    bearer_token: str | None = None,
+    stub: bool = False,
+    allowed_hosts: list[str] | None = None,
+) -> FastAPI:
     """Build the WebOS app.
 
     ``bearer_token`` set → every ``/api``/``/events`` request must carry
     ``Authorization: Bearer <token>`` (the non-loopback red-line). The
     static shell stays open — the pairing prompt lives in it.
 
+    ``allowed_hosts`` extends the loopback Host allowlist (the server
+    passes its ``--host`` so LAN binds serve their own name). Any other
+    Host header → 400: the DNS-rebinding fence.
+
     ``stub`` → actors run the engine on stub runners (the test suite's
     end-to-end path; production leaves it False).
     """
     app = FastAPI(title="Modulatio WebOS", docs_url=None, redoc_url=None)
     app.state.stub = stub
+
+    served_hosts = _LOOPBACK_HOSTS | set(allowed_hosts or ())
+
+    @app.middleware("http")
+    async def _trusted_host(request: Request, call_next):
+        host = request.headers.get("host", "").rsplit(":", 1)[0]
+        if host not in served_hosts and host.lower() not in served_hosts:
+            return JSONResponse({"detail": "unrecognized Host"}, status_code=400)
+        return await call_next(request)
 
     if bearer_token is not None:
         @app.middleware("http")
