@@ -18,7 +18,12 @@ from __future__ import annotations
 from unittest import mock
 
 from modulatio import setup_wizard
-from modulatio.setup_wizard import clipboard_step, pandoc_step, steps
+from modulatio.setup_wizard import (
+    clipboard_step,
+    pandoc_step,
+    renderer_step,
+    steps,
+)
 
 
 def _abort(*_args, **_kwargs):
@@ -186,6 +191,7 @@ def test_system_tools_snapshot_swallows_probe_errors():
     with (
         mock.patch.object(pandoc_step, "is_installed", side_effect=RuntimeError("boom")),
         mock.patch.object(clipboard_step, "is_installed", return_value=True),
+        mock.patch.object(renderer_step, "is_installed", return_value=False),
     ):
         snap = setup_wizard._system_tools_snapshot()
-    assert snap == {"pandoc": False, "clipboard": True}
+    assert snap == {"pandoc": False, "clipboard": True, "renderer": False}

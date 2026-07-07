@@ -29,9 +29,9 @@ def _print_welcome_blurb() -> None:
         print(theme.color("  Edit any step; press Enter at confirm to keep what's there.", "muted"))
     else:
         print(f"  {theme.color('Welcome to Modulatio', 'primary', bold=True)} — first-install setup.")
-        print(theme.color("  This wizard checks pandoc + clipboard, then your vault path, budget,", "muted"))
-        print(theme.color("  and first project, prefetches the embedded LLM, and confirms. Models", "muted"))
-        print(theme.color("  and agents are configured later in the TUI Config tab. ~5 minutes.", "muted"))
+        print(theme.color("  This wizard checks pandoc, clipboard + SVG renderer, then vault path,", "muted"))
+        print(theme.color("  budget, and first project, prefetches the embedded LLM, and confirms.", "muted"))
+        print(theme.color("  Models + agents are configured later in the TUI Config tab. ~5 minutes.", "muted"))
     print()
 
 

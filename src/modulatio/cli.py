@@ -1133,6 +1133,22 @@ def _run_doctor_checks() -> None:
             "`wl-clipboard` on Wayland), or run `modulatio setup`."
         )
 
+    # SVG renderer (visual QC renders SVG artifacts to PNG so a vision seat
+    # judges the picture; raster images work without it — `modulatio setup`
+    # ensures it like pandoc + clipboard).
+    import shutil as _shutil
+    typer.echo("\nSVG renderer (visual QC review):")
+    if _shutil.which("rsvg-convert"):
+        typer.echo("  ✓ rsvg-convert — vision-capable QC seats review SVG "
+                   "artifacts as rendered images.")
+    else:
+        typer.echo(
+            "  ✗ rsvg-convert not installed. Vision QC still reviews raster "
+            "images; SVG artifacts stay text-only reviews. Install: "
+            "`sudo apt install librsvg2-bin` (brew/dnf: librsvg), or run "
+            "`modulatio setup`."
+        )
+
     # Engine calibration (v0.1.0 Beta — what the engine is and isn't
     # tested for; sets correct expectations on first contact).
     typer.echo("\nEngine calibration (v0.1.0 Beta):")

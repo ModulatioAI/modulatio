@@ -60,6 +60,7 @@ from modulatio.setup_wizard import (
     finalize,
     first_project_step,
     pandoc_step,
+    renderer_step,
     steps,
     vault_path_step,
 )
@@ -73,6 +74,7 @@ WIZARD_VERSION = "2.0.0"
 _STEP_TITLES = {
     "pandoc": "1. Check pandoc",
     "clipboard": "1a. Check clipboard backend",
+    "renderer": "1b. Check SVG renderer",
     "vault_path": "2. Vault paths",
     # Models + agents are configured in the TUI Config tab now, not here.
     "budget": "3. Budget defaults (optional)",
@@ -89,6 +91,8 @@ def _dispatch(step_name: str, state: dict) -> Any:
         return pandoc_step.run(state)
     if step_name == "clipboard":
         return clipboard_step.run(state)
+    if step_name == "renderer":
+        return renderer_step.run(state)
     if step_name == "vault_path":
         return vault_path_step.run(state)
     if step_name == "budget":
@@ -115,6 +119,7 @@ def _pop_state(step_name: str, state: dict) -> None:
     keys_per_step = {
         "pandoc": ["pandoc_installed", "pandoc_skipped"],
         "clipboard": ["clipboard_backend_installed", "clipboard_skipped"],
+        "renderer": ["svg_renderer_installed", "svg_renderer_skipped"],
         "vault_path": ["vault_root", "shared_resources_path"],
         "budget": ["budget_caps"],
         "first_project": ["first_project_code", "first_project_objective"],
@@ -258,7 +263,8 @@ def _system_tools_snapshot() -> dict[str, bool]:
     the abort path can't crash.
     """
     snapshot: dict[str, bool] = {}
-    for name, module in (("pandoc", pandoc_step), ("clipboard", clipboard_step)):
+    for name, module in (("pandoc", pandoc_step), ("clipboard", clipboard_step),
+                         ("renderer", renderer_step)):
         try:
             snapshot[name] = bool(module.is_installed())
         except Exception:
@@ -297,7 +303,8 @@ def _join_tool_names(names: list[str]) -> str:
 
     "pandoc" -> "pandoc"; ["pandoc", "clipboard"] -> "pandoc and clipboard".
     """
-    labels = {"pandoc": "pandoc", "clipboard": "a clipboard backend"}
+    labels = {"pandoc": "pandoc", "clipboard": "a clipboard backend",
+              "renderer": "an SVG renderer"}
     rendered = [labels.get(n, n) for n in names]
     if len(rendered) <= 1:
         return rendered[0] if rendered else ""
@@ -326,6 +333,7 @@ def _run_setup_body() -> bool:
     step_order = [
         "pandoc",
         "clipboard",
+        "renderer",
         "vault_path",
         "budget",
         "first_project",

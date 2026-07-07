@@ -149,6 +149,7 @@ def confirm(state: dict) -> Any:
     print(f"    Vault root:    {theme.color(state.get('vault_root', '?'), 'accent')}")
     print(f"    Shared res:    {theme.color(state.get('shared_resources_path', '?'), 'accent')}")
     print(f"    Pandoc:        {'✓ installed' if state.get('pandoc_installed') else '✗ skipped'}")
+    print(f"    SVG renderer:  {'✓ installed' if state.get('svg_renderer_installed') else '✗ skipped'}")
     print(f"    Providers:     {', '.join(_derive_providers(state)) or '(none)'}")
     print(f"    Models:        {len(state.get('configured_models', []))} curated")
     print(f"    API keys:      {len(state.get('staged_api_keys', {}))} staged")
@@ -263,6 +264,8 @@ def commit(state: dict, *, version: str) -> None:
     skipped = []
     if state.get("pandoc_skipped"):
         skipped.append("pandoc")
+    if state.get("svg_renderer_skipped"):
+        skipped.append("SVG renderer (rsvg-convert)")
     if state.get("embedded_llm_skipped"):
         skipped.append("embedded_llm")
     setup_state.mark_completed(version=version, skipped_steps=skipped)
