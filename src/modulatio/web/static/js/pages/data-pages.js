@@ -115,7 +115,7 @@ export function mountLogs(page, ctx) {
     emptyText: "no crash / error / doctor logs — good sign",
     renderDetail: (l) => [
       heading(l.label),
-      kv([["when", l.timestamp], ["size", `${l.size} B`], ["sent", l.sent]]),
+      kv([["when", l.timestamp], ["size", l.size_human], ["sent", l.sent]]),
       pre(l.summary),
     ],
   });
@@ -143,7 +143,7 @@ export function mountArtifacts(page, ctx) {
     columns: [
       { label: "", cell: (f) => f.family_glyph, mono: true },
       { label: "path", cell: (f) => f.path, mono: true },
-      { label: "size", cell: (f) => `${f.size} B`, mono: true },
+      { label: "size", cell: (f) => f.size_human, mono: true },
     ],
     rowLabel: (f) => f.path,
     emptyText: "no artifacts yet — they land here as runs produce",

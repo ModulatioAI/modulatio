@@ -198,6 +198,7 @@ def test_logs_list_no_paths_exposed(client):
     logs = resp.json()["logs"]
     assert logs and logs[0]["kind"]
     assert "path" not in logs[0], "filesystem layout never crosses the boundary"
+    assert logs[0]["size_human"] == vault.human_size(logs[0]["size"])
 
 
 # ── artifacts ─────────────────────────────────────────────────────────
@@ -212,6 +213,8 @@ def test_artifacts_walk_and_preview(client):
     files = resp.json()["files"]
     entry = next(f for f in files if f["path"].endswith("note.md"))
     assert entry["family_glyph"]
+    # Sizes speak the shared vault.human_size format on every surface.
+    assert entry["size_human"] == vault.human_size(entry["size"])
 
     prev = client.get("/api/web/artifacts/preview", params={"path": entry["path"]})
     assert prev.status_code == 200

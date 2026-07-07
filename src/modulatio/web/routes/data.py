@@ -219,6 +219,7 @@ def list_logs() -> dict:
             "summary": json_safe(e.summary),
             "sent": e.sent,
             "size": e.size,
+            "size_human": vault.human_size(e.size),
         })
     return {"logs": entries}
 
@@ -267,9 +268,11 @@ def list_artifacts(project: str) -> dict:
             if not _is_artifact_file(p):
                 continue
             family = families.infer_artifact_family_from_path(p)
+            size = p.stat().st_size
             files.append({
                 "path": str(p.relative_to(root)),
-                "size": p.stat().st_size,
+                "size": size,
+                "size_human": vault.human_size(size),
                 "family": family,
                 "family_glyph": _FAMILY_GLYPH.get(family, "·"),
             })
