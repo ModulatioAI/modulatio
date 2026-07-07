@@ -39,9 +39,10 @@ def create_app(*, bearer_token: str | None = None) -> FastAPI:
                     )
             return await call_next(request)
 
-    from modulatio.web.routes import projects
+    from modulatio.web.routes import console, projects
 
     app.include_router(projects.router)
+    app.include_router(console.router)
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app
