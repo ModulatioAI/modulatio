@@ -227,3 +227,23 @@ def test_artifact_preview_refuses_symlink_out_of_artifact_roots(client):
     assert client.get(
         "/api/web/artifacts/preview", params={"path": "artifacts/sneaky.json"}
     ).status_code in (400, 404)
+
+
+def test_artifact_preview_refuses_symlinked_artifact_root(client, tmp_path):
+    """WB-R2: the artifact ROOT itself must not be a trusted symlink. If
+    `artifacts/` is replaced by a symlink to an outside dir, its resolved
+    target must NOT become an authorized root."""
+    proj = vault.project_dir("web")
+    outside = tmp_path / "outside_arts"
+    outside.mkdir()
+    (outside / "leak.md").write_text("outside artifact-root symlink leak\n",
+                                     encoding="utf-8")
+    art = proj / "artifacts"
+    for child in art.iterdir():
+        child.unlink()
+    art.rmdir()
+    art.symlink_to(outside)
+
+    assert client.get(
+        "/api/web/artifacts/preview", params={"path": "artifacts/leak.md"}
+    ).status_code in (400, 404)
