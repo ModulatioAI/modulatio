@@ -12897,21 +12897,14 @@ class Orchestrator:
         skill-creation proposal). Both are advisory; the task still runs."""
         notes: list[str] = []
         if result.capability_shortfall:
+            # Clif directive (2026-07-07): the engine NEVER complains about a
+            # model missing innate capabilities (vision, tool use, reasoning)
+            # — especially on producers. A shortfall entry is by construction
+            # a model-fit tag (the planner's soft preference), so routing
+            # best-available IS the design working, not a defect to report.
+            # The fact stays on the task's transition rationale (this quiet
+            # dispatch-note trail) for the audit record; no PQR reservation.
             caps = ", ".join(result.capability_shortfall)
-            summary.recommendations.append({
-                "goal_id": goal.id,
-                "concern": (
-                    f"Task {task.id} ran on the best-available producer "
-                    f"({task.assigned_agent_id}). No configured model "
-                    f"advertised the capability this task preferred ({caps}) "
-                    f"— a soft preference, not a hard requirement, so it ran "
-                    f"on the strongest available model instead of blocking."
-                ),
-                "suggestion": (
-                    f"Add a producer whose model advertises {caps} if this "
-                    f"task's quality matters; otherwise the result stands."
-                ),
-            })
             notes.append(f"ran below preferred capability ({caps}) — best-available")
         if result.missing_skills:
             sk = ", ".join(result.missing_skills)

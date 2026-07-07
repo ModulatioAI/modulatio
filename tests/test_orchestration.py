@@ -4897,7 +4897,7 @@ def test_coordinator_without_required_capabilities_field_defaults_to_empty_list(
     assert tasks[0].required_capabilities == []
 
 
-def test_orchestrator_skill_floor_shortfall_ships_pqr_reservation(
+def test_orchestrator_skill_floor_shortfall_stays_off_the_pqr(
     project: Project, tmp_path, monkeypatch
 ):
     """Brick 3 never-block: when a skill file declares a capability floor and
@@ -4961,14 +4961,19 @@ def test_orchestrator_skill_floor_shortfall_ships_pqr_reservation(
     assert tasks[0].status == TaskStatus.COMPLETED
     assert drafter_calls["n"] >= 1
     assert store.list_tickets(PROJECT_CODE) == []
-    # The shortfall surfaces as a Product Quality Report reservation.
-    assert any(
+    # Clif directive (2026-07-07): no PQR complaint for an innate-capability
+    # shortfall (tool use, vision, reasoning) — quiet audit trail only.
+    assert not any(
         "shell-access" in (r.get("concern", "") + r.get("suggestion", ""))
         for r in summary.recommendations
     )
+    assert any(
+        "shell-access" in t.rationale
+        for t in tasks[0].transitions if t.rationale
+    )
 
 
-def test_orchestrator_domain_floor_shortfall_ships_pqr_reservation(
+def test_orchestrator_domain_floor_shortfall_stays_off_the_pqr(
     project: Project, tmp_path, monkeypatch
 ):
     """Brick 3 never-block: a domain-level capability floor (declared in a
@@ -5033,22 +5038,27 @@ def test_orchestrator_domain_floor_shortfall_ships_pqr_reservation(
 
     tasks = store.list_tasks(PROJECT_CODE)
     assert len(tasks) == 1
-    # Never-block: completes best-available, shortfall → PQR reservation.
+    # Never-block: completes best-available; no PQR complaint for an
+    # innate-capability shortfall (Clif 2026-07-07) — audit trail only.
     assert tasks[0].status == TaskStatus.COMPLETED
     assert store.list_tickets(PROJECT_CODE) == []
-    assert any(
+    assert not any(
         "structured-output" in (r.get("concern", "") + r.get("suggestion", ""))
         for r in summary.recommendations
     )
+    assert any(
+        "structured-output" in t.rationale
+        for t in tasks[0].transitions if t.rationale
+    )
 
 
-def test_orchestrator_capability_shortfall_ships_pqr_reservation(
+def test_orchestrator_capability_shortfall_stays_off_the_pqr(
     project: Project, tmp_path, monkeypatch
 ):
     """Brick 3 never-block: a task-declared capability no producer holds does
-    NOT block. The producer runs best-available, the task completes, and the
-    shortfall ships as a Product Quality Report reservation — never a CRITICAL
-    ticket."""
+    NOT block. The producer runs best-available and the task completes; the
+    shortfall stays on the quiet dispatch-note audit trail — never a PQR
+    complaint (Clif 2026-07-07), never a CRITICAL ticket."""
     from modulatio import skills as skills_mod
 
     shared_skills = tmp_path / "shared_skills"
@@ -5101,10 +5111,16 @@ def test_orchestrator_capability_shortfall_ships_pqr_reservation(
     assert tasks[0].status == TaskStatus.COMPLETED
     assert drafter_calls["n"] >= 1
     assert store.list_tickets(PROJECT_CODE) == []
-    # The shortfall surfaces as a Product Quality Report reservation.
-    assert any(
+    # Clif directive (2026-07-07): no PQR complaint about innate model
+    # capabilities (vision / tool use / reasoning) — the shortfall stays on
+    # the task's quiet dispatch-note audit trail only.
+    assert not any(
         "reasoning-heavy" in (r.get("concern", "") + r.get("suggestion", ""))
         for r in summary.recommendations
+    )
+    assert any(
+        "reasoning-heavy" in t.rationale
+        for t in tasks[0].transitions if t.rationale
     )
 
 
@@ -11426,3 +11442,30 @@ def test_skill_routed_retry_carries_corrective_notes(project, monkeypatch):
         "QC's corrective notes must reach the skill-routed retry prompt"
     )
     assert "(first attempt — no prior feedback)" not in seen["prompt"]
+
+
+def test_capability_shortfall_never_complains_in_the_pqr(project):
+    """Clif directive (2026-07-07): the engine must NEVER complain about a
+    model missing innate capabilities (vision, tool use, reasoning) —
+    especially on producers. Routing stays best-available; the fact stays in
+    the task's quiet dispatch-note audit trail; the operator-facing Product
+    Quality Report carries NO reservation about it."""
+    from modulatio import dispatch
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal
+
+    from uuid import uuid4
+
+    orch = Orchestrator(project, {"drafter": _drafter_stub})
+    goal = Goal(id="X-G-001", project_id=uuid4(), description="g",
+                success_criteria="s")
+    task = _qcfix_task(assigned_agent_id="james")
+    result = dispatch.DispatchResult(
+        outcome=dispatch.DispatchOutcome.MATCHED,
+        capability_shortfall=("reasoning-heavy", "vision"),
+    )
+    summary = RunSummary(project=project)
+    notes: dict = {}
+    orch._record_dispatch_advisories(goal, task, result, summary, notes)
+    assert summary.recommendations == []          # no PQR complaint
+    assert "best-available" in notes.get(task.id, "")  # quiet audit trail kept
