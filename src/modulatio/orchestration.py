@@ -5448,6 +5448,23 @@ class Orchestrator:
                 f"Orchestrator(chat_runner=...) for a single shared runner — "
                 f"typically runners.litellm_chat_runner(<model preset key>)."
             )
+        # A declared tool with no registered backing must not wedge the lane
+        # at the loop driver's fail-fast (run ef9d62: the generate-images
+        # seed's ``generate_image`` with no image service configured → 3
+        # retries into the same RuntimeError wall, task blocked, no producer
+        # call ever made). Filter to the registry THIS loop will actually
+        # serve and log the gap; the driver's fail-fast stays for direct
+        # callers. The chat-runner guard above keeps the ORIGINAL loadout in
+        # its message on purpose — it reports the skill's declaration.
+        _registry_now = self._active_tool_registry()
+        _missing = tuple(t for t in tool_loadout if t not in _registry_now)
+        if _missing:
+            _logger.warning(
+                "%s (%s): loadout tool(s) %s not in the registry (no backing "
+                "service/config) — dropped for this call; running with the "
+                "registered tools", skill_name, task_id, ", ".join(_missing),
+            )
+            tool_loadout = tuple(t for t in tool_loadout if t in _registry_now)
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         # Audit transcript carries verbatim tool args + results (run_shell
         # commands, http_get URLs, full responses). On a multi-user host

@@ -11520,3 +11520,38 @@ def test_qc_fix_forward_still_declines_a_real_multifile_bundle(project, monkeypa
     )
     assert handled is False
     assert task.qc_authored_fix is False
+
+
+def test_unbacked_loadout_tool_is_dropped_not_wedged(project):
+    """Run ef9d62: the generate-images seed declares generate_image; with no
+    image service configured the loop driver's fail-fast wedged the task
+    through 3 identical RuntimeError retries — blocked, no producer call ever
+    made. The chat loop now filters the loadout to the registry it actually
+    serves (logging the gap): the producer RUNS, tool-less if need be."""
+    from types import SimpleNamespace
+    from modulatio.orchestration import Orchestrator
+    from modulatio.runners import ChatResponse
+
+    seen: dict = {}
+
+    def chat_runner(*, messages, tools, tool_choice=None):
+        seen["tools"] = [t["function"]["name"] for t in tools]
+        return ChatResponse(content="<svg xmlns='x'/>", tool_calls=())
+
+    orch = Orchestrator(
+        project, {"drafter": _drafter_stub},
+        chat_runners={"james": chat_runner},
+    )
+    skill = SimpleNamespace(
+        name="generate-images", executor="llm", prompt_template="draw it",
+        needs_network=False, pass_env=[], tool_loadout=["generate_image"],
+    )
+    task = _qcfix_task(assigned_agent_id="james",
+                       required_skills=["generate-images"])
+    path = orch._resolve_draft_path(task)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out_path, _checksum, _tokens = orch._llm_with_tools_execute(
+        task, skill, path, tool_loadout=("generate_image",),
+    )
+    assert seen["tools"] == []          # unbacked tool dropped — loop still ran
+    assert out_path.exists()            # the producer produced
