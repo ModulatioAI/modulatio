@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Cowboy Claude and Clifton Knox.
+"""The WebOS FastAPI application factory.
+
+Thin by law: handlers call engine seams and serialize; anything a
+handler wants to invent belongs in the engine. The static SPA (vanilla
+ES modules, no build step) is mounted last so API routes win.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+def create_app(*, bearer_token: str | None = None) -> FastAPI:
+    """Build the WebOS app.
+
+    ``bearer_token`` set → every ``/api``/``/events`` request must carry
+    ``Authorization: Bearer <token>`` (the non-loopback red-line). The
+    static shell stays open — the pairing prompt lives in it.
+    """
+    app = FastAPI(title="Modulatio WebOS", docs_url=None, redoc_url=None)
+
+    if bearer_token is not None:
+        @app.middleware("http")
+        async def _require_token(request: Request, call_next):
+            path = request.url.path
+            if path.startswith(("/api", "/events")):
+                supplied = request.headers.get("authorization", "")
+                if supplied != f"Bearer {bearer_token}":
+                    return JSONResponse(
+                        {"detail": "bearer token required"}, status_code=401
+                    )
+            return await call_next(request)
+
+    from modulatio.web.routes import projects
+
+    app.include_router(projects.router)
+
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+    return app

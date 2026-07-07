@@ -58,6 +58,9 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
+    # starlette's preferred TestClient transport — keeps the web-API
+    # tests' output pristine (its httpx path is deprecated).
+    "httpx2>=2.0",
 ]
 # `[export]` bundles a pandoc binary via pypandoc_binary so DOCX/PDF
 # export works without a system pandoc install. modulatio/export.py
@@ -66,12 +69,23 @@ dev = [
 export = [
     "pypandoc_binary>=1.13",
 ]
+# `[web]` ships the WebOS backend — a FastAPI + uvicorn server that serves
+# the hand-authored static SPA and hooks straight into the engine seams.
+# Opt-in so the base install stays lean (the TUI/CLI need none of it); the
+# `modulatio-api` entry point prints an install hint when the extra is absent.
+# The SPA itself is vanilla ES modules + CSS — no node, no build step, no
+# runtime JS dependency; it ships as static files inside the wheel.
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
 
 [project.scripts]
 modulatio = "modulatio.cli:main"
-# `modulatio-api` (FastAPI server entry point for a future web dashboard)
-# is intentionally NOT declared until the underlying module ships. A
-# console script that ImportErrors on launch is worse than no script.
+# The WebOS server (opt-in `[web]` extra). The entry point itself always
+# resolves; if fastapi/uvicorn aren't installed it prints the install hint
+# rather than ImportError-ing at launch (see web.server.run).
+modulatio-api = "modulatio.web.server:run"
 modulatio-tui = "modulatio.tui:run"
 modulatio-standards = "modulatio.cli_standards:main"
 modulatio-memory = "modulatio.cli_memory:main"
