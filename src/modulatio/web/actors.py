@@ -79,8 +79,9 @@ class ApprovalBroker:
                 self._pending.pop(rid, None)
 
     def resolve(self, rid: str, approve: bool) -> bool:
-        """Record a browser's decision. False when the id is unknown
-        (already resolved, timed out, or never existed)."""
+        """Record a browser's decision. True when the id was pending and
+        the decision landed; False when it's unknown (already resolved,
+        timed out, or never existed)."""
         with self._lock:
             entry = self._pending.get(rid)
             if entry is None:
@@ -88,7 +89,7 @@ class ApprovalBroker:
             done, decision = entry
             decision.append(approve)
         done.set()
-        return approve
+        return True
 
 
 def _build_project(code: str, objective: str, leader_model: str) -> Project:
@@ -126,6 +127,11 @@ class OrchestratorActor:
             attachments=attachments,
             permission_callback=self.broker.request,
         )
+
+    def reset_thread(self):
+        """Archive the Leader conversation (the operator's /new). Returns
+        the archive path or None when there was no thread yet."""
+        return self._ensure_converse_orch().reset_conversation()
 
     def _ensure_converse_orch(self) -> Orchestrator:
         with self._converse_build_lock:

@@ -18,14 +18,18 @@ from fastapi.staticfiles import StaticFiles
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(*, bearer_token: str | None = None) -> FastAPI:
+def create_app(*, bearer_token: str | None = None, stub: bool = False) -> FastAPI:
     """Build the WebOS app.
 
     ``bearer_token`` set → every ``/api``/``/events`` request must carry
     ``Authorization: Bearer <token>`` (the non-loopback red-line). The
     static shell stays open — the pairing prompt lives in it.
+
+    ``stub`` → actors run the engine on stub runners (the test suite's
+    end-to-end path; production leaves it False).
     """
     app = FastAPI(title="Modulatio WebOS", docs_url=None, redoc_url=None)
+    app.state.stub = stub
 
     if bearer_token is not None:
         @app.middleware("http")
