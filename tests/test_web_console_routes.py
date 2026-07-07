@@ -13,15 +13,7 @@ import pytest
 from modulatio import vault
 
 
-@pytest.fixture(autouse=True)
-def _fresh_web_registries():
-    from modulatio.web import actors, events
-
-    actors._actors.clear()
-    events._buses.clear()
-    yield
-    actors._actors.clear()
-    events._buses.clear()
+pytestmark = pytest.mark.usefixtures("fresh_web_registries")
 
 
 @pytest.fixture()

@@ -29,24 +29,10 @@ from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
 
 
-def _human_size(num: int) -> str:
-    size = float(num)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} GB"
-
-
-def _run_size(run_path: Path) -> int:
-    total = 0
-    try:
-        for p in run_path.rglob("*"):
-            if p.is_file() and not p.is_symlink():
-                total += p.stat().st_size
-    except OSError:
-        pass
-    return total
+# Run sizing lives on vault (the neutral engine home) so the JOBS tab and
+# the WebOS never show different numbers for the same run.
+_run_size = vault.run_size
+_human_size = vault.human_size
 
 
 class JobsScreen(Vertical):

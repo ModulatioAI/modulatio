@@ -13,17 +13,7 @@ from modulatio import vault
 from modulatio.web.events import get_bus
 
 
-@pytest.fixture(autouse=True)
-def _fresh_web_registries():
-    """Module-level registries outlive the per-test tmp vault — clear them
-    so no actor/bus built against a previous test's vault leaks forward."""
-    from modulatio.web import actors, events
-
-    actors._actors.clear()
-    events._buses.clear()
-    yield
-    actors._actors.clear()
-    events._buses.clear()
+pytestmark = pytest.mark.usefixtures("fresh_web_registries")
 
 
 @pytest.fixture()

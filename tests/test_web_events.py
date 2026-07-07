@@ -47,6 +47,15 @@ def test_event_to_json_scrubs_embedded_secrets_in_detail():
     assert "sk-live-abc123" not in json.dumps(data)
 
 
+def test_event_to_json_scrubs_secret_shaped_dict_keys():
+    """WB-2: a secret can ride in KEY position too — the scrub must reach
+    keys, not just values."""
+    from modulatio.web.serialize import event_to_json
+
+    data = event_to_json(_event(detail={"api_key=sk-live-xyz789": "visible"}))
+    assert "sk-live-xyz789" not in json.dumps(data)
+
+
 def test_event_to_json_stringifies_unknown_detail_objects():
     from modulatio.web.serialize import event_to_json
 

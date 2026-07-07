@@ -471,3 +471,30 @@ def test_delete_run_refuses_a_symlinked_run(isolated_vault, tmp_path):
     with pytest.raises(Exception):
         vault.delete_run("STA", rid)
     assert outside.exists()  # the symlink target is never followed/deleted
+
+
+def test_run_size_sums_files_skips_symlinks(isolated_vault, tmp_path):
+    vault.init_project("STA", "x", "obj")
+    run = vault.init_run("STA", "20260101T010101Z-size01", "obj")
+    base = vault.run_size(run)  # objective.md etc. from init_run
+    (run / "a.txt").write_text("hello", encoding="utf-8")  # 5 bytes
+    (run / "b.txt").write_text("world!", encoding="utf-8")  # 6 bytes
+    outside = tmp_path / "big"
+    outside.write_bytes(b"x" * 1000)
+    (run / "link").symlink_to(outside)  # must NOT be counted
+    assert vault.run_size(run) == base + 11
+
+
+def test_run_size_tolerates_vanished_file(isolated_vault):
+    vault.init_project("STA", "x", "obj")
+    run = vault.init_run("STA", "20260101T010101Z-size02", "obj")
+    # A missing dir returns 0, never raises (concurrent-delete tolerance).
+    assert vault.run_size(run / "gone") == 0
+
+
+def test_human_size_transitions():
+    assert vault.human_size(0) == "0 B"
+    assert vault.human_size(512) == "512 B"
+    assert vault.human_size(512000) == "500.0 KB"
+    assert vault.human_size(5 * 1024 * 1024) == "5.0 MB"
+    assert vault.human_size(3 * 1024 ** 3) == "3.0 GB"

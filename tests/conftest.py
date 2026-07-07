@@ -26,6 +26,24 @@ from modulatio import config as _config_early
 _config_early._DOTENV_LOADED = True
 
 
+@pytest.fixture()
+def fresh_web_registries():
+    """Clear the WebOS module-level actor/bus registries around a test.
+
+    They outlive the per-test tmp vault, so a WebOS test would otherwise
+    see an actor/bus built against a previous test's vault. Named (not
+    autouse) so only the web test modules pay for it — they opt in via
+    ``pytestmark = pytest.mark.usefixtures("fresh_web_registries")``.
+    """
+    from modulatio.web import actors, events
+
+    actors._actors.clear()
+    events._buses.clear()
+    yield
+    actors._actors.clear()
+    events._buses.clear()
+
+
 @pytest.fixture(autouse=True)
 def _modulatio_run_shell_unsafe(monkeypatch):
     """Skip the bubblewrap wrapper for run_shell during tests.

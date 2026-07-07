@@ -40,29 +40,14 @@ def _valid_run(code: str, run_id: str) -> str:
 # ── runs / jobs ───────────────────────────────────────────────────────
 
 
-def _run_size(run_path) -> int:
-    return sum(p.stat().st_size for p in run_path.rglob("*") if p.is_file())
-
-
-def _human_size(num: int) -> str:
-    for unit in ("B", "KB", "MB"):
-        if num < 1024:
-            return f"{num:.0f} {unit}"
-        num /= 1024
-    return f"{num:.1f} GB"
-
-
 @router.get("/{project}/runs")
 def list_runs(project: str) -> dict:
     code = valid_project(project)
     runs = []
     for run_id in reversed(vault.list_runs(code)):  # newest first, JOBS order
-        try:
-            size = _run_size(vault.run_dir(code, run_id))
-        except OSError:
-            size = 0
+        size = vault.run_size(vault.run_dir(code, run_id))
         runs.append({
-            "run_id": run_id, "size": size, "size_human": _human_size(size),
+            "run_id": run_id, "size": size, "size_human": vault.human_size(size),
         })
     return {"runs": runs}
 
@@ -85,7 +70,7 @@ def run_detail(project: str, run_id: str) -> dict:
         "run_id": run_id,
         "objective": json_safe(objective),
         "counts": counts,
-        "size_human": _human_size(_run_size(run_path)),
+        "size_human": vault.human_size(vault.run_size(run_path)),
     }
 
 
@@ -270,12 +255,15 @@ def artifact_preview(project: str, path: str = Query(...)) -> dict:
     from modulatio.tui.screens.artifacts import _is_artifact_file
 
     code = valid_project(project)
-    root = vault.project_dir(code).resolve()
+    root = vault.project_dir(code)
     target = (root / path).resolve()
-    # Bounds first (never resolve-and-read outside the project), then the
-    # same extension/dotfile filter the TUI applies.
-    if root not in target.parents:
-        raise HTTPException(status_code=404, detail="outside the project root")
+    # The authorization boundary is the ARTIFACT ROOTS, never the project
+    # root (WB-1): a project-root file like permissions.json can pass the
+    # extension filter but is not an artifact. Resolve the roots too so a
+    # symlink inside artifacts/ can't point back out to a non-artifact.
+    roots = [d.resolve() for d in _artifact_roots(code) if d.exists()]
+    if not any(r == target or r in target.parents for r in roots):
+        raise HTTPException(status_code=404, detail="not under an artifact root")
     if not target.exists() or not _is_artifact_file(target):
         raise HTTPException(status_code=404, detail="not a previewable artifact")
     text = target.read_text(encoding="utf-8", errors="replace")

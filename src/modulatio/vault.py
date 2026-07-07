@@ -199,6 +199,35 @@ def list_projects() -> list[str]:
     return sorted(c.name for c in VAULT_ROOT.iterdir() if _is_project_dir(c))
 
 
+def run_size(run_path: Path) -> int:
+    """Total bytes of the regular files under ``run_path`` (recursive).
+
+    Skips symlinks (never follow one out of the run tree) and tolerates a
+    vanished file mid-walk (a concurrent delete) — returns 0 for a path
+    that doesn't exist. The single source for run-folder sizing; the JOBS
+    tab and the WebOS both read it so the two surfaces never disagree.
+    """
+    total = 0
+    try:
+        for p in run_path.rglob("*"):
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+    except OSError:
+        pass
+    return total
+
+
+def human_size(num: int) -> str:
+    """``512000`` → ``"500.0 KB"``. Bytes shown whole; KB/MB/GB to one
+    decimal. Shared so run sizes read identically across surfaces."""
+    size = float(num)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
 def runs_dir(code: str) -> Path:
     """The parent directory holding every kickoff's run folder.
 

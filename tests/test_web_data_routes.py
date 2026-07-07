@@ -11,15 +11,7 @@ import pytest
 from modulatio import vault
 
 
-@pytest.fixture(autouse=True)
-def _fresh_web_registries():
-    from modulatio.web import actors, events
-
-    actors._actors.clear()
-    events._buses.clear()
-    yield
-    actors._actors.clear()
-    events._buses.clear()
+pytestmark = pytest.mark.usefixtures("fresh_web_registries")
 
 
 @pytest.fixture()
@@ -204,4 +196,34 @@ def test_artifact_preview_traversal_and_dotfile_refused(client):
     secret.write_text("API_KEY=oops", encoding="utf-8")
     assert client.get(
         "/api/web/artifacts/preview", params={"path": "artifacts/.env"}
+    ).status_code in (400, 404)
+
+
+def test_artifact_preview_refuses_in_root_non_artifact_files(client):
+    """WB-1: the preview boundary is the artifact roots, NOT the project
+    root — an allowlisted-extension file that sits at the project root
+    (permissions.json, and the escape-hatch `artifacts/../permissions.json`)
+    must not be readable through the preview endpoint."""
+    leak = vault.project_dir("web") / "permissions.json"
+    leak.write_text('{"grant":"/home/cknox/private"}\n', encoding="utf-8")
+
+    assert client.get(
+        "/api/web/artifacts/preview", params={"path": "permissions.json"}
+    ).status_code in (400, 404)
+    assert client.get(
+        "/api/web/artifacts/preview",
+        params={"path": "artifacts/../permissions.json"},
+    ).status_code in (400, 404)
+
+
+def test_artifact_preview_refuses_symlink_out_of_artifact_roots(client):
+    """A symlink INSIDE artifacts/ pointing at an in-project non-artifact
+    file must not be a read primitive."""
+    proj = vault.project_dir("web")
+    (proj / "permissions.json").write_text("{}\n", encoding="utf-8")
+    link = proj / "artifacts" / "sneaky.json"
+    link.symlink_to(proj / "permissions.json")
+
+    assert client.get(
+        "/api/web/artifacts/preview", params={"path": "artifacts/sneaky.json"}
     ).status_code in (400, 404)
