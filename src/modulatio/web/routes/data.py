@@ -154,16 +154,42 @@ def skill_detail(project: str, name: str) -> dict:
 # ── memory ────────────────────────────────────────────────────────────
 
 
+#: Per-layer cap on agent entries — the TUI's memory table shows the
+#: same window (newest 50 episodic + 50 semantic per agent).
+_AGENT_MEMORY_LIMIT = 50
+
+
 @router.get("/{project}/memory")
 def memory(project: str) -> dict:
-    from modulatio.memory import team_memory
+    from modulatio import roster
+    from modulatio.memory import agent_memory, team_memory
 
     code = valid_project(project)
+    # Every roster agent's individual layers ride with the team layer, the
+    # web analog of the TUI's Layer/When/Kind/Content table; the list's
+    # search box takes the place of the TUI's focused-agent picker.
+    agent_entries: list[dict] = []
+    for agent in roster.list_agents(code):
+        for layer, getter in (
+            ("episodic", agent_memory.get_episodic),
+            ("semantic", agent_memory.get_semantic),
+        ):
+            try:
+                entries = getter(
+                    agent.id, project_code=code, limit=_AGENT_MEMORY_LIMIT
+                )
+            except Exception:  # noqa: BLE001 — one bad layer never blanks the page
+                entries = []
+            agent_entries.extend(
+                json_safe({"agent_id": agent.id, "layer": layer, **e.to_dict()})
+                for e in entries
+            )
     return {
         "entries": [json_safe(asdict(e)) for e in team_memory.list_entries(code)],
         "proposals": [
             json_safe(asdict(p)) for p in team_memory.list_proposals(code)
         ],
+        "agent_entries": agent_entries,
     }
 
 

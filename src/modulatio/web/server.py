@@ -59,6 +59,14 @@ def run(argv: list[str] | None = None) -> None:
         print(_INSTALL_HINT, file=sys.stderr, end="")
         raise SystemExit(1)
 
+    # The same env-load contract every other entry point gets from cli.py:
+    # install-root + vault .env BEFORE any engine work, so the Leader's
+    # provider keys exist in the server's environment (without this,
+    # converse 500s — the keys the TUI sees are invisible here).
+    from modulatio import config
+
+    config.load_modulatio_env()
+
     parser = argparse.ArgumentParser(
         prog="modulatio-api", description="Serve the Modulatio WebOS."
     )

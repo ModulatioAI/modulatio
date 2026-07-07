@@ -157,24 +157,37 @@ export function mountArtifacts(page, ctx) {
 
 export function mountMemory(page, ctx) {
   if (needsProject(page, ctx)) return;
+  // One row shape for all three sources, mirroring the TUI's memory
+  // table (Layer/When/Kind/Content); `raw` keeps the full entry for the
+  // detail pane. Kind follows the TUI: team → artifact kind, episodic →
+  // entry type, semantic → confidence.
+  const row = (layer, agent, when, kind, body, raw) =>
+    ({ layer, agent, when, kind: kind || "?", body: body ?? "", raw });
   masterDetail(page, {
-    title: "Team memory",
+    title: "Memory",
     load: async () => {
       const m = await api(`${P(ctx)}/memory`);
       return [
-        ...m.proposals.map((p) => ({ kind: "proposal", ...p })),
-        ...m.entries.map((e) => ({ kind: "entry", ...e })),
+        ...m.proposals.map((p) =>
+          row("pending", "", p.timestamp, p.artifact_kind, p.body, p)),
+        ...m.entries.map((e) =>
+          row("team", "", e.timestamp, e.artifact_kind, e.body, e)),
+        ...m.agent_entries.map((e) =>
+          row(e.layer, e.agent_id, e.when,
+            e.layer === "semantic" ? e.confidence : e.type, e.content, e)),
       ];
     },
     columns: [
+      { label: "layer", cell: (m) => m.layer, mono: true },
+      { label: "agent", cell: (m) => m.agent || "—", mono: true },
       { label: "kind", cell: (m) => m.kind, mono: true },
-      { label: "memory", cell: (m) => m.title ?? m.summary ?? m.text ?? m.id ?? "…" },
+      { label: "memory", cell: (m) => m.body.split("\n")[0].slice(0, 96) },
     ],
-    rowLabel: (m) => JSON.stringify(m),
+    rowLabel: (m) => `${m.layer} ${m.agent} ${m.kind} ${m.body}`,
     emptyText: "nothing remembered yet",
     renderDetail: (m) => [
-      heading(m.kind),
-      kv(Object.entries(m).filter(([k]) => k !== "kind")),
+      heading(m.agent ? `${m.layer} · ${m.agent}` : m.layer),
+      kv(Object.entries(m.raw)),
     ],
   });
 }

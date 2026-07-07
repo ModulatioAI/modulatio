@@ -143,7 +143,37 @@ def test_docs_list_and_read(client):
 def test_memory_entries_and_proposals_empty_ok(client):
     resp = client.get("/api/web/memory")
     assert resp.status_code == 200
-    assert resp.json() == {"entries": [], "proposals": []}
+    assert resp.json() == {"entries": [], "proposals": [], "agent_entries": []}
+
+
+def test_memory_returns_team_bodies_and_agent_layers(client):
+    """The MEMORY page's contract (live #4/#5): team entries carry their
+    body text, and every roster agent's episodic + semantic layers ride
+    along — the web mirrors the TUI's Layer/When/Kind/Content table."""
+    from modulatio import roster
+    from modulatio.memory import agent_memory, team_memory
+
+    team_memory.write(
+        writer_id="operator", writer_tier="leader",
+        body="cite the field floor, not the lab limit", project_code="web",
+        artifact_kind="research",
+    )
+    roster.add_agent(
+        project_code="web", agent_id="scout", name="Scout",
+        identity="researcher", skills=["research"],
+    )
+    agent_memory.add_episodic("scout", "saw a broken citation", project_code="web")
+    agent_memory.add_semantic("scout", "always verify sources", project_code="web")
+
+    resp = client.get("/api/web/memory")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["entries"][0]["body"] == "cite the field floor, not the lab limit"
+    layers = {(e["agent_id"], e["layer"]) for e in body["agent_entries"]}
+    assert layers == {("scout", "episodic"), ("scout", "semantic")}
+    contents = {e["content"] for e in body["agent_entries"]}
+    assert contents == {"saw a broken citation", "always verify sources"}
 
 
 def test_cron_list(client):

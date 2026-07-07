@@ -41,6 +41,27 @@ def test_run_prints_install_hint_when_web_deps_missing(monkeypatch, capsys):
     assert 'pip install "modulatio[web]"' in err
 
 
+def test_run_loads_vault_env_before_serving(monkeypatch):
+    """`modulatio-api` must load the install-root + vault `.env` before
+    serving — the same env-load contract cli.py gives every other entry
+    point. Without it the server runs with an empty key environment and
+    the Leader's chat runner 500s (live #6, 2026-07-07)."""
+    import uvicorn
+
+    from modulatio import config as config_mod
+    from modulatio.web import server
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        config_mod, "load_modulatio_env", lambda: calls.append("env")
+    )
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: calls.append("serve"))
+
+    server.run([])
+
+    assert calls == ["env", "serve"]
+
+
 # ── /api/projects ─────────────────────────────────────────────────────
 
 

@@ -309,6 +309,15 @@ dialog.approval::backdrop { background: rgba(20, 20, 20, 0.35); }
   align-items: start;
 }
 .masterdetail--wide-detail { grid-template-columns: 1fr 60%; }
+/* The TUI contract: the detail pane never scrolls out from under you —
+   it sticks to the viewport while the list scrolls with the page, so a
+   row picked deep in a long list previews fully in view. */
+.masterdetail .detail {
+  position: sticky;
+  top: 18px;
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
+}
 
 .stack { display: flex; flex-direction: column; gap: 16px; }
 .row { display: flex; align-items: center; gap: 12px; }
