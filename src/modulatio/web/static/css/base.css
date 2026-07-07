@@ -269,6 +269,37 @@ dialog.approval::backdrop { background: rgba(20, 20, 20, 0.35); }
   white-space: pre-wrap;
 }
 
+/* ── masterdetail details ────────────────────────────────────────── */
+
+.search {
+  font-size: 13px;
+  color: inherit;
+  background: none;
+  border: none;
+  border-bottom: 1.5px solid var(--ink-soft);
+  padding: 4px 2px;
+  width: 180px;
+}
+.search:focus { outline: none; border-bottom-color: var(--ink); }
+
+.detail-body {
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 62vh;
+  overflow-y: auto;
+  margin-top: 12px;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 18px;
+  font-size: 13.5px;
+  margin: 10px 0;
+}
+.kv dd { overflow-wrap: anywhere; }
+
 /* ── layout helpers ──────────────────────────────────────────────── */
 
 .masterdetail {

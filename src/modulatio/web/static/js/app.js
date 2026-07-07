@@ -8,6 +8,10 @@ import { api } from "./api.js";
 import { el } from "./dom.js";
 import { mountConsole } from "./pages/console.js";
 import {
+  mountArtifacts, mountCron, mountDocs, mountJobs, mountJts, mountLogs,
+  mountMemory, mountSkills, mountTickets,
+} from "./pages/data-pages.js";
+import {
   ATELIER_FIELDS, cycleTheme, loadTheme, setTheme, themeLabel, themeState,
 } from "./theme.js";
 
@@ -27,7 +31,18 @@ const TABS = [
 
 // Pages by tab id — each mount receives (container, ctx) and may return
 // an unmount cleanup.
-export const PAGES = { console: mountConsole };
+export const PAGES = {
+  console: mountConsole,
+  jts: mountJts,
+  tickets: mountTickets,
+  jobs: mountJobs,
+  logs: mountLogs,
+  skills: mountSkills,
+  artifacts: mountArtifacts,
+  memory: mountMemory,
+  cron: mountCron,
+  docs: mountDocs,
+};
 
 const ctx = { project: null, projects: [] };
 let unmount = null;
