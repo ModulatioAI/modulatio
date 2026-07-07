@@ -1747,3 +1747,55 @@ async def test_flip_tabs_wear_the_tab_chrome(project_with_roster):
         team = _static_text(screen.query_one("#flip-team", Static))
         assert "▔" in team              # the bar follows the active tab
         assert "▔" not in leader
+
+
+async def test_send_with_attachment_registers_in_the_chat_history(
+    project_with_roster, tmp_path
+):
+    """Clif live-test (2026-07-06): a message sent WITH attachments must show
+    in the visible chat history — the TV line carries the same '[attached: …]'
+    marker the durable thread records, so the operator's input never vanishes
+    from the transcript."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    doc = tmp_path / "notes.md"
+    doc.write_text("hello", encoding="utf-8")
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        screen.attach_chat(doc, kind="document")
+        screen.query_one("#prompt-input", ChatInput).text = "look at this"
+        screen._send_message()
+        await pilot.pause()
+        tv = app.query_one("#stream-leader", StreamView)
+        line = next((m for m in tv.messages if "look at this" in m), "")
+        assert line, "the operator's message must be in the visible history"
+        assert "[attached: notes.md]" in line
+
+
+async def test_attachment_only_send_still_registers_and_sends(
+    project_with_roster, tmp_path
+):
+    """An attachment with an EMPTY chatbox must still send and still register —
+    the old `if not text: return` swallowed it silently (nothing sent, nothing
+    shown, attachments left staged)."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.stream_view import StreamView
+
+    doc = tmp_path / "spec.md"
+    doc.write_text("the spec", encoding="utf-8")
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        screen.attach_chat(doc, kind="document")
+        screen._send_message()
+        await pilot.pause()
+        assert screen.chatbox_attachments == []  # actually sent, not stranded
+        tv = app.query_one("#stream-leader", StreamView)
+        assert any("[attached: spec.md]" in m for m in tv.messages)

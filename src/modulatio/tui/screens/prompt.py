@@ -460,7 +460,11 @@ class PromptScreen(Vertical):
         inp = self.query_one("#prompt-input", ChatInput)
         text = inp.text.strip()
         if not text:
-            return
+            # An attachment-only send is still a message to the Leader; an
+            # empty box with nothing staged (or mid-brief) stays a no-op —
+            # the old bare `return` silently swallowed staged attachments.
+            if self._kickoff_capture is not None or not self._chatbox_attachments:
+                return
         inp.text = ""
         leader_tv = self.query_one("#stream-leader", StreamView)
 
@@ -527,9 +531,16 @@ class PromptScreen(Vertical):
             return
 
         # ── Plain text → a message to the Leader (converse) ──
-        leader_tv.add_operator_message(text)
         attachments = self.chatbox_attachments
         self.clear_chatbox_attachments()
+        # The visible history carries the SAME attachment marker the durable
+        # thread records — the operator's input never vanishes from the TV
+        # (an attachment-only send shows as its marker alone).
+        record = text
+        if attachments:
+            names = ", ".join(a.name for a in attachments)
+            record = (f"{text}  " if text else "") + f"[attached: {names}]"
+        leader_tv.add_operator_message(record)
         handler = getattr(self.app, "_operator_message", None)
         if handler is not None:
             handler(text, attachments)
