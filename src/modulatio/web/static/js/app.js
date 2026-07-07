@@ -5,6 +5,8 @@
 // project and shared helpers. The TUI's tabs, in the TUI's order.
 
 import { api } from "./api.js";
+import { el } from "./dom.js";
+import { mountConsole } from "./pages/console.js";
 import {
   ATELIER_FIELDS, cycleTheme, loadTheme, setTheme, themeLabel, themeState,
 } from "./theme.js";
@@ -23,21 +25,12 @@ const TABS = [
   ["docs", "DOCS"],
 ];
 
-// Pages register their mount here (console.js, masterdetail pages…).
-export const PAGES = {};
+// Pages by tab id — each mount receives (container, ctx) and may return
+// an unmount cleanup.
+export const PAGES = { console: mountConsole };
 
 const ctx = { project: null, projects: [] };
 let unmount = null;
-
-function el(tag, attrs = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-    else if (v !== null && v !== undefined) node.setAttribute(k, v);
-  }
-  node.append(...children);
-  return node;
-}
 
 function renderBreadcrumb() {
   const code = ctx.project ? ctx.project.toUpperCase() : "—";

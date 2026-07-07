@@ -192,6 +192,83 @@ footer#hints .key { font-family: var(--font-mono); font-weight: 600; color: var(
 .error-text { color: var(--error); font-weight: 600; }
 .error-text::before { content: "✗ "; font-family: var(--font-mono); }
 
+/* ── the Console ─────────────────────────────────────────────────── */
+
+.console { max-width: 1200px; }
+
+#lamps { font-size: 13px; }
+.lamp.attention .glyph { font-weight: 800; color: var(--ink); }
+
+.tv {
+  height: 46vh;
+  overflow-y: auto;
+  padding: 16px 18px;
+  font-size: 13.5px;
+}
+
+.stream-line { padding: 2px 0; }
+.stream-line .glyph { margin-right: 6px; }
+.stream-line.op { color: var(--ink-soft); }
+
+/* Leader speech — the ink block with field text (LEADER_HIGHLIGHT_BG). */
+.leader-speech {
+  background: var(--card-ink-bg);
+  color: var(--card-ink-fg);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin: 8px 0;
+  white-space: pre-wrap;
+  max-width: 72ch;
+}
+:root[data-theme="vellum"] .leader-speech {
+  background: var(--field);
+  color: var(--ink);
+}
+
+.teamwrap {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 22px;
+  align-items: stretch;
+}
+.teamwrap[hidden], .tv[hidden] { display: none; }
+
+.rail { font-size: 13px; }
+.rail div { padding: 2px 0; }
+
+.statusline { font-size: 13px; padding: 0 4px; }
+
+.composer { padding: 14px 16px; }
+.composer-input {
+  width: 100%;
+  font-size: 14px;
+  color: inherit;
+  background: none;
+  border: none;
+  resize: vertical;
+  margin-bottom: 10px;
+}
+.composer-input:focus { outline: none; }
+.composer-input::placeholder { color: var(--ink-soft); }
+:root[data-theme="vellum"] .composer .soft { --ink-soft: rgba(198, 204, 195, 0.65); }
+:root[data-theme="vellum"][data-vellum="inverted"] .composer .soft {
+  --ink-soft: rgba(36, 39, 43, 0.65);
+}
+
+dialog.approval {
+  margin: auto;
+  max-width: 520px;
+  border: var(--line-w, 1.5px) solid var(--ink);
+}
+dialog.approval::backdrop { background: rgba(20, 20, 20, 0.35); }
+.approval-detail {
+  max-height: 200px;
+  overflow: auto;
+  font-size: 12.5px;
+  margin: 10px 0 16px;
+  white-space: pre-wrap;
+}
+
 /* ── layout helpers ──────────────────────────────────────────────── */
 
 .masterdetail {
