@@ -125,9 +125,14 @@ def test_converse_grants_harness_to_clay_seat(project: Project, monkeypatch):
     monkeypatch.setattr(orch, "_run_chat_loop", _fake_loop)
     orch.converse("what did the team produce?")
 
-    assert seen.get("grants") and str(vault.VAULT_ROOT) in seen["grants"], (
-        "converse must grant the vault root so Clay's tools can reach the runs"
+    grants = seen.get("grants") or ()
+    assert str(vault.project_dir(PROJECT_CODE)) in grants, (
+        "converse must grant the PROJECT dir so Clay's tools reach the runs"
     )
+    # Wild Bill (vision-night BLOCK): never the VAULT ROOT — Clay's native
+    # tools include a shell with no dotfile floor, and the vault root holds
+    # the `.env` secret store. The project dir covers every run without it.
+    assert str(vault.VAULT_ROOT) not in grants
     assert getattr(orch._tls, "seat_extra_grants", None) is None, "grant must restore"
 
 
@@ -455,3 +460,40 @@ def test_converse_prompt_states_the_harness_addresses(
     prompt = orch._build_converse_prompt([], "hi")
     assert str(shared / "skills") in prompt      # the library's real path
     assert str(vault.VAULT_ROOT) in prompt       # the vault's real path
+
+
+def test_run_shell_roots_exclude_the_vault_secret_store(
+    project: Project, tmp_path: Path, monkeypatch
+):
+    """Wild Bill (vision-night BLOCK): the dotfile floor checks path ARGS and
+    cwd COMPONENTS, but arbitrary code (python3 -c) reads `.env` BY NAME from
+    inside a bound shell root — so the VAULT ROOT (the secret store's home)
+    must never be a run_shell root. File tools keep the vault (their
+    in-process floor holds, his verdict confirms); shell keeps the workspace
+    (primary) + shared resources."""
+    from modulatio import config
+    from modulatio import tools as tools_mod
+
+    shared = tmp_path / "shared-res"
+    shared.mkdir()
+    monkeypatch.setattr(config, "get_shared_resources_path", lambda: shared)
+    seen: dict = {}
+    real = tools_mod.build_registry
+
+    def spy(**kw):
+        seen.update(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(tools_mod, "build_registry", spy)
+    orch = Orchestrator(project, _runners())
+    orch._leader_tool_registry()
+    shell_roots = [str(r) for r in seen["run_shell_extra_roots"]]
+    file_roots = [str(r) for r in seen["extra_roots"]]
+    assert str(vault.VAULT_ROOT) not in shell_roots  # the BLOCK, engine-bound
+    assert str(shared) in shell_roots                # shared keeps shell
+    assert str(vault.VAULT_ROOT) in file_roots       # file tools keep vault
+    # And the floor still guards the file lane (his verdict's confirmed half):
+    (vault.VAULT_ROOT / ".env").write_text("SECRET=sk-live\n", encoding="utf-8")
+    reg = orch._leader_tool_registry()
+    with pytest.raises(ValueError):
+        reg["read_file"].call(path=str(vault.VAULT_ROOT / ".env"))

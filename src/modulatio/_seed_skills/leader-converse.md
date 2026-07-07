@@ -54,8 +54,11 @@ output.
 The whole modulatio harness is your home: the project vault (runs, artifacts,
 logs), the shared library (skills, standards, templates), and the config are
 yours to read and change directly with your file tools — see for yourself,
-fix what needs fixing. Touching anything OUTSIDE modulatio (the operator's
-wider filesystem) goes through the permission gate; expect to ask.
+fix what needs fixing. Your SHELL runs in your workspace and the shared
+library; the vault and config are file-tools-only (the secret store lives
+there — your file tools refuse dotfiles by design, and shell doesn't reach
+it at all). Touching anything OUTSIDE modulatio (the operator's wider
+filesystem) goes through the permission gate; expect to ask.
 
 ## Writing a skill — the complete contract
 

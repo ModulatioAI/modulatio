@@ -5892,8 +5892,10 @@ class Orchestrator:
             f"- the project vault (all projects, runs, artifacts, logs): {_vault.VAULT_ROOT}\n"
             f"- the config dir (services, defaults): {_config.CONFIG_DIR}\n\n"
             "All of these are inside your home — reach them with ABSOLUTE paths "
-            "through your file tools, no permission needed. Paths outside them "
-            "go through the operator gate."
+            "through your FILE tools, no permission needed. Your shell runs in "
+            "your workspace and the shared library only; the vault and config "
+            "are file-tools-only. Paths outside your home go through the "
+            "operator gate."
         )
 
     def _with_producer_runbook(self, prompt: str) -> str:
@@ -6715,13 +6717,21 @@ class Orchestrator:
                     augmented = dict(self._leader_tool_registry())
                     augmented.update(self._leader_function_tools())
                     self._tls.tool_registry_override = augmented
-                    # B5 (converse): grant a Clay leader the harness roots so its
+                    # B5 (converse): grant a Clay leader its harness home so its
                     # native file tools see what the litellm leader's rebound
-                    # builtins see — the whole harness is home (covers every
-                    # run's deliverables; team_status / read_deliverable aren't
-                    # callable from claude -p). A litellm leader ignores the
-                    # hint and uses the function tools.
-                    self._tls.seat_extra_grants = self._harness_roots()
+                    # builtins see (team_status / read_deliverable aren't
+                    # callable from claude -p). NOT the vault root: Clay's
+                    # native tools include a shell and carry no dotfile floor,
+                    # and the vault root contains the ``.env`` secret store
+                    # (Wild Bill, vision-night BLOCK — same class as the
+                    # litellm shell-root fix). The PROJECT dir covers every
+                    # run's deliverables without reaching the secret store.
+                    from modulatio import config as _config
+                    self._tls.seat_extra_grants = (
+                        str(_vault.project_dir(self.project.code)),
+                        str(_config.get_shared_resources_path()),
+                        str(_config.CONFIG_DIR),
+                    )
                     try:
                         reply = self._run_chat_loop(
                             prompt=prompt,
@@ -8557,7 +8567,7 @@ class Orchestrator:
         workspace = self._leader_workspace()
         gate = self.leader_gate()
         folder_rw, folder_read = self._folder_roots()
-        harness = self._harness_roots()
+        vault_root, shared_root, config_dir = self._harness_roots()
         rebound = tools.build_registry(
             artifacts_root=workspace,
             tool_calls_dir=workspace / "tool_calls",
@@ -8569,12 +8579,22 @@ class Orchestrator:
             # operator's standing write grant (the FOLDERS tab is the
             # permission decision — no prompt); ro/output folders are
             # read-class only. The HARNESS roots are the Leader's standing
-            # home (see _harness_roots) — file tools get all of them; the
-            # config dir stays out of run_shell's roots (they double as
-            # writable bwrap binds, and shell work belongs in the vault).
-            extra_roots=(*gate.granted_roots(), *folder_rw, *harness),
+            # home (see _harness_roots) — file tools get all three (their
+            # in-process dotfile floor holds), but the VAULT ROOT must NEVER
+            # be a shell root (Wild Bill, vision-night BLOCK): the floor
+            # checks path ARGS and cwd components, while arbitrary code
+            # (``python3 -c``) reads ``.env`` BY NAME from inside a bound
+            # root — the operator's provider keys would reach the Leader's
+            # model. Shell keeps the workspace (primary root) + shared
+            # resources (no secret store lives there by contract); the
+            # config dir stays file-tools-only too (shell roots double as
+            # writable bwrap binds).
+            extra_roots=(
+                *gate.granted_roots(), *folder_rw,
+                vault_root, shared_root, config_dir,
+            ),
             run_shell_extra_roots=(
-                *gate.granted_roots("exec"), *folder_rw, *harness[:2]),
+                *gate.granted_roots("exec"), *folder_rw, shared_root),
             extra_read_roots=folder_read,
         )
         merged = dict(self.tool_registry)
