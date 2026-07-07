@@ -8,6 +8,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The WebOS — Modulatio in your browser** (opt-in `[web]` extra;
+  `pip install "modulatio[web]"` → `modulatio-api` → browse). The TUI's
+  layout rendered as a web app, hooked straight to the same engine seams the
+  terminal already uses — no parallel data paths. The **Console** is the
+  centerpiece: the status-lamp row, the LEADER / MOD SQUAD flip (`F4`), the
+  live activity TV (the terminal's exact glyph-and-verb vocabulary), the run
+  telemetry rail (task gauge, QC tally, context tokens), and a composer where
+  `/kickoff … /end` brackets are the only job trigger and `F8` stops a run.
+  Nine read-only **MasterDetail** pages (JT Library, Tickets, Artifacts with
+  previews, Skills, Memory, Jobs, Cron, Logs, Docs) ride one archetype. Two
+  print-flavored **Feng-Web themes** switched with `F2` — **Atelier** (thin
+  ink on an operator-chosen field: Sage, Reed, Mist, Clay, Heather, Bone) and
+  **Vellum** (invertible greyscale). The frontend is hand-authored vanilla ES
+  modules — no framework, no build step, no runtime JS dependency; it ships as
+  static files inside the wheel. **Security posture:** binds `127.0.0.1` by
+  default; a non-loopback `--host` requires a bearer token (generated `0600`
+  into the config dir) and every request's `Host` is allowlisted against
+  DNS-rebinding; key values, vault secrets and OAuth tokens never cross the
+  boundary and event text is secret-scrubbed server-side; the Leader's
+  permission asks land as a modal that **fails closed** (no decision → deny);
+  file previews are extension-filtered, size-capped, and confined to the
+  project's artifact roots. One operator per project for now. Full four-round
+  security + quality cadre cleared.
+
 - **SERVICES — outside APIs on the team** (CONFIG → SERVICES). Configure outside
   SaaS services — image, video, speech, research, or any custom API — from a
   shipped catalog (OpenAI Images, Tavily, ElevenLabs, Luma Dream Machine —
