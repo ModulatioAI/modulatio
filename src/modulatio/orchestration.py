@@ -9648,6 +9648,31 @@ class Orchestrator:
     # Never presented as a clean producer win.
 
 
+    def _task_staged_siblings(self, t: Task, draft_path: Path) -> bool:
+        """True when THIS task's staging wrote artifact files beyond the
+        primary draft — the split form of a multi-file diff attempt (the
+        writer lands sibling files next to the primary, so the body alone
+        can't reveal them). Worker-path only: the per-task ``.staging`` tree
+        is the attribution boundary; the sequential path has no staging and
+        the shared artifacts tree can't attribute writes, so it reports
+        False (header test still guards the bundle form there)."""
+        staging_arts = self._scope_root() / ".staging" / t.id / "artifacts"
+        if not staging_arts.is_dir():
+            return False
+        try:
+            primary = draft_path.resolve()
+        except OSError:
+            return False
+        for p in staging_arts.rglob("*"):
+            if not p.is_file() or "tool_calls" in p.parts:
+                continue
+            try:
+                if p.resolve() != primary:
+                    return True
+            except OSError:
+                continue
+        return False
+
     def _attempt_qc_fix_forward(
         self,
         t: Task,
@@ -9689,8 +9714,20 @@ class Orchestrator:
                 body = draft_path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 return False  # binary/media — not text-authorable
-            if _draft_is_multifile(t, draft_path):
-                return False  # cross-file: single-file patch/build would partial-pass
+            # Fix B (2026-07-07): decline on the draft's ACTUAL shape, never the
+            # kind/mode label. ``_draft_is_multifile`` answers a different
+            # question (which patch FORMAT the producer retry should use) and
+            # says True for every artifact_kind=="code" task — which silently
+            # voided the #18 forced-fixer floor for ALL code artifacts: two live
+            # runs settled rejected while QC held a one-line surgical recipe.
+            # A single-file draft is patchable whatever its label; only a REAL
+            # multi-file set (FILE-header bundle in the body, or staged sibling
+            # artifacts from this task) still declines — a single-file rescue
+            # there would stamp COMPLETED over sibling defects (partial-pass).
+            if _DIFF_FILE_HEADER_RE.search(body):
+                return False  # a real multi-file bundle body
+            if self._task_staged_siblings(t, draft_path):
+                return False  # split multi-file set on disk
         target_path = draft_path if draft_path is not None else self._resolve_draft_path(t)
         # WB cadre (self-heal arc): the planner path validates model-produced
         # output_path, but this LOWER-LEVEL recovery path trusts the persisted

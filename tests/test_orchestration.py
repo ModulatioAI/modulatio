@@ -11469,3 +11469,54 @@ def test_capability_shortfall_never_complains_in_the_pqr(project):
     orch._record_dispatch_advisories(goal, task, result, summary, notes)
     assert summary.recommendations == []          # no PQR complaint
     assert "best-available" in notes.get(task.id, "")  # quiet audit trail kept
+
+
+def test_qc_fix_forward_rescues_single_file_code_draft(project, monkeypatch):
+    """Fix B (2026-07-07, two live scalps): the fixer's decline must test the
+    draft's ACTUAL shape, not the kind/mode label. A code-kind, diff-mode task
+    whose draft is ONE plain file (no === FILE: headers, no staged siblings)
+    is exactly the surgical-patch case — the darby run died with the drawing
+    done and QC holding a one-line recipe while the fixer auto-declined."""
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import TaskStatus
+
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "1")
+    orch = _qcfix_orch(project)
+    task = _qcfix_task(project_id=project.id, artifact_kind="code",
+                       producer_mode="diff")
+    draft = orch._resolve_draft_path(task)
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("scaffolding preamble\n---\n<?xml version=\"1.0\"?><svg/>")
+    summary = RunSummary(project=project)
+
+    handled = orch._attempt_qc_fix_forward(
+        task, draft, (_rejected_verdict(), "strip everything before <?xml"),
+        summary,
+    )
+    assert handled is True
+    assert task.status == TaskStatus.COMPLETED
+    assert task.qc_authored_fix is True
+
+
+def test_qc_fix_forward_still_declines_a_real_multifile_bundle(project, monkeypatch):
+    """The original partial-pass hazard stays fenced: a draft that really IS a
+    multi-file bundle (=== FILE: headers in the body) still declines — a
+    single-file rescue would stamp COMPLETED over sibling defects."""
+    from modulatio.orchestration import RunSummary
+
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "1")
+    orch = _qcfix_orch(project)
+    task = _qcfix_task(project_id=project.id, artifact_kind="code",
+                       producer_mode="diff")
+    draft = orch._resolve_draft_path(task)
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text(
+        "=== FILE: a.py ===\nprint(1)\n=== FILE: b.py ===\nprint(2)\n"
+    )
+    summary = RunSummary(project=project)
+
+    handled = orch._attempt_qc_fix_forward(
+        task, draft, (_rejected_verdict(), "fix it"), summary,
+    )
+    assert handled is False
+    assert task.qc_authored_fix is False
