@@ -9829,7 +9829,14 @@ class Orchestrator:
         can't reveal them). Worker-path only: the per-task ``.staging`` tree
         is the attribution boundary; the sequential path has no staging and
         the shared artifacts tree can't attribute writes, so it reports
-        False (header test still guards the bundle form there)."""
+        False (header test still guards the bundle form there).
+
+        The ``resolve()`` comparison FOLLOWS SYMLINKS by design (Jenny,
+        vision-night cadre): a staged symlink pointing AT the primary counts
+        as the primary — deliberately, since patching the primary patches
+        what the link shows, so a single-file rescue is still complete. A
+        sibling with its own content resolves to its own path and correctly
+        declines the rescue."""
         staging_arts = self._scope_root() / ".staging" / t.id / "artifacts"
         if not staging_arts.is_dir():
             return False
