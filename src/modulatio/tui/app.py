@@ -232,6 +232,37 @@ def _blocked_reservations(summary) -> int:
     )
 
 
+def _wire_engine_file_log() -> None:
+    """Engine logs must land somewhere DURABLE: a Textual app hides stderr
+    (python logging's last-resort sink), so without a handler every
+    logger.warning in the engine — the visual-review degrade traces, the
+    dropped-loadout notes — vanishes. One rotating file, INFO+, the
+    TUI-process analog of the daemon's basicConfig. Called from every TUI
+    entry (the ``modulatio-tui`` script AND the ``modulatio`` CLI, which
+    constructs ModulatioApp directly); idempotent so tests constructing
+    many Apps don't stack handlers."""
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    from modulatio import config as _config
+
+    _mlog = logging.getLogger("modulatio")
+    if any(isinstance(h, RotatingFileHandler) for h in _mlog.handlers):
+        return
+    log_path = _config.CONFIG_DIR / "tui.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            log_path, maxBytes=2_000_000, backupCount=2, encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        _mlog.addHandler(handler)
+        if _mlog.level == logging.NOTSET or _mlog.level > logging.INFO:
+            _mlog.setLevel(logging.INFO)
+    except OSError:
+        pass  # unwritable config dir — logs stay on the last-resort sink
+
+
 class ModulatioApp(App):
     """Prompt-first Textual shell for the Modulatio business harness."""
 
@@ -429,6 +460,7 @@ class ModulatioApp(App):
     def __init__(self, *, project_code: str = "TUI", stub: bool = True,
                  splash: bool = False):
         super().__init__()
+        _wire_engine_file_log()
         self.project_code = project_code
         self.stub = stub
         # Show the Feng-Tui boot frame on launch. Opt-in (default off) so the
@@ -2005,26 +2037,7 @@ def run() -> None:
     import typer
     from modulatio import config, model_presets
 
-    # Engine logs must land somewhere DURABLE: a Textual app hides stderr
-    # (python logging's last-resort sink), so without a handler every
-    # logger.warning in the engine — the visual-review degrade traces, the
-    # dropped-loadout notes — vanishes. One rotating file, INFO+, the
-    # TUI-process analog of the daemon's basicConfig.
-    import logging
-    from logging.handlers import RotatingFileHandler
-    _log_path = config.CONFIG_DIR / "tui.log"
-    try:
-        _log_path.parent.mkdir(parents=True, exist_ok=True)
-        _handler = RotatingFileHandler(
-            _log_path, maxBytes=2_000_000, backupCount=2, encoding="utf-8")
-        _handler.setFormatter(logging.Formatter(
-            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        _mlog = logging.getLogger("modulatio")
-        _mlog.addHandler(_handler)
-        if _mlog.level == logging.NOTSET or _mlog.level > logging.INFO:
-            _mlog.setLevel(logging.INFO)
-    except OSError:
-        pass  # unwritable config dir — logs stay on the last-resort sink
+    _wire_engine_file_log()
 
     # Load .env files BEFORE constructing the app — model presets read
     # API keys at runner-build time. Same env-load contract as cli.py;
