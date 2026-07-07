@@ -18,7 +18,7 @@ from modulatio.logstore import scrub_secrets
 from modulatio.types import ActivityEvent
 
 
-def _json_safe(value: object) -> object:
+def json_safe(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
@@ -26,11 +26,11 @@ def _json_safe(value: object) -> object:
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
+        return {str(k): json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
+        return [json_safe(v) for v in value]
     return scrub_secrets(repr(value))
 
 
 def event_to_json(event: ActivityEvent) -> dict:
-    return {k: _json_safe(v) for k, v in asdict(event).items()}
+    return {k: json_safe(v) for k, v in asdict(event).items()}
