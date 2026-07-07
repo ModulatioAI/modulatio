@@ -10,6 +10,21 @@ from __future__ import annotations
 
 import pytest
 
+# ── .env immunity — MUST run at conftest IMPORT, before test collection ──
+# cli.py calls ``config.load_modulatio_env()`` at MODULE IMPORT (line ~31),
+# and pytest imports test modules (which import cli) during collection —
+# BEFORE any fixture, monkeypatch, or ``config.reload()`` exists. At that
+# moment ``get_vault_root()`` is the developer's REAL vault, so the real
+# ``.env`` — every live API key — loaded into ``os.environ`` for the whole
+# test process (vision-night gate: a stale live-test key in the real .env
+# made test_services_screen's before-assert see "1 key(s)" deterministically
+# in full-suite runs only). Setting the module's own idempotence flag here,
+# at conftest import (which pytest performs before test-module imports),
+# makes every later call a no-op: tests never load ANY .env.
+from modulatio import config as _config_early
+
+_config_early._DOTENV_LOADED = True
+
 
 @pytest.fixture(autouse=True)
 def _modulatio_run_shell_unsafe(monkeypatch):
