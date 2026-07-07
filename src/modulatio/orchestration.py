@@ -6828,7 +6828,10 @@ class Orchestrator:
             try:
                 agent = roster.load(qc_agent_id, self.project.code)
                 key = agent.model if agent is not None else None
-            except Exception:  # noqa: BLE001 — gate is advisory, fail closed
+            except Exception as exc:  # noqa: BLE001 — gate is advisory, fail closed
+                _logger.warning(
+                    "qc vision gate: roster lookup for %r failed (%s) — "
+                    "text-only review", qc_agent_id, type(exc).__name__)
                 key = None
         if not key:
             key = getattr(self.runners.get("qc"), "model_name", None)
@@ -7677,11 +7680,24 @@ class Orchestrator:
                 if evidence is not None:
                     from modulatio.attachments import build_attachment
                     image_att = build_attachment(evidence, kind="image")
-            except (ValueError, OSError):
+                elif draft_path.suffix.lower() == ".svg":
+                    # An SVG with a vision seat SHOULD have rendered — a
+                    # loud trace, or a degrade costs a live run to diagnose.
+                    _logger.warning(
+                        "%s: visual review degraded — svg render produced "
+                        "nothing (renderer missing/failed)", task.id)
+            except (ValueError, OSError) as exc:
+                _logger.warning(
+                    "%s: visual review degraded — image attachment failed "
+                    "(%s: %s)", task.id, type(exc).__name__, exc)
                 image_att = None
             if image_att is None:
                 _render_tmp.cleanup()
                 _render_tmp = None
+            else:
+                _logger.info(
+                    "%s: visual review ENGAGED — attaching %s for %s",
+                    task.id, image_att.name, vision_model)
 
         try:
             body = draft_path.read_text(encoding="utf-8")
