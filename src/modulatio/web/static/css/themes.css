@@ -1,0 +1,99 @@
+/* SPDX-License-Identifier: Apache-2.0
+   SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Cowboy Claude and Clifton Knox.
+
+   The Feng-Web themes — siblings of the terminal's Feng-Tui, printed
+   rather than phosphor. Two materials, one component grammar; every
+   component consumes tokens only.
+
+   ATELIER — the draftsman's studio: thin ink hairlines on a flat,
+   operator-chosen field. Depth is ink fill, never shadow.
+
+   VELLUM — the e-reader: invertible greyscale, charcoal panels,
+   folder-tab notches, hatch as the one ornament (idle texture only,
+   never on live content). */
+
+/* ── ATELIER ─────────────────────────────────────────────────────── */
+
+:root[data-theme="atelier"] {
+  --field: #BFC8BD;              /* Sage — the default field */
+  --ink: #141414;
+  --ink-soft: rgba(20, 20, 20, 0.62);
+  --card-bg: transparent;        /* cards ARE the field, outlined */
+  --card-ink-bg: var(--ink);     /* the filled feature card */
+  --card-ink-fg: var(--field);
+  --panel: var(--ink);           /* selected rows, leader speech */
+  --panel-fg: var(--field);
+  --line-w: 1.5px;
+  --radius: 14px;
+  --error: #B3261E;              /* the one non-ink color, sparingly */
+  --hatch: none;
+}
+
+/* The operator's field — six swatches, softened Feng-Tui accents.
+   No yellow is offered. */
+:root[data-theme="atelier"][data-field="sage"]    { --field: #BFC8BD; }
+:root[data-theme="atelier"][data-field="reed"]    { --field: #BCD9C2; }
+:root[data-theme="atelier"][data-field="mist"]    { --field: #B8D4DB; }
+:root[data-theme="atelier"][data-field="clay"]    { --field: #D9BDB8; }
+:root[data-theme="atelier"][data-field="heather"] { --field: #CCC2DB; }
+:root[data-theme="atelier"][data-field="bone"]    { --field: #D9D4C8; }
+
+/* ── VELLUM ──────────────────────────────────────────────────────── */
+
+:root[data-theme="vellum"] {
+  --field: #C6CCC3;              /* sage-grey paper */
+  --panel: #24272B;              /* charcoal card */
+  --panel-fg: #C6CCC3;
+  --ink: #1A1D20;
+  --ink-soft: rgba(26, 29, 32, 0.60);
+  --card-bg: var(--panel);
+  --card-ink-bg: var(--panel);
+  --card-ink-fg: var(--panel-fg);
+  --line-w: 0px;                 /* vellum frames with tone, not line */
+  --radius: 16px;
+  --error: #B3261E;
+  --hatch: repeating-linear-gradient(
+    45deg,
+    transparent, transparent 5px,
+    var(--ink-soft) 5px, var(--ink-soft) 6px
+  );
+}
+
+:root[data-theme="vellum"][data-vfield="grey"] { --field: #C9C9C6; }
+
+/* Inside a charcoal panel the field's ink-soft is invisible — cards
+   re-scope the soft tone to their own surface. */
+:root[data-theme="vellum"] .card {
+  --ink-soft: rgba(198, 204, 195, 0.65);
+}
+:root[data-theme="vellum"][data-vellum="inverted"] .card {
+  --ink-soft: rgba(36, 39, 43, 0.65);
+}
+
+/* One switch trades which tone is field and which is panel. */
+:root[data-theme="vellum"][data-vellum="inverted"] {
+  --field: #24272B;
+  --panel: #C6CCC3;
+  --panel-fg: #24272B;
+  --ink: #D2D6CF;
+  --ink-soft: rgba(210, 214, 207, 0.60);
+  --card-bg: var(--panel);
+  --card-ink-bg: var(--panel);
+  --card-ink-fg: var(--panel-fg);
+}
+
+:root[data-theme="vellum"][data-vellum="inverted"][data-vfield="grey"] {
+  --panel: #C9C9C6;
+  --panel-fg: #24272B;
+}
+
+/* Vellum's signature: the folder-tab notch on feature cards. */
+:root[data-theme="vellum"] .card--feature {
+  clip-path: polygon(
+    0 14px, 14px 14px, 22px 0,
+    100% 0, 100% 100%, 0 100%
+  );
+}
+
+/* Hatch marks EMPTY/idle regions only — texture as information. */
+:root[data-theme="vellum"] .idle-region { background: var(--hatch); }

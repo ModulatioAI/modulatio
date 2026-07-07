@@ -64,16 +64,18 @@ Shared foundations (both themes, per the feng-shui composition rules):
   page's single strongest contrast (Console: the TV; MasterDetail: the list's first row).
 - **Cards** are the unit of grouping. Radius 14px. Generous padding (20–24px). No shadows —
   these themes are FLAT; depth comes from ink fill or panel tone, never elevation blur.
-- **Type**: bundled webfonts, self-contained (no CDN): a geometric humanist sans for UI
-  (Inter; weights 400/600/800) + a mono for streams/ids/code (JetBrains Mono). Big-numeral
-  displays (telemetry, counts) use the sans at 800, tight tracking — the reference images'
-  giant-figure confidence.
+- **Type** (build decision, supersedes "bundled webfonts"): system font stacks — a
+  humanist sans for UI (`system-ui`, Inter/Segoe where present; weights 400/600/800) + the
+  system mono for streams/ids/code (`ui-monospace`, JetBrains Mono/Cascadia where present).
+  Self-contained by definition — no CDN AND no binary blobs in the wheel; the web analog of
+  the TUI using the terminal's own font. Big-numeral displays (telemetry, counts) use the
+  sans at 800, tight tracking — the reference images' giant-figure confidence.
 - **Status is never color-alone**: every state carries its glyph + word (`● on`, `✗ error`),
   exactly as the TUI does.
 - Both themes ship as **CSS custom-property sets on `:root[data-theme=…]`** — one component
   library, zero per-theme components.
 
-### 2.1 Theme 1 — **INK** (thin line, changeable field)
+### 2.1 Theme 1 — **ATELIER** (thin line, changeable field; working name "INK")
 From the ink-outline reference: hairline-outlined cards on a flat colored field, with
 ink-filled feature cards for emphasis. **The field color is the operator's choice; yellow is
 not offered.**
@@ -109,7 +111,7 @@ default, ink-filled for the primary action. The Console TV in INK: an outlined c
 operator lines in ink; **Leader speech on an ink-filled block with field-colored text**
 (the web translation of `LEADER_HIGHLIGHT_BG`). Big telemetry numerals in ink at 800.
 
-### 2.2 Theme 2 — **EREADER** (greyscale, invertible)
+### 2.2 Theme 2 — **VELLUM** (greyscale, invertible; working name "EREADER")
 From the e-reader reference: charcoal panels on a grey field, folder-tab card corners,
 numbered pills, hatched texture as the only ornament. **Pure greyscale; one switch inverts
 which tone is field and which is panel.**
@@ -211,17 +213,17 @@ wants to invent belongs in the engine.
   delivery stars) exposed as `GET /api/{p}/artifacts` + file preview endpoint
   (text-only, size-capped, path-validated) + export ← `ExportDialog.run_export` seam.
 
-### 3.3 Frontend
-- **Vite + React + TypeScript**, no component framework — the aesthetic is bespoke and a
-  library would fight it; the component set is small (Card, Table, ControlsRow, Tabs,
-  MasterDetail, Configurator, StreamView, StatusLamps, Rail, Modal, Composer).
-- State: TanStack Query for REST (staleness = the TUI's on_show re-read semantics);
-  a single WS client feeding a lane-filtered event store for Console.
-- StreamView renders capped at 2,000 lines (the TUI's prune) with virtualization.
-- All styling via CSS custom properties from §2; components consume tokens only.
-- Built SPA ships inside the wheel (`modulatio/web/dist`) and is served by
-  `modulatio-api` — `pip install modulatio` → `modulatio-api` → browse. No node at
-  runtime; node is a build-time dev dependency only.
+### 3.3 Frontend (build decision, supersedes the Vite+React sketch)
+- **Hand-authored vanilla ES modules + CSS custom properties** — no node at runtime OR
+  build time, no framework, no build step. Matches the whole project's hand-built ethos
+  (the TUI is raw Textual). The component set stays small (card, rows, tabs, masterdetail,
+  stream view, lamps, rail, modal, composer) as CSS classes + small JS modules.
+- Events: **SSE consumed via fetch-streaming** (not EventSource, which can't carry the
+  bearer header; not WS — the bus is strictly engine→browser, and approvals/converse are
+  plain POSTs). A single lane-filtered event store feeds the Console.
+- Stream render capped at 2,000 lines (the TUI's prune).
+- Static files ship inside the wheel (`modulatio/web/static`) and are served by
+  `modulatio-api` — `pip install "modulatio[web]"` → `modulatio-api` → browse.
 
 ### 3.4 Security red-lines (engine truths the web must keep)
 1. **Never** expose `services.checkout_key`, `config.set_env_secret` values, the vault
@@ -285,9 +287,10 @@ each phase live-fired against a real run before the next begins; cadre letters a
 
 ---
 
-## 5. Open decisions for the operator
-1. Theme names: **INK** and **EREADER** are working names — bikeshed freely.
-2. INK default field: Sage (as speced) or Feng Green?
+## 5. Open decisions — SETTLED at build (operator delegated the calls, 2026-07-07)
+1. Theme names: **ATELIER** and **VELLUM** ("the Feng-Web themes"). Atelier field
+   swatches: Sage (default) · Reed · Mist · Clay · Heather · Bone.
+2. Atelier default field: **Sage**.
 3. Phase 2 LAN story: loopback-only until 1.0, or token+LAN from the start?
 4. The web Console's composer: keep `/kickoff … /end` typing as the only trigger
    (TUI-faithful) with the JT button as the one-click path — or add a dedicated

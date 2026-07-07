@@ -97,3 +97,19 @@ def test_index_served_at_root(client):
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     assert "MODULATIO" in resp.text
+
+
+def test_shell_assets_serve(client):
+    """The SPA shell's css/js modules ship and serve — both themes in the
+    token sheet, the app module as ES module JS."""
+    themes = client.get("/css/themes.css")
+    assert themes.status_code == 200
+    assert 'data-theme="atelier"' in themes.text
+    assert 'data-theme="vellum"' in themes.text
+
+    base = client.get("/css/base.css")
+    assert base.status_code == 200
+
+    app_js = client.get("/js/app.js")
+    assert app_js.status_code == 200
+    assert "javascript" in app_js.headers["content-type"]
