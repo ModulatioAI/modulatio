@@ -401,6 +401,16 @@ async def test_adding_a_key_updates_the_services_count(tmp_path, monkeypatch):
         await pilot.pause()
         app.query_one("#cfg-newkey", Input).value = "sk-test-live"
         await screen._add_provider_key()
+        # Diagnostic split (vision-night gate): name the failing STAGE — did
+        # the key never land in the backend (add path), or did the UI never
+        # refresh (widget path)? The full-suite flake kept failing the UI
+        # assert; this tells us which half to chase.
+        from modulatio import provider_keys as _pk
+        backend_n = len([k for k in _pk.list_keys("SVCKEY_C30D01") if k["is_set"]])
+        assert backend_n == 1, (
+            f"backend: add_key never landed (count={backend_n}) — "
+            f"prov_base={screen._prov_base!r} prov_id={screen._prov_id!r}"
+        )
         # bounded wait (the _wait_options idiom): under a loaded full-suite
         # run one pause isn't always enough for the table rebuild to land.
         # Hardened (vision-night gate): 3s was still too short under a fully

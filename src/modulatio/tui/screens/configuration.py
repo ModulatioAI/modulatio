@@ -530,6 +530,13 @@ class ConfigScreen(Vertical):
         # Status into the remount (the old #cfg-status is discarded — Wild Bill L3).
         await self._show_provider_keys(
             self._prov_id, message="Added a key to the shared pool.")
+        # Refresh AGAIN after the awaited remount settles (vision-night gate):
+        # _refresh_key_counts swallows a query failure by design, so if the
+        # pre-remount refresh caught the table mid-remount it silently
+        # no-opped and NOTHING ever repainted the count — the full-suite
+        # flake's mechanism, and the same stale-count class the pre-remount
+        # refresh was added to fix. Post-remount the widgets are settled.
+        self._refresh_key_counts()
 
     def _do_remove_model(self, key: str) -> None:
         model_presets.remove_preset(key)
@@ -562,9 +569,14 @@ class ConfigScreen(Vertical):
                     model_key, auth_config={"env_var": base, "pool": True})
         provider_keys.remove_key(ev)
         self._refresh_key_counts()  # left-list count is stale until re-read
-        # Pass the status into the remount so it lands on the fresh widget.
-        self.run_worker(self._show_provider_keys(
-            self._prov_id, message=f"Removed {ev} from Modulatio."))
+        # Pass the status into the remount so it lands on the fresh widget;
+        # refresh counts again once it settles (same swallowed-race guard as
+        # the add path — a mid-remount query no-ops silently).
+        async def _remount_then_refresh() -> None:
+            await self._show_provider_keys(
+                self._prov_id, message=f"Removed {ev} from Modulatio.")
+            self._refresh_key_counts()
+        self.run_worker(_remount_then_refresh())
 
     # ── SERVICES (the outside-service API pool — spec 2026-07-05) ────────
 
