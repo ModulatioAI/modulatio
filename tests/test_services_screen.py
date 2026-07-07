@@ -403,9 +403,13 @@ async def test_adding_a_key_updates_the_services_count(tmp_path, monkeypatch):
         await screen._add_provider_key()
         # bounded wait (the _wait_options idiom): under a loaded full-suite
         # run one pause isn't always enough for the table rebuild to land.
-        table = app.query_one("#cfg-services", DataTable)
-        for _ in range(60):
+        # Hardened (vision-night gate): 3s was still too short under a fully
+        # loaded 20-minute suite — wait up to 15s and RE-QUERY the table each
+        # tick (a refresh may remount the widget, leaving a stale reference).
+        for _ in range(300):
             await pilot.pause(0.05)
-            if "1 key" in table.get_row_at(0)[2]:
+            table = app.query_one("#cfg-services", DataTable)
+            if table.row_count and "1 key" in table.get_row_at(0)[2]:
                 break
+        table = app.query_one("#cfg-services", DataTable)
         assert "1 key" in table.get_row_at(0)[2]          # after — updated
