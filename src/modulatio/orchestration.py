@@ -4497,8 +4497,13 @@ class Orchestrator:
             # granted to a producer as needed, no fixed roles.)
             task_loadout = self._task_tool_loadout(task, primary_skill)
             if primary_skill.executor == "llm" and task_loadout:
+                # The corrective notes MUST ride this early-return too —
+                # dropping them here ran every skill-routed retry blind
+                # (superhero forensics 2026-07-07: producer prompts byte-
+                # identical across 3 redos while QC's recipe sat in a ticket).
                 return self._llm_with_tools_execute(
                     task, primary_skill, path, tool_loadout=task_loadout,
+                    corrective_notes=corrective_notes,
                 )
 
         research_context = self._ensure_research(task)
@@ -6785,6 +6790,7 @@ class Orchestrator:
         path: Path,
         *,
         tool_loadout: "tuple[str, ...] | None" = None,
+        corrective_notes: str = "",
     ) -> tuple[Path, str, int]:
         """Run an LLM-executor skill with a function-calling loop.
 
@@ -6847,7 +6853,7 @@ class Orchestrator:
             team_memory_context=_format_team_memory_block(team_memory_context),
             team_canvas=_format_team_canvas(team_canvas_block),
             repo_map=repo_map_block,
-            corrective_notes=_format_corrective_notes(""),
+            corrective_notes=_format_corrective_notes(corrective_notes),
             inbox_notes=self._inbox_block_for(
                 producer_role,
                 target_agent_id=task.assigned_agent_id,

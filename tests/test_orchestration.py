@@ -11391,3 +11391,38 @@ def test_ready_wave_holds_on_failed_or_pending_cross_goal_dep():
     # back-compat: no status map → absent dep treated as satisfied
     assert [t.id for t in _ready_wave([consumer()])] == ["G2-T1"]
 
+
+
+def test_skill_routed_retry_carries_corrective_notes(project, monkeypatch):
+    """Superhero-run forensics (2026-07-07): the redo loop prepares QC's
+    corrective notes, but the skill-routed producer path returned early into
+    _llm_with_tools_execute WITHOUT them — the tool-loop prompt hardcoded
+    "(first attempt)" and every skill-routed retry ran blind (producer
+    in-tokens 9403 x3, identical). The notes must reach the tool-loop prompt."""
+    from types import SimpleNamespace
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"drafter": lambda p: "body"})
+    seen: dict = {}
+
+    def _fake_loop(*, prompt, **kwargs):
+        seen["prompt"] = prompt
+        return "the corrected artifact body"
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _fake_loop)
+    skill = SimpleNamespace(
+        name="coding", prompt_template="craft rules here", needs_network=False,
+        pass_env=[], tool_loadout=["run_shell"],
+    )
+    task = _qcfix_task(artifact_kind="code", producer_mode="diff",
+                       required_skills=["coding"])
+    path = orch._resolve_draft_path(task)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    orch._llm_with_tools_execute(
+        task, skill, path, tool_loadout=("run_shell",),
+        corrective_notes="Drop the #808080 jawline stroke to reach 6 colors.",
+    )
+    assert "Drop the #808080 jawline stroke" in seen["prompt"], (
+        "QC's corrective notes must reach the skill-routed retry prompt"
+    )
+    assert "(first attempt — no prior feedback)" not in seen["prompt"]
