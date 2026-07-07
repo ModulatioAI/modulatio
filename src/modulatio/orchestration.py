@@ -5798,7 +5798,29 @@ class Orchestrator:
         return (
             runbook.rstrip() + "\n\n---\n\n" + formatted
             + deliverables_section + _format_registered_folders()
+            + "\n\n---\n\n" + self._harness_home_block()
             + self._autonomy_block()
+        )
+
+    def _harness_home_block(self) -> str:
+        """The Leader's home ADDRESSES, engine-rendered into every converse
+        turn. His file tools resolve relative paths against his workspace
+        only; the rest of the harness needs absolute paths — and a grant
+        without an address is unreachable (live-fire 2026-07-06: the Leader
+        had standing write access to the shared library but no way to know
+        where it lives, so every read_file came back 'does not exist')."""
+        from modulatio import config as _config
+        from modulatio import vault as _vault
+        lib = Path(_config.get_shared_resources_path()) / "skills"
+        return (
+            "## Your home on disk\n\n"
+            f"- your workspace (relative paths land here): {self._leader_workspace()}\n"
+            f"- the shared skills library: {lib}\n"
+            f"- the project vault (all projects, runs, artifacts, logs): {_vault.VAULT_ROOT}\n"
+            f"- the config dir (services, defaults): {_config.CONFIG_DIR}\n\n"
+            "All of these are inside your home — reach them with ABSOLUTE paths "
+            "through your file tools, no permission needed. Paths outside them "
+            "go through the operator gate."
         )
 
     def _with_producer_runbook(self, prompt: str) -> str:

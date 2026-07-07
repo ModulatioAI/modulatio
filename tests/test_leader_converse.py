@@ -437,3 +437,21 @@ def test_improve_skill_tool_can_repair_frontmatter(
     assert skill.tool_loadout == ("api_call",)
     assert skill.capability_tags == ("ocr",)
     assert "Name the tool in the loadout." in skill.prompt_template
+
+
+def test_converse_prompt_states_the_harness_addresses(
+    project: Project, tmp_path: Path, monkeypatch
+):
+    """Live-fire 2026-07-06: the Leader had the GRANT to edit the library but
+    not its ADDRESS — file tools take absolute paths for anything beyond his
+    workspace, and nothing told him where his home is on disk. The converse
+    prompt now states the harness addresses as engine-rendered facts."""
+    from modulatio import config
+
+    shared = tmp_path / "shared-res"
+    (shared / "skills").mkdir(parents=True)
+    monkeypatch.setattr(config, "get_shared_resources_path", lambda: shared)
+    orch = Orchestrator(project, _runners())
+    prompt = orch._build_converse_prompt([], "hi")
+    assert str(shared / "skills") in prompt      # the library's real path
+    assert str(vault.VAULT_ROOT) in prompt       # the vault's real path
