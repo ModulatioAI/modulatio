@@ -16,9 +16,10 @@ interview prose) rendered on select.
   │                               │ — interview    │
   └───────────────────────────────────────────────┘
 
-Read-only: this browses the library. Templates are authored/codified elsewhere
-(the Leader's create_job_template, the Alfred loop); jobs run from a template
-via the Leader. ``r`` refreshes.
+Templates are authored/codified elsewhere (the Leader's create_job_template,
+the Alfred loop). From here a selected template can be KICKED OFF now
+(`k` / the Kick off button — bound-JT run, pre-flighted while the operator
+is present) or SCHEDULED as a recurring cron job (`s`). ``r`` refreshes.
 """
 from __future__ import annotations
 
@@ -26,13 +27,32 @@ from rich.markup import escape
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
-from textual.widgets import DataTable, Input, Markdown, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, DataTable, Input, Markdown, Static
 
 from modulatio import cron, job_template_library
 from modulatio.tui.widgets.controls_row import ControlsRow
 from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.schedule_modal import ScheduleModal
+
+
+def kickoff_template_now(name: str, project_code: str) -> tuple[bool, str]:
+    """Pre-flight a one-click JT kickoff from the library (Clif 2026-07-07).
+    Mirrors ``cron.add``'s add-time gate: the template must exist and its
+    required params must be satisfiable from its own defaults — validate NOW,
+    while the operator is here, instead of letting the run refuse the bind.
+    Returns ``(ok, message)``; the caller launches only on ok."""
+    jt = job_template_library.checkout(name, project_code)
+    if not jt.name:
+        return False, f"Template '{name}' not found."
+    missing = jt.unfilled_required(dict(jt.defaults()))
+    if missing:
+        return False, (
+            f"'{name}' needs parameter(s) first: {', '.join(missing)}. "
+            f"Run it from the LEADER console so the Leader can interview "
+            f"you for them."
+        )
+    return True, f"Run job template: {name}"
 
 
 def schedule_template_as_cron(
@@ -63,12 +83,15 @@ class JTLibraryScreen(Vertical):
     BINDINGS = [
         Binding("r", "refresh", "Refresh", show=True),
         Binding("s", "schedule", "Schedule as cron", show=True),
+        Binding("k", "kickoff", "Kick off now", show=True),
     ]
 
     # The split + full-height divider live in MasterDetail now.
     DEFAULT_CSS = """
     JTLibraryScreen { padding: 1; }
     JTLibraryScreen #jt-table { height: 1fr; }
+    JTLibraryScreen #jt-controls { height: auto; padding: 1 0 0 0; }
+    JTLibraryScreen #jt-controls > Button { margin-right: 2; }
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -87,9 +110,12 @@ class JTLibraryScreen(Vertical):
                 table = DataTable(id="jt-table", cursor_type="row")
                 table.add_columns("Template", "Description", "Capabilities")
                 yield table
+                with Horizontal(id="jt-controls"):
+                    yield Button("Kick off", id="jt-kickoff", variant="primary")
+                    yield Button("Schedule", id="jt-schedule")
                 yield Static(
-                    "↑↓ move · type to search · s schedule as cron — "
-                    "templates are codified by the Leader",
+                    "↑↓ move · type to search · k kick off now · "
+                    "s schedule as cron — templates are codified by the Leader",
                     id="jt-affordance",
                     classes="affordance",
                 )
@@ -167,6 +193,35 @@ class JTLibraryScreen(Vertical):
 
     def action_refresh(self) -> None:
         self.refresh_templates()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "jt-kickoff":
+            self.action_kickoff()
+        elif event.button.id == "jt-schedule":
+            self.action_schedule()
+
+    def action_kickoff(self) -> None:
+        """`k` — launch the highlighted template as a job RIGHT NOW, bound to
+        the JT (no console hop). Pre-flighted here (params satisfiable from
+        defaults); the app's kickoff runner still applies its own guards
+        (already-running / no-models) and reports refusals."""
+        name = self._selected_name
+        if not name:
+            return
+        ok, msg = kickoff_template_now(name, self.project_code)
+        if not ok:
+            self.app.notify(msg, severity="error")
+            return
+        runner = getattr(self.app, "_run_kickoff", None)
+        if runner is None:
+            return
+        accepted = bool(runner(msg, jt_name=name))
+        self.app.notify(
+            f"Kicked off '{name}' — watch the Mod Squad floor."
+            if accepted else
+            "Couldn't launch — see the console status line.",
+            severity="information" if accepted else "error",
+        )
 
     def action_schedule(self) -> None:
         """`s` — schedule the highlighted template as a recurring cron job."""

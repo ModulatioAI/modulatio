@@ -514,13 +514,17 @@ class ModulatioApp(App):
 
     # ── Kickoff flow ────────────────────────────────────────────────────
 
-    def _run_kickoff(self, objective: str) -> bool:
+    def _run_kickoff(self, objective: str, jt_name: "str | None" = None) -> bool:
         """Launch a job from a `/kickoff … /end` brief on the LEADER chat — the
         Leader's orchestrate function. Returns True if the job was accepted +
         launched, False on a refusal (empty / already-running / no-models) so
         the caller can keep the captured brief and surface the reason. The
         producer team streams into the TEAM floor; the Leader reports the
-        verdict back on the LEADER tab."""
+        verdict back on the LEADER tab.
+
+        ``jt_name`` (JT-library one-click kickoff): bind the run to that Job
+        Template explicitly — same engine bind the cron lane uses — instead
+        of relying on the candidate-surfacing match."""
         objective = (objective or "").strip()
         if not objective:
             self._set_kickoff_status(
@@ -593,12 +597,14 @@ class ModulatioApp(App):
         # fire via ``_record_activity`` (which uses call_from_thread to
         # safely update widgets from the worker). Completion is handled by
         # ``on_worker_state_changed``.
-        self._kickoff_worker(project, runners, objective, mode, attachments)
+        self._kickoff_worker(project, runners, objective, mode, attachments,
+                             jt_name)
         return True  # accepted + launched (the caller commits its own state)
 
     @work(thread=True, exclusive=True, group="kickoff")
     def _kickoff_worker(
         self, project, runners, objective: str, mode: str, attachments,
+        jt_name: "str | None" = None,
     ) -> dict:
         """Run the orchestrator in a background thread. Returns a small
         result dict; ``on_worker_state_changed`` renders it. Any exception
@@ -627,7 +633,9 @@ class ModulatioApp(App):
         # Fix C: expose this run's orchestrator so the STOP key (action_stop_job)
         # can signal its abort_event from the main thread while we run here.
         self._kickoff_orch = orch
-        summary = orch.kickoff(objective, attachments=attachments)
+        summary = orch.kickoff(
+            objective, attachments=attachments, bound_jt_name=jt_name,
+        )
         # Honest outcome (no hollow success): a run that RETURNS is not the same as
         # a run that DELIVERED. Count what actually landed vs what blocked / never
         # finished, so the verdict can't claim "deliverables are in" over a blocked,

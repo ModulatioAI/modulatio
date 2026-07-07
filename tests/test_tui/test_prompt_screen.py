@@ -669,7 +669,8 @@ async def test_kickoff_job_rides_the_chatbox_attachments(
         # capture what _run_kickoff ships, without launching a real worker
         monkeypatch.setattr(
             app, "_kickoff_worker",
-            lambda project, runners, objective, mode, attachments:
+            lambda project, runners, objective, mode, attachments,
+            jt_name=None:
                 captured.update(objective=objective, attachments=attachments))
         app._run_kickoff("write the haiku")
         await pilot.pause()
@@ -1564,7 +1565,7 @@ async def test_kickoff_stays_on_leader_view(project_with_roster, monkeypatch):
         await pilot.pause()
         monkeypatch.setattr(
             app, "_kickoff_worker",
-            lambda project, runners, objective, mode, attachments: None)
+            lambda project, runners, objective, mode, attachments, jt_name=None: None)
         assert app._run_kickoff("write the haiku") is True
         await pilot.pause()
         assert app.query_one(PromptScreen).view == "leader"

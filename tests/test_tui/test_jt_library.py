@@ -130,3 +130,46 @@ def test_format_template_includes_params_and_output(lib):
     assert "per-item" in out
     assert "Which competitor?" in out
     assert "Interview" in out
+
+
+async def test_k_kicks_off_selected_template(lib):
+    """`k` on the highlighted template launches it NOW through the app's
+    kickoff runner, bound to the JT (Clif 2026-07-07: select a JT and kick
+    it off right there — no console hop)."""
+    _save("daily-essay", "A daily philosophy essay")
+    app = _Host()
+    calls: list = []
+    app._run_kickoff = lambda objective, jt_name=None: (
+        calls.append((objective, jt_name)) or True
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(JTLibraryScreen)
+        assert screen._selected_name == "daily-essay"
+        screen.action_kickoff()
+        await pilot.pause()
+    assert calls and calls[0][1] == "daily-essay"      # bound to the JT
+    assert "daily-essay" in calls[0][0]                 # objective names it
+
+
+async def test_k_refuses_template_with_unfilled_required_param(lib):
+    """A JT whose required param has no default can't run one-click — the
+    press is refused with the reason (mirror of cron.add's add-time gate),
+    and the kickoff runner is never called."""
+    jt.save(jt.JobTemplate(
+        name="parameterised", description="needs a topic",
+        interview_body="x",
+        param_schema=[jt.ParamField(name="topic", type="str", required=True)],
+    ))
+    app = _Host()
+    calls: list = []
+    app._run_kickoff = lambda objective, jt_name=None: (
+        calls.append((objective, jt_name)) or True
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(JTLibraryScreen)
+        assert screen._selected_name == "parameterised"
+        screen.action_kickoff()
+        await pilot.pause()
+    assert calls == []  # refused before launch — operator fills params first
