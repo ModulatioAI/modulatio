@@ -2048,6 +2048,36 @@ def _draft_is_multifile(task: "Task", draft_path: "Path") -> bool:
     return _DIFF_FILE_HEADER_RE.search(text) is not None
 
 
+#: Raster suffixes whose file IS its own visual evidence for review.
+_RASTER_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
+
+#: Appended to the FORMATTED review prompt (never a template placeholder —
+#: a skill-file override would silently drop a new slot) when the review
+#: carries the artifact's image as a content block.
+_QC_IMAGE_NOTE = """
+
+## Visual evidence
+
+The artifact's IMAGE is attached to this review as a content block — you are
+seeing the actual render/pixels, not just text. Judge visual conformance
+(composition, style, palette, pose, legibility) against the task contract and
+the standards from what you SEE, alongside any markup above.
+"""
+
+
+def _image_evidence(path: "Path", tmp_dir: "Path") -> "Path | None":
+    """The reviewable IMAGE for an artifact, if it has one: a raster file is
+    its own evidence; an SVG contributes its render (optional-if-available —
+    ``None`` when no renderer is on PATH). Non-visual artifacts → ``None``."""
+    suffix = path.suffix.lower()
+    if suffix in _RASTER_SUFFIXES:
+        return path
+    if suffix == ".svg":
+        from modulatio.multimodal import render_svg_to_png
+        return render_svg_to_png(path, tmp_dir)
+    return None
+
+
 def _next_producer_mode(
     task: "Task",
     defect_type: str | None,
@@ -2808,12 +2838,6 @@ class Orchestrator:
         keys work alongside raw LiteLLM model ids. Both unset → raise
         a clear configuration error.
         """
-        from modulatio.multimodal import build_image_content_block
-
-        if chat_completion is None:
-            from litellm import completion as chat_completion  # type: ignore[no-redef]
-
-        from modulatio.runners import _resolve_model_call_args
         leader_model_id = (
             self.project.agent_models.get("leader") or self.project.leader_model
         )
@@ -2823,7 +2847,34 @@ class Orchestrator:
                 "Project.agent_models['leader'] (preferred) or the "
                 "legacy Project.leader_model field."
             )
-        litellm_model, kwargs = _resolve_model_call_args(leader_model_id)
+        return self._run_multimodal_call(
+            model_id=leader_model_id, prompt=prompt, attachments=attachments,
+            chat_completion=chat_completion, budget_role=budget_role,
+            runner_role="leader", agent_id="leader",
+        )
+
+    def _run_multimodal_call(
+        self,
+        *,
+        model_id: str,
+        prompt: str,
+        attachments: list,
+        chat_completion: "Callable[..., Any] | None",
+        budget_role: str,
+        runner_role: str,
+        agent_id: str,
+    ) -> str:
+        """The shared multimodal dispatch body (extracted from the Leader
+        wrapper so the QC seat's visual review uses the SAME plumbing —
+        preset resolution, telemetry, None-coalescing — with its own model
+        and lane instead of a duplicated litellm path)."""
+        from modulatio.multimodal import build_image_content_block
+
+        if chat_completion is None:
+            from litellm import completion as chat_completion  # type: ignore[no-redef]
+
+        from modulatio.runners import _resolve_model_call_args
+        litellm_model, kwargs = _resolve_model_call_args(model_id)
 
         content: list[dict] = [{"type": "text", "text": prompt}]
         for att in attachments:
@@ -2831,7 +2882,7 @@ class Orchestrator:
                 content.append(build_image_content_block(att.path))
         messages = [{"role": "user", "content": content}]
 
-        # Multimodal Leader: image content blocks aren't tokenizable
+        # Multimodal: image content blocks aren't tokenizable
         # by the budget gate, so this path emits a one-shot
         # status='unsupported_multimodal' telemetry row and does NOT
         # enforce. budget_role follows the calling lane (only the
@@ -2845,11 +2896,11 @@ class Orchestrator:
         )
         with _ctx_budget_module.dispatch_context(
             budget_role=budget_role,
-            runner_role="leader",
+            runner_role=runner_role,
             model=litellm_model,
             project_code=self.project.code,
             run_id=self.project.run_id,
-            agent_id="leader",
+            agent_id=agent_id,
             user_override=self._user_override_for(budget_role),
             project_overrides=project_overrides,
             unsupported_reason="multimodal_token_estimation",
@@ -6766,6 +6817,23 @@ class Orchestrator:
                 return sk
         return None
 
+    def _qc_vision_model(self, qc_agent_id: "str | None") -> "str | None":
+        """The model key a visual QC review would dispatch on, iff that model
+        has vision — the gate and the dispatch must test the SAME key or they
+        can diverge. Roster agent's model first (the per-agent runner path),
+        else the role-keyed qc runner's ``model_name``. ``None`` → no vision
+        → the text-only review path, byte-identical to today."""
+        key: "str | None" = None
+        if qc_agent_id:
+            try:
+                agent = roster.load(qc_agent_id, self.project.code)
+                key = agent.model if agent is not None else None
+            except Exception:  # noqa: BLE001 — gate is advisory, fail closed
+                key = None
+        if not key:
+            key = getattr(self.runners.get("qc"), "model_name", None)
+        return key if key and roster.model_has_vision(key) else None
+
     def _task_tool_loadout(self, task: Task, primary_skill) -> tuple[str, ...]:
         """The tools a producer holds for THIS task — the union of every
         required skill's ``tool_loadout``, primary first, de-duplicated in
@@ -7569,7 +7637,18 @@ class Orchestrator:
             # composited it from QC-passed units and the bytes are intact, and flag
             # that perceptual CONTENT is not machine-verifiable (human spot-check).
             if record.strategy == "media":
-                return self._qc_media_verdict(task, draft_path, record)
+                media_verdict = self._qc_media_verdict(task, draft_path, record)
+                # Visual review (2026-07-07): when the mechanical checks PASS,
+                # the composite is a raster image, and the QC seat has vision,
+                # fall through to the full review in image mode — a perceptual
+                # look replaces the "NOT machine-verifiable" disclaimer. A
+                # failed mechanical check stays terminal (no LLM call), and a
+                # non-raster composite (video/zip) keeps today's verdict.
+                if not media_verdict[0].passed:
+                    return media_verdict
+                if (draft_path.suffix.lower() not in _RASTER_SUFFIXES
+                        or self._qc_vision_model(task.qc_agent_id) is None):
+                    return media_verdict
             self._emit_activity(
                 role="qc",
                 phase="assembly_qc_fallback",
@@ -7577,24 +7656,63 @@ class Orchestrator:
                 agent_id=task.qc_agent_id,
             )
             # fall through to a normal full review (fail-closed): {reason}
+        # Visual review (2026-07-07): when the QC seat's model has vision and
+        # the artifact is visual (a raster, or an SVG with a renderer on
+        # PATH), the review DELIVERS THE IMAGE as a content block — pixels,
+        # not just markup/checksums. The SVG render temp lives under the
+        # SYSTEM tmp, never the run tree (the sequential artifacts root is
+        # durable, and _seed_staging fans the shared tree into every worker's
+        # staging seed); it is cleaned after dispatch. build_attachment
+        # enforces the image-size cap HERE so an oversized image degrades to
+        # the text path instead of raising inside the retry loop below
+        # (where a ValueError reads as a parse failure).
+        import tempfile as _tempfile
+        vision_model = self._qc_vision_model(task.qc_agent_id)
+        image_att = None
+        _render_tmp: "_tempfile.TemporaryDirectory | None" = None
+        if vision_model is not None:
+            _render_tmp = _tempfile.TemporaryDirectory(prefix="modulatio-qc-render-")
+            try:
+                evidence = _image_evidence(draft_path, Path(_render_tmp.name))
+                if evidence is not None:
+                    from modulatio.attachments import build_attachment
+                    image_att = build_attachment(evidence, kind="image")
+            except (ValueError, OSError):
+                image_att = None
+            if image_att is None:
+                _render_tmp.cleanup()
+                _render_tmp = None
+
         try:
             body = draft_path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError) as exc:
-            # Defensive backstop: ANY binary/undecodable artifact reaching QC (a
-            # media output with no record, an opaque blob) gets an environmental
-            # verdict instead of crashing the review (Nemo B4 #2).
-            verdict = AssertionEvidence(
-                producer="qc", primary=False,
-                check=f"binary/undecodable artifact — QC cannot text-review ({type(exc).__name__})",
-                passed=False,
-            )
-            return verdict, (
-                "The deliverable is binary or undecodable as text, so QC cannot "
-                "review its content. If this is a media product, it must go through "
-                "media-assembly (which records an engine-composited proof); otherwise "
-                "a human must verify it."
-            ), "environmental"
+            if image_att is not None:
+                # Visual review: the artifact IS the image — the seat sees it
+                # as an attached content block, so unreadable-as-text is the
+                # expected shape here, not an environmental defect.
+                body = "(binary image artifact — attached to this review as an image)"
+            else:
+                # Defensive backstop: ANY binary/undecodable artifact reaching QC (a
+                # media output with no record, an opaque blob) gets an environmental
+                # verdict instead of crashing the review (Nemo B4 #2).
+                verdict = AssertionEvidence(
+                    producer="qc", primary=False,
+                    check=f"binary/undecodable artifact — QC cannot text-review ({type(exc).__name__})",
+                    passed=False,
+                )
+                return verdict, (
+                    "The deliverable is binary or undecodable as text, so QC cannot "
+                    "review its content. If this is a media product, it must go through "
+                    "media-assembly (which records an engine-composited proof); otherwise "
+                    "a human must verify it."
+                ), "environmental"
         band = _token_band(task)
+        if image_att is not None and draft_path.suffix.lower() != ".svg":
+            # Raster image mode: the body is a ~dozen-token placeholder, so a
+            # declared band must not trip the near-empty backstop and size
+            # guidance is meaningless for pixels. The SVG case keeps its band
+            # — there the markup IS the text deliverable under review.
+            band = None
         # The near-empty GATE below is a deterministic pass/fail, so it MUST judge
         # real TOKENS — not a whitespace word count (a compact
         # one-line JSON / minified-code deliverable collapses hundreds of tokens
@@ -7615,6 +7733,8 @@ class Orchestrator:
         # re-introduce the rigid gate. With NO declared band the engine invents
         # nothing: QC judges all sizes, including empties.
         if band is not None and gate_tokens < max(1, int(band[0] * 0.10)):
+            if _render_tmp is not None:  # early exit — release the SVG render
+                _render_tmp.cleanup()
             verdict = AssertionEvidence(
                 producer="qc", primary=False,
                 check=f"non-deliverable: {gate_tokens} tokens (near-empty)",
@@ -7708,6 +7828,10 @@ class Orchestrator:
         # the standard JSON verdict as final content. Same parsing path
         # downstream — the verdict shape is unchanged.
         qc_tool_skill = self._qc_tool_loadout_skill(task.qc_agent_id)
+        if image_att is not None:
+            # Appended to the FORMATTED prompt (a template slot would be
+            # silently dropped by skill-file overrides of the qc template).
+            prompt = prompt + _QC_IMAGE_NOTE
 
         # Transient providers occasionally return empty or malformed responses.
         # Retry once on parse failure before giving up — don't lose a good
@@ -7719,47 +7843,64 @@ class Orchestrator:
         # runner when no qc-tier agent qualified (different-mind still
         # guaranteed at the model level via --qc-model CLI flag).
         last_err: Exception | None = None
-        for attempt in range(2):
-            try:
-                if qc_tool_skill is not None:
-                    # Phase 2A.5: inject the skill body so code-review
-                    # / security-audit / etc. prose actually reaches QC.
-                    qc_prompt = prompt
-                    if qc_tool_skill.prompt_template.strip():
-                        qc_prompt = (
-                            "## Skill guidance\n\n"
-                            f"{qc_tool_skill.prompt_template.strip()}\n\n"
-                            f"## Task\n\n{prompt}"
+        try:
+            for attempt in range(2):
+                try:
+                    if image_att is not None:
+                        # Visual review: image turns bypass the tool loop —
+                        # content blocks aren't carried through the text
+                        # tool-loop (the converse image turn's precedent).
+                        response = self._run_multimodal_call(
+                            model_id=vision_model,
+                            prompt=prompt,
+                            attachments=[image_att],
+                            chat_completion=None,
+                            budget_role="qc",
+                            runner_role="qc",
+                            agent_id=task.qc_agent_id or "qc",
                         )
-                    artifacts_root = self._artifacts_root()
-                    transcript_path = (
-                        artifacts_root / "tool_calls"
-                        / f"qc_{task.id.lower()}.jsonl"
-                    )
-                    response = self._run_chat_loop(
-                        prompt=qc_prompt,
-                        tool_loadout=tuple(qc_tool_skill.tool_loadout),
-                        role="qc",
-                        agent_id=task.qc_agent_id or "qc",
-                        task_id=task.id,
-                        transcript_path=transcript_path,
-                        skill_name=qc_tool_skill.name,
-                        needs_network=qc_tool_skill.needs_network,
-                        pass_env=qc_tool_skill.pass_env,
-                    )
-                else:
-                    response = self._run_agent_call(
-                        task.qc_agent_id, "qc", prompt, task_id=task.id,
-                    )
-                data = _extract_json(response)
-                break
-            except ValueError as exc:
-                last_err = exc
-                if attempt == 0:
-                    continue
-                raise
-        else:  # pragma: no cover — loop always break/raises above
-            raise last_err  # type: ignore[misc]
+                    elif qc_tool_skill is not None:
+                        # Phase 2A.5: inject the skill body so code-review
+                        # / security-audit / etc. prose actually reaches QC.
+                        qc_prompt = prompt
+                        if qc_tool_skill.prompt_template.strip():
+                            qc_prompt = (
+                                "## Skill guidance\n\n"
+                                f"{qc_tool_skill.prompt_template.strip()}\n\n"
+                                f"## Task\n\n{prompt}"
+                            )
+                        artifacts_root = self._artifacts_root()
+                        transcript_path = (
+                            artifacts_root / "tool_calls"
+                            / f"qc_{task.id.lower()}.jsonl"
+                        )
+                        response = self._run_chat_loop(
+                            prompt=qc_prompt,
+                            tool_loadout=tuple(qc_tool_skill.tool_loadout),
+                            role="qc",
+                            agent_id=task.qc_agent_id or "qc",
+                            task_id=task.id,
+                            transcript_path=transcript_path,
+                            skill_name=qc_tool_skill.name,
+                            needs_network=qc_tool_skill.needs_network,
+                            pass_env=qc_tool_skill.pass_env,
+                        )
+                    else:
+                        response = self._run_agent_call(
+                            task.qc_agent_id, "qc", prompt, task_id=task.id,
+                        )
+                    data = _extract_json(response)
+                    break
+                except ValueError as exc:
+                    last_err = exc
+                    if attempt == 0:
+                        continue
+                    raise
+            else:  # pragma: no cover — loop always break/raises above
+                raise last_err  # type: ignore[misc]
+        finally:
+            if _render_tmp is not None:  # release the SVG render temp
+                _render_tmp.cleanup()
 
         verdict = AssertionEvidence(
             producer="qc",
@@ -10652,6 +10793,21 @@ class Orchestrator:
         )
         task_summary_lines = []
         artifact_blocks: list[str] = []
+        # Visual review (2026-07-07): when the Leader seat's model has vision,
+        # image deliverables (rasters, or SVGs with a renderer on PATH) are
+        # DELIVERED as content blocks alongside the text blocks — the verdict
+        # judges pixels, not coordinate-inference. Capped at 4 images; render
+        # temps live under the system tmp (never the run tree) and are
+        # released in the finally around the verdict dispatch below.
+        import tempfile as _tempfile
+        verify_images: list = []
+        _verify_tmp: "_tempfile.TemporaryDirectory | None" = None
+        _leader_model_key = (
+            self.project.agent_models.get("leader") or self.project.leader_model
+        )
+        if _leader_model_key and roster.model_has_vision(_leader_model_key):
+            _verify_tmp = _tempfile.TemporaryDirectory(
+                prefix="modulatio-verify-render-")
         # #80 slice 4: the GOAL-LEVEL aggregate of declared-spec (HARD) violations
         # across ALL digests — the verdict clamp binds from THIS, not the per-task
         # local `spec_issues` (a naive clamp on the local var would see only the
@@ -10725,6 +10881,22 @@ class Orchestrator:
                     if fallback.exists():
                         candidate = fallback
                 if candidate is not None:
+                    # Visual review: collect this deliverable's image evidence
+                    # (the raster itself / an SVG render) while assembling its
+                    # text block — an unbuildable/oversized image degrades to
+                    # the text-only block, never raises here.
+                    image_idx = 0
+                    if _verify_tmp is not None and len(verify_images) < 4:
+                        try:
+                            evidence = _image_evidence(
+                                candidate, Path(_verify_tmp.name))
+                            if evidence is not None:
+                                from modulatio.attachments import build_attachment
+                                verify_images.append(
+                                    build_attachment(evidence, kind="image"))
+                                image_idx = len(verify_images)
+                        except (ValueError, OSError):
+                            image_idx = 0
                     # Include path AND content so Leader can evaluate
                     # quality, not just file existence. Truncate large
                     # bodies to keep prompt size bounded; full file is
@@ -10732,7 +10904,12 @@ class Orchestrator:
                     try:
                         body = candidate.read_text(encoding="utf-8")
                     except Exception as exc:
-                        body = f"(could not read: {exc})"
+                        body = (
+                            f"(binary image — attached to this review as "
+                            f"image {image_idx})"
+                            if image_idx
+                            else f"(could not read: {exc})"
+                        )
                     snippet = body if len(body) <= 4000 else (
                         body[:4000]
                         + f"\n\n... [truncated; full file at {candidate}, "
@@ -10787,6 +10964,17 @@ class Orchestrator:
         def _render_verdict(correction: str) -> str:
             # ``correction`` is appended on a parse-failure retry (empty first try).
             p = prompt + correction
+            if verify_images:
+                # Visual review: image turns bypass the tool loop (content
+                # blocks aren't carried through the text tool-loop — the
+                # converse image turn's precedent). budget_role matches the
+                # single-shot verify lane.
+                return self._run_multimodal_leader(
+                    prompt=p + _QC_IMAGE_NOTE,
+                    attachments=verify_images,
+                    chat_completion=None,
+                    budget_role="leader-reflect",
+                )
             if leader_tool_skill is not None:
                 # Inject skill body as preamble, mirroring the QC path.
                 body = p
@@ -10852,9 +11040,13 @@ class Orchestrator:
             # The verdict JSON now carries only short structured fields (the long
             # report rides outside it), so a parse failure is rare; the retry-once
             # correction stays as a backstop for a stray quote in those fields.
-            data = _extract_json_resilient(
-                _capture, context=f"leader-verify {goal.id}"
-            )
+            try:
+                data = _extract_json_resilient(
+                    _capture, context=f"leader-verify {goal.id}"
+                )
+            finally:
+                if _verify_tmp is not None:  # release the SVG render temps
+                    _verify_tmp.cleanup()
             if data is None:
                 raise ValueError("verdict response unparseable after retry")
         except (ValueError, KeyError) as exc:

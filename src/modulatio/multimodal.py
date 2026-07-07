@@ -162,6 +162,33 @@ def _longest_backtick_run(text: str) -> int:
     return longest
 
 
+def render_svg_to_png(
+    svg_path: Path, out_dir: Path, timeout: float = 10.0
+) -> Path | None:
+    """Render an SVG to a PNG in ``out_dir`` so a vision model can be shown
+    the picture, not just the markup. Optional-if-available: uses
+    ``rsvg-convert`` when it's on PATH (``apt install librsvg2-bin``) and
+    degrades silently to ``None`` on absence, failure, or timeout — callers
+    fall back to the text-only review path."""
+    import shutil
+    import subprocess
+
+    renderer = shutil.which("rsvg-convert")
+    if renderer is None:
+        return None
+    out = Path(out_dir) / (svg_path.stem + ".png")
+    try:
+        subprocess.run(
+            [renderer, "-o", str(out), str(svg_path)],
+            timeout=timeout, check=True, capture_output=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if not out.is_file() or out.stat().st_size == 0:
+        return None
+    return out
+
+
 def chat_with_agent_multimodal(
     *,
     agent: Agent,
@@ -197,4 +224,5 @@ __all__ = [
     "build_image_content_block",
     "build_multimodal_messages",
     "chat_with_agent_multimodal",
+    "render_svg_to_png",
 ]

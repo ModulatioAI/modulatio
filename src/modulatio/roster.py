@@ -399,6 +399,14 @@ def _caps_from_model(model_key: str | None) -> tuple[list[str], str | None, str 
     return caps, tier, cost
 
 
+def model_has_vision(model_key: str | None) -> bool:
+    """True when ``model_key``'s preset advertises the ``vision`` capability
+    (explicit wizard tag wins, else family inference). Raw litellm ids and
+    unknown keys resolve to no preset → False — fail-closed, so a seat whose
+    vision can't be established keeps today's text-only review path."""
+    return "vision" in _caps_from_model(model_key)[0]
+
+
 # Ordered roster template. Each entry declares the agent id, the skills
 # it holds, its organizational tier (drives QC/producer-escalation
 # routing), and the CLI model-flag key it should bind to. Kept as data
@@ -740,4 +748,4 @@ def _seed_from_team_template(
     return written
 
 
-__all__ = ["Agent", "list_agents", "load", "model_for_tier", "save", "seed_default_roster"]
+__all__ = ["Agent", "list_agents", "load", "model_for_tier", "model_has_vision", "save", "seed_default_roster"]
