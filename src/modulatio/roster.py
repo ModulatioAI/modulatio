@@ -400,11 +400,20 @@ def _caps_from_model(model_key: str | None) -> tuple[list[str], str | None, str 
 
 
 def model_has_vision(model_key: str | None) -> bool:
-    """True when ``model_key``'s preset advertises the ``vision`` capability
-    (explicit wizard tag wins, else family inference). Raw litellm ids and
-    unknown keys resolve to no preset → False — fail-closed, so a seat whose
-    vision can't be established keeps today's text-only review path."""
-    return "vision" in _caps_from_model(model_key)[0]
+    """True when ``model_key`` advertises the ``vision`` capability. A preset
+    key resolves through the preset (explicit wizard tag wins, else family
+    inference). A RAW litellm id has no preset but still names its family —
+    infer from the id itself (the Leader seat often carries a raw id like
+    ``openai/grok-4.3``). Genuinely unknown models → False, fail-closed:
+    a seat whose vision can't be established keeps the text-only review."""
+    if not model_key:
+        return False
+    caps = _caps_from_model(model_key)[0]
+    if caps:
+        return "vision" in caps
+    from modulatio import model_capabilities
+    _tier, _cost, inferred = model_capabilities.infer(model_key)
+    return "vision" in inferred
 
 
 # Ordered roster template. Each entry declares the agent id, the skills

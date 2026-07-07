@@ -97,9 +97,9 @@ _FAMILY_TABLE: tuple[tuple[tuple[str, ...], str, str | None, tuple[str, ...]], .
     # with; matched on the distinct "gpt-oss" substring.
     (("gpt-oss",), "generalist", "paid-cloud",
      ("reasoning-heavy", "structured-output")),
-    # xAI
+    # xAI — Grok 3+ are multimodal (vision) models.
     (("grok",), "reasoning-heavy", "paid-cloud",
-     ("reasoning-heavy", "long-context", "web-search")),
+     ("reasoning-heavy", "long-context", "web-search", "vision")),
     # NVIDIA Nemotron
     (("nemotron",), "reasoning-heavy", "paid-cloud",
      ("reasoning-heavy", "structured-output")),
@@ -109,7 +109,10 @@ _FAMILY_TABLE: tuple[tuple[tuple[str, ...], str, str | None, tuple[str, ...]], .
     # Zhipu GLM
     (("glm",), "reasoning-heavy", "paid-cloud",
      ("reasoning-heavy", "structured-output")),
-    # Moonshot Kimi
+    # Moonshot Kimi — the K2.7 line is multimodal; match it before the
+    # generic family so older K2 ids keep the conservative tags.
+    (("kimi-k2.7", "kimi_k2_7"), "reasoning-heavy", "paid-cloud",
+     ("long-context", "reasoning-heavy", "code-production", "vision")),
     (("kimi",), "reasoning-heavy", "paid-cloud",
      ("long-context", "reasoning-heavy")),
     # Qwen
@@ -118,7 +121,8 @@ _FAMILY_TABLE: tuple[tuple[tuple[str, ...], str, str | None, tuple[str, ...]], .
     # Google Gemini / Gemma
     (("gemini",), "reasoning-heavy", "paid-cloud",
      ("long-context", "vision", "structured-output")),
-    (("gemma",), "budget", None, ("fast",)),
+    # Gemma 3+ are multimodal (vision) open-weights models.
+    (("gemma",), "budget", None, ("fast", "vision")),
     # Meta Llama
     (("llama",), "generalist", None, ()),
     # MiniMax

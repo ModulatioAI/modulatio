@@ -67,8 +67,12 @@ def test_model_has_vision_preset_and_raw(monkeypatch):
     monkeypatch.setattr(model_presets, "get_preset", lambda k: presets.get(k))
     assert roster.model_has_vision("seeing") is True
     assert roster.model_has_vision("blind") is False
-    assert roster.model_has_vision("raw/litellm-id") is False  # no preset
     assert roster.model_has_vision(None) is False
+    # A RAW litellm id has no preset but names its family — inference covers
+    # it (the Leader seat often carries a raw id like openai/grok-4.3).
+    assert roster.model_has_vision("openai/grok-4.3") is True
+    assert roster.model_has_vision("kimi-k2.7-code") is True
+    assert roster.model_has_vision("totally/unknown-model") is False
 
 
 # ── the shared multimodal dispatch ──────────────────────────────────────
