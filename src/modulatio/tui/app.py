@@ -2005,6 +2005,27 @@ def run() -> None:
     import typer
     from modulatio import config, model_presets
 
+    # Engine logs must land somewhere DURABLE: a Textual app hides stderr
+    # (python logging's last-resort sink), so without a handler every
+    # logger.warning in the engine — the visual-review degrade traces, the
+    # dropped-loadout notes — vanishes. One rotating file, INFO+, the
+    # TUI-process analog of the daemon's basicConfig.
+    import logging
+    from logging.handlers import RotatingFileHandler
+    _log_path = config.CONFIG_DIR / "tui.log"
+    try:
+        _log_path.parent.mkdir(parents=True, exist_ok=True)
+        _handler = RotatingFileHandler(
+            _log_path, maxBytes=2_000_000, backupCount=2, encoding="utf-8")
+        _handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        _mlog = logging.getLogger("modulatio")
+        _mlog.addHandler(_handler)
+        if _mlog.level == logging.NOTSET or _mlog.level > logging.INFO:
+            _mlog.setLevel(logging.INFO)
+    except OSError:
+        pass  # unwritable config dir — logs stay on the last-resort sink
+
     # Load .env files BEFORE constructing the app — model presets read
     # API keys at runner-build time. Same env-load contract as cli.py;
     # without this, the TUI process never sees vault-staged keys and
