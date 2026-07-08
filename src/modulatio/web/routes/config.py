@@ -401,3 +401,106 @@ def keys_remove(env_var: str) -> dict:
     from modulatio import provider_keys
 
     return {"deleted": provider_keys.remove_key(env_var)}
+
+
+# ── SERVICES (outside APIs; catalog or custom; keys via the pool) ─────
+
+
+class ServiceCatalogAdd(BaseModel):
+    catalog_id: str
+
+
+class ServiceCustomAdd(BaseModel):
+    name: str
+    base_url: str
+    auth_shape: str = "bearer"
+    capabilities: list[str]
+    per_task_cap: int = 1
+
+
+class CapabilityDefault(BaseModel):
+    capability: str
+    service_id: str
+
+
+def _service_json(s) -> dict:
+    return {
+        "id": s.id, "name": s.name, "kind": s.kind,
+        "capabilities": list(s.capabilities), "base_url": s.base_url,
+        "env_var": s.env_var, "free_tier": s.free_tier,
+        "per_task_cap": s.per_task_cap,
+    }
+
+
+@router.get("/config/service-catalog")
+def service_catalog_read() -> dict:
+    from modulatio import service_catalog as sc
+
+    return {"catalog": [
+        {
+            "id": e.service.id, "name": e.service.name,
+            "capabilities": list(e.service.capabilities),
+            "base_url": e.service.base_url, "beta": e.beta, "notes": e.notes,
+        }
+        for e in sc.catalog()
+    ]}
+
+
+@router.get("/config/services")
+def services_list() -> dict:
+    from modulatio import services
+
+    return {"services": [_service_json(s) for s in services.load_services().values()]}
+
+
+@router.post("/config/services/add-catalog")
+def service_add_catalog(body: ServiceCatalogAdd) -> dict:
+    from modulatio import service_catalog as sc, services
+
+    entry = sc.entry(body.catalog_id)
+    if entry is None:
+        raise HTTPException(status_code=422, detail=f"unknown service {body.catalog_id}")
+    try:
+        services.add_service(entry.service)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"id": entry.service.id}
+
+
+@router.post("/config/services/add-custom")
+def service_add_custom(body: ServiceCustomAdd) -> dict:
+    from modulatio import services
+
+    slug = re.sub(r"[^a-z0-9]+", "-", body.name.lower()).strip("-")
+    if not slug:
+        raise HTTPException(status_code=422, detail="name the service")
+    svc = services.Service(
+        id=slug, name=body.name.strip(), kind="custom",
+        capabilities=tuple(body.capabilities),
+        env_var=services.new_key_handle(),  # opaque SVCKEY_<hex> — no name leak
+        base_url=body.base_url, auth_shape=body.auth_shape,
+        per_task_cap=body.per_task_cap,
+    )
+    try:
+        services.add_service(svc)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"id": slug, "env_var": svc.env_var}
+
+
+@router.delete("/config/services/{service_id}")
+def service_remove(service_id: str) -> dict:
+    from modulatio import services
+
+    return {"deleted": services.remove_service(service_id)}
+
+
+@router.post("/config/services/default")
+def service_set_default(body: CapabilityDefault) -> dict:
+    from modulatio import services
+
+    try:
+        services.set_capability_default(body.capability, body.service_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"capability": body.capability, "default": body.service_id}

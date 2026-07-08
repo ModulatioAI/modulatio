@@ -343,9 +343,88 @@ function mountModels(body) {
   });
 }
 
+// ── SERVICES (outside APIs; keys via the same write-only pool) ────────
+
+function mountServices(body) {
+  masterDetail(body, {
+    title: "Services",
+    load: async () => (await api("/config/services")).services,
+    columns: [
+      { label: "service", cell: (s) => s.name },
+      { label: "kind", cell: (s) => s.kind, mono: true },
+      { label: "does", cell: (s) => s.capabilities.join(", "), mono: true },
+    ],
+    rowLabel: (s) => `${s.name} ${s.kind} ${s.capabilities.join(" ")}`,
+    emptyText: "no services — add one from the catalog or a custom API",
+    actions: [
+      { label: "Add from catalog", needsSelection: false, run: async () => {
+        const cat = (await api("/config/service-catalog")).catalog;
+        const f = await formDialog("Add a catalog service", [
+          { name: "catalog_id", label: "Service",
+            options: cat.map((e) => e.id) }]);
+        if (!f) return false;
+        await api("/config/services/add-catalog",
+          { method: "POST", body: { catalog_id: f.catalog_id } });
+        notify(`Added '${f.catalog_id}'. Set its key next.`);
+      } },
+      { label: "Add custom", needsSelection: false, run: async () => {
+        const f = await formDialog("Add a custom service", [
+          { name: "name", label: "Name" },
+          { name: "base_url", label: "Base URL (https:// — pinned; the pin is the auth)" },
+          { name: "auth_shape", label: "Auth: bearer | header:<Name> | query:<name>",
+            value: "bearer" },
+          { name: "capabilities", label: "Capabilities, comma-separated (image, research…)" }]);
+        if (!f) return false;
+        const caps = f.capabilities.split(",").map((s) => s.trim()).filter(Boolean);
+        await api("/config/services/add-custom", { method: "POST", body: {
+          name: f.name, base_url: f.base_url, auth_shape: f.auth_shape,
+          capabilities: caps } });
+        notify(`Added '${f.name}'. Set its key next.`);
+      } },
+      { label: "Set key", run: async (s) => {
+        const f = await formDialog(`Set the API key for ${s.name}`, [
+          { name: "value", label: "Key (write-only, never shown again)",
+            type: "password" }]);
+        if (!f) return false;
+        await api("/config/keys",
+          { method: "POST", body: { base: s.env_var, value: f.value, label: s.name } });
+        notify(`Key set for ${s.name}.`);
+        return false;
+      } },
+      { label: "Make default", run: async (s) => {
+        const f = await formDialog(`Default ${s.name} for which capability?`, [
+          { name: "capability", label: "Capability", options: s.capabilities }]);
+        if (!f) return false;
+        await api("/config/services/default", { method: "POST",
+          body: { capability: f.capability, service_id: s.id } });
+        notify(`${s.name} is now the default for ${f.capability}.`);
+        return false;
+      } },
+      { label: "Remove", danger: true,
+        confirm: (s) => `Remove service '${s.name}'?`,
+        run: async (s) => {
+          await api(`/config/services/${encodeURIComponent(s.id)}`, { method: "DELETE" });
+          notify(`Removed '${s.name}'.`);
+        } },
+    ],
+    renderDetail: async (s) => {
+      const slots = (await api(
+        `/config/keys?base=${encodeURIComponent(s.env_var)}`)).slots;
+      const n = slots.filter((x) => x.is_set).length;
+      return [
+        el("h2", {}, s.name),
+        kv([["kind", s.kind], ["capabilities", s.capabilities.join(", ")],
+          ["base url", s.base_url], ["per-task cap", s.per_task_cap],
+          ["keys", `${n} set`]]),
+      ];
+    },
+  });
+}
+
 const SUBPAGES = {
   models: mountModels,
   agents: mountAgents,
+  services: mountServices,
   folders: mountFolders,
   projects: mountProjects,
   settings: mountSettings,

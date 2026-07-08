@@ -320,3 +320,58 @@ def test_key_remove(client, monkeypatch):
 def test_key_add_blank_refused(client):
     r = client.post("/api/config/keys", json={"base": _BASE, "value": "  "})
     assert r.status_code == 422
+
+
+# ── SERVICES (catalog + custom; keys via the write-only pool) ─────────
+
+
+def test_service_catalog_read(client):
+    resp = client.get("/api/config/service-catalog")
+    assert resp.status_code == 200
+    ids = [e["id"] for e in resp.json()["catalog"]]
+    assert "tavily" in ids
+
+
+def test_service_add_from_catalog_and_remove(client):
+    from modulatio import services
+
+    add = client.post("/api/config/services/add-catalog", json={"catalog_id": "tavily"})
+    assert add.status_code == 200
+    assert "tavily" in services.load_services()
+    assert client.delete("/api/config/services/tavily").status_code == 200
+    assert "tavily" not in services.load_services()
+
+
+def test_service_add_catalog_unknown_422(client):
+    r = client.post("/api/config/services/add-catalog", json={"catalog_id": "nope"})
+    assert r.status_code == 422
+
+
+def test_service_add_custom_gets_opaque_key_handle(client):
+    from modulatio import services
+
+    add = client.post("/api/config/services/add-custom", json={
+        "name": "My OCR", "base_url": "https://ocr.example.com",
+        "auth_shape": "bearer", "capabilities": ["research"]})
+    assert add.status_code == 200
+    sid = add.json()["id"]
+    svc = services.load_services()[sid]
+    assert svc.kind == "custom"
+    assert svc.env_var.startswith("SVCKEY_")  # opaque — no service name in the handle
+
+
+def test_service_add_custom_bad_base_url_422(client):
+    r = client.post("/api/config/services/add-custom", json={
+        "name": "Bad", "base_url": "ftp://nope", "auth_shape": "bearer",
+        "capabilities": ["research"]})
+    assert r.status_code == 422
+
+
+def test_service_set_capability_default(client):
+    from modulatio import services
+
+    client.post("/api/config/services/add-catalog", json={"catalog_id": "tavily"})
+    r = client.post("/api/config/services/default",
+                    json={"capability": "research", "service_id": "tavily"})
+    assert r.status_code == 200
+    assert services.capability_default("research") == "tavily"
