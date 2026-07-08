@@ -311,7 +311,13 @@ dialog.approval {
   margin: auto;
   max-width: 520px;
   border: var(--line-w, 1.5px) solid var(--ink);
+  /* A dialog floats ABOVE the page, so it needs an OPAQUE fill — the
+     Atelier card bg is `transparent` (cards are the outlined field), which
+     is right on the page but lets content bleed through a modal. Use the
+     solid field colour; Vellum uses its opaque panel. */
+  background: var(--field);
 }
+:root[data-theme="vellum"] dialog.approval { background: var(--panel); }
 dialog.approval::backdrop { background: rgba(20, 20, 20, 0.35); }
 .approval-detail {
   max-height: 200px;
