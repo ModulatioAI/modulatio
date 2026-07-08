@@ -259,9 +259,94 @@ function mountAgents(body, ctx) {
   });
 }
 
+// ── MODELS + the write-only key manager ───────────────────────────────
+
+function mountModels(body) {
+  masterDetail(body, {
+    title: "Models",
+    load: async () => (await api("/config/models")).models,
+    columns: [
+      { label: "key", cell: (m) => m.key, mono: true },
+      { label: "provider", cell: (m) => m.provider, mono: true },
+      { label: "model", cell: (m) => m.model, mono: true },
+      { label: "", cell: (m) => (m.available ? "● ready" : "○ needs key"), mono: true },
+    ],
+    rowLabel: (m) => `${m.key} ${m.provider} ${m.model}`,
+    emptyText: "no models yet — add one, then add its key",
+    actions: [
+      { label: "Add model", needsSelection: false, run: async () => {
+        const providers = (await api("/config/providers")).providers;
+        const f = await formDialog("Add a model", [
+          { name: "provider_id", label: "Provider",
+            options: providers.map((p) => p.id) },
+          { name: "model", label: "Model id (e.g. meta/llama-3, gpt-4o)" }]);
+        if (!f) return false;
+        await api("/config/models/add",
+          { method: "POST", body: { provider_id: f.provider_id, model: f.model } });
+        notify(`Added model '${f.model}'.`);
+      } },
+      { label: "Set key", run: async (m) => {
+        if (!m.env_var) {
+          notify("This model has no key slot (local / OAuth).", { error: true });
+          return false;
+        }
+        // Write-only: the value POSTs in and never comes back. type=password so
+        // it's masked in the field too.
+        const f = await formDialog(`Set an API key for ${m.provider}`, [
+          { name: "value", label: `Key (stored under ${m.env_var}, never shown again)`,
+            type: "password" },
+          { name: "label", label: "Label (optional)" }]);
+        if (!f) return false;
+        await api("/config/keys",
+          { method: "POST", body: { base: m.env_var, value: f.value, label: f.label } });
+        notify(`Key set for ${m.provider}.`);
+      } },
+      { label: "Remove key", danger: true, run: async (m) => {
+        if (!m.env_var) return false;
+        const slots = (await api(
+          `/config/keys?base=${encodeURIComponent(m.env_var)}`)).slots
+          .filter((s) => s.is_set);
+        if (!slots.length) {
+          notify("No keys set for this provider.");
+          return false;
+        }
+        const f = await formDialog(`Remove a key for ${m.provider}`, [
+          { name: "env_var", label: "Which slot",
+            options: slots.map((s) => s.env_var) }]);
+        if (!f) return false;
+        await api(`/config/keys/${encodeURIComponent(f.env_var)}`, { method: "DELETE" });
+        notify("Key removed.");
+        return false;
+      } },
+      { label: "Remove model", danger: true,
+        confirm: (m) => `Remove model '${m.key}'?`,
+        run: async (m) => {
+          await api(`/config/models/${encodeURIComponent(m.key)}`, { method: "DELETE" });
+          notify(`Removed '${m.key}'.`);
+        } },
+    ],
+    renderDetail: async (m) => {
+      let keyLine = "no key slot (local / OAuth)";
+      if (m.env_var) {
+        const slots = (await api(
+          `/config/keys?base=${encodeURIComponent(m.env_var)}`)).slots;
+        const n = slots.filter((s) => s.is_set).length;
+        keyLine = `${n} key(s) set under ${m.env_var}`;
+      }
+      return [
+        el("h2", {}, m.key),
+        kv([["provider", m.provider], ["model", m.model],
+          ["status", m.available ? "● ready" : "○ needs a key"],
+          ["keys", keyLine]]),
+      ];
+    },
+  });
+}
+
 const SUBPAGES = {
-  settings: mountSettings,
+  models: mountModels,
+  agents: mountAgents,
   folders: mountFolders,
   projects: mountProjects,
-  agents: mountAgents,
+  settings: mountSettings,
 };

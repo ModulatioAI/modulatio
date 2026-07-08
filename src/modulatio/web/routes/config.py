@@ -16,8 +16,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, field_validator
 
 from modulatio.web.routes.console import valid_project
 
@@ -185,6 +185,8 @@ def models_list() -> dict:
             "provider": rec.get("provider", ""),
             "model": rec.get("model", ""),
             "available": model_presets.is_available(key),
+            # The key env-var NAME (not a secret) — the key manager targets it.
+            "env_var": (rec.get("auth_config") or {}).get("env_var"),
         }
         for key, rec in presets.items()
     ]}
@@ -289,3 +291,113 @@ def agents_remove(project: str, agent_id: str) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"deleted": roster.remove_agent(project_code=code, agent_id=agent_id)}
+
+
+# ── MODELS (add / remove) + the provider catalog ──────────────────────
+
+
+class ModelAdd(BaseModel):
+    provider_id: str
+    model: str
+
+
+@router.get("/config/providers")
+def providers_catalog() -> dict:
+    """The shipped, user-agnostic provider catalog the add-model form picks
+    from — base_url / api_format / auth options auto-filled per provider; the
+    operator supplies only the model id and (separately) the key."""
+    from modulatio import provider_catalog as pc
+
+    out = []
+    for p in pc.list_providers():
+        out.append({
+            "id": p.id, "name": p.name, "base_url": p.base_url,
+            "api_format": p.api_format, "signup_url": p.signup_url,
+            "auth": [
+                {"auth_type": a.auth_type, "label": a.label, "env_var": a.env_var}
+                for a in p.auth_options
+            ],
+        })
+    return {"providers": out}
+
+
+@router.post("/config/models/add")
+def model_add(body: ModelAdd) -> dict:
+    from modulatio import model_presets
+    from modulatio import provider_catalog as pc
+
+    provider = pc.get_provider(body.provider_id)
+    if provider is None:
+        raise HTTPException(status_code=422, detail=f"unknown provider {body.provider_id}")
+    if not body.model.strip():
+        raise HTTPException(status_code=422, detail="model id required")
+    # The default auth is the provider's api-key option (carries the env var),
+    # else its first option. The KEY itself is never handled here — it lives in
+    # the write-only key pool under that env var.
+    auth = next((a for a in provider.auth_options if a.auth_type == "api_key"),
+                provider.auth_options[0])
+    model = pc.CatalogModel(id=body.model, name=body.model, provider_id=provider.id)
+    kwargs = pc.preset_kwargs(provider, model, auth)
+    key = kwargs.pop("key")
+    try:
+        model_presets.add_preset(key, **kwargs)
+    except ValueError as exc:  # collision / invalid
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"key": key}
+
+
+@router.delete("/config/models/{key}")
+def model_remove(key: str) -> dict:
+    from modulatio import model_presets
+
+    return {"deleted": model_presets.remove_preset(key)}
+
+
+# ── KEYS (write-only provider-key pool — the red-line) ────────────────
+#
+# Values go IN write-only (POST) and are NEVER returned; a slot view reports
+# only whether it is_set. This is the whole security crux of Feature 2 — the
+# key never leaves the vault, so it never crosses the web boundary out.
+
+
+class KeyAdd(BaseModel):
+    base: str
+    value: str
+    label: str | None = None
+
+    @field_validator("value")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("key value must be non-blank")
+        return v
+
+
+def _slot_json(s) -> dict:
+    # Deliberately enumerate the safe fields — never `value`.
+    return {
+        "index": s["index"], "env_var": s["env_var"], "label": s.get("label"),
+        "is_set": s["is_set"], "pinned_to": list(s.get("pinned_to", [])),
+    }
+
+
+@router.get("/config/keys")
+def keys_list(base: str = Query(...)) -> dict:
+    from modulatio import provider_keys
+
+    return {"slots": [_slot_json(s) for s in provider_keys.list_keys(base)]}
+
+
+@router.post("/config/keys")
+def keys_add(body: KeyAdd) -> dict:
+    from modulatio import provider_keys
+
+    slot = provider_keys.add_key(body.base, body.value, body.label)
+    return _slot_json(slot)
+
+
+@router.delete("/config/keys/{env_var}")
+def keys_remove(env_var: str) -> dict:
+    from modulatio import provider_keys
+
+    return {"deleted": provider_keys.remove_key(env_var)}

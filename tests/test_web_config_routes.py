@@ -245,3 +245,78 @@ def test_agent_name_is_sanitized_to_a_safe_id(client):
 def test_agent_change_model_unknown_agent_404(client):
     r = client.put("/api/web/config/agents/ghost/model", json={"model": "gpt-x"})
     assert r.status_code == 404
+
+
+# ── MODELS add/remove + provider catalog ──────────────────────────────
+
+
+def test_providers_catalog(client):
+    resp = client.get("/api/config/providers")
+    assert resp.status_code == 200
+    ps = resp.json()["providers"]
+    assert ps and all("id" in p and "base_url" in p and "api_format" in p for p in ps)
+
+
+def test_model_add_and_remove(client):
+    from modulatio import model_presets
+
+    add = client.post("/api/config/models/add",
+                      json={"provider_id": "openrouter", "model": "meta/llama-3"})
+    assert add.status_code == 200
+    key = add.json()["key"]
+    assert key in model_presets.load_presets()
+
+    rm = client.delete(f"/api/config/models/{key}")
+    assert rm.status_code == 200
+    assert key not in model_presets.load_presets()
+
+
+def test_model_add_unknown_provider_422(client):
+    r = client.post("/api/config/models/add",
+                    json={"provider_id": "nope", "model": "x"})
+    assert r.status_code == 422
+
+
+# ── KEYS (write-only — the security crux) ─────────────────────────────
+
+_BASE = "OPENROUTER_API_KEY"
+_SECRET = "sk-DO-NOT-LEAK-abc123"
+
+
+def test_key_add_is_set_and_value_never_echoed(client, monkeypatch):
+    monkeypatch.delenv(_BASE, raising=False)
+    add = client.post("/api/config/keys",
+                      json={"base": _BASE, "value": _SECRET, "label": "primary"})
+    assert add.status_code == 200
+    slot = add.json()
+    assert slot["is_set"] is True
+    # THE red-line: the value never crosses the boundary back out.
+    assert _SECRET not in add.text
+    assert "value" not in slot
+
+
+def test_key_list_reports_is_set_never_the_value(client, monkeypatch):
+    monkeypatch.delenv(_BASE, raising=False)
+    client.post("/api/config/keys",
+                json={"base": _BASE, "value": _SECRET, "label": "primary"})
+    resp = client.get("/api/config/keys", params={"base": _BASE})
+    assert resp.status_code == 200
+    assert _SECRET not in resp.text
+    slots = resp.json()["slots"]
+    assert any(s["is_set"] for s in slots)
+    assert all("value" not in s for s in slots)
+
+
+def test_key_remove(client, monkeypatch):
+    monkeypatch.delenv(_BASE, raising=False)
+    ev = client.post("/api/config/keys",
+                     json={"base": _BASE, "value": _SECRET}).json()["env_var"]
+    rm = client.delete(f"/api/config/keys/{ev}")
+    assert rm.status_code == 200
+    slots = client.get("/api/config/keys", params={"base": _BASE}).json()["slots"]
+    assert not any(s["env_var"] == ev and s["is_set"] for s in slots)
+
+
+def test_key_add_blank_refused(client):
+    r = client.post("/api/config/keys", json={"base": _BASE, "value": "  "})
+    assert r.status_code == 422
