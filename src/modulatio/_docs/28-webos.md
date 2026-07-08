@@ -47,10 +47,13 @@ it never tracebacks at launch.
   action, the request lands as a modal. No decision within the window
   means **deny**: approvals fail closed, exactly like the terminal.
 
-The **CONFIG tab (models, agents, projects, settings, folders) is read/write
-in the terminal today and lands in the WebOS next release** — this first cut
-ships the Console plus the read-only pages above. Configure your models, team,
-and services from the TUI's Config tab for now.
+The **CONFIG tab is now read/write in the browser** — all six sub-pages
+(**Models**, **Agents**, **Services**, **Folders**, **Projects**, **Settings**)
+configure the team straight from the WebOS, each binding the same engine seam
+the terminal's Config screens use and reproducing its guards. **API keys are
+write-only**: a value goes in and the interface only ever reports whether a
+slot *is set*, never the secret, and keys are allowlisted to configured
+model/service handles.
 
 ## The Feng-Web themes
 

@@ -6,6 +6,44 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.9.2] — 2026-07-08
+
+### Added
+
+- **The WebOS CONFIG tab is now read/write — set up your whole team from the
+  browser.** All six sub-pages act: **Models** (add a model from the provider
+  catalog, set its API key, remove) · **Agents** (add / remove producers,
+  change a seat's model, set fallbacks — leader and QC stay singletons) ·
+  **Services** (add an outside image/video/speech/research API from the catalog
+  or a custom one, set its key, make it a capability default) · **Folders**
+  (register / remove operator folders, set the delivery output) · **Projects**
+  (create / switch / delete, refused on the active or an in-flight project) ·
+  **Settings** (edit the engine knobs, with shell/.env-owned values read-only).
+  Every write binds the SAME engine seam the terminal's Config screens use and
+  reproduces each screen's guards — a new user can now configure models,
+  agents, and API-based services without ever opening the TUI.
+- **A write-only key manager.** API keys go in through the browser and never
+  come back out: a value is stored write-only in the vault and the UI only ever
+  reports whether a slot *is set*, never the secret. Keys are scoped to
+  configured model/service handles.
+
+### Changed
+
+- **Both Feng-Web themes polished.** Modal dialogs get an opaque fill (Atelier
+  popups no longer show the page through them); action-row buttons adapt to
+  their surface so they stay visible on Vellum's dark panels (were
+  dark-on-dark); the Console centers its width instead of leaving a right-hand
+  gutter; the Leader's speech fills the TV; and the operator's own lines read in
+  full-strength text.
+
+### Security
+
+- A two-lens cadre (security + quality) cleared the CONFIG tab: the write-only
+  key contract holds (no secret crosses the boundary out), and keys are
+  allowlisted to configured model/service handles so an arbitrary env var —
+  e.g. a sandbox-bypass switch — can't be written through the key route. Every
+  TUI guard is reproduced at the web boundary.
+
 ## [0.9.9.1] — 2026-07-08
 
 ### Added
