@@ -152,12 +152,10 @@ export function mountConsole(page, ctx) {
   // — approval modal —
   const modal = el("dialog", { class: "approval card" });
 
-  page.append(
-    el("section", { class: "stack console" },
-      el("div", { class: "spread" }, lamps, el("div", { class: "row" }, btnLeader, btnTeam)),
-      tvLeader, teamWrap, statusLine, composer),
-    modal,
-  );
+  const consoleSection = el("section", { class: "stack console", "data-lane": "leader" },
+    el("div", { class: "spread" }, lamps, el("div", { class: "row" }, btnLeader, btnTeam)),
+    tvLeader, teamWrap, statusLine, composer);
+  page.append(consoleSection, modal);
 
   // ── rendering ────────────────────────────────────────────────────
 
@@ -192,6 +190,8 @@ export function mountConsole(page, ctx) {
     btnTeam.setAttribute("aria-current", lane === "team" ? "page" : "false");
     // The composer talks to the Leader — no kickoff box on the team view.
     composer.hidden = lane !== "leader";
+    // Team view has no composer, so the TV grows to fill (CSS on the lane).
+    consoleSection.dataset.lane = lane;
     // A hidden lane can't scroll while hidden — catch it up now that it shows.
     const shown = lane === "leader" ? tvLeader : tvTeam;
     shown.scrollTop = shown.scrollHeight;
@@ -322,6 +322,9 @@ export function mountConsole(page, ctx) {
   const unsubscribe = subscribe(ctx.project, (frame) => {
     if (frame.type === "event") eventLine(frame.data);
     else if (frame.type === "telemetry") {
+      // Telemetry only flows during a run — so it can't be "standby". Belt over
+      // run_started (which the replay now delivers) so the status never lies.
+      if (!state.running) setRunning(true);
       state.telemetry = frame.data;
       state.tokens = frame.data.tokens;
       state.elapsed = frame.data.elapsed_s;

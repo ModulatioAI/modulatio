@@ -302,6 +302,17 @@ footer#hints .key { font-family: var(--font-mono); font-weight: 600; color: var(
 }
 .teamwrap[hidden], .tv[hidden] { display: none; }
 
+/* Team view drops the composer, so the TV fills the page to the bottom
+   instead of leaving a gap. Scoped to the team lane — the leader view keeps
+   its 46vh TV with the composer below. */
+.console[data-lane="team"] { height: 100%; }
+.console[data-lane="team"] .teamwrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+.console[data-lane="team"] .tv { height: auto; min-height: 0; }
+
 .rail { font-size: 13px; }
 .rail div { padding: 2px 0; }
 
