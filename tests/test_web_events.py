@@ -74,17 +74,43 @@ def test_event_to_json_stringifies_unknown_detail_objects():
 # ── bus ───────────────────────────────────────────────────────────────
 
 
-def test_bus_delivers_to_subscriber_no_replay():
+def test_bus_replays_current_run_to_new_subscriber():
     from modulatio.web.events import EventBus
 
     bus = EventBus()
-    bus.publish({"type": "event", "data": {"n": 0}})  # before subscribe → lost
+    bus.publish({"type": "event", "data": {"n": 0}})  # before subscribe → REPLAYED
     q = bus.subscribe()
-    bus.publish({"type": "event", "data": {"n": 1}})
-    assert q.get(timeout=2) == {"type": "event", "data": {"n": 1}}
+    bus.publish({"type": "event", "data": {"n": 1}})  # live
+    assert q.get(timeout=2) == {"type": "event", "data": {"n": 0}}  # replay first
+    assert q.get(timeout=2) == {"type": "event", "data": {"n": 1}}  # then live
     bus.unsubscribe(q)
     bus.publish({"type": "event", "data": {"n": 2}})
+    assert q.empty()  # unsubscribed → no more live frames
+
+
+def test_run_started_resets_the_replay_buffer():
+    from modulatio.web.events import EventBus
+
+    bus = EventBus()
+    bus.publish({"type": "event", "data": {"n": "old"}})  # a prior run's frame
+    bus.publish({"type": "run_started", "data": {"run_id": "r2"}})
+    bus.publish({"type": "event", "data": {"n": "new"}})
+    q = bus.subscribe()
+    # replay starts at the new run_started — the prior run's frame is gone
+    assert q.get(timeout=2) == {"type": "run_started", "data": {"run_id": "r2"}}
+    assert q.get(timeout=2) == {"type": "event", "data": {"n": "new"}}
     assert q.empty()
+
+
+def test_telemetry_replays_latest_only():
+    from modulatio.web.events import EventBus
+
+    bus = EventBus()
+    bus.publish({"type": "telemetry", "data": {"tokens": 10}})
+    bus.publish({"type": "telemetry", "data": {"tokens": 20}})
+    q = bus.subscribe()
+    assert q.get(timeout=2) == {"type": "telemetry", "data": {"tokens": 20}}
+    assert q.empty()  # the latest only, never a backlog of ticks
 
 
 def test_get_bus_is_per_project_singleton():

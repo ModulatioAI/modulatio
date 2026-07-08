@@ -14,20 +14,43 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections import deque
 
 #: Frames a subscriber can miss before we drop the oldest — a stuck
 #: browser must never wedge the publishing engine thread.
 _SUBSCRIBER_DEPTH = 1000
+
+#: The current run's activity frames held for replay, so a (re)connecting
+#: browser rebuilds the whole stream instead of only what happens next. The
+#: SSE self-heals every 2s and a tab switch re-subscribes; without replay any
+#: event in the gap is lost (leader decompose, producer bursts). Telemetry is
+#: kept separately (latest-only) — it fires 1/s and is idempotent, so buffering
+#: every frame would evict the real events.
+_REPLAY_DEPTH = 4000
 
 
 class EventBus:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue] = []
+        self._replay: deque[dict] = deque(maxlen=_REPLAY_DEPTH)
+        self._last_telemetry: dict | None = None
 
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=_SUBSCRIBER_DEPTH)
         with self._lock:
+            # Replay the current run first, then register for live frames —
+            # both under the lock so no live frame slips in between.
+            for frame in self._replay:
+                try:
+                    q.put_nowait(frame)
+                except queue.Full:
+                    break
+            if self._last_telemetry is not None:
+                try:
+                    q.put_nowait(self._last_telemetry)
+                except queue.Full:
+                    pass
             self._subscribers.append(q)
         return q
 
@@ -38,6 +61,16 @@ class EventBus:
 
     def publish(self, frame: dict) -> None:
         with self._lock:
+            # Keep the run's stream for replay; a new run_started resets it.
+            ftype = frame.get("type")
+            if ftype == "run_started":
+                self._replay.clear()
+                self._last_telemetry = None
+                self._replay.append(frame)
+            elif ftype == "telemetry":
+                self._last_telemetry = frame
+            else:
+                self._replay.append(frame)
             targets = list(self._subscribers)
         for q in targets:
             try:

@@ -190,6 +190,20 @@ export function mountConsole(page, ctx) {
     teamWrap.hidden = lane !== "team";
     btnLeader.setAttribute("aria-current", lane === "leader" ? "page" : "false");
     btnTeam.setAttribute("aria-current", lane === "team" ? "page" : "false");
+    // A hidden lane can't scroll while hidden — catch it up now that it shows.
+    const shown = lane === "leader" ? tvLeader : tvTeam;
+    shown.scrollTop = shown.scrollHeight;
+  }
+
+  // Rebuild-on-(re)connect: the server replays the current run on every
+  // connection, so clear the view and let the replay repaint it — no duplicate
+  // lines, and a reconnect or tab-return restores the whole stream.
+  function resetView() {
+    tvLeader.replaceChildren();
+    tvTeam.replaceChildren();
+    state.producers.clear();
+    state.telemetry = null;
+    renderRail();
   }
 
   function appendLine(tv, node) {
@@ -327,7 +341,8 @@ export function mountConsole(page, ctx) {
     }
   }, {
     onStatus: (s) => {
-      if (s === "reconnecting") statusLine.textContent = "◌ reconnecting…";
+      if (s === "connected") resetView();
+      else if (s === "reconnecting") statusLine.textContent = "◌ reconnecting…";
     },
   });
 
