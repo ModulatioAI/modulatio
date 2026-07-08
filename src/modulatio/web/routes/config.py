@@ -381,10 +381,39 @@ def _slot_json(s) -> dict:
     }
 
 
+def _allowed_key_bases() -> set:
+    """The ONLY env vars the WebOS key manager may touch (WB-1): the key
+    handles of CONFIGURED models + services. The route exposes the provider-key
+    pool primitive, so without this a crafted request could write ANY env var
+    into the vault .env — e.g. the MODULATIO_RUN_SHELL_UNSAFE sandbox switch.
+    Keys are only ever set for a model/service that already exists, so the
+    configured set is exactly the legitimate target set."""
+    from modulatio import model_presets, services
+
+    bases: set = set()
+    for rec in model_presets.load_presets().values():
+        ev = (rec.get("auth_config") or {}).get("env_var")
+        if ev:
+            bases.add(ev)
+    for svc in services.load_services().values():
+        if svc.env_var:
+            bases.add(svc.env_var)
+    return bases
+
+
+def _require_key_base(base: str) -> str:
+    if not base.isidentifier() or base not in _allowed_key_bases():
+        raise HTTPException(
+            status_code=404,
+            detail="not a configured model/service key handle")
+    return base
+
+
 @router.get("/config/keys")
 def keys_list(base: str = Query(...)) -> dict:
     from modulatio import provider_keys
 
+    _require_key_base(base)
     return {"slots": [_slot_json(s) for s in provider_keys.list_keys(base)]}
 
 
@@ -392,6 +421,7 @@ def keys_list(base: str = Query(...)) -> dict:
 def keys_add(body: KeyAdd) -> dict:
     from modulatio import provider_keys
 
+    _require_key_base(body.base)
     slot = provider_keys.add_key(body.base, body.value, body.label)
     return _slot_json(slot)
 
@@ -400,6 +430,15 @@ def keys_add(body: KeyAdd) -> dict:
 def keys_remove(env_var: str) -> dict:
     from modulatio import provider_keys
 
+    # A slot's env var is its base (#1) or ``<base>_<digits>`` (#2..) — the
+    # target must belong to an ALLOWED base, never an arbitrary name (WB-1).
+    if not env_var.isidentifier():
+        raise HTTPException(status_code=404, detail="invalid key handle")
+    ok = any(env_var == b or re.fullmatch(rf"{re.escape(b)}_\d+", env_var)
+             for b in _allowed_key_bases())
+    if not ok:
+        raise HTTPException(
+            status_code=404, detail="not a configured model/service key slot")
     return {"deleted": provider_keys.remove_key(env_var)}
 
 

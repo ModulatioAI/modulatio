@@ -296,8 +296,17 @@ _BASE = "OPENROUTER_API_KEY"
 _SECRET = "sk-DO-NOT-LEAK-abc123"
 
 
+def _allow_base(client):
+    """Register an openrouter model so OPENROUTER_API_KEY becomes a legitimate
+    (allowlisted) key handle — the key routes only target configured
+    model/service env vars (WB-1)."""
+    client.post("/api/config/models/add",
+                json={"provider_id": "openrouter", "model": "meta/llama-3"})
+
+
 def test_key_add_is_set_and_value_never_echoed(client, monkeypatch):
     monkeypatch.delenv(_BASE, raising=False)
+    _allow_base(client)
     add = client.post("/api/config/keys",
                       json={"base": _BASE, "value": _SECRET, "label": "primary"})
     assert add.status_code == 200
@@ -310,6 +319,7 @@ def test_key_add_is_set_and_value_never_echoed(client, monkeypatch):
 
 def test_key_list_reports_is_set_never_the_value(client, monkeypatch):
     monkeypatch.delenv(_BASE, raising=False)
+    _allow_base(client)
     client.post("/api/config/keys",
                 json={"base": _BASE, "value": _SECRET, "label": "primary"})
     resp = client.get("/api/config/keys", params={"base": _BASE})
@@ -322,6 +332,7 @@ def test_key_list_reports_is_set_never_the_value(client, monkeypatch):
 
 def test_key_remove(client, monkeypatch):
     monkeypatch.delenv(_BASE, raising=False)
+    _allow_base(client)
     ev = client.post("/api/config/keys",
                      json={"base": _BASE, "value": _SECRET}).json()["env_var"]
     rm = client.delete(f"/api/config/keys/{ev}")
@@ -331,8 +342,34 @@ def test_key_remove(client, monkeypatch):
 
 
 def test_key_add_blank_refused(client):
+    _allow_base(client)
     r = client.post("/api/config/keys", json={"base": _BASE, "value": "  "})
     assert r.status_code == 422
+
+
+# ── WB-1 remediation: keys are scoped to configured model/service handles ─
+
+
+def test_key_add_refuses_arbitrary_env_var(client, monkeypatch):
+    """WB-1 HIGH: the key route must not write ANY env var into the vault —
+    only configured model/service key handles. A sandbox-bypass switch like
+    MODULATIO_RUN_SHELL_UNSAFE is not a key handle and must be refused."""
+    monkeypatch.delenv("MODULATIO_RUN_SHELL_UNSAFE", raising=False)
+    r = client.post("/api/config/keys",
+                    json={"base": "MODULATIO_RUN_SHELL_UNSAFE", "value": "1"})
+    assert r.status_code == 404
+    import os
+    assert "MODULATIO_RUN_SHELL_UNSAFE" not in os.environ
+
+
+def test_key_list_refuses_arbitrary_env_var(client):
+    r = client.get("/api/config/keys", params={"base": "HOME"})
+    assert r.status_code == 404
+
+
+def test_key_delete_refuses_arbitrary_env_var(client):
+    r = client.delete("/api/config/keys/HOME")
+    assert r.status_code == 404
 
 
 # ── SERVICES (catalog + custom; keys via the write-only pool) ─────────
