@@ -25,7 +25,8 @@ def client():
     from modulatio.web.app import create_app
 
     vault.init_project("web", "Web", "o")
-    return TestClient(create_app(stub=True), base_url="http://localhost")
+    return TestClient(create_app(stub=True), base_url="http://localhost",
+                      headers={"X-Modulatio-WebOS": "1"})
 
 
 @pytest.fixture()

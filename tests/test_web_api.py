@@ -152,6 +152,29 @@ def test_static_shell_not_token_gated():
     assert client.get("/").status_code == 200
 
 
+# ── CSRF guard (state-changing requests need the SPA's custom header) ──
+
+
+def test_state_changing_request_requires_webos_header():
+    """A bodyless cross-origin POST is a CORS 'simple request' (no preflight),
+    so the JSON-content-type defense doesn't cover it. State-changing /api
+    requests must carry the SPA's custom header; a page that can't set it (no
+    preflight → blocked, no CORS middleware) can't drive the API."""
+    from fastapi.testclient import TestClient
+
+    from modulatio.web.app import create_app
+
+    client = TestClient(create_app(), base_url="http://localhost")
+    # Reads are unaffected.
+    assert client.get("/api/projects").status_code == 200
+    # A mutating request without the header is refused before routing.
+    assert client.post("/api/web/cron/j/enable").status_code == 403
+    assert client.delete("/api/web/tickets/T-1").status_code == 403
+    # With the header it reaches routing (404 = no such job, not a CSRF block).
+    ok = client.post("/api/web/cron/j/enable", headers={"X-Modulatio-WebOS": "1"})
+    assert ok.status_code != 403
+
+
 # ── DNS-rebinding guard ───────────────────────────────────────────────
 
 

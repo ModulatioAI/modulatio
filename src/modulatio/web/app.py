@@ -24,6 +24,14 @@ STATIC_DIR = Path(__file__).parent / "static"
 #: non-loopback binds).
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
 
+#: A custom header the SPA sends on every request. State-changing methods
+#: require it: a cross-origin page cannot set a custom header on a CORS
+#: "simple request", so demanding one forces a preflight that (no CORS
+#: middleware exists) fails — closing CSRF on the token-free loopback bind,
+#: including the bodyless POSTs that a JSON content-type wouldn't catch.
+_CSRF_HEADER = "x-modulatio-webos"
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
 
 def create_app(
     *,
@@ -54,6 +62,17 @@ def create_app(
         host = request.headers.get("host", "").rsplit(":", 1)[0]
         if host not in served_hosts and host.lower() not in served_hosts:
             return JSONResponse({"detail": "unrecognized Host"}, status_code=400)
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def _csrf_guard(request: Request, call_next):
+        # State-changing /api requests must carry the SPA's custom header.
+        # Reads (GET/HEAD) and preflight (OPTIONS) pass; static assets pass.
+        if (request.method not in _SAFE_METHODS
+                and request.url.path.startswith(("/api", "/events"))
+                and _CSRF_HEADER not in request.headers):
+            return JSONResponse(
+                {"detail": "missing WebOS request header"}, status_code=403)
         return await call_next(request)
 
     if bearer_token is not None:

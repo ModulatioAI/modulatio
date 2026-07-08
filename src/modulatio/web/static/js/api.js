@@ -27,6 +27,9 @@ export async function api(path, { method = "GET", body } = {}) {
   const resp = await fetch(`/api${path}`, {
     method,
     headers: {
+      // A custom header a cross-origin "simple request" can't set — the
+      // CSRF guard requires it on every state-changing call.
+      "X-Modulatio-WebOS": "1",
       ...authHeaders(),
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
