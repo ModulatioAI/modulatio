@@ -255,11 +255,12 @@ def _artifact_roots(code: str) -> list:
 
 @router.get("/{project}/artifacts")
 def list_artifacts(project: str) -> dict:
-    from modulatio import families
+    from modulatio import delivery, families
     from modulatio.tui.screens.artifacts import _FAMILY_GLYPH, _is_artifact_file
 
     code = valid_project(project)
     root = vault.project_dir(code)
+    products = delivery.finished_product_paths(code)
     files = []
     for d in _artifact_roots(code):
         if not d.exists():
@@ -269,13 +270,21 @@ def list_artifacts(project: str) -> dict:
                 continue
             family = families.infer_artifact_family_from_path(p)
             size = p.stat().st_size
+            try:
+                is_product = p.resolve() in products
+            except OSError:
+                is_product = p in products
             files.append({
                 "path": str(p.relative_to(root)),
                 "size": size,
                 "size_human": vault.human_size(size),
                 "family": family,
                 "family_glyph": _FAMILY_GLYPH.get(family, "·"),
+                "product": is_product,
             })
+    # The TUI contract: finished products hoist to the top; the sort is
+    # stable, so walk order holds within each group.
+    files.sort(key=lambda f: not f["product"])
     return {"files": files}
 
 

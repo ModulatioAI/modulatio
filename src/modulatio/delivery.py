@@ -648,6 +648,35 @@ def blocked_goal_ids(goals) -> "list[str]":
     return out
 
 
+def finished_product_paths(project_code: str) -> "set[Path]":
+    """Absolute paths of EVERY run's finished deliverables — the files the
+    operator actually asked for. UIs use it to ★-flag + hoist them out of
+    the research/draft pile (TUI Artifacts tab, WebOS Artifacts page).
+    Best-effort: any failure returns empty (the flag is cosmetic and must
+    never block a listing).
+
+    Spans ALL runs, not just the latest: a finished product stays starred
+    permanently (until deleted), so the operator always picks their
+    products out of the accumulating durable pile."""
+    try:
+        from modulatio import store, vault
+
+        out: "set[Path]" = set()
+        for run_id in vault.list_runs(project_code):
+            tasks = store.list_tasks(project_code, run_id=run_id)
+            artifacts_root = vault.project_dir(project_code) / "artifacts" / run_id
+            for _tid, path, _fallback, _fam in deliverables_from_tasks(
+                tasks, artifacts_root
+            ):
+                try:
+                    out.add(path.resolve())
+                except OSError:
+                    out.add(path)
+        return out
+    except Exception:
+        return set()
+
+
 __all__ = [
     "DEFAULT_DELIVERY_FORMAT",
     "DeliveredProduct",
@@ -659,6 +688,7 @@ __all__ = [
     "deliver_product",
     "deliverables_from_tasks",
     "delivery_root",
+    "finished_product_paths",
     "human_name_from_markdown",
     "job_dir",
     "job_folder_name",

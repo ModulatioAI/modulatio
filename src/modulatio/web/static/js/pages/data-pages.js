@@ -141,11 +141,14 @@ export function mountArtifacts(page, ctx) {
     title: "Artifacts",
     load: async () => (await api(`${P(ctx)}/artifacts`)).files,
     columns: [
-      { label: "", cell: (f) => f.family_glyph, mono: true },
+      // ★ marks the finished product — the deliverable the operator asked
+      // for — hoisted above the research/draft pile (the TUI contract).
+      { label: "", cell: (f) => (f.product ? "★ " : "") + f.family_glyph,
+        mono: true },
       { label: "path", cell: (f) => f.path, mono: true },
       { label: "size", cell: (f) => f.size_human, mono: true },
     ],
-    rowLabel: (f) => f.path,
+    rowLabel: (f) => (f.product ? "★ " : "") + f.path,
     emptyText: "no artifacts yet — they land here as runs produce",
     renderDetail: async (f) => {
       const prev = await api(

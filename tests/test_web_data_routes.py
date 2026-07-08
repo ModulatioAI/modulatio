@@ -221,6 +221,27 @@ def test_artifacts_walk_and_preview(client):
     assert "hello from the vault" in prev.json()["text"]
 
 
+def test_artifacts_star_and_hoist_finished_products(client, finished_run):
+    """The TUI contract (live #7): a run's finished deliverable is
+    product-flagged and hoisted above the research/draft pile."""
+    from modulatio import store
+
+    (vault.project_dir("web") / "artifacts" / "aaa-note.md").write_text(
+        "draft pile\n", encoding="utf-8"
+    )
+    task = store.list_tasks("web", run_id=finished_run)[0]
+    task.deliverable = True
+    store.save_task("web", task, run_id=finished_run)
+
+    files = client.get("/api/web/artifacts").json()["files"]
+
+    products = [f for f in files if f["product"]]
+    assert len(products) == 1
+    assert products[0]["path"].endswith(f"{task.id.lower()}.md")
+    assert files[0]["product"], "finished products hoist to the top"
+    assert not files[-1]["product"]
+
+
 def test_artifact_preview_traversal_and_dotfile_refused(client):
     assert client.get(
         "/api/web/artifacts/preview", params={"path": "../../../etc/passwd"}
