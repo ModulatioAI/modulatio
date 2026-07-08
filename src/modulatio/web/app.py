@@ -87,12 +87,13 @@ def create_app(
                     )
             return await call_next(request)
 
-    from modulatio.web.routes import actions, console, data, projects
+    from modulatio.web.routes import actions, config as config_routes, console, data, projects
 
     app.include_router(projects.router)
     app.include_router(console.router)
     app.include_router(data.router)
     app.include_router(actions.router)
+    app.include_router(config_routes.router)
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app

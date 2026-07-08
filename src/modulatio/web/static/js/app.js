@@ -6,6 +6,7 @@
 
 import { api } from "./api.js";
 import { el } from "./dom.js";
+import { mountConfig } from "./pages/config.js";
 import { mountConsole } from "./pages/console.js";
 import {
   mountArtifacts, mountCron, mountDocs, mountJobs, mountJts, mountLogs,
@@ -33,6 +34,7 @@ const TABS = [
 // an unmount cleanup.
 export const PAGES = {
   console: mountConsole,
+  config: mountConfig,
   jts: mountJts,
   tickets: mountTickets,
   jobs: mountJobs,

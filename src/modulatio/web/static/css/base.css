@@ -101,6 +101,16 @@ body {
   font-weight: 600;
 }
 
+/* CONFIG inner sub-tab row — smaller, underlined-active, above the sub-page. */
+.subtab-row {
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0 16px;
+  padding-bottom: 10px;
+  border-bottom: var(--line-w, 1.5px) solid var(--ink-soft);
+}
+.tab.subtab { font-size: 12px; padding: 4px 12px; }
+
 main#page {
   padding: 4px 28px 24px;
   min-height: 0;
