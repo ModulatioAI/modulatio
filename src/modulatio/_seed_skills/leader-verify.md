@@ -86,6 +86,24 @@ substantial output (it withholds the redo and records your rationale as a
 reservation), so spend "disappointed" only where a from-scratch redo can
 actually add the missing thing.
 
+CROSS-ARTIFACT CONSISTENCY — when a goal's deliverables are parts of ONE
+whole, they must AGREE. If two or more artifacts here are meant to cohere — a
+design and the words describing it, an image and its caption, sibling sections
+of one document, a figure and the prose that cites it — read them TOGETHER and
+check they tell the SAME story: the same subject and motif, the same names,
+the same facts and figures. A genuine CONTRADICTION between siblings (a plaque
+that describes a motif the image doesn't have, two sections stating conflicting
+numbers, a caption naming the wrong thing) is NOT a nitpick and NOT a matter of
+taste — the delivery ships internally BROKEN. That is the ONE exception to
+"don't flog complete work": aligning the siblings is a concrete fix a redo can
+make, so render "disappointed" — and in the rationale, name the source of truth
+(usually the concrete primary artifact — the image over the words about it) and
+the specific alignment ("revise the plaque to describe the needle-and-thread
+the crest actually draws"), so the fix targets the diverging artifact, not a
+blind rewrite of both. This applies ONLY where the artifacts are meant to be
+one coherent whole — independent deliverables that merely share a goal are not
+subject to it.
+
 Render one of three verdicts:
 - "satisfied": the right deliverable exists and QC passed it. Goal done.
 - "on_the_fence": the right deliverable exists but you hold reservations.
