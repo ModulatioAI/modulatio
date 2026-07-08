@@ -66,6 +66,44 @@ def test_run_loads_vault_env_before_serving(monkeypatch):
     assert calls == ["env", "serve"]
 
 
+def test_run_default_port_is_8787(monkeypatch):
+    from modulatio.web import server
+
+    monkeypatch.setattr(server, "is_installed", lambda: True)
+    monkeypatch.setattr(server.config, "load_modulatio_env", lambda: None)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "uvicorn.run", lambda app, **k: captured.update(k))
+    server.run([])
+    assert captured["port"] == 8787
+
+
+def test_run_port_from_env_override_knob(monkeypatch):
+    """The MODULATIO_WEB_PORT settings knob changes the default port so the
+    operator can move the WebOS off an occupied port."""
+    from modulatio.web import server
+
+    monkeypatch.setattr(server, "is_installed", lambda: True)
+    monkeypatch.setattr(server.config, "load_modulatio_env", lambda: None)
+    monkeypatch.setenv("MODULATIO_WEB_PORT", "9001")
+    captured: dict = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **k: captured.update(k))
+    server.run([])
+    assert captured["port"] == 9001
+
+
+def test_run_explicit_port_flag_wins_over_env(monkeypatch):
+    from modulatio.web import server
+
+    monkeypatch.setattr(server, "is_installed", lambda: True)
+    monkeypatch.setattr(server.config, "load_modulatio_env", lambda: None)
+    monkeypatch.setenv("MODULATIO_WEB_PORT", "9001")
+    captured: dict = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **k: captured.update(k))
+    server.run(["--port", "8080"])
+    assert captured["port"] == 8080
+
+
 # ── /api/projects ─────────────────────────────────────────────────────
 
 

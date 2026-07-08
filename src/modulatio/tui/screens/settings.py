@@ -94,6 +94,10 @@ KNOBS: "tuple[Knob, ...]" = tuple(
         Knob("MODULATIO_SIZE_TOLERANCE", "QC size tolerance", "0.10",
              "QC's discretion margin on size-band checks. Range 0.0–0.5.",
              _float_range(0.0, 0.5)),
+        Knob("MODULATIO_WEB_PORT", "WebOS port", "8787",
+             "Port `modulatio-api` serves the WebOS on. Change it if something "
+             "else occupies the default. Range 1–65535; `--port` still wins.",
+             _int_range(1, 65535)),
     ]
     + [
         Knob(

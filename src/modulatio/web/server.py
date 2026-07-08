@@ -15,10 +15,16 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import os
 import secrets
 import sys
 
+from modulatio import config
 from modulatio.web.install import is_installed
+
+#: The shipped default WebOS port. Overridable by the MODULATIO_WEB_PORT
+#: settings knob, and by an explicit ``--port`` (which wins over both).
+_DEFAULT_PORT = 8787
 
 _INSTALL_HINT = (
     "modulatio-api needs the web extra. Install it with:\n"
@@ -63,17 +69,21 @@ def run(argv: list[str] | None = None) -> None:
     # The same env-load contract every other entry point gets from cli.py:
     # install-root + vault .env BEFORE any engine work, so the Leader's
     # provider keys exist in the server's environment (without this,
-    # converse 500s — the keys the TUI sees are invisible here).
-    from modulatio import config
-
+    # converse 500s — the keys the TUI sees are invisible here). Then apply
+    # the operator's saved settings-tab overrides so MODULATIO_WEB_PORT (and
+    # any other knob) reaches this process.
     config.load_modulatio_env()
+    config.apply_env_overrides()
 
     parser = argparse.ArgumentParser(
         prog="modulatio-api", description="Serve the Modulatio WebOS."
     )
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8787)
+    # default=None so an explicit --port is distinguishable from the fallback
+    # chain (--port > MODULATIO_WEB_PORT knob > shipped default).
+    parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args(argv)
+    port = args.port if args.port is not None else _resolve_port()
 
     token: str | None = None
     allowed_hosts: list[str] = []
@@ -94,5 +104,20 @@ def run(argv: list[str] | None = None) -> None:
 
     uvicorn.run(
         create_app(bearer_token=token, allowed_hosts=allowed_hosts),
-        host=args.host, port=args.port,
+        host=args.host, port=port,
     )
+
+
+def _resolve_port() -> int:
+    """The default port: the MODULATIO_WEB_PORT knob if set to a valid port,
+    else the shipped default. A malformed value falls back rather than
+    crashing the launch."""
+    raw = os.environ.get("MODULATIO_WEB_PORT", "").strip()
+    if raw:
+        try:
+            port = int(raw)
+            if 1 <= port <= 65535:
+                return port
+        except ValueError:
+            pass
+    return _DEFAULT_PORT

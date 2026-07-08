@@ -191,7 +191,7 @@ class OrchestratorActor:
     def live_run_id(self) -> str | None:
         return self._kickoff_run_id if self.kickoff_active() else None
 
-    def kickoff(self, objective: str) -> str:
+    def kickoff(self, objective: str, *, jt_name: str | None = None) -> str:
         with self._kickoff_lock:
             if self.kickoff_active():
                 raise KickoffBusy(self._kickoff_run_id or "")
@@ -206,7 +206,7 @@ class OrchestratorActor:
             })
             thread = threading.Thread(
                 target=self._kickoff_worker,
-                args=(orch, objective, run_id),
+                args=(orch, objective, run_id, jt_name),
                 name=f"webos-kickoff-{self.code}",
                 daemon=True,
             )
@@ -227,7 +227,10 @@ class OrchestratorActor:
             self._kickoff_orch.abort_event.set()
             return True
 
-    def _kickoff_worker(self, orch: Orchestrator, objective: str, run_id: str) -> None:
+    def _kickoff_worker(
+        self, orch: Orchestrator, objective: str, run_id: str,
+        jt_name: str | None = None,
+    ) -> None:
         ticker_stop = threading.Event()
         ticker = threading.Thread(
             target=self._telemetry_ticker,
@@ -238,7 +241,7 @@ class OrchestratorActor:
         error: str | None = None
         digest = ""
         try:
-            summary = orch.kickoff(objective)
+            summary = orch.kickoff(objective, bound_jt_name=jt_name)
             if summary is not None:
                 from modulatio.project_execution import _summarize_kickoff_result
 

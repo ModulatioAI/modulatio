@@ -359,6 +359,7 @@ ENV_OVERRIDE_ALLOWLIST: frozenset[str] = frozenset({
     "MODULATIO_CTX_BUDGET_LEADER_REFLECT",
     "MODULATIO_CTX_BUDGET_LEADER_CHAT",
     "MODULATIO_CTX_BUDGET_RESEARCH",
+    "MODULATIO_WEB_PORT",
 })
 
 #: Keys apply_env_overrides has set — so a later save can update or unset
