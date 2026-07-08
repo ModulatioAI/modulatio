@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.9.1] — 2026-07-08
+
 ### Added
 
 - **The WebOS pages can now act — a clickable button for every verb.** The
@@ -36,6 +38,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can't run (offline, a locked-down environment), it falls back to showing the
   manual command. Skipping in the wizard costs nothing: install later by
   re-running setup or pressing the button.
+
+### Security
+
+- **CSRF fence on the WebOS.** Every state-changing (`POST`/`PUT`/`DELETE`)
+  request to the API must carry a custom header the SPA sends and a
+  cross-origin page cannot set without a preflight that (there is no CORS
+  middleware) fails — closing the bodyless-POST simple-request gap on the
+  token-free loopback bind. Cron verbs are scoped to their own project (a
+  global job id under one project's path can't touch another's schedule), a
+  run can't be deleted while a job is writing it, artifact export returns only
+  the folder name + filename (never the host path), and the installer accepts
+  only real requirement names from its own metadata. Full two-lens cadre
+  (security + quality) cleared.
 
 ## [0.9.9.0] — 2026-07-07
 
