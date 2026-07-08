@@ -110,6 +110,10 @@ export function mountConsole(page, ctx) {
   // — flip —
   const btnLeader = el("button", { class: "tab", onclick: () => flip("leader") }, "LEADER");
   const btnTeam = el("button", { class: "tab", onclick: () => flip("team") }, "MOD SQUAD");
+  const btnClear = el("button", {
+    class: "tab", title: "Clear the activity log (both lanes)",
+    onclick: () => clearScreen(),
+  }, "CLEAR");
 
   // — TVs —
   const tvLeader = el("div", { class: "card tv", role: "log", "aria-label": "Leader lane" });
@@ -153,7 +157,8 @@ export function mountConsole(page, ctx) {
   const modal = el("dialog", { class: "approval card" });
 
   const consoleSection = el("section", { class: "stack console", "data-lane": "leader" },
-    el("div", { class: "spread" }, lamps, el("div", { class: "row" }, btnLeader, btnTeam)),
+    el("div", { class: "spread" }, lamps,
+      el("div", { class: "row" }, btnLeader, btnTeam, btnClear)),
     tvLeader, teamWrap, statusLine, composer);
   page.append(consoleSection, modal);
 
@@ -206,6 +211,13 @@ export function mountConsole(page, ctx) {
     state.producers.clear();
     state.telemetry = null;
     renderRail();
+  }
+
+  // Operator "clear screen" — wipe both activity logs; leaves the telemetry
+  // rail and any live run alone. A reconnect repaints from the server replay.
+  function clearScreen() {
+    tvLeader.replaceChildren();
+    tvTeam.replaceChildren();
   }
 
   function appendLine(tv, node) {
