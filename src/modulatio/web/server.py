@@ -17,7 +17,8 @@ import argparse
 import ipaddress
 import secrets
 import sys
-from importlib.util import find_spec
+
+from modulatio.web.install import is_installed
 
 _INSTALL_HINT = (
     "modulatio-api needs the web extra. Install it with:\n"
@@ -55,7 +56,7 @@ def _is_loopback(host: str) -> bool:
 
 
 def run(argv: list[str] | None = None) -> None:
-    if find_spec("fastapi") is None or find_spec("uvicorn") is None:
+    if not is_installed():
         print(_INSTALL_HINT, file=sys.stderr, end="")
         raise SystemExit(1)
 

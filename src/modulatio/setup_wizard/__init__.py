@@ -9,6 +9,7 @@ Wizard step order (8 steps; step 5 added 2026-04-30 for budget caps):
 
     1. pandoc check + cross-OS install panel + auto-install
        (also prints the welcome / re-config banner — no separate intro)
+       plus clipboard + SVG-renderer + WebOS-install tooling checks (1a/1b/1c)
     2. vault path (Obsidian-detection + neutral fallback)
     3. models — combined endpoint + auth + model-id step. Quick-add rows
        for detected OAuth credentials + local services. Each entry is
@@ -63,6 +64,7 @@ from modulatio.setup_wizard import (
     renderer_step,
     steps,
     vault_path_step,
+    webos_step,
 )
 
 # Bump this when the wizard layout/output schema changes meaningfully —
@@ -75,6 +77,7 @@ _STEP_TITLES = {
     "pandoc": "1. Check pandoc",
     "clipboard": "1a. Check clipboard backend",
     "renderer": "1b. Check SVG renderer",
+    "webos": "1c. Install WebOS (optional)",
     "vault_path": "2. Vault paths",
     # Models + agents are configured in the TUI Config tab now, not here.
     "budget": "3. Budget defaults (optional)",
@@ -93,6 +96,8 @@ def _dispatch(step_name: str, state: dict) -> Any:
         return clipboard_step.run(state)
     if step_name == "renderer":
         return renderer_step.run(state)
+    if step_name == "webos":
+        return webos_step.run(state)
     if step_name == "vault_path":
         return vault_path_step.run(state)
     if step_name == "budget":
@@ -120,6 +125,7 @@ def _pop_state(step_name: str, state: dict) -> None:
         "pandoc": ["pandoc_installed", "pandoc_skipped"],
         "clipboard": ["clipboard_backend_installed", "clipboard_skipped"],
         "renderer": ["svg_renderer_installed", "svg_renderer_skipped"],
+        "webos": ["webos_installed", "webos_skipped"],
         "vault_path": ["vault_root", "shared_resources_path"],
         "budget": ["budget_caps"],
         "first_project": ["first_project_code", "first_project_objective"],
@@ -264,7 +270,7 @@ def _system_tools_snapshot() -> dict[str, bool]:
     """
     snapshot: dict[str, bool] = {}
     for name, module in (("pandoc", pandoc_step), ("clipboard", clipboard_step),
-                         ("renderer", renderer_step)):
+                         ("renderer", renderer_step), ("webos", webos_step)):
         try:
             snapshot[name] = bool(module.is_installed())
         except Exception:
@@ -304,7 +310,7 @@ def _join_tool_names(names: list[str]) -> str:
     "pandoc" -> "pandoc"; ["pandoc", "clipboard"] -> "pandoc and clipboard".
     """
     labels = {"pandoc": "pandoc", "clipboard": "a clipboard backend",
-              "renderer": "an SVG renderer"}
+              "renderer": "an SVG renderer", "webos": "the WebOS"}
     rendered = [labels.get(n, n) for n in names]
     if len(rendered) <= 1:
         return rendered[0] if rendered else ""
@@ -334,6 +340,7 @@ def _run_setup_body() -> bool:
         "pandoc",
         "clipboard",
         "renderer",
+        "webos",
         "vault_path",
         "budget",
         "first_project",

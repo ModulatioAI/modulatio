@@ -37,7 +37,7 @@ def test_run_prints_install_hint_when_web_deps_missing(monkeypatch, capsys):
     hint and exit nonzero — never an ImportError traceback at launch."""
     from modulatio.web import server
 
-    monkeypatch.setattr(server, "find_spec", lambda name: None)
+    monkeypatch.setattr(server, "is_installed", lambda: False)
     with pytest.raises(SystemExit) as exc:
         server.run([])
     assert exc.value.code != 0

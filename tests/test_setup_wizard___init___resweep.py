@@ -37,6 +37,7 @@ from modulatio.setup_wizard import (
     pandoc_step,
     renderer_step,
     vault_path_step,
+    webos_step,
 )
 
 
@@ -70,6 +71,7 @@ def _run_body_recording():
         mock.patch.object(pandoc_step, "run", _rec("pandoc")),
         mock.patch.object(clipboard_step, "run", _rec("clipboard")),
         mock.patch.object(renderer_step, "run", _rec("renderer")),
+        mock.patch.object(webos_step, "run", _rec("webos")),
         mock.patch.object(vault_path_step, "run", _rec("vault_path")),
         mock.patch.object(budget_step, "run", _rec("budget")),
         mock.patch.object(first_project_step, "run", _rec("first_project")),

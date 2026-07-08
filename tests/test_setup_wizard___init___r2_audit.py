@@ -23,6 +23,7 @@ from modulatio.setup_wizard import (
     pandoc_step,
     renderer_step,
     steps,
+    webos_step,
 )
 
 
@@ -192,6 +193,9 @@ def test_system_tools_snapshot_swallows_probe_errors():
         mock.patch.object(pandoc_step, "is_installed", side_effect=RuntimeError("boom")),
         mock.patch.object(clipboard_step, "is_installed", return_value=True),
         mock.patch.object(renderer_step, "is_installed", return_value=False),
+        mock.patch.object(webos_step, "is_installed", return_value=False),
     ):
         snap = setup_wizard._system_tools_snapshot()
-    assert snap == {"pandoc": False, "clipboard": True, "renderer": False}
+    assert snap == {
+        "pandoc": False, "clipboard": True, "renderer": False, "webos": False,
+    }

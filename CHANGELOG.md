@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **One-click WebOS install, in the wizard and the TUI.** The opt-in `[web]`
+  extra now has two in-product doors instead of only the manual
+  `pip install "modulatio[web]"`: the setup wizard offers an **Install WebOS**
+  step, and **CONFIG → SETTINGS** grows an **Install WebOS** button. Both run
+  the environment-correct command for you — `pipx inject` when Modulatio runs
+  from a pipx install (so the deps survive a later `pipx upgrade`), otherwise
+  `pip install` into the current interpreter — with the package specs derived
+  from Modulatio's own metadata (they can't drift from the declared extra) and
+  the install verified by re-checking the imports. If an automatic install
+  can't run (offline, a locked-down environment), it falls back to showing the
+  manual command. Skipping in the wizard costs nothing: install later by
+  re-running setup or pressing the button.
+
 ## [0.9.9.0] — 2026-07-07
 
 ### Added

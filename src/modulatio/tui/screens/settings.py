@@ -22,6 +22,7 @@ from textual.widgets import Button, DataTable, Input, Static
 
 from modulatio import config
 from modulatio.tui.widgets.configurator import Configurator
+from modulatio.web import install as webos_install
 
 
 def _int_range(lo: int, hi: int) -> "Callable[[str], bool]":
@@ -133,6 +134,11 @@ class SettingsScreen(Vertical):
                     id="settings-affordance",
                     classes="affordance",
                 )
+                yield Button(
+                    self._webos_button_label(),
+                    id="settings-install-webos",
+                    disabled=webos_install.is_installed(),
+                )
             yield Vertical(
                 Static("_Select a setting to adjust it._", id="setting-detail"),
                 id="cfg-companion",
@@ -213,7 +219,43 @@ class SettingsScreen(Vertical):
     def action_refresh(self) -> None:
         self._refresh()
 
+    # ── WebOS install ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _webos_button_label() -> str:
+        return "WebOS installed ✓" if webos_install.is_installed() else "Install WebOS"
+
+    def _refresh_webos_button(self) -> None:
+        try:
+            btn = self.query_one("#settings-install-webos", Button)
+        except Exception:
+            return
+        btn.label = self._webos_button_label()
+        btn.disabled = webos_install.is_installed()
+
+    def _install_webos(self) -> None:
+        """Install the opt-in [web] extra on a worker thread (the pip/pipx call
+        must not block the UI), then report + relabel. Same helper the setup
+        wizard's WebOS step calls."""
+        self.app.notify("Installing the WebOS…")
+        self.run_worker(self._webos_install_work, thread=True, exclusive=True,
+                        group="webos-install")
+
+    def _webos_install_work(self) -> None:
+        ok, message = webos_install.install()
+        self.app.call_from_thread(self._webos_install_done, ok, message)
+
+    def _webos_install_done(self, ok: bool, message: str) -> None:
+        self.app.notify(
+            message if ok else f"{message}  (manual: {webos_install.manual_command()})",
+            severity="information" if ok else "error",
+        )
+        self._refresh_webos_button()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "settings-install-webos":
+            self._install_webos()
+            return
         if not self._editing:
             return
         if event.button.id == "setting-save":
