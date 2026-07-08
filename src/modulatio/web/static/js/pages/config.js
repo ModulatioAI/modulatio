@@ -181,8 +181,87 @@ function mountProjects(body, ctx) {
   });
 }
 
+// ── AGENTS (project roster) ───────────────────────────────────────────
+
+async function modelKeys() {
+  return (await api("/config/models")).models.map((m) => m.key);
+}
+
+function mountAgents(body, ctx) {
+  if (!ctx.project) {
+    body.append(el("section", { class: "card", style: "max-width:520px" },
+      el("p", { class: "soft" }, "No project yet — create one on the Projects tab.")));
+    return;
+  }
+  const P = `/${ctx.project}`;
+  masterDetail(body, {
+    title: "Agents",
+    load: async () => (await api(`${P}/config/agents`)).agents,
+    columns: [
+      { label: "tier", cell: (a) => a.tier, mono: true },
+      { label: "id", cell: (a) => a.id, mono: true },
+      { label: "name", cell: (a) => a.name },
+      { label: "model", cell: (a) => a.model || "—", mono: true },
+    ],
+    rowLabel: (a) => `${a.tier} ${a.id} ${a.name} ${a.model}`,
+    emptyText: "no agents yet — a kickoff needs a Leader, a QC, and a producer",
+    actions: [
+      { label: "Add agent", needsSelection: false, run: async () => {
+        const models = await modelKeys();
+        if (!models.length) {
+          notify("Add a model on the Models tab first.", { error: true });
+          return false;
+        }
+        const f = await formDialog("Add an agent", [
+          { name: "tier", label: "Tier", options: ["producer", "leader", "qc"] },
+          { name: "name", label: "Name" },
+          { name: "model", label: "Model", options: models }]);
+        if (!f) return false;
+        await api(`${P}/config/agents`,
+          { method: "POST", body: { tier: f.tier, name: f.name, model: f.model } });
+        notify(`Added ${f.tier} '${f.name}'.`);
+      } },
+      { label: "Change model", run: async (a) => {
+        const models = await modelKeys();
+        const f = await formDialog(`Model for '${a.id}'`, [
+          { name: "model", label: "Model", options: models, value: a.model }]);
+        if (!f) return false;
+        await api(`${P}/config/agents/${encodeURIComponent(a.id)}/model`,
+          { method: "PUT", body: { model: f.model } });
+        notify(`'${a.id}' now runs ${f.model}.`);
+      } },
+      { label: "Fallbacks", run: async (a) => {
+        const f = await formDialog(`Fallback chain for '${a.id}'`, [
+          { name: "chain", label: "Model keys, comma-separated (ordered)",
+            value: (a.fallbacks || []).join(", ") }]);
+        if (!f) return false;
+        const chain = f.chain.split(",").map((s) => s.trim()).filter(Boolean);
+        await api(`${P}/config/agents/${encodeURIComponent(a.id)}/fallbacks`,
+          { method: "PUT", body: { fallbacks: chain } });
+        notify(`Set ${chain.length} fallback(s) for '${a.id}'.`);
+      } },
+      { label: "Remove", danger: true,
+        confirm: (a) => (a.tier === "producer"
+          ? `Remove producer '${a.id}'?`
+          : `Remove the ${a.tier.toUpperCase()} '${a.id}'? Kickoffs degrade until you re-add one.`),
+        run: async (a) => {
+          await api(`${P}/config/agents/${encodeURIComponent(a.id)}`,
+            { method: "DELETE" });
+          notify(`Removed '${a.id}'.`);
+        } },
+    ],
+    renderDetail: (a) => [
+      el("h2", {}, `${a.tier} · ${a.id}`),
+      kv([["name", a.name], ["model", a.model || "—"],
+        ["fallbacks", (a.fallbacks || []).join(", ") || "—"],
+        ["skills", (a.skills || []).join(", ") || "—"]]),
+    ],
+  });
+}
+
 const SUBPAGES = {
   settings: mountSettings,
   folders: mountFolders,
   projects: mountProjects,
+  agents: mountAgents,
 };

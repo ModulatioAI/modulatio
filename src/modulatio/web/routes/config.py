@@ -13,12 +13,27 @@ a slot is set.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from modulatio.web.routes.console import valid_project
+
 router = APIRouter(prefix="/api")
+
+
+def _producer_id(name: str, existing: set) -> str:
+    """The TUI's exact producer-id derivation: sanitize the name to
+    ``[a-z0-9_]`` (so a junk/traversal name can't make a traversal id), then
+    de-duplicate with a numeric suffix."""
+    base = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "producer"
+    agent_id, n = base, 2
+    while agent_id in existing:
+        agent_id = f"{base}_{n}"
+        n += 1
+    return agent_id
 
 
 # ── SETTINGS (install-wide engine knobs) ──────────────────────────────
@@ -154,3 +169,123 @@ def folders_set_output(name: str) -> dict:
                    "can receive the job's finished product")
     config.set_job_output_folder(name)
     return {"output": name}
+
+
+# ── MODELS (read — the preset list; the add/key surface is its own slice) ─
+
+
+@router.get("/config/models")
+def models_list() -> dict:
+    from modulatio import model_presets
+
+    presets = model_presets.load_presets()
+    return {"models": [
+        {
+            "key": key,
+            "provider": rec.get("provider", ""),
+            "model": rec.get("model", ""),
+            "available": model_presets.is_available(key),
+        }
+        for key, rec in presets.items()
+    ]}
+
+
+# ── AGENTS (project roster; leader/qc singletons; TUI guards ported) ──
+
+
+class AgentAdd(BaseModel):
+    tier: str
+    name: str
+    model: str
+
+
+class AgentModel(BaseModel):
+    model: str
+
+
+class AgentFallbacks(BaseModel):
+    fallbacks: list[str]
+
+
+def _agent_json(a) -> dict:
+    return {
+        "id": a.id, "tier": a.tier, "name": a.name, "model": a.model,
+        "skills": list(getattr(a, "skills", []) or []),
+        "fallbacks": list(getattr(a, "fallback_models", []) or []),
+    }
+
+
+@router.get("/{project}/config/agents")
+def agents_list(project: str) -> dict:
+    from modulatio import roster
+
+    code = valid_project(project)
+    return {"agents": [_agent_json(a) for a in roster.list_agents(code)]}
+
+
+@router.post("/{project}/config/agents")
+def agents_add(project: str, body: AgentAdd) -> dict:
+    from modulatio import roster
+
+    code = valid_project(project)
+    if body.tier not in ("leader", "qc", "producer"):
+        raise HTTPException(status_code=422, detail=f"bad tier {body.tier!r}")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name the agent first")
+    existing = {a.id for a in roster.list_agents(code)}
+    if body.tier in ("leader", "qc"):
+        agent_id = body.tier  # singleton keyed by the role
+        if agent_id in existing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"a {body.tier} already exists — remove it first, then re-add")
+        identity = f"{name}, the {body.tier}."
+    else:
+        agent_id = _producer_id(name, existing)
+        identity = f"{name}, a producer."
+    roster.add_agent(
+        project_code=code, agent_id=agent_id, name=name, identity=identity,
+        skills=[], model=body.model, tier=body.tier)
+    return {"agent_id": agent_id}
+
+
+@router.put("/{project}/config/agents/{agent_id}/model")
+def agents_set_model(project: str, agent_id: str, body: AgentModel) -> dict:
+    from modulatio import roster
+
+    code = valid_project(project)
+    try:
+        roster.add_model(project_code=code, agent_id=agent_id, model=body.model)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:  # invalid agent id
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"model": body.model}
+
+
+@router.put("/{project}/config/agents/{agent_id}/fallbacks")
+def agents_set_fallbacks(project: str, agent_id: str, body: AgentFallbacks) -> dict:
+    from modulatio import roster
+
+    code = valid_project(project)
+    try:
+        roster.set_fallbacks(
+            project_code=code, agent_id=agent_id, fallback_keys=body.fallbacks)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"fallbacks": body.fallbacks}
+
+
+@router.delete("/{project}/config/agents/{agent_id}")
+def agents_remove(project: str, agent_id: str) -> dict:
+    from modulatio import roster, vault
+
+    code = valid_project(project)
+    try:
+        vault.validate_registry_name(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"deleted": roster.remove_agent(project_code=code, agent_id=agent_id)}

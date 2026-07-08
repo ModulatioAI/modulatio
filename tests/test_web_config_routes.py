@@ -163,3 +163,85 @@ def test_project_delete_refuses_while_in_flight(client, monkeypatch):
     r = client.delete("/api/projects/delta")
     assert r.status_code == 409
     assert "delta" in vault.list_projects()
+
+
+# ── MODELS (read — the preset list agents pick from) ──────────────────
+
+
+def test_models_list(client):
+    from modulatio import model_presets
+
+    model_presets.add_preset(
+        "gpt-x", label="GPT-X", base_url="https://api.openai.com/v1",
+        api_format="openai", auth_type="api_key", model="gpt-x")
+    resp = client.get("/api/config/models")
+    assert resp.status_code == 200
+    keys = [m["key"] for m in resp.json()["models"]]
+    assert "gpt-x" in keys
+
+
+# ── AGENTS (roster writes; leader/qc singletons; guards ported) ───────
+
+
+def test_agent_add_producer_list_and_remove(client):
+    from modulatio import roster
+
+    add = client.post("/api/web/config/agents",
+                      json={"tier": "producer", "name": "Scout", "model": "gpt-x"})
+    assert add.status_code == 200
+    agent_id = add.json()["agent_id"]
+    assert any(a.id == agent_id for a in roster.list_agents("web"))
+
+    rm = client.delete(f"/api/web/config/agents/{agent_id}")
+    assert rm.status_code == 200
+    assert not any(a.id == agent_id for a in roster.list_agents("web"))
+
+
+def test_agent_leader_is_a_singleton(client):
+    first = client.post("/api/web/config/agents",
+                        json={"tier": "leader", "name": "Boss", "model": "gpt-x"})
+    assert first.status_code == 200
+    again = client.post("/api/web/config/agents",
+                        json={"tier": "leader", "name": "Boss2", "model": "gpt-x"})
+    assert again.status_code == 409
+
+
+def test_agent_change_model_and_fallbacks(client):
+    from modulatio import roster
+
+    aid = client.post("/api/web/config/agents",
+                      json={"tier": "producer", "name": "Ace", "model": "gpt-x"}
+                      ).json()["agent_id"]
+    m = client.put(f"/api/web/config/agents/{aid}/model", json={"model": "claude-y"})
+    assert m.status_code == 200
+    assert next(a for a in roster.list_agents("web") if a.id == aid).model == "claude-y"
+
+    fb = client.put(f"/api/web/config/agents/{aid}/fallbacks",
+                    json={"fallbacks": ["gpt-x"]})
+    assert fb.status_code == 200
+
+
+def test_agent_add_blank_name_refused(client):
+    r = client.post("/api/web/config/agents",
+                    json={"tier": "producer", "name": "  ", "model": "gpt-x"})
+    assert r.status_code == 422
+
+
+def test_agent_add_bad_tier_refused(client):
+    r = client.post("/api/web/config/agents",
+                    json={"tier": "overlord", "name": "X", "model": "gpt-x"})
+    assert r.status_code == 422
+
+
+def test_agent_name_is_sanitized_to_a_safe_id(client):
+    """A junk/traversal name can't produce a traversal id — the derivation
+    strips non-alphanumerics (the TUI's exact rule), so the id is always safe."""
+    r = client.post("/api/web/config/agents",
+                    json={"tier": "producer", "name": "../evil", "model": "gpt-x"})
+    assert r.status_code == 200
+    assert r.json()["agent_id"] == "evil"
+
+
+def test_agent_change_model_unknown_agent_404(client):
+    r = client.put("/api/web/config/agents/ghost/model", json={"model": "gpt-x"})
+    assert r.status_code == 404
