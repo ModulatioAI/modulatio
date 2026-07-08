@@ -91,6 +91,98 @@ function mountSettings(body) {
   });
 }
 
+// ── FOLDERS ───────────────────────────────────────────────────────────
+
+function mountFolders(body) {
+  masterDetail(body, {
+    title: "Folders",
+    load: async () => (await api("/config/folders")).folders,
+    columns: [
+      { label: "name", cell: (f) => f.name, mono: true },
+      { label: "mode", cell: (f) => f.mode, mono: true },
+      { label: "path", cell: (f) => f.path, mono: true },
+    ],
+    rowLabel: (f) => `${f.name} ${f.mode} ${f.path}`,
+    emptyText: "no folders registered — add one the team can use by name",
+    actions: [
+      { label: "Add folder", needsSelection: false, run: async () => {
+        const f = await formDialog("Register a folder", [
+          { name: "name", label: "Name (used in kickoff directions)" },
+          { name: "path", label: "Absolute path (a mounted share's mount point)" },
+          { name: "mode", label: "Mode", options: ["ro", "output", "rw"] }]);
+        if (!f) return false;
+        await api("/config/folders",
+          { method: "POST", body: { name: f.name, path: f.path, mode: f.mode } });
+        notify(`Registered '${f.name}'.`);
+      } },
+      { label: "Set as output", run: async (f) => {
+        await api(`/config/folders/${encodeURIComponent(f.name)}/output`,
+          { method: "POST" });
+        notify(`'${f.name}' will receive the job's finished product.`);
+        return false;
+      } },
+      { label: "Remove", danger: true,
+        confirm: (f) => `Unregister folder '${f.name}'?`,
+        run: async (f) => {
+          await api(`/config/folders/${encodeURIComponent(f.name)}`,
+            { method: "DELETE" });
+          notify(`Removed '${f.name}'.`);
+        } },
+    ],
+    renderDetail: (f) => [
+      el("h2", {}, f.name),
+      kv([["mode", f.mode], ["path", f.path]]),
+    ],
+  });
+}
+
+// ── PROJECTS ──────────────────────────────────────────────────────────
+
+function mountProjects(body, ctx) {
+  masterDetail(body, {
+    title: "Projects",
+    load: async () => {
+      const d = await api("/projects");
+      return d.projects.map((code) => ({ code, active: code === d.default }));
+    },
+    columns: [
+      { label: "project", cell: (p) => p.code, mono: true },
+      { label: "", cell: (p) => (p.active ? "● active" : ""), mono: true },
+    ],
+    rowLabel: (p) => p.code,
+    emptyText: "no projects yet — create one to start",
+    actions: [
+      { label: "New project", needsSelection: false, run: async () => {
+        const f = await formDialog("New project", [
+          { name: "code", label: "Code (lowercase letters, digits, _)" },
+          { name: "objective", label: "Objective (optional)" }]);
+        if (!f) return false;
+        await api("/projects",
+          { method: "POST", body: { code: f.code, objective: f.objective } });
+        notify(`Created '${f.code}'.`);
+      } },
+      { label: "Switch to", run: async (p) => {
+        await api(`/projects/${encodeURIComponent(p.code)}/switch`,
+          { method: "POST" });
+        ctx.project = p.code;
+        notify(`Switched to '${p.code}'.`);
+      } },
+      { label: "Delete", danger: true,
+        confirm: (p) => `Delete project '${p.code}'? (It is backed up first.)`,
+        run: async (p) => {
+          await api(`/projects/${encodeURIComponent(p.code)}`, { method: "DELETE" });
+          notify(`Deleted '${p.code}' (backed up).`);
+        } },
+    ],
+    renderDetail: (p) => [
+      el("h2", {}, p.code),
+      el("p", { class: "soft" }, p.active ? "The active project." : "Not active."),
+    ],
+  });
+}
+
 const SUBPAGES = {
   settings: mountSettings,
+  folders: mountFolders,
+  projects: mountProjects,
 };
