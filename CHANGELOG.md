@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.9.0] — 2026-07-07
+
 ### Added
 
 - **The WebOS — Modulatio in your browser** (opt-in `[web]` extra;
@@ -30,7 +32,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permission asks land as a modal that **fails closed** (no decision → deny);
   file previews are extension-filtered, size-capped, and confined to the
   project's artifact roots. One operator per project for now. Full four-round
-  security + quality cadre cleared.
+  security + quality cadre cleared. **The CONFIG tab (models, agents,
+  projects, settings, folders) lands read/write next release** — this first
+  cut ships the Console plus the nine read-only pages.
 
 - **SERVICES — outside APIs on the team** (CONFIG → SERVICES). Configure outside
   SaaS services — image, video, speech, research, or any custom API — from a
