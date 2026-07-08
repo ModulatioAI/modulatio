@@ -36,39 +36,43 @@ def _valid_run(code: str, run_id: str) -> str:
 # ── cron ──────────────────────────────────────────────────────────────
 
 
-def _require_job(job_id: str) -> dict:
+def _require_job(code: str, job_id: str) -> dict:
+    """Fetch a cron job, refusing one that belongs to a DIFFERENT project
+    (WB-2): the job id is global, but a verb reached under ``/api/{project}``
+    must only touch that project's own schedule. Cron stores project_code
+    uppercased (``cron.add``), so compare against ``code.upper()``."""
     job = cron.get(job_id)
-    if job is None:
+    if job is None or job.get("project_code") != code.upper():
         raise HTTPException(status_code=404, detail=f"unknown cron job {job_id}")
     return job
 
 
 @router.post("/{project}/cron/{job_id}/enable")
 def cron_enable(project: str, job_id: str) -> dict:
-    valid_project(project)
-    _require_job(job_id)
+    code = valid_project(project)
+    _require_job(code, job_id)
     return {"enabled": cron.enable(job_id)}
 
 
 @router.post("/{project}/cron/{job_id}/disable")
 def cron_disable(project: str, job_id: str) -> dict:
-    valid_project(project)
-    _require_job(job_id)
+    code = valid_project(project)
+    _require_job(code, job_id)
     return {"disabled": cron.disable(job_id)}
 
 
 @router.post("/{project}/cron/{job_id}/run-now")
 def cron_run_now(project: str, job_id: str) -> dict:
-    valid_project(project)
-    _require_job(job_id)
+    code = valid_project(project)
+    _require_job(code, job_id)
     job = cron.run_now(job_id)
     return {"queued": job is not None}
 
 
 @router.delete("/{project}/cron/{job_id}")
 def cron_remove(project: str, job_id: str) -> dict:
-    valid_project(project)
-    _require_job(job_id)
+    code = valid_project(project)
+    _require_job(code, job_id)
     return {"removed": cron.remove(job_id)}
 
 
@@ -93,6 +97,13 @@ def ticket_delete(project: str, ticket_id: str) -> dict:
 @router.delete("/{project}/runs/{run_id}")
 def run_delete(project: str, run_id: str, request: Request) -> dict:
     code = valid_project(project)
+    # WB-1: never delete a run folder while the engine is writing one — the
+    # TUI Jobs screen refuses deletion while any job is in flight. Mirror that:
+    # a live kickoff on this project's actor blocks deletion (409).
+    if get_actor(code, stub=bool(request.app.state.stub)).kickoff_active():
+        raise HTTPException(
+            status_code=409,
+            detail="a job is in flight — finish or stop it before deleting runs")
     _valid_run(code, run_id)
     return {"deleted": vault.delete_run(code, run_id)}
 
@@ -439,10 +450,12 @@ def artifact_export(project: str, body: ExportBody) -> dict:
         raise HTTPException(status_code=422, detail=f"bad format {body.format!r}")
     dest = Path(dest_dir) / (source.stem + ext)
     try:
-        result = export.export_artifact(source, dest, body.format)
+        export.export_artifact(source, dest, body.format)
     except export.ExportError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"dest": str(result.dest if hasattr(result, "dest") else dest)}
+    # WB-3: the absolute host path (folder/share name) never crosses the
+    # boundary — return only the folder name asked for + the filename.
+    return {"folder": body.folder, "filename": dest.name}
 
 
 # ── jobs reveal ───────────────────────────────────────────────────────

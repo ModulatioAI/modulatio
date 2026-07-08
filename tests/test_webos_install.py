@@ -33,6 +33,21 @@ def test_web_requirements_parses_web_extra_both_quote_styles(monkeypatch):
     assert reqs == ["fastapi>=0.110", "uvicorn>=0.29"]
 
 
+def test_web_requirements_drops_option_shaped_specs(monkeypatch):
+    """WB-4: hostile/broken dist-info can't smuggle a pip OPTION (e.g. a
+    rogue --index-url) into the install command — any spec that starts with
+    '-' is dropped, so only real package requirements reach argv."""
+    poisoned = [
+        "fastapi>=0.110; extra == 'web'",
+        "--index-url=https://evil.invalid/simple; extra == 'web'",
+        "uvicorn>=0.29; extra == 'web'",
+    ]
+    monkeypatch.setattr(install._md, "requires", lambda name: poisoned)
+    reqs = install.web_requirements()
+    assert reqs == ["fastapi>=0.110", "uvicorn>=0.29"]
+    assert not any(r.startswith("-") for r in reqs)
+
+
 def test_install_command_uses_pipx_inject_under_pipx(monkeypatch):
     monkeypatch.setattr(install._md, "requires", lambda name: _FAKE_REQUIRES)
     monkeypatch.setattr(

@@ -346,6 +346,10 @@ def test_artifact_export_to_registered_folder(client, tmp_path):
         "path": "artifacts/report.md", "format": "markdown", "folder": "share"})
     assert resp.status_code == 200
     assert (dest / "report.md").exists()
+    # WB-3: the absolute host path (folder/share name) never crosses the
+    # boundary — only the folder name it was asked for + the filename.
+    assert resp.json() == {"folder": "share", "filename": "report.md"}
+    assert str(dest) not in resp.text
 
 
 def test_artifact_export_rejects_unregistered_folder(client):
@@ -366,3 +370,33 @@ def test_job_reveal_returns_path(client, finished_run, monkeypatch):
     resp = client.post(f"/api/web/runs/{finished_run}/reveal")
     assert resp.status_code == 200
     assert finished_run in resp.json()["path"]
+
+
+# ── Wild Bill remediation: cross-project cron + live-run delete ────────
+
+
+def test_cron_verbs_refuse_cross_project(client):
+    """WB-2: a cron job id is global, but a verb must only touch a job that
+    belongs to the URL's project — else /api/beta can mutate alpha's schedule."""
+    from modulatio import cron, vault
+
+    vault.init_project("other", "Other", "o")
+    jid = _add_cron()  # belongs to project 'web'
+    # 'other' must not reach 'web's job
+    assert client.post(f"/api/other/cron/{jid}/disable").status_code == 404
+    assert client.delete(f"/api/other/cron/{jid}").status_code == 404
+    assert cron.get(jid)["enabled"] is True  # untouched
+    # its own project still works
+    assert client.post(f"/api/web/cron/{jid}/disable").status_code == 200
+
+
+def test_run_delete_refused_while_a_job_is_in_flight(client, monkeypatch):
+    """WB-1: mirror the TUI — never delete a run folder while the engine is
+    writing it. A live kickoff blocks deletion with 409."""
+    from modulatio.web.actors import get_actor
+
+    actor = get_actor("web", stub=True)
+    monkeypatch.setattr(actor, "kickoff_active", lambda: True)
+    # any run id — the guard fires before the run is even resolved
+    resp = client.delete("/api/web/runs/20260101T000000Z-abcdef")
+    assert resp.status_code == 409

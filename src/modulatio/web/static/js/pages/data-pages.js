@@ -235,7 +235,7 @@ export function mountArtifacts(page, ctx) {
         if (!form) return false;
         const r = await post(`${P(ctx)}/artifacts/export`,
           { path: f.path, format: form.format, folder: form.folder });
-        notify(`Exported to ${r.dest}`);
+        notify(`Exported ${r.filename} to folder '${r.folder}'.`);
         return false;
       } },
       { label: "Delete", danger: true,
