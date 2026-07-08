@@ -6371,7 +6371,13 @@ class Orchestrator:
                     "'api_call' — API keys are engine-injected, so never "
                     "mention keys in the prompt); and 'capability_tags' — the "
                     "general capabilities that route the skill to matching "
-                    "tasks (untagged skills can't be routed)."
+                    "tasks (untagged skills can't be routed). The skill enters "
+                    "the SHARED library — loaded by EVERY project and run — so "
+                    "write it AGNOSTIC: no project name, producer name, run/task "
+                    "id, or one-off vocabulary anywhere in the prompt; state the "
+                    "reusable contract and leave subject/domain specifics (example "
+                    "families, palettes, templates) to the standards, not the "
+                    "skill body."
                 ),
                 call=create_skill,
                 params_schema={
@@ -6409,7 +6415,10 @@ class Orchestrator:
                     "path for a skill missing its loadout or tags. APPEND-ONLY "
                     "for the body: a WRONG body is fixed in place with your "
                     "file tools (the library is in your home), never by "
-                    "appending a corrected copy that contradicts the original."
+                    "appending a corrected copy that contradicts the original. "
+                    "Keep the guidance AGNOSTIC — the skill is shared across "
+                    "every project and run, so add reusable rules, never a "
+                    "reference to the run/task/producer that prompted the fix."
                 ),
                 call=improve_skill,
                 params_schema={

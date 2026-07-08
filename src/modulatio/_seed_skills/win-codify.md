@@ -35,7 +35,10 @@ Prefer **IMPROVE** — a recovery means the producer HAD the capability but lack
 *technique*, so teach the EXISTING skill that owns this work (don't mint a near-
 duplicate); **CREATE** only when none fits. Write the guidance as a GENERAL RULE the
 producer follows to APPLY the technique itself — imperative, concrete, short,
-artifact-agnostic within its domain.
+artifact-agnostic within its domain. The skill enters the SHARED library — loaded
+by EVERY project and run — so keep it project-, producer-, and run-AGNOSTIC: no
+project names, producer names, run/task ids, or one-off vocabulary; subject/domain
+specifics belong in the STANDARDS for the artifact_kind, not the skill body.
 
 ## Respond
 

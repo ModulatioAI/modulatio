@@ -39,6 +39,13 @@ Good: "Wrap every external/IO call in explicit error handling." Bad: "In task
 T-3 the producer forgot a try/except." Cite the verdict ids that show the
 pattern.
 
+The skill enters the SHARED library — loaded by EVERY project and run — so it
+must be project-, producer-, and run-AGNOSTIC: strip project names, producer
+names, run/task ids, and any one-off vocabulary from the guidance; a skill reads
+the same for anyone who loads it. Subject/domain specifics (example families,
+palettes, templates) belong in the STANDARDS for the artifact_kind, not the
+skill body.
+
 ## Respond
 
 ONLY a JSON object, fenced in ```json ... ```. No prose outside the fence.

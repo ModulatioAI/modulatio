@@ -192,6 +192,22 @@ For the architectural deep-dive on how skills compose and dispatch, read [Skill 
 
 ---
 
+### `svg-drawing`
+
+**Purpose:** Producer skill for a single self-contained, inert SVG drawing — vector art delivered as a standalone `.svg` artifact.
+
+**Capability tags:** `svg`, `vector`, `illustration`, `media`.
+
+**Tool loadout:** none by default (writes via the base `write_artifact`).
+
+**Producer mode:** GENERATE.
+
+**Contract:** the SVG is fully inert and self-contained (no `<script>`, event handlers, `<foreignObject>`, external references, or embedded base64 rasters), always carries a `viewBox`, and must render legibly on **both a light and a dark** ground — prefer `currentColor` so it takes the ink of whatever frames it. The craft flavor (palettes, layering, composition templates) lives in the `svg` standard (`_seed_standards/svg.md`), not the skill body; the self-check is visual-aware because a reviewer may *see* the render.
+
+**Override path:** `<shared>/skills/svg-drawing.md` or `<project>/skills/svg-drawing.md`.
+
+---
+
 ### Assembler skills (familial)
 
 Assembling a multi-piece deliverable — joining N already-produced units into ONE product — is a **family** of skills, one per the *byte-nature* of the product. The shared invariant: the producer emits a small **plan** (a manifest naming the units + framing/options), and **the engine owns the mechanical join** — unit bytes are read from disk and never round-trip through the model as output tokens, so a large deliverable can't truncate at the model's output cap. The family is chosen by the artifact's kind (each `_seed_standards/<kind>.md` declares its `assembler_skill`).
