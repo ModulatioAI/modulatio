@@ -190,6 +190,8 @@ export function mountConsole(page, ctx) {
     teamWrap.hidden = lane !== "team";
     btnLeader.setAttribute("aria-current", lane === "leader" ? "page" : "false");
     btnTeam.setAttribute("aria-current", lane === "team" ? "page" : "false");
+    // The composer talks to the Leader — no kickoff box on the team view.
+    composer.hidden = lane !== "leader";
     // A hidden lane can't scroll while hidden — catch it up now that it shows.
     const shown = lane === "leader" ? tvLeader : tvTeam;
     shown.scrollTop = shown.scrollHeight;
