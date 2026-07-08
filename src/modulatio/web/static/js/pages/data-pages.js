@@ -5,7 +5,13 @@
 
 import { api } from "../api.js";
 import { el } from "../dom.js";
-import { heading, kv, masterDetail, pre } from "./masterdetail.js";
+import {
+  formDialog, heading, kv, masterDetail, notify, pre,
+} from "./masterdetail.js";
+
+// Small helpers so each page's actions stay one-liners.
+const post = (path, body) => api(path, { method: "POST", body });
+const del = (path) => api(path, { method: "DELETE" });
 
 const P = (ctx) => `/${ctx.project}`;
 
@@ -26,6 +32,22 @@ export function mountJts(page, ctx) {
       { label: "description", cell: (j) => j.description },
     ],
     rowLabel: (j) => `${j.name} ${j.description}`,
+    actions: [
+      { label: "Kick off", run: async (j) => {
+        const r = await post(`${P(ctx)}/jts/${encodeURIComponent(j.name)}/kickoff`);
+        notify(`Kicked off '${j.name}' — run ${r.run_id}. Watch the Console.`);
+        return false;  // no list change
+      } },
+      { label: "Schedule…", run: async (j) => {
+        const f = await formDialog(`Schedule '${j.name}' as a cron job`, [
+          { name: "schedule", label: "Schedule (e.g. 7d · 6h · 0 9 * * 1)" }]);
+        if (!f) return false;
+        await post(`${P(ctx)}/jts/${encodeURIComponent(j.name)}/schedule`,
+          { schedule: f.schedule });
+        notify(`Scheduled '${j.name}' — ${f.schedule}.`);
+        return false;
+      } },
+    ],
     renderDetail: async (j) => {
       const full = await api(`${P(ctx)}/jts/${j.name}`);
       return [
@@ -55,6 +77,14 @@ export function mountTickets(page, ctx) {
     ],
     rowLabel: (t) => `${t.id} ${t.priority} ${t.status} ${t.title}`,
     emptyText: "no tickets — the floor is quiet",
+    actions: [
+      { label: "Delete", danger: true,
+        confirm: (t) => `Delete ticket ${t.id}?`,
+        run: async (t) => {
+          await del(`${P(ctx)}/tickets/${encodeURIComponent(t.id)}`);
+          notify(`Deleted ${t.id}.`);
+        } },
+    ],
     renderDetail: (t) => [
       heading(`${t.id} — ${t.title}`),
       kv([
@@ -78,6 +108,19 @@ export function mountJobs(page, ctx) {
     ],
     rowLabel: (r) => r.run_id,
     emptyText: "no runs yet — kick one off from the Console",
+    actions: [
+      { label: "Reveal folder", run: async (r) => {
+        const x = await post(`${P(ctx)}/runs/${r.run_id}/reveal`);
+        notify(x.path);
+        return false;
+      } },
+      { label: "Delete", danger: true,
+        confirm: (r) => `Delete run ${r.run_id}? This is permanent.`,
+        run: async (r) => {
+          await del(`${P(ctx)}/runs/${r.run_id}`);
+          notify("Deleted the run.");
+        } },
+    ],
     renderDetail: async (r) => {
       const [detail, tasks] = await Promise.all([
         api(`${P(ctx)}/runs/${r.run_id}`),
@@ -113,6 +156,16 @@ export function mountLogs(page, ctx) {
     ],
     rowLabel: (l) => `${l.kind} ${l.timestamp} ${l.summary}`,
     emptyText: "no crash / error / doctor logs — good sign",
+    actions: [
+      { label: "Send to team", run: async (l) => {
+        const x = await post(`/logs/${l.id}/send`);
+        window.open(x.url, "_blank", "noopener");
+        notify("Opened a prefilled issue in a new tab.");
+      } },
+      { label: "Delete", danger: true, confirm: "Delete this log for good?",
+        run: async (l) => { await del(`/logs/${l.id}`); notify("Deleted."); } },
+      { label: "Refresh", needsSelection: false, run: async () => {} },
+    ],
     renderDetail: (l) => [
       heading(l.label),
       kv([["when", l.timestamp], ["size", l.size_human], ["sent", l.sent]]),
@@ -128,6 +181,23 @@ export function mountSkills(page, ctx) {
     load: async () => (await api(`${P(ctx)}/skills`)).skills.map((s) => ({ name: s })),
     columns: [{ label: "skill", cell: (s) => s.name, mono: true }],
     rowLabel: (s) => s.name,
+    actions: [
+      { label: "Add skill", needsSelection: false, run: async () => {
+        const f = await formDialog("New skill", [
+          { name: "name", label: "Name (kebab-case)" },
+          { name: "description", label: "Description" },
+          { name: "prompt_template", label: "Prompt template", textarea: true }]);
+        if (!f) return false;
+        await post(`${P(ctx)}/skills`, f);
+        notify(`Added '${f.name}'.`);
+      } },
+      { label: "Delete", danger: true,
+        confirm: (s) => `Delete skill '${s.name}'?`,
+        run: async (s) => {
+          await del(`${P(ctx)}/skills/${encodeURIComponent(s.name)}`);
+          notify(`Deleted '${s.name}'.`);
+        } },
+    ],
     renderDetail: async (s) => {
       const full = await api(`${P(ctx)}/skills/${s.name}`);
       return [heading(s.name), pre(full.body || "(empty prompt template)")];
@@ -150,6 +220,31 @@ export function mountArtifacts(page, ctx) {
     ],
     rowLabel: (f) => (f.product ? "★ " : "") + f.path,
     emptyText: "no artifacts yet — they land here as runs produce",
+    actions: [
+      { label: "Export…", run: async (f) => {
+        const folders = (await api("/folders")).folders
+          .filter((x) => x.mode === "rw" || x.mode === "output");
+        if (!folders.length) {
+          notify("Register a writable folder on the Folders tab first.",
+            { error: true });
+          return false;
+        }
+        const form = await formDialog(`Export '${f.path.split("/").pop()}'`, [
+          { name: "format", label: "Format", options: ["docx", "pdf", "markdown"] },
+          { name: "folder", label: "To folder", options: folders.map((x) => x.name) }]);
+        if (!form) return false;
+        const r = await post(`${P(ctx)}/artifacts/export`,
+          { path: f.path, format: form.format, folder: form.folder });
+        notify(`Exported to ${r.dest}`);
+        return false;
+      } },
+      { label: "Delete", danger: true,
+        confirm: (f) => `Delete '${f.path}'?`,
+        run: async (f) => {
+          await del(`${P(ctx)}/artifacts?path=${encodeURIComponent(f.path)}`);
+          notify("Deleted.");
+        } },
+    ],
     renderDetail: async (f) => {
       const prev = await api(
         `${P(ctx)}/artifacts/preview?path=${encodeURIComponent(f.path)}`);
@@ -188,6 +283,67 @@ export function mountMemory(page, ctx) {
     ],
     rowLabel: (m) => `${m.layer} ${m.agent} ${m.kind} ${m.body}`,
     emptyText: "nothing remembered yet",
+    // Verbs mirror the TUI: an operator manages an AGENT's own memory in
+    // place, while TEAM memory is QC-curated (edits propose, never write).
+    actions: [
+      { label: "Add", needsSelection: false, run: async () => {
+        const f = await formDialog("Add a semantic memory to an agent", [
+          { name: "agent_id", label: "Agent id" },
+          { name: "content", label: "Memory", textarea: true }]);
+        if (!f) return false;
+        await post(`${P(ctx)}/memory/agent/${encodeURIComponent(f.agent_id)}`,
+          { content: f.content });
+        notify(`Added a memory for '${f.agent_id}'.`);
+      } },
+      { label: "Edit", run: async (m) => {
+        if (m.layer === "pending") {
+          notify("A pending proposal isn't editable — approve or reject it.");
+          return false;
+        }
+        if (m.layer === "team") {
+          const f = await formDialog("Propose a revision (QC reviews it)", [
+            { name: "body", label: "Revision", textarea: true, value: m.body }]);
+          if (!f) return false;
+          await post(`${P(ctx)}/memory/propose`, { body: f.body });
+          notify("Proposed a revision — QC will review it.");
+          return false;
+        }
+        const f = await formDialog(`Edit this ${m.layer} memory of '${m.agent}'`, [
+          { name: "content", label: "Memory", textarea: true, value: m.body }]);
+        if (!f) return false;
+        await api(
+          `${P(ctx)}/memory/agent/${encodeURIComponent(m.agent)}/${m.raw.id}`,
+          { method: "PUT", body: { layer: m.layer, content: f.content } });
+        notify("Edited.");
+      } },
+      { label: "Approve", run: async (m) => {
+        if (m.layer !== "pending") {
+          notify("Only pending proposals are approvable.");
+          return false;
+        }
+        await post(`${P(ctx)}/memory/proposals/${m.raw.proposal_id}/approve`);
+        notify("Approved — it's team memory now.");
+      } },
+      { label: "Delete", danger: true,
+        confirm: (m) => m.layer === "pending"
+          ? "Reject this pending proposal?"
+          : `Delete this ${m.layer} memory of '${m.agent}'?`,
+        run: async (m) => {
+          if (m.layer === "team") {
+            notify("Team memory is QC-curated — revise it via Edit (propose).");
+            return false;
+          }
+          if (m.layer === "pending") {
+            await post(`${P(ctx)}/memory/proposals/${m.raw.proposal_id}/reject`);
+            notify("Rejected.");
+            return;
+          }
+          await del(
+            `${P(ctx)}/memory/agent/${encodeURIComponent(m.agent)}/${m.raw.id}` +
+            `?layer=${encodeURIComponent(m.layer)}`);
+          notify("Deleted.");
+        } },
+    ],
     renderDetail: (m) => [
       heading(m.agent ? `${m.layer} · ${m.agent}` : m.layer),
       kv(Object.entries(m.raw)),
@@ -207,6 +363,22 @@ export function mountCron(page, ctx) {
     ],
     rowLabel: (j) => `${j.name} ${j.schedule} ${j.objective}`,
     emptyText: "no scheduled jobs",
+    actions: [
+      { label: "Enable", run: async (j) => {
+        await post(`${P(ctx)}/cron/${j.id}/enable`); notify("Enabled.");
+      } },
+      { label: "Disable", run: async (j) => {
+        await post(`${P(ctx)}/cron/${j.id}/disable`); notify("Disabled.");
+      } },
+      { label: "Run now", run: async (j) => {
+        await post(`${P(ctx)}/cron/${j.id}/run-now`);
+        notify("Queued a run."); return false;
+      } },
+      { label: "Remove", danger: true,
+        confirm: (j) => `Remove cron job '${j.name}'?`,
+        run: async (j) => { await del(`${P(ctx)}/cron/${j.id}`); notify("Removed."); } },
+      { label: "Refresh", needsSelection: false, run: async () => {} },
+    ],
     renderDetail: (j) => [
       heading(j.name),
       kv([
@@ -226,6 +398,16 @@ export function mountDocs(page, ctx) {
     load: async () => (await api("/docs")).docs,
     columns: [{ label: "page", cell: (d) => d.title }],
     rowLabel: (d) => `${d.slug} ${d.title}`,
+    actions: [
+      { label: "Update docs", needsSelection: false, run: async () => {
+        const x = await post("/docs/update");
+        notify(x.status);
+      } },
+      { label: "Open online", run: async () => {
+        window.open("https://modulatio.ai/", "_blank", "noopener");
+        return false;
+      } },
+    ],
     renderDetail: async (d) => {
       const page_ = await api(`/docs/${d.slug}`);
       return [heading(d.title), pre(page_.markdown)];

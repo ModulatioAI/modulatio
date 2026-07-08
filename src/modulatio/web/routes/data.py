@@ -232,6 +232,21 @@ def list_docs() -> dict:
     return {"docs": [{"slug": s, "title": t} for s, t in docs.list_docs()]}
 
 
+# ── folders (install-wide; the write targets an export can reach) ─────
+
+
+@router.get("/folders")
+def list_folders() -> dict:
+    """The registered folders (Folders tab). Names + modes only — the paths
+    (which may be OS-mounted network shares) never cross the boundary; the
+    export picker only needs the name it references."""
+    from modulatio import config
+
+    return {"folders": [
+        {"name": f["name"], "mode": f["mode"]} for f in config.list_folders()
+    ]}
+
+
 @router.get("/docs/{slug}")
 def read_doc(slug: str) -> dict:
     try:

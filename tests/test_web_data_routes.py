@@ -305,3 +305,17 @@ def test_artifact_preview_refuses_symlinked_artifact_root(client, tmp_path):
     assert client.get(
         "/api/web/artifacts/preview", params={"path": "artifacts/leak.md"}
     ).status_code in (400, 404)
+
+
+def test_folders_list_names_and_modes_no_paths(client, tmp_path):
+    from modulatio import config
+
+    d = tmp_path / "share"
+    d.mkdir()
+    config.save_folders([
+        {"name": "share", "path": str(d), "mode": "rw", "kind": "path"}])
+    resp = client.get("/api/folders")
+    assert resp.status_code == 200
+    folders = resp.json()["folders"]
+    assert folders == [{"name": "share", "mode": "rw"}]
+    assert "path" not in folders[0]

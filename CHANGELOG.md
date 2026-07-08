@@ -8,6 +8,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The WebOS pages can now act — a clickable button for every verb.** The
+  nine read-only pages grow an action row (the web's version of the TUI's
+  key-actions, as buttons): **JT Library** kick off + schedule · **Tickets**
+  delete · **Artifacts** export (to a registered Folders-tab folder — including
+  an OS-mounted network share — via pandoc) + delete · **Skills** add + delete
+  · **Memory** add / edit / delete an agent's own memory + approve / reject a
+  QC proposal (team memory stays QC-curated — an edit proposes, never
+  overwrites) · **Jobs** reveal folder + delete · **Cron** enable / disable /
+  run now / remove / refresh · **Logs** send to the team (opens a prefilled
+  issue) / delete / refresh · **Docs** update / open online. Every button is a
+  thin call to the SAME engine seam the terminal uses; destructive verbs
+  confirm first and validate their id at the boundary; the Leader converse lane
+  is untouched.
+- **Configurable WebOS port.** A `MODULATIO_WEB_PORT` knob in CONFIG →
+  SETTINGS (default 8787) so you can move the WebOS off an occupied port;
+  `modulatio-api --port` still wins.
 - **One-click WebOS install, in the wizard and the TUI.** The opt-in `[web]`
   extra now has two in-product doors instead of only the manual
   `pip install "modulatio[web]"`: the setup wizard offers an **Install WebOS**
