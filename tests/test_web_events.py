@@ -10,7 +10,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from modulatio.types import ActivityEvent
+# The WebOS backend is the opt-in `[web]` extra; skip its suite cleanly
+# when FastAPI isn't installed rather than erroring on a lean install.
+pytest.importorskip("fastapi")
+
+from modulatio.types import ActivityEvent  # noqa: E402 — after the extra guard
 
 
 def _event(**over) -> ActivityEvent:

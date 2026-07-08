@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import pytest
 
-from modulatio import config, vault
+# The WebOS backend is the opt-in `[web]` extra; skip its suite cleanly
+# when FastAPI isn't installed rather than erroring on a lean install.
+pytest.importorskip("fastapi")
+
+from modulatio import config, vault  # noqa: E402 — after the extra guard
 
 
 @pytest.fixture()

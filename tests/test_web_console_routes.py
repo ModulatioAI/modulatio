@@ -10,7 +10,11 @@ import threading
 
 import pytest
 
-from modulatio import vault
+# The WebOS backend is the opt-in `[web]` extra; skip its suite cleanly
+# when FastAPI isn't installed rather than erroring on a lean install.
+pytest.importorskip("fastapi")
+
+from modulatio import vault  # noqa: E402 — after the extra guard
 
 
 pytestmark = pytest.mark.usefixtures("fresh_web_registries")
