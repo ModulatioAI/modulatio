@@ -16,6 +16,19 @@ from modulatio import config, vault  # noqa: E402 — after the extra guard
 pytestmark = pytest.mark.usefixtures("fresh_web_registries")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_knob_env(monkeypatch):
+    """The SETTINGS knob writes mutate PROCESS-GLOBAL os.environ +
+    config._ENV_OVERRIDES_SET (a knob applies to the next call in-process).
+    Reset both per test, and clear the knobs these tests touch, so a knob left
+    set by another file's test can't make ours read it as shell/.env-owned
+    (the full-suite-only failure the isolated run hid — engram 2274 class)."""
+    monkeypatch.setattr(config, "_ENV_OVERRIDES_SET", set())
+    for k in ("MODULATIO_TASK_MAX_RETRIES", "MODULATIO_QC_FIXER"):
+        monkeypatch.delenv(k, raising=False)
+    yield
+
+
 @pytest.fixture()
 def client():
     from fastapi.testclient import TestClient
