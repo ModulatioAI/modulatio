@@ -78,6 +78,16 @@ uv pip install -e ".[export]"
 
 This pulls `pypandoc_binary` so you don't need a system pandoc install. If you already have system pandoc on PATH, you can skip the `[export]` extra and Modulatio will use the system binary.
 
+### Optional: WebOS extra (Modulatio in your browser)
+
+The [WebOS](/reference/webos/) — the TUI's layout rendered as a web app — is an opt-in extra so the base install stays lean:
+
+```bash
+pip install "modulatio[web]"      # then: modulatio-api → open it in your browser
+```
+
+You don't have to type this yourself: the setup wizard offers to install the WebOS as a step, and the TUI's **CONFIG → SETTINGS** tab has an **Install WebOS** button — both run the environment-correct command for you (pipx-aware). The manual command above is the fallback when an automatic install can't run.
+
 ### Activate the venv
 
 For each new shell session:
@@ -112,8 +122,7 @@ The install pulls in several things:
 - **`modulatio-tui`** — the terminal UI (run `modulatio-tui` in any terminal).
 - **`modulatio-standards`** — manage TQM standards and per-team overrides from the CLI.
 - **`modulatio-memory`** — inspect and manage the per-agent + team-shared memory stores.
-
-`modulatio-api` (a planned FastAPI server for a future web dashboard) is not installed in this release. The console script is intentionally not declared until the underlying module ships — see the [Roadmap](/roadmap/) for the long-horizon dashboard work.
+- **`modulatio-api`** — serve the [WebOS](/reference/webos/) (Modulatio in your browser). Available once the `[web]` extra is installed; without it the command prints an install hint and exits.
 
 Run any of these with `--help` for inline help.
 

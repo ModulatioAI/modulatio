@@ -92,8 +92,6 @@ Below the model list is a **PROVIDERS & KEYS** section — a key manager that do
 - **Add key** — paste a new key; it joins the shared pool with an optional label.
 - **Remove key** — purge a key from Modulatio entirely (value from the vault and the environment, plus its label and any pins). If the key was pinned to a model, that model is automatically put back on the shared pool, so a removal never leaves a model pointing at a dead key.
 
-Outside-service API keys (the **SERVICES** section just below — image / video / speech / research services) ride the **same numbered-slot pool**, keyed by each service's env var and managed with the same companion. See [The SERVICES pool](/reference/tools/#the-services-pool).
-
 ### Pinning a key to a model
 
 Select a model and choose **Pin key**. Pick a key to pin it to that model (it leaves the pool, isolating its spend), or choose **Use pool** to put the model back on the shared pool. Pinning is the one advanced lever — you only meet it if you go looking for it.

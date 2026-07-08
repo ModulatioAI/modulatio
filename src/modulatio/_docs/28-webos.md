@@ -7,10 +7,24 @@ receives a pushed event, the web reads a Server-Sent-Events stream.
 
 ## Install and launch
 
-The web server is an opt-in extra, so the base install stays lean:
+The web server is an opt-in extra, so the base install stays lean. There are
+three ways to add it — all install the same thing:
+
+- **In the setup wizard** — `modulatio setup` offers an *Install WebOS* step.
+- **In the TUI** — **CONFIG → SETTINGS** has an *Install WebOS* button.
+- **By hand:**
+
+  ```bash
+  pip install "modulatio[web]"
+  ```
+
+The wizard step and the TUI button run the environment-correct command for you
+— `pipx inject` when Modulatio runs from a pipx install (so the deps survive a
+later `pipx upgrade`), otherwise `pip install` into the current interpreter —
+and fall back to the manual command above if an automatic install can't run.
+Then launch it:
 
 ```bash
-pip install "modulatio[web]"
 modulatio-api            # serves http://127.0.0.1:8787
 ```
 
@@ -26,12 +40,17 @@ it never tracebacks at launch.
   the composer. `/kickoff … /end` brackets are the only job trigger —
   the **Kick off** button just pre-fills them. **F8** stops a run,
   with confirmation.
-- **The pages** — JT Library, Tickets, Artifacts (with previews),
-  Skills, Memory, Jobs, Cron, Logs and Docs, each a list + detail over
-  the same data the TUI tabs read.
+- **The pages** — JT Library, Tickets, Artifacts (with previews and
+  delivery stars), Skills, Memory, Jobs, Cron, Logs and Docs, each a
+  list + detail over the same data the TUI tabs read.
 - **Approvals** — when the Leader asks permission for an out-of-scope
   action, the request lands as a modal. No decision within the window
   means **deny**: approvals fail closed, exactly like the terminal.
+
+The **CONFIG tab (models, agents, projects, settings, folders) is read/write
+in the terminal today and lands in the WebOS next release** — this first cut
+ships the Console plus the read-only pages above. Configure your models, team,
+and services from the TUI's Config tab for now.
 
 ## The Feng-Web themes
 

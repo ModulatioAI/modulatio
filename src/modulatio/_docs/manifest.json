@@ -1,126 +1,126 @@
 {
- "version": "0.9.8.9",
- "bundle": "docs-bundle.tar.gz",
- "pages": [
-  {
-   "slug": "01-overview",
-   "title": "Overview"
-  },
-  {
-   "slug": "02-example-multi-piece",
-   "title": "Example: multi-piece deliverable"
-  },
-  {
-   "slug": "03-example-production-scale",
-   "title": "Example: production-scale, Phase 1 only"
-  },
-  {
-   "slug": "04-install",
-   "title": "Install"
-  },
-  {
-   "slug": "05-quickstart",
-   "title": "Quickstart"
-  },
-  {
-   "slug": "06-wizard",
-   "title": "Setup wizard"
-  },
-  {
-   "slug": "07-agents",
-   "title": "Agents"
-  },
-  {
-   "slug": "08-concepts",
-   "title": "Concepts overview"
-  },
-  {
-   "slug": "09-plan-lifecycle",
-   "title": "Plan lifecycle"
-  },
-  {
-   "slug": "10-providers",
-   "title": "Providers & models"
-  },
-  {
-   "slug": "11-assembly",
-   "title": "Assembly + the review-ledger"
-  },
-  {
-   "slug": "12-audit-trails",
-   "title": "Audit trails"
-  },
-  {
-   "slug": "13-deliverable-fidelity",
-   "title": "Deliverable fidelity"
-  },
-  {
-   "slug": "14-key-pool",
-   "title": "API key pool"
-  },
-  {
-   "slug": "15-sandbox",
-   "title": "Sandbox + tool execution"
-  },
-  {
-   "slug": "16-skill-system",
-   "title": "Skill system"
-  },
-  {
-   "slug": "17-working-memory",
-   "title": "Working memory \u2014 the five-layer architecture"
-  },
-  {
-   "slug": "18-acp",
-   "title": "ACP \u2014 drive Modulatio from an editor"
-  },
-  {
-   "slug": "19-ci-integration",
-   "title": "CI integration"
-  },
-  {
-   "slug": "20-daemon",
-   "title": "Daemon operator's guide"
-  },
-  {
-   "slug": "21-multi-user-hardening",
-   "title": "Multi-user host hardening"
-  },
-  {
-   "slug": "22-vault-backup",
-   "title": "Vault backup + restore"
-  },
-  {
-   "slug": "23-api",
-   "title": "Python API reference"
-  },
-  {
-   "slug": "24-cli",
-   "title": "CLI reference"
-  },
-  {
-   "slug": "25-skills",
-   "title": "Skill catalog"
-  },
-  {
-   "slug": "26-tools",
-   "title": "Tool catalog"
-  },
-  {
-   "slug": "27-methodology",
-   "title": "Testing methodology"
-  },
-  {
-   "slug": "28-troubleshooting",
-   "title": "Troubleshooting"
-  },
-  {
-   "slug": "29-folders",
-   "title": "Folders"
-  },
-  {
-   "slug": "30-webos",
-   "title": "The WebOS"
-  }
- ]
+  "version": "0.9.9.0",
+  "bundle": "docs-bundle.tar.gz",
+  "pages": [
+    {
+      "slug": "01-overview",
+      "title": "Overview"
+    },
+    {
+      "slug": "02-example-multi-piece",
+      "title": "Example: multi-piece deliverable"
+    },
+    {
+      "slug": "03-example-production-scale",
+      "title": "Example: production-scale, Phase 1 only"
+    },
+    {
+      "slug": "04-install",
+      "title": "Install"
+    },
+    {
+      "slug": "05-quickstart",
+      "title": "Quickstart"
+    },
+    {
+      "slug": "06-wizard",
+      "title": "Setup wizard"
+    },
+    {
+      "slug": "07-agents",
+      "title": "Agents"
+    },
+    {
+      "slug": "08-concepts",
+      "title": "Concepts overview"
+    },
+    {
+      "slug": "09-plan-lifecycle",
+      "title": "Plan lifecycle"
+    },
+    {
+      "slug": "10-providers",
+      "title": "Providers & models"
+    },
+    {
+      "slug": "11-assembly",
+      "title": "Assembly + the review-ledger"
+    },
+    {
+      "slug": "12-audit-trails",
+      "title": "Audit trails"
+    },
+    {
+      "slug": "13-deliverable-fidelity",
+      "title": "Deliverable fidelity"
+    },
+    {
+      "slug": "14-key-pool",
+      "title": "API key pool"
+    },
+    {
+      "slug": "15-sandbox",
+      "title": "Sandbox + tool execution"
+    },
+    {
+      "slug": "16-skill-system",
+      "title": "Skill system"
+    },
+    {
+      "slug": "17-working-memory",
+      "title": "Working memory \u2014 the five-layer architecture"
+    },
+    {
+      "slug": "18-acp",
+      "title": "ACP \u2014 drive Modulatio from an editor"
+    },
+    {
+      "slug": "19-ci-integration",
+      "title": "CI integration"
+    },
+    {
+      "slug": "20-daemon",
+      "title": "Daemon operator's guide"
+    },
+    {
+      "slug": "21-folders",
+      "title": "Folders \u2014 named operator folders"
+    },
+    {
+      "slug": "22-multi-user-hardening",
+      "title": "Multi-user host hardening"
+    },
+    {
+      "slug": "23-vault-backup",
+      "title": "Vault backup + restore"
+    },
+    {
+      "slug": "24-api",
+      "title": "Python API reference"
+    },
+    {
+      "slug": "25-cli",
+      "title": "CLI reference"
+    },
+    {
+      "slug": "26-skills",
+      "title": "Skill catalog"
+    },
+    {
+      "slug": "27-tools",
+      "title": "Tool catalog"
+    },
+    {
+      "slug": "28-webos",
+      "title": "The WebOS"
+    },
+    {
+      "slug": "29-methodology",
+      "title": "Testing methodology"
+    },
+    {
+      "slug": "30-troubleshooting",
+      "title": "Troubleshooting"
+    }
+  ]
 }

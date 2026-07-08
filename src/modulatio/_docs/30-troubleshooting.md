@@ -121,36 +121,6 @@ Fix:
 
 ## Plan execution
 
-### A seat's call never returns / the run seems wedged
-
-No seat model-call can outlive its wall-clock anymore. Every in-process call
-(litellm chat + single-shot + Codex) carries a **hard kill-boundary**: the
-transport timeout (`MODULATIO_CALL_TIMEOUT`, default 600s) gets first chance at
-a clean error, and a call that outlives it by 30s — a CPU spin or C-level stall
-no network timeout can see — is force-released. The seat fails with an
-availability-class error, so the normal recovery runs: fallback model, retry
-backoff, seat cooldown, and the QC backstop if it stays down. The wedged call's
-**all-threads stack dump** lands in the crash log — read it in the **LOGS** tab
-(`seat call hard-timeout: …`) and send it to the team if it recurs. Clay
-(`claude -p`) seats are bounded separately by their subprocess timeout.
-
-A Python stack dump stops at the C boundary — it shows *which* call wedged but
-not a C-extension stall's native frames (neither `sys._current_frames` nor
-faulthandler can — both dump Python only). So the dump and the warning name the
-wedged thread's OS **native TID**; to read the native stack of an *ongoing*
-stall, attach an out-of-process tool to that TID:
-
-```bash
-py-spy dump --pid <modulatio-pid> --native   # or: gdb -p <pid>, then `thread apply all bt`
-```
-
-Two honest limits: the released call's thread is *abandoned*, not killed
-(CPython can't kill a thread) — it burns quietly until the transport lets go,
-and the log line counts live zombies so accumulation is visible; and a stall
-that holds the GIL inside a C extension freezes the whole process (nothing
-in-process can run, including this boundary) — the native TID above plus
-`py-spy`/`gdb` is how you'd capture that shape if it ever appears live.
-
 ### Plan stuck in `awaiting-approval`
 
 You haven't approved or rejected. Approve via:
@@ -193,6 +163,22 @@ Three causes ranked by frequency:
 1. **Standard too implicit.** QC knows the artifact "feels off" but the standard doesn't say what to fix. Add an explicit rule: `modulatio-standards add <kind> "..."`.
 2. **Producer model too weak.** Escalate to a stronger model; the rejected drafts should pass on the new model.
 3. **Standard contradicts task constraint.** E.g., standard says "1000 words minimum" but task says "keep it under 400." Resolve at the task level (task-level constraint wins per QC's conformance hierarchy).
+
+### A seat's call never returns / the run seems wedged
+
+No seat model-call can outlive its wall-clock. Every in-process call (litellm chat + single-shot + Codex) carries a **hard kill-boundary**: the transport timeout (`MODULATIO_CALL_TIMEOUT`, default 600s) gets first chance at a clean error, and a call that outlives it by 30s — a CPU spin or C-level stall no network timeout can see — is force-released. The seat then fails with an **availability-class** error, so the normal recovery runs: fallback model, retry backoff, seat cooldown, and the QC backstop if it stays down.
+
+- The wedged call's **all-threads stack dump** lands in the crash log — read it in the **LOGS** tab (`seat call hard-timeout: …`) and attach it to an issue if it recurs.
+- Clay (`claude -p`) seats are bounded separately by their own subprocess timeout.
+- If a **local** model legitimately needs more than 600s per completion (a big model on a slow lane at long context), raise the knob: `export MODULATIO_CALL_TIMEOUT=1200`. The failure mode without it is a clean, recoverable timeout — never a silent wedge.
+
+A Python stack dump stops at the C boundary — it shows *which* call wedged but not a C-extension stall's native frames (neither `sys._current_frames` nor faulthandler can — both dump Python only). So the dump and warning name the wedged thread's OS **native TID**; to read the native stack of an *ongoing* stall, attach an out-of-process tool to that TID:
+
+```bash
+py-spy dump --pid <modulatio-pid> --native   # or: gdb -p <pid>, then thread apply all bt
+```
+
+Two honest limits: the released call's thread is *abandoned*, not killed (CPython can't kill a thread) — it burns quietly until the transport lets go, and the log line counts live "zombies" so accumulation is visible; and a stall that holds the GIL inside a C extension freezes the whole process — nothing in-process can run, and the native TID above plus `py-spy`/`gdb` is how you'd capture that shape if it ever appears live.
 
 ### "Plan reached `done` but the output is wrong"
 
@@ -348,6 +334,14 @@ Cause: a call landed in the 70-80% band of the model's window. This is **early s
 Fix: usually nothing. If you see soft-warn lines reliably in the same place, that sub-objective is over-scoped and a `revise-major` is in your future. Pre-empt by tightening the sub-objective scope in the next plan iteration.
 
 If your monitoring parses logs programmatically, filter on `modulatio_event="context_budget_soft_warn"` to ignore them.
+
+### "plan has X tasks — exceeds the per-goal task cap"
+
+Symptom: a CRITICAL ticket fires when the daemon claims a plan; the body cites `_PLAN_HARD_CAP`.
+
+Cause: the planner emitted more than 6 tasks for one sub-objective. The hard cap is a guardrail; plans wanting more raise `_PlanError` and route to `revise-major`.
+
+Fix: split the sub-objective. If the plan was emitted by Leader and you want to fix it once, edit the plan body to break the offending sub-objective into two narrower ones and re-approve. If Leader is consistently emitting over-scoped plans, the project's deliverable shape is production-scale — see [Example: production-scale Phase 1](/getting-started/example-production-scale/).
 
 ### "Engine calibration: ! Multi-phase / long-running work — NOT yet supported"
 

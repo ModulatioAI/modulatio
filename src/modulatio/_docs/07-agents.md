@@ -181,7 +181,7 @@ You don't usually configure skill loadouts directly — they emerge from the rol
 
 The roster comes from two places:
 
-- `<vault>/team_template.json` — an optional **default** roster reused as the starting point for new projects. Written when you save a team as the default; configured in the Config tab (the setup wizard no longer writes it).
+- `<vault>/team_template.json` — an optional **default** roster reused as the starting point for new projects. Configured in the Config tab (the setup wizard no longer writes it).
 - `<vault>/projects/<code>/team.json` (optional) — a **project-specific** override. Created if you customize the roster for a single project (e.g., add a `fact-checker` only for the cosmic-horror thesis project).
 
 Per-project overrides inherit from the template; only the deltas are stored.

@@ -22,11 +22,6 @@ model on it draws from (rotate + failover); **pin** a key to a model when you
 want its spend isolated for a budget. The CLI commands below remain available and
 edit the same `model_presets.json`.
 
-Below PROVIDERS & KEYS sits a **SERVICES** section for outside (non-LLM) APIs —
-image, video, speech, research, or any custom service — whose keys ride the same
-numbered-slot pool. Those aren't model providers; see
-[The SERVICES pool](/reference/tools/#the-services-pool).
-
 ## How model entries work
 
 A **model entry** in Modulatio is a self-contained tuple stored in `<vault>/model_presets.json`:
@@ -114,38 +109,31 @@ authentication_error`, so setup no longer offers it. See
 
 ##### Clay as the Leader — what works, and what's limited
 
-Clay can hold any seat, **including the Leader**, and it functions as a full
-Leader: it converses with you, decomposes objectives into plans, drives the swarm,
-and renders a goal verdict plus a human-facing Product Quality Report at the end.
-But because Clay runs as a sandboxed `claude -p` subprocess — reaching Claude
-through its *own* native Claude Code tools rather than Modulatio's in-process
-tools — it has a few caveats worth knowing:
+Clay can hold any seat, **including the Leader**, and it functions as a full Leader: it converses
+with you, decomposes objectives into plans, drives the swarm, and renders a goal verdict plus a
+human-facing Product Quality Report at the end. But because Clay runs as a sandboxed `claude -p`
+subprocess — reaching Claude through its *own* native tools rather than Modulatio's in-process
+tools — it has a few honest edges (improved in v0.9.8.5):
 
-- **It inspects deliverables with its own file tools, read-only.** Clay cannot
-  call the engine's `team_status` / `read_deliverable` helpers (those are
-  in-process tools a metered-API Leader uses). Instead, the run's directory is
-  granted to Clay's seat **read-only** (v0.9.8.5), so its native `Read`/`Grep`
-  can open the produced files to judge them — but it **cannot modify** a
-  deliverable it was only meant to review. (A metered-API Leader uses the helper
-  tools and reaches the same files; the destination is identical, the path
-  differs.)
-- **Its goal-verdict can lean on task summaries.** During the automated
-  end-of-run verification, Clay sometimes judges from the engine's task-outcome
-  digest rather than opening every file, so it tends toward a conservative
-  verdict — often *"on the fence"* with an explicit *"I couldn't independently
-  confirm X"* reservation addressed to you. The verdict and report are still
-  valid and the work still ships; the reservation is a flag for your spot-check,
-  not a failure. (Deeper read-during-verify is a planned refinement.)
-- **An occasional turn can come back empty.** A `claude -p` call can rarely
-  return no text; the engine's model-fallback and a simple retry recover it.
-- **Reads widen, writes stay gated.** A Clay leader's visibility into the run
-  directory is read-only; any *write* outside its own workspace still passes
-  through the same operator-widen permission gate as any other model — Clay is
-  treated like any seat, with no bespoke trust and no bespoke confinement.
+- **It inspects deliverables with its own file tools, read-only.** Clay can't call the engine's
+  `team_status` / `read_deliverable` helpers (those are in-process tools a metered-API Leader
+  uses). Instead the run directory is granted to Clay's seat **read-only**, so its native `Read` /
+  `Grep` can open the produced files to judge them — but it **cannot modify** a deliverable it was
+  only meant to review.
+- **Its goal-verdict can lean on task summaries.** During the automated end-of-run verification,
+  Clay sometimes judges from the engine's task-outcome digest rather than opening every file, so
+  it tends toward a conservative verdict — often *"on the fence"* with an explicit *"I couldn't
+  independently confirm X"* reservation addressed to you. The verdict and report are still valid
+  and the work still ships; the reservation is a flag for your spot-check, not a failure.
+- **An occasional turn can come back empty.** A `claude -p` call can rarely return no text; the
+  engine's model-fallback and a simple retry recover it.
+- **Reads widen, writes stay gated.** Clay's visibility into the run directory is read-only; any
+  *write* outside its own workspace still passes through the same operator-widen permission gate
+  as any other model — Clay is treated like any seat, no bespoke trust and no bespoke confinement.
 
-None of these stop Clay from leading a project end-to-end; they're the honest
-edges of running a subscription CLI as an orchestrator. For fully unattended,
-deep-verifying runs, a metered-API Leader (`api_key`) has no subprocess caveats.
+None of these stop Clay from leading a project end-to-end; they're the honest edges of running a
+subscription CLI as an orchestrator. For fully unattended, deep-verifying runs, a metered-API
+Leader (`api_key`) has no subprocess caveats.
 
 #### `cli_subprocess` — Claude CLI passthrough
 
@@ -304,7 +292,9 @@ The watchdog catches a known failure pattern where a fallback "wins" and the ses
 
 ## Call timeouts and the hard kill-boundary
 
-**`MODULATIO_CALL_TIMEOUT`** (seconds, default `600`) bounds every seat model-call — the single-shot path AND the tool-loop chat path share it as their transport timeout, and an explicit `timeout=` on a runner still wins. On top of it sits the **hard kill-boundary**: a call that outlives the transport timeout by 30s (a CPU spin or C-level stall the network timeout can't see) is force-released with an availability-class failure — the seat's fallback chain, retry backoff, cooldown, and the QC backstop take it from there, and the wedged call's all-threads stack dump lands in the LOGS tab. Raise the knob if your models legitimately need longer than 10 minutes per completion; both bounds scale with it. Clay (`claude -p`) seats are bounded by their own subprocess timeout instead.
+Every seat model-call is bounded twice. The **transport timeout** — `MODULATIO_CALL_TIMEOUT`, default **600s** — gets first chance to raise a clean error on a slow or silent network call, and governs both the single-shot and the tool-loop (chat) paths. Behind it sits a **hard kill-boundary**: a call that outlives the transport bound by 30s — a CPU spin or C-level stall no network timeout can observe — is force-released, and the seat fails with an **availability-class** error that flows into the [fallback chain](#fallback-chains), retry backoff, seat cooldown, and the QC backstop.
+
+A released wedge leaves an **all-threads stack dump** in the crash log (the **LOGS** tab). If a local model on a slow lane legitimately needs longer than 600s per completion, raise the knob (`export MODULATIO_CALL_TIMEOUT=1200`) — without it the call raises a clean, recoverable timeout rather than wedging. Clay (`claude -p`) seats carry their own subprocess bound and are exempt from the in-process boundary.
 
 ## Common provider issues
 

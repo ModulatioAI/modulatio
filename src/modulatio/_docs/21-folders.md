@@ -1,4 +1,4 @@
-# Folders — named operator folders for job runs
+# Folders — named operator folders
 
 Register folder locations the team can use during a run: a share full of
 documents to process, a drop-folder for the finished product, an application
