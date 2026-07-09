@@ -281,6 +281,7 @@ export function mountConsole(page, ctx) {
       rows.push(
         el("div", {}, `tasks ${seg(t.pct)} ${t.pct}%`),
         el("div", {}, `qc    ✗ ${t.qc_rejected} rejected`),
+        el("div", {}, `tok   ↑ ${fmtTokens(t.tokens_in || 0)} in · ↓ ${fmtTokens(t.tokens_out || 0)} out`),
         el("div", {}, `ctx   ${fmtTokens(t.tokens)} tok · ${t.compressions} compress`),
       );
     } else {

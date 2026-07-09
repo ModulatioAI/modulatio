@@ -22,6 +22,7 @@ surface, same wiring, stub mode included for the test suite.
 
 from __future__ import annotations
 
+import json
 import secrets
 import threading
 import time
@@ -240,6 +241,17 @@ class OrchestratorActor:
         ticker.start()
         error: str | None = None
         digest = ""
+        # Bind a run-level budget tracker BEFORE orch.kickoff so record_usage
+        # actually accounts this interactive run — the orchestrator copies the
+        # ContextVar binding into each wave worker (see budget.py), so producer
+        # completions land too, not just the Leader's. Caps stay unset (no
+        # enforcement change); the usage log is what feeds the tokens-in/out
+        # rail. Interactive runs bound no tracker before this.
+        from modulatio import budget
+        tracker = budget.BudgetTracker(
+            log_path=vault.run_dir(self.code, run_id) / "usage.jsonl",
+        )
+        budget_token = budget.bind(tracker)
         try:
             summary = orch.kickoff(objective, bound_jt_name=jt_name)
             if summary is not None:
@@ -249,6 +261,7 @@ class OrchestratorActor:
         except Exception as exc:  # noqa: BLE001 — the frame IS the error surface
             error = f"{type(exc).__name__}: {exc}"
         finally:
+            budget.unbind(budget_token)
             ticker_stop.set()
             ticker.join()
             data: dict = {"run_id": run_id, "digest": json_safe(digest)}
@@ -295,6 +308,7 @@ class OrchestratorActor:
         offset, tokens, compressions = _tally_audit(
             audit_path, offset, tokens, compressions
         )
+        tokens_in, tokens_out = self._read_usage_totals(run_id)
         self._bus.publish({
             "type": "telemetry",
             "data": {
@@ -306,9 +320,30 @@ class OrchestratorActor:
                 "qc_rejected": qc_rejected,
                 "tokens": tokens,
                 "compressions": compressions,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
             },
         })
         return offset, tokens, compressions
+
+    def _read_usage_totals(self, run_id: str) -> tuple[int, int]:
+        """Running billed input/output tokens from the usage log's last line
+        (self-describing per line). Absent/mid-write → 0; telemetry never
+        raises. Input and output are kept separate — they price differently
+        per provider, so the honest figure is the two counts, not a sum."""
+        path = vault.run_dir(self.code, run_id) / "usage.jsonl"
+        try:
+            last = ""
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        last = line
+            if last:
+                row = json.loads(last)
+                return int(row.get("input_total") or 0), int(row.get("output_total") or 0)
+        except (OSError, ValueError):
+            pass
+        return 0, 0
 
     def _build_kickoff_orchestrator(self, objective: str, run_id: str) -> Orchestrator:
         from modulatio import tools

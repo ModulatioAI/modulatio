@@ -70,6 +70,11 @@ class BudgetTracker:
     max_cost_usd: float | None = None
     tokens_used: int = 0
     cost_usd_used: float = 0.0
+    #: Split running totals — input and output tokens price differently and
+    #: the ratio varies by provider, so the honest usage figure is the two
+    #: counts, not a combined number or an estimated dollar cost.
+    input_tokens_used: int = 0
+    output_tokens_used: int = 0
     log_path: Path | None = None
     # re-sweep (Opus R2 MED/race): one tracker is intentionally shared
     # across the default-on concurrent wave workers (orchestration.py copies
@@ -99,6 +104,8 @@ class BudgetTracker:
         # append so the running totals captured per JSONL line come from a
         # consistent snapshot and concurrent writers can't interleave.
         with self._lock:
+            self.input_tokens_used += int(input_tokens)
+            self.output_tokens_used += int(output_tokens)
             self.tokens_used += int(input_tokens) + int(output_tokens)
             self.cost_usd_used += float(cost_usd)
             if self.log_path is not None:
@@ -122,6 +129,8 @@ class BudgetTracker:
                 "model": model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "input_total": self.input_tokens_used,
+                "output_total": self.output_tokens_used,
                 "cost_usd": round(cost_usd, 6),
                 "tokens_total": self.tokens_used,
                 "cost_total": round(self.cost_usd_used, 6),
