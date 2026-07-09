@@ -132,14 +132,19 @@ export function mountConsole(page, ctx) {
   });
   const btnSend = el("button", { class: "btn btn--primary", onclick: send }, "Send");
   const btnKick = el("button", {
-    class: "btn", title: "Pre-fill the kickoff brackets",
+    class: "btn", title: "Bracket what you typed as a job and kick it off",
     onclick: () => {
-      if (!input.value.trim()) input.value = "/kickoff \n\n/end";
-      else if (!/^\s*\/kickoff/i.test(input.value)) {
-        input.value = `/kickoff ${input.value} /end`;
+      const raw = input.value.trim();
+      if (!raw) {
+        // Nothing to kick off yet — drop in the brackets and let them type.
+        input.value = "/kickoff \n\n/end";
+        input.focus();
+        input.setSelectionRange(9, 9);
+        return;
       }
-      input.focus();
-      input.setSelectionRange(9, 9);
+      // Bare objective → bracket it; already-bracketed → leave as is; then GO.
+      if (!/^\s*\/kickoff/i.test(raw)) input.value = `/kickoff ${raw} /end`;
+      send();
     },
   }, "Kick off…");
   const btnStop = el("button", {
