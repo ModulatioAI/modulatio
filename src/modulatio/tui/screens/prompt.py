@@ -78,6 +78,7 @@ class PromptScreen(Vertical):
         "#rail-elapsed": "⏱ —",
         "#rail-tasks": "tasks ▱▱▱▱▱▱▱▱▱▱ —",
         "#rail-qc": "qc    ✓ — · ✗ —",
+        "#rail-tok": "tok   ↑ — in · ↓ — out",
         "#rail-ctx": "ctx   — tok · — compress",
     }
 
@@ -585,6 +586,8 @@ class PromptScreen(Vertical):
         qc_fail: int,
         tokens: int,
         compressions: int,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
     ) -> None:
         """Paint the live run gauges (fed by the app's 1s tick, read-side)."""
         mins, secs = divmod(max(0, int(elapsed)), 60)
@@ -592,6 +595,8 @@ class PromptScreen(Vertical):
             "#rail-elapsed": f"⏱ {mins}:{secs:02d}",
             "#rail-tasks": f"tasks {_tasks_bar(tasks_done, tasks_total)}",
             "#rail-qc": f"qc    ✓ {qc_pass} · ✗ {qc_fail}",
+            "#rail-tok": (
+                f"tok   ↑ {_fmt_tokens(tokens_in)} in · ↓ {_fmt_tokens(tokens_out)} out"),
             "#rail-ctx": (
                 f"ctx   {_fmt_tokens(tokens)} tok · {compressions} compress"),
         }

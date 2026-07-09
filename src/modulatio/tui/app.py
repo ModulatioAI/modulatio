@@ -665,9 +665,21 @@ class ModulatioApp(App):
         # Fix C: expose this run's orchestrator so the STOP key (action_stop_job)
         # can signal its abort_event from the main thread while we run here.
         self._kickoff_orch = orch
-        summary = orch.kickoff(
-            objective, attachments=attachments, bound_jt_name=jt_name,
+        # Bind a run-level budget tracker so record_usage accounts this
+        # interactive run (the orchestrator copies the ContextVar into each
+        # wave worker, so producer completions land too). Caps unset — the
+        # usage log feeds the rail's tokens-in/out. Mirrors the WebOS actor.
+        from modulatio import budget as _budget
+        _tracker = _budget.BudgetTracker(
+            log_path=_vault.run_dir(project.code, run_id) / "usage.jsonl",
         )
+        _budget_token = _budget.bind(_tracker)
+        try:
+            summary = orch.kickoff(
+                objective, attachments=attachments, bound_jt_name=jt_name,
+            )
+        finally:
+            _budget.unbind(_budget_token)
         # Honest outcome (no hollow success): a run that RETURNS is not the same as
         # a run that DELIVERED. Count what actually landed vs what blocked / never
         # finished, so the verdict can't claim "deliverables are in" over a blocked,
@@ -1914,12 +1926,16 @@ class ModulatioApp(App):
             elapsed = int(_time.monotonic() - started)
         else:
             elapsed = 0
+        from modulatio import budget
+        tokens_in, tokens_out = budget.read_usage_totals(
+            vault.run_dir(project.code, run_id) / "usage.jsonl")
         from modulatio.tui.screens.prompt import PromptScreen
         try:
             self.query_one(PromptScreen).update_team_telemetry(
                 elapsed=elapsed, tasks_done=settled, tasks_total=total,
                 qc_pass=qc_pass, qc_fail=qc_fail,
-                tokens=tokens, compressions=compressions)
+                tokens=tokens, compressions=compressions,
+                tokens_in=tokens_in, tokens_out=tokens_out)
         except Exception:
             pass
 

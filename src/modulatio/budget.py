@@ -203,6 +203,26 @@ def with_tracker(tracker: BudgetTracker):
         _current_tracker.reset(token)
 
 
+def read_usage_totals(path) -> "tuple[int, int]":
+    """Running billed ``(input, output)`` tokens from a usage log's last line
+    (the log is self-describing per line). Absent / mid-write / malformed →
+    ``(0, 0)`` — telemetry must never raise. Input and output stay separate:
+    they price differently per provider, so the honest figure is the two
+    counts, not a sum or an estimated dollar cost."""
+    try:
+        last = ""
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last = line
+        if last:
+            row = json.loads(last)
+            return int(row.get("input_total") or 0), int(row.get("output_total") or 0)
+    except (OSError, ValueError):
+        pass
+    return 0, 0
+
+
 def bind(tracker: BudgetTracker):
     """Non-context-manager binding for callers that can't easily wrap
     a long loop body in ``with`` without re-indenting. Returns an

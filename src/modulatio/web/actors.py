@@ -22,7 +22,6 @@ surface, same wiring, stub mode included for the test suite.
 
 from __future__ import annotations
 
-import json
 import secrets
 import threading
 import time
@@ -327,23 +326,9 @@ class OrchestratorActor:
         return offset, tokens, compressions
 
     def _read_usage_totals(self, run_id: str) -> tuple[int, int]:
-        """Running billed input/output tokens from the usage log's last line
-        (self-describing per line). Absent/mid-write → 0; telemetry never
-        raises. Input and output are kept separate — they price differently
-        per provider, so the honest figure is the two counts, not a sum."""
-        path = vault.run_dir(self.code, run_id) / "usage.jsonl"
-        try:
-            last = ""
-            with path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        last = line
-            if last:
-                row = json.loads(last)
-                return int(row.get("input_total") or 0), int(row.get("output_total") or 0)
-        except (OSError, ValueError):
-            pass
-        return 0, 0
+        from modulatio import budget
+        return budget.read_usage_totals(
+            vault.run_dir(self.code, run_id) / "usage.jsonl")
 
     def _build_kickoff_orchestrator(self, objective: str, run_id: str) -> Orchestrator:
         from modulatio import tools
