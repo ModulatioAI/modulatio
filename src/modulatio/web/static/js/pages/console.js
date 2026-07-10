@@ -223,13 +223,21 @@ export function mountConsole(page, ctx) {
     renderRail();
   }
 
-  // Operator "clear screen" — wipe both activity logs AND the server-side
-  // replay buffer, so a tab-flip/reconnect doesn't repaint what was cleared
-  // (Clif 2026-07-09). Telemetry rail and any live run stay untouched.
+  // Operator "clear screen" — wipe both activity logs AND every repaint
+  // source, so neither a reconnect nor a tab-return brings the cleared log
+  // back (Clif 2026-07-09, twice): the server replay buffer is dropped, and
+  // the conversation history — which the boot paint replays in full — gets a
+  // turn-count watermark so remounts skip what was cleared. The thread itself
+  // stays intact (reset is the destructive verb); telemetry and any live run
+  // are untouched.
+  const clearMarkKey = `modulatio.clearmark.${ctx.project}`;
   function clearScreen() {
     tvLeader.replaceChildren();
     tvTeam.replaceChildren();
     api(`/${ctx.project}/console/clear`, { method: "POST" }).catch(() => {});
+    api(`/${ctx.project}/conversation`)
+      .then(({ turns }) => localStorage.setItem(clearMarkKey, String(turns.length)))
+      .catch(() => {});
   }
 
   function appendLine(tv, node) {
@@ -460,7 +468,11 @@ export function mountConsole(page, ctx) {
   (async () => {
     try {
       const { turns } = await api(`/${ctx.project}/conversation`);
-      for (const t of turns) {
+      // Honor the operator's clear: skip the watermarked prefix. A watermark
+      // LONGER than the thread means the thread was reset since — drop it.
+      let skip = parseInt(localStorage.getItem(clearMarkKey) || "0", 10) || 0;
+      if (skip > turns.length) { skip = 0; localStorage.removeItem(clearMarkKey); }
+      for (const t of turns.slice(skip)) {
         if (t.role === "operator") operatorLine(t.content);
         else leaderSpeech(t.content);
       }
