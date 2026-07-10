@@ -33,19 +33,35 @@ it never tracebacks at launch.
 
 ## What you get
 
-- **The Console** — the centerpiece. The status lamp row, the
+- **The Console** — the centerpiece. The status lamp row (including the
+  **autonomy pill** — the Leader's current mode, default / yolo / goal /
+  yolo-goal, set with the slash-commands in converse), the
   LEADER / MOD SQUAD flip (F4), the live TV fed by the engine's
   activity events (the same glyph + verb vocabulary as the terminal),
-  the run-telemetry rail (task gauge, QC tally, context tokens), and
-  the composer. `/kickoff … /end` brackets are the only job trigger —
-  the **Kick off** button just pre-fills them. **F8** stops a run,
-  with confirmation.
+  the run-telemetry rail (task gauge, QC tally, context tokens, and
+  **tokens in / tokens out** — the run's raw billed counts, never a
+  dollar guess), and the composer. `/kickoff … /end` brackets start a
+  job — the **Kick off** button submits them for you. **F8** stops a
+  run, with confirmation. The run stream **replays on reconnect** — a
+  tab switch or a dropped connection rebuilds the whole run, and
+  **CLEAR** wipes both TVs and *stays* cleared across tab flips (the
+  conversation thread itself is untouched; reset is the destructive
+  verb).
 - **The pages** — JT Library, Tickets, Artifacts (with previews and
   delivery stars), Skills, Memory, Jobs, Cron, Logs and Docs, each a
   list + detail over the same data the TUI tabs read.
+- **The scheduler** — the JT Library's **Schedule** builds a real
+  schedule, Teams-style: pick a date and time, one-off or recurring
+  (daily / weekly / monthly / every N days or weeks), ending never,
+  after N runs, or on a date, with a live plain-English preview. The
+  daemon holds the stop rules fail-closed — a one-off fires once and a
+  count is a hard upper limit.
 - **Approvals** — when the Leader asks permission for an out-of-scope
-  action, the request lands as a modal. No decision within the window
-  means **deny**: approvals fail closed, exactly like the terminal.
+  action, the request lands as a modal running the engine's own
+  permission gate: grant **once**, for **this session**, or **always**
+  (persisted through the engine's stores, exactly as the terminal
+  grants), or deny. No decision within the window means **deny**:
+  approvals fail closed.
 
 The **CONFIG tab is now read/write in the browser** — all six sub-pages
 (**Models**, **Agents**, **Services**, **Folders**, **Projects**, **Settings**)

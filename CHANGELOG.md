@@ -6,6 +6,65 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.9.3] — 2026-07-09
+
+### Added
+
+- **A real cron scheduler in the JT Library — Teams-style.** Schedule a Job
+  Template with a picked date + time, one-off or recurring (daily / weekly /
+  monthly / every N days / every N weeks), ending never, after N runs, or on a
+  date — every logical combination, with a live plain-English preview of
+  exactly what will run and when. The daemon enforces the stop rules
+  fail-closed: a one-off fires once, a count is a hard upper limit, an end
+  date ends it, and any hand-edited/malformed schedule metadata disables the
+  job before it can fire rather than wedging the sweep or running forever.
+- **Tokens-in / tokens-out on the console telemetry rail** — raw billed token
+  counts for the current run (in and out price differently per provider, so
+  the counts are shown, never a dollar guess), on both the WebOS rail and the
+  terminal's, read from the same usage ledger. Interactive kickoff runs are
+  now token-accounted like scheduled ones.
+- **The autonomy pill.** The console shows the Leader's current autonomy mode
+  (default / yolo / goal / yolo-goal) live — set it in converse with the
+  slash-commands as always; the pill just tells the truth about where the
+  dial sits.
+- **Permission-gate parity in the browser.** A Leader capability ask in the
+  WebOS now runs the engine's own gate end-to-end: the approval modal offers
+  the same once / this-session / always / deny scopes as the terminal,
+  durable grants persist through the engine's own stores, and everything
+  fails closed — a timeout, a dismissed modal, or an out-of-set scope is a
+  deny.
+- **An svg-drawing seed skill + SVG standard.** Inert, self-contained,
+  theme-aware (currentColor) vector art as a first-class artifact kind, with
+  the craft conventions in the standard. Skill-crafting agents now write
+  library skills agnostic — no project/producer/run lingo; domain specifics
+  live in the standards.
+
+### Fixed
+
+- **The run stream survives reconnects and tab switches.** The console replays
+  the current run on every (re)connect — the Leader decompose, producer
+  bursts, and the finish line no longer vanish into a 2-second SSE gap, and a
+  long run's newest frames (including `run_done`) win over its oldest.
+- **CLEAR actually clears.** Clearing the consoles now sticks across tab
+  flips and reconnects — it drops the server replay buffer and watermarks the
+  conversation repaint instead of only wiping the screen. The thread itself
+  is untouched; reset stays the destructive verb.
+- **The Settings page matches reality.** Every engine knob was audited against
+  its real consumer: the qc context-window default had drifted stale (the
+  registry said 64000 while the engine moved to 96000 — and refused the
+  engine's own default); budget-knob defaults and ranges now derive from the
+  engine's own table and can't drift again. The WebOS-port entry now says
+  when the live server is bound elsewhere via `--port`.
+- **The "Kick off…" button kicks off.** And the composer hides on the team
+  view, the team TV fills to the bottom of the screen, and the Leader's
+  verify pass now catches cross-artifact contradictions inside a goal (the
+  one exception to "don't flog complete work").
+
+### Changed
+
+- Live provider round-trip tests are opt-in (`pytest -m live`) — the default
+  gate and the release stamp stay deterministic.
+
 ## [0.9.9.2] — 2026-07-08
 
 ### Added
