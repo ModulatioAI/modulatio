@@ -1181,3 +1181,88 @@ def test_chat_runner_explicit_timeout_still_wins(monkeypatch):
     runner = litellm_chat_runner("openrouter/test", timeout=900.0)
     runner(messages=[{"role": "user", "content": "hi"}], tools=[])
     assert seen["timeout"] == 900.0
+
+
+# ── key-pool failover re-raise seeding (LOW-audit #79 fold) ─────────────────
+# The failover's `raise last_err` was seeded None: a TOCTOU where the pool
+# shrank to empty between the >1 guard and the retry range() raised None ->
+# TypeError masking the real 429. Seeded with the original RateLimitError.
+
+
+def _make_429():
+    from litellm.exceptions import RateLimitError
+    return RateLimitError(message="429", llm_provider="x", model="m")
+
+def test_chat_failover_toctou_pool_shrink_reraises_real_error(monkeypatch):
+    """Guard sees >1 key, then the pool empties so the failover loop runs zero
+    times. The original RateLimitError must surface — never ``raise None``."""
+    import litellm
+
+    from modulatio import runners
+    from modulatio.runners import litellm_runner
+
+    # Pool guard returns >1 (failover entered); the range() count returns 0
+    # (pool drained out from under us) -> loop body never runs.
+    counts = iter([2, 0])
+    monkeypatch.setattr(runners, "_pool_count", lambda pool_base: next(counts))
+    monkeypatch.setattr(runners, "_pool_base", lambda model: "TESTPOOL_KEY")
+    monkeypatch.setattr(runners, "_pooled_call_key", lambda pool_base, model: "k")
+    monkeypatch.setattr(runners, "_rotated_pool_key", lambda pool_base: "k")
+
+    preset = {
+        "label": "Pooled", "base_url": "https://example.invalid/v1",
+        "api_format": "openai", "auth_type": "api_key",
+        "auth_config": {"env_var": "TESTPOOL_KEY", "pool": True},
+        "model": "meta/llama-3.1",
+    }
+    monkeypatch.setattr("modulatio.model_presets.load_presets",
+                        lambda: {"pooled": preset})
+    monkeypatch.setattr("modulatio.model_presets.get_preset",
+                        lambda k: preset if k == "pooled" else None)
+
+    def always_429(**kw):
+        raise _make_429()
+
+    monkeypatch.setattr(litellm, "completion", always_429)
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+
+    from litellm.exceptions import RateLimitError
+
+    # Before the fix this raised TypeError ("exceptions must derive from
+    # BaseException" / NoneType); after the fix it re-raises the real 429.
+    with pytest.raises(RateLimitError):
+        litellm_runner("pooled")("hi")
+
+
+def test_chat_pool_seed_last_err_is_a_ratelimiterror(monkeypatch):
+    """Even when the failover loop DOES run and every retry 429s, the re-raise
+    is a RateLimitError (not None / not TypeError)."""
+    import litellm
+
+    from modulatio import runners
+    from modulatio.runners import litellm_runner
+
+    monkeypatch.setattr(runners, "_pool_count", lambda pool_base: 2)
+    monkeypatch.setattr(runners, "_pool_base", lambda model: "TESTPOOL_KEY")
+    monkeypatch.setattr(runners, "_pooled_call_key", lambda pool_base, model: "k")
+    monkeypatch.setattr(runners, "_rotated_pool_key", lambda pool_base: "k")
+
+    preset = {
+        "label": "Pooled", "base_url": "https://example.invalid/v1",
+        "api_format": "openai", "auth_type": "api_key",
+        "auth_config": {"env_var": "TESTPOOL_KEY", "pool": True},
+        "model": "meta/llama-3.1",
+    }
+    monkeypatch.setattr("modulatio.model_presets.load_presets",
+                        lambda: {"pooled": preset})
+    monkeypatch.setattr("modulatio.model_presets.get_preset",
+                        lambda k: preset if k == "pooled" else None)
+
+    monkeypatch.setattr(litellm, "completion",
+                        lambda **kw: (_ for _ in ()).throw(_make_429()))
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+
+    from litellm.exceptions import RateLimitError
+
+    with pytest.raises(RateLimitError):
+        litellm_runner("pooled")("hi")

@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -593,6 +594,10 @@ def test_echo_correction_overwrites_and_emits_audit(
     )
     assert outcome.echo_correction is not None
     assert outcome.echo_correction.field == "original_user_goal"
+    # The in-memory correction carries both raw values (the AUDIT row only
+    # ever gets sha+excerpt — see the carries_sha test below).
+    assert outcome.echo_correction.leader_value == "paraphrased goal that drifted"
+    assert outcome.echo_correction.source_value == "Original user goal verbatim"
     # Versioned file carries the source value, NOT Leader's drift
     body = state_version_path(run_dir, 1).read_text(encoding="utf-8")
     assert "Original user goal verbatim" in body
@@ -1208,3 +1213,262 @@ def test_audit_append_helper_swallows_write_failures(
     compression._append_audit_row_0600(
         run_dir / "audit.jsonl", {"event": "compaction_emit"},
     )
+
+
+# ── audit-append write_lock (0.9.0-preship fold) ────────────────────────────
+
+
+def test_append_audit_row_acquires_write_lock_when_bound(tmp_path: Path) -> None:
+    """Preship LOW/race: the audit append gained an optional ``write_lock``
+    (parity with context_budget) so concurrent wave workers can't tear rows.
+    When bound, the whole touch+chmod+open+write critical section runs under
+    the lock."""
+    acquisitions = {"count": 0, "held_during_write": False}
+    audit_path = tmp_path / "audit.jsonl"
+
+    class _RecordingLock:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+
+        def __enter__(self):
+            self._lock.acquire()
+            acquisitions["count"] += 1
+            # The audit file must NOT exist yet when the lock is taken —
+            # proves the whole critical section runs under the lock.
+            acquisitions["held_during_write"] = not audit_path.exists()
+            return self
+
+        def __exit__(self, *exc) -> None:
+            self._lock.release()
+
+    lock = _RecordingLock()
+    compression._append_audit_row_0600(
+        audit_path, {"event": "compaction_emit"}, lock,
+    )
+
+    assert acquisitions["count"] == 1
+    assert acquisitions["held_during_write"] is True
+    # The row landed exactly once.
+    assert audit_path.read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_append_audit_row_no_lock_is_prior_behavior(tmp_path: Path) -> None:
+    """Unbound (``write_lock=None``) path appends with no locking —
+    the sequential / back-compat behavior is preserved."""
+    audit_path = tmp_path / "audit.jsonl"
+    compression._append_audit_row_0600(audit_path, {"event": "x"})
+    compression._append_audit_row_0600(audit_path, {"event": "y"})
+    assert audit_path.read_text(encoding="utf-8").count("\n") == 2
+
+
+def test_append_audit_row_concurrent_appends_under_shared_lock_dont_tear(
+    tmp_path: Path,
+) -> None:
+    """A shared lock serializes concurrent appends so every JSONL line is
+    intact (no interleaved/torn rows) under parallel wave workers."""
+    audit_path = tmp_path / "audit.jsonl"
+    shared_lock = threading.Lock()
+    n = 60
+
+    def _worker(i: int) -> None:
+        compression._append_audit_row_0600(
+            audit_path, {"event": "compaction_emit", "i": i}, shared_lock,
+        )
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    lines = [
+        ln for ln in audit_path.read_text(encoding="utf-8").splitlines() if ln
+    ]
+    assert len(lines) == n
+    seen = set()
+    for ln in lines:
+        row = json.loads(ln)  # each line is valid JSON (not torn)
+        seen.add(row["i"])
+    assert seen == set(range(n))
+
+
+def test_append_audit_row_releases_lock_on_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-effort contract holds WITH a lock: a write failure is swallowed
+    and the lock is released, so a subsequent append can still acquire it."""
+    audit_path = tmp_path / "audit.jsonl"
+    lock = threading.Lock()
+    real_open = Path.open
+
+    def explosive_open(self, *args, **kwargs):
+        if self.name == "audit.jsonl":
+            raise OSError("simulated disk-full")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", explosive_open)
+    # Must not raise and must not leave the lock held.
+    compression._append_audit_row_0600(audit_path, {"event": "x"}, lock)
+    assert lock.acquire(blocking=False) is True
+    lock.release()
+
+
+# ── non-string Leader echo (r2-audit fold) ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "bad_echo",
+    [
+        ["a", "b"],          # list
+        123,                 # int
+        {"goal": "x"},       # dict
+        True,                # bool
+    ],
+)
+def test_non_string_echo_does_not_crash_compaction(
+    run_dir: Path, audit_path: Path, bad_echo
+) -> None:
+    """r2 MEDIUM: a non-string original_user_goal echo (arbitrary LLM JSON —
+    validate_state_doc deliberately skips it) must be treated as ABSENT, not
+    crash emit_compaction with AttributeError on ``leader_echo.strip()``
+    (which the sole prod caller swallows, silently dropping the compaction)."""
+    state = _well_formed_state(original_user_goal=bad_echo)
+
+    outcome = emit_compaction(
+        project_code="STA", run_id="run-1", plan_id="plan-1",
+        after_sub_objective=1, run_dir=run_dir, audit_path=audit_path,
+        call_scope_id="cs-1", call_id="c-1", model="m",
+        parsed_state=state,
+        original_user_goal_source="Ship goal-state compression",
+    )
+
+    # The compaction completed (a versioned record written), not aborted.
+    assert outcome.record is not None
+    assert outcome.skip_reason is None
+    # Non-string echo is treated as ABSENT -> no echo correction event.
+    assert outcome.echo_correction is None
+
+    # The canonical source value landed in the versioned parsed state.
+    manifest = read_manifest(run_dir)
+    assert manifest is not None
+    parsed_path = (
+        run_dir / "compressed_state" / "parsed"
+        / f"{manifest.latest_version:03d}.json"
+    )
+    parsed = json.loads(parsed_path.read_text(encoding="utf-8"))
+    assert parsed["original_user_goal"] == "Ship goal-state compression"
+
+    rows = _read_audit_rows(audit_path)
+    events = [r["event"] for r in rows]
+    assert "compaction_emit" in events
+    assert "compression_echo_corrected" not in events
+
+
+# ── per-run compaction lock (LOW-audit #54 fold) ────────────────────────────
+
+
+def _emit_racing(run_dir: Path, audit_path: Path, focus: str) -> None:
+    emit_compaction(
+        project_code="STA", run_id="run-race", plan_id="plan-race",
+        after_sub_objective=1, run_dir=run_dir, audit_path=audit_path,
+        call_scope_id="scope", call_id=None, model=None,
+        # Distinct body per call so neither short-circuits on
+        # no_material_change — both must allocate a real version.
+        parsed_state=_well_formed_state(current_focus=focus),
+        original_user_goal_source="Ship goal-state compression",
+    )
+
+
+def test_concurrent_emit_compaction_does_not_clobber_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LOW #54: two threads racing emit_compaction on the SAME run_dir must
+    allocate DISTINCT versions (1 and 2), not both read latest_version=None
+    and clobber each other's state/diff/parsed/manifest quadruple. A barrier
+    in _write_state_version pins the race window deterministically; the
+    per-run flock (_compaction_lock) closes it."""
+    run_dir = tmp_path / "run"
+    audit_path = run_dir / "audit.jsonl"
+
+    real_write_state = compression._write_state_version
+    barrier = threading.Barrier(2, timeout=1.5)
+    _tripped = {"done": False}
+
+    def _slow_write_state(rd: Path, version: int, body: str):
+        if not _tripped["done"]:
+            _tripped["done"] = True
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                pass
+        return real_write_state(rd, version, body)
+
+    monkeypatch.setattr(compression, "_write_state_version", _slow_write_state)
+
+    errors: list[BaseException] = []
+
+    def _worker(focus: str) -> None:
+        try:
+            _emit_racing(run_dir, audit_path, focus)
+        except BaseException as exc:  # noqa: BLE001 - surface to assert
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_worker, args=("focus-A",))
+    t2 = threading.Thread(target=_worker, args=("focus-B",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert not errors, f"worker raised: {errors!r}"
+
+    # Both versions landed; the sequence is monotonic and uncorrupted.
+    manifest = read_manifest(run_dir)
+    assert manifest is not None
+    assert manifest.latest_version == 2
+    assert state_version_path(run_dir, 1).exists()
+    assert state_version_path(run_dir, 2).exists()
+
+    # Two compaction_emit rows — one per attempt, neither lost.
+    rows = _read_audit_rows(audit_path)
+    emits = [r for r in rows if r["event"] == "compaction_emit"]
+    assert len(emits) == 2
+    versions = sorted(r["compaction_version"] for r in emits)
+    assert versions == [1, 2]
+
+
+def test_compaction_lock_serializes_holders(tmp_path: Path) -> None:
+    """The per-run lock is a real mutual-exclusion guard: while one holder is
+    inside the context, a second acquisition blocks."""
+    if compression.fcntl is None:  # pragma: no cover - non-POSIX
+        pytest.skip("flock unavailable on this platform")
+
+    run_dir = tmp_path / "run"
+    entered = threading.Event()
+    second_acquired = threading.Event()
+    release = threading.Event()
+
+    def _holder() -> None:
+        with compression._compaction_lock(run_dir):
+            entered.set()
+            release.wait(timeout=5)  # hold until the waiter is proven blocked
+
+    def _waiter() -> None:
+        with compression._compaction_lock(run_dir):
+            second_acquired.set()
+
+    h = threading.Thread(target=_holder)
+    h.start()
+    assert entered.wait(timeout=5)
+
+    w = threading.Thread(target=_waiter)
+    w.start()
+
+    # The waiter must NOT acquire while the holder is inside.
+    assert not second_acquired.wait(timeout=0.5)
+
+    # Release the holder; now the waiter proceeds.
+    release.set()
+    assert second_acquired.wait(timeout=5)
+    h.join(timeout=5)
+    w.join(timeout=5)

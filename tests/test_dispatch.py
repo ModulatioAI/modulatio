@@ -1606,3 +1606,22 @@ def test_schedule_wave_occupancy_default_empty_unchanged():
     agents = [_wagent("solo", ["drafter"], cap=1)]
     sched = dispatch.schedule_wave(tasks, agents)
     assert sched.assignments == {"W-T-010": "solo"}
+
+
+def test_global_cap_deferral_uses_sentinel_not_producer_capacity():
+    """r3-preship regression: when the run-wide GLOBAL in-flight cap is the
+    limiter — not any one producer's per-agent capacity — the deferred tuple
+    must NOT attribute the block to a specific producer (which may still have
+    free slots). Sentinel ("", 0), distinct from the per-agent deferral that
+    names the saturated producer + cap (the test above)."""
+    tasks = [_wtask(f"W-T-00{i}", ["drafter"]) for i in (1, 2, 3)]
+    agents = [_wagent("a", ["drafter"], cap=5), _wagent("b", ["drafter"], cap=5)]
+    sched = dispatch.schedule_wave(tasks, agents, global_in_flight_cap=2)
+
+    assert len(sched.assignments) == 2
+    assert len(sched.deferred) == 1
+    blocked_task, blocking_agent, blocking_cap = sched.deferred[0]
+    assert blocked_task == "W-T-003"
+    # Global cap is the limiter — sentinel, not a specific producer/cap.
+    assert blocking_agent == ""
+    assert blocking_cap == 0

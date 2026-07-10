@@ -73,3 +73,50 @@ def test_index_precedence_project_shadows_shared(tmp_path, monkeypatch):
     _save("x", "PROJECT desc", project_code=code)
     idx = {e.name: e for e in jtl.build_index(project_code=code)}
     assert idx["x"].description == "PROJECT desc"  # project wins
+
+
+# ── index name is the checkout handle (LOW-audit #63 fold) ──────────────────
+# A hand-authored JT whose frontmatter `name` diverges from its filename stem
+# produced search hits that could not be checked out: checkout() resolves
+# strictly by stem, so the index must expose the stem.
+
+
+def _write_divergent_jt(lib_root):
+    """Write a JT file whose filename stem ('philosophy-article') differs from
+    its frontmatter ``name`` ('Philosophy Article') — as a hand-authored or
+    externally-renamed file can."""
+    jt._JT_ROOT.mkdir(parents=True, exist_ok=True)
+    path = jt._JT_ROOT / "philosophy-article.md"
+    path.write_text(
+        "---\n"
+        "name: Philosophy Article\n"
+        "description: A long-form philosophy article\n"
+        "capability_preferences: long-form-writing\n"
+        "---\n\n"
+        "# Interview\n" + "x" * 5000 + "\n"
+    )
+    return path
+
+
+def test_index_name_is_checkout_handle_not_frontmatter(lib):
+    _write_divergent_jt(lib)
+    idx = jtl.build_index()
+    assert len(idx) == 1
+    entry = idx[0]
+    # The index name must be the stem (the checkout handle), NOT the frontmatter
+    # display name — otherwise the round-trip below breaks.
+    assert entry.name == "philosophy-article"
+
+
+def test_search_hit_round_trips_to_checkout(lib):
+    _write_divergent_jt(lib)
+    hits = jtl.search_job_templates("philosophy article")
+    assert hits, "expected a search hit for the divergent-name JT"
+    entry = hits[0]
+    # The whole point of the index: search -> name -> checkout that name.
+    loaded = jtl.checkout(entry.name)
+    assert loaded.name != "", (
+        "search hit could not be checked out — index name diverged from the "
+        "filename stem that checkout() resolves"
+    )
+    assert "Interview" in loaded.interview_body
