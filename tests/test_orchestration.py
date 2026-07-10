@@ -19,6 +19,33 @@ from modulatio.types import (
     Project,
     TaskStatus,
 )
+from types import SimpleNamespace
+from modulatio.orchestration import RunSummary
+from modulatio.types import (
+    Task,
+)
+import hashlib
+import importlib
+from uuid import uuid4
+from modulatio.types import (
+    Goal,
+)
+from datetime import datetime, timedelta, timezone
+from modulatio.types import (
+    TicketPriority,
+    TicketStatus,
+)
+from modulatio import assembly
+from modulatio.orchestration import (
+    TaskExecutionResult,
+    _format_kickoff_attachments,
+)
+from modulatio.orchestration import (
+    _extract_code_from_prose,
+)
+from modulatio.types import (
+    AssertionEvidence,
+)
 
 
 PROJECT_CODE = "TST"
@@ -11555,3 +11582,1524 @@ def test_unbacked_loadout_tool_is_dropped_not_wedged(project):
     )
     assert seen["tools"] == []          # unbacked tool dropped — loop still ran
     assert out_path.exists()            # the producer produced
+
+
+# ═══ fold: test_orchestration_low_audit.py ═══
+# Regression tests for the 0.9.0 LOW-severity audit fixes in
+# ``orchestration.py``.
+#
+# - #68 a vision CONVERSE turn must be billed against ``leader-chat``, not the
+#   ``leader-decompose`` budget role (the vision-in-kickoff default).
+# - #69 ``_pin_attachments`` must not crash on binary attachment content (a
+#   bytes payload or an undecodable file on disk) — it skips the bad one.
+# - #70 a non-positive ``max_retries`` must still give a task ONE attempt rather
+#   than skip the loop and crash the escalation None-unpack with a TypeError.
+# - #71 a crashed wave worker must tear down its per-task staging directory
+#   rather than leak it under ``.staging/``.
+
+
+
+
+def _runners() -> dict:
+    return {
+        "leader": lambda p: "", "planner": lambda p: "```json\n[]\n```",
+        "drafter": lambda p: "", "qc": lambda p: "",
+    }
+
+
+def _orch_low(project: Project) -> Orchestrator:
+    return Orchestrator(project, _runners())
+
+
+def _make_task(pid, tid: str, **kw) -> Task:
+    return Task(
+        id=tid, project_id=pid, goal_id="LOW-G-001",
+        description=f"task {tid}", **kw,
+    )
+
+
+# ── #68: vision converse turn bills against leader-chat ───────────────────────
+def test_vision_converse_bills_leader_chat_not_decompose(project: Project):
+    """A converse turn carrying an image must run _run_multimodal_leader with
+    ``budget_role='leader-chat'`` — not the ``leader-decompose`` default."""
+    orch = _orch_low(project)
+    captured: dict = {}
+
+    def _fake_multimodal(*, prompt, attachments, chat_completion,
+                         budget_role="leader-decompose"):
+        captured["budget_role"] = budget_role
+        return "ok"
+
+    orch._run_multimodal_leader = _fake_multimodal  # type: ignore[assignment]
+    # Pretend a leader chat runner is wired so converse doesn't short-circuit.
+    orch._resolve_chat_runner = lambda role: (lambda p: "")  # type: ignore[assignment]
+
+    image = SimpleNamespace(kind="image", name="pic.png", path="pic.png",
+                            content=None)
+    reply = orch.converse("look at this", attachments=[image])
+
+    assert reply == "ok"
+    assert captured["budget_role"] == "leader-chat", (
+        "a vision converse turn must bill against leader-chat"
+    )
+
+
+def test_run_multimodal_leader_default_budget_role_unchanged():
+    """The decompose caller passes no budget_role — the default must remain
+    'leader-decompose' so the kickoff vision path is byte-identical."""
+    import inspect
+
+    sig = inspect.signature(Orchestrator._run_multimodal_leader)
+    assert sig.parameters["budget_role"].default == "leader-decompose"
+
+
+# ── #69: _pin_attachments survives binary content ─────────────────────────────
+def test_pin_attachments_skips_bytes_content(project: Project):
+    """A document attachment whose ``content`` is bytes (binary) must be
+    skipped (write_text raises TypeError) — not crash the whole pin step."""
+    # The pin step writes into the RUN workspace — needs a run-scoped project
+    # (the round file's fixture carried run_id; the suite's does not).
+    orch = _orch_low(project.model_copy(update={"run_id": "run-low"}))
+    good = SimpleNamespace(kind="document", name="ok.md", path="ok.md",
+                           content="hello")
+    binary = SimpleNamespace(kind="document", name="bin.docx", path="bin.docx",
+                             content=b"\x00\x01\x02binary")
+
+    # Must not raise; the good one still pins.
+    orch._pin_attachments([binary, good])
+
+    assert "ok.md" in [str(p) for p in orch._pinned_files]
+    assert "bin.docx" not in [str(p) for p in orch._pinned_files]
+
+
+def test_pin_attachments_skips_undecodable_disk_file(project: Project, tmp_path):
+    """A document attachment with content=None pointing at an undecodable
+    file on disk (UnicodeDecodeError <: ValueError) must be skipped."""
+    orch = _orch_low(project.model_copy(update={"run_id": "run-low"}))
+    blob = tmp_path / "raw.bin"
+    blob.write_bytes(b"\xff\xfe\x00\x80not-utf8")
+    bad = SimpleNamespace(kind="document", name="raw.bin", path=str(blob),
+                          content=None)
+    good = SimpleNamespace(kind="document", name="ok.md",
+                           path=str(tmp_path / "ok.md"), content="hi")
+
+    orch._pin_attachments([bad, good])
+
+    names = [str(p) for p in orch._pinned_files]
+    assert "ok.md" in names
+    assert "raw.bin" not in names
+
+
+# ── #70: non-positive max_retries still runs one attempt (no None-unpack) ──────
+def test_negative_max_retries_runs_one_attempt(project: Project):
+    """A task with max_retries < 0 must still get ONE producer attempt — the
+    loop body must run rather than fall through to the escalation None-unpack
+    (which raised TypeError on last_qc=None)."""
+    orch = _orch_low(project)
+    pid = project.id
+    task = _make_task(pid, "LOW-T-001", deliverable=True, max_retries=-1)
+    task.status = TaskStatus.PENDING
+
+    attempts: list[int] = []
+
+    # Stub the producer so the loop body executes and QC passes on the one
+    # attempt it gets — proving the body ran (and no None-unpack crash).
+    def _producer_execute(t, corrective_notes=""):
+        attempts.append(t.retry_count)
+        return (Path("draft.md"), "csum", 100)
+
+    def _qc_review(t, draft_path, checksum, token_count):
+        from modulatio.types import AssertionEvidence
+        return (AssertionEvidence(producer="qc", primary=True,
+                                  check="ok", passed=True), "", None)
+
+    orch._producer_execute = _producer_execute  # type: ignore[assignment]
+    orch._qc_review = _qc_review  # type: ignore[assignment]
+
+    summary = RunSummary(project=project)
+    # Must not raise TypeError from the escalation last_qc unpack.
+    orch._run_task_with_redo(task, summary)
+
+    assert attempts == [0], "a task must always get at least one attempt"
+
+
+# ── #71/#6643: a crashed wave worker recovers its buffers + lets the merge ────
+# tear down its staging dir, rather than re-raising and dropping side effects ──
+def test_crashed_wave_worker_recovers_buffers_and_blocks(project: Project):
+    """If _run_task_with_redo escapes with an unexpected exception, the worker
+    must NOT re-raise and silently drop its already-accumulated deferred store
+    writes / decompose children (#6643). It marks the task BLOCKED and returns a
+    result carrying those buffers + the staging root, so the deterministic merge
+    commits them and tears the staging dir down."""
+    from modulatio.types import TaskStatus
+    orch = _orch_low(project)
+    pid = project.id
+    task = _make_task(pid, "LOW-T-009", deliverable=True)
+
+    staging_dir = orch._scope_root() / ".staging" / task.id
+
+    def _boom(t, summary, initial_corrective_notes=""):
+        # The staging dir exists at this point (seeded by the caller). Stash a
+        # deferred write + a child task the way real worker code would, then
+        # crash with an unexpected engine bug.
+        assert staging_dir.exists()
+        orch._tls.deferred_writes.append(("save_task", t))
+        orch._tls.child_tasks.append("LOW-T-009-child")
+        raise RuntimeError("engine bug in the worker")
+
+    orch._run_task_with_redo = _boom  # type: ignore[assignment]
+
+    # No longer raises — the crash is recovered into a result.
+    result = orch._execute_task_isolated(task, "")
+
+    assert result.task.status == TaskStatus.BLOCKED
+    assert result.deferred_writes == [("save_task", task)], (
+        "the worker's deferred store writes must survive the crash"
+    )
+    assert result.child_tasks == ["LOW-T-009-child"], (
+        "the worker's decompose children must survive the crash"
+    )
+    assert result.staging_root == staging_dir, (
+        "staging is handed to the merge to clean, not torn down inline"
+    )
+    assert any("crashed" in e for e in result.errors)
+
+
+def test_crashed_wave_worker_propagates_keyboardinterrupt(project: Project):
+    """A KeyboardInterrupt/SystemExit is runtime teardown, not a recoverable
+    worker crash — it must still propagate and clean staging inline."""
+    orch = _orch_low(project)
+    pid = project.id
+    task = _make_task(pid, "LOW-T-010", deliverable=True)
+    staging_dir = orch._scope_root() / ".staging" / task.id
+
+    def _boom(t, summary, initial_corrective_notes=""):
+        raise KeyboardInterrupt
+
+    orch._run_task_with_redo = _boom  # type: ignore[assignment]
+
+    with pytest.raises(KeyboardInterrupt):
+        orch._execute_task_isolated(task, "")
+    assert not staging_dir.exists()
+
+
+# ═══ fold: test_orchestration_resweep.py ═══
+# 0.9.0 pre-ship RE-sweep regressions for src/modulatio/orchestration.py.
+#
+# Each test pins a CONFIRMED finding from the 0.9.0 pre-ship re-sweep of
+# orchestration.py and FAILS without its fix. Dedicated file (no collision with
+# the existing suite). Fixtures mirror tests/test_orchestration_preship.py.
+
+
+def _orch_rsw(tmp_path, monkeypatch, *, code="RSW"):
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(code, "resweep test", "obj")
+    vault.init_run(code, "run-1", "obj")
+    project = Project(
+        code=code, name="Resweep", objective="obj", leader_model="stub",
+        wiki_path=str(tmp_path / code.lower()), run_id="run-1",
+    )
+    runners = {"drafter": lambda p: "x", "qc": lambda p: "ACCEPT"}
+    return Orchestrator(project, runners)
+
+
+# ── F1: regress guard measures TOKENS, not whitespace word-count ──────────────
+
+
+def test_regress_guard_protects_compact_data_deliverable(tmp_path, monkeypatch):
+    """A compact/minified data deliverable (near-zero whitespace) must still be
+    protected by the no-regress shrink guard. With `.split()` word-count the
+    prior collapses to ~1 'word' and the floor never fires; with a real token
+    count the guard correctly blocks the shrinking clobber."""
+    orch = _orch_rsw(tmp_path, monkeypatch)
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    path = art / "data.json"
+
+    # A large single-line JSON object: hundreds of tokens but ONE whitespace
+    # "word" (no spaces). `.split()` -> 1, so the old guard never engaged.
+    big = "{" + ",".join(f'"k{i}":{i}' for i in range(600)) + "}"
+    assert len(big.split()) == 1, "fixture must be whitespace-free to expose the bug"
+    path.write_text(big, encoding="utf-8")
+
+    task = Task(
+        id="RSW-T-001", project_id=uuid4(), goal_id="RSW-G-001",
+        description="d", depends_on=[],
+    )
+    task.producer_mode = "generate"
+    task.qc_passed_checksum = f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+
+    # A drifted rewrite shrinking the deliverable to a tiny stub.
+    stub = '{"k0":0}'
+    assert orch._regression_blocked(task, path, stub), (
+        "compact data deliverable must be protected by the token-native guard"
+    )
+
+
+def test_regress_guard_allows_legitimate_compact_growth(tmp_path, monkeypatch):
+    """A new compact deliverable that is NOT a shrink must pass (no false block)."""
+    orch = _orch_rsw(tmp_path, monkeypatch)
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    path = art / "data.json"
+    big = "{" + ",".join(f'"k{i}":{i}' for i in range(600)) + "}"
+    path.write_text(big, encoding="utf-8")
+    task = Task(
+        id="RSW-T-002", project_id=uuid4(), goal_id="RSW-G-001",
+        description="d", depends_on=[],
+    )
+    task.producer_mode = "generate"
+    task.qc_passed_checksum = f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+    # Same size — not a regression.
+    assert not orch._regression_blocked(task, path, big)
+
+
+# ── F3: malformed MODULATIO_WIN_CODIFY_FLOOR must not brick module import ─────
+
+
+def test_win_codify_floor_tolerates_garbage_env(monkeypatch):
+    """A non-integer env value must not raise at import time (cli.py imports
+    orchestration unconditionally) — it must clamp/fall back to the default."""
+    import modulatio.orchestration as orch_mod
+
+    monkeypatch.setenv("MODULATIO_WIN_CODIFY_FLOOR", "foo")
+    # Re-importing must NOT raise ValueError.
+    reloaded = importlib.reload(orch_mod)
+    assert reloaded._WIN_CODIFY_FLOOR == 3
+    # A valid value is honored and clamped to >=1.
+    monkeypatch.setenv("MODULATIO_WIN_CODIFY_FLOOR", "5")
+    assert importlib.reload(orch_mod)._win_codify_floor() == 5
+    monkeypatch.setenv("MODULATIO_WIN_CODIFY_FLOOR", "0")
+    assert importlib.reload(orch_mod)._win_codify_floor() == 1
+    # Restore a clean module state for the rest of the suite.
+    monkeypatch.delenv("MODULATIO_WIN_CODIFY_FLOOR", raising=False)
+    importlib.reload(orch_mod)
+
+
+# ── F5: a synthetic-crash result must not leak its .staging/<tid> dir ─────────
+
+
+def test_wave_crash_handler_sweeps_leaked_staging(tmp_path, monkeypatch):
+    """When a worker escapes BEFORE building its result (e.g. _seed_staging /
+    _staging_tool_registry throws before the worker's own try), fut.result()
+    raises and the synthetic crash result carries NO staging_root — so
+    _merge_wave_artifacts won't tear that task's .staging/<tid> dir down. The
+    main-thread collection handler must sweep it, or it leaks every crash."""
+    from modulatio import dispatch, store
+
+    orch = _orch_rsw(tmp_path, monkeypatch)
+    goal = Goal(
+        id="RSW-G-005", project_id=uuid4(), description="g",
+        success_criteria="sc", status=GoalStatus.IN_PROGRESS,
+    )
+    tid = "RSW-T-CRASH"
+    task = Task(
+        id=tid, project_id=uuid4(), goal_id="RSW-G-005",
+        description="t", depends_on=[],
+    )
+    task.status = TaskStatus.PENDING
+    store.save_task(orch.project.code, task, run_id=orch.project.run_id)
+
+    # Assign the task so the wave actually submits it to the pool.
+    monkeypatch.setattr(
+        dispatch, "schedule_wave",
+        lambda *a, **k: __import__("types").SimpleNamespace(
+            assignments={tid: "drafter"}
+        ),
+    )
+
+    staging = orch._scope_root() / ".staging" / tid
+
+    def _crash_before_result(t, *a, **k):
+        # Mimic a worker that built its staging dir then escaped before its try.
+        (orch._scope_root() / ".staging" / t.id).mkdir(parents=True, exist_ok=True)
+        (orch._scope_root() / ".staging" / t.id / "leaked.txt").write_text(
+            "orphan", encoding="utf-8"
+        )
+        raise RuntimeError("boom before worker try-block")
+
+    monkeypatch.setattr(orch, "_execute_task_isolated", _crash_before_result)
+
+    task_map = {tid: task}
+    summary = RunSummary(project=orch.project)
+    orch._run_task_waves(goal, [task], summary, task_map)
+
+    assert task.status == TaskStatus.BLOCKED, "a crashed worker's task is BLOCKED"
+    assert not staging.exists(), (
+        "the crashed worker's staging dir must be swept, not leaked"
+    )
+
+
+# ── F6: zero-settle must pop the redo loop-breaker fingerprint ────────────────
+
+
+def test_settle_zero_completed_pops_redo_fingerprint(tmp_path, monkeypatch):
+    """The shared terminalizer must drop the goal's redo fingerprint (matching
+    the normal terminal-COMPLETED path), so a redone-then-zero-settled goal does
+    not strand a stale fingerprint in the per-run dict."""
+    orch = _orch_rsw(tmp_path, monkeypatch)
+    goal = Goal(
+        id="RSW-G-006", project_id=uuid4(), description="d",
+        success_criteria="s", status=GoalStatus.IN_PROGRESS,
+    )
+    from modulatio import store
+    store.save_goal(orch.project.code, goal, run_id=orch.project.run_id)
+    orch._goal_redo_fingerprints[goal.id] = "deadbeef"
+    summary = RunSummary(project=orch.project)
+    orch._settle_zero_completed(
+        goal, summary, concern="c", rationale="r",
+    )
+    assert goal.id not in orch._goal_redo_fingerprints, (
+        "zero-settle must pop the redo fingerprint"
+    )
+    assert goal.status == GoalStatus.COMPLETED
+
+
+# F8 (resume topo unknown-ref symmetry) is DEFERRED — see the structured report:
+# the validated-cross-goal-id filter collides with the #10755 contract test, which
+# models a store-absent cross-goal id as a VALID dep. Reconciling needs a cross-
+# agent decision + an update to that existing test, out of scope for a single-file
+# minimal fix. No test here.
+
+
+# ── F9: allowlist filter uses canonical _norm_unit (prefix strip) ─────────────
+
+
+def test_assembly_allowlist_filter_rejects_undeclared_dotfile(tmp_path, monkeypatch):
+    """The manifest allowlist pre-filter must normalize with the canonical
+    _norm_unit (PREFIX strip), not `.lstrip("./")` (char-set strip). The
+    char-set strip mangles a leading-dot name: an UNDECLARED in-root dotfile
+    `.config.json` strips to `config.json`, which then spuriously matches a
+    legitimately-declared dep `config.json` — so the buggy filter KEEPS an
+    undeclared file (the pre-QC exposure hull #8 was meant to close). The
+    canonical _norm_unit keeps `.config.json` distinct from `config.json`, so
+    the undeclared dotfile is correctly filtered OUT."""
+    orch = _orch_rsw(tmp_path, monkeypatch)
+    from modulatio import store
+
+    # The ONLY declared dependency output is `config.json` (no leading dot).
+    dep = Task(
+        id="RSW-T-DEP", project_id=uuid4(), goal_id="RSW-G-009",
+        description="unit", depends_on=[],
+    )
+    dep.output_path = "config.json"
+    dep.status = TaskStatus.COMPLETED
+    store.save_task(orch.project.code, dep, run_id=orch.project.run_id)
+
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "config.json").write_text("DECLARED-UNIT", encoding="utf-8")
+    # An UNDECLARED in-root dotfile the producer slipped into the manifest.
+    (art / ".config.json").write_text("UNDECLARED-SECRET", encoding="utf-8")
+
+    assembler = Task(
+        id="RSW-T-ASM", project_id=uuid4(), goal_id="RSW-G-009",
+        description="assemble", depends_on=["RSW-T-DEP"],
+    )
+    assembler.output_path = "out.md"
+
+    # The producer's manifest names the UNDECLARED dotfile. With the char-set
+    # strip both `.config.json` and the dep `config.json` collapse to
+    # `config.json`, so the undeclared dotfile sneaks past the allowlist.
+    body = (
+        "```assembly\n"
+        '{"title": "T", "units": [".config.json"]}\n'
+        "```"
+    )
+    result = orch._apply_assembly_manifest(assembler, body)
+    assert result is not None, "an assembler with deps must produce an assembly"
+    assert "UNDECLARED-SECRET" not in result, (
+        "the undeclared leading-dot file must be FILTERED OUT — canonical "
+        "_norm_unit keeps `.config.json` distinct from the declared `config.json`"
+    )
+
+
+# ═══ fold: test_orchestration_resweep_r3.py ═══
+# Round-3 re-sweep regressions for ``src/modulatio/orchestration.py``.
+#
+# Each test pins one confirmed 0.9.0 pre-ship debug finding. Kept additive +
+# isolated from any prior ``test_orchestration_resweep*.py`` file.
+#
+# Findings covered (others were deferred / false-positive — see the run report):
+#   #1  Comptroller deny BLOCKER now carries affected_goal_id so auto-resume fires
+#   #2  qc_history.similar_verdicts failure can no longer fail a QC review
+#   #3  converse attachment inlining falls back to reading att.path (content=None)
+#   #5  auto-resume retires a stale ticket whose goal already terminalized
+#   #6  no-regress refusal audit logs the TOKEN measure, not whitespace word-count
+#   #8  wave-reflect cannot swap a pending task's ASSEMBLER skill out of band
+
+
+
+
+def _orch_r3(project: Project):
+    from modulatio.orchestration import Orchestrator
+
+    runners = {
+        "leader": lambda p: "",
+        "planner": lambda p: "",
+        "drafter": lambda p: "",
+        "qc": lambda p: "",
+        "researcher": lambda p: "",
+    }
+    return Orchestrator(project, runners)
+
+
+# ── Finding #1 ──────────────────────────────────────────────────────────────
+def test_deny_ticket_carries_affected_goal_id(project: Project):
+    """The Comptroller escalation-budget deny BLOCKER must bind affected_goal_id
+    (= task.goal_id), or _auto_resume_refreshable_goals — which skips
+    affected_goal_id-only tickets — can never honor the ticket's auto-resume
+    promise."""
+    from modulatio import comptroller, roster
+    from modulatio.orchestration import RunSummary
+
+    orch = _orch_r3(project)
+    summary = RunSummary(project=project)
+
+    task = Task(
+        id="R3O-T-001",
+        project_id=project.id,
+        goal_id="R3O-G-001",
+        description="produce a unit",
+        status=TaskStatus.QC_REJECTED,
+    )
+    denied = roster.Agent(
+        id="premium-1",
+        name="Premium",
+        model_tier="reasoning",
+        cost_class="premium-cloud",
+    )
+    refresh_at = datetime.now(timezone.utc) + timedelta(days=1)
+    auth = comptroller.Authorization(
+        allowed=False, refresh_at=refresh_at, reason="daily budget exhausted"
+    )
+
+    orch._open_budget_ticket(task, denied, auth, summary)
+
+    tickets = [
+        t
+        for t in store.list_tickets(project.code)
+        if t.priority is TicketPriority.BLOCKER
+    ]
+    assert tickets, "expected a BLOCKER ticket"
+    assert tickets[0].affected_goal_id == "R3O-G-001"
+    assert tickets[0].affected_task_id == "R3O-T-001"
+
+
+# ── Finding #2 ──────────────────────────────────────────────────────────────
+def test_qc_review_survives_similar_verdicts_failure(project: Project, monkeypatch):
+    """Advisory QC-history precedent must never fail a task: a raising
+    similar_verdicts is swallowed and the review proceeds (mirrors
+    _recall_team_memory's defensive contract)."""
+    from modulatio import qc_history
+    from modulatio.orchestration import Orchestrator
+
+    artifacts = Path(project.wiki_path) / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    draft = artifacts / "draft.md"
+    draft.write_text("This is a complete, substantive draft body.\n" * 5)
+
+    def _raise(*a, **k):
+        raise RuntimeError("lancedb rebuild blew up mid-create")
+
+    monkeypatch.setattr(qc_history, "similar_verdicts", _raise)
+
+    runners = {
+        "leader": lambda p: "",
+        "planner": lambda p: "",
+        "drafter": lambda p: "",
+        # Valid JSON verdict so the review parses through to a result.
+        "qc": lambda p: '{"passed": true, "check": "ok", "notes": ""}',
+        "researcher": lambda p: "",
+    }
+    orch = Orchestrator(project, runners)
+    # Force the embedder-present branch so similar_verdicts is actually called.
+    orch.qc_history_embedder = object()
+
+    task = Task(
+        id="R3O-T-002",
+        project_id=project.id,
+        goal_id="R3O-G-002",
+        description="write a draft",
+        artifact_kind="text",
+        qc_agent_id=None,
+    )
+
+    verdict, _notes, _defect = orch._qc_review(
+        task, draft, checksum="sha256:deadbeef"
+    )
+    assert verdict.passed is True
+
+
+# ── Finding #3 ──────────────────────────────────────────────────────────────
+def test_kickoff_attachment_path_only_document_is_read(tmp_path: Path):
+    """A path-only document attachment (content=None) must inline its file body,
+    not an empty fenced block, so the Leader does not plan blind."""
+    from modulatio.attachments import Attachment
+    from modulatio.orchestration import _format_kickoff_attachments
+
+    doc = tmp_path / "brief.md"
+    doc.write_text("LOAD-BEARING-BRIEF-CONTENT")
+    att = Attachment(kind="document", path=doc, name="brief.md", content=None)
+
+    rendered = _format_kickoff_attachments([att])
+    assert "LOAD-BEARING-BRIEF-CONTENT" in rendered
+
+
+def test_kickoff_attachment_missing_path_falls_back_to_empty(tmp_path: Path):
+    """A path-only document whose file is unreadable degrades to '' without
+    raising."""
+    from modulatio.attachments import Attachment
+    from modulatio.orchestration import _format_kickoff_attachments
+
+    att = Attachment(
+        kind="document",
+        path=tmp_path / "nope.md",
+        name="nope.md",
+        content=None,
+    )
+    rendered = _format_kickoff_attachments([att])
+    assert "nope.md" in rendered  # filename still referenced, no crash
+
+
+# ── Finding #5 ──────────────────────────────────────────────────────────────
+def test_auto_resume_retires_stale_ticket_for_terminal_goal(project: Project):
+    """An OPEN refreshable ticket whose goal already COMPLETED (e.g. a duplicate
+    ticket recovered first) must be RESOLVED, not orphaned OPEN forever."""
+    from modulatio.orchestration import RunSummary
+
+    orch = _orch_r3(project)
+    summary = RunSummary(project=project)
+
+    goal = Goal(
+        id="R3O-G-005",
+        project_id=project.id,
+        description="already done",
+        success_criteria="ok",
+        status=GoalStatus.COMPLETED,
+    )
+    store.save_goal(project.code, goal)
+
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    ticket = store.create_ticket(
+        project_id=project.id,
+        project_code=project.code,
+        run_id=project.run_id,
+        priority=TicketPriority.BLOCKER,
+        title="stale refresh ticket",
+        body="body",
+        affected_goal_id=goal.id,
+        actor="leader",
+    )
+    ticket.refresh_at = past
+    from modulatio.store import _ticket_path, _write_entity
+
+    _write_entity(_ticket_path(project.code, ticket.id), ticket, ticket.body)
+
+    orch._auto_resume_refreshable_goals(summary)
+
+    reloaded = [t for t in store.list_tickets(project.code) if t.id == ticket.id]
+    assert reloaded, "ticket should still exist"
+    assert reloaded[0].status is TicketStatus.RESOLVED
+
+
+# ── Finding #6 ──────────────────────────────────────────────────────────────
+def test_note_regression_kept_audit_is_token_native(project: Project, monkeypatch):
+    """The no-regress refusal AUDIT rationale must use the TOKEN measure the gate
+    decides on, not whitespace word-count — so a low-whitespace (minified)
+    deliverable does not log a misleading '1 -> 1 tokens'."""
+    from modulatio import tool_summarization
+    from modulatio.orchestration import Orchestrator
+
+    artifacts = Path(project.wiki_path) / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    # A single-line "minified" blob: hundreds of chars, ~1 whitespace word.
+    kept_text = "a" * 800
+    path = artifacts / "kept.json"
+    path.write_text(kept_text)
+
+    # Deterministic, whitespace-independent token count (char/4-style).
+    monkeypatch.setattr(
+        tool_summarization,
+        "count_tokens",
+        lambda model, *, text: max(1, len(text) // 4),
+    )
+
+    runners = {
+        "leader": lambda p: "",
+        "planner": lambda p: "",
+        "drafter": lambda p: "",
+        "qc": lambda p: "",
+        "researcher": lambda p: "",
+    }
+    orch = Orchestrator(project, runners)
+    task = Task(
+        id="R3O-T-006",
+        project_id=project.id,
+        goal_id="R3O-G-006",
+        description="data",
+        artifact_kind="data",
+    )
+
+    orch._note_regression_kept(task, path, "tiny")
+
+    # The AUDIT rationale is token-native: 800 chars -> ~200 tokens, NOT the
+    # single whitespace "word" .split() would report for a minified blob.
+    rationale = task.transitions[-1].rationale
+    assert f"{len(kept_text) // 4} →" in rationale  # "200 →" not "1 →"
+    assert "1 → 1 tokens" not in rationale
+    assert "no-regress" in rationale
+
+
+# ── Finding #8 ──────────────────────────────────────────────────────────────
+def test_wave_reflect_rejects_assembler_skill_swap(project: Project):
+    """A wave-boundary reflect 'revise' must NOT swap a pending task's assembler
+    skill out of band — that bypasses _select_assembler_skill canonicalization +
+    the #73 evidence-family normalization. Non-assembler revisions still apply."""
+    import json
+
+    from modulatio.orchestration import Orchestrator, RunSummary
+
+    task = Task(
+        id="R3O-T-008",
+        project_id=project.id,
+        goal_id="R3O-G-008",
+        description="assemble units",
+        artifact_kind="text",
+        required_skills=["document-assembly"],
+        status=TaskStatus.PENDING,
+    )
+    store.save_task(project.code, task)
+
+    reflection = json.dumps(
+        {
+            "edits": [
+                {
+                    "task_id": task.id,
+                    "action": "revise",
+                    # swaps the assembler family AND tries to re-describe
+                    "description": "now assemble as media",
+                    "required_skills": ["media-assembly"],
+                }
+            ]
+        }
+    )
+
+    orch = Orchestrator(
+        project,
+        {
+            "leader": lambda p: reflection,
+            "planner": lambda p: "",
+            "drafter": lambda p: "",
+            "qc": lambda p: "",
+            "researcher": lambda p: "",
+        },
+    )
+    orch.operator_present = False  # autonomous-only path
+
+    saved: list = []
+    orch._wave_boundary_reflect(
+        [task], {task.id: task}, RunSummary(project=project), saved.append
+    )
+
+    # Assembler skill swap rejected — still document-assembly.
+    assert "media-assembly" not in task.required_skills
+    assert "document-assembly" in task.required_skills
+    # Non-skill revision (description) still landed.
+    assert task.description == "now assemble as media"
+
+
+# ═══ fold: test_orchestration_resweep_r4.py ═══
+# Round-4 re-sweep regressions for ``src/modulatio/orchestration.py``.
+#
+# Each test pins one confirmed 0.9.0 pre-ship debug finding. Kept additive +
+# isolated from any prior ``test_orchestration_resweep*.py`` file (no shared
+# fixtures, no import collision).
+#
+# Findings covered:
+#   #1  tool-loop producer path now honors a binary assembly ``output_file``
+#       (moves the media composite onto the deliverable, no receipt-as-artifact,
+#       no leaked temp file)
+#   #2  _format_kickoff_attachments fences a document body with a dynamic
+#       backtick run so a ``` inside it can't break out of the wrapper
+#   #3  escalation attempt's OWN defect_type rides back to the QC-fixer witness
+#   #4  wave merge can't land a sidecar on another (unwritten) task's primary slot
+
+
+
+
+def _orch_r4(project: Project) -> Orchestrator:
+    runners = {
+        "leader": lambda p: "",
+        "planner": lambda p: "",
+        "drafter": lambda p: "",
+        "qc": lambda p: "",
+        "researcher": lambda p: "",
+    }
+    return Orchestrator(project, runners)
+
+
+def _task(**kw) -> Task:
+    base = dict(
+        id="R4O-T-001",
+        project_id=None,
+        goal_id="R4O-G-001",
+        description="produce a unit",
+    )
+    base.update(kw)
+    return Task(**base)
+
+
+# ── Finding 1: tool-loop binary assembly output_file ─────────────────────────
+
+
+def test_tool_loop_honors_binary_assembly_output_file(project, tmp_path, monkeypatch):
+    """A media (binary) assembly in the tool-loop producer path must move the
+    composited file onto the deliverable and NOT write the human-readable
+    receipt string as the artifact — mirroring the other two assembly callers.
+    Pre-fix the receipt text was persisted and the binary temp file leaked."""
+    orch = _orch_r4(project)
+    task = _task(project_id=project.id, artifact_kind="media")
+
+    # Stand in for runners.run_llm_with_tools: the producer "finishes" with a
+    # body the engine would normally shape into the deliverable.
+    monkeypatch.setattr(orch, "_run_chat_loop", lambda **kw: "RECEIPT BODY")
+    # Quiet the prompt-context collaborators (no roster / research / memory).
+    monkeypatch.setattr(orch, "_ensure_research", lambda t: "")
+    monkeypatch.setattr(orch, "_recall_team_memory", lambda t: "")
+    monkeypatch.setattr(orch, "_build_team_canvas_digest", lambda: "")
+    monkeypatch.setattr(orch, "_iteration_contract_block", lambda: "")
+    monkeypatch.setattr(orch, "_extract_producer_proposals", lambda r, **kw: r)
+
+    # The composited binary the media strategy already wrote into the vault.
+    composite_src = tmp_path / "composite.bin"
+    composite_bytes = b"\x89PNG\r\n\x1a\n binary composite payload \x00\x01\x02"
+    composite_src.write_bytes(composite_bytes)
+    from modulatio import review_ledger as _rl
+    checksum = _rl.file_checksum(composite_src)
+
+    def _fake_apply(t, body_text):
+        # Mimic _apply_assembly_manifest for a media family: seed the record
+        # with a binary output_file and return the human-readable receipt.
+        orch._assembly_records[t.id] = assembly.AssemblyRecord(
+            manifest={"units": []},
+            final_checksum=checksum,
+            complete=True,
+            strategy="media",
+            output_file=composite_src,
+        )
+        return "media assembly (image): composite of 3 frames"
+
+    monkeypatch.setattr(orch, "_apply_assembly_manifest", _fake_apply)
+
+    skill = SimpleNamespace(
+        name="media-composite",
+        prompt_template="",
+        tool_loadout=(),
+        needs_network=False,
+        pass_env=(),
+    )
+    out_path = tmp_path / "deliverable.bin"
+    path, returned_checksum, tokens = orch._llm_with_tools_execute(
+        task, skill, out_path  # type: ignore[arg-type]
+    )
+
+    # The binary bytes — not the receipt — landed on the deliverable.
+    assert path == out_path
+    assert out_path.read_bytes() == composite_bytes
+    assert returned_checksum == checksum
+    assert tokens == 0
+    # The temp composite was moved, not left behind to leak.
+    assert not composite_src.exists()
+
+
+# ── Finding 2: dynamic document fence in kickoff attachments ─────────────────
+
+
+def test_kickoff_attachment_fence_survives_inner_backticks():
+    """A document whose body contains a ``` line must stay fully wrapped — the
+    engine fences with a longer backtick run so the body can't break out and
+    bleed into the Leader's instruction context. Pre-fix the fixed ``` fence
+    let the inner ``` close the wrapper early."""
+    body = "intro\n```\nmalicious instruction posing as prompt\n```\nmore"
+    att = SimpleNamespace(kind="document", name="payload.md", content=body, path=None)
+
+    rendered = _format_kickoff_attachments([att])
+
+    # The opening fence must be a run STRICTLY longer than any run in the body
+    # (the body's longest run is 3), so the document's own ``` cannot terminate
+    # the wrapper. CommonMark: a fenced block only closes on a run >= its open.
+    assert "````" in rendered
+    # The whole body — including its inner triple-backtick lines — is inside the
+    # wrapper. Find the open fence and confirm the body precedes the matching
+    # close fence of the SAME length.
+    open_idx = rendered.index("````")
+    after_open = rendered[open_idx + 4 :]
+    close_idx = after_open.index("\n````")
+    enclosed = after_open[:close_idx]
+    assert "malicious instruction posing as prompt" in enclosed
+    assert "```\nmalicious" in enclosed  # the inner fence sits INSIDE, not breaking out
+
+
+# ── Finding 4: wave merge can't claim another task's primary slot ────────────
+
+
+def test_wave_merge_sidecar_cannot_land_on_unwritten_sibling_primary(project, tmp_path):
+    """Task A declares primary X but never writes it (failed producer). Task B's
+    sidecar also targets X. The merge must NOT let B's sidecar land on A's
+    declared primary slot — it reserves every declared primary up front and
+    drops the colliding sidecar with a merge transition."""
+    orch = _orch_r4(project)
+    shared = orch._scope_root() / "artifacts"
+    shared.mkdir(parents=True, exist_ok=True)
+
+    primary_rel = "out/shared.md"
+
+    # Task A: declares primary X but writes NOTHING (empty artifact_writes).
+    task_a = _task(
+        id="R4O-T-001", project_id=project.id, output_path=primary_rel,
+        status=TaskStatus.QC_REJECTED,
+    )
+    staging_a = tmp_path / "stg_a"
+    staging_a.mkdir()
+    result_a = TaskExecutionResult(
+        task=task_a, staging_root=staging_a, artifact_writes=[],
+    )
+
+    # Task B: its own primary is elsewhere; it writes a SIDECAR at X.
+    task_b = _task(
+        id="R4O-T-002", project_id=project.id, output_path="out/b_primary.md",
+        status=TaskStatus.COMPLETED,
+    )
+    staging_b = tmp_path / "stg_b"
+    (staging_b / "out").mkdir(parents=True)
+    (staging_b / "out" / "b_primary.md").write_text("B primary", encoding="utf-8")
+    (staging_b / primary_rel).write_text("B SIDECAR — must NOT win X", encoding="utf-8")
+    result_b = TaskExecutionResult(
+        task=task_b, staging_root=staging_b,
+        artifact_writes=["out/b_primary.md", primary_rel],
+    )
+
+    orch._merge_wave_artifacts(
+        {task_a.id: result_a, task_b.id: result_b}, RunSummary(project=project)
+    )
+
+    # B's own primary merged fine.
+    assert (shared / "out" / "b_primary.md").read_text() == "B primary"
+    # X — A's declared primary — was NOT overwritten by B's sidecar. A never
+    # wrote it, so the shared path stays absent rather than holding B's sidecar.
+    assert not (shared / primary_rel).exists(), "B's sidecar claimed A's primary slot"
+    # The drop is surfaced as a merge transition on task B.
+    assert any(
+        tr.actor == "merge" and "primary" in tr.rationale
+        for tr in task_b.transitions
+    ), "expected a dropped-sidecar merge transition on task B"
+
+
+# ═══ fold: test_orchestration_preship.py ═══
+# 0.9.0 pre-ship sweep regressions for src/modulatio/orchestration.py.
+#
+# Each test pins a CONFIRMED finding from docs/design/0.9.0-preship-sweep-findings.md
+# that lived in orchestration.py. They reuse the fixtures/stubs from
+# test_orchestration.py where helpful but are self-contained otherwise.
+
+
+def _orch(tmp_path, monkeypatch, *, code="PRE", leader=None):
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(code, "preship test", "obj")
+    vault.init_run(code, "run-1", "obj")
+    project = Project(
+        code=code, name="Preship", objective="obj", leader_model="stub",
+        wiki_path=str(tmp_path / code.lower()), run_id="run-1",
+    )
+    runners = {"drafter": lambda p: "x", "qc": lambda p: "ACCEPT"}
+    if leader is not None:
+        runners["leader"] = leader
+    return Orchestrator(project, runners)
+
+
+def _deliverable(code, *, output) -> Task:
+    t = Task(
+        id=f"{code}-T-001", project_id=uuid4(), goal_id=f"{code}-G-001",
+        description="d", depends_on=[],
+    )
+    t.status = TaskStatus.COMPLETED
+    t.deliverable = True
+    t.output_path = output
+    return t
+
+
+# ── #9392: redo loop-breaker fingerprint must see BINARY content changes ─────
+
+
+def test_fingerprint_tracks_binary_deliverable_changes(tmp_path, monkeypatch):
+    """A binary/media deliverable (non-UTF-8) used to collapse to "" every round
+    so the loop-breaker forced a false 'stalled' after one redo. The fingerprint
+    must now move when the raw bytes change."""
+    orch = _orch(tmp_path, monkeypatch)
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    task = _deliverable("PRE", output="deck.pptx")
+
+    # Non-UTF-8 bytes (a NUL + high byte) — _read_task_artifact returns None here.
+    (art / "deck.pptx").write_bytes(b"PK\x03\x04\x00\xff\xfe binary-v1")
+    fp1 = orch._goal_deliverable_fingerprint([task])
+    assert fp1 == orch._goal_deliverable_fingerprint([task]), "stable when unchanged"
+
+    (art / "deck.pptx").write_bytes(b"PK\x03\x04\x00\xff\xfe binary-v2-different")
+    fp2 = orch._goal_deliverable_fingerprint([task])
+    assert fp2 != fp1, "binary deliverable change must move the fingerprint"
+
+
+def test_fingerprint_distinguishes_two_distinct_binaries(tmp_path, monkeypatch):
+    """Two different binary deliverables must NOT hash identically (the old ""
+    collapse made every binary identical)."""
+    orch = _orch(tmp_path, monkeypatch)
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    a = _deliverable("PRE", output="a.bin")
+    (art / "a.bin").write_bytes(b"\x00\x01\x02 alpha")
+    fp_a = orch._goal_deliverable_fingerprint([a])
+    (art / "a.bin").write_bytes(b"\x00\x01\x02 beta-distinct")
+    fp_b = orch._goal_deliverable_fingerprint([a])
+    assert fp_a != fp_b
+
+
+# ── #8651: Leader recommendations deduped across redo rounds ──────────────────
+
+
+def test_record_recommendations_dedups_across_rounds(tmp_path, monkeypatch):
+    orch = _orch(tmp_path, monkeypatch)
+    summary = RunSummary(project=orch.project)
+    goal = Goal(
+        id="PRE-G-001", project_id=uuid4(), description="d",
+        success_criteria="s", status=GoalStatus.IN_PROGRESS,
+    )
+    recs = [{"concern": "tone is off", "suggestion": "warm it up"}]
+    # The recursive redo verify re-runs _record_recommendations each round.
+    orch._record_recommendations(goal, recs, summary)
+    orch._record_recommendations(goal, recs, summary)
+    orch._record_recommendations(goal, recs, summary)
+    matching = [
+        r for r in summary.recommendations
+        if r.get("concern") == "tone is off"
+    ]
+    assert len(matching) == 1, "identical reservation must appear once, not per round"
+
+
+def test_record_recommendations_keeps_distinct_entries(tmp_path, monkeypatch):
+    orch = _orch(tmp_path, monkeypatch)
+    summary = RunSummary(project=orch.project)
+    goal = Goal(
+        id="PRE-G-001", project_id=uuid4(), description="d",
+        success_criteria="s", status=GoalStatus.IN_PROGRESS,
+    )
+    orch._record_recommendations(goal, [{"concern": "a", "suggestion": "x"}], summary)
+    orch._record_recommendations(goal, [{"concern": "b", "suggestion": "y"}], summary)
+    concerns = {r["concern"] for r in summary.recommendations}
+    assert {"a", "b"} <= concerns, "distinct reservations must all be kept"
+
+
+# ── #11219: _pin_attachments tolerates a non-encodable attachment ─────────────
+
+
+def test_pin_attachments_skips_unencodable_without_aborting(tmp_path, monkeypatch):
+    """A UnicodeEncodeError (ValueError) on one attachment must not abort pinning
+    the rest. Forcing a non-UTF-8 default locale encoding would be flaky, so we
+    assert the explicit-utf-8 write succeeds for legitimate non-ASCII content
+    (the case that previously crashed under a C-locale)."""
+    orch = _orch(tmp_path, monkeypatch)
+
+    class _Att:
+        def __init__(self, name, content):
+            self.name = name
+            self.kind = "document"
+            self.path = None
+            self.content = content
+
+    good = _Att("good.md", "résumé — em–dash ✓")  # non-ASCII, valid UTF-8
+    orch._pin_attachments([good])
+    assert "good.md" in orch._pinned_files
+    dest = orch._shared_artifacts_root() / "good.md"
+    assert dest.read_text(encoding="utf-8") == "résumé — em–dash ✓"
+
+
+# ── #10755: reopened cross-goal dep keeps intra-goal ordering ─────────────────
+
+
+def test_reopened_tasks_preserve_order_with_cross_goal_dep(tmp_path, monkeypatch):
+    """A reopened goal whose task depends on a task in ANOTHER goal must still be
+    topo-ordered within the goal, not silently collapse to store order."""
+    orch = _orch(tmp_path, monkeypatch)
+    summary = RunSummary(project=orch.project)
+    goal = Goal(
+        id="PRE-G-002", project_id=uuid4(), description="d",
+        success_criteria="s", status=GoalStatus.IN_PROGRESS,
+    )
+
+    ran: list[str] = []
+
+    def _fake_run_task_with_redo(t, _summary, **_kw):
+        ran.append(t.id)
+        t.status = TaskStatus.COMPLETED
+
+    monkeypatch.setattr(orch, "_run_task_with_redo", _fake_run_task_with_redo)
+
+    def _save(t):
+        pass
+
+    monkeypatch.setattr("modulatio.store.save_task", lambda *a, **k: None)
+    # X-T-999 is a REAL prior-goal task (COMPLETED) — a legitimate cross-goal dep
+    # resolves in the store. (An UNRESOLVABLE/typo id is now fail-closed-blocked;
+    # see test_nemo_resweep_remediation — so a valid cross-goal dep must resolve.)
+    _xdep = Task(id="X-T-999", project_id=uuid4(), goal_id="PRE-G-001",
+                 description="prior-goal unit", depends_on=[],
+                 status=TaskStatus.COMPLETED)
+    monkeypatch.setattr(
+        "modulatio.store.get_task",
+        lambda code, tid, run_id=None: _xdep if tid == "X-T-999" else None,
+    )
+
+    # B depends on A (intra-goal) AND on X-T-999 (a real, COMPLETED cross-goal dep).
+    a = Task(id="PRE-T-A", project_id=uuid4(), goal_id=goal.id,
+             description="a", depends_on=[], status=TaskStatus.PENDING)
+    b = Task(id="PRE-T-B", project_id=uuid4(), goal_id=goal.id,
+             description="b", depends_on=["PRE-T-A", "X-T-999"],
+             status=TaskStatus.PENDING)
+    # Store order deliberately puts B before A.
+    orch._run_reopened_tasks(goal, [b, a], summary)
+    assert ran == ["PRE-T-A", "PRE-T-B"], (
+        "A must run before B despite the cross-goal dep; got " + str(ran)
+    )
+
+
+# ── #8592: unparseable verify verdict settles the goal terminally ─────────────
+
+
+def test_verify_unparseable_settles_goal(tmp_path, monkeypatch):
+    """A leader-verify response that won't parse used to return leaving the goal
+    IN_PROGRESS forever. It must now settle terminally with a PQR reservation."""
+    orch = _orch(tmp_path, monkeypatch, leader=lambda p: "not json at all {{{")
+    summary = RunSummary(project=orch.project)
+    goal = Goal(
+        id="PRE-G-003", project_id=uuid4(), description="d",
+        success_criteria="s", status=GoalStatus.IN_PROGRESS,
+    )
+    task = _deliverable("PRE", output="out.md")
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "out.md").write_text("body")
+
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert goal.status in (GoalStatus.COMPLETED, GoalStatus.BLOCKED), (
+        "goal must not be stranded IN_PROGRESS on an unparseable verdict"
+    )
+    assert any(
+        "could not be parsed" in str(r.get("concern", "")).lower()
+        or "unparse" in str(r.get("concern", "")).lower()
+        for r in summary.recommendations
+    )
+
+
+# ── #8396: dead method removed ───────────────────────────────────────────────
+
+
+def test_dead_daily_budget_method_removed():
+    assert not hasattr(Orchestrator, "_refresh_daily_budget_if_new_day")
+
+
+# ── #5326: converse offline guard is branch-aware for the vision path ─────────
+
+
+def test_converse_image_turn_not_offline_when_multimodal_model_set(
+    tmp_path, monkeypatch
+):
+    """An image turn must NOT report 'offline' merely because the TEXT chat runner
+    is unwired — the vision path resolves agent_models['leader'] / leader_model."""
+    orch = _orch(tmp_path, monkeypatch)
+    # No chat runner for leader (text path would be offline)…
+    monkeypatch.setattr(orch, "_resolve_chat_runner", lambda *_a, **_k: None)
+    # …but a multimodal model IS configured.
+    orch.project.agent_models = {"leader": "stub-vision"}
+
+    captured = {}
+
+    def _fake_multimodal(*, prompt, attachments, chat_completion, budget_role):
+        captured["called"] = True
+        return "vision reply"
+
+    monkeypatch.setattr(orch, "_run_multimodal_leader", _fake_multimodal)
+
+    class _Img:
+        name = "pic.png"
+        kind = "image"
+        path = str(tmp_path / "pic.png")
+
+    reply = orch.converse("look at this", attachments=[_Img()])
+    assert captured.get("called"), "vision path must dispatch, not short-circuit offline"
+    assert "offline" not in reply.lower()
+
+
+def test_converse_text_turn_offline_when_no_chat_runner(tmp_path, monkeypatch):
+    """The text path keeps its chat-runner-based offline guard."""
+    orch = _orch(tmp_path, monkeypatch)
+    monkeypatch.setattr(orch, "_resolve_chat_runner", lambda *_a, **_k: None)
+    reply = orch.converse("hello", attachments=[])
+    assert "offline" in reply.lower()
+
+
+# ═══ fold: test_orchestration_r2_audit.py ═══
+# Regression tests for the Opus R2 full-debug MEDIUM/LOW audit fixes in
+# ``orchestration.py``.
+#
+# Each test fails before its fix and passes after:
+#
+# - _load_conversation must not strict-UTF-8-wedge the converse surface on a
+#   single bad byte in the durable log.
+# - revise/edit producer mode must not crash on a BINARY draft (UnicodeDecodeError
+#   masked as a confusing BLOCKED) — it falls back to generate.
+# - the wave merge must not let a reused tool-call id silently overwrite another
+#   worker's raw tool-result in the durable audit tree.
+# - the QC-as-fixer rescue must re-assert the P5 declared-format gate (no fake
+#   binary shipped as a clean completion) and must refuse a single-file rescue of
+#   a multi-file draft.
+# - the QC patch must not mangle an off-contract ``=== FILE: ===`` body via
+#   _extract_code_from_prose.
+# - the vision CONVERSE prompt must correct the "future slice" wording (the image
+#   IS attached as a content block on this surface).
+# - the goal redo-fingerprint dict must be pruned when a goal terminalizes.
+# - a wave where every ready task is DEFERRED_CAPACITY with no slot freeing must
+#   BLOCK those tasks visibly rather than orphan them PENDING.
+
+
+
+
+
+
+def _orch_r2(project: Project) -> Orchestrator:
+    return Orchestrator(project, _runners())
+
+
+
+
+# ── _load_conversation: a bad byte must not wedge converse ────────────────────
+def test_load_conversation_survives_non_utf8_byte(project: Project):
+    """A non-UTF-8 byte in the durable conversation log must degrade to a
+    best-effort thread, not raise UnicodeDecodeError on every converse turn."""
+    orch = _orch_r2(project)
+    path = orch._conversation_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    good = json.dumps({"role": "operator", "content": "hi", "ts": "t"})
+    # One valid line, one line with an invalid UTF-8 byte (0xff).
+    path.write_bytes(good.encode("utf-8") + b"\n\xff\xfe garbage\n")
+
+    # Must not raise; the valid line still surfaces, the bad one is dropped.
+    turns = orch._load_conversation()
+    assert any(t.get("content") == "hi" for t in turns)
+
+
+def test_load_conversation_missing_file_returns_empty(project: Project):
+    orch = _orch_r2(project)
+    assert orch._load_conversation() == []
+
+
+# ── revise/edit producer mode: binary draft falls back, no crash ──────────────
+def test_producer_revise_binary_draft_falls_back_to_generate(project: Project):
+    """A BINARY draft routed to producer_mode='revise' (via the leader-redo /
+    auto-resume lanes, since _draft_is_multifile is False for binary) must not
+    raise UnicodeDecodeError — it falls through to the generate branch."""
+    orch = _orch_r2(project)
+    pid = project.id
+    task = _make_task(pid, "R2A-T-001", artifact_kind="document",
+                      output_path="report.pdf")
+    task.producer_mode = "revise"
+
+    # Lay a binary "draft" at the task's output path so path.exists() is True
+    # but read_text() would raise UnicodeDecodeError.
+    artifacts = orch._artifacts_root()
+    draft = artifacts / "report.pdf"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_bytes(b"%PDF-1.4\x00\x01\xff\xfebinary-bytes")
+
+    captured: dict = {}
+
+    def _fake_run(agent_id, role, prompt, **kw):
+        # If we reach the model call without crashing on read_text, the fix
+        # held. Capture the prompt so we can assert it's the generate path
+        # (no "existing draft" wording from the revise prompt).
+        captured["prompt"] = prompt
+        return "regenerated body of sufficient length " * 10
+
+    orch._run_agent_call = _fake_run  # type: ignore[assignment]
+
+    # Must not raise UnicodeDecodeError.
+    out_path, _checksum, _tokens = orch._producer_execute(task)
+    assert "prompt" in captured, "the producer must reach the model call"
+    assert out_path is not None
+
+
+# ── wave merge: reused tool-call id must not clobber the audit record ─────────
+def test_merge_wave_namespaces_colliding_tool_results(project: Project):
+    """Two workers each stage tool_calls/call_1.txt with DIFFERENT content. The
+    merge must keep both (namespacing the loser under tool_calls/<task>/) rather
+    than letting the later task silently overwrite the earlier audit record."""
+    orch = _orch_r2(project)
+    pid = project.id
+
+    shared = orch._shared_artifacts_root()
+    shared.mkdir(parents=True, exist_ok=True)
+
+    done: dict[str, TaskExecutionResult] = {}
+    for tid, content in (("R2A-T-AAA", b"result-A"), ("R2A-T-BBB", b"result-B")):
+        task = _make_task(pid, tid, output_path=f"{tid}.md")
+        staging = orch._scope_root() / ".staging" / tid
+        (staging / "tool_calls").mkdir(parents=True, exist_ok=True)
+        # The colliding reused-id raw tool-result file.
+        (staging / "tool_calls" / "call_1.txt").write_bytes(content)
+        # A primary output so the merge has a declared artifact too.
+        (staging / f"{tid}.md").write_text("body")
+        done[tid] = TaskExecutionResult(
+            task=task, staging_root=staging,
+            artifact_writes=[f"{tid}.md"],
+        )
+
+    orch._merge_wave_artifacts(done, RunSummary(project=project))
+
+    tc = shared / "tool_calls"
+    # The first task claims tool_calls/call_1.txt; the second is namespaced.
+    bodies = {p.read_bytes() for p in tc.rglob("call_1.txt")}
+    assert b"result-A" in bodies
+    assert b"result-B" in bodies, (
+        "the colliding tool-result must be preserved, not overwritten"
+    )
+
+
+def test_merge_wave_identical_tool_result_not_duplicated(project: Project):
+    """When two workers stage byte-identical tool-result files under the same
+    name, the merge must NOT create a spurious namespaced copy."""
+    orch = _orch_r2(project)
+    pid = project.id
+    shared = orch._shared_artifacts_root()
+    shared.mkdir(parents=True, exist_ok=True)
+
+    done: dict[str, TaskExecutionResult] = {}
+    for tid in ("R2A-T-CCC", "R2A-T-DDD"):
+        task = _make_task(pid, tid, output_path=f"{tid}.md")
+        staging = orch._scope_root() / ".staging" / tid
+        (staging / "tool_calls").mkdir(parents=True, exist_ok=True)
+        (staging / "tool_calls" / "call_0.txt").write_bytes(b"same")
+        (staging / f"{tid}.md").write_text("body")
+        done[tid] = TaskExecutionResult(
+            task=task, staging_root=staging, artifact_writes=[f"{tid}.md"],
+        )
+
+    orch._merge_wave_artifacts(done, RunSummary(project=project))
+    copies = list((shared / "tool_calls").rglob("call_0.txt"))
+    assert len(copies) == 1, "identical results must not be needlessly duplicated"
+
+
+# ── QC-patch: P5 declared-format gate re-asserted on the rescue path ──────────
+def test_qc_patch_rejects_text_under_binary_extension(project: Project):
+    """_qc_patch_artifact writes TEXT; on a declared-binary output_path it must
+    raise (P5 declared-format integrity) so the caller never completes a fake
+    binary as a clean qc_authored_fix."""
+    orch = _orch_r2(project)
+    pid = project.id
+    task = _make_task(pid, "R2A-T-PDF", artifact_kind="document",
+                      output_path="out.pdf")
+    artifacts = orch._artifacts_root()
+    draft = artifacts / "out.pdf"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("storm partial text")
+
+    # QC returns plain text — which is NOT a real PDF.
+    orch._run_agent_call = (  # type: ignore[assignment]
+        lambda agent_id, role, prompt, **kw: "Here is the fixed text body."
+    )
+
+    with pytest.raises(ValueError, match="declared-format"):
+        orch._qc_patch_artifact(task, draft, "defects", "storm partial text")
+
+
+def test_qc_patch_allows_plain_text_extension(project: Project):
+    """A text artifact (.md) patched to text must pass the format gate."""
+    orch = _orch_r2(project)
+    pid = project.id
+    task = _make_task(pid, "R2A-T-MD", artifact_kind="document",
+                      output_path="out.md")
+    artifacts = orch._artifacts_root()
+    draft = artifacts / "out.md"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("old body")
+
+    orch._run_agent_call = (  # type: ignore[assignment]
+        lambda agent_id, role, prompt, **kw: "patched markdown body"
+    )
+    out = orch._qc_patch_artifact(task, draft, "defects", "old body")
+    assert "patched" in out
+
+
+# ── QC rescue: refuse single-file rescue of a multi-file draft ────────────────
+def test_qc_fix_forward_refuses_multifile_draft(project: Project, monkeypatch):
+    """A multi-file draft (=== FILE: === headers) must NOT be rescued by the
+    single-file QC patch — the rescue would patch only the primary and stamp
+    COMPLETED while a sibling defect survives. It falls through (returns False)."""
+    orch = _orch_r2(project)
+    pid = project.id
+    task = _make_task(pid, "R2A-T-MF", artifact_kind="code",
+                      output_path="src/main.py")
+    artifacts = orch._artifacts_root()
+    draft = artifacts / "src" / "main.py"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    # A concatenated multi-file body carrying FILE headers (what
+    # _draft_is_multifile detects).
+    draft.write_text(
+        "=== FILE: src/main.py ===\nprint('hi')\n"
+        "=== FILE: src/util.py ===\nx = 1\n"
+    )
+
+    patched_called: list = []
+    orch._qc_patch_artifact = (  # type: ignore[assignment]
+        lambda *a, **k: patched_called.append(True) or "x"
+    )
+
+    verdict = AssertionEvidence(producer="qc", primary=True,
+                                check="sibling defect", passed=False)
+    rescued = orch._attempt_qc_fix_forward(
+        task, draft, (verdict, "fix util.py"), RunSummary(project=project),
+    )
+    assert rescued is False, "a multi-file draft must not be single-file rescued"
+    assert not patched_called, "the single-file patch must not run"
+    assert task.status != TaskStatus.COMPLETED
+
+
+# ── _extract_code_from_prose: skip FILE-header bodies ─────────────────────────
+def test_extract_code_from_prose_unchanged_for_plain_prose():
+    """Sanity: the helper still extracts the largest fenced block from prose."""
+    text = (
+        "Here is some explanatory prose before the code that is reasonably long "
+        "enough to dominate.\n\n```python\nprint('hello world')\n```\n\nMore prose.\n"
+    )
+    assert _extract_code_from_prose(text) == "print('hello world')"
+
+
+def test_qc_patch_preserves_file_header_body(project: Project):
+    """If the QC patch returns an (off-contract) concatenated multi-file body
+    with FILE headers, _qc_patch_artifact must NOT run prose-extraction (which
+    would drop all but the largest fenced block) — the headers survive."""
+    orch = _orch_r2(project)
+    pid = project.id
+    task = _make_task(pid, "R2A-T-HDR", artifact_kind="code",
+                      output_path="a.py")
+    artifacts = orch._artifacts_root()
+    draft = artifacts / "a.py"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("old")
+
+    multi = (
+        "=== FILE: a.py ===\n```python\nprint('a')\n```\n"
+        "=== FILE: b.py ===\n```python\nprint('b')\n```\n"
+    )
+    orch._run_agent_call = (  # type: ignore[assignment]
+        lambda agent_id, role, prompt, **kw: multi
+    )
+    out = orch._qc_patch_artifact(task, draft, "defects", "old")
+    assert "=== FILE: a.py ===" in out
+    assert "=== FILE: b.py ===" in out, "FILE headers must not be mangled away"
+
+
+# ── vision converse prompt: correct the "future slice" wording ────────────────
+def test_converse_prompt_corrects_future_slice_for_image(project: Project):
+    """When a converse turn carries an image, the built prompt must include the
+    corrective note (the image IS attached as a content block here), not just
+    the kickoff 'future slice' wording."""
+    orch = _orch_r2(project)
+    image = SimpleNamespace(kind="image", name="pic.png", path="pic.png",
+                            content=None)
+    prompt = orch._build_converse_prompt([], "look", [image])
+    assert "content blocks below" in prompt
+    assert "examine them" in prompt
+
+
+def test_converse_prompt_no_image_note_for_document(project: Project):
+    """A document-only converse turn must NOT get the image corrective note."""
+    orch = _orch_r2(project)
+    doc = SimpleNamespace(kind="document", name="d.md", path="d.md",
+                          content="hi")
+    prompt = orch._build_converse_prompt([], "read", [doc])
+    assert "content blocks below — examine them" not in prompt
+
+
+# ── goal redo-fingerprints pruned on terminal ─────────────────────────────────
+def test_redo_fingerprints_pruned_when_goal_terminalizes(project: Project):
+    """A goal's redo loop-breaker fingerprint must be dropped once the goal
+    reaches a terminal (COMPLETED) verdict so the per-run dict doesn't grow
+    stale entries for every goal that ever redid."""
+    orch = _orch_r2(project)
+    pid = project.id
+    goal = Goal(
+        id="R2A-G-FP", project_id=pid, description="g",
+        success_criteria="sc", status=GoalStatus.IN_PROGRESS,
+    )
+    store.save_goal(project.code, goal, run_id=project.run_id)
+    # Seed a fingerprint as if a redo was dispatched.
+    orch._goal_redo_fingerprints[goal.id] = "fp-abc"
+
+    task = _make_task(pid, "R2A-T-FP", deliverable=True)
+    task.status = TaskStatus.COMPLETED
+
+    # Drive the leader-verify completion with a 'satisfied' verdict — the goal
+    # terminalizes and the fingerprint must be pruned. _leader_verify_goal calls
+    # self._run (simple-shot, no chat runner wired) then _extract_json.
+    orch._run = (  # type: ignore[assignment]
+        lambda *a, **k: "```json\n" + json.dumps({
+            "verdict": "satisfied", "rationale": "ok",
+            "report_body": "## R\n", "recommendations": [],
+        }) + "\n```"
+    )
+    orch._leader_verify_goal(goal, [task], RunSummary(project=project))
+
+    assert goal.status == GoalStatus.COMPLETED
+
+    assert goal.id not in orch._goal_redo_fingerprints, (
+        "a terminalized goal must not leak its redo fingerprint"
+    )
+
+
+# ── wave loop: DEFERRED_CAPACITY-only wave blocks visibly, not orphan ─────────
+def test_wave_capacity_starved_blocks_tasks(project: Project, monkeypatch):
+    """When every ready task is DEFERRED_CAPACITY and no slot will free (a
+    pathological roster), the wave loop must BLOCK those tasks with a capacity
+    rationale and surface an error — not break leaving them PENDING-orphaned."""
+    from modulatio import dispatch
+
+    orch = _orch_r2(project)
+    pid = project.id
+    goal = Goal(
+        id="R2A-G-CAP", project_id=pid, description="g",
+        success_criteria="sc", status=GoalStatus.IN_PROGRESS,
+    )
+    task = _make_task(pid, "R2A-T-CAP", required_skills=["writing"])
+    task.status = TaskStatus.PENDING
+    store.save_task(project.code, task, run_id=project.run_id)
+
+    # Force schedule_wave to return an empty assignment set (capacity starved):
+    # the only producers carry cap 0, so the skill-routed task is deferred and
+    # never assigned.
+    monkeypatch.setattr(
+        dispatch, "schedule_wave",
+        lambda *a, **k: SimpleNamespace(assignments={}),
+    )
+
+    task_map = {task.id: task}
+    summary = RunSummary(project=project)
+    # Must terminate (no infinite spin) and BLOCK the starved task.
+    orch._run_task_waves(goal, [task], summary, task_map)
+
+    assert task.status == TaskStatus.BLOCKED, (
+        "a capacity-starved ready task must be BLOCKED, not left PENDING"
+    )
+    assert any("capacity" in e for e in summary.errors), (
+        "the saturated roster must surface a visible error"
+    )

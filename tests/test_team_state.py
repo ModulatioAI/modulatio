@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from modulatio import team_state, vault
+import threading
 
 
 @pytest.fixture
@@ -492,3 +493,182 @@ def test_parse_state_doc_block_last_match_wins() -> None:
     result = team_state.parse_state_doc_block(response)
     assert result.reason == "ok"
     assert result.parsed["reason_code"] == "actual"
+
+
+# ═══ fold: test_team_state_low_audit.py ═══
+# LOW-audit regression tests for team_state.
+#
+# Finding #65 [correctness]: team_state.append_activity inserted the new
+# entry newest-FIRST (right after the "### Recent Activity" anchor) while
+# render_state writes entries oldest-FIRST/newest-last (push_activity
+# appends to the tail; render iterates in order). The two writers produced
+# opposite on-disk orderings, so the displayed order flipped depending on
+# which writer last touched the file. append_activity must now append at
+# the END of the Recent Activity block to agree with render_state.
+
+
+@pytest.fixture()
+def project_run_pathstub(tmp_path, monkeypatch) -> tuple[str, str]:
+    monkeypatch.setattr(team_state, "state_path", lambda code, run_id: tmp_path / f"{code}-{run_id}.md")
+    return ("PROJ", "run1")
+
+
+def _recent_activity_lines(body: str) -> list[str]:
+    """Extract the rendered Recent Activity entry lines, in order."""
+    out: list[str] = []
+    in_section = False
+    for line in body.split("\n"):
+        if line.startswith("### Recent Activity"):
+            in_section = True
+            continue
+        if in_section:
+            if line.startswith("### ") or line == "":
+                break
+            out.append(line)
+    return out
+
+
+def test_append_activity_matches_render_state_order(project_run_pathstub: tuple[str, str]) -> None:
+    """The appended entry lands AFTER the existing one (oldest-first),
+    matching what render_state would emit for the same sequence."""
+    code, run_id = project_run_pathstub
+    s = team_state.TeamState(
+        updated=datetime(2026, 5, 5, 21, 0, tzinfo=timezone.utc),
+        recent_activity=[team_state.ActivityEntry("21:00", "drafter", "first")],
+    )
+    team_state.write_state(code, run_id, s)
+    team_state.append_activity(
+        code, run_id, team_state.ActivityEntry("21:05", "qc", "second")
+    )
+    body = team_state.load_body(code, run_id)
+    lines = _recent_activity_lines(body)
+    # Oldest-first: "first" precedes "second" — same as a render_state
+    # call would produce from push_activity'ing both in sequence.
+    assert lines == [
+        "- 21:00 — drafter: first",
+        "- 21:05 — qc: second",
+    ]
+
+    # Agreement check: a fresh render_state of the equivalent structured
+    # state yields the identical Recent Activity ordering.
+    s.push_activity(team_state.ActivityEntry("21:05", "qc", "second"))
+    rendered = team_state.render_state(s)
+    assert _recent_activity_lines(rendered) == lines
+
+
+def test_append_activity_replaces_none_placeholder(project_run_pathstub: tuple[str, str]) -> None:
+    """When the Recent Activity section is the empty "- (none)"
+    placeholder, the appended entry supersedes it (no stray placeholder
+    left mixed with real entries)."""
+    code, run_id = project_run_pathstub
+    s = team_state.TeamState(
+        updated=datetime(2026, 5, 5, 21, 0, tzinfo=timezone.utc),
+        recent_activity=[],
+    )
+    team_state.write_state(code, run_id, s)
+    assert "- (none)" in team_state.load_body(code, run_id)
+    team_state.append_activity(
+        code, run_id, team_state.ActivityEntry("21:05", "qc", "only")
+    )
+    lines = _recent_activity_lines(team_state.load_body(code, run_id))
+    assert lines == ["- 21:05 — qc: only"]
+
+
+def test_append_activity_preserves_following_sections(project_run_pathstub: tuple[str, str]) -> None:
+    """Appending to Recent Activity must not disturb later sections."""
+    code, run_id = project_run_pathstub
+    s = team_state.TeamState(
+        updated=datetime(2026, 5, 5, 21, 0, tzinfo=timezone.utc),
+        recent_activity=[team_state.ActivityEntry("21:00", "drafter", "first")],
+        key_decisions=["chose plan A"],
+    )
+    team_state.write_state(code, run_id, s)
+    team_state.append_activity(
+        code, run_id, team_state.ActivityEntry("21:05", "qc", "second")
+    )
+    body = team_state.load_body(code, run_id)
+    assert "### Key Decisions (cumulative)" in body
+    assert "- chose plan A" in body
+    assert "### Open Blockers" in body
+
+
+# ═══ fold: test_team_state_preship.py ═══
+# Pre-ship regression — team_state atomic-write uniqueness.
+#
+# Covers the 0.9.0 pre-ship LOW/race finding (team_state.py:400): the
+# state-doc writers shared a fixed ``<name>.tmp`` temp file. Two writers
+# for the SAME run racing would clobber each other's temp bytes and
+# interleave the rename, leaving a torn/corrupt doc. The fix routes all
+# three writers (write_state / write_body / append_activity) through a
+# ``tempfile.mkstemp`` unique-temp + atomic os.replace helper.
+
+
+def _state(code: str, run_id: str) -> team_state.TeamState:
+    return team_state.TeamState()
+
+
+def test_write_body_uses_unique_temp_not_fixed_name(
+    project_run: tuple[str, str],
+) -> None:
+    """The writer must NOT leave/clobber a shared ``<name>.tmp`` file.
+
+    We seed a marker at the fixed legacy temp path; a correct
+    implementation never touches it (uses a mkstemp-unique name), so the
+    marker survives untouched after a write.
+    """
+    code, run_id = project_run
+    path = team_state.state_path(code, run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_tmp = path.with_suffix(path.suffix + ".tmp")
+    legacy_tmp.write_text("SENTINEL-DO-NOT-TOUCH")
+
+    team_state.write_body(code, run_id, "# Body\n")
+
+    assert path.read_text() == "# Body\n"
+    # The fixed-name temp must be untouched — the writer used a unique one.
+    assert legacy_tmp.read_text() == "SENTINEL-DO-NOT-TOUCH"
+
+
+def test_concurrent_writers_never_corrupt_doc(
+    project_run: tuple[str, str],
+) -> None:
+    """Many threads writing the same doc must leave a COMPLETE version.
+
+    With a shared fixed-name temp, concurrent writers interleave and can
+    rename a half-written file into place. With unique temps + atomic
+    replace, the on-disk file is always exactly one writer's full body.
+    """
+    code, run_id = project_run
+    bodies = {f"# Version {i}\n{'x' * 500}\n" for i in range(40)}
+    body_list = list(bodies)
+
+    def writer(b: str) -> None:
+        team_state.write_body(code, run_id, b)
+
+    threads = [threading.Thread(target=writer, args=(b,)) for b in body_list]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    final = team_state.state_path(code, run_id).read_text()
+    # Final content must be exactly one of the written bodies — never a
+    # torn interleave of two.
+    assert final in bodies
+
+    # No stray temp files should be left behind by completed writers.
+    leftovers = list(team_state.state_path(code, run_id).parent.glob("*.tmp"))
+    assert leftovers == []
+
+
+def test_write_state_atomic_replace(project_run: tuple[str, str]) -> None:
+    """write_state still produces a single, complete file."""
+    code, run_id = project_run
+    state = _state(code, run_id)
+    state.push_activity(
+        team_state.ActivityEntry("12:00", "Ada", "did the thing")
+    )
+    path = team_state.write_state(code, run_id, state)
+    text = path.read_text()
+    assert "did the thing" in text
+    assert list(path.parent.glob("*.tmp")) == []
