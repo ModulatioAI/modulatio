@@ -6,7 +6,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from modulatio import job_templates as jt
 from modulatio import config, cron, heartbeat, vault
+import re
+import multiprocessing as mp
+import os
+import time
+import fcntl
+import threading
+from tests._thread_check import run_threads_checked
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +24,13 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DEFAULTS_FILE", cfg_dir / "defaults.json")
     config.save_defaults({"vault_root": str(tmp_path / "vault")})
     config.reload()
+    # Union of the audit-round isolates (folded 2026-07-10): seed projects the
+    # round tests target + JT roots pointed at tmp so add-time JT validation
+    # never touches the real shared library.
+    vault.init_project("PHI", "PHI", "o", exist_ok=True)
+    vault.init_project("TEST", "TEST", "o", exist_ok=True)
+    monkeypatch.setattr(jt, "_JT_ROOT", tmp_path / "shared" / "job_templates")
+    monkeypatch.setattr(jt, "_SEED_JT_ROOT", tmp_path / "seed" / "job_templates")
     yield
 
 
@@ -575,3 +590,571 @@ def test_add_rejects_nonpositive_count_and_bad_stop_metadata():
     with pytest.raises(ValueError):
         cron.add(name="j", schedule="daily 09:00", project_code="CRONX",
                  objective="x", start_at="totally-bogus")
+
+
+# ═══ fold: test_cron_r2_audit.py ═══
+# Regression tests for the r2 full-debug cron findings.
+#
+# Three MEDIUM defects in src/modulatio/cron.py:
+#   1. add-time JT validation missed enum + per-item-driver checks the run-time
+#      fit-gate (`_jt_fit`) refuses on every cycle.
+#   2. `_new_id` truncated to 18 chars with no random suffix → colliding ids.
+#   3. `dispatch_due` pinned a job as perpetually-due when `add_task` failed or
+#      the schedule became unparseable.
+
+
+# === Finding 1: add-time JT validation parity with the run-time fit-gate ===
+
+
+def test_add_jt_out_of_enum_param_raises():
+    """A supplied value outside its declared enum must be refused at add time —
+    the run-time fit-gate (`enum_violations`) would skip the slot every cycle."""
+    jt.create_job_template(
+        name="ranked", description="d", interview_body="b",
+        param_schema=(jt.ParamField(name="mode", required=True,
+                                     enum=("fast", "deep")),),
+    )
+    with pytest.raises(ValueError, match="outside their allowed values"):
+        cron.add(name="x", schedule="daily 09:00", project_code="PHI",
+                 objective="o", jt_id="ranked", jt_params={"mode": "turbo"})
+
+
+def test_add_jt_in_enum_param_ok():
+    jt.create_job_template(
+        name="ranked2", description="d", interview_body="b",
+        param_schema=(jt.ParamField(name="mode", required=True,
+                                     enum=("fast", "deep")),),
+    )
+    job = cron.add(name="x", schedule="daily 09:00", project_code="PHI",
+                   objective="o", jt_id="ranked2", jt_params={"mode": "deep"})
+    assert job["jt_params"] == {"mode": "deep"}
+
+
+def test_add_jt_per_item_empty_driver_raises():
+    """A per-item JT whose fan-out driver param is empty/absent (and NOT marked
+    required, so unfilled_required wouldn't catch it) must be refused at add
+    time — the run-time fit-gate refuses an empty per-driver every cycle."""
+    jt.create_job_template(
+        name="fanout", description="d", interview_body="b",
+        output_spec=jt.OutputSpec(cardinality="per-item", per="targets"),
+        param_schema=(jt.ParamField(name="targets", required=False),),
+    )
+    with pytest.raises(ValueError, match=r"per-item.*driver"):
+        cron.add(name="x", schedule="daily 09:00", project_code="PHI",
+                 objective="o", jt_id="fanout", jt_params={})
+
+
+def test_add_jt_per_item_with_list_driver_ok():
+    jt.create_job_template(
+        name="fanout2", description="d", interview_body="b",
+        output_spec=jt.OutputSpec(cardinality="per-item", per="targets"),
+        param_schema=(jt.ParamField(name="targets", required=False),),
+    )
+    job = cron.add(name="x", schedule="daily 09:00", project_code="PHI",
+                   objective="o", jt_id="fanout2",
+                   jt_params={"targets": ["a", "b"]})
+    assert job["jt_params"] == {"targets": ["a", "b"]}
+
+
+# === Finding 2: _new_id must be collision-resistant ===
+
+
+def test_new_id_keeps_all_microsecond_digits_and_random_suffix():
+    nid = cron._new_id()
+    # 14 datetime digits + 6 microsecond digits + 6 hex chars (token_hex(3)).
+    assert re.fullmatch(r"\d{20}[0-9a-f]{6}", nid), nid
+
+
+def test_new_id_no_collision_in_tight_loop():
+    ids = {cron._new_id() for _ in range(2000)}
+    assert len(ids) == 2000
+
+
+# === Finding 3: dispatch_due must not pin a job as perpetually-due ===
+
+
+def _due_job(**over):
+    base = dict(name="j", schedule="30m", project_code="PHI", objective="o")
+    base.update(over)
+    job = cron.add(**base)
+    # Force it due now.
+    past = (cron._now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+    cron.update(job["id"], next_run=past)
+    return cron.get(job["id"])
+
+
+def test_dispatch_advances_next_run_even_when_add_task_fails(monkeypatch):
+    job = _due_job()
+    job_id = job["id"]
+    old_next = cron.get(job_id)["next_run"]
+
+    def boom(**kw):
+        raise RuntimeError("add_task blew up")
+
+    monkeypatch.setattr(heartbeat, "add_task", boom)
+    now = cron._now()
+    fired = cron.dispatch_due(now=now)
+
+    # Failed dispatch isn't reported as fired ...
+    assert fired == []
+    after = cron.get(job_id)
+    # ... but next_run MUST have advanced so the job isn't perpetually due.
+    assert after["next_run"] != old_next
+    assert datetime.fromisoformat(after["next_run"]) > now
+    assert after["last_status"].startswith("error:")
+    # It is no longer selected as due on the next tick.
+    assert cron.check_due(now=now) == []
+
+
+def test_dispatch_disables_job_with_unparseable_schedule(monkeypatch):
+    job = _due_job()
+    job_id = job["id"]
+    # add_task succeeds, but the schedule was hand-edited to garbage.
+    monkeypatch.setattr(heartbeat, "add_task", lambda **kw: None)
+    # update() refuses an unparseable schedule, so simulate a hand-edited config
+    # by writing the corrupt schedule + a due next_run directly through the store.
+    past = (cron._now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+    jobs = cron._load()
+    for j in jobs:
+        if j["id"] == job_id:
+            j["schedule"] = "not-a-real-schedule"
+            j["next_run"] = past
+            j["enabled"] = True
+    cron._save(jobs)
+
+    now = cron._now()
+    cron.dispatch_due(now=now)
+    after = cron.get(job_id)
+    # Fail-closed: disabled so it stops re-firing every tick.
+    assert after["enabled"] is False
+    assert cron.check_due(now=now) == []
+
+
+# ═══ fold: test_cron_resweep.py ═══
+# Regression: cron.dispatch_due must not double-fire a due job across
+# concurrent OS processes (finding 1, MEDIUM/race, cron.py:419).
+#
+# `dispatch_due` ran check_due (load-decide-release) → add_task → update across
+# three separate in-process-lock windows, and `_cron_lock` is an in-process RLock
+# only. The daemon's per-tick `cron.dispatch_due()` and a separate `modulatio
+# cron dispatch-due` CLI invocation are distinct OS processes sharing the same
+# on-disk cron-config; both could observe the same job as due and both fire
+# add_task (duplicate kickoff, duplicate cost). The fix wraps the
+# select-advance-dispatch window in a cross-process POSIX flock.
+
+
+def _add_overdue_job() -> dict:
+    job = cron.add(
+        name="resweep-job",
+        schedule="1d",
+        project_code="TEST",
+        objective="do the thing",
+    )
+    # Pin next_run into the past so it is unambiguously due.
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+    cron.update(job["id"], next_run=past)
+    return job
+
+
+def test_dispatch_holds_cross_process_lock_during_window(monkeypatch):
+    """While dispatch_due is selecting-advancing-dispatching, the sidecar lock
+    file must be exclusively held — proven by a NON-BLOCKING flock from a fresh
+    fd failing inside the add_task seam. Without the fix there is no flock and
+    the non-blocking acquire succeeds.
+    """
+    import fcntl
+
+    _add_overdue_job()
+
+    observed = {}
+
+    def fake_add_task(**kwargs):
+        lock_path = cron._dispatch_lock_file()
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Acquired ⇒ the dispatch window is NOT protecting it.
+                observed["locked_during_dispatch"] = False
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except (BlockingIOError, OSError):
+                observed["locked_during_dispatch"] = True
+        finally:
+            os.close(fd)
+        return {"id": "task-x"}
+
+    monkeypatch.setattr(cron.heartbeat, "add_task", fake_add_task)
+
+    fired = cron.dispatch_due()
+    assert len(fired) == 1
+    assert observed.get("locked_during_dispatch") is True
+
+
+# --- True cross-process double-fire test (subprocess workers) ---
+
+def _worker(cfg_dir_str, count_file, ready, go):
+    """Run in a separate OS process: configure the same on-disk cron-config and
+    call dispatch_due. add_task appends a marker line to a shared file so the
+    parent can count total fires across both processes. A barrier makes the two
+    workers' check_due windows overlap so the race is exercised."""
+    from pathlib import Path
+
+    from modulatio import config as _config
+    from modulatio import cron as _cron
+    from modulatio import vault as _vault
+
+    _config.CONFIG_DIR = Path(cfg_dir_str)
+    _config.DEFAULTS_FILE = Path(cfg_dir_str) / "defaults.json"
+    _config.reload()
+    _vault.reload()  # sync VAULT_ROOT (a real daemon process does this at startup)
+
+    def fake_add_task(**kwargs):
+        # Widen the window between check_due and the advancing update so both
+        # workers, absent a cross-process lock, would both get here.
+        with open(count_file, "a", encoding="utf-8") as fh:
+            fh.write("fire\n")
+        time.sleep(0.3)
+        return {"id": "t"}
+
+    _cron.heartbeat.add_task = fake_add_task  # type: ignore[assignment]
+
+    ready.set()
+    go.wait(5)
+    _cron.dispatch_due()
+
+
+def test_concurrent_processes_fire_due_job_once(tmp_path):
+    """Two real OS processes calling dispatch_due on the same overdue job must
+    produce exactly ONE heartbeat add_task — the cross-process flock makes the
+    loser re-read an already-advanced next_run and skip it."""
+    if not hasattr(__import__("fcntl"), "flock"):  # pragma: no cover
+        pytest.skip("flock unavailable")
+
+    cfg_dir = tmp_path / "config"
+    vault_root = tmp_path / "vault"
+    config.CONFIG_DIR = cfg_dir
+    config.DEFAULTS_FILE = cfg_dir / "defaults.json"
+    config.save_defaults({"vault_root": str(vault_root)})
+    config.reload()
+    vault.reload()  # sync VAULT_ROOT to this test's vault (matches the subprocess)
+    vault.init_project("TEST", "TEST", "o", exist_ok=True)  # the cron's project must exist
+    _add_overdue_job()
+
+    count_file = tmp_path / "fires.txt"
+    count_file.write_text("", encoding="utf-8")
+
+    ctx = mp.get_context("spawn")
+    ready1, ready2 = ctx.Event(), ctx.Event()
+    go = ctx.Event()
+    args = (str(cfg_dir), str(count_file))
+    p1 = ctx.Process(target=_worker, args=(*args, ready1, go))
+    p2 = ctx.Process(target=_worker, args=(*args, ready2, go))
+    p1.start()
+    p2.start()
+    ready1.wait(5)
+    ready2.wait(5)
+    go.set()
+    p1.join(10)
+    p2.join(10)
+
+    fires = [ln for ln in count_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(fires) == 1, f"expected exactly one fire, got {len(fires)}"
+
+
+# ═══ fold: test_cron_resweep_r3.py ═══
+# Round-3 cron re-sweep regressions (additive to test_cron_resweep.py).
+#
+# Finding 1 [MEDIUM/race, cron.py:129] — the cross-process dispatch flock was held
+# ONLY by dispatch_due. The CLI-facing mutators add/update/remove (and
+# enable/disable via update) took only the in-process _cron_lock RLock, which can't
+# see across the OS-process boundary. A daemon dispatch (which RMWs the config via
+# _dispatch_one -> update) and a concurrent `modulatio cron add/update/remove`
+# process could interleave their load/modify/save and lose a write. Fix: wrap the
+# mutators in the same _cross_process_dispatch_lock, made re-entrant per thread so
+# the dispatch path (which already holds it) can still call update without
+# deadlocking against a fresh-fd flock.
+#
+# Finding 2 [LOW/integration, cron.py:332] — cron.add only .upper()'d project_code,
+# never validating its shape (heartbeat.add_task does). A malformed/path-hostile
+# code was accepted at add-time then rejected on every headless dispatch. Fix:
+# validate up front via vault.validate_project_code so the operator is told
+# immediately.
+
+
+def _nonblocking_flock_is_blocked() -> bool:
+    """True if a fresh-fd non-blocking LOCK_EX on the sidecar fails — i.e. the
+    cross-process dispatch lock is currently held by someone."""
+    lock_path = cron._dispatch_lock_file()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        except (BlockingIOError, OSError):
+            return True
+    finally:
+        os.close(fd)
+
+
+# --- Finding 1: mutators hold the cross-process lock during their RMW ---
+
+
+def test_add_holds_cross_process_lock_during_rmw(monkeypatch):
+    """While cron.add does its load-append-save, the sidecar flock must be held
+    exclusively. We probe it from inside _save (the write seam) using a fresh fd
+    in another thread, so the non-blocking acquire there must fail. Without the
+    fix add takes only the in-process RLock and the probe succeeds."""
+    observed = {}
+    real_save = cron._save
+
+    def probing_save(jobs):
+        # Probe from a SEPARATE thread: same-thread re-entrant acquire would ride
+        # the held flock and not reflect cross-process exclusion.
+        result = {}
+
+        def probe():
+            result["blocked"] = _nonblocking_flock_is_blocked()
+
+        run_threads_checked([probe])
+        observed["blocked_during_save"] = result["blocked"]
+        return real_save(jobs)
+
+    monkeypatch.setattr(cron, "_save", probing_save)
+
+    cron.add(name="j", schedule="1d", project_code="test", objective="do it")
+    assert observed.get("blocked_during_save") is True
+
+
+def test_update_holds_cross_process_lock_during_rmw(monkeypatch):
+    job = cron.add(name="j", schedule="1d", project_code="test", objective="do it")
+    observed = {}
+    real_save = cron._save
+
+    def probing_save(jobs):
+        result = {}
+
+        def probe():
+            result["blocked"] = _nonblocking_flock_is_blocked()
+
+        run_threads_checked([probe])
+        observed["blocked_during_save"] = result["blocked"]
+        return real_save(jobs)
+
+    monkeypatch.setattr(cron, "_save", probing_save)
+
+    cron.update(job["id"], priority=9)
+    assert observed.get("blocked_during_save") is True
+
+
+def test_remove_holds_cross_process_lock_during_rmw(monkeypatch):
+    job = cron.add(name="j", schedule="1d", project_code="test", objective="do it")
+    observed = {}
+    real_save = cron._save
+
+    def probing_save(jobs):
+        result = {}
+
+        def probe():
+            result["blocked"] = _nonblocking_flock_is_blocked()
+
+        run_threads_checked([probe])
+        observed["blocked_during_save"] = result["blocked"]
+        return real_save(jobs)
+
+    monkeypatch.setattr(cron, "_save", probing_save)
+
+    assert cron.remove(job["id"]) is True
+    assert observed.get("blocked_during_save") is True
+
+
+# --- Finding 1: re-entrancy — dispatch_due -> _dispatch_one -> update must NOT
+#     deadlock against the outer flock, and must still fire exactly once. ---
+
+
+def test_dispatch_due_does_not_deadlock_on_nested_update(monkeypatch):
+    """dispatch_due holds the flock, then _dispatch_one calls update() which now
+    ALSO takes the flock. A non-re-entrant flock would deadlock (two fresh-fd
+    LOCK_EX from the same process block). The re-entrant guard must let the
+    nested update proceed and the dispatch complete within a hard timeout."""
+    job = cron.add(name="j", schedule="1d", project_code="test", objective="do it")
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+    cron.update(job["id"], next_run=past)
+
+    monkeypatch.setattr(cron.heartbeat, "add_task", lambda **kw: {"id": "t"})
+
+    result = {}
+
+    _errs = []
+
+    def run():
+        try:
+            result["fired"] = cron.dispatch_due()
+        except BaseException as _e:  # noqa: BLE001 — surface to assert, no ghost warning
+            _errs.append(_e)
+
+    t = threading.Thread(target=run)
+    t.start()
+    t.join(timeout=10)
+    assert not _errs, f"dispatch_due thread raised: {_errs!r}"
+    assert not t.is_alive(), "dispatch_due deadlocked on the nested update flock"
+    assert len(result["fired"]) == 1
+
+    # And next_run was actually advanced past now (the nested update took effect).
+    advanced = cron.get(job["id"])
+    assert datetime.fromisoformat(advanced["next_run"]) > datetime.now(timezone.utc)
+
+
+def test_lock_releases_after_mutator_so_dispatch_can_still_acquire(monkeypatch):
+    """After add/update/remove return, the cross-process flock must be fully
+    released (fd closed, lock dropped) — a leaked hold would wedge the daemon's
+    next dispatch_due. Probe from a fresh fd after each call: must be free."""
+    cron.add(name="j", schedule="1d", project_code="test", objective="do it")
+    assert _nonblocking_flock_is_blocked() is False
+    job2 = cron.add(name="k", schedule="1d", project_code="test", objective="do it")
+    assert _nonblocking_flock_is_blocked() is False
+    cron.update(job2["id"], priority=3)
+    assert _nonblocking_flock_is_blocked() is False
+    cron.remove(job2["id"])
+    assert _nonblocking_flock_is_blocked() is False
+
+
+def test_no_fd_leak_across_many_mutations(monkeypatch):
+    """Each outermost lock acquisition opens an fd; it must be closed on release.
+    Hammer the mutators well past a typical soft fd budget and assert the open-fd
+    count for THIS process stays bounded (no per-call leak)."""
+    fd_dir = f"/proc/{os.getpid()}/fd"
+    if not os.path.isdir(fd_dir):  # pragma: no cover — non-Linux
+        pytest.skip("/proc fd introspection unavailable")
+
+    before = len(os.listdir(fd_dir))
+    for i in range(300):
+        j = cron.add(name=f"j{i}", schedule="1d", project_code="test", objective="x")
+        cron.update(j["id"], priority=(i % 9) + 1)
+        cron.remove(j["id"])
+    after = len(os.listdir(fd_dir))
+    # Allow a small slack for incidental fds; a leak would be ~900.
+    assert after - before < 20, f"fd leak: {before} -> {after}"
+
+
+# --- Finding 2: cron.add validates project_code shape at add-time ---
+
+
+@pytest.mark.parametrize(
+    "bad_code",
+    [
+        "../etc",          # path traversal
+        "bad code",        # whitespace
+        "9starts_digit",   # must start with a letter
+        "has/slash",       # path separator
+        "x" * 33,          # too long (>32)
+        "",                # empty
+    ],
+)
+def test_add_rejects_malformed_project_code(bad_code):
+    """A malformed/path-hostile project code must raise ValueError at add-time
+    (operator present), mirroring heartbeat.add_task — not be silently accepted
+    and rejected on every headless dispatch. Without the fix add() stored it."""
+    with pytest.raises(ValueError):
+        cron.add(name="j", schedule="1d", project_code=bad_code, objective="do it")
+    # Nothing was persisted.
+    assert cron.list_jobs() == []
+
+
+def test_add_accepts_valid_code_and_stores_uppercased():
+    """A valid code (case-permissive) is accepted and stored upper, as before."""
+    job = cron.add(name="j", schedule="1d", project_code="myproj", objective="do it")
+    assert job["project_code"] == "MYPROJ"
+    job2 = cron.add(name="k", schedule="1d", project_code="MixedCase1", objective="x")
+    assert job2["project_code"] == "MIXEDCASE1"
+
+
+def test_added_job_dispatches_without_code_error(monkeypatch):
+    """End-to-end: a job added with a valid code dispatches cleanly (the code is
+    already validated, so heartbeat.add_task's own validate won't reject it)."""
+    job = cron.add(name="j", schedule="1d", project_code="test", objective="do it")
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+    cron.update(job["id"], next_run=past)
+
+    seen = {}
+
+    def fake_add_task(**kwargs):
+        seen["project_code"] = kwargs["project_code"]
+        return {"id": "t"}
+
+    monkeypatch.setattr(cron.heartbeat, "add_task", fake_add_task)
+    fired = cron.dispatch_due()
+    assert len(fired) == 1
+    assert seen["project_code"] == "TEST"
+
+
+# ═══ fold: test_cron_resweep_r4.py ═══
+# Round-4 re-sweep regressions for src/modulatio/cron.py.
+#
+# Finding 1 (MEDIUM/integration): cron.add's JT fit-gate must MIRROR the run-time
+# #97 fit-gate, which evaluates the bind AFTER folding the JT's standing defaults
+# in (`_run_jt_interview` → `_jt_fit`). The add-time gate previously checked the
+# RAW `jt_params` alone, so a cron whose required blank is filled by the template's
+# OWN default was rejected at add time even though the headless dispatch would run
+# it happily every cycle. These tests pin the gate to the merged dict.
+
+
+def _make_jt(name, schema):
+    jt.create_job_template(name=name, description="d", interview_body="b",
+                           param_schema=tuple(schema))
+
+
+def test_required_param_filled_by_jt_default_is_accepted_at_add_time():
+    """A required param that has a standing default is filled by `defaults()` on
+    the run-time path → the headless fit-gate passes. cron.add must therefore
+    accept the bind even when `jt_params` omits it. (Before the fix, cron.add
+    checked the raw `jt_params` and raised 'missing required'.)"""
+    _make_jt("brief", [jt.ParamField(name="topic", required=True, default="AI")])
+    job = cron.add(name="x", schedule="daily 09:00", project_code="PHI",
+                   objective="o", jt_id="brief")  # no jt_params — default fills 'topic'
+    assert job["jt_id"] == "brief"
+    # The raw bind is preserved untouched (defaults are a gate-time overlay only).
+    assert job["jt_params"] is None
+
+
+def test_enum_param_satisfied_by_default_is_accepted_at_add_time():
+    """An enum-constrained required param whose default is a valid enum member
+    must pass the add-time gate when not explicitly bound — the run-time gate
+    sees the default and accepts it."""
+    _make_jt("modefmt", [jt.ParamField(
+        name="fmt", required=True, default="pdf", enum=("pdf", "docx"))])
+    job = cron.add(name="x", schedule="daily 09:00", project_code="PHI",
+                   objective="o", jt_id="modefmt")
+    assert job["jt_id"] == "modefmt"
+
+
+def test_explicit_bind_still_overrides_default_and_is_gated():
+    """Defaults are an overlay base, not a mask: an explicit out-of-enum bind
+    still violates and is rejected, even though the default would be valid."""
+    _make_jt("modefmt", [jt.ParamField(
+        name="fmt", required=True, default="pdf", enum=("pdf", "docx"))])
+    with pytest.raises(ValueError, match="outside their allowed"):
+        cron.add(name="x", schedule="daily 09:00", project_code="PHI",
+                 objective="o", jt_id="modefmt", jt_params={"fmt": "html"})
+
+
+def test_per_item_driver_filled_by_default_is_accepted():
+    """A per-item JT whose fan-out driver param is supplied by the JT's own
+    default (a non-empty list) must pass the add-time gate without an explicit
+    bind — exactly as the run-time per-driver shape check would."""
+    _make_jt("fanout", [jt.ParamField(
+        name="items", required=True, default=["a", "b"])])
+    job = cron.add(name="x", schedule="daily 09:00", project_code="PHI",
+                   objective="o", jt_id="fanout",
+                   jt_params=None)
+    assert job["jt_id"] == "fanout"
+
+
+def test_required_still_rejected_when_no_default_and_unbound():
+    """Back-compat: a required param with NO default and no bind is still
+    rejected at add time (the merge can't fill it)."""
+    _make_jt("brief", [jt.ParamField(name="topic", required=True)])
+    with pytest.raises(ValueError, match="missing required"):
+        cron.add(name="x", schedule="daily 09:00", project_code="PHI",
+                 objective="o", jt_id="brief")

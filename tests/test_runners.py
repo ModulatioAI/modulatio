@@ -18,10 +18,26 @@ import json
 
 import pytest
 
+import sys
+from unittest.mock import MagicMock
+
+from modulatio import (
+    auth_alerts,
+    config,
+    model_presets,
+    oauth_helpers,
+    runners,
+    tool_summarization,
+    tools,
+)
+from modulatio import tool_summarization as _tool_sum
 from modulatio.runners import (
+    ChatResponse,
+    ToolCall,
     _article_stub_runners_for_tests,
     default_generic_stub_runners,
 )
+from litellm.exceptions import RateLimitError
 
 _STUB_ROLES = {"leader", "planner", "drafter", "qc", "researcher"}
 
@@ -1266,3 +1282,764 @@ def test_chat_pool_seed_last_err_is_a_ratelimiterror(monkeypatch):
 
     with pytest.raises(RateLimitError):
         litellm_runner("pooled")("hi")
+
+
+# ═══ fold: test_runners_resweep_r3.py ═══
+# Round-3 re-sweep regressions for ``src/modulatio/runners.py``.
+#
+# Two confirmed pre-ship findings:
+#
+# Finding 1 (MEDIUM/integration): ``litellm_chat_runner.run`` — the PRIMARY
+# tool-using producer path — had no ``AuthenticationError`` handling, so an
+# expired OAuth access token (they die ~24h) killed every tool-using producer
+# overnight while the single-shot ``litellm_runner`` self-healed. The tool-loop
+# runner must now refresh-once + retry, fire an auth alert on persistent 401,
+# and clear a prior alert on success — same contract as ``litellm_runner``.
+#
+# Finding 2 (LOW/product-agnostic): on the summarizer-FAILED truncation
+# fallback in ``run_llm_with_tools``, the kept head was budgeted with the
+# SUMMARIZER model's tokenizer (``count_model``) even though the truncated text
+# lands in the MAIN model's context. The head must be sized against the
+# tokenizer that will actually carry it (``model``).
+#
+# Tests mock litellm so no real LLM is hit; isolated config dir per test.
+
+
+@pytest.fixture(autouse=True)
+def isolate_config(tmp_path, monkeypatch):
+    cfg = tmp_path / "config"
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg)
+    monkeypatch.setattr(config, "AUTH_ALERTS_FILE", cfg / "auth_alerts.json")
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", cfg / "model_presets.json")
+    monkeypatch.setattr(
+        oauth_helpers, "ANTHROPIC_CREDENTIALS_FILE", tmp_path / "anthropic.json"
+    )
+    monkeypatch.setattr(
+        oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "openai.json"
+    )
+
+
+@pytest.fixture(autouse=True)
+def disable_external_alert_channels(monkeypatch):
+    monkeypatch.setattr(auth_alerts, "_try_desktop_notification", lambda *a, **k: None)
+    monkeypatch.setattr(auth_alerts, "_try_telegram_notification", lambda *a, **k: None)
+
+
+# ── litellm mock plumbing (mirrors test_runners_oauth) ─────────────────────
+
+
+def _stub_litellm(monkeypatch, completion_side_effect):
+    fake_completion = MagicMock(side_effect=completion_side_effect)
+    fake_litellm = MagicMock()
+    fake_litellm.completion = fake_completion
+    fake_exceptions = MagicMock()
+    fake_exceptions.AuthenticationError = type(
+        "AuthenticationError", (Exception,), {}
+    )
+    fake_exceptions.RateLimitError = type("RateLimitError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
+    monkeypatch.setitem(sys.modules, "litellm.exceptions", fake_exceptions)
+    return fake_completion, fake_exceptions.AuthenticationError
+
+
+def _chat_response(content: str = "ok", tool_calls=None):
+    """A minimal litellm chat-completion response object."""
+    msg = MagicMock()
+    msg.content = content
+    msg.tool_calls = tool_calls or []
+    choice = MagicMock()
+    choice.message = msg
+    resp = MagicMock()
+    resp.choices = [choice]
+    resp.usage = None
+    return resp
+
+
+def _add_oauth_preset(key="grok"):
+    model_presets.add_preset(
+        key, label="Grok", base_url="https://api.x.ai/v1",
+        api_format="openai", auth_type="oauth_xai",
+        auth_config={"creds_file": "~/.grok/auth.json"}, model="grok-4",
+    )
+
+
+# ── Finding 1: tool-loop chat runner recovers from a 401 via refresh ───────
+
+
+def test_chat_runner_refreshes_on_auth_error_and_retries(monkeypatch):
+    """A 401 followed by a successful refresh → retry once → return content."""
+    _add_oauth_preset("grok")
+    fake_completion, AuthErr = _stub_litellm(monkeypatch, None)
+    fake_completion.side_effect = [AuthErr("401 expired token"), _chat_response("hi")]
+    # Strategy refresh yields a fresh token.
+    monkeypatch.setattr(runners, "_try_refresh_for", lambda m: "fresh-token")
+
+    runner = runners.litellm_chat_runner("grok")
+    resp = runner(messages=[{"role": "user", "content": "yo"}], tools=[])
+
+    assert resp.content == "hi"
+    assert fake_completion.call_count == 2
+    # The retry call carried the REFRESHED token directly (in-memory refresh).
+    assert fake_completion.call_args_list[1].kwargs["api_key"] == "fresh-token"
+
+
+def test_chat_runner_fires_alert_when_refresh_unavailable(monkeypatch):
+    """No refresh available → fire an auth alert and re-raise the 401."""
+    _add_oauth_preset("grok")
+    fake_completion, AuthErr = _stub_litellm(monkeypatch, None)
+    fake_completion.side_effect = AuthErr("401 dead")
+    monkeypatch.setattr(runners, "_try_refresh_for", lambda m: None)
+
+    runner = runners.litellm_chat_runner("grok")
+    with pytest.raises(AuthErr):
+        runner(messages=[{"role": "user", "content": "yo"}], tools=[])
+
+    assert auth_alerts.has_active_alerts() is True
+
+
+def test_chat_runner_fires_alert_when_refresh_still_401(monkeypatch):
+    """Refresh succeeds but the retry still 401s → fire alert and re-raise."""
+    _add_oauth_preset("grok")
+    fake_completion, AuthErr = _stub_litellm(monkeypatch, None)
+    fake_completion.side_effect = [AuthErr("401 a"), AuthErr("401 b")]
+    monkeypatch.setattr(runners, "_try_refresh_for", lambda m: "fresh")
+
+    runner = runners.litellm_chat_runner("grok")
+    with pytest.raises(AuthErr):
+        runner(messages=[{"role": "user", "content": "yo"}], tools=[])
+
+    assert fake_completion.call_count == 2
+    assert auth_alerts.has_active_alerts() is True
+
+
+def test_chat_runner_clears_alert_on_success(monkeypatch):
+    """A clean dispatch clears any prior alert so the banner self-heals."""
+    _add_oauth_preset("grok")
+    auth_alerts.raise_alert("grok", error_message="old", auth_type="oauth_xai")
+    assert auth_alerts.has_active_alerts() is True
+    _stub_litellm(monkeypatch, [_chat_response("ok")])
+
+    runner = runners.litellm_chat_runner("grok")
+    runner(messages=[{"role": "user", "content": "yo"}], tools=[])
+
+    assert auth_alerts.has_active_alerts() is False
+
+
+# ── Finding 2: summarizer-failed truncation budgets with the MAIN model ────
+
+
+def test_summarizer_failed_truncation_budgets_with_main_model(monkeypatch, tmp_path):
+    """When the summarizer raises, the truncation fallback must size the kept
+    head with the MAIN model's tokenizer (``model``), not the summarizer's
+    (``count_model``) — the truncated text lands in the main model's context."""
+    captured: dict = {}
+
+    def _fake_truncate(text, *, call_id, max_tokens, model=None):
+        captured["model"] = model
+        return f"[truncated {call_id}]"
+
+    monkeypatch.setattr(_tool_sum, "truncate_tool_result", _fake_truncate)
+    # Big result → over threshold; persist is a no-op stub.
+    monkeypatch.setattr(_tool_sum, "count_tokens", lambda *a, **k: 9999)
+    monkeypatch.setattr(_tool_sum, "persist_raw_result", lambda *a, **k: None)
+
+    def _boom(*a, **k):
+        raise RuntimeError("summarizer down")
+
+    monkeypatch.setattr(_tool_sum, "summarize_tool_result", _boom)
+
+    cfg = _tool_sum.ToolSummarizationConfig(
+        enabled=True,
+        threshold_tokens=100,
+        summarizer_model="summarizer/small",
+        tool_calls_dir=tmp_path / "tc",
+    )
+    with _tool_sum.with_config(cfg):
+        # One tool call returns a big result, then the model emits final content.
+        big = "x" * 5000
+        tool = MagicMock()
+        tool.params_schema = None
+        tool.cost_class = None
+        tool.name = "big_tool"
+        tool.description = "returns a lot"
+        tool.call = MagicMock(return_value=big)
+        registry = {"big_tool": tool}
+
+        scripted = [
+            runners.ChatResponse(
+                content=None,
+                tool_calls=(runners.ToolCall(id="c1", name="big_tool", args={}),),
+            ),
+            runners.ChatResponse(content="done", tool_calls=()),
+        ]
+        chat_runner = runners.stub_chat_runner(scripted)
+
+        out = runners.run_llm_with_tools(
+            chat_runner=chat_runner,
+            prompt="go",
+            tool_loadout=("big_tool",),
+            tool_registry=registry,
+            summarizer_chat_runner_factory=lambda m: (lambda p: "summary"),
+            model="main/big-model",
+        )
+        assert out == "done"
+
+    # The fix: the fallback budgets the head against the MAIN model, never the
+    # summarizer model.
+    assert captured["model"] == "main/big-model"
+    assert captured["model"] != "summarizer/small"
+
+
+# ═══ fold: test_runners_resweep_r4.py ═══
+# Re-sweep round-4 regressions for ``src/modulatio/runners.py``.
+#
+# Finding 1 (LOW, product-agnostic) — sibling of re-sweep Finding 2.
+#
+# When a tool result crosses ``threshold_tokens`` and gets truncated, the kept
+# HEAD lands in the MAIN model's context, so it must be sized against the MAIN
+# model's tokenizer. The summarizer-FAILED branch was fixed (Finding 2) to pass
+# ``model=model``. The sibling no-summarizer branch still passed
+# ``model=count_model`` (= ``summarizer_model or model``). When ``summarizer_model``
+# is set but the runner factory is unwired (``have_summarizer`` False), that branch
+# sized the head with the SUMMARIZER's tokenizer — wrong, since the head still
+# lands in the main model's context.
+#
+# These tests assert both truncation branches budget the head with the MAIN
+# model's tokenizer regardless of why summarization was skipped.
+
+
+def _capture_truncate(monkeypatch):
+    """Patch ``truncate_tool_result`` to record the ``model`` kwarg it was
+    called with, returning a short marker so the loop continues cleanly."""
+    seen: dict[str, str | None] = {}
+
+    def _fake_truncate(text, *, call_id, max_tokens, model=None):
+        seen["model"] = model
+        return f"[truncated for test call_id={call_id}]"
+
+    monkeypatch.setattr(
+        tool_summarization, "truncate_tool_result", _fake_truncate
+    )
+    return seen
+
+
+def _run_one_big_tool_call(monkeypatch, cfg, factory):
+    """Drive ``run_llm_with_tools`` through exactly one big tool result with
+    the given config bound and summarizer factory wired (or None)."""
+    big = "x " * 5000  # comfortably over a 2000-token threshold
+
+    def big_tool():
+        return big
+
+    registry = {
+        "big": tools.Tool(name="big", description="big", call=big_tool),
+    }
+    scripted = [
+        ChatResponse(
+            content=None,
+            tool_calls=(ToolCall(id="c1", name="big", args={}),),
+        ),
+        ChatResponse(content="done", tool_calls=()),
+    ]
+    runner = runners.stub_chat_runner(scripted)
+
+    token = tool_summarization.bind(cfg)
+    try:
+        runners.run_llm_with_tools(
+            chat_runner=runner,
+            prompt="call big",
+            tool_loadout=("big",),
+            tool_registry=registry,
+            summarizer_chat_runner_factory=factory,
+            model="main/model-A",
+        )
+    finally:
+        tool_summarization.unbind(token)
+
+
+def test_no_summarizer_branch_sizes_head_with_main_model(monkeypatch, tmp_path):
+    """summarizer_model SET but factory UNWIRED -> no-summarizer truncation
+    branch must budget the head with the MAIN model, not the summarizer."""
+    seen = _capture_truncate(monkeypatch)
+    cfg = tool_summarization.ToolSummarizationConfig(
+        enabled=True,
+        threshold_tokens=2000,
+        summarizer_model="tiny/summarizer-Z",
+        tool_calls_dir=tmp_path,
+    )
+    # Factory None -> have_summarizer False -> no-summarizer branch runs even
+    # though summarizer_model is set (count_model would be the summarizer).
+    _run_one_big_tool_call(monkeypatch, cfg, factory=None)
+
+    assert seen["model"] == "main/model-A", (
+        "no-summarizer truncation must size the kept head with the MAIN "
+        "model's tokenizer; it lands in the main model's context"
+    )
+    assert seen["model"] != "tiny/summarizer-Z"
+
+
+def test_no_summarizer_branch_with_no_summarizer_model(monkeypatch, tmp_path):
+    """No summarizer_model at all -> still the main model (count_model would
+    already be `model` here, but pin the contract)."""
+    seen = _capture_truncate(monkeypatch)
+    cfg = tool_summarization.ToolSummarizationConfig(
+        enabled=True,
+        threshold_tokens=2000,
+        summarizer_model=None,
+        tool_calls_dir=tmp_path,
+    )
+    _run_one_big_tool_call(monkeypatch, cfg, factory=None)
+
+    assert seen["model"] == "main/model-A"
+
+
+def test_summarizer_failed_branch_still_sizes_head_with_main_model(
+    monkeypatch, tmp_path
+):
+    """Finding-2 sibling: when the summarizer is wired but RAISES, the
+    fallback truncation must also use the MAIN model. Guards against a
+    regression that re-couples this branch to count_model."""
+    seen = _capture_truncate(monkeypatch)
+    cfg = tool_summarization.ToolSummarizationConfig(
+        enabled=True,
+        threshold_tokens=2000,
+        summarizer_model="tiny/summarizer-Z",
+        tool_calls_dir=tmp_path,
+    )
+
+    def boom_factory(_model):
+        def _runner(*_a, **_k):
+            raise RuntimeError("summarizer down")
+        return _runner
+
+    _run_one_big_tool_call(monkeypatch, cfg, factory=boom_factory)
+
+    assert seen["model"] == "main/model-A"
+
+
+# ═══ fold: test_runners_preship.py ═══
+# 0.9.0 PRE-SHIP regression tests for src/modulatio/runners.py.
+#
+# Four findings fixed in this file; one regression apiece.
+#
+# 1. [MEDIUM/race] ``_rotated_pool_key`` second TOCTOU window — it checked
+#    ``pool_env_vars`` non-empty then re-derived the pool via
+#    ``next_pool_env_var``, which falls back to the BARE base var on an emptied
+#    pool. The base var may be PINNED → a pooled model could borrow a pinned key.
+#    Fix: snapshot the pool ONCE and index that snapshot (no second derivation).
+#
+# 2. [LOW/error-path] The responses() endpoint path skipped OAuth refresh AND
+#    429 pool failover (only completion() had them). Fix: mirror both onto the
+#    responses path via a shared refresh-kwargs helper + a failover loop.
+#
+# 3. [LOW/cost] The AuthenticationError refresh retry for a POOLED api_key preset
+#    re-used the refreshed BASE-var token (ApiKeyStrategy.refresh = re-read base
+#    var), which may be pinned. Fix: re-draw from the unpinned pool on the
+#    refresh-retry for a pooled preset.
+#
+# 4. [LOW/correctness] ``default_params`` could override the authoritative
+#    api_key for a NONE-auth preset (strategy emits no token, so nothing
+#    downstream re-asserts it). Fix: strip api_key/api_base from default_params
+#    so only the dedicated base_url/strategy fields set them.
+
+
+# ── Finding 4: default_params can't override authoritative auth ──────────────
+
+def test_default_params_cannot_override_api_key_for_none_auth_preset(monkeypatch):
+    """A none-auth preset whose ``default_params`` smuggles an api_key/api_base
+    must NOT have those reach the resolved kwargs — the dedicated base_url +
+    strategy token fields are authoritative. The smuggled api_key is stripped
+    before auth resolution, so even though a local openai endpoint now resolves
+    a hardcoded placeholder key (0.9.4.1), the smuggled value can never be it."""
+    from modulatio.runners import _resolve_model_call_args
+
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {
+            "local": {
+                "label": "Local (no auth)",
+                "base_url": "http://localhost:11434",
+                "api_format": "openai",
+                "auth_type": "none",
+                "auth_config": {},
+                "model": "llama3",
+                "default_params": {
+                    "extra_body": {"reasoning": {"enabled": False}},
+                    "api_key": "sk-SMUGGLED-INTO-DEFAULT-PARAMS",
+                    "api_base": "https://evil.invalid/v1",
+                },
+            }
+        },
+    )
+
+    _model, kwargs = _resolve_model_call_args("local")
+    # The tuning param survives; the smuggled auth fields do NOT.
+    assert kwargs["extra_body"] == {"reasoning": {"enabled": False}}
+    # A local openai endpoint resolves the hardcoded placeholder key (0.9.4.1) —
+    # NOT the value smuggled via default_params. The smuggle is still defeated.
+    assert kwargs["api_key"] == "modulatio-local"
+    assert kwargs["api_key"] != "sk-SMUGGLED-INTO-DEFAULT-PARAMS"
+    assert kwargs["api_base"] == "http://localhost:11434"  # dedicated field wins
+
+
+def test_default_params_api_base_does_not_clobber_dedicated_base_url(monkeypatch):
+    from modulatio.runners import _resolve_model_call_args
+
+    monkeypatch.setattr(
+        "modulatio.model_presets.load_presets",
+        lambda: {
+            "p": {
+                "base_url": "https://real.example/v1",
+                "api_format": "openai",
+                "auth_type": "none",
+                "auth_config": {},
+                "model": "m",
+                "default_params": {"api_base": "https://wrong.invalid/v1"},
+            }
+        },
+    )
+    _model, kwargs = _resolve_model_call_args("p")
+    assert kwargs["api_base"] == "https://real.example/v1"
+
+
+# ── Finding 1: _rotated_pool_key TOCTOU — single snapshot, never base ────────
+
+def test_rotated_pool_key_emptied_pool_returns_none_not_base(monkeypatch):
+    """If the pool snapshot is empty, return None — NEVER the base var (which
+    may be pinned). The old code only checked emptiness then re-derived the pool
+    via ``next_pool_env_var``, which falls back to the base var if the pool
+    emptied between the two reads."""
+    from modulatio import provider_keys, runners
+
+    runners._pool_rr_cursor.clear()
+    monkeypatch.setattr(provider_keys, "pool_env_vars", lambda base: [])
+    # If the code ever calls next_pool_env_var, it would fall back to base —
+    # blow up so the test catches a regression to the two-derivation shape.
+    def _boom(base):
+        raise AssertionError("must not re-derive pool via next_pool_env_var")
+    monkeypatch.setattr(provider_keys, "next_pool_env_var", _boom)
+
+    assert runners._rotated_pool_key("SOME_BASE") is None
+
+
+def test_rotated_pool_key_indexes_single_snapshot(monkeypatch):
+    """The pool is read ONCE per call and indexed; no second derivation that
+    could disagree with the emptiness check."""
+    from modulatio import provider_keys, runners
+
+    runners._pool_rr_cursor.clear()
+    calls = {"n": 0}
+
+    def _pool(base):
+        calls["n"] += 1
+        return ["K1", "K2"]
+
+    monkeypatch.setattr(provider_keys, "pool_env_vars", _pool)
+    monkeypatch.setattr(provider_keys, "next_pool_env_var",
+                        lambda base: (_ for _ in ()).throw(
+                            AssertionError("no re-derivation")))
+    monkeypatch.setenv("K1", "val-1")
+    monkeypatch.setenv("K2", "val-2")
+
+    # Round-robin across the single snapshot.
+    got = [runners._rotated_pool_key("B") for _ in range(3)]
+    assert got == ["val-1", "val-2", "val-1"]
+    # Exactly one pool derivation per call — never two.
+    assert calls["n"] == 3
+
+
+# ── Finding 3: AuthenticationError refresh on a pooled preset ────────────────
+
+def _pooled_preset_invalid_host():
+    return {
+        "label": "Pooled", "base_url": "https://example.invalid/v1",
+        "api_format": "openai", "auth_type": "api_key",
+        "auth_config": {"env_var": "PRESHIP_POOL", "pool": True},
+        "model": "meta/llama-3.1",
+    }
+
+
+def _fake_completion_response(content="ok"):
+    class _U:
+        prompt_tokens = 10
+        completion_tokens = 5
+
+    class _M:
+        def __init__(self):
+            self.content = content
+            self.tool_calls = None
+
+    class _C:
+        def __init__(self):
+            self.message = _M()
+
+    class _R:
+        def __init__(self):
+            self.choices = [_C()]
+            self.usage = _U()
+
+    return _R()
+
+
+def test_auth_refresh_retry_for_pooled_preset_redraws_from_pool(monkeypatch):
+    """On a 401 for a pooled preset, the refresh-retry must draw from the
+    UNPINNED pool (``_pooled_call_key``) — not the refreshed base-var token,
+    which (for a pooled api_key strategy) is just a re-read of the base var and
+    may be pinned to another model (metering-keel violation)."""
+    import litellm
+    from litellm.exceptions import AuthenticationError
+
+    from modulatio import runners
+    from modulatio.runners import litellm_runner
+
+    preset = _pooled_preset_invalid_host()
+    monkeypatch.setattr("modulatio.model_presets.load_presets",
+                        lambda: {"pooled": preset})
+    monkeypatch.setattr("modulatio.model_presets.get_preset",
+                        lambda k: preset if k == "pooled" else None)
+    monkeypatch.setattr(runners, "_pool_base", lambda model: "PRESHIP_POOL")
+    # First call uses this pooled key; the refresh retry must use the pool too.
+    monkeypatch.setattr(runners, "_pooled_call_key",
+                        lambda pool_base, model: "POOL-KEY-OK")
+    # _try_refresh_for returns the BASE var value (what ApiKeyStrategy.refresh
+    # does) — a key that may be pinned. The fix must IGNORE it for pooled.
+    monkeypatch.setattr(runners, "_try_refresh_for",
+                        lambda model: "BASE-VAR-MAYBE-PINNED")
+
+    seen = []
+
+    def _completion(**kw):
+        seen.append(kw.get("api_key"))
+        if len(seen) == 1:
+            raise AuthenticationError(message="401", llm_provider="x", model="m")
+        return _fake_completion_response("ok")
+
+    monkeypatch.setattr(litellm, "completion", _completion)
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+
+    out = litellm_runner("pooled")("hi")
+    assert out == "ok"
+    # Retry used the POOL key, never the (maybe-pinned) refreshed base var.
+    assert seen == ["POOL-KEY-OK", "POOL-KEY-OK"]
+    assert "BASE-VAR-MAYBE-PINNED" not in seen
+
+
+# ── Finding 2: responses() path gains OAuth refresh + 429 failover ───────────
+
+def _fake_responses_obj(text="resp-ok"):
+    class _Content:
+        def __init__(self):
+            self.type = "output_text"
+            self.text = text
+
+    class _Item:
+        def __init__(self):
+            self.content = [_Content()]
+
+    class _Resp:
+        def __init__(self):
+            self.output = [_Item()]
+            self.usage = None
+
+    return _Resp()
+
+
+def _responses_preset():
+    return {
+        "label": "Responses", "base_url": "https://example.invalid/v1",
+        "api_format": "openai", "auth_type": "oauth_xai",
+        "auth_config": {},
+        "model": "grok-4",
+        "endpoint": "responses",
+    }
+
+
+def test_responses_path_refreshes_oauth_on_401(monkeypatch):
+    """The responses() endpoint must attempt an OAuth refresh-once retry on a
+    401, mirroring completion() — before the fix it just fired an alert and
+    re-raised, leaving the xAI/o1 responses path unable to self-heal an expired
+    token."""
+    import litellm
+    from litellm.exceptions import AuthenticationError
+
+    from modulatio import runners
+    from modulatio.runners import litellm_runner
+
+    preset = _responses_preset()
+    monkeypatch.setattr("modulatio.model_presets.load_presets",
+                        lambda: {"r": preset})
+    monkeypatch.setattr("modulatio.model_presets.get_preset",
+                        lambda k: preset if k == "r" else None)
+    monkeypatch.setattr(runners, "_pool_base", lambda model: None)
+    monkeypatch.setattr(runners, "_try_refresh_for",
+                        lambda model: "FRESH-OAUTH-TOKEN")
+
+    seen = []
+
+    def _responses(**kw):
+        seen.append(kw.get("api_key"))
+        if len(seen) == 1:
+            raise AuthenticationError(message="401", llm_provider="x", model="m")
+        return _fake_responses_obj("resp-ok")
+
+    monkeypatch.setattr(litellm, "responses", _responses)
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+
+    out = litellm_runner("r")("hi")
+    assert out == "resp-ok"
+    assert seen[1] == "FRESH-OAUTH-TOKEN"  # retry used the refreshed token
+
+
+def test_responses_path_429_pool_failover(monkeypatch):
+    """The responses() endpoint must fail over across a key pool on a 429,
+    mirroring completion()."""
+    import litellm
+    from litellm.exceptions import RateLimitError
+
+    from modulatio import runners
+    from modulatio.runners import litellm_runner
+
+    preset = {
+        "label": "Responses pooled", "base_url": "https://example.invalid/v1",
+        "api_format": "openai", "auth_type": "api_key",
+        "auth_config": {"env_var": "PRESHIP_RPOOL", "pool": True},
+        "model": "grok-4", "endpoint": "responses",
+    }
+    monkeypatch.setattr("modulatio.model_presets.load_presets",
+                        lambda: {"r": preset})
+    monkeypatch.setattr("modulatio.model_presets.get_preset",
+                        lambda k: preset if k == "r" else None)
+    monkeypatch.setattr(runners, "_pool_base", lambda model: "PRESHIP_RPOOL")
+    monkeypatch.setattr(runners, "_pool_count", lambda pool_base: 2)
+    monkeypatch.setattr(runners, "_pooled_call_key",
+                        lambda pool_base, model: "FIRST-KEY")
+    rotated = iter(["SECOND-KEY"])
+    monkeypatch.setattr(runners, "_rotated_pool_key",
+                        lambda pool_base: next(rotated))
+
+    seen = []
+
+    def _responses(**kw):
+        seen.append(kw.get("api_key"))
+        if len(seen) == 1:
+            raise RateLimitError(message="429", llm_provider="x", model="m")
+        return _fake_responses_obj("resp-ok")
+
+    monkeypatch.setattr(litellm, "responses", _responses)
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+
+    out = litellm_runner("r")("hi")
+    assert out == "resp-ok"
+    assert seen == ["FIRST-KEY", "SECOND-KEY"]
+
+
+# ═══ fold: test_runners_r2_audit.py ═══
+# Round-2 LOW-audit regression tests for src/modulatio/runners.py.
+#
+# Two TOCTOU-pool-shrink holes in the RateLimitError key-pool failover, distinct
+# from the seeded-``last_err`` fix already covered by test_runners_low_audit.py:
+#
+# Finding 1 (litellm_runner failover): when ``_rotated_pool_key`` transiently
+# returns ``None`` for a retry slot (the last unpinned key got pinned/unset
+# between iterations), the old code retried with ``retry_kwargs`` that carried NO
+# explicit ``api_key`` (pooled construction leaves ``api_key`` out of ``kwargs``),
+# letting LiteLLM resolve the maybe-PINNED base env var and borrow a key the
+# metering keel forbids. The fix skips an empty slot instead of dispatching.
+#
+# Finding 2 (litellm_chat_runner failover): ``_call`` invokes
+# ``_pooled_call_key``, which RAISES RuntimeError on an emptied pool. The loop
+# only caught RateLimitError, so that RuntimeError escaped and MASKED the seeded
+# 429 re-raise. The fix swallows the RuntimeError so the seeded 429 surfaces.
+
+
+_PRESET = {
+    "label": "Pooled", "base_url": "https://example.invalid/v1",
+    "api_format": "openai", "auth_type": "api_key",
+    "auth_config": {"env_var": "TESTPOOL_KEY", "pool": True},
+    "model": "meta/llama-3.1",
+}
+
+
+def _patch_presets(monkeypatch):
+    monkeypatch.setattr("modulatio.model_presets.load_presets",
+                        lambda: {"pooled": _PRESET})
+    monkeypatch.setattr("modulatio.model_presets.get_preset",
+                        lambda k: _PRESET if k == "pooled" else None)
+
+
+def test_failover_skips_empty_rotated_slot_never_borrows_base_key(monkeypatch):
+    """Finding 1: a transient ``_rotated_pool_key() is None`` mid-failover must
+    NOT dispatch a retry — that retry would carry no explicit api_key and let
+    LiteLLM borrow the (maybe-pinned) base env var. Every completion call must
+    carry an explicit pooled key; an all-empty failover re-raises the 429."""
+    import litellm
+
+    from modulatio import runners
+    from modulatio.runners import litellm_runner
+
+    _patch_presets(monkeypatch)
+    monkeypatch.setattr(runners, "_pool_base", lambda model: "TESTPOOL_KEY")
+    monkeypatch.setattr(runners, "_pool_count", lambda pool_base: 2)
+    # First request (call_kwargs path) gets a real pooled key and 429s; the
+    # failover retry slot then transiently rotates to None (pool drained).
+    rotated = iter(["key-1", None])
+    monkeypatch.setattr(runners, "_rotated_pool_key",
+                        lambda pool_base: next(rotated, None))
+
+    seen_keys: list = []
+
+    def boom(**kw):
+        seen_keys.append(kw.get("api_key"))
+        raise _make_429()
+
+    monkeypatch.setattr(litellm, "completion", boom)
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+
+    # The seeded 429 re-raises (no slot produced a usable key on retry).
+    with pytest.raises(RateLimitError):
+        litellm_runner("pooled")("hi")
+
+    # The only dispatched call was the initial one with the real pooled key.
+    # The retry slot was SKIPPED (rk is None) rather than dispatching with a
+    # borrowed/absent key — so no completion was ever called without an
+    # explicit pooled api_key.
+    assert seen_keys == ["key-1"]
+    assert all(k for k in seen_keys)  # no None / borrowed-base dispatch
+
+
+def test_chat_failover_swallows_pooled_key_runtimeerror_reraises_429(monkeypatch):
+    """Finding 2: in litellm_chat_runner, a mid-failover pool-empty makes
+    ``_pooled_call_key`` raise RuntimeError. That must NOT escape the loop and
+    mask the rate limit — the seeded 429 re-raises instead."""
+    import litellm
+
+    from modulatio import runners
+    from modulatio.runners import litellm_chat_runner
+
+    _patch_presets(monkeypatch)
+    monkeypatch.setattr(runners, "_pool_base", lambda model: "TESTPOOL_KEY")
+    monkeypatch.setattr(runners, "_pool_count", lambda pool_base: 2)
+
+    # Initial _call() draws a real key and 429s; every failover retry's
+    # _pooled_call_key raises RuntimeError (pool emptied under us).
+    keys = iter(["key-1"])
+
+    def fake_pooled_call_key(pool_base, model):
+        try:
+            return next(keys)
+        except StopIteration:
+            raise RuntimeError("Pooled model: no unpinned key in pool")
+
+    monkeypatch.setattr(runners, "_pooled_call_key", fake_pooled_call_key)
+
+    def first_429(**kw):
+        raise _make_429()
+
+    monkeypatch.setattr(litellm, "completion", first_429)
+    monkeypatch.setattr(litellm, "completion_cost", lambda **kw: 0.0)
+
+    runner = litellm_chat_runner("pooled")
+    # Before the fix this raised RuntimeError (masking the 429); after, the
+    # seeded RateLimitError surfaces.
+    with pytest.raises(RateLimitError):
+        runner(messages=[{"role": "user", "content": "hi"}], tools=[])

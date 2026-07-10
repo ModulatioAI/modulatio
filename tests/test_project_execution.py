@@ -16,15 +16,23 @@ import pytest
 
 from modulatio import plans, project_execution, vault
 from modulatio.types import Project
+import dataclasses
+import unittest.mock as _mock
+from modulatio import store
+from datetime import datetime, timedelta, timezone
+from modulatio import budget
+from types import SimpleNamespace
 
 
 PROJECT_CODE = "tst"
+RUN_ID = "20260601T000000Z-resweep"
 
 
 @pytest.fixture
 def isolated(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
     vault.init_project(PROJECT_CODE, "Test", "obj")
+    vault.init_run(PROJECT_CODE, RUN_ID, "obj", exist_ok=True)
     return tmp_path
 
 
@@ -34,6 +42,7 @@ def project(isolated, tmp_path):
         code=PROJECT_CODE,
         name="Test",
         objective="Improve telemetry coverage",
+        run_id=RUN_ID,
         leader_model="stub",
         wiki_path=str(tmp_path / "projects" / PROJECT_CODE),
     )
@@ -1995,3 +2004,741 @@ def test_compression_pressure_gate_uses_token_count_not_word_count():
     # Fixed token-native gate correctly registers pressure ≥ threshold
     # → compaction fires.
     assert token_pressure >= threshold
+
+
+# ═══ fold: test_project_execution_preship.py ═══
+# Pre-ship (0.9.0) regression tests for project_execution.
+#
+# Covers three confirmed pre-ship findings:
+#
+#   * MEDIUM/race — start_execution resumed from the STALE pre-lock plan
+#     snapshot rather than the fresh reload taken under the lock, re-running
+#     already-completed sub-objectives and double-counting budget under a
+#     daemon race.
+#   * LOW/correctness — tick() sliced ``discovered[:max_per_tick]`` BEFORE
+#     the staleness skip, so a stale lowest-id plan starved the tick.
+#   * LOW/error-path — tick() reported ``final_status='executing'`` for
+#     project_loader / runners_for failures even though the plan never
+#     started and is still 'approved' on disk.
+
+
+
+
+
+
+
+
+
+
+
+
+# ── MEDIUM/race: resume from fresh under-lock snapshot, not stale ───────
+
+
+def test_start_execution_resumes_from_fresh_under_lock_index(project, isolated):
+    """The pre-lock load can be STALE: a concurrent claimer may have
+    advanced ``current_index`` (completed sub-objectives) before we won
+    the claim lock. start_execution must resume from the FRESH reload
+    taken under the lock, not the stale pre-lock snapshot — otherwise it
+    re-runs already-completed sub-objectives.
+
+    With the bug, ``completed`` is taken from the stale plan
+    (current_index=0) and all 3 sub-objectives are re-kicked. With the
+    fix it's taken from fresh (current_index=2) and only the final one
+    fires.
+    """
+    plan = _approved_plan(project, sub_objective_count=3)
+
+    real_load = plans.load
+    call_count = {"n": 0}
+
+    def _advancing_load(plan_id, project_code):
+        call_count["n"] += 1
+        rec = real_load(plan_id, project_code)
+        # The SECOND load is the under-lock ``fresh`` reload. Simulate a
+        # concurrent claimer having completed the first two sub-objectives
+        # by returning a record with current_index=2 there. The first
+        # (pre-lock) load keeps the stale current_index=0.
+        if call_count["n"] == 2 and rec is not None:
+            return dataclasses.replace(rec, current_index=2)
+        return rec
+
+    kicked: list[dict] = []
+
+    def _kickoff(_text: str, so: dict):
+        kicked.append(so)
+        return "kicked"
+
+    reflect = _scripted_reflect([{"outcome": "continue", "rationale": "x"}])
+
+    with _mock.patch.object(plans, "load", side_effect=_advancing_load):
+        result = project_execution.start_execution(
+            plan.id, project,
+            runners={"leader": reflect},
+            reflect_runner=reflect,
+            kickoff_callable=_kickoff,
+        )
+
+    # Resumed from fresh index 2 → only the third sub-objective fired.
+    assert len(kicked) == 1
+    assert result.sub_objectives_completed == 3
+    assert result.sub_objectives_total == 3
+    assert result.final_status == "done"
+
+
+def test_start_execution_resumes_budget_totals_from_fresh(project, isolated):
+    """Budget tracker resume totals must come from the FRESH under-lock
+    reload, not the stale pre-lock snapshot — otherwise a concurrent
+    claimer's already-spent tokens are discounted and the cap clock is
+    reset to an earlier total (double-counting headroom)."""
+    plan = _approved_plan(project, sub_objective_count=1)
+
+    real_load = plans.load
+    call_count = {"n": 0}
+
+    def _spent_load(plan_id, project_code):
+        call_count["n"] += 1
+        rec = real_load(plan_id, project_code)
+        # Under-lock reload reports tokens already spent by a concurrent
+        # claimer; the stale pre-lock snapshot still shows zero.
+        if call_count["n"] == 2 and rec is not None:
+            return dataclasses.replace(rec, tokens_used=4321, cost_usd_used=0.42)
+        return rec
+
+    captured: dict = {}
+
+    real_tracker = project_execution.budget.BudgetTracker
+
+    def _capturing_tracker(*args, **kwargs):
+        captured["tokens_used"] = kwargs.get("tokens_used")
+        captured["cost_usd_used"] = kwargs.get("cost_usd_used")
+        return real_tracker(*args, **kwargs)
+
+    reflect = _scripted_reflect([{"outcome": "continue", "rationale": "x"}])
+
+    with _mock.patch.object(plans, "load", side_effect=_spent_load), \
+         _mock.patch.object(
+             project_execution.budget, "BudgetTracker",
+             side_effect=_capturing_tracker,
+         ):
+        project_execution.start_execution(
+            plan.id, project,
+            runners={"leader": reflect},
+            reflect_runner=reflect,
+            kickoff_callable=lambda _t, _s: "x",
+        )
+
+    assert captured["tokens_used"] == 4321
+    assert captured["cost_usd_used"] == 0.42
+
+
+# ── LOW/correctness: cap AFTER the staleness skip ──────────────────────
+
+
+def test_tick_stale_lowest_id_plan_does_not_starve_tick(project, isolated):
+    """tick() must not let a stale lowest-id plan consume the
+    max_per_tick slot. With the bug the slice happened before the
+    staleness skip, so a single stale lowest-id entry produced zero
+    dispatches. With the fix the cap counts only plans actually
+    dispatched, so a still-approved later plan is reached."""
+    stale = _approved_plan(project, sub_objective_count=1)
+    fresh_plan = _approved_plan(project, sub_objective_count=1)
+
+    # The first entry is stale (claimed since the scan); the second is
+    # genuinely still approved. Ordered list: stale first.
+    stale_rec = plans.load(stale.id, project.code)
+    fresh_rec = plans.load(fresh_plan.id, project.code)
+
+    # Simulate the stale entry having been claimed since the scan.
+    plans.set_status(
+        stale.id, project.code, "executing",
+        decided_by="other-daemon", note="claimed",
+    )
+    stale_snapshot = dataclasses.replace(stale_rec, status="approved")
+
+    dispatched: list[str] = []
+
+    def _loader(_code):
+        return project
+
+    def _runners(_p):
+        return {"leader": _scripted_reflect(
+            [{"outcome": "continue", "rationale": "x"}]
+        )}
+
+    real_start = project_execution.start_execution
+
+    def _tracking_start(plan_id, proj, **kwargs):
+        dispatched.append(plan_id)
+        # Stub the kickoff so the dispatch is cheap and deterministic.
+        return real_start(
+            plan_id, proj,
+            kickoff_callable=lambda _t, _s: "x",
+            **kwargs,
+        )
+
+    with _mock.patch.object(
+        project_execution, "find_approved_plans",
+        return_value=[
+            (project.code, stale_snapshot),
+            (project.code, fresh_rec),
+        ],
+    ), _mock.patch.object(
+        project_execution, "start_execution", side_effect=_tracking_start
+    ):
+        results = project_execution.tick(
+            project_loader=_loader,
+            runners_for=_runners,
+            project_codes=[project.code],
+            max_per_tick=1,
+        )
+
+    # The stale lowest-id plan was skipped, and the still-approved plan
+    # was reached within the same tick rather than being starved.
+    assert dispatched == [fresh_plan.id]
+    assert len(results) == 1
+    assert results[0].plan_id == fresh_plan.id
+
+
+# ── LOW/error-path: loader / runners failure reports real status ───────
+
+
+def test_tick_loader_failure_reports_real_status_not_executing(project, isolated):
+    """When project_loader raises, the plan never started and is still
+    'approved' on disk. The ExecutionResult must report that real
+    status, not a misleading hardcoded 'executing'."""
+    plan = _approved_plan(project, sub_objective_count=1)
+    rec = plans.load(plan.id, project.code)
+
+    def _boom_loader(_code):
+        raise RuntimeError("cannot build project")
+
+    def _runners(_p):  # pragma: no cover — never reached
+        return {}
+
+    with _mock.patch.object(
+        project_execution, "find_approved_plans",
+        return_value=[(project.code, rec)],
+    ):
+        results = project_execution.tick(
+            project_loader=_boom_loader,
+            runners_for=_runners,
+            project_codes=[project.code],
+        )
+
+    assert len(results) == 1
+    assert results[0].final_status == "approved"
+    assert "project_loader failed" in (results[0].error or "")
+
+
+def test_tick_runners_failure_reports_real_status_not_executing(project, isolated):
+    """Same as the loader-failure path for runners_for: the plan never
+    started, so report the real 'approved' status, not 'executing'."""
+    plan = _approved_plan(project, sub_objective_count=1)
+    rec = plans.load(plan.id, project.code)
+
+    def _loader(_code):
+        return project
+
+    def _boom_runners(_p):
+        raise RuntimeError("cannot wire runners")
+
+    with _mock.patch.object(
+        project_execution, "find_approved_plans",
+        return_value=[(project.code, rec)],
+    ):
+        results = project_execution.tick(
+            project_loader=_loader,
+            runners_for=_boom_runners,
+            project_codes=[project.code],
+        )
+
+    assert len(results) == 1
+    assert results[0].final_status == "approved"
+    assert "runners_for failed" in (results[0].error or "")
+
+
+# ═══ fold: test_project_execution_r2_audit.py ═══
+# Round-2 audit regression tests for project_execution.
+#
+# Three confirmed findings from the 2026-06-13 Opus full-debug r2 ledger:
+#
+# 1. MEDIUM/correctness — over-cap start_execution raised (leaving the plan
+#    'approved'), so the daemon re-discovered + re-raised on it every tick,
+#    starving every other approved plan. Fixed: flip to 'paused' + open a
+#    ticket instead of raising.
+# 2. MEDIUM/correctness — the reflection-prompt progress markers used the
+#    LLM-supplied ``so['index']`` instead of positional order, desyncing the
+#    markers from what actually ran when the plan was mis-numbered.
+# 3. MEDIUM/integration — the structured emit_state schema omitted the
+#    revise_major / pause / abort payload objects, so a schema-constrained
+#    model couldn't supply the ticket/summary text on the now-default
+#    structured path.
+#
+# Uniquely named to avoid colliding with a sibling agent editing
+# test_project_execution.py concurrently.
+
+
+
+
+
+
+
+
+
+
+# ── Finding 1: over-cap pauses (does not raise + does not starve) ───────
+
+
+def test_over_cap_pauses_instead_of_raising(project):
+    """A plan with more sub-objectives than the cap must flip to 'paused'
+    and open a ticket — not raise. (Pre-fix it raised, leaving status
+    'approved'.)"""
+    plan = _approved_plan(project, sub_objective_count=3)
+
+    result = project_execution.start_execution(
+        plan.id, project,
+        runners={"leader": lambda _p: "x", "drafter": lambda _p: "x"},
+        max_sub_objectives=2,
+        kickoff_callable=lambda _t, _so: "kick",
+    )
+
+    assert result.final_status == "paused"
+    assert result.paused_ticket_id is not None
+    # On-disk status must be 'paused' so the daemon won't re-pick it.
+    refreshed = plans.load(plan.id, project.code)
+    assert refreshed.status == "paused"
+
+
+def test_over_cap_plan_no_longer_starves_the_queue(project):
+    """After an over-cap plan pauses, find_approved_plans must not return
+    it — so a lower-id poisoned plan can't be re-selected every tick and
+    starve higher-id approved plans."""
+    plan = _approved_plan(project, sub_objective_count=3)
+
+    # Before: it's an approved plan the daemon would select.
+    assert any(
+        pid == plan.id
+        for _code, rec in project_execution.find_approved_plans([project.code])
+        for pid in (rec.id,)
+    )
+
+    project_execution.start_execution(
+        plan.id, project,
+        runners={"leader": lambda _p: "x", "drafter": lambda _p: "x"},
+        max_sub_objectives=2,
+        kickoff_callable=lambda _t, _so: "kick",
+    )
+
+    # After: no longer discoverable as approved → cannot starve the queue.
+    remaining = [
+        rec.id
+        for _code, rec in project_execution.find_approved_plans([project.code])
+    ]
+    assert plan.id not in remaining
+
+
+def test_over_cap_opens_pause_ticket(project):
+    """The over-cap pause must surface a human-actionable ticket."""
+    plan = _approved_plan(project, sub_objective_count=4)
+    project_execution.start_execution(
+        plan.id, project,
+        runners={"leader": lambda _p: "x", "drafter": lambda _p: "x"},
+        max_sub_objectives=2,
+        kickoff_callable=lambda _t, _so: "kick",
+    )
+    open_tickets = store.list_tickets(project.code)
+    assert any(
+        "sub-objective" in (t.title or "").lower() for t in open_tickets
+    ), [t.title for t in open_tickets]
+
+
+# ── Finding 2: reflection markers use positional order ──────────────────
+
+
+def test_reflection_markers_positional_not_llm_index(project):
+    """When the LLM mis-numbers sub-objectives, the progress markers must
+    track POSITIONAL order (what the loop actually ran), not so['index']."""
+    plan = _approved_plan(project, sub_objective_count=3)
+    # Simulate a mis-numbered plan: indices 1, 1, 5 (duplicate + gap).
+    subs = plans.extract_sub_objectives(plan.body)
+    subs[0]["index"] = 1
+    subs[1]["index"] = 1
+    subs[2]["index"] = 5
+
+    prompt = project_execution._build_reflection_prompt(
+        project=project,
+        plan=plan,
+        sub_objectives=subs,
+        completed_index=1,  # position 0 done, position 1 just-completed
+        last_kickoff_summary="ok",
+    )
+
+    lines = [ln for ln in prompt.splitlines() if ln.strip().startswith(("✓", "▶", "☐"))]
+    assert len(lines) == 3
+    # Exactly one ▶ (the just-completed position), one ✓ before it, one ☐.
+    assert sum(ln.strip().startswith("✓") for ln in lines) == 1
+    assert sum(ln.strip().startswith("▶") for ln in lines) == 1
+    assert sum(ln.strip().startswith("☐") for ln in lines) == 1
+    # Positionally: line 0 ✓, line 1 ▶, line 2 ☐ — regardless of the
+    # bogus LLM indices. (Pre-fix, idx=so['index']-1 gave 0,0,4 vs
+    # completed_index=1 → two ☐ and a misplaced marker.)
+    assert lines[0].strip().startswith("✓")
+    assert lines[1].strip().startswith("▶")
+    assert lines[2].strip().startswith("☐")
+
+
+# ── Finding 3: emit_state schema carries outcome payloads ───────────────
+
+
+def test_emit_state_schema_exposes_outcome_payloads():
+    """The structured emit_state decision schema must define the
+    revise_major / pause / abort payload objects the outcome handlers
+    read, or a schema-constrained model can never supply ticket/summary
+    text on the default structured path."""
+    schema = project_execution.build_emit_state_tool_schema()
+    decision_props = (
+        schema["function"]["parameters"]["properties"]["decision"]["properties"]
+    )
+
+    assert "revise_major" in decision_props
+    assert set(decision_props["revise_major"]["properties"]) == {
+        "summary", "ticket_body",
+    }
+    assert "pause" in decision_props
+    assert set(decision_props["pause"]["properties"]) == {
+        "ticket_title", "ticket_body",
+    }
+    assert "abort" in decision_props
+    assert set(decision_props["abort"]["properties"]) == {"summary"}
+
+
+def test_emit_state_response_passes_outcome_payloads_through():
+    """A model that fills revise_major.summary in the emit_state call must
+    have it survive into the parsed decision dict the handlers read."""
+    from types import SimpleNamespace
+
+    payload_decision = {
+        "outcome": "revise-major",
+        "rationale": "scope shifted",
+        "revise_major": {
+            "summary": "narrow to part 1",
+            "ticket_body": "details here",
+        },
+    }
+    call = SimpleNamespace(
+        name=project_execution.EMIT_STATE_TOOL_NAME,
+        args={"state": {"compressed_active_goal": "g"}, "decision": payload_decision},
+    )
+    resp = SimpleNamespace(tool_calls=[call], content="")
+
+    got = project_execution._emit_state_from_response(resp)
+    assert got is not None
+    _state, decision, _raw = got
+    assert decision.get("revise_major", {}).get("summary") == "narrow to part 1"
+    assert decision.get("revise_major", {}).get("ticket_body") == "details here"
+
+
+# ═══ fold: test_project_execution_resweep_r4.py ═══
+# Round-4 re-sweep regression for project_execution.
+#
+# Covers one confirmed 0.9.0 pre-ship finding:
+#
+#   * LOW/error-path — the bounded-mode wall-clock cap check guarded only
+#     the ``datetime.fromisoformat`` parse in a try/except, NOT the
+#     subsequent ``datetime.now(timezone.utc) - started_dt`` subtraction.
+#     A hand-edited (frontmatter is an explicitly supported edit surface)
+#     timezone-NAIVE ``execution_started_at`` parses fine, then explodes
+#     the aware-minus-naive subtraction with a TypeError that escapes the
+#     whole execution loop. The fix coerces a naive ``started_dt`` to UTC
+#     so the cap math is well-defined.
+
+
+
+
+
+
+
+
+def _executing_plan(project, sub_objective_count: int = 2) -> "plans.PlanRecord":
+    items = []
+    for i in range(1, sub_objective_count + 1):
+        items.append(
+            f"**{i}. Step {i} title** — Step {i} description.\n"
+            f"  - *Files:* src/step{i}.py\n"
+            f"  - *Done when:* tests pass\n"
+        )
+    body = (
+        plans.PLAN_MARKER + "\n\n"
+        "### Diagnostic\nState X.\n\n"
+        "### Sub-objectives\n" + "\n".join(items) + "\n\n"
+        "### Risks\nMaybe.\n"
+    )
+    saved = plans.persist(
+        body, project_code=project.code,
+        agent_id="leader",
+        source_message="please plan",
+    )
+    plans.mark_approved(saved.id, project.code, decided_by="user")
+    plans.set_status(
+        saved.id, project.code, "executing",
+        decided_by="dispatcher", note="execution started",
+    )
+    return plans.load(saved.id, project.code)
+
+
+def test_wall_clock_cap_handles_naive_started_at_without_typeerror(project, isolated):
+    """A NAIVE ``plan_started_at`` (no tz offset — a legitimately
+    hand-edited frontmatter value) must not crash the cap check.
+
+    With the bug, ``datetime.fromisoformat`` parses the naive string
+    successfully (so the try/except doesn't trip), then
+    ``datetime.now(timezone.utc) - started_dt`` raises a TypeError that
+    escapes the entire execution loop. With the fix the naive value is
+    coerced to UTC and the cap fires cleanly → the plan pauses.
+    """
+    plan = _executing_plan(project, sub_objective_count=2)
+
+    # Cap = 1 minute; started 10 minutes ago — well over the cap. The
+    # timestamp is timezone-NAIVE (no offset), the bug trigger.
+    naive_started = (
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=10)
+    ).isoformat()
+    assert "+" not in naive_started and naive_started[-6] != "-"  # truly naive
+
+    # The top-of-loop ``live = plans.load(...)`` supplies the cap via
+    # ``(live or plan).max_wall_clock_min`` — give the loaded record the cap.
+    capped = dataclasses.replace(plan, max_wall_clock_min=1.0)
+
+    tracker = budget.BudgetTracker(max_tokens=None, max_cost_usd=None)
+
+    def _kickoff(_text: str, _so: dict):  # never reached: cap fires first
+        raise AssertionError("kickoff should not run; cap should pause first")
+
+    def _reflect(_prompt: str) -> str:  # never reached
+        raise AssertionError("reflect should not run; cap should pause first")
+
+    with _mock.patch.object(plans, "load", return_value=capped):
+        result = project_execution._run_execution_loop(
+            plan_id=plan.id,
+            project=project,
+            plan=capped,
+            sub_objectives=plans.extract_sub_objectives(plan.body),
+            kickoff_callable=_kickoff,
+            reflect_runner=_reflect,
+            reflect_chat_runner=None,
+            completed=0,
+            spawned_local=[],
+            reflection_log_local=[],
+            plan_started_at=naive_started,
+            tracker=tracker,
+        )
+
+    # No TypeError escaped; the cap fired and paused the plan.
+    assert result.final_status == "paused"
+    assert result.paused_ticket_id is not None
+    assert result.sub_objectives_completed == 0
+
+
+def test_wall_clock_cap_still_fires_for_aware_started_at(project, isolated):
+    """Regression guard: the AWARE path (engine-written, with offset)
+    keeps working exactly as before — over-cap → paused."""
+    plan = _executing_plan(project, sub_objective_count=2)
+
+    aware_started = (
+        datetime.now(timezone.utc) - timedelta(minutes=10)
+    ).isoformat()
+    capped = dataclasses.replace(plan, max_wall_clock_min=1.0)
+    tracker = budget.BudgetTracker(max_tokens=None, max_cost_usd=None)
+
+    def _kickoff(_text: str, _so: dict):
+        raise AssertionError("kickoff should not run")
+
+    def _reflect(_prompt: str) -> str:
+        raise AssertionError("reflect should not run")
+
+    with _mock.patch.object(plans, "load", return_value=capped):
+        result = project_execution._run_execution_loop(
+            plan_id=plan.id,
+            project=project,
+            plan=capped,
+            sub_objectives=plans.extract_sub_objectives(plan.body),
+            kickoff_callable=_kickoff,
+            reflect_runner=_reflect,
+            reflect_chat_runner=None,
+            completed=0,
+            spawned_local=[],
+            reflection_log_local=[],
+            plan_started_at=aware_started,
+            tracker=tracker,
+        )
+
+    assert result.final_status == "paused"
+    assert result.paused_ticket_id is not None
+
+
+# ═══ fold: test_project_execution_low_audit.py ═══
+# LOW-severity audit regression tests for project_execution.
+#
+# Finding #61: tick() error-path ExecutionResults reported
+# sub_objectives_total=0, misrepresenting plan size to the daemon even
+# though sub_objectives_completed was set to the plan's current_index.
+# The error paths now derive the real total from the plan body.
+
+
+
+
+
+
+
+
+
+
+def test_tick_project_loader_failure_reports_real_total(project, isolated):
+    """When project_loader raises, the error ExecutionResult must report
+    the real plan size, not 0 (which paired with completed misrepresents
+    plan size to the daemon)."""
+    plan = _approved_plan(project, sub_objective_count=4)
+
+    def _project_loader(_code: str):
+        raise RuntimeError("boom")
+
+    def _runners_for(_p):
+        return {"leader": lambda p: ""}
+
+    results = project_execution.tick(
+        project_loader=_project_loader,
+        runners_for=_runners_for,
+        project_codes=[project.code],
+    )
+
+    assert len(results) == 1
+    res = results[0]
+    assert res.plan_id == plan.id
+    assert "project_loader failed" in (res.error or "")
+    # Regression: previously hardcoded 0. The plan has 4 sub-objectives.
+    assert res.sub_objectives_total == 4
+
+
+def test_tick_runners_for_failure_reports_real_total(project, isolated):
+    plan = _approved_plan(project, sub_objective_count=3)
+
+    def _project_loader(_code: str):
+        return project
+
+    def _runners_for(_p):
+        raise RuntimeError("no runners")
+
+    results = project_execution.tick(
+        project_loader=_project_loader,
+        runners_for=_runners_for,
+        project_codes=[project.code],
+    )
+
+    assert len(results) == 1
+    res = results[0]
+    assert res.plan_id == plan.id
+    assert "runners_for failed" in (res.error or "")
+    assert res.sub_objectives_total == 3
+
+
+# ═══ fold: test_project_execution_resweep.py ═══
+# Re-sweep (0.9.0 pre-ship) regression tests for project_execution.
+#
+# Covers one confirmed-then-re-investigated finding:
+#
+#   * MEDIUM/race (Finding 1) — flagged that the leader-reflect
+#     ``compression.emit_compaction`` / ``emit_compaction_skipped`` calls
+#     fire WITHOUT the shared-run-file ``write_lock`` that every other
+#     ``<run>/audit.jsonl`` writer threads through. On inspection this is a
+#     FALSE POSITIVE: the reflect-emit runs in the single claim-holding
+#     worker's main loop thread, AFTER ``kickoff_callable`` (and its joined
+#     internal wave) returns, and ``_claim_plan_lock`` (fcntl LOCK_EX)
+#     guarantees exactly one worker writes a given run's audit.jsonl at a
+#     time. ``project_execution`` is moreover the ONLY caller of
+#     ``emit_compaction*`` in the codebase, so there is no concurrent
+#     compaction writer to serialize against.
+#
+#     Rather than thread an inert lock (which would protect against
+#     contention the claim-lock architecture already precludes), this test
+#     PINS the intended serial behavior: the unlocked reflect-emit path
+#     writes a well-formed ``actor='compression'`` row to the run's
+#     audit.jsonl. A future "fix" that breaks the serial emit (or a
+#     regression in the emit plumbing) is caught here.
+#
+# Uniquely named to avoid colliding with sibling agents editing
+# test_project_execution*.py concurrently.
+
+
+def _structured_reflect_runner():
+    """A tool-capable chat_runner that always emits a valid ``emit_state``
+    tool call with ``outcome='continue'`` — driving the structured
+    leader-reflect path into ``compression.emit_compaction``."""
+
+    def _runner(*, messages=None, tools=None, tool_choice=None, **_kw):
+        call = SimpleNamespace(
+            name=project_execution.EMIT_STATE_TOOL_NAME,
+            args={
+                "state": {"compressed_active_goal": "ship the thing"},
+                "decision": {"outcome": "continue", "rationale": "on track"},
+            },
+        )
+        return SimpleNamespace(tool_calls=[call], content="")
+
+    return _runner
+
+
+# ── Finding 1: serial reflect-emit writes the compaction row unlocked ──
+
+
+def test_leader_reflect_emit_compaction_serial_path_writes_audit_row(project):
+    """The leader-reflect ``emit_compaction`` runs in the single
+    claim-holder's main thread with NO write_lock — and that is correct,
+    because the path is provably serial (claim-lock + joined kickoff wave,
+    and compaction has no other writer). Assert the unlocked emit still
+    lands a well-formed ``actor='compression'`` compaction row in the
+    run's audit.jsonl.
+
+    Pins the intended behavior the re-sweep finding would have changed: a
+    regression that breaks the serial emit (or a lock-plumbing "fix" that
+    drops the row) fails here.
+    """
+    plan = _approved_plan(project, sub_objective_count=1)
+
+    reflect = _structured_reflect_runner()
+
+    result = project_execution.start_execution(
+        plan.id, project,
+        runners={"leader": lambda _p: "x", "drafter": lambda _p: "x"},
+        reflect_runner=lambda _p: "ignored — structured runner wins",
+        reflect_chat_runner=reflect,
+        kickoff_callable=lambda _t, _so: "kicked",
+    )
+
+    assert result.final_status == "done"
+    assert result.sub_objectives_completed == 1
+
+    audit_path = vault.run_dir(project.code, project.run_id) / "audit.jsonl"
+    assert audit_path.exists(), "reflect-emit must create the run audit.jsonl"
+
+    rows = [
+        json.loads(ln)
+        for ln in audit_path.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    compaction_rows = [
+        r for r in rows
+        if r.get("actor") == "compression"
+        and r.get("event") == "compaction_emit"
+    ]
+    assert compaction_rows, (
+        "serial leader-reflect path must emit a compaction_emit row; "
+        f"saw actors={[r.get('actor') for r in rows]}"
+    )
+    row = compaction_rows[0]
+    # The row is well-formed JSONL (one object per line) and carries the
+    # join-key fields — i.e. the unlocked single-writer append did not
+    # interleave or corrupt the line.
+    assert row["run_id"] == project.run_id
+    assert row["project_code"] == project.code
+    assert row["plan_id"] == plan.id

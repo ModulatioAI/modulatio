@@ -30,6 +30,8 @@ from urllib.error import HTTPError
 import pytest
 
 from modulatio import tools
+import subprocess
+from modulatio import sandbox as _sandbox
 
 
 # ── registry ───────────────────────────────────────────────────────────────
@@ -2107,3 +2109,579 @@ def test_run_shell_passive_ruff_rejects_mutating_flags(tmp_path, cmd):
     rs = tools.make_run_shell(art)
     with pytest.raises(ValueError, match="not allowed"):
         rs(cmd=cmd, profile="passive")
+
+
+# ═══ fold: test_tools_low_audit.py ═══
+# LOW-severity audit regression tests for ``modulatio.tools``.
+#
+# Uniquely named to avoid colliding with concurrent agents editing the
+# primary ``test_tools.py``.
+#
+# Finding #83 [correctness]: ``go vet`` args were unvalidated in the
+# passive profile. Every sibling linter (gofmt/ruff/mypy/pyflakes) confines
+# its path args because the tool echoes offending source lines — an
+# unconfined path is an arbitrary-file read. ``go vet`` did not. These tests
+# pin that ``go vet`` still accepts legitimate Go package patterns while
+# refusing path args that can escape the artifacts root.
+
+
+def _art(tmp_path: Path) -> Path:
+    art = tmp_path / "artifacts"
+    art.mkdir()
+    return art
+
+
+# ── go vet must keep accepting legitimate Go package patterns ──────────
+
+def test_go_vet_package_patterns_stay_passive(tmp_path):
+    """``./...``, ``.``, ``./pkg/...`` and bare package names are package
+    specs, not file leaks — still passive."""
+    root = _art(tmp_path)
+    assert tools._check_passive(["go", "vet", "./..."], root)
+    assert tools._check_passive(["go", "vet", "."], root)
+    assert tools._check_passive(["go", "vet", "./pkg/..."], root)
+    assert tools._check_passive(["go", "vet", "mypkg"], root)
+    assert tools._check_passive(["go", "vet"], root)  # bare
+
+
+def test_go_vet_confined_file_stays_passive(tmp_path):
+    """A plain relative .go file under cwd is fine."""
+    root = _art(tmp_path)
+    assert tools._check_passive(["go", "vet", "main.go"], root)
+    assert tools._check_passive(["go", "vet", "sub/main.go"], root)
+
+
+# ── go vet must REFUSE unconfined / traversal / absolute path args ─────
+
+def test_go_vet_rejects_parent_traversal(tmp_path):
+    """A ``..`` segment can climb out of the confined cwd — refused.
+
+    Fails before the fix (old code returned True for any args after vet).
+    """
+    root = _art(tmp_path)
+    assert not tools._check_passive(["go", "vet", "../secret.go"], root)
+    assert not tools._check_passive(["go", "vet", "sub/../../etc"], root)
+
+
+def test_go_vet_rejects_absolute_outside_root(tmp_path):
+    """An absolute path outside the artifacts root would leak source via
+    go vet's diagnostics — refused."""
+    root = _art(tmp_path)
+    assert not tools._check_passive(["go", "vet", "/etc/passwd"], root)
+
+
+def test_go_vet_allows_absolute_inside_root(tmp_path):
+    """An absolute path that resolves under root is safe."""
+    root = _art(tmp_path)
+    inside = str(root / "main.go")
+    assert tools._check_passive(["go", "vet", inside], root)
+
+
+# ── end-to-end through run_shell (matches existing test style) ─────────
+
+def test_run_shell_passive_go_vet_traversal_refused(tmp_path):
+    """``go vet ../x.go`` is refused by the passive profile end-to-end."""
+    art = _art(tmp_path)
+    rs = tools.make_run_shell(art)
+    with pytest.raises(ValueError, match="not allowed"):
+        rs(cmd="go vet ../x.go", profile="passive")
+
+
+# ═══ fold: test_tools_r2_audit.py ═══
+# Round-2 full-debug audit regressions for ``modulatio.tools``.
+#
+# Filed in a uniquely-named module (not test_tools.py) to avoid colliding
+# with a sibling agent editing the same suite concurrently.
+
+
+
+
+def test_run_shell_binary_child_output_does_not_crash(tmp_path):
+    """A child that emits non-UTF-8/binary bytes on stdout must NOT raise
+    ``UnicodeDecodeError`` out of ``run_shell`` and discard all output.
+
+    ``subprocess.Popen(..., text=True)`` decodes child output as UTF-8;
+    the default 'strict' decoder raises ``UnicodeDecodeError`` inside
+    ``communicate()`` on undecodable bytes — and that exception is caught
+    by neither the TimeoutExpired nor the FileNotFoundError handler, so it
+    would propagate and crash the chat loop. The fix passes
+    ``errors="replace"`` so the model still gets a best-effort body.
+
+    Before the fix this test errors with UnicodeDecodeError; after, it
+    returns a normal result body.
+    """
+    art = _make_artifacts(tmp_path)
+    # Write raw invalid-UTF-8 bytes (0xFF 0xFE 0x80) straight to stdout's
+    # binary buffer, then a sentinel marker so we can confirm the surrounding
+    # output survives the replacement.
+    (art / "emit_binary.py").write_text(
+        "import sys\n"
+        "sys.stdout.buffer.write(b'\\xff\\xfe\\x80')\n"
+        "sys.stdout.buffer.write(b'SENTINEL')\n"
+        "sys.stdout.buffer.flush()\n"
+    )
+    rs = tools.make_run_shell(art)
+    # Must not raise; must return a result string with the decodable portion.
+    out = rs(cmd="python3 emit_binary.py", profile="full", timeout=10)
+    assert "exit_code: 0" in out
+    assert "SENTINEL" in out
+    # The undecodable bytes were substituted, not dropped wholesale.
+    assert "�" in out
+
+
+# ═══ fold: test_tools_preship.py ═══
+# Pre-ship (0.9.0) regression tests for ``modulatio.tools``.
+#
+# Uniquely named to avoid colliding with concurrent agents editing the
+# primary ``test_tools.py`` / ``test_tools_low_audit.py``.
+#
+# Covers three confirmed pre-ship findings:
+#
+#   1. [MEDIUM/security] ``go vet -vettool=BIN`` / ``-flag=PATH`` bypass the
+#      passive allowlist (arbitrary-binary exec + unconfined path arg in a
+#      no-execution profile).
+#   2. [MEDIUM/security] Single-dash flags slipped through ``_is_safe_file_arg``
+#      as "files" for ls/cat/head/tail/wc.
+#   3. [LOW/resource-leak] Popen pipes leaked fds on the pathological
+#      triple-timeout drain path.
+
+
+
+
+# ── Finding 1: go vet flag bypass ──────────────────────────────────────
+
+def test_go_vet_rejects_vettool_binary_exec(tmp_path):
+    """``-vettool=<binary>`` makes go vet EXECUTE an arbitrary binary —
+    a direct violation of the no-execution passive contract. Refused.
+
+    Fails before the fix (old code returned True for any ``-``-leading arg).
+    """
+    root = _art(tmp_path)
+    assert not tools._check_passive(
+        ["go", "vet", "-vettool=/usr/bin/id", "./..."], root
+    )
+    assert not tools._check_passive(["go", "vet", "-vettool=/bin/sh"], root)
+    assert not tools._check_passive(["go", "vet", "--vettool=/bin/sh"], root)
+    # bare -vettool (value as the next token) is still not a value-less flag
+    assert not tools._check_passive(["go", "vet", "-vettool"], root)
+
+
+def test_go_vet_confines_flag_value_paths(tmp_path):
+    """``-flag=value`` whose value is a traversal/absolute path is refused;
+    a benign value-flag and a value-less flag stay passive."""
+    root = _art(tmp_path)
+    # path payload in a flag value must not escape the root
+    assert not tools._check_passive(["go", "vet", "-tags=../../etc", "./..."], root)
+    assert not tools._check_passive(
+        ["go", "vet", "-mod=/etc/passwd", "./..."], root
+    )
+    # benign relative flag value is fine
+    assert tools._check_passive(["go", "vet", "-tags=integration", "./..."], root)
+    # value-less flag carries no path — still passive
+    assert tools._check_passive(["go", "vet", "-json", "./..."], root)
+
+
+# ── Finding 2: single-dash flags as "files" ────────────────────────────
+
+def test_is_safe_file_arg_rejects_leading_dash(tmp_path):
+    """A dash-leading token is a flag, never a file."""
+    root = _art(tmp_path)
+    assert not tools._is_safe_file_arg("-R", root)
+    assert not tools._is_safe_file_arg("-A", root)
+    assert not tools._is_safe_file_arg("--color=always", root)
+    # a real relative file still passes
+    assert tools._is_safe_file_arg("notes.txt", root)
+    assert tools._is_safe_file_arg("sub/notes.txt", root)
+
+
+def test_passive_heads_reject_dash_flags(tmp_path):
+    """ls/cat/head/tail must not admit arbitrary flags via the file-arg path.
+
+    Fails before the fix (``-R``/``--color`` were accepted as filenames).
+    """
+    root = _art(tmp_path)
+    assert not tools._check_passive(["ls", "-R"], root)
+    assert not tools._check_passive(["ls", "--color=always"], root)
+    assert not tools._check_passive(["cat", "-A", "notes.txt"], root)
+    assert not tools._check_passive(["head", "--bytes=99999"], root)
+    assert not tools._check_passive(["tail", "-f", "notes.txt"], root)
+
+
+def test_passive_heads_keep_legitimate_forms(tmp_path):
+    """The hardening must not break the real read forms."""
+    root = _art(tmp_path)
+    assert tools._check_passive(["ls"], root)
+    assert tools._check_passive(["ls", "-la", "notes.txt"], root)
+    assert tools._check_passive(["cat", "notes.txt"], root)
+    assert tools._check_passive(["head", "-n", "5", "notes.txt"], root)
+    assert tools._check_passive(["head", "-5", "notes.txt"], root)
+    assert tools._check_passive(["tail", "-n", "5", "notes.txt"], root)
+    assert tools._check_passive(["wc", "-l", "notes.txt"], root)
+
+
+# ── Finding 3: fd leak on the triple-timeout drain path ────────────────
+
+def test_triple_timeout_drain_closes_pipes(tmp_path, monkeypatch):
+    """On the pathological path where every drain ``communicate`` times out,
+    run_shell must close the Popen pipe ends rather than leak the fds.
+
+    We simulate a Popen whose communicate always raises TimeoutExpired and
+    assert both pipe ends end up closed and a TIMEOUT result is returned.
+    """
+    import subprocess
+
+    closed: dict[str, bool] = {"stdout": False, "stderr": False}
+
+    class _FakePipe:
+        def __init__(self, name: str):
+            self._name = name
+
+        def close(self):
+            closed[self._name] = True
+
+    class _FakeProc:
+        def __init__(self, *a, **k):
+            self.pid = 424242
+            self.returncode = -9
+            self.stdout = _FakePipe("stdout")
+            self.stderr = _FakePipe("stderr")
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _FakeProc())
+    # Neutralize process-group / rlimit side effects that the fake pid lacks.
+    monkeypatch.setattr(tools.os, "killpg", lambda *a, **k: None)
+    monkeypatch.setattr(tools.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(tools, "_apply_rlimits_to_pid", lambda pid: None)
+
+    root = _art(tmp_path)
+    run_shell = tools.make_run_shell(root)
+    # A command that passes the passive profile so we reach the Popen path.
+    result = run_shell("ls", profile="passive", cwd=str(root))
+
+    assert "[TIMEOUT" in result
+    assert closed["stdout"] is True
+    assert closed["stderr"] is True
+
+
+# ═══ fold: test_tools_resweep.py ═══
+# Re-sweep (0.9.0 pre-ship) regression tests for ``modulatio.tools``.
+#
+# Uniquely named to avoid colliding with concurrent agents editing the
+# primary ``test_tools.py`` and the other audit modules.
+#
+# Covers one confirmed re-sweep finding:
+#
+#   1. [LOW/resource-leak] On run_shell's give-up drain branch (every
+#      ``communicate`` drain times out because a double-forking grandchild
+#      keeps the pipes open), the SIGKILL'd child was never reaped, so it
+#      lingered as a zombie until ``Popen.__del__`` ran under the chat
+#      loop's GC. The fix reaps it promptly with a non-blocking ``poll()``.
+
+
+
+
+# ── Finding 1: give-up drain branch reaps the SIGKILL'd child ──────────
+
+def test_give_up_branch_reaps_child(tmp_path, monkeypatch):
+    """When every drain ``communicate`` times out, run_shell must reap the
+    SIGKILL'd child (a non-blocking ``poll()``) rather than leave it as a
+    zombie for ``Popen.__del__`` to clean up under GC.
+
+    We simulate a Popen whose communicate always raises TimeoutExpired —
+    driving the pathological give-up branch — and assert ``poll`` is
+    called there (the reap) while a TIMEOUT result is still returned.
+    """
+    polled: dict[str, int] = {"count": 0}
+
+    class _FakePipe:
+        def close(self):
+            pass
+
+    class _FakeProc:
+        def __init__(self, *a, **k):
+            self.pid = 525252
+            self.returncode = -9
+            self.stdout = _FakePipe()
+            self.stderr = _FakePipe()
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+
+        def kill(self):
+            pass
+
+        def poll(self):
+            # Non-blocking reap; updates returncode in real Popen.
+            polled["count"] += 1
+            return self.returncode
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _FakeProc())
+    # Neutralize process-group / rlimit side effects the fake pid lacks.
+    monkeypatch.setattr(tools.os, "killpg", lambda *a, **k: None)
+    monkeypatch.setattr(tools.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(tools, "_apply_rlimits_to_pid", lambda pid: None)
+
+    root = _art(tmp_path)
+    run_shell = tools.make_run_shell(root)
+    # A command that passes the passive profile so we reach the Popen path.
+    result = run_shell("ls", profile="passive", cwd=str(root))
+
+    assert "[TIMEOUT" in result
+    # Without the fix, poll() is never called on the give-up branch.
+    assert polled["count"] >= 1
+
+
+# ═══ fold: test_tools_resweep_r3.py ═══
+# Round-3 (0.9.0 pre-ship) re-sweep regression tests for ``modulatio.tools``.
+#
+# Separate, additive file (do NOT collide with ``test_tools_resweep.py`` from a
+# prior round). Covers one confirmed re-sweep finding:
+#
+#   1. [MEDIUM/security] H3a memory/disk/core rlimit cap did not reach the
+#      payload on the SANDBOXED (production) path. ``_apply_rlimits_to_pid``
+#      clamps the PID ``Popen`` returns, which under bwrap is the MONITOR
+#      process; bwrap forks the real payload into its own PID namespace AFTER,
+#      so the per-process limits set on the monitor never inherit to the
+#      payload. Fix: prefix the payload argv with ``prlimit --as --fsize
+#      --core -- <argv>`` so the caps are set on the payload's own PID at exec
+#      time, INSIDE the sandbox (before bwrap, so the prefix lands after `--`).
+
+
+
+
+class _CapturePipe:
+    def close(self):
+        pass
+
+
+class _CaptureProc:
+    """A fake Popen that records the argv it was launched with and returns
+    a clean exit so run_shell takes the happy path."""
+
+    last_argv: list[str] | None = None
+
+    def __init__(self, argv, *a, **k):
+        type(self).last_argv = list(argv)
+        self.pid = 424242
+        self.returncode = 0
+        self.stdout = _CapturePipe()
+        self.stderr = _CapturePipe()
+
+    def communicate(self, timeout=None):
+        return ("", "")
+
+    def kill(self):
+        pass
+
+    def poll(self):
+        return self.returncode
+
+
+def _patch_common(monkeypatch):
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda argv, *a, **k: _CaptureProc(argv, *a, **k)
+    )
+    # The fake pid isn't a real child; neuter the parent-side prlimit clamp.
+    monkeypatch.setattr(tools, "_apply_rlimits_to_pid", lambda pid: None)
+    monkeypatch.setattr(tools.os, "killpg", lambda *a, **k: None)
+    monkeypatch.setattr(tools.os, "getpgid", lambda pid: pid)
+
+
+def _force_prlimit_available(monkeypatch):
+    """Pin the prlimit prefix to a stable, present-looking value so the test
+    is deterministic on a host without util-linux."""
+    prefix = [
+        "/usr/bin/prlimit",
+        f"--as={tools._RUN_SHELL_RLIMIT_AS_BYTES}",
+        f"--fsize={tools._RUN_SHELL_RLIMIT_FSIZE_BYTES}",
+        "--core=0",
+        "--",
+    ]
+    monkeypatch.setattr(tools, "_prlimit_wrapper_prefix", lambda: list(prefix))
+    return prefix
+
+
+# ── prefix helper ──────────────────────────────────────────────────────────
+
+def test_prlimit_prefix_present_when_binary_available(monkeypatch):
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/prlimit")
+    prefix = tools._prlimit_wrapper_prefix()
+    assert prefix[0] == "/usr/bin/prlimit"
+    assert f"--as={tools._RUN_SHELL_RLIMIT_AS_BYTES}" in prefix
+    assert f"--fsize={tools._RUN_SHELL_RLIMIT_FSIZE_BYTES}" in prefix
+    assert "--core=0" in prefix
+    assert prefix[-1] == "--"
+
+
+def test_prlimit_prefix_empty_when_binary_missing(monkeypatch):
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert tools._prlimit_wrapper_prefix() == []
+
+
+# ── Finding 1: caps reach the payload on the SANDBOXED path ─────────────────
+
+def test_sandboxed_payload_is_prlimit_wrapped_inside_bwrap(tmp_path, monkeypatch):
+    """On the sandboxed (production) path the prlimit prefix must land INSIDE
+    the bwrap argv — i.e. ``build_sandboxed_argv`` receives the prlimit-wrapped
+    payload, so the caps are set on the real payload PID in its own PID
+    namespace, not on the bwrap monitor.
+
+    Without the fix the payload handed to bwrap is the bare command and the
+    only rlimit application is the parent-side clamp on the monitor PID — which
+    never reaches the payload."""
+    _patch_common(monkeypatch)
+    prefix = _force_prlimit_available(monkeypatch)
+
+    monkeypatch.setattr(_sandbox, "current_profile", lambda: "passive")
+    monkeypatch.setattr(_sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(_sandbox, "is_sandbox_available", lambda: True)
+
+    captured: dict[str, list[str]] = {}
+
+    def _fake_build(payload_argv, artifacts_root, *, profile=None, **kwargs):
+        # **kwargs absorbs build_sandboxed_argv's optional binds (extra_binds,
+        # extra_rw_roots [exec-widen], allow_network, pass_env) so this stub
+        # tracks the real signature without re-listing each.
+        captured["payload"] = list(payload_argv)
+        return (["bwrap", "--die-with-parent", "--", *payload_argv], {})
+
+    monkeypatch.setattr(_sandbox, "build_sandboxed_argv", _fake_build)
+
+    root = _art(tmp_path)
+    run_shell = tools.make_run_shell(root)
+    run_shell("ls", profile="passive", cwd=str(root))
+
+    # build_sandboxed_argv received the prlimit-wrapped payload.
+    assert captured["payload"][: len(prefix)] == prefix
+    assert captured["payload"][len(prefix):] == ["ls"]
+
+    # And the actual launched argv has prlimit AFTER bwrap's `--` (inside the
+    # sandbox), not as the outer process.
+    launched = _CaptureProc.last_argv
+    assert launched is not None
+    assert launched[0] == "bwrap"
+    dd = launched.index("--")
+    assert launched[dd + 1 :][: len(prefix)] == prefix
+
+
+def test_unsandboxed_payload_is_prlimit_wrapped(tmp_path, monkeypatch):
+    """On the bypass/unsandboxed path the launched argv must still be
+    prlimit-wrapped so the caps reach the (direct-child) payload."""
+    _patch_common(monkeypatch)
+    prefix = _force_prlimit_available(monkeypatch)
+
+    monkeypatch.setattr(_sandbox, "current_profile", lambda: "passive")
+    monkeypatch.setattr(_sandbox, "is_bypass_requested", lambda: True)
+
+    root = _art(tmp_path)
+    run_shell = tools.make_run_shell(root)
+    run_shell("ls", profile="passive", cwd=str(root))
+
+    launched = _CaptureProc.last_argv
+    assert launched is not None
+    assert launched[: len(prefix)] == prefix
+    assert launched[len(prefix):] == ["ls"]
+
+
+# ═══ fold: test_tools_resweep_r4.py ═══
+# Round-4 (0.9.0 pre-ship) re-sweep regression tests for ``modulatio.tools``.
+#
+# Separate, additive file (do NOT collide with ``test_tools_resweep.py`` /
+# ``test_tools_resweep_r3.py`` from prior rounds). Covers one confirmed
+# re-sweep finding:
+#
+#   1. [MEDIUM/integration] The H3a ``prlimit`` wrapper prefix masks the
+#      friendly ``[INFO] tool 'X' not installed`` body for standalone binaries.
+#      Once the payload argv is wrapped as ``prlimit -- <payload>``, ``Popen``
+#      execs ``prlimit`` (which exists), so a missing payload (ruby/go/node/...)
+#      no longer raises ``FileNotFoundError`` — prlimit runs and exits 127, and
+#      the documented friendly body never fires. Fix: pre-check the payload
+#      binary against the host PATH BEFORE wrapping, returning the ``[INFO]``
+#      body (exit_code -1) directly when it isn't installed.
+
+
+
+
+def test_missing_standalone_payload_returns_info_body_even_with_prlimit(
+    tmp_path, monkeypatch
+):
+    """With the prlimit wrapper ACTIVE (production path) and the payload
+    binary missing, run_shell must still return the friendly [INFO] body with
+    exit_code -1 — not a prlimit exit 127, and not a FileNotFoundError.
+
+    This is the regression: pre-fix, ``_payload_argv = [prlimit, ..., '--',
+    'ruby', ...]`` so Popen execs prlimit (present), prlimit fails to exec
+    'ruby' and exits 127, and the FileNotFoundError handler never fires.
+    """
+    art = _art(tmp_path)
+    rs = tools.make_run_shell(art)
+
+    # Force the prlimit prefix ON, as on a real Linux production host, so the
+    # FileNotFoundError handler would be dead for a standalone binary.
+    monkeypatch.setattr(
+        tools, "_prlimit_wrapper_prefix",
+        lambda: ["/usr/bin/prlimit", "--as=1", "--core=0", "--"],
+    )
+
+    # Force the payload binary 'ruby' to resolve as NOT installed, regardless
+    # of whether the test host actually has it. (ruby --version passes the
+    # passive allowlist as an interpreter-version probe.) The resolver imports
+    # shutil locally, so patch the real module attribute.
+    import shutil as _shutil
+
+    real_which = _shutil.which
+
+    def fake_which(name, *a, **k):
+        if name == "ruby":
+            return None
+        return real_which(name, *a, **k)
+
+    monkeypatch.setattr(_shutil, "which", fake_which)
+
+    out = rs(cmd="ruby --version", profile="passive", timeout=5)
+
+    assert "[INFO]" in out
+    assert "ruby" in out
+    assert "not installed" in out
+    assert "exit_code: -1" in out
+    # The masked prlimit-127 path must NOT be what surfaces.
+    assert "exit_code: 127" not in out
+
+
+def test_present_payload_still_runs_and_is_not_masked(tmp_path, monkeypatch):
+    """A payload that IS installed must NOT be short-circuited by the
+    not-installed pre-check — it must actually run."""
+    art = _art(tmp_path)
+    # Write a trivial script the python interpreter executes.
+    (art / "ok.py").write_text("print('hello-present')\n")
+    rs = tools.make_run_shell(art)
+
+    out = rs(cmd="python3 ok.py", profile="full", timeout=10)
+
+    # python3 is rewritten to sys.executable (an existing absolute exe), so the
+    # pre-check passes and the script runs.
+    assert "hello-present" in out
+    assert "[INFO]" not in out
+
+
+def test_resolve_payload_binary_handles_bare_and_path_forms(tmp_path):
+    """Unit cover for the resolver: bare missing name -> None; existing
+    executable path -> itself; non-existent path -> None."""
+    # A bare name that won't exist on any PATH.
+    assert tools._resolve_payload_binary("totally_not_a_real_binary_xyz") is None
+    # An absolute path to a real executable (the running interpreter).
+    import sys
+
+    assert tools._resolve_payload_binary(sys.executable) == sys.executable
+    # A path form pointing at a non-existent file.
+    missing = str(tmp_path / "nope" / "ghost")
+    assert tools._resolve_payload_binary(missing) is None

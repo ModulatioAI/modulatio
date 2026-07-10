@@ -15,6 +15,12 @@ from pathlib import Path
 import pytest
 
 from modulatio import assembly
+import csv
+from modulatio.assembly import _MAX_UNIT_BYTES, _merge_csv
+import json
+import threading
+from modulatio.assembly import _document_head, _unit_headings
+import re
 
 
 # ── manifest parsing ──────────────────────────────────────────────────────
@@ -994,3 +1000,535 @@ def test_line_leading_runbook_block_is_still_stripped(tmp_path):
     _units(tmp_path, **{"a.md": plain})
     r = assembly.assemble({"units": ["a.md"]}, tmp_path)
     assert r.content.startswith("# Note")
+
+
+# ═══ fold: test_assembly_low_audit.py ═══
+# LOW-audit regression tests for src/modulatio/assembly.py.
+#
+# Finding #47 [resource-leak]: ``_merge_csv`` called ``csv.field_size_limit()``,
+# which mutates process-wide CSV parser state, and never restored it — leaking the
+# merge ceiling onto all subsequent CSV parsing in the process.
+
+
+def test_merge_csv_restores_global_field_size_limit() -> None:
+    """After a merge, the process-wide CSV field-size limit is unchanged."""
+    before = csv.field_size_limit()
+    content, errors = _merge_csv([("a", "h1,h2\n1,2\n"), ("b", "h1,h2\n3,4\n")], dedupe=False)
+    after = csv.field_size_limit()
+    # The merge produced output (sanity) and left the global state untouched.
+    assert "h1,h2" in content
+    assert after == before
+    # And it was NOT left pinned at the merge ceiling.
+    assert after != _MAX_UNIT_BYTES or before == _MAX_UNIT_BYTES
+
+
+def test_merge_csv_restores_limit_even_when_no_header() -> None:
+    """The early-return (no header) path also restores the prior limit."""
+    before = csv.field_size_limit()
+    content, errors = _merge_csv([], dedupe=False)
+    assert content == ""
+    assert csv.field_size_limit() == before
+
+
+def test_merge_csv_restores_limit_with_known_prior_value() -> None:
+    """Set a distinct prior limit; confirm it survives the merge exactly."""
+    original = csv.field_size_limit()
+    try:
+        sentinel = 12345
+        csv.field_size_limit(sentinel)
+        _merge_csv([("a", "h\n1\n")], dedupe=True)
+        assert csv.field_size_limit() == sentinel
+    finally:
+        csv.field_size_limit(original)
+
+
+# ═══ fold: test_assembly_preship.py ═══
+# 0.9.0 pre-ship regression tests for assembly.py findings.
+#
+# - MEDIUM/resource-leak: PDF render path orphans a partial <stem>.pdf when
+#   libreoffice fails.
+# - LOW/correctness: CSV dedupe key can collide across differently-shaped rows.
+
+
+def _pdf_artifacts(root):
+    return sorted(p.name for p in root.iterdir() if p.suffix == ".pdf")
+
+
+def test_pdf_render_failure_leaves_no_orphan_pdf(tmp_path, monkeypatch):
+    """When soffice 'succeeds' but writes a partial PDF and the size check (or a
+    later failure) rejects it, no <stem>.pdf is orphaned in artifacts_root."""
+    calls = {"n": 0}
+
+    def fake_run_doc_tool(argv, tool):
+        calls["n"] += 1
+        if tool == "pandoc":
+            # pandoc writes the intermediate .docx
+            out = argv[argv.index("-o") + 1]
+            assembly.Path(out).write_bytes(b"PK\x03\x04 fake docx")
+            return
+        # libreoffice: simulate writing a partial PDF into outdir, then fail
+        outdir = assembly.Path(argv[argv.index("--outdir") + 1])
+        docx = assembly.Path(argv[-1])
+        (outdir / docx.with_suffix(".pdf").name).write_bytes(b"%PDF partial")
+        raise assembly._DocToolError("libreoffice failed — boom")
+
+    monkeypatch.setattr(assembly, "_run_doc_tool", fake_run_doc_tool)
+
+    try:
+        assembly.render_document("# x\n\nbody\n", "pdf", tmp_path)
+    except assembly._DocToolError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected _DocToolError")
+
+    assert _pdf_artifacts(tmp_path) == [], (
+        "partial PDF was orphaned in artifacts_root on soffice failure"
+    )
+
+
+def test_pdf_render_oversize_leaves_no_orphan_pdf(tmp_path, monkeypatch):
+    """An over-cap PDF must be unlinked, not left behind."""
+    def fake_run_doc_tool(argv, tool):
+        if tool == "pandoc":
+            out = argv[argv.index("-o") + 1]
+            assembly.Path(out).write_bytes(b"PK\x03\x04 fake docx")
+            return
+        outdir = assembly.Path(argv[argv.index("--outdir") + 1])
+        docx = assembly.Path(argv[-1])
+        (outdir / docx.with_suffix(".pdf").name).write_bytes(b"%PDF over cap")
+
+    monkeypatch.setattr(assembly, "_run_doc_tool", fake_run_doc_tool)
+    monkeypatch.setattr(assembly, "_MAX_TOTAL_BYTES", 1)  # force over-cap
+
+    try:
+        assembly.render_document("# x\n\nbody\n", "pdf", tmp_path)
+    except (assembly._DocToolError, assembly._MediaToolError):
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected a tool error on over-cap output")
+
+    assert _pdf_artifacts(tmp_path) == [], "over-cap PDF was orphaned"
+
+
+def test_pdf_render_invokes_pandoc_to_fill_the_docx_before_soffice(tmp_path, monkeypatch):
+    """Regression (0.9.0 re-sweep HIGH): the pdf branch MUST render the markdown
+    source into the intermediate .docx via pandoc BEFORE handing that .docx to
+    libreoffice — else soffice gets an empty docx and the PDF is contentless.
+    Records the real call sequence (the leak tests mock pandoc but never assert
+    it runs, so the dropped-pandoc regression slipped past them)."""
+    seq = []
+
+    def fake_run_doc_tool(argv, tool):
+        seq.append((tool, list(argv)))
+        if tool == "pandoc":
+            out = assembly.Path(argv[argv.index("-o") + 1])
+            # pandoc must be given the markdown SOURCE as input and the docx as -o
+            assert argv[1].endswith(".md"), f"pandoc input not the md source: {argv}"
+            assert out.suffix == ".docx", f"pandoc -o not a docx: {out}"
+            out.write_bytes(b"PK\x03\x04 real docx from pandoc")
+            return
+        # libreoffice: the docx it converts must be NON-EMPTY (pandoc filled it)
+        docx = assembly.Path(argv[-1])
+        assert docx.stat().st_size > 0, "soffice handed an EMPTY docx — pandoc step missing"
+        outdir = assembly.Path(argv[argv.index("--outdir") + 1])
+        (outdir / docx.with_suffix(".pdf").name).write_bytes(b"%PDF real content here")
+
+    monkeypatch.setattr(assembly, "_run_doc_tool", fake_run_doc_tool)
+    out, msg = assembly.render_document("# title\n\nbody\n", "pdf", tmp_path)
+
+    assert [t for t, _ in seq] == ["pandoc", "libreoffice"], (
+        f"pandoc must run before libreoffice; got {[t for t, _ in seq]}"
+    )
+    assert out.suffix == ".pdf" and out.is_file()
+
+
+def test_csv_dedupe_does_not_collide_on_nul_shifted_values():
+    """Two genuinely-distinct rows whose values differ only by where a NUL byte
+    falls must NOT collapse to one row under dedupe (the old "\\x00".join key
+    aliased them)."""
+    csv_a = "h1,h2\r\n" + 'a\x00b,c\r\n' + 'a,b\x00c\r\n'
+    content, errors = assembly._merge_csv([("u", csv_a)], dedupe=True)
+
+    assert errors == [], errors
+    # Header + two distinct data rows must survive dedupe.
+    body_lines = [ln for ln in content.splitlines() if ln]
+    assert len(body_lines) == 3, (content, body_lines)
+
+
+def test_csv_dedupe_still_collapses_true_duplicates():
+    """Dedupe must still remove an exact duplicate row."""
+    csv_text = "h1,h2\n" + "x,y\n" + "x,y\n" + "p,q\n"
+    content, errors = assembly._merge_csv([("u", csv_text)], dedupe=True)
+    assert errors == []
+    body_lines = [ln for ln in content.splitlines() if ln]
+    # header + (x,y) + (p,q) == 3
+    assert len(body_lines) == 3, body_lines
+
+
+def test_csv_dedupe_key_is_unambiguous_serialization():
+    """Sanity: the dedupe serialization round-trips field boundaries."""
+    assert json.loads(json.dumps(["a\x00b", "c"])) == ["a\x00b", "c"]
+
+
+# ═══ fold: test_assembly_r2_audit.py ═══
+# Regression tests for the Cowboy/Opus round-2 full-debug findings scoped to
+# ``src/modulatio/assembly.py``:
+#
+#   * MEDIUM/race — csv.field_size_limit save/restore races across concurrent wave
+#     workers (process-global) and could leak the raised ceiling.
+#   * LOW/product-agnostic — TOC cap math omitted framing bytes, so the TOC could
+#     list a unit the body drops at the byte cap.
+
+
+# ── MEDIUM: csv.field_size_limit must not leak across concurrent merges ────────
+
+def test_merge_csv_restores_field_size_limit():
+    """A single merge restores the prior process-global field_size_limit."""
+    orig = csv.field_size_limit()
+    try:
+        out, errs = _merge_csv([("a.csv", "h\n1\n2\n")], dedupe=False)
+        assert out.startswith("h")
+        assert csv.field_size_limit() == orig
+    finally:
+        csv.field_size_limit(orig)
+
+
+def test_merge_csv_concurrent_does_not_leak_raised_ceiling():
+    """Concurrently running many merges must always leave the process-global
+    ``csv.field_size_limit`` at its true original value.
+
+    Pre-fix the save/restore idiom raced: one worker could capture another's
+    RAISED ceiling as its "prior" value and restore THAT in its finally, leaking
+    the 4 MiB ceiling onto unrelated CSV parsing. The module lock makes
+    set→parse→restore atomic, so the original is always what gets restored.
+    """
+    orig = csv.field_size_limit()
+    # Force a distinct, small baseline so a leaked 4 MiB ceiling is unmistakable.
+    sentinel = 131072
+    csv.field_size_limit(sentinel)
+    try:
+        start = threading.Barrier(8)
+        observed: list[int] = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            start.wait()
+            for _ in range(40):
+                _merge_csv([("u.csv", "col\nx\ny\nz\n")], dedupe=True)
+            with lock:
+                observed.append(csv.field_size_limit())
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Every worker, after its merges, must see the sentinel restored — never
+        # the raised _MAX_UNIT_BYTES ceiling leaked by a racing worker.
+        assert observed, "no observations recorded"
+        assert all(v == sentinel for v in observed), observed
+        assert csv.field_size_limit() == sentinel
+    finally:
+        csv.field_size_limit(orig)
+
+
+def test_csv_field_limit_lock_serializes_window():
+    """The lock is held across the whole set→parse→restore body so two merges can
+    never interleave their global mutations."""
+    assert isinstance(assembly._CSV_FIELD_LIMIT_LOCK, type(threading.Lock()))
+
+
+# ── LOW: TOC cap math must include framing bytes so it agrees with the body ────
+
+def test_unit_headings_base_total_drops_unit_at_byte_cap(tmp_path, monkeypatch):
+    """With ``base_total`` seeded near the total-byte cap, the LAST unit that the
+    body would drop must also be dropped from the heading list — the TOC and body
+    stop at the same unit."""
+    # Shrink the caps so we can exercise the boundary cheaply.
+    monkeypatch.setattr(assembly, "_MAX_TOTAL_BYTES", 200)
+    monkeypatch.setattr(assembly, "_MAX_UNIT_BYTES", 200)
+
+    sep = "\n\n"
+    # Two units, ~80 bytes each.
+    u1 = tmp_path / "u1.md"
+    u2 = tmp_path / "u2.md"
+    u1.write_text("# One\n" + "a" * 80)
+    u2.write_text("# Two\n" + "b" * 80)
+
+    # base_total=0: both units fit (80 + 80 + sep < 200) → both headings.
+    both = _unit_headings(["u1.md", "u2.md"], tmp_path, separator=sep, base_total=0)
+    assert both == ["One", "Two"]
+
+    # base_total=80 (framing): now 80 + 80 + sep(2) = 162 fits u1, but u2 pushes to
+    # 162 + 80 + 2 = 244 > 200 → body drops u2, so the TOC must drop it too.
+    seeded = _unit_headings(
+        ["u1.md", "u2.md"], tmp_path, separator=sep, base_total=80
+    )
+    assert seeded == ["One"]
+
+
+def test_document_head_toc_excludes_unit_body_drops(tmp_path, monkeypatch):
+    """End-to-end through ``_document_head``: a large title_page frame plus units
+    that just exceed the cap must produce a TOC that omits the trailing unit the
+    body would drop — no phantom TOC entry."""
+    monkeypatch.setattr(assembly, "_MAX_TOTAL_BYTES", 300)
+    monkeypatch.setattr(assembly, "_MAX_UNIT_BYTES", 300)
+
+    u1 = tmp_path / "u1.md"
+    u2 = tmp_path / "u2.md"
+    u1.write_text("# Alpha\n" + "x" * 100)
+    u2.write_text("# Beta\n" + "y" * 100)
+
+    # A big title makes framing_bytes large enough that, combined with u1, u2 no
+    # longer fits under the 300-byte cap.
+    big_title = "T" * 90
+    manifest = {"units": ["u1.md", "u2.md"]}
+    out = _document_head(
+        manifest, tmp_path, title=big_title, required_structure=("title", "toc"),
+    )
+    title_page = out.get("title_page", "")
+    assert "## Contents" in title_page
+    # Alpha (u1) survives; Beta (u2) is dropped by the body at the cap, so it must
+    # NOT appear in the TOC.
+    assert "Alpha" in title_page
+    assert "Beta" not in title_page
+
+
+# ═══ fold: test_assembly_resweep.py ═══
+# 0.9.0 pre-ship re-sweep regressions for assembly.py.
+#
+# Finding 1 (LOW, #101/0.9.0): the deliverable digest for a single-file-output
+# family (media composites) used to fall to ``_generic_digest``, which stats the
+# INPUT unit files from ``units_used``. For a media join the deliverable IS the
+# single composited binary (``output_file``), so the verifier's "eyes" were
+# pointed at N input files instead of the one produced artifact. The fix: when a
+# real composite ``output_file`` is present, the generic digest describes THAT one
+# file (1 part, its byte size, ``whole_size`` = same). Product-agnostic — it keys
+# on "a composite was produced", not on "media".
+
+
+def _write(root: Path, name: str, data: bytes) -> Path:
+    p = root / name
+    p.write_bytes(data)
+    return p
+
+
+def test_media_digest_describes_composite_not_input_units(tmp_path: Path):
+    # Two small input units (what units_used names) ...
+    _write(tmp_path, "clip_a.mp4", b"a" * 100)
+    _write(tmp_path, "clip_b.mp4", b"b" * 100)
+    # ... and the single composite the media join actually produced.
+    composite = _write(tmp_path, "composite.mp4", b"c" * 4096)
+
+    digest = assembly.build_deliverable_digest(
+        {"units": ["clip_a.mp4", "clip_b.mp4"]},
+        ["clip_a.mp4", "clip_b.mp4"],
+        tmp_path,
+        strategy="media",
+        output_file=composite,
+    )
+
+    # The deliverable is the ONE composite, not the N inputs.
+    assert digest.part_count == 1
+    assert digest.parts == [{"label": "composite.mp4", "size": 4096}]
+    assert digest.whole_size == 4096
+    assert digest.whole_size_unit == "bytes"
+    assert digest.part_size_unit == "bytes"
+
+
+def test_generic_digest_without_output_file_still_stats_units(tmp_path: Path):
+    # No composite output → unchanged behavior: parts = the input units.
+    _write(tmp_path, "u1.bin", b"x" * 10)
+    _write(tmp_path, "u2.bin", b"y" * 20)
+
+    digest = assembly.build_deliverable_digest(
+        {"units": ["u1.bin", "u2.bin"]},
+        ["u1.bin", "u2.bin"],
+        tmp_path,
+        strategy="media",
+    )
+
+    assert digest.part_count == 2
+    assert [p["size"] for p in digest.parts] == [10, 20]
+    assert digest.whole_size is None
+
+
+def test_missing_output_file_falls_back_to_unit_digest(tmp_path: Path):
+    # A composite path that does not exist on disk (fail-open): describe the units.
+    _write(tmp_path, "only.bin", b"z" * 5)
+    ghost = tmp_path / "ghost_composite.mp4"  # never written
+
+    digest = assembly.build_deliverable_digest(
+        {"units": ["only.bin"]},
+        ["only.bin"],
+        tmp_path,
+        strategy="media",
+        output_file=ghost,
+    )
+
+    assert digest.part_count == 1
+    assert digest.parts == [{"label": "only.bin", "size": 5}]
+    assert digest.whole_size is None
+
+
+# ═══ fold: test_assembly_resweep_r3.py ═══
+# 0.9.0 pre-ship round-3 re-sweep regressions for assembly.py.
+#
+# Finding 1 (LOW, assembly.py:491): the document head's TOC cap-math used to seed
+# ``_unit_headings``'s ``base_total`` with the TITLE line only — but the body that
+# ``_assemble_document`` later concatenates counts the FULL ``title_page`` (title +
+# the entire rendered ``## Contents`` block) as its framing, AND it prepends that
+# head as the first block, so it separates the first unit too. The TOC's running
+# total therefore under-counted framing (the TOC block bytes + one leading
+# separator) vs. the body, and at the ``_MAX_TOTAL_BYTES`` cap the TOC could list a
+# final unit the body actually drops (TOC/body diverge by one unit).
+#
+# The fix (a) charges the leading separator in ``_unit_headings`` when a framing
+# block precedes the units, and (b) iterates the head to a byte-size fixpoint
+# (seeding with the FULL candidate head), picking the safe side in the narrow
+# bistable band right at the cap — so the TOC is always a SUBSET of the units that
+# survive into the body, never a phantom entry.
+#
+# This file is additive and must not collide with tests/test_assembly_resweep.py
+# (round-2, a different finding).
+
+
+def _toc_titles(title_page: str) -> list[str]:
+    """The heading text the rendered ``## Contents`` block lists, in order."""
+    out: list[str] = []
+    in_toc = False
+    for line in title_page.splitlines():
+        if line.strip() == "## Contents":
+            in_toc = True
+            continue
+        if in_toc:
+            m = re.match(r"^\d+\.\s+(.*)$", line.strip())
+            if m:
+                out.append(m.group(1))
+    return out
+
+
+def _body_kept_headings(title_page: str, bodies: dict[str, str], sep: str,
+                        cap: int) -> list[str]:
+    """Reproduce _assemble_document's unit-survival under ``cap`` for a given final
+    ``title_page``, returning the headings of the units the body actually keeps."""
+    framing = len(title_page.encode())
+    if framing > cap:
+        framing = 0
+    total = framing
+    sep_b = len(sep.encode())
+    emitted = bool(title_page.strip())
+    kept: list[str] = []
+    for name, text in bodies.items():
+        size = len(text.encode())
+        added = size + (sep_b if emitted else 0)
+        if total + added > cap:
+            break
+        total += added
+        emitted = True
+        kept.append(assembly._first_heading(text))
+    return kept
+
+
+def test_toc_is_always_a_subset_of_body_units_across_the_cap_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Tiny fixtures + a shrunk cap so we can sweep the byte boundary where the
+    # TOC/body coupling used to diverge, instead of needing 32MB of data.
+    bodies = {
+        "u1.txt": "# Alpha\n" + ("a" * 60),
+        "u2.txt": "# Bravo\n" + ("b" * 60),
+        "u3.txt": "# Charlie\n" + ("c" * 60),
+    }
+    for name, text in bodies.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    sep = "\n\n---\n\n"
+    title = "My Report"
+
+    # Sweep a band of caps that straddles where the third unit and the TOC block
+    # fight for the last few bytes — this is exactly where the title-only seed used
+    # to let the TOC list a unit the body dropped.
+    saw_partial = False
+    for cap in range(240, 320):
+        monkeypatch.setattr(assembly, "_MAX_TOTAL_BYTES", cap)
+        framed = assembly.apply_framing(
+            {"units": list(bodies), "separator": sep}, tmp_path, "document",
+            title=title, required_structure=("toc",),
+        )
+        toc = _toc_titles(framed["title_page"])
+        kept = _body_kept_headings(framed["title_page"], bodies, sep, cap)
+        if len(kept) < len(bodies):
+            saw_partial = True
+        # The core invariant the finding is about: the TOC never lists a unit the
+        # body drops at the cap.
+        assert set(toc) <= set(kept), (
+            f"cap={cap}: TOC {toc} lists a unit the body dropped (kept={kept})"
+        )
+
+    # Make sure the sweep actually exercised the cap-truncation boundary (otherwise
+    # the subset assertion is vacuous).
+    assert saw_partial
+
+
+def test_toc_charges_the_leading_separator(tmp_path: Path,
+                                           monkeypatch: pytest.MonkeyPatch):
+    # Regression for sub-bug (a): with a non-empty head the body separates the FIRST
+    # unit too. Pick a cap where one unit fits in the body ONLY if you (wrongly) skip
+    # the leading separator. The TOC must drop the boundary unit, matching the body.
+    bodies = {
+        "u1.txt": "# Alpha\n" + ("a" * 50),
+        "u2.txt": "# Bravo\n" + ("b" * 50),
+    }
+    for name, text in bodies.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    sep = "\n\n---\n\n"
+    title = "Doc"
+
+    for cap in range(120, 200):
+        monkeypatch.setattr(assembly, "_MAX_TOTAL_BYTES", cap)
+        framed = assembly.apply_framing(
+            {"units": list(bodies), "separator": sep}, tmp_path, "document",
+            title=title, required_structure=("toc",),
+        )
+        toc = _toc_titles(framed["title_page"])
+        kept = _body_kept_headings(framed["title_page"], bodies, sep, cap)
+        assert set(toc) <= set(kept), f"cap={cap}: TOC {toc} vs body {kept}"
+
+
+def test_toc_lists_all_units_when_everything_fits(tmp_path: Path):
+    # No artificial cap: the fix must not over-prune when there is plenty of headroom.
+    for name, text in {
+        "a.txt": "# One\nbody",
+        "b.txt": "# Two\nbody",
+        "c.txt": "# Three\nbody",
+    }.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    framed = assembly.apply_framing(
+        {"units": ["a.txt", "b.txt", "c.txt"]}, tmp_path, "document",
+        title="Doc", required_structure=("toc",),
+    )
+    assert _toc_titles(framed["title_page"]) == ["One", "Two", "Three"]
+
+
+def test_unit_headings_leading_block_charges_first_separator():
+    # Direct unit test of the new _unit_headings parameter: leading_block=True must
+    # charge a separator before the first unit (the body does, when a head precedes).
+    import tempfile
+
+    d = Path(tempfile.mkdtemp())
+    (d / "x.txt").write_text("# X\n" + "x" * 20, encoding="utf-8")
+    sep = "----"
+    size = len((d / "x.txt").read_bytes())
+    # Cap exactly at body size, so the extra leading separator pushes it over.
+    cap = size
+    import modulatio.assembly as a
+    orig = a._MAX_TOTAL_BYTES
+    try:
+        a._MAX_TOTAL_BYTES = cap
+        # Without a leading block: the single unit fits (no separator charged).
+        assert a._unit_headings(["x.txt"], d, separator=sep, leading_block=False) == ["X"]
+        # With a leading block: the leading separator pushes it over the cap → dropped.
+        assert a._unit_headings(["x.txt"], d, separator=sep, leading_block=True) == []
+    finally:
+        a._MAX_TOTAL_BYTES = orig
