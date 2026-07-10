@@ -87,6 +87,16 @@ function mountSettings(body) {
       el("p", { class: "soft" }, k.hint),
       kv([["key", k.key], ["value", k.value || "(default)"],
         ["default", k.default || "(project decides)"], ["source", k.source]]),
+      // Truth-in-display: THIS server's actually-bound port can differ from
+      // the knob when it was launched with an explicit `--port` (which wins).
+      // Say so, instead of showing a "default" that contradicts the URL bar.
+      ...(k.key === "MODULATIO_WEB_PORT"
+          && (location.port || "80") !== String(k.value || k.default)
+        ? [el("p", { class: "soft" },
+            `Note: this server is currently serving on port ${location.port || "80"} `
+            + `(a --port launch flag overrides this setting). The value above `
+            + `applies the next time modulatio-api starts without --port.`)]
+        : []),
     ],
   });
 }

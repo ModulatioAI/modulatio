@@ -20,7 +20,7 @@ import os
 from dataclasses import dataclass
 from typing import Callable
 
-from modulatio import config
+from modulatio import config, context_budget
 
 
 def _int_range(lo: int, hi: int) -> "Callable[[str], bool]":
@@ -55,10 +55,17 @@ class Knob:
     valid: "Callable[[str], bool]"
 
 
-_BUDGET_ROLES = (
-    ("producer", "48000"), ("qc", "64000"), ("planner", "32000"),
-    ("leader-decompose", "48000"), ("leader-iterate", "32000"),
-    ("leader-reflect", "40000"), ("leader-chat", "48000"), ("research", "64000"),
+# Defaults + range come FROM the engine's own table/constants, never copied by
+# hand — the qc default drifted stale here (64000 while the engine moved to
+# 96000 on 2026-07-06) and the copied 64000 range cap then REFUSED the engine's
+# real default. One source of truth; the registry can't lie again.
+_BUDGET_ROLE_NAMES = (
+    "producer", "qc", "planner", "leader-decompose", "leader-iterate",
+    "leader-reflect", "leader-chat", "research",
+)
+_BUDGET_ROLES = tuple(
+    (role, str(context_budget.EXPERIMENTAL_DEFAULTS[role]))
+    for role in _BUDGET_ROLE_NAMES
 )
 
 KNOBS: "tuple[Knob, ...]" = tuple(
@@ -101,9 +108,12 @@ KNOBS: "tuple[Knob, ...]" = tuple(
         Knob(
             "MODULATIO_CTX_BUDGET_" + role.upper().replace("-", "_"),
             f"Context window · {role}", default,
-            f"Token window for the {role} role. Range 1000–64000 (hard "
-            f"ceiling). Applies on the next call.",
-            _int_range(1_000, 64_000),
+            f"Token window for the {role} role. Range "
+            f"{context_budget.CTX_BUDGET_MIN_TOKENS}–"
+            f"{context_budget.HARD_GLOBAL_CEILING} (hard ceiling). "
+            f"Applies on the next call.",
+            _int_range(context_budget.CTX_BUDGET_MIN_TOKENS,
+                       context_budget.HARD_GLOBAL_CEILING),
         )
         for role, default in _BUDGET_ROLES
     ]

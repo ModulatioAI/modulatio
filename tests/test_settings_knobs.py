@@ -68,3 +68,47 @@ def test_every_knob_is_backend_allowlisted():
     isn't allowlisted would save but silently never apply."""
     missing = {k.key for k in settings_knobs.KNOBS} - config.ENV_OVERRIDE_ALLOWLIST
     assert not missing, f"knobs not allowlisted: {missing}"
+
+
+# === registry-matches-reality drift guards (Clif 2026-07-09: "check every
+# setting… matches reality") — the qc window default drifted stale (64000
+# displayed while the engine moved to 96000) and the copied range cap then
+# REFUSED the engine's real default. Each knob's displayed default must BE
+# the consumer's default, and its validator must accept the engine's range.
+
+
+def test_ctx_budget_knob_defaults_match_the_engine_table():
+    from modulatio import context_budget
+
+    for knob in settings_knobs.KNOBS:
+        if not knob.key.startswith("MODULATIO_CTX_BUDGET_"):
+            continue
+        role = knob.key.removeprefix("MODULATIO_CTX_BUDGET_").lower().replace("_", "-")
+        assert int(knob.default) == context_budget.EXPERIMENTAL_DEFAULTS[role], (
+            f"{knob.key}: displayed default {knob.default} != engine default "
+            f"{context_budget.EXPERIMENTAL_DEFAULTS[role]}")
+        # The validator must accept everything up to the engine's hard ceiling —
+        # a stale copied cap refused the engine's own qc default.
+        assert knob.valid(str(context_budget.HARD_GLOBAL_CEILING)), knob.key
+        assert not knob.valid(str(context_budget.HARD_GLOBAL_CEILING + 1)), knob.key
+
+
+def test_engine_knob_defaults_match_their_consumers():
+    """Spot-weld the hand-written defaults to their engine consumers."""
+    from modulatio import context_budget, orchestration
+    from modulatio.types import Goal, Task
+    from modulatio.web import server
+
+    import uuid
+    pid = uuid.uuid4()
+    by = settings_knobs.BY_KEY
+    assert int(by["MODULATIO_TASK_MAX_RETRIES"].default) == Task(
+        id="t", goal_id="g", project_id=pid, description="d").max_retries
+    assert int(by["MODULATIO_GOAL_MAX_RETRIES"].default) == Goal(
+        id="g", objective="o", description="d", project_id=pid,
+        success_criteria="s").max_retries
+    assert float(by["MODULATIO_TASK_CONTEXT_CAP_PCT"].default) == (
+        context_budget.TASK_CONTEXT_CAP_PCT_DEFAULT)
+    assert float(by["MODULATIO_SIZE_TOLERANCE"].default) == (
+        orchestration._SIZE_TOLERANCE)
+    assert int(by["MODULATIO_WEB_PORT"].default) == server._DEFAULT_PORT
