@@ -413,3 +413,45 @@ def test_acp_run_prompt_wires_ask_capability_into_converse():
     srv._run_prompt("r1", sess, "hello", [])
     assert captured.get("ask") == sess.ask_capability          # broker ask wired
     assert captured.get("permission_callback") == sess.permission_cb  # gate wired
+
+
+# ── session/cancel framing (LOW-audit fold) ─────────────────────────────────
+
+
+def test_cancel_as_request_gets_a_response(vault_root):
+    """#46 regression: a non-compliant client that sends ``session/cancel`` as a
+    request (with an id) must still receive a response, or it hangs forever.
+
+    Before the fix ``_dispatch`` treated cancel as a pure notification and never
+    responded → ``client.wait`` here would time out."""
+    client = _Client(_factory([ChatResponse(content="ok", tool_calls=())], lambda **k: ""))
+    client.start()
+    try:
+        client.request("initialize", {})
+        sid = client.request("session/new", {})["result"]["sessionId"]
+        # Send cancel WITH an id (request-shaped, off-spec but real in the wild).
+        rid = client.send("session/cancel", {"sessionId": sid})
+        resp = client.wait(rid, timeout=5)
+        assert "id" in resp
+        # Either a JSON-RPC result (we ACK) — never silence.
+        assert "result" in resp or "error" in resp
+    finally:
+        client.close()
+
+
+def test_cancel_as_notification_still_silent(vault_root):
+    """The spec path is preserved: a cancel with NO id remains a notification —
+    the server emits no response frame for it (no spurious id:null response)."""
+    client = _Client(_factory([ChatResponse(content="ok", tool_calls=())], lambda **k: ""))
+    client.start()
+    try:
+        client.request("initialize", {})
+        sid = client.request("session/new", {})["result"]["sessionId"]
+        # Notification-shaped cancel (no id).
+        client._push(rpc.make_notification("session/cancel", {"sessionId": sid}))
+        # A following request must round-trip normally (server didn't wedge and
+        # didn't emit a stray response).
+        again = client.request("session/new", {})
+        assert again["result"]["sessionId"].startswith("sess-")
+    finally:
+        client.close()

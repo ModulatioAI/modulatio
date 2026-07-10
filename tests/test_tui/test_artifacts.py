@@ -973,3 +973,46 @@ def test_is_artifact_file_rejects_symlink(tmp_path):
     link = tmp_path / "link.md"
     link.symlink_to(real)
     assert _is_artifact_file(link) is False
+
+
+async def test_preview_read_error_with_markup_in_exc_does_not_crash(
+    tui_vault_with_artifacts, monkeypatch
+):
+    """Re-sweep regression (0.9.0-preship LOW/error-path): the preview's
+    read-FAILURE branch handed a bare f-string to ``Static.update``, which
+    parses Rich markup — an OSError whose str() carries a stray ``[/]`` made
+    the error handler itself raise MarkupError. The fix wraps the error
+    message in ``Text(...)``, matching the success path: rendered verbatim."""
+    from textual.widgets import ListView, Static, TabbedContent
+
+    from modulatio.tui.app import ModulatioApp
+
+    real_read_text = Path.read_text
+
+    def _boom_read_text(self, *args, **kwargs):
+        # An OSError whose str() carries a stray closing tag — exactly the
+        # kind of markup that Static.update would choke on.
+        if self.name == "art-t-001.md":
+            raise OSError("disk fault near token [/] while reading")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _boom_read_text)
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-artifacts"
+        await pilot.pause()
+        listview = app.query_one("#artifacts-list", ListView)
+        items = [str(item.children[0].render()) for item in listview.children]
+        idx = next(i for i, s in enumerate(items) if "art-t-001.md" in s)
+        # Highlighting triggers _refresh_preview -> the failing read path.
+        listview.index = idx
+        await pilot.pause()
+        preview = app.query_one("#artifact-preview", Static)
+        rendered = str(preview.render())
+
+    # The error message rendered verbatim — bracket sequence preserved, no
+    # MarkupError propagated out of the highlight handler.
+    assert "could not read art-t-001.md" in rendered
+    assert "[/]" in rendered
