@@ -9,6 +9,9 @@ the catalog→preset wiring onto the existing model_presets backend.
 from __future__ import annotations
 
 from modulatio import model_presets, provider_catalog as pc
+from pathlib import Path
+from modulatio.provider_catalog import get_provider, parse_models
+import pytest
 
 # A trimmed payload mirroring OpenRouter's /models shape.
 PAYLOAD = {
@@ -605,3 +608,339 @@ def test_capability_flags_for_falls_back_to_litellm_when_no_feed_tags(monkeypatc
     monkeypatch.setattr(pc, "capability_flags", lambda mid: "r")
     m = pc.CatalogModel(id="x/unknown", name="U", provider_id="openrouter")
     assert pc.capability_flags_for(m) == "r"
+
+
+# ═══ fold: test_provider_catalog_low_audit.py ═══
+# LOW-severity audit regressions for provider_catalog.
+#
+# #75 — OpenRouter free-detection must respect non-token pricing dimensions
+#       (per-request / per-image), not just prompt+completion.
+# #76 — curated_default must keep pinned ids even when the feed dropped them,
+#       consistent with apply_pinned (no silent pin loss).
+
+
+# ── #75: free-detection respects request / image pricing ─────────────────────
+
+
+def test_zero_token_rate_but_billed_per_request_is_not_free():
+    # prompt+completion are 0 but the model bills per request → NOT free.
+    model = {
+        "id": "vendor/charges-per-request",
+        "pricing": {"prompt": "0", "completion": "0", "request": "0.001"},
+    }
+    assert not pc._is_free(model, "pricing_zero")
+
+
+def test_zero_token_rate_but_billed_per_image_is_not_free():
+    model = {
+        "id": "vendor/charges-per-image",
+        "pricing": {"prompt": "0", "completion": "0", "image": "0.002"},
+    }
+    assert not pc._is_free(model, "pricing_zero")
+
+
+def test_zero_everywhere_stays_free():
+    # explicit zeros across all dimensions → free
+    model = {
+        "id": "vendor/truly-free",
+        "pricing": {
+            "prompt": "0", "completion": "0", "request": "0", "image": "0",
+        },
+    }
+    assert pc._is_free(model, "pricing_zero")
+
+
+def test_missing_extra_fields_still_free():
+    # most free models omit request/image entirely — must still read as free
+    model = {"id": "vendor/free", "pricing": {"prompt": "0", "completion": "0"}}
+    assert pc._is_free(model, "pricing_zero")
+
+
+# ── #76: curated_default keeps pins the feed dropped ─────────────────────────
+
+
+def test_curated_default_keeps_pin_missing_from_feed():
+    # a feed that dropped a pinned id, fed straight to curated_default
+    # (not via apply_pinned) must still surface every pin, leading the list.
+    payload = {
+        "data": [
+            {"id": "google/gemma-4-31b-it:free",
+             "pricing": {"prompt": "0", "completion": "0"}, "created": 1769800000},
+        ]
+    }
+    models = pc.parse_models(pc.OPENROUTER, payload)  # no apply_pinned
+    curated = pc.curated_default(pc.OPENROUTER, models, limit=30)
+    ids = [m.id for m in curated]
+    assert ids[:2] == ["openrouter/auto", "openrouter/free"]  # both pins survive
+    assert "google/gemma-4-31b-it:free" in ids
+
+
+# ═══ fold: test_provider_catalog_preship.py ═══
+# 0.9.0 pre-ship regressions for provider_catalog error-path hardening.
+#
+# Three malformed-feed cases that previously aborted the entire catalog parse
+# (or the whole fetch) instead of degrading per-entry:
+#   1. _is_free with a truthy non-dict `pricing` (e.g. "free") -> AttributeError
+#   2. parse_models with a truthy non-string `id` (e.g. int) -> AttributeError /
+#      pydantic ValidationError
+#   3. _load_picklist when the seed file is missing/corrupt -> JSON/OSError
+
+
+# ── 1. _is_free: non-dict pricing must not crash, just be treated as unknown ──
+
+
+def test_is_free_non_dict_pricing_does_not_crash():
+    # A feed that returns pricing as a string ("free") used to raise
+    # AttributeError out of parse_models, aborting the whole catalog.
+    model = {"id": "vendor/model", "pricing": "free"}
+    # Should not raise; a non-dict pricing can't prove zero rates -> not free.
+    assert pc._is_free(model, "pricing_zero") is False
+
+
+def test_is_free_list_pricing_does_not_crash():
+    model = {"id": "vendor/model", "pricing": ["0", "0"]}
+    assert pc._is_free(model, "pricing_zero") is False
+
+
+def test_is_free_zero_dict_pricing_still_free():
+    # Regression guard: the real zero-priced path is unchanged.
+    model = {"id": "vendor/model:free", "pricing": {"prompt": "0", "completion": "0"}}
+    assert pc._is_free(model, "pricing_zero") is True
+
+
+def test_parse_models_survives_non_dict_pricing_entry():
+    provider = pc.OPENROUTER  # free_detect="pricing_zero"
+    payload = {
+        "data": [
+            {"id": "good/model", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "bad/model", "pricing": "free"},  # the poison entry
+        ]
+    }
+    models = pc.parse_models(provider, payload)
+    ids = {m.id for m in models}
+    # Both entries parse; neither aborts the batch.
+    assert "good/model" in ids
+    assert "bad/model" in ids
+
+
+# ── 2. parse_models: non-string truthy id must skip, not abort ───────────────
+
+
+def test_parse_models_skips_non_string_id_with_strip():
+    # Google has id_prefix_strip="models/"; an int id used to hit
+    # int.startswith -> AttributeError, killing the whole feed.
+    provider = pc.GOOGLE
+    payload = {
+        "data": [
+            {"id": 12345},  # poison: truthy non-string
+            {"id": "models/gemini-2.5-flash"},
+        ]
+    }
+    models = pc.parse_models(provider, payload)
+    ids = {m.id for m in models}
+    assert "gemini-2.5-flash" in ids  # strip still applied to the good one
+    assert 12345 not in ids
+    assert all(isinstance(m.id, str) for m in models)
+
+
+def test_parse_models_skips_non_string_id_no_strip():
+    # OpenRouter has no strip; an int id used to reach CatalogModel(id=int)
+    # and raise pydantic ValidationError.
+    provider = pc.OPENROUTER
+    payload = {"data": [{"id": 999}, {"id": "ok/model"}]}
+    models = pc.parse_models(provider, payload)
+    assert {m.id for m in models} == {"ok/model"}
+
+
+def test_parse_models_coerces_non_string_name():
+    provider = pc.OPENROUTER
+    payload = {"data": [{"id": "x/y", "name": 7}]}
+    models = pc.parse_models(provider, payload)
+    assert len(models) == 1
+    assert models[0].name == "x/y"  # falls back to id when name isn't a usable str
+
+
+# ── 3. _load_picklist: missing/corrupt seed degrades to [] ───────────────────
+
+
+def test_load_picklist_missing_file_returns_empty(monkeypatch):
+    # _load_picklist builds Path(__file__).parent / ...; simulate the seed file
+    # being absent by raising FileNotFoundError from read_text for that name.
+    orig_read_text = Path.read_text
+
+    def _boom(self, *a, **k):
+        if self.name == "oauth_model_picklists.json":
+            raise FileNotFoundError("seed gone")
+        return orig_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    assert pc._load_picklist("anthropic") == []
+
+
+def test_load_picklist_corrupt_json_returns_empty(monkeypatch):
+    orig_read_text = Path.read_text
+
+    def _garbage(self, *a, **k):
+        if self.name == "oauth_model_picklists.json":
+            return "{ this is not json ]"
+        return orig_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _garbage)
+    assert pc._load_picklist("anthropic") == []
+
+
+def test_load_picklist_non_dict_json_returns_empty(monkeypatch):
+    orig_read_text = Path.read_text
+
+    def _list_json(self, *a, **k):
+        if self.name == "oauth_model_picklists.json":
+            return "[1, 2, 3]"
+        return orig_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _list_json)
+    assert pc._load_picklist("anthropic") == []
+
+
+def test_load_picklist_happy_path_still_works():
+    # The real seed file is present and parses for a real OAuth provider.
+    out = pc._load_picklist("anthropic")
+    assert isinstance(out, list)
+
+
+# ═══ fold: test_provider_catalog_r2_audit.py ═══
+# Regression tests for r2 audit findings in provider_catalog.parse_models.
+#
+# Covers:
+#   - parse_models must not crash on non-list-of-dict /models payloads
+#     (error envelopes, scalars, malformed feed rows).
+#   - non-integer created/context_length must not abort the whole catalog.
+
+
+def _provider():
+    p = get_provider("openrouter")
+    assert p is not None
+    return p
+
+
+def test_error_envelope_dict_does_not_crash():
+    # An error body returned with HTTP 200 has no data/models key -> raw becomes
+    # the dict itself; iterating its string keys must not raise AttributeError.
+    payload = {"error": {"message": "invalid key", "code": 401}}
+    assert parse_models(_provider(), payload) == []
+
+
+def test_scalar_payload_does_not_crash():
+    assert parse_models(_provider(), 42) == []
+    assert parse_models(_provider(), "boom") == []
+    assert parse_models(_provider(), None) == []
+
+
+def test_malformed_non_dict_rows_are_skipped():
+    payload = {"data": ["just-a-string", 7, None, {"id": "good-model"}]}
+    out = parse_models(_provider(), payload)
+    assert [m.id for m in out] == ["good-model"]
+
+
+def test_non_integer_fields_do_not_abort_catalog():
+    payload = {
+        "data": [
+            {"id": "m1", "created": "2024-01-01", "context_length": "128k"},
+            {"id": "m2", "created": 1700000000, "context_length": 8192},
+        ]
+    }
+    out = parse_models(_provider(), payload)
+    assert [m.id for m in out] == ["m1", "m2"]
+    # bad row coerces to None instead of dropping the model or raising.
+    assert out[0].created is None
+    assert out[0].context_length is None
+    assert out[1].created == 1700000000
+    assert out[1].context_length == 8192
+
+
+def test_numeric_string_fields_still_coerce():
+    payload = {"data": [{"id": "m", "created": "1700000000", "context_length": "8192"}]}
+    out = parse_models(_provider(), payload)
+    assert out[0].created == 1700000000
+    assert out[0].context_length == 8192
+
+
+def test_bool_field_not_treated_as_int():
+    payload = {"data": [{"id": "m", "context_length": True}]}
+    out = parse_models(_provider(), payload)
+    assert out[0].context_length is None
+
+
+# ═══ fold: test_provider_catalog_resweep_r3.py ═══
+# 0.9.0 pre-ship re-sweep (round 3) regressions for provider_catalog.
+#
+# Two LOW findings, additive to the existing provider_catalog test modules:
+#
+#   1. _load_picklist must degrade a NON-LIST seed value (str/dict for a provider
+#      key) to [] — never `list("claude-opus-4-8")` (one model id per char) nor a
+#      dict's keys.
+#   2. preset_kwargs(..., pool=True) must NOT silently drop pooling when the auth
+#      option has no resolvable env_var (e.g. CUSTOM's keyed AuthOption); it raises
+#      a clear ValueError instead.
+
+
+# ── 1. _load_picklist: a non-list seed value degrades to [] ──────────────────
+
+
+def _patch_seed(monkeypatch, raw: str) -> None:
+    orig_read_text = Path.read_text
+
+    def _fake(self, *a, **k):
+        if self.name == "oauth_model_picklists.json":
+            return raw
+        return orig_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", _fake)
+
+
+def test_load_picklist_string_value_degrades_to_empty(monkeypatch):
+    # Before the fix, list("claude-opus-4-8") yielded one id per character.
+    _patch_seed(monkeypatch, '{"anthropic": "claude-opus-4-8"}')
+    assert pc._load_picklist("anthropic") == []
+
+
+def test_load_picklist_dict_value_degrades_to_empty(monkeypatch):
+    # A dict value would otherwise iterate to its KEYS as model ids.
+    _patch_seed(monkeypatch, '{"anthropic": {"claude-opus-4-8": true}}')
+    assert pc._load_picklist("anthropic") == []
+
+
+def test_load_picklist_list_keeps_only_str_entries(monkeypatch):
+    # A well-formed list still passes through; non-str junk is dropped.
+    _patch_seed(monkeypatch, '{"anthropic": ["claude-opus-4-8", 7, null, "x"]}')
+    assert pc._load_picklist("anthropic") == ["claude-opus-4-8", "x"]
+
+
+# ── 2. preset_kwargs pool=True with no env_var raises, doesn't drop ──────────
+
+
+def test_preset_kwargs_pool_without_env_var_raises():
+    model = pc.CatalogModel(id="m/x", name="X", provider_id="custom")
+    # CUSTOM's api_key AuthOption has env_var=None.
+    keyed = next(a for a in pc.CUSTOM.auth_options if a.auth_type == "api_key")
+    assert keyed.env_var is None
+    with pytest.raises(ValueError, match="pool=True requires"):
+        pc.preset_kwargs(pc.CUSTOM, model, keyed, pool=True)
+
+
+def test_preset_kwargs_no_pool_custom_key_is_fine():
+    # Without pool, a keyless-env custom api_key option still builds cleanly.
+    model = pc.CatalogModel(id="m/x", name="X", provider_id="custom")
+    keyed = next(a for a in pc.CUSTOM.auth_options if a.auth_type == "api_key")
+    kwargs = pc.preset_kwargs(pc.CUSTOM, model, keyed)
+    assert kwargs["auth_type"] == "api_key"
+    assert kwargs["auth_config"] is None
+
+
+def test_preset_kwargs_pool_with_env_var_still_pools():
+    # The happy path (named env var) is unchanged: pool lands in auth_config.
+    p = pc.get_provider("openrouter")
+    model = pc.CatalogModel(id="x/y", name="Y", provider_id="openrouter")
+    keyed = next(a for a in p.auth_options if a.auth_type == "api_key")
+    kwargs = pc.preset_kwargs(p, model, keyed, pool=True)
+    assert kwargs["auth_config"]["pool"] is True
+    assert kwargs["auth_config"]["env_var"] == keyed.env_var

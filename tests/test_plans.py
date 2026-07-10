@@ -13,6 +13,9 @@ import pytest
 
 from modulatio import plans, vault
 from modulatio.attachments import build_attachment
+import modulatio.plans as plans_mod
+import threading
+import time
 
 
 @pytest.fixture
@@ -951,3 +954,624 @@ def test_extract_sub_objectives_normal_descriptions_unchanged():
     assert [s["index"] for s in out] == [1, 2]
     assert out[0]["description"] == "first."
     assert out[1]["description"] == "second."
+
+
+# ═══ fold: test_plans_r2_audit.py ═══
+# Regression tests for the round-2 full-debug findings on plans.py.
+#
+# Each test fails against the pre-fix code and passes after:
+#
+# 1. extract_sub_objectives dropped any sub-objective whose bold title
+#    contained a markdown emphasis asterisk (negated-`*` title class).
+# 2. persist() allocated next_plan_id then wrote non-atomically, so two
+#    concurrent persists could collide on the same id and clobber.
+# 3. YAML bool / malformed max_tokens / max_cost_usd silently coerced to
+#    a tiny cap (or raised) instead of degrading to None.
+
+
+
+
+# ── Finding 1: inner-emphasis titles must not be dropped ────────────────
+
+
+def test_extract_sub_objectives_keeps_inner_emphasis_title():
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. First plain title** — do the first thing.\n"
+        "**2. Write the *draft*** — produce a draft.\n"
+        "**3. Third plain title** — do the third thing.\n"
+    )
+    items = plans.extract_sub_objectives(body)
+    indices = [it["index"] for it in items]
+    # The core bug: the inner-emphasis item (2) used to be DROPPED
+    # entirely. It must now be present and in order.
+    assert indices == [1, 2, 3]
+    # The emphasized word survives in the title (the load-bearing
+    # content is preserved; the exact * balancing on a triple-asterisk
+    # `*draft***` boundary is inherently ambiguous and not asserted).
+    assert "draft" in items[1]["title"]
+    assert "produce a draft." in items[1]["description"]
+
+
+def test_extract_sub_objectives_keeps_multiple_emphasis_items():
+    # Two emphasized items in a row — both used to vanish pre-fix.
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. Refine the *outline*** — sketch it.\n"
+        "**2. Draft the *body*** — write it.\n"
+        "**3. Plain finish** — done.\n"
+    )
+    items = plans.extract_sub_objectives(body)
+    assert [it["index"] for it in items] == [1, 2, 3]
+
+
+def test_extract_sub_objectives_plain_titles_unchanged():
+    # Behavior preservation: the common case still parses identically.
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. Research the topic** — gather sources.\n"
+        "**2. Write the report**\n"
+    )
+    items = plans.extract_sub_objectives(body)
+    assert [it["index"] for it in items] == [1, 2]
+    assert items[0]["title"] == "Research the topic"
+    assert items[0]["description"] == "gather sources."
+    # Title-only item defaults description to the title.
+    assert items[1]["title"] == "Write the report"
+    assert items[1]["description"] == "Write the report"
+
+
+def test_extract_sub_objectives_warns_on_dropped_item(caplog):
+    # If a future regex drift drops an item, the count cross-check logs.
+    # We can't easily force a drop now (the fix parses them), so assert
+    # the no-drop happy path emits NO warning.
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. Alpha** — a.\n"
+        "**2. Beta with *style*** — b.\n"
+    )
+    with caplog.at_level("WARNING", logger="modulatio.plans"):
+        plans.extract_sub_objectives(body)
+    assert "may have been dropped" not in caplog.text
+
+
+# ── Pre-ship: nested **bold** inside a title must not corrupt parse ─────
+
+
+def test_extract_sub_objectives_nested_bold_title_not_truncated():
+    # A nested **bold** span inside the title used to truncate it: the
+    # lazy title match stopped at the first inner `**`, so the title
+    # became "Do the " and the real title/description bled into the
+    # description — WITHOUT tripping the count cross-check (still 1 item).
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. Do the **important** thing** — ship it.\n"
+        "**2. Plain second** — and this.\n"
+    )
+    items = plans.extract_sub_objectives(body)
+    assert [it["index"] for it in items] == [1, 2]
+    # Title now spans to the LAST `**` on the line, keeping the bold span.
+    assert items[0]["title"] == "Do the **important** thing"
+    assert items[0]["description"] == "ship it."
+    # The greedy match stays line-anchored: item 2 is untouched.
+    assert items[1]["title"] == "Plain second"
+    assert items[1]["description"] == "and this."
+
+
+# ── Pre-ship: detected item-drop fails CLOSED (returns empty) ───────────
+
+
+def test_extract_sub_objectives_returns_empty_on_detected_drop(caplog):
+    # A malformed item (missing closing bold) matches the line-start
+    # cross-check but not the item regex. Previously the function logged
+    # a warning and returned the SHORT list, silently skipping the
+    # approved sub-objective. It must now fail closed (empty) so the
+    # dispatcher pauses for human revision.
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. First well-formed task** — do it.\n"
+        "**2. Second task that forgot its closing bold\n"
+        "**3. Third well-formed task** — do it too.\n"
+    )
+    with caplog.at_level("WARNING", logger="modulatio.plans"):
+        items = plans.extract_sub_objectives(body)
+    assert items == []
+    assert "fail closed" in caplog.text or "dropped" in caplog.text
+
+
+# ── Finding 2: persist() id allocation is collision-safe ────────────────
+
+
+_PLAN_BODY = (
+    "<!-- modulatio:plan -->\n"
+    "### Diagnostic\nx\n\n### Sub-objectives\n**1. Do it**\n\n### Risks\nnone\n"
+)
+
+
+def test_persist_does_not_clobber_pre_existing_id(isolated_vault, monkeypatch):
+    # Pin next_plan_id to a fixed value to force a collision, then verify
+    # the first plan's bytes survive (O_EXCL won't overwrite) and the
+    # second persist still succeeds with a fresh id.
+    first = plans.persist(
+        _PLAN_BODY, project_code="tst", agent_id="leader",
+        source_message="first",
+    )
+    assert first is not None
+    first_text = first.path.read_text()
+
+    # Simulate a stale next_plan_id that re-returns the existing id once,
+    # then the real (incremented) id on retry.
+    real_next = plans_mod.next_plan_id
+    calls = {"n": 0}
+
+    def flaky_next(code: str) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return first.id  # collide with the existing file
+        return real_next(code)
+
+    monkeypatch.setattr(plans_mod, "next_plan_id", flaky_next)
+    second = plans.persist(
+        _PLAN_BODY, project_code="tst", agent_id="leader",
+        source_message="second",
+    )
+    assert second is not None
+    assert second.id != first.id
+    # The first plan's bytes were NOT clobbered by the colliding second.
+    assert first.path.read_text() == first_text
+    assert "first" in first.path.read_text()
+    assert "second" in second.path.read_text()
+
+
+def test_persist_round_trips_after_atomic_write(isolated_vault):
+    rec = plans.persist(
+        _PLAN_BODY, project_code="tst", agent_id="leader",
+        source_message="msg",
+    )
+    assert rec is not None
+    loaded = plans.load(rec.id, "tst")
+    assert loaded is not None
+    assert loaded.id == rec.id
+    assert loaded.source_message == "msg"
+
+
+# ── Finding 3: malformed budget caps degrade to None ────────────────────
+
+
+def _write_plan_with_frontmatter(isolated_vault, plan_id: str, fm_lines: str):
+    plans_dir = vault.project_dir("tst") / "plans"
+    plans_dir.mkdir(parents=True, exist_ok=True)
+    (plans_dir / f"{plan_id}.md").write_text(
+        "---\n"
+        f"id: {plan_id}\n"
+        "project_code: tst\n"
+        "created_at: '2026-06-13T00:00:00+00:00'\n"
+        "agent_id: leader\n"
+        "source_message: m\n"
+        "status: draft\n"
+        f"{fm_lines}"
+        "---\n\nbody\n"
+    )
+    return plan_id
+
+
+def test_load_rejects_yaml_bool_max_tokens(isolated_vault):
+    pid = _write_plan_with_frontmatter(
+        isolated_vault, "TST-PLAN-901", "max_tokens: true\n",
+    )
+    rec = plans.load(pid, "tst")
+    assert rec is not None
+    # `true` must NOT become a cap of 1 (int(True)); it degrades to None.
+    assert rec.max_tokens is None
+
+
+def test_load_rejects_yaml_bool_max_cost_usd(isolated_vault):
+    pid = _write_plan_with_frontmatter(
+        isolated_vault, "TST-PLAN-902", "max_cost_usd: false\n",
+    )
+    rec = plans.load(pid, "tst")
+    assert rec is not None
+    assert rec.max_cost_usd is None
+
+
+def test_load_degrades_non_numeric_cap_to_none(isolated_vault):
+    # A non-numeric string previously raised ValueError out of load(),
+    # which list_plans silently swallowed (whole plan vanished).
+    pid = _write_plan_with_frontmatter(
+        isolated_vault, "TST-PLAN-903", "max_tokens: not-a-number\n",
+    )
+    rec = plans.load(pid, "tst")
+    assert rec is not None
+    assert rec.max_tokens is None
+
+
+def test_load_non_ascii_plan_under_c_locale(isolated_vault, monkeypatch):
+    # The write path is UTF-8; a non-UTF-8 process locale must not turn a
+    # legitimate non-ASCII title/body into a UnicodeDecodeError that bricks
+    # load() + list_plans(). Force a non-UTF-8 default encoding to mirror a
+    # daemon/cron run under C/POSIX.
+    rec = plans.persist(
+        "<!-- modulatio:plan -->\n"
+        "### Diagnostic\nRédiger un résumé — 概要 ✦\n\n"
+        "### Sub-objectives\n**1. Écrire**\n",
+        project_code="tst", agent_id="leader", source_message="café",
+    )
+    assert rec is not None
+
+    # Simulate the locale-default decode path failing on UTF-8 bytes:
+    # patch read_text to behave as if the platform default were ASCII when
+    # no encoding is passed, and UTF-8 only when encoding is explicit.
+    real_read_text = Path.read_text
+
+    def locale_sensitive_read_text(self, *args, encoding=None, **kwargs):
+        if encoding is None:
+            # Emulate C/POSIX: ascii decode of UTF-8 bytes raises.
+            data = self.read_bytes()
+            return data.decode("ascii")  # raises UnicodeDecodeError
+        return real_read_text(self, *args, encoding=encoding, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", locale_sensitive_read_text)
+
+    loaded = plans.load(rec.id, "tst")
+    assert loaded is not None
+    assert "concept" not in loaded.body  # sanity: real body, not placeholder
+    assert "概要" in loaded.body
+    # list_plans must not silently swallow it either.
+    listed = plans.list_plans("tst")
+    assert any(p.id == rec.id for p in listed)
+
+
+def test_load_preserves_valid_numeric_caps(isolated_vault):
+    pid = _write_plan_with_frontmatter(
+        isolated_vault, "TST-PLAN-904",
+        "max_tokens: 50000\nmax_cost_usd: 2.5\nmax_wall_clock_min: 30\n",
+    )
+    rec = plans.load(pid, "tst")
+    assert rec is not None
+    assert rec.max_tokens == 50000
+    assert rec.max_cost_usd == 2.5
+    assert rec.max_wall_clock_min == 30.0
+
+
+# ═══ fold: test_plans_resweep.py ═══
+# Re-sweep regression tests for two 0.9.0 pre-ship findings on plans.py.
+#
+# Each test FAILS against the pre-fix code and PASSES after the fix.
+#
+# Finding 1 (extract_sub_objectives, LOW/correctness):
+#     A nested ``**bold**`` span in the DESCRIPTION (after the em-dash)
+#     made the greedy title capture bind its closing ``**`` to the last
+#     ``**`` on the line, corrupting both title and description WITHOUT
+#     tripping the item-count cross-check (still one parsed item).
+#
+# Finding 2 (set_status / update_execution_state, LOW/race):
+#     Both do an unguarded read-YAML / modify / write-YAML on the same
+#     plan file. A concurrent cancel()'s ``status='declined'`` flip could
+#     be clobbered by the dispatcher loop's update_execution_state writing
+#     back its (pre-cancel) meta — a lost update. The fix serializes both
+#     mutators under a per-plan flock and reads INSIDE the lock.
+
+
+
+
+
+
+# ── Finding 1: bold in the DESCRIPTION must not corrupt title/desc ──────
+
+
+def test_bold_in_description_does_not_corrupt_title():
+    # The exact finding example: greedy capture used to bind the title's
+    # closing ** to the ** around "care" in the description, yielding a
+    # title of "Build the thing** — do it with **care" and dropping the
+    # rest of the description.
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. Build the thing** — do it with **care** and precision.\n"
+        "**2. Plain second** — and this.\n"
+    )
+    items = plans.extract_sub_objectives(body)
+    assert [it["index"] for it in items] == [1, 2]
+    assert items[0]["title"] == "Build the thing"
+    assert items[0]["description"] == "do it with **care** and precision."
+    # The second item must be untouched (no line bleed).
+    assert items[1]["title"] == "Plain second"
+    assert items[1]["description"] == "and this."
+
+
+def test_bold_in_description_and_nested_bold_in_title_together():
+    # Nested bold in the TITLE *and* bold in the description on the same
+    # line: the title closes at the ** preceding the em-dash, the nested
+    # title bold and the description bold both survive intact.
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. Do the **important** thing** — handle with **care** now.\n"
+    )
+    items = plans.extract_sub_objectives(body)
+    assert len(items) == 1
+    assert items[0]["title"] == "Do the **important** thing"
+    assert items[0]["description"] == "handle with **care** now."
+
+
+def test_colon_separated_description_with_bold():
+    # A colon (not an em-dash) is also a valid separator; bold after it
+    # must stay in the description, not pull the title boundary.
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. Ship it**: ship with **urgency** today.\n"
+    )
+    items = plans.extract_sub_objectives(body)
+    assert len(items) == 1
+    assert items[0]["title"] == "Ship it"
+    assert items[0]["description"] == "ship with **urgency** today."
+
+
+def test_title_only_nested_bold_still_preserved():
+    # Behavior preservation: a title-only item with nested bold (no
+    # description) keeps its nested bold — the title closes at the LAST **.
+    body = (
+        "### Sub-objectives\n\n"
+        "**1. Do the **important** thing**\n"
+    )
+    items = plans.extract_sub_objectives(body)
+    assert len(items) == 1
+    assert items[0]["title"] == "Do the **important** thing"
+    # Title-only item defaults description to the title.
+    assert items[0]["description"] == "Do the **important** thing"
+
+
+# ── Finding 2: mutators serialize under a per-plan lock ─────────────────
+
+
+def test_update_execution_state_blocks_while_plan_lock_held(isolated_vault):
+    # Proves update_execution_state participates in the per-plan lock: a
+    # held lock must make the call wait. Pre-fix (no lock) it never waited.
+    saved = _make_plan()
+    # Generous timeout so the call would WAIT (not time out) on a held lock.
+    import os
+    os.environ["MODULATIO_PLAN_LOCK_TIMEOUT"] = "5"
+    try:
+        released = threading.Event()
+        started = threading.Event()
+
+        def hold_lock():
+            with plans._plan_lock(saved.id, "tst"):
+                started.set()
+                # Hold briefly so the writer must wait for us.
+                time.sleep(0.4)
+            released.set()
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        assert started.wait(2.0)
+
+        t0 = time.monotonic()
+        plans.update_execution_state(saved.id, "tst", current_index=1)
+        elapsed = time.monotonic() - t0
+        holder.join(5.0)
+        assert released.is_set()
+        # The write had to wait for the lock holder (~0.4s). Pre-fix the
+        # call took no lock and returned essentially immediately.
+        assert elapsed >= 0.2
+    finally:
+        os.environ.pop("MODULATIO_PLAN_LOCK_TIMEOUT", None)
+
+
+def test_cancel_not_clobbered_by_concurrent_update(isolated_vault):
+    # Lost-update integration test: the dispatcher loop's
+    # update_execution_state and a user cancel run concurrently, many
+    # rounds. The fix guarantees cancel's 'declined' is never resurrected
+    # to 'executing' by an update that read pre-cancel meta. Pre-fix this
+    # races and a resurrected 'executing' shows up.
+    import os
+    os.environ["MODULATIO_PLAN_LOCK_TIMEOUT"] = "5"
+    try:
+        for _ in range(30):
+            saved = _make_plan()
+            plans.set_status(
+                saved.id, "tst", "executing", decided_by="dispatcher",
+            )
+
+            barrier = threading.Barrier(2)
+
+            def do_update(pid=saved.id):
+                barrier.wait()
+                plans.update_execution_state(
+                    pid, "tst", current_index=2, tokens_used=123,
+                )
+
+            def do_cancel(pid=saved.id):
+                barrier.wait()
+                plans.cancel(pid, "tst", decided_by="user")
+
+            tu = threading.Thread(target=do_update)
+            tc = threading.Thread(target=do_cancel)
+            tu.start()
+            tc.start()
+            tu.join(5.0)
+            tc.join(5.0)
+
+            loaded = plans.load(saved.id, "tst")
+            # cancel is terminal: once declined, no update may flip it back.
+            assert loaded.status == "declined", (
+                f"cancel was clobbered: status={loaded.status!r}"
+            )
+    finally:
+        os.environ.pop("MODULATIO_PLAN_LOCK_TIMEOUT", None)
+
+
+# ── Finding 2b: a lock-free load() must never observe a torn write ──────
+
+
+def test_concurrent_load_never_observes_torn_write(isolated_vault):
+    # Atomic-write regression (re-sweep F2b — the ROOT of the cancel-vs-update
+    # flake). The per-plan lock serializes the read-modify-WRITE mutators, but
+    # pure readers (load(), and list_plans through it) run lock-free. The old
+    # writer used Path.write_text — open("w") TRUNCATES before writing — so a
+    # concurrent reader could catch the empty/partial window, fail to match the
+    # frontmatter, and get None: a live plan looks *missing*, which is exactly
+    # why cancel() raised "plan not found" and never flipped status. The fix
+    # writes a same-dir temp then os.replace (atomic), so a reader sees either
+    # the complete old or complete new file — never a torn one.
+    #
+    # Pre-fix this trips within a second under contention; post-fix never.
+    saved = _make_plan()
+    plans.set_status(saved.id, "tst", "executing", decided_by="dispatcher")
+    stop = threading.Event()
+    torn: list[str] = []
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            plans.update_execution_state(
+                saved.id, "tst", current_index=i, tokens_used=i,
+            )
+            i += 1
+
+    def reader():
+        while not stop.is_set():
+            rec = plans.load(saved.id, "tst")
+            if rec is None:
+                torn.append("load() saw a torn/empty plan file")
+                return
+
+    w = threading.Thread(target=writer)
+    readers = [threading.Thread(target=reader) for _ in range(4)]
+    w.start()
+    for r in readers:
+        r.start()
+    time.sleep(1.5)
+    stop.set()
+    w.join(5.0)
+    for r in readers:
+        r.join(5.0)
+
+    assert not torn, torn[0]
+
+
+# ═══ fold: test_plans_resweep_r3.py ═══
+# Round-3 re-sweep regression tests for two 0.9.0 pre-ship findings on
+# plans.py. Each test FAILS against the pre-fix code and PASSES after.
+#
+# Finding 1 (_plan_lock, MEDIUM/race):
+#     The re-entrancy key was computed as
+#     ``str(lock_path.resolve() if lock_path.exists() else lock_path)``.
+#     On the OUTER acquisition the lock file doesn't exist yet (touch()ed
+#     later in the same call) → key is the UNRESOLVED path. On a NESTED
+#     re-entrant acquisition the file now exists → key is the symlink-
+#     RESOLVED path. Under a symlinked plans-root the two keys diverge, so
+#     the nested call misses the depth>0 fast-path and re-grabs fcntl on
+#     the same fd → self-deadlock. Fix: compute the key unconditionally as
+#     ``str(lock_path.resolve())`` so both acquisitions agree.
+#
+# Finding 2 (_coerce_cap, LOW/correctness):
+#     A negative cap (``max_tokens: -1``) was coerced as-is; ``over_cap()``
+#     returns a halt reason on the first usage record (``0 > -1``), so the
+#     plan halts immediately with a confusing "cap exceeded". Fix: a
+#     negative coerced cap degrades to ``None`` (unbounded), mirroring
+#     ``comptroller._parse_int``.
+
+
+@pytest.fixture
+def symlinked_vault(tmp_path: Path, monkeypatch):
+    """Vault root reached through a symlinked component, so that
+    ``Path.resolve()`` (symlink-following) differs from the literal path.
+    This is the exact condition that made the outer/inner lock keys
+    diverge in Finding 1."""
+    real_root = tmp_path / "real_projects"
+    real_root.mkdir()
+    link_root = tmp_path / "linked_projects"
+    link_root.symlink_to(real_root, target_is_directory=True)
+    # Point the vault at the SYMLINK; resolve() will follow it to real_root.
+    monkeypatch.setattr(vault, "VAULT_ROOT", link_root)
+    vault.init_project("tst", "Test", "obj")
+    return link_root
+
+
+
+
+# ── Finding 1: nested re-entrant lock under a symlinked root ────────────
+
+
+def test_reentrant_plan_lock_under_symlinked_root_does_not_deadlock(
+    symlinked_vault,
+):
+    record = _make_plan()
+
+    # Run the nested acquisition on a worker thread with a hard timeout.
+    # Pre-fix: the inner acquisition computes a RESOLVED key (file now
+    # exists) that differs from the outer UNRESOLVED key, so it tries to
+    # re-grab the non-recursive flock on the same fd and self-deadlocks —
+    # the thread never finishes within the join timeout.
+    done = threading.Event()
+    error: list[BaseException] = []
+
+    def _exercise():
+        try:
+            with plans._plan_lock(record.id, "tst"):
+                # Nested re-entry on the SAME path: must pass through the
+                # depth>0 fast-path, not re-grab the OS lock.
+                with plans._plan_lock(record.id, "tst"):
+                    pass
+            done.set()
+        except BaseException as exc:  # noqa: BLE001 — surface to assert
+            error.append(exc)
+            done.set()
+
+    t = threading.Thread(target=_exercise, daemon=True)
+    t.start()
+    finished = done.wait(timeout=10.0)
+
+    assert finished, "nested re-entrant _plan_lock self-deadlocked"
+    assert not error, f"nested lock raised: {error!r}"
+
+
+def test_reentrant_lock_keys_match_across_existence(symlinked_vault):
+    # Direct assertion on the keying invariant the fix restores: the key
+    # the lock derives must be identical whether or not the lock file
+    # exists on disk.
+    record = _make_plan()
+    code = vault.validate_project_code("tst")
+    lock_path = plans._plans_dir(code) / f"{record.id}.lock"
+
+    assert not lock_path.exists()
+    key_before = str(lock_path.resolve())
+    lock_path.touch()
+    key_after = str(lock_path.resolve())
+    assert key_before == key_after
+
+
+# ── Finding 2: negative budget caps degrade to unbounded ────────────────
+
+
+def test_negative_token_cap_coerces_to_none():
+    # Pre-fix: int(-1) returned as-is. Fix: < 0 → None (unbounded).
+    assert plans._coerce_cap(-1, int) is None
+    assert plans._coerce_cap(-5, float) is None
+
+
+def test_zero_cap_is_preserved():
+    # Guard the boundary: 0 is a legitimate (if tight) cap, not negative.
+    assert plans._coerce_cap(0, int) == 0
+    assert plans._coerce_cap(0.0, float) == 0.0
+
+
+def test_positive_cap_unaffected():
+    assert plans._coerce_cap(1000, int) == 1000
+    assert plans._coerce_cap("2.5", float) == 2.5
+
+
+def test_negative_cap_in_frontmatter_loads_as_unbounded(symlinked_vault):
+    # End-to-end through persist/load: a hand-edited negative cap in the
+    # frontmatter must load as None (unbounded) rather than instant-halt.
+    record = _make_plan()
+    target = plans._plans_dir(
+        vault.validate_project_code("tst")
+    ) / f"{record.id}.md"
+    raw = target.read_text(encoding="utf-8")
+    # Inject a negative cap into the frontmatter (after the opening '---').
+    raw = raw.replace("---\n", "---\nmax_tokens: -1\n", 1)
+    target.write_text(raw, encoding="utf-8")
+
+    reloaded = plans.load(record.id, "tst")
+    assert reloaded is not None
+    assert reloaded.max_tokens is None

@@ -35,20 +35,6 @@ def project(tmp_path: Path, monkeypatch) -> str:
     return PROJECT_CODE
 
 
-def _record(entry_id: str = "v-1") -> "qc_history.VerdictRecord":
-    return qc_history.VerdictRecord(
-        entry_id=entry_id,
-        timestamp="2026-04-21T12:00:00Z",
-        task_id="TST-T-001",
-        producer_agent="drafter",
-        qc_agent="kimi",
-        verdict="fail",
-        defect_type="substantive",
-        rationale="Missing required topic.",
-        artifact_body="This draft is about X, not Y.",
-    )
-
-
 def test_load_verdicts_does_not_crash_on_non_utf8_file(project):
     """A non-UTF-8 / binary .md in the domain dir must not raise
     UnicodeDecodeError out of load_verdicts. Before the fix the bare

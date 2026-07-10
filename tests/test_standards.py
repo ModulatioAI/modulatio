@@ -13,11 +13,13 @@ from pathlib import Path
 import pytest
 
 from modulatio import standards, vault
+import os
+from modulatio import config
 
 
 def _write_standards(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -270,3 +272,198 @@ def test_assembler_skill_parsed_from_frontmatter(tmp_path, monkeypatch):
     # a kind with no assembler_skill declared → None (engine document default)
     _write_standards(shared_root / "text.md", "# text rules\n")
     assert standards.load_with_metadata("text").assembler_skill is None
+
+
+# ═══ fold: test_standards_r2_audit.py ═══
+# Regression tests for the r2 debug audit findings on standards.py.
+#
+# 1. ``_parse_file`` must honor ``load_with_metadata``'s documented contract
+#    ("return empty rather than raise") for a present-but-broken standards file
+#    (non-utf-8 bytes, unreadable perms) — a single bad
+#    ``<project>/standards/<domain>.md`` must NOT crash the producer/QC hot path.
+# 2. The shared-standards path must be resolved at CALL time, not frozen at
+#    import — relocating ``config.get_shared_resources_path()`` (e.g. after a
+#    config reload) must take effect without re-importing the module.
+
+
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def test_non_utf8_shared_file_returns_empty_not_raise(tmp_path, monkeypatch):
+    """A non-utf-8 shared standards file is treated as absent, not a crash."""
+    shared_root = tmp_path / "shared"
+    monkeypatch.setattr(standards, "_STANDARDS_ROOT", shared_root)
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
+    bad = shared_root / "text.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    # 0x80 0x81 are invalid as standalone UTF-8 — read_text(utf-8) would raise.
+    bad.write_bytes(b"---\nfreshness_class: fresh\n---\n\x80\x81 broken body")
+
+    entry = standards.load_with_metadata("text")
+    assert entry.body == ""
+    assert entry.freshness_class is None
+    assert standards.load("text") == ""
+
+
+def test_non_utf8_project_file_returns_empty_not_raise(tmp_path, monkeypatch):
+    """Same contract for a present-but-broken PROJECT-local override file."""
+    shared_root = tmp_path / "shared"
+    monkeypatch.setattr(standards, "_STANDARDS_ROOT", shared_root)
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
+    proj_file = vault.project_dir("TST") / "standards" / "text.md"
+    proj_file.parent.mkdir(parents=True, exist_ok=True)
+    proj_file.write_bytes(b"\xff\xfe not utf-8")
+
+    # Must not raise; broken project file is treated as absent → empty entry.
+    entry = standards.load_with_metadata("text", project_code="TST")
+    assert entry.body == ""
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file perms")
+def test_unreadable_shared_file_returns_empty_not_raise(tmp_path, monkeypatch):
+    """An unreadable (OSError on read) shared file is treated as absent."""
+    shared_root = tmp_path / "shared"
+    monkeypatch.setattr(standards, "_STANDARDS_ROOT", shared_root)
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
+    f = shared_root / "code.md"
+    _write(f, "---\n---\n# rules\n")
+    os.chmod(f, 0o000)
+    try:
+        entry = standards.load_with_metadata("code")
+        assert entry.body == ""
+    finally:
+        os.chmod(f, 0o644)
+
+
+def test_parse_file_directly_returns_empty_on_bad_bytes(tmp_path):
+    """Unit-level: _parse_file swallows decode errors and returns ({}, '')."""
+    bad = tmp_path / "x.md"
+    bad.write_bytes(b"\x80\x81\x82")
+    assert standards._parse_file(bad) == ({}, "")
+
+
+def test_shared_root_resolved_at_call_time(tmp_path, monkeypatch):
+    """With no pin, _standards_root() re-resolves from config every call — a
+    relocated shared-resources path takes effect without re-import."""
+    monkeypatch.setattr(standards, "_STANDARDS_ROOT", None)
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
+
+    first = tmp_path / "loc_a"
+    second = tmp_path / "loc_b"
+    _write(first / "standards" / "text.md", "---\n---\n# from A\n")
+    _write(second / "standards" / "text.md", "---\n---\n# from B\n")
+
+    monkeypatch.setattr(config, "get_shared_resources_path", lambda: first)
+    assert standards._standards_root() == first / "standards"
+    assert "from A" in standards.load("text")
+
+    # Relocate (simulating a config reload) — no module re-import.
+    monkeypatch.setattr(config, "get_shared_resources_path", lambda: second)
+    assert standards._standards_root() == second / "standards"
+    assert "from B" in standards.load("text")
+
+
+def test_pinned_root_overrides_config(tmp_path, monkeypatch):
+    """When _STANDARDS_ROOT is pinned, it wins over config (test-pin behavior
+    that the existing suite relies on)."""
+    pinned = tmp_path / "pinned"
+    monkeypatch.setattr(standards, "_STANDARDS_ROOT", pinned / "standards")
+    monkeypatch.setattr(config, "get_shared_resources_path", lambda: tmp_path / "other")
+    assert standards._standards_root() == pinned / "standards"
+
+
+# ═══ fold: test_standards_resweep_r4.py ═══
+# 0.9.0 pre-ship re-sweep regressions for ``standards.py``.
+#
+# Finding 1 [LOW/security]: ``load_with_metadata(domain, ...)`` built its three
+# tier paths (``seed``/``shared``/``project``) straight from ``domain`` (the
+# task's free-form, planner-sourced ``artifact_kind``) with no slug validation,
+# unlike ``qc_notes`` which guards with ``_DOMAIN_RE``. A traversal value could
+# escape the standards roots and read an arbitrary ``.md`` file. The fix
+# engine-binds the same bare-slug guard so every consumer inherits it.
+
+
+
+
+@pytest.fixture
+def isolate_roots(tmp_path, monkeypatch):
+    """Point all three tiers at controlled temp dirs so the test reasons
+    about path resolution, not Modulatio's shipped baseline standards."""
+    seed_root = tmp_path / "seed"
+    seed_root.mkdir()
+    monkeypatch.setattr(standards, "_SEED_STANDARDS_ROOT", seed_root)
+    monkeypatch.setattr(standards, "_STANDARDS_ROOT", tmp_path / "shared")
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "projects")
+    return tmp_path
+
+
+# --- Finding 1: path-traversal domain is rejected fail-closed ---------------
+
+def test_traversal_domain_cannot_read_file_outside_seed_root(isolate_roots):
+    """A ``../`` domain that would resolve to a real ``.md`` OUTSIDE the seed
+    root must not be read — the guard returns the empty entry instead."""
+    # Plant a "secret" .md one level above the seed root. A traversal domain
+    # of "../secret" would resolve seed_path to exactly this file.
+    secret = isolate_roots / "seed" / ".." / "secret.md"
+    _write(secret.resolve(), "TOP SECRET STANDARDS\n")
+    # Sanity: without the guard this path WOULD exist and be read.
+    assert (standards._SEED_STANDARDS_ROOT / "../secret.md").exists()
+
+    entry = standards.load_with_metadata("../secret")
+    assert entry is standards._EMPTY_ENTRY
+    assert entry.body == ""
+    assert entry.sources == ()
+
+
+def test_traversal_domain_via_load_wrapper_returns_empty(isolate_roots):
+    """The string-returning ``load`` wrapper inherits the guard too."""
+    secret = isolate_roots / "seed" / ".." / "secret.md"
+    _write(secret.resolve(), "TOP SECRET\n")
+    assert standards.load("../secret") == ""
+
+
+def test_deep_traversal_into_etc_passwd_style_path_is_empty(isolate_roots):
+    """A multi-segment traversal domain is non-conforming → empty entry,
+    no crash, no read attempt outside the roots."""
+    entry = standards.load_with_metadata("../../../../etc/passwd")
+    assert entry is standards._EMPTY_ENTRY
+
+
+def test_absolute_and_slash_domains_are_rejected(isolate_roots):
+    """Any domain carrying a path separator fails the bare-slug pattern."""
+    for bad in ("/etc/hosts", "sub/dir", "a/b", "."):
+        entry = standards.load_with_metadata(bad)
+        assert entry is standards._EMPTY_ENTRY, bad
+
+
+def test_uppercase_and_special_chars_rejected(isolate_roots):
+    """The slug pattern matches qc_notes: lowercase alnum + ``-``/``_`` only."""
+    for bad in ("Text", "my domain", "kind!", "a" * 33):
+        entry = standards.load_with_metadata(bad)
+        assert entry is standards._EMPTY_ENTRY, bad
+
+
+# --- Guard must NOT break legitimate bare-slug domains ----------------------
+
+def test_legit_slug_domain_still_loads(isolate_roots):
+    """A normal artifact_kind slug resolves and loads exactly as before."""
+    _write(
+        standards._SEED_STANDARDS_ROOT / "code.md",
+        "# Code rules\n- Tests required.\n",
+    )
+    entry = standards.load_with_metadata("code")
+    assert "Code rules" in entry.body
+    assert len(entry.sources) == 1
+
+
+def test_legit_slug_with_dash_and_underscore_loads(isolate_roots):
+    """Hyphen/underscore slugs (e.g. ``data-set``, ``web_copy``) are valid."""
+    for ok in ("data-set", "web_copy", "kind123"):
+        _write(
+            standards._SEED_STANDARDS_ROOT / f"{ok}.md",
+            f"# {ok} rules\n",
+        )
+        entry = standards.load_with_metadata(ok)
+        assert ok in entry.body, ok

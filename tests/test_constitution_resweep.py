@@ -15,18 +15,6 @@ from modulatio import config, constitution
 from modulatio.vault import project_dir
 
 
-@pytest.fixture
-def iso(tmp_path, monkeypatch):
-    seed = tmp_path / "seed_constitution.md"
-    seed.write_text("---\nname: constitution\nfreshness_class: stable\n---\n"
-                    "SEED VALUES\n", encoding="utf-8")
-    monkeypatch.setattr(constitution, "_SEED_CONSTITUTION_FILE", seed)
-    shared_root = tmp_path / "shared"
-    shared_root.mkdir()
-    monkeypatch.setattr(config, "get_shared_resources_path", lambda: shared_root)
-    return tmp_path
-
-
 def test_real_project_dir_raises_on_traversal_code():
     """Guard the assumption the fix rests on: the REAL project_dir raises
     ValueError for a path-traversal project_code. If this ever stops raising,

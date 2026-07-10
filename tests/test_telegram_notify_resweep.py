@@ -25,7 +25,7 @@ class _FakeResponse:
         return False
 
 
-def _capture_send(tmp_path, monkeypatch, *, caption: str) -> bytes:
+def _capture_send_caption(tmp_path, monkeypatch, *, caption: str) -> bytes:
     """Send a document with *caption* and return the raw multipart body."""
     monkeypatch.setenv("MODULATIO_MAX_TELEGRAM_DOC_BYTES", "100000")
     monkeypatch.setattr(
@@ -56,7 +56,7 @@ def test_send_document_crlf_caption_does_not_inject_parts(tmp_path, monkeypatch)
             "----ModulatioFormBoundary7MA4YWxkTrZu0gW"
         )
     )
-    body = _capture_send(tmp_path, monkeypatch, caption=malicious).decode("latin-1")
+    body = _capture_send_caption(tmp_path, monkeypatch, caption=malicious).decode("latin-1")
 
     boundary = "----ModulatioFormBoundary7MA4YWxkTrZu0gW"
     # Each real part opens with the boundary delimiter immediately followed by
@@ -75,7 +75,7 @@ def test_send_document_crlf_caption_does_not_inject_parts(tmp_path, monkeypatch)
 
 
 def test_send_document_caption_strips_control_chars(tmp_path, monkeypatch):
-    body = _capture_send(
+    body = _capture_send_caption(
         tmp_path, monkeypatch, caption="a\rb\nc\x00d"
     ).decode("latin-1")
     # CR, LF and the NUL are all stripped from the caption value; the visible
@@ -89,12 +89,12 @@ def test_send_document_caption_preserves_quotes_and_tabs(tmp_path, monkeypatch):
     # Captions are body text, not a quoted header value — quotes/backslashes
     # are harmless and must be preserved unescaped; tab is meaningful text.
     caption = 'say "hi"\tto\\you'
-    body = _capture_send(tmp_path, monkeypatch, caption=caption).decode("latin-1")
+    body = _capture_send_caption(tmp_path, monkeypatch, caption=caption).decode("latin-1")
     assert 'say "hi"\tto\\you' in body
 
 
 def test_send_document_normal_caption_preserved(tmp_path, monkeypatch):
-    body = _capture_send(
+    body = _capture_send_caption(
         tmp_path, monkeypatch, caption="Kickoff complete"
     ).decode("latin-1")
     assert "Kickoff complete" in body

@@ -16,7 +16,7 @@ import pytest
 from modulatio import standards_proposals, vault
 
 
-PROJECT_CODE = "R2A"
+PROJECT_CODE = "TST"
 
 
 @pytest.fixture
