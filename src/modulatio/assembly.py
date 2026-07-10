@@ -7,7 +7,7 @@ units (N stories into a book, N modules into a package, N records into a
 dataset) used to be told *"your response IS the assembled output"* — so it
 re-emitted every unit's body as LLM output tokens. For anything large that
 hits the model's OUTPUT token ceiling and the deliverable comes back
-**truncated** (the 2026-06-03 western anthology: 6 stories ≈ 12K output
+**truncated** (a large multi-unit deliverable: 6 stories ≈ 12K output
 tokens → only 2 stories survived).
 
 The fix is the speculative-decoding thesis applied to assembly: the smart
@@ -57,10 +57,10 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# #100 Hero m2: ONE canonical unit-name normalizer, shared by the assembler (here)
+# ONE canonical unit-name normalizer, shared by the assembler (here)
 # and the validator (review_ledger.verify_assembly / assembly_validate). Two
 # byte-identical twins normalizing the two sides of the same equality check is the
-# exact drift m2 prohibits — touch one and bundle member names skew, silently
+# exact drift this rule prohibits — touch one and bundle member names skew, silently
 # stopping the cheap path. review_ledger is the lower-level module (no runtime
 # import of assembly), so it owns the canonical helper; we alias it as `_norm`.
 from modulatio.review_ledger import _norm_unit as _norm
@@ -78,7 +78,7 @@ _DEFAULT_SEPARATOR = "\n\n---\n\n"
 #: above a unit's first heading. Runbook-SHAPED means line-leading (optionally
 #: bolded/emphasised) — a mid-sentence mention ("discusses Operation: market
 #: entry") is business prose, not scaffold, and stripping it is silent data
-#: loss (Wild Bill, code review 2026-07-02). BOTH markers must appear as lines
+#: loss. BOTH markers must appear as lines
 #: in the pre-heading region: the runbook always emits the pair together.
 _SCAFFOLD_MARKER_PATTERNS = (
     re.compile(r"^\s*[*_>]*\s*operation[*_]{0,2}\s*:", re.IGNORECASE),
@@ -151,7 +151,7 @@ class AssemblyResult:
 @dataclass
 class AssemblyRecord:
     """Engine-authored proof that a deliverable was produced by MECHANICAL
-    assembly (task #85, Nemo blocker 3). It exists ONLY when the engine ran
+    assembly. It exists ONLY when the engine ran
     ``assemble()`` — a producer that merely emits assembled-looking text leaves
     no record, so it cannot bypass normal QC. Assembly QC (``verify_assembly``)
     routes to the cheap structural check only when this record exists AND the
@@ -190,7 +190,7 @@ class AssemblyRecord:
 class DeliverableDigest:
     """Engine-extracted, MODEL-READABLE structure of an assembled deliverable — the
     verifier's EYES (#101 Part 0). Computed at assembly time so the smart layer can
-    judge the WHOLE without reading binary bytes it cannot (the HRWT Leader-verify
+    judge the WHOLE without reading binary bytes it cannot (a verifier that
     was handed ``"(could not read: …)"`` and shipped ``on_the_fence``).
 
     PRODUCT-AGNOSTIC by design. The engine defines only the CONTRACT — how many
@@ -259,7 +259,7 @@ def _safe_unit_path(name: str, artifacts_root: Path) -> Path | None:
     stripped = (name or "").strip()
     if not stripped or stripped.startswith("/") or stripped.startswith("~"):
         return None
-    # Nemo B4 #5: reject C0 control chars (esp. \r \n \0). A legitimate artifact
+    # Reject C0 control chars (esp. \r \n \0). A legitimate artifact
     # filename never contains them, and a newline in a unit name could inject a
     # `file '...'` directive into ffmpeg's line-oriented concat list (the media
     # join) — belt-and-suspenders beyond the single-quote escaping there.
@@ -328,7 +328,7 @@ def _generic_digest(
     default until a family grows a richer extractor — it reads NO domain meaning from
     the bytes, so it is correct for code / data / media / anything at all.
 
-    # re-sweep (#101/0.9.0): for a SINGLE-FILE-OUTPUT family (a media composite —
+    # For a SINGLE-FILE-OUTPUT family (a media composite —
     # ffmpeg/ImageMagick/zip write ONE binary), the deliverable IS that produced
     # ``output_file``, not the N input units in ``units_used``. Pointing the digest at
     # the inputs aims the verifier's "eyes" at the wrong files. When a real composite
@@ -567,7 +567,7 @@ def _document_head(
         # discrete cap boundary sits between the two head sizes); there we must pick the
         # SAFE side, so we always seed with the LARGEST head seen — fewer TOC entries —
         # which makes the TOC a SUBSET of the body's units (never a phantom entry the
-        # reader can't find). re-sweep: a single seed pass let TOC/body diverge by one
+        # reader can't find). A single seed pass once let TOC/body diverge by one
         # unit at the cap. The seed is non-decreasing, so this converges in ≤ N steps.
         seed = len("\n".join(lines).encode())  # title-only to start
         headings = _headings_for(seed)
@@ -652,7 +652,7 @@ def _normalize_doc_sequence(headings: "list[str]") -> "tuple[list[str], bool]":
     sequence onto unlabeled parts, never disturb an already-correct one). Returns the
     (possibly rewritten) headings + whether anything changed.
 
-    The label family must be HOMOGENEOUS (Nemo follow-up): a heterogeneous set
+    The label family must be HOMOGENEOUS: a heterogeneous set
     (``Story 1`` / ``Chapter 7`` / ``Section 3``, or a label form mixed with a bare
     leading-number form) is not one sequence, so it is left untouched rather than
     renumbered into a fake one."""
@@ -879,7 +879,7 @@ def _assemble_document(
             missing.append(name)
             continue
         # Count the SEPARATOR that will precede this block, not just the body —
-        # a huge separator × N blocks must not slip past the cap (Nemo hull #1).
+        # a huge separator × N blocks must not slip past the cap.
         added = size + (sep_bytes if blocks else 0)
         if total + added > _MAX_TOTAL_BYTES:
             errors.append(
@@ -912,7 +912,7 @@ def _assemble_document(
         blocks.append(trailer.strip("\n"))
 
     content = separator.join(blocks)
-    # Hard belt: NEVER return over-cap content for writing (Nemo hull #1 — the
+    # Hard belt: NEVER return over-cap content for writing (the
     # old "final check" only logged an error but still returned the bytes). An
     # over-cap assembly is incomplete → fail-closed to a full review.
     if over_cap or len(content.encode()) > _MAX_TOTAL_BYTES:
@@ -934,7 +934,7 @@ def _assemble_document(
             # Catch BOTH: a missing/failed render tool raises _DocToolError; the
             # output-size cap (_check_output_size) raises _MediaToolError. Either way
             # fail CLOSED — keep the real text, flag the binary as unrendered, never
-            # let it escape and never fabricate (Nemo hull #8).
+            # let it escape and never fabricate.
             result.errors.append(
                 f"binary render unavailable ({render_format}); kept text — {exc}"
             )
@@ -1041,8 +1041,8 @@ def _assemble_data(manifest: dict, artifacts_root: Path) -> AssemblyResult:
 
 
 def _capped(content: str, errors: list[str], what: str) -> tuple[str, list[str]]:
-    """Enforce the final-output cap on a merged dataset (Nemo hull #2 —
-    serialization/quoting can expand a near-cap input past the cap). Over → fail
+    """Enforce the final-output cap on a merged dataset (serialization/quoting
+    can expand a near-cap input past the cap). Over → fail
     closed (empty content + error → incomplete → full review)."""
     if len(content.encode()) > _MAX_TOTAL_BYTES:
         return "", errors + [f"merged {what} exceeds {_MAX_TOTAL_BYTES} bytes"]
@@ -1051,7 +1051,7 @@ def _capped(content: str, errors: list[str], what: str) -> tuple[str, list[str]]
 
 def _dedupe_key(text: str) -> str:
     """Bounded dedupe key — a short hash, so the `seen` set can't grow to the
-    full serialized size of a huge dataset (Nemo hull #2 memory bound)."""
+    full serialized size of a huge dataset (memory bound)."""
     return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -1090,7 +1090,7 @@ def _merge_json(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[s
 
 def _merge_csv(items: list[tuple[str, str]], dedupe: bool) -> tuple[str, list[str]]:
     """Stack CSV units under ONE header. ``strict=True`` so malformed quoting is a
-    real ``csv.Error`` (not silently normalized — Nemo hull #3). Header mismatch
+    real ``csv.Error`` (not silently normalized). Header mismatch
     AND row-arity mismatch are recorded errors → the assembly is incomplete
     (fail-closed), never silently merging mismatched/garbage schemas."""
     # ``field_size_limit`` is process-wide global parser state; raise it only for
@@ -1181,8 +1181,8 @@ def _media_kind(manifest: dict, resolved: "list[tuple[str, Path]]") -> str:
 
 
 #: Extra directories to search for an engine tool BEYOND ``PATH`` — the common
-#: non-PATH installs (a user's ~/bin, pipx/local, Homebrew, /opt, snap). The HRWT
-#: render failed only because pandoc lived in ``~/bin``, off the launching process's
+#: non-PATH installs (a user's ~/bin, pipx/local, Homebrew, /opt, snap). A render
+#: once failed only because pandoc lived in ``~/bin``, off the launching process's
 #: PATH; the engine should find a tool wherever it is, not only when the shell that
 #: started it happened to export the right PATH.
 _TOOL_SEARCH_DIRS: tuple[str, ...] = (
@@ -1201,7 +1201,7 @@ def _usable_abs(p: "Path") -> bool:
 def resolve_tool(name: str) -> "str | None":
     """Resolve an external engine tool to an ABSOLUTE path, robust to ``PATH``.
 
-    Order (Nemo hull #6/#7 — the security contract is a real absolute,
+    Order (the security contract is a real absolute,
     PATH-independent invocation):
 
     1. operator override ``MODULATIO_<NAME>_PATH`` — must be an ABSOLUTE path to an
@@ -1282,7 +1282,7 @@ def _run_doc_tool(argv: "list[str]", *, tool: str) -> None:
     """Run a document-render tool, fail-closed on absent/timeout/non-zero. Engine-
     owned (not the producer sandbox); argv is built from engine-validated paths.
     The tool is resolved to an ABSOLUTE path (robust to PATH) so the render works
-    however the process was launched — the HRWT pandoc-in-~/bin failure."""
+    however the process was launched — guarding against a pandoc-in-~/bin PATH gap."""
     resolved = resolve_tool(argv[0])
     if resolved is None:
         raise _DocToolError(
@@ -1317,7 +1317,7 @@ def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path
     rendered file path inside ``artifacts_root`` (the engine moves it onto the
     deliverable path). Raises :class:`_DocToolError` when the toolchain is
     unavailable, so the caller keeps the real text and flags the binary as
-    unrendered — it NEVER fabricates a binary (the HRWT text-named-.pdf failure)."""
+    unrendered — it NEVER fabricates a binary (guarding against a text file wrongly named .pdf)."""
     fmt = (fmt or "").lower().lstrip(".")
     src = _media_out(artifacts_root, ".md")
     src.write_text(content, encoding="utf-8")
@@ -1328,7 +1328,7 @@ def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path
                 _run_doc_tool(["pandoc", str(src), "-o", str(out)], tool="pandoc")
                 _check_output_size(out)
             except (_DocToolError, _MediaToolError):
-                # Fail-closed hygiene (Nemo hull #9): a failed/oversized render must
+                # Fail-closed hygiene: a failed/oversized render must
                 # not leave a partial hidden output behind to pollute artifact scans.
                 out.unlink(missing_ok=True)
                 raise
@@ -1344,7 +1344,7 @@ def render_document(content: str, fmt: str, artifacts_root: Path) -> "tuple[Path
                 # md → docx (pandoc) → pdf (libreoffice). The intermediate docx
                 # MUST be rendered from the markdown source FIRST; handing an
                 # empty docx to soffice yields a contentless PDF (regression
-                # caught in the 0.9.0 pre-ship re-sweep). Both steps fail-closed.
+                # caught during pre-ship testing). Both steps fail-closed.
                 _run_doc_tool(["pandoc", str(src), "-o", str(docx_tmp)], tool="pandoc")
                 _run_doc_tool(
                     ["soffice", "--headless", "--convert-to", "pdf",

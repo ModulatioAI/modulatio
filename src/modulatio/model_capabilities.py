@@ -58,7 +58,7 @@ _DEFAULT_CAPS: tuple[str, ...] = ()
 # the token must start the id or follow a separator (``/`` ``-`` whitespace) and
 # end the id or be followed by a separator — never embedded inside a longer word.
 #
-# re-sweep (0.9.0): the LEFT boundary must NOT include a bare ``-``/``_``. An
+# the LEFT boundary must NOT include a bare ``-``/``_``. An
 # o-token welded between two name segments (``command-o4-beta``,
 # ``llama-o3-instruct``, ``foo_o3_bar``) has a ``-``/``_`` on both sides, so the
 # old class ``[/\s_-]`` matched it and mis-tagged it OpenAI o-series. Genuine

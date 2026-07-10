@@ -5,7 +5,7 @@
 Writes (in order):
   1. ``~/.config/modulatio/defaults.json`` — paths + default models
   2. ``<vault>/.env`` — staged API keys (chmod 600)
-  3. (deferred to slice 4 onward) Roster files for triad + workers
+  3. (deferred) Roster files for triad + workers
   4. ``~/.config/modulatio/setup-state.json`` — mark wizard complete
 
 This is the ONLY place filesystem side effects happen — earlier steps
@@ -24,7 +24,7 @@ from modulatio.setup_wizard import steps
 
 def _derive_default_models(structural: list[dict], workers: list[dict]) -> dict[str, str]:
     """Map agent picks to role-default models for the kickoff CLI's flag
-    defaults. Skills-first (#143): the structural roles are the Leader (always)
+    defaults. Skills-first: the structural roles are the Leader (always)
     and an optional QC — this maps whichever are present.
     The task-planning utility call (``planner``) uses the Leader's model —
     planning is the Leader's job now that the Coordinator role is gone.
@@ -92,7 +92,7 @@ def _derive_providers(state: dict) -> list[str]:
     providers: set[str] = set()
     for env_var in state.get("staged_api_keys", {}):
         name = str(env_var).strip()
-        # re-sweep: the neutral 'API_KEY' sentinel (the malformed-base-url
+        # The neutral 'API_KEY' sentinel (the malformed-base-url
         # fallback) carries no provider — it's 7 chars so it doesn't end with
         # '_API_KEY' (8) and would otherwise render a bogus 'api_key' provider
         # on the confirm line. Skip it.
@@ -253,7 +253,7 @@ def commit(state: dict, *, version: str) -> None:
         )
         theme.success(f"Wrote {len(staged)} API key(s) to {env_path} (chmod 600)")
 
-    # 3. shared resources directory + per-role agent files (deferred to slice 4
+    # 3. shared resources directory + per-role agent files (deferred
     # for full roster integration; for now ensure the directory tree exists).
     shared = Path(state["shared_resources_path"])
     for sub in ("templates", "skills", "standards", "research"):

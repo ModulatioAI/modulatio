@@ -95,7 +95,7 @@ class ModelWizard(Vertical):
                 model=model,
             )
         except FileNotFoundError as exc:
-            # re-sweep #1: escape — exc embeds the operator-typed agent id
+            # Escape — exc embeds the operator-typed agent id
             status.update(f"[red]Agent not found: {escape(str(exc))}[/red]")
             return None
         except Exception as exc:
@@ -103,7 +103,7 @@ class ModelWizard(Vertical):
             return None
 
         self.last_updated = updated
-        # re-sweep #1: updated.model is the free-form operator-typed id; a
+        # updated.model is the free-form operator-typed id; a
         # `[/]`-class value would raise MarkupError in Static.update otherwise.
         status.update(
             f"[green]Updated {escape(str(updated.id))} → "

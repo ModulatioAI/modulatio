@@ -10,9 +10,8 @@ file actions; future gates (``network`` egress, ``exec`` code, paid ``spend``)
 are other classes. once/session live in the gate (in-memory). ``revoke_all`` is
 the ``/rp`` escape hatch (clears every class).
 
-Cadre-shaped (2026-06-18): keyed store + action-scoping (Jenny-B / Nemo-BLOCK2 /
-Wild Bill HIGH-2); realpath-pinned path grants (Wild Bill HIGH-1); fail-closed,
-abs-only path resources (Wild Bill #7). Pure data/logic — no UI coupling
+Keyed store + action-scoping; realpath-pinned path grants; fail-closed,
+abs-only path resources. Pure data/logic — no UI coupling
 (web-UI safe). Forward-compat: a v1 ``allowed_roots`` list migrates to path
 grants with the full action set.
 """
@@ -39,7 +38,7 @@ SCOPES = (SCOPE_ONCE, SCOPE_SESSION, SCOPE_ALWAYS, SCOPE_DENY)
 #: (legacy/v1 path grants migrate to this).
 ACTION_ALL = "*"
 #: The file actions a folder-widen (request_class="path") grants. Code exec and
-#: network egress are SEPARATE classes/actions (Wild Bill HIGH-2), never folded
+#: network egress are SEPARATE classes/actions, never folded
 #: into a path grant.
 PATH_ACTIONS = ("read", "edit", "write")
 
@@ -57,7 +56,7 @@ def _permission_file(code: str) -> Path:
 def _normalize_path(path: str) -> str:
     """Canonical REALPATH — resolves symlinks (a filesystem touch) so a durable
     path grant pins to the concrete directory at grant time; retargeting the
-    symlink later cannot widen the grant (Wild Bill HIGH-1)."""
+    symlink later cannot widen the grant."""
     return str(Path(path).resolve())
 
 

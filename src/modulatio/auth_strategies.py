@@ -15,8 +15,8 @@ knowing which provider sits underneath. Adding a new auth type =
 implement the protocol + register the factory; nothing else changes.
 
 The plugin registration point (``register_strategy``) is also what
-makes future paths like a subprocess-CLI auth (``claude`` / ``codex``
-/ ``opencode`` invoked as binaries instead of HTTP-bearer tokens) drop
+makes future paths like a subprocess-CLI auth (invoking a CLI binary
+instead of HTTP-bearer tokens) drop
 in cleanly — they're just another strategy implementation.
 
 This module wraps existing helpers in ``oauth_helpers`` and
@@ -180,8 +180,7 @@ class OAuthAnthropicStrategy:
     ``oauth_refresh.try_refresh_anthropic``.
 
     Note: today's runtime passes the OAuth token directly to
-    ``api.anthropic.com`` without Claude-Code attribution headers.
-    See ``feedback_modulatio_oauth_attribution_gap.md``. The strategy
+    ``api.anthropic.com`` without CLI-attribution headers. The strategy
     pattern doesn't fix that; it just collects the existing behavior
     behind a uniform interface.
     """

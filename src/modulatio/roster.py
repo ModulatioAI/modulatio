@@ -115,7 +115,7 @@ class Agent(BaseModel):
         "regardless of construction path" claim actually holds."""
         return v if v >= 1 else 1
 
-    # re-sweep finding 1: floor the cap on the copy path too. field_validator
+    # 1: floor the cap on the copy path too. field_validator
     # does not run on Pydantic's model_copy, so ``add_model``/``clear_model``
     # (and any future update) could otherwise slip a sub-1, non-dispatchable
     # cap into the roster.
@@ -747,7 +747,7 @@ def _seed_from_team_template(
             tier=entry.get("tier") or "producer",
             template_origin=entry.get("template_origin") or "wizard-team",
             # Per-agent context budget (model-agnostic, by role). Usually
-            # None → the tested per-role PIANO defaults govern; set only when
+            # None → the tested per-role defaults govern; set only when
             # the user deliberately overrode it in the wizard (discouraged).
             context_budget=entry.get("context_budget"),
             disable_thinking=entry.get("disable_thinking"),

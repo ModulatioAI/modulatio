@@ -141,7 +141,7 @@ def load_body(project_code: str, run_id: str | None) -> str:
     except (OSError, UnicodeDecodeError):
         # Strict decode — a corrupt state doc degrades to empty prompt context,
         # never decode-with-replacement (which on the append RMW below would
-        # persist U+FFFD back into the durable state doc). Nemo.
+        # persist U+FFFD back into the durable state doc).
         return ""
 
 
@@ -223,8 +223,7 @@ STATE_DOC_PARSE_REASONS = (
 class StateDocParseResult:
     """Typed result from :func:`parse_state_doc_block`. Distinguishes
     the four pre-validation failure modes so callers can route to the
-    correct ``compaction_skipped`` audit row (Nemo Round-2 implementation
-    sweep M5).
+    correct ``compaction_skipped`` audit row.
 
     ``parsed`` is the decoded dict on ``reason == "ok"``; ``None``
     otherwise. Callers must never treat ``parsed=None`` alone as
@@ -475,7 +474,7 @@ def append_activity(
         body = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         # No-op on a corrupt/unreadable state doc — caller rewrites a fresh
-        # state from a structured snapshot. Never splice + write back lossy. Nemo.
+        # state from a structured snapshot. Never splice + write back lossy.
         return None
     anchor = "### Recent Activity"
     if anchor not in body:

@@ -4,7 +4,7 @@
 This is the single security-approval surface for every gated Leader request
 (folder-widening is the first consumer; ``exec`` / ``network`` / ``spend`` are
 future ones). ``decide()`` returns a SCOPE — not a bare bool — so the engine
-honors once / session / always distinctly (Jenny-A). The default
+honors once / session / always distinctly. The default
 ``leader_workspace`` is silently allowed; anything else prompts (the prompt is
 INJECTED — no UI here, web-UI safe), and the decision is recorded at its scope:
 
@@ -14,8 +14,8 @@ INJECTED — no UI here, web-UI safe), and the decision is recorded at its scope
     deny     → refused
 
 Grants are action-scoped AND class-keyed, so a folder (``path``) grant of
-read/edit/write never covers an ``exec`` or ``network`` request (Wild Bill
-HIGH-2). ``available_scopes`` lets a request class restrict what may be offered
+read/edit/write never covers an ``exec`` or ``network`` request.
+``available_scopes`` lets a request class restrict what may be offered
 (destructive omits ``always``); the gate refuses a returned scope out of that
 set. ``revoke_all`` (the ``/rp`` escape hatch) clears session + persisted.
 """
@@ -42,14 +42,14 @@ _FS_CLASSES = {lp.REQUEST_CLASS_PATH, "exec"}
 @dataclass(frozen=True)
 class SecurityRequest:
     """An engine-owned, gated request. ``action``/``resource``/``why`` are
-    ENGINE-rendered (never model-narrated — Wild Bill MED-5)."""
+    ENGINE-rendered (never model-narrated)."""
 
     action: str            # read / edit / write / exec / egress / spend / delete …
     resource: str          # path / host / cost-class — the thing being accessed
     request_class: str     # "path" / "exec" / "network" / … — the store bucket
     why: str               # human reason shown in the modal
     available_scopes: tuple = lp.SCOPES   # subset this class may offer
-    cap_unit: str | None = None           # magnitude axis (Jenny-C): "$" / "seconds" / …
+    cap_unit: str | None = None           # magnitude axis: "$" / "seconds" / …
     cap_value: float | None = None
 
 
@@ -69,7 +69,7 @@ class LeaderPermissionGate:
         self.code = code
         self.workspace = Path(workspace)
         # Swarm deliverable/run trees the Leader must never be widened over OR
-        # into (the structural cheat-guard, Wild Bill BLOCK-1). Engine-enforced
+        # into (the structural cheat-guard). Engine-enforced
         # in ``refusal_reason``, not merely warned about.
         self._blocked_subtrees = tuple(str(s) for s in blocked_subtrees)
         self._session: dict[str, list[dict]] = {}  # {request_class: [grant, ...]}
@@ -82,7 +82,7 @@ class LeaderPermissionGate:
         """Per-call check: is this request already covered? The Leader's own
         ``workspace`` is auto-allowed for any FILESYSTEM action (path + exec) —
         it's his bwrap-confined home. A WIDENED path grant (read/edit/write) does
-        NOT cover exec (separate class) — Wild Bill HIGH-2. Non-filesystem
+        NOT cover exec (separate class). Non-filesystem
         classes (network/spend) need an exact resource match (no workspace)."""
         grants = self._grants(request.request_class)
         if request.request_class in _FS_CLASSES:
@@ -103,18 +103,18 @@ class LeaderPermissionGate:
     def refusal_reason(self, request: SecurityRequest) -> "str | None":
         """Engine-bound HARD refusal: a reason this request can NEVER be granted
         in v1 (regardless of the scope the operator picks) — else ``None``. This
-        is the enforcement Wild Bill required: a warning string alone let a
+        is enforced here: a warning string alone let a
         dangerous root still be granted. Two binds:
 
         * ``exec`` outside the workspace is refused outright (exec-widen is
           deferred) — even if a stale exec grant exists, so v1 never accumulates
-          one (Wild Bill CHANGES-2).
+          one.
         * a ``path`` widen that overlaps a broad/system root or a swarm
-          deliverable tree is refused (Wild Bill BLOCK-1)."""
+          deliverable tree is refused."""
         if request.request_class == "exec":
             # Workspace exec is always allowed (the Leader's own bwrap home).
             # exec-widen: an out-of-workspace exec is GRANTABLE (prompts), but the
-            # cheat-guard applies (Nemo #5) — exec is at least as dangerous as a
+            # cheat-guard applies — exec is at least as dangerous as a
             # path widen, so refuse a broad/system root or one overlapping a swarm
             # deliverable tree. The exec resource IS the cwd dir (realpath-stable).
             if self._in_workspace(request.resource):
@@ -156,8 +156,8 @@ class LeaderPermissionGate:
         prompt the operator (``prompt_fn``) and record at the chosen scope."""
         # Engine-bound refusal FIRST: a dangerous/deliverable-overlapping path or
         # an out-of-workspace exec can never be granted — the operator is never
-        # even prompted, and any stale grant is ignored (Wild Bill BLOCK-1 /
-        # CHANGES-2). Checked before is_granted so a pre-existing grant can't
+        # even prompted, and any stale grant is ignored. Checked before is_granted
+        # so a pre-existing grant can't
         # resurrect a now-refused resource.
         if self.refusal_reason(request) is not None:
             return ScopedDecision(scope=SCOPE_DENY, granted_via="refused")
@@ -186,20 +186,20 @@ class LeaderPermissionGate:
     def revoke_all(self) -> None:
         """The ``/rp`` escape hatch: clear persisted grants (every class) AND the
         in-memory session grants. (The caller also clears pending modal tickets +
-        rebuilds any cached registry — Wild Bill MED-6.)"""
+        rebuilds any cached registry.)"""
         lp.revoke_all(self.code)
         self._session.clear()
 
 
-# ── resource extractor (Nemo-BLOCK4/6) ───────────────────────────────────────
+# ── resource extractor ────────────────────────────────────────────────────
 # Maps a tool call to the SecurityRequest(s) it needs gated — or [] if ungated.
 # The headline: run_shell has NO `path` arg; its paths hide in `cwd` AND inside
 # the shlex-split `cmd`, so a gate that only reads args["path"] is bypassable
 # (`run_shell(cmd="cat /etc/passwd")`). run_shell is ALSO an exec request,
-# separate from any path read/edit/write (Wild Bill HIGH-2).
+# separate from any path read/edit/write.
 
 #: Only these tools are gated; others (search/skills/status/web) carry no
-#: out-of-workspace resource (Nemo-BLOCK7).
+#: out-of-workspace resource.
 _GATED_TOOLS = {"read_file", "edit_file", "write_artifact", "run_shell"}
 _PATH_ACTION_BY_TOOL = {"read_file": "read", "edit_file": "edit", "write_artifact": "write"}
 
@@ -222,8 +222,8 @@ def extract_tool_requests(tool_name: str, args: dict, *, root) -> list[SecurityR
     cwd = args.get("cwd") or ""
     exec_dir = str((root / cwd).resolve()) if cwd else str(root.resolve())
     exec_dir_path = Path(exec_dir)
-    # exec offers once/session/deny only — NO persisted `always` (Decision B (ii));
-    # the "RUN COMMANDS" copy is engine-rendered (MED-5), sharper than read/edit.
+    # exec offers once/session/deny only — NO persisted `always`;
+    # the "RUN COMMANDS" copy is engine-rendered, sharper than read/edit.
     reqs.append(SecurityRequest(
         action="exec", resource=exec_dir, request_class="exec",
         why=f"run_shell: RUN COMMANDS in {cwd or '.'}",
@@ -242,7 +242,7 @@ def extract_tool_requests(tool_name: str, args: dict, *, root) -> list[SecurityR
                         else str((exec_dir_path / tok).resolve()))
         else:
             # Bare filename (no slash): gate a dotfile-leading name (.env, .ssh)
-            # OR a name resolving to a REAL FILE under the cwd (Nemo #3 — a bare
+            # OR a name resolving to a REAL FILE under the cwd (so a bare
             # `cat .env` must not ride the exec grant ungated). Plain command
             # names (cat, make, pytest) and subcommands matching dir names are not
             # files in the cwd, so they are not gated.
@@ -281,7 +281,7 @@ def dangerous_widen_root(root: str, blocked_subtrees=()) -> "str | None":
     """A reason string if ``root`` is unsafe to widen the Leader into, else
     ``None``. Refuses broad system/home dirs, and any root that is an ancestor of
     (or equal to) a swarm deliverable/run tree — so the operator can't grant away
-    the structural cheat-guard (Wild Bill note). The modal surfaces the reason;
+    the structural cheat-guard. The modal surfaces the reason;
     the gate refuses absent an explicit override."""
     r = Path(root).resolve()
     rs = str(r)
@@ -290,8 +290,8 @@ def dangerous_widen_root(root: str, blocked_subtrees=()) -> "str | None":
     # The secret floor extends to the ROOT itself: a dot-directory (~/.ssh,
     # ~/.aws, an .envdir) is a secrets store, and the per-file dotfile guard in
     # the tools only checks components BELOW the matched root — so a root whose
-    # own path has a dotfile component would expose its contents (Wild Bill
-    # BLOCK). Refuse it here, where every grant/widen path is classified.
+    # own path has a dotfile component would expose its contents. Refuse it
+    # here, where every grant/widen path is classified.
     if any(part.startswith(".") for part in r.parts):
         return f"{rs} has a dotfile path component (a secrets dir) — refused"
     for sub in blocked_subtrees:

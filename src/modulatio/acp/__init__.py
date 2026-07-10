@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Agent Client Protocol (ACP) server for Modulatio.
 
-Lets an external client (an editor like Zed) drive Modulatio's conversational
+Lets an external client (a code editor) drive Modulatio's conversational
 Leader over JSON-RPC-on-stdio: prompt turns, live activity, and
 client-approved tool calls. See :func:`modulatio.acp.server.run_acp_server`.
 """

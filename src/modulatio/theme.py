@@ -2,13 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Modulatio Theme — Centralized color palette and terminal UI helpers.
 
-Carried from v1.3.1 (drop-in, no v2 architectural conflict).
-
 Inspired by the European modulatio: glossy iridescent black with purple/green
 sheen, yellow speckles and beak. The palette aims for high contrast against
 both dark and light terminal backgrounds.
 
-Used by the CLI setup wizard (slice 3) and any future CLI surfaces.
+Used by the CLI setup wizard and any future CLI surfaces.
 The TUI (Textual) uses Textual's native styling system — these tokens are
 exposed as Rich color names (PRIMARY, ACCENT, etc.) for any TUI widget
 that wants to align with the wizard's visual language.
@@ -165,7 +163,7 @@ def clear_screen():
         return
     if _dark_screen_active:
         print(_ANSI["clear"], end="", flush=True)
-        # re-sweep: keep the per-cell dark-bg paint as the fill; the prior
+        # Keep the per-cell dark-bg paint as the fill; the prior
         # second ESC[2J here erased that whole paint, making it dead work.
         # Re-assert the dark-bg/light-fg SGR so content printed afterward
         # renders on the fill (the paint already leaves it active; cheap belt).

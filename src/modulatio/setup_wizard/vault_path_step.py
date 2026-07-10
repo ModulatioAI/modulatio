@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Vault path step — picks vault root + shared resources path.
 
-Detects ``~/Obsidian/`` presence and suggests an Obsidian-integrated
-default if the user already uses Obsidian; otherwise neutral
+Detects ``~/Obsidian/`` presence and suggests a matching
+default if the user already has that directory; otherwise neutral
 ``~/Documents/Modulatio/projects/`` (kept out of ``~/modulatio`` so it
 can never land inside a repo checkout of the dev tree).
 
-Per locked principle (feedback_modulatio_no_hardcoded_paths.md): no
+Per locked principle: no
 hardcoded paths in production code; user override always wins.
 """
 

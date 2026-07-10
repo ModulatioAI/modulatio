@@ -6,8 +6,6 @@ Detects pandoc availability; if missing, presents a cross-OS install
 panel (Linux apt / macOS brew / Windows choco / pandoc.org link) plus
 [Try automatic install] / [I'll install manually, recheck] / [Skip] options.
 
-Mirrors the design discussion in feedback_modulatio_pandoc_ux.md and
-project_modulatio_pandoc_ux.md.
 """
 
 from __future__ import annotations

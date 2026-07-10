@@ -265,7 +265,7 @@ class MemoryScreen(Vertical):
         # Pending QC proposals — staged in _proposals/, NOT yet team memory.
         # Surfacing them here (with one-keypress approve/reject) is what makes
         # the propose→approve ACL livable; the old surface was a CLI nobody
-        # ran, so proposals accumulated invisibly (W5a, 2026-07-03).
+        # ran, so proposals accumulated invisibly.
         try:
             proposals = team_memory.list_proposals(self._project_code)
         except Exception:

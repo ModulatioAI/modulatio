@@ -257,7 +257,7 @@ class Task(BaseModel):
     # it wants a specific path, or by the expansion of an
     # ``artifacts: [...]`` list (one sub-task per declared path).
     output_path: str | None = None
-    #: Finished-product flag (2026-05-29). When True, this task's artifact is
+    #: Finished-product flag. When True, this task's artifact is
     #: a deliverable the user should receive — the Leader tags it at plan
     #: time. The run-finalization stage renders every deliverable's Markdown
     #: to a real document (DOCX default), names it from the document's own
@@ -308,7 +308,7 @@ class Task(BaseModel):
     #: re-entry. ``_run_task_with_redo`` bounds its remaining attempts by
     #: ``(max_retries + 1) - lifetime_attempts``; when spent, QC-as-fixer is forced.
     lifetime_attempts: int = 0
-    #: Recursion guard for overflow→decompose (2026-05-30). A task that
+    #: Recursion guard for overflow→decompose. A task that
     #: overflowed its context budget is split into smaller children, each
     #: ``decompose_depth = parent + 1``. Past a small cap the engine stops
     #: re-splitting and escalates (genuine stuck, not confusion). 0 = an
@@ -502,7 +502,7 @@ class Project(BaseModel):
     #: breaker's hard backstop derives from the soft cap, so this is the one
     #: knob an operator turns. Bound-checked at construction.
     output_budgets: dict[str, int] = Field(default_factory=dict)
-    #: §5 (2026-06-03): the concurrent wave executor is ON by default —
+    #: The concurrent wave executor is ON by default —
     #: parallelism is the point of a swarm. This field is the per-project
     #: switch the A/B harness still varies as a dimension: when the
     #: ``MODULATIO_CONCURRENT_WAVES`` env var is unset, this field decides

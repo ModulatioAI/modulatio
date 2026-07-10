@@ -106,7 +106,7 @@ The harness measures *config* knobs. The model sweep answered the harder questio
 
 **Same-model controls.** When a producer spiraled (endless propose → abandon loops, never committing an artifact), the obvious-but-wrong conclusion is "weak model." The sweep instead held the model fixed and toggled *only* reasoning on/off. The **exact same model** that looped with reasoning ON ran clean with reasoning OFF. Changing one variable isolated the cause: the spiral was the *reasoning mode*, not the model and not an engine defect.
 
-This is the load-bearing result behind the whole seating guidance — that apparent "engine brokenness" was model-fit, not a defect — and it only held up because the control changed one thing at a time. The four-deep case for *why* reasoning producers drift (cost, PIANO/Sid lineage, context budget, drift) is in [Choosing models by role](/concepts/agents/#choosing-models-by-role).
+This is the load-bearing result behind the whole seating guidance — that apparent "engine brokenness" was model-fit, not a defect — and it only held up because the control changed one thing at a time. The four-deep case for *why* reasoning producers drift (cost, architecture lineage, context budget, drift) is in [Choosing models by role](/concepts/agents/#choosing-models-by-role).
 
 **Architecture controls.** The same one-variable discipline surfaced the dense-vs-sparse finding: dense mid-size models made clean producers; *locally-quantized* sparse MoEs degraded on sustained tool-calling — but a full-precision sparse MoE (cloud, reasoning off) was also clean. So the weak combination is *locally-quantized-sparse* specifically, not sparsity as such — a distinction you only reach by varying the serving condition independently of the architecture.
 

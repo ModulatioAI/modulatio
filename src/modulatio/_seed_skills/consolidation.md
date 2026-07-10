@@ -1,6 +1,6 @@
 ---
 name: consolidation
-description: Producer skill for assembling N unit artifacts into ONE consolidated deliverable (per the standards' assembly spec for the task's artifact_kind). Emits a small ASSEMBLY MANIFEST (title + ordered unit filenames + separator) and the engine concatenates the unit bodies from disk — unit content is never re-emitted as output tokens, so large deliverables can't truncate. Does NOT rewrite unit content. Drift detection is `continuity-check`'s job. Slice #83 PR-C; mechanical-assembly rework 2026-06-03.
+description: Producer skill for assembling N unit artifacts into ONE consolidated deliverable (per the standards' assembly spec for the task's artifact_kind). Emits a small ASSEMBLY MANIFEST (title + ordered unit filenames + separator) and the engine concatenates the unit bodies from disk — unit content is never re-emitted as output tokens, so large deliverables can't truncate. Does NOT rewrite unit content. Drift detection is `continuity-check`'s job.
 executor: llm
 capability_tags: consolidation, assembly, multi-unit-aggregation, structured-output
 required_capabilities: writing

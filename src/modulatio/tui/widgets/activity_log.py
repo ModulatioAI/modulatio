@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """ActivityLog widget — renders a stream of ActivityEvents.
 
-Slice #21. The Status tab uses one instance for the team-aggregate feed
+The Status tab uses one instance for the team-aggregate feed
 plus one per default role (filtered). Subscribers (ModulatioApp) push
 events via ``add_event``; the widget keeps an append-order backing
 list + updates its renderable text.

@@ -82,7 +82,7 @@ _MAX_JOB_SLUG_LEN = 64
 #: Unicode BIDI controls + C1 NEL that survive the ASCII illegal-char regex.
 #: Harmless on Linux (no path escape), but a right-to-left override can scramble
 #: an ``ls`` listing — and the slug comes from Leader JSON in Feature B, so we
-#: strip them here (Nemo's Feature-A hull advisory A3, defense-in-depth).
+#: strip them here (defense-in-depth).
 _UNICODE_CONTROL_CHARS = re.compile("[\u0085\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
 
@@ -155,7 +155,7 @@ def job_dir(
     ``~/Documents/Modulatio`` — the in-app pick is the operator's newer, more
     specific intent; the env var stays the install-level default.
 
-    Concurrency (Nemo's Feature-A hull advisory A1): the ``exists()`` check is
+    Concurrency: the ``exists()`` check is
     not atomic with the later ``mkdir``, so two *simultaneous* runs of the same
     project + same slug + same day could both resolve to the bare name and share
     a folder. Per-file disambiguation inside :func:`deliver_product` (``name
@@ -217,12 +217,12 @@ def human_name_from_markdown(text: str, *, fallback: str) -> str:
     kept readable — a human should recognize the product by its name, not by
     a task id like ``t-004``.
 
-    REVIEWER NOTE (cadre agnostic audit): the Markdown/ATX-heading assumption
+    Note: the Markdown/ATX-heading assumption
     here is BY DESIGN, not an output-agnostic violation — this helper is only
     ever called on the PROSE/document branch (``_is_prose_source``); code/data/
     media deliverables derive their name from the verbatim stem and never reach
     this function. The name is a (harmless) prose-specific detail, not shared
-    logic. Confirmed NOT a violation (both reviewers)."""
+    logic."""
     title = None
     for line in text.splitlines():
         s = line.strip()
@@ -247,7 +247,7 @@ def human_name_from_markdown(text: str, *, fallback: str) -> str:
 #: runnable source — copied verbatim, original filename + extension preserved —
 #: never pandoc-rendered into a DOCX (a Word doc full of Python is useless as
 #: a game). Markdown / plain text still flow through the document-render path.
-#: Live repro 2026-05-30: a Hollow-Knight ``game.py`` (artifact_kind=code) was
+#: For example, a ``game.py`` (artifact_kind=code) was
 #: headed for a .docx wrapper. Detection is by on-disk extension — the real
 #: signal of "would pandoc-rendering this make sense" — independent of how the
 #: planner tagged it.
@@ -473,7 +473,7 @@ def deliver_finished_products(
     (no code) is unaffected: its deliverables still render to ``fmt``."""
     present = [(t, Path(s), f, fam) for t, s, f, fam in deliverables if Path(s).exists()]
     # A code bundle is signalled by EITHER a recognizable code suffix OR the
-    # resolved assembly family (Wild Bill): a code-family fallback lands at a
+    # resolved assembly family: a code-family fallback lands at a
     # `.txt` path (`_is_code_source` false), so the family must count too — else
     # a README.md companion beside it would render to .docx instead of shipping
     # verbatim as part of the runnable folder.
@@ -483,7 +483,7 @@ def deliver_finished_products(
     out: list[DeliveredProduct] = []
     for task_id, src, fallback, family in present:
         # markdown companion in a code bundle → keep it verbatim (README.md)
-        # Family-aware (cadre/Wild Bill): a non-document deliverable (code/data/
+        # Family-aware: a non-document deliverable (code/data/
         # media) ships VERBATIM regardless of its extension — `.txt` is globally
         # classified as prose, so the suffix can't be trusted; the family can.
         verbatim = (bundle_has_code and not _is_code_source(src)) or family != "document"
@@ -632,7 +632,7 @@ def blocked_goal_ids(goals) -> "list[str]":
     """Ids of goals in a blocked/failed terminal state — the cross-GOAL
     companion to ``blocked_task_ids``.
 
-    Why this exists (2026-05-30, live run): a goal whose task-plan is
+    Why this exists: a goal whose task-plan is
     REJECTED produces ZERO tasks — just a BLOCKED goal + a ticket — so it
     is invisible to ``blocked_task_ids``. In the wild this shipped a
     polished but OFF-TOPIC product: the research goal (G-001) was blocked,

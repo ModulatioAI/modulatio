@@ -12,8 +12,7 @@ room that only ever says NO is a brick wall. This module turns the refusal into 
 
 and **remembers** session/always answers so it never nags twice.
 
-Design + reviewer sign-off: ``docs/design/operator-permissions-and-autonomy.md``
-(Lovecraft coherence + Nemo hull, both signed). The §6 invariants are binding:
+Design: ``docs/design/operator-permissions-and-autonomy.md``. The §6 invariants are binding:
 
 - **§6.A auto-grant bypasses the ASK, never the SUBSTRATE.** ``/yolo`` skips the
   human prompt; it never runs a sandbox-requiring capability unsandboxed. A
@@ -70,7 +69,7 @@ class RunMode(enum.Enum):
     @classmethod
     def from_command(cls, text: str) -> "RunMode | None":
         """Parse an EXACT leading ``/yolo`` / ``/goal`` / ``/yolo-goal`` command
-        (Nemo minor: not ``lstrip('/')`` — stray slashes in pasted text must not
+        (not ``lstrip('/')`` — stray slashes in pasted text must not
         toggle a mode). Returns the mode, or ``None`` when the first token isn't a
         mode command (the caller treats it as an ordinary message)."""
         parts = (text or "").strip().split(maxsplit=1)
@@ -108,7 +107,7 @@ class Decision(enum.Enum):
         (§6.C fail-closed)."""
         if isinstance(value, Decision):
             return value
-        # Nemo code-review r1 (minor): don't stringify arbitrary objects — a hostile
+        # Don't stringify arbitrary objects — a hostile
         # object whose __str__ returns "always" must not allow. The ask bridge
         # answers with a Decision, a str, or None; anything else is DENY.
         if value is not None and not isinstance(value, str):
@@ -181,15 +180,14 @@ def mode_status_rows(
 
 def _host_of(url: str) -> str:
     # rstrip('.') normalizes a trailing-dot FQDN ("safe.com." → "safe.com") so the
-    # session/host and always/domain keys derive from the same host string
-    # (MiniMax M3 code-review M2 — safe before, just surprising).
+    # session/host and always/domain keys derive from the same host string.
     try:
         return (urlparse(url).hostname or "").lower().rstrip(".")
     except ValueError:
         return ""
 
 
-# Nemo code-review r1 Major B: a coarse last-two-labels rule collapses a host on a
+# A coarse last-two-labels rule collapses a host on a
 # multi-label public suffix (``x.co.uk`` → ``co.uk``) into a registrar-wide grant.
 # Without a full public-suffix-list dependency, we derive a registrable domain ONLY
 # when we're confident, and otherwise return "" so an ``always`` grant falls back to
@@ -239,8 +237,8 @@ def capability_for(tool_name: str, args: "dict | None" = None) -> Capability:
 
     ``Capability.label``/``detail`` are the HUMAN utterance a surface speaks in the
     Leader's voice ("access the internet"), never the policy key — the key is the
-    typed ``scoped_key`` (Lovecraft code-review nit). ``args`` is defensively
-    coerced to a dict so a direct/public call can't crash (MiniMax M3 M1)."""
+    typed ``scoped_key``. ``args`` is defensively
+    coerced to a dict so a direct/public call can't crash."""
     args = args if isinstance(args, dict) else {}
     name = (tool_name or "").strip()
     if name in ("http_get", "web_search"):
@@ -406,8 +404,8 @@ class PermissionBroker:
         self.on_decision = on_decision
 
     def authorize(self, tool_name: str, args: "dict | None" = None) -> bool:
-        """Return True iff this tool call may proceed. Top-level fail-closed guard
-        (Nemo, gate-reconcile): any broker-side exception — e.g. the operator-
+        """Return True iff this tool call may proceed. Top-level fail-closed guard:
+        any broker-side exception — e.g. the operator-
         supplied ``_sandbox_available()`` doing failing I/O, outside the inner
         ask-crash catch — is a deterministic DENY. An exception must never let a
         sandbox-requiring capability run open, record a grant, or escalate an audit.
@@ -420,8 +418,8 @@ class PermissionBroker:
     def _authorize_inner(self, tool_name: str, args: "dict | None" = None) -> bool:
         cap = capability_for(tool_name, args or {})
 
-        # §6.A — the substrate is the HULL, not a preflight (Nemo code-review r1
-        # Blocker A). A sandbox-requiring capability cannot run without a live
+        # §6.A — the substrate is the HULL, not a preflight. A sandbox-requiring
+        # capability cannot run without a live
         # sandbox by ANY path — not yolo, not a remembered/preauthorized grant, and
         # NOT a fresh operator ALLOW through the ask. The ONLY override is an
         # explicit unsafe posture chosen out-of-band (never via the model path).

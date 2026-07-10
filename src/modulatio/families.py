@@ -190,7 +190,7 @@ def task_output_rel_path(task) -> str:
     declared ``output_path``, else ``drafts/<fallback name>``. THE one
     definition of "dependency output" — shared by the assembly manifest
     builder, the ``_apply_assembly_manifest`` allowlist, and the review-ledger
-    verifier. Wild Bill BLOCK (assembler arc, 2026-07-03): resolving the
+    verifier. Resolving the
     fallback in ONE of those three consumers re-created the very content
     defect the arc fixed — the other two kept filtering the unit out."""
     op = str(getattr(task, "output_path", None) or "").strip()

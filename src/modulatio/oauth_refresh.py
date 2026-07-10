@@ -70,8 +70,7 @@ _PROVIDER_LOCKS: dict[str, threading.Lock] = {
 # To actually collapse the burst we cache the leader's just-minted access token
 # in memory, keyed by the refresh token it was minted from, for a short TTL. A
 # follower holding that same pre-lock refresh token returns the cached token
-# rather than spending the consumed grant. (resweep: in-comment claim that the
-# lock collapses the burst was overstated — this cache makes it true.)
+# rather than spending the consumed grant.
 _XAI_FRESH_TOKEN_TTL_SEC = 30.0
 _xai_fresh_token: dict[str, Any] = {"refresh_token": None, "access_token": None, "minted_at": 0.0}
 
@@ -124,11 +123,11 @@ _TOKEN_PATTERNS = (
     re.compile(r"AIza[A-Za-z0-9_\-]{16,}"),       # Google API keys
     re.compile(r"ya29\.[A-Za-z0-9_\-]{16,}"),     # Google OAuth
     re.compile(r"xoxb-[A-Za-z0-9_\-]{8,}"),       # Slack bot tokens
-    re.compile(r"(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA)[0-9A-Z]{16}"),  # AWS access key IDs (Nemo SEC-03)
+    re.compile(r"(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA)[0-9A-Z]{16}"),  # AWS access key IDs
     # Labeled AWS creds: once the LABEL identifies a credential, redact the whole
     # value run (any non-space/non-quote chars) — not a shape-specific class — so
     # a quoted / wrapped / abbreviated value can't leave the prefix behind
-    # (Nemo SEC-03 round-2: `aws_access_key_id=AKIA…` with non-alnum chars).
+    # (`aws_access_key_id=AKIA…` with non-alnum chars).
     re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*[\"']?[^\s\"']+"),
     re.compile(r"(?i)aws_access_key_id\s*[=:]\s*[\"']?[^\s\"']+"),
     re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{10,}"),  # Stripe secret keys
@@ -410,7 +409,7 @@ def refresh_xai_token(*, timeout: float = 30.0) -> str:
     # serialize the exchanges. Because xAI doesn't write back the rotated token
     # (the Grok file format is unvalidated), serialization alone would still let
     # followers re-POST the consumed grant; the short-TTL in-memory cache below
-    # is what actually collapses the burst to a single exchange. (resweep)
+    # is what actually collapses the burst to a single exchange.
     lock_path = str(oauth_helpers.XAI_GROK_CREDENTIALS_FILE) + ".lock"
     with _single_flight("xai", lock_path):
         # Re-check under the lock: if the leader of this burst just minted an

@@ -107,7 +107,7 @@ def build_attachment(path: Path, *, kind: AttachmentKind) -> Attachment:
     if not path.exists():
         raise FileNotFoundError(f"attachment not found: {path}")
     if not path.is_file():
-        # R3 (cadre): reject a non-regular file (FIFO / device / socket /
+        # Reject a non-regular file (FIFO / device / socket /
         # directory). Its ``st_size`` reads 0 so it slips past the size cap
         # below, and reading it can block or stream unboundedly. A symlink to a
         # real regular file still passes — ``is_file`` follows the link.

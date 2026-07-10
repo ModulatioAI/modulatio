@@ -74,7 +74,7 @@ _logger = logging.getLogger("modulatio.ab_harness")
 
 
 #: Required interpretation note on every :class:`ExperimentReport`.
-#: M2 close-out (Lovecraft Round 1 design review): the rendered
+#: The rendered
 #: markdown opens with this note in a fenced quote block BEFORE any
 #: metric tables, deltas, or directional flags. ``directional_signal``
 #: is a coarse "signal vs noise" indicator, NOT a statistical test;
@@ -104,7 +104,7 @@ AB_HARNESS_EVENT_LITERALS = (
 #: grows as later slices add dimensions. Adding a value is a deliberate
 #: CHANGELOG entry, never free text.
 #: - ``compression`` → toggles ``Project.compression_enabled``
-#: - ``concurrent_waves`` (2026-05-29) → toggles
+#: - ``concurrent_waves`` → toggles
 #:   ``Project.concurrent_waves_enabled`` (the wave-executor eval: does
 #:   running a goal's tasks in concurrent waves regress verdict quality vs
 #:   the sequential default, and what does it buy in wall-clock?)
@@ -148,7 +148,7 @@ class ABHarnessUnconfirmedLiveCostError(ABHarnessError):
     """Raised by :func:`run_experiment` when ``mode="live"`` is set
     without the explicit ``allow_paid_live=True`` opt-in. The Python
     API is non-interactive; callers must explicitly acknowledge the
-    cost of paid live runs (Nemo Round-1 disposition #3)."""
+    cost of paid live runs."""
 
 
 class ABHarnessInvalidConfigError(ABHarnessError):
@@ -233,7 +233,7 @@ class MetricSnapshot:
     plan-local usage log. **No new telemetry** — / .4 / .5
     already write everything this struct consumes.
 
-    Two compaction-skip count surfaces (Nemo Round-2 disposition on
+    Two compaction-skip count surfaces (split by handling of
     ``disabled_by_config``):
 
       - ``compaction_skip_counts`` carries ALL skip reasons including
@@ -285,8 +285,7 @@ class ArmAggregate:
     preserved on disk via :attr:`per_replicate` paths so anyone
     wanting real statistics can re-derive them.
 
-    ``metric_observation_counts`` (Nemo Medium 2 close-out,
-    2026-05-19): per-metric count of non-``None`` observations actually
+    ``metric_observation_counts`` is a per-metric count of non-``None`` observations actually
     used in the mean / stdev. A metric whose observations had None on
     some replicates will have a smaller count than ``n_successful``;
     this is what populates :attr:`MetricDelta.sample_sizes` so the
@@ -313,7 +312,7 @@ class MetricDelta:
     EXPLICITLY NOT a statistical test — ``statistical_test`` is
     always ``None`` to make that clear at the data layer too.
 
-    Guards (Nemo Round-1 + Round-2):
+    Guards:
 
       - ``directional_signal=False`` if either arm is underpowered.
       - ``directional_signal=False`` if either arm has fewer than 2
@@ -321,7 +320,7 @@ class MetricDelta:
       - ``directional_signal=False`` if either side carries ``None``.
       - Sign convention: ``arm_a - arm_b``, always.
 
-    ``sample_sizes`` (Nemo Medium 2 close-out, 2026-05-19): per-metric
+    ``sample_sizes`` carries per-metric
     non-``None`` observation counts ``(n_a, n_b)``. NOT arm-level
     ``n_successful`` — a metric whose snapshots had ``None`` on
     some replicates will report a smaller per-metric N than the
@@ -343,8 +342,7 @@ class ExperimentReport:
     ``<experiment_id>/report.json`` and rendered to
     ``<experiment_id>/report.md`` via :func:`render_report_markdown`.
 
-    ``interpretation_note`` is REQUIRED (M2 close-out, Lovecraft
-    Round 1). The rendered markdown opens with the note before any
+    ``interpretation_note`` is REQUIRED. The rendered markdown opens with the note before any
     metric tables. Callers cannot omit it; the harness builder
     populates it from :data:`INTERPRETATION_NOTE`.
     """
@@ -453,7 +451,7 @@ def aggregate_arm(
             f.get(name) for f in flat_per_replicate
             if f.get(name) is not None
         ]
-        # Nemo Medium 2 (2026-05-19): record the per-metric N even
+        # Record the per-metric N even
         # when None / empty, so downstream readers can tell
         # "no observations" (count=0) from "didn't aggregate".
         metric_observation_counts[name] = len(observations)
@@ -487,7 +485,7 @@ def aggregate_arm(
 #: Kept as a string so a forensic reader can re-derive the
 #: directional_signal flag without re-reading the harness source.
 #:
-#: NOTE on the zero-stdev case (Nemo close-out, 2026-05-19): when
+#: NOTE on the zero-stdev case: when
 #: ``combined_stdev == 0`` AND both arms have ≥2 observations each,
 #: the rule fires for ANY nonzero delta — a deterministic arm
 #: difference is the cleanest possible directional signal, not a
@@ -513,8 +511,7 @@ def compute_deltas(
         (``abs(delta_mean) <= 2 * combined_stdev``).
 
     ``statistical_test`` is always ``None`` — the harness explicitly
-    does NOT perform formal significance testing (M2 + Nemo Round-1
-    posture). The directional flag is a coarse signal-vs-noise
+    does NOT perform formal significance testing. The directional flag is a coarse signal-vs-noise
     indicator, nothing more."""
     deltas: dict[str, MetricDelta] = {}
     metric_names = sorted(
@@ -562,13 +559,13 @@ def compute_deltas(
         # significance test, just a coarse noise floor for the
         # directional_signal flag.
         combined_stdev = (stdev_a ** 2 + stdev_b ** 2) ** 0.5
-        # Underpower guard (Nemo Round-1 + Round-2): never fire flag
+        # Underpower guard: never fire flag
         # if either arm is underpowered as a whole, regardless of
         # per-metric obs count.
         if arm_a.underpowered or arm_b.underpowered:
             directional = False
         else:
-            # Nemo close-out (2026-05-19): NO extra ``combined_stdev > 0``
+            # NO extra ``combined_stdev > 0``
             # guard. When both arms are internally consistent and differ
             # from each other, ``combined_stdev == 0`` and ANY nonzero
             # delta is the cleanest possible directional signal. Stub
@@ -602,7 +599,7 @@ def _replicate_order(
 
     Default: interleaved A1, B1, A2, B2, A3, B3 — reduces hidden
     confounds from provider drift / server-side load / local
-    machine state (Nemo Round-1 #5).
+    machine state.
 
     With ``order_seed``: deterministic Fisher-Yates shuffle seeded
     with the given int. The seed is stamped onto the experiment's
@@ -800,7 +797,7 @@ def _write_artifact_0600(path: Path, text: str) -> None:
     """Write an experiment artifact (config / manifest / metrics /
     aggregate / report) with mode ``0o600`` and parent dir ``0o700``.
 
-    Nemo Low close-out (2026-05-19): the audit file was hardened but
+    The audit file was hardened but
     the rest of the experiment surface inherited process umask, which
     could expose effective config, run paths, plan ids, and cost
     estimates to other local users on a shared box. Apply the same
@@ -1069,7 +1066,7 @@ def render_report_markdown(report: ExperimentReport) -> str:
     Opens with the :data:`INTERPRETATION_NOTE` in a fenced quote block
     BEFORE any metric tables, deltas, or directional flags — so a
     reader scanning top-down cannot miss the "directional, not
-    statistical" disclaimer (M2 close-out, Lovecraft Round 1).
+    statistical" disclaimer.
 
     Metric layout:
       - Headline quality row uses ``compaction_problem_skips_total``
@@ -1321,7 +1318,7 @@ def _usage_cost_total(usage_log_path: Path | None) -> float:
 
 
 #: Compaction skip reasons that count as "problem" skips for the
-#: quality signal (Nemo Round-2 metric-split). Excludes
+#: quality signal. Excludes
 #: ``disabled_by_config`` because that's forensic provenance for the
 #: compression-off arm, NOT a quality issue.
 _COMPACTION_PROBLEM_SKIP_REASONS = (
@@ -1343,7 +1340,7 @@ def extract_metric_snapshot(
     """Build a per-replicate :class:`MetricSnapshot` by reading only
     EXISTING surfaces — ``audit.jsonl`` for inbox / budget /
     compression rows, the plan-local usage log, ``ExecutionResult``,
-    and (Nemo Medium 1 close-out, 2026-05-19) per-task
+    and per-task
     ``Task.transitions`` for QC verdicts. No new telemetry —
     / / already write everything consumed here.
 
@@ -1376,7 +1373,7 @@ def extract_metric_snapshot(
     reflection_log = reflection_log or []
 
     # ── QC verdicts: per-task first-verdict + retry-rejection counts ──
-    # Nemo Medium 1 (2026-05-19): QC verdicts persist in
+    # QC verdicts persist in
     # ``Task.transitions`` (engine source-of-truth), NOT
     # ``audit.jsonl``. The earlier ``actor=='qc'`` filter against
     # audit rows never matched, so QC metrics always reported
@@ -1417,8 +1414,8 @@ def extract_metric_snapshot(
     # ── Execution success rate (plan-level) ──
     # ExecutionResult.final_status == "done" means the plan completed
     # all sub-objectives without pause/abort/failure. Use as a coarse
-    # plan-level success indicator (renamed from "qc_pass_rate" per
-    # Nemo Round-2 sharper definition).
+    # plan-level success indicator (renamed from "qc_pass_rate" for a
+    # sharper definition).
     final_status = execution_result.get("final_status")
     execution_success_rate: float | None
     if final_status is None:
@@ -1609,7 +1606,7 @@ def _classify_failures(
     Counts are independent (a single execution failure can match
     multiple buckets if its symptoms span them).
 
-    Nemo Medium 1 (2026-05-19): the terminal-QC-rejection count
+    The terminal-QC-rejection count
     now reads from ``Task.transitions`` for the same reason
     :func:`extract_metric_snapshot`'s QC block does — engine never
     wrote ``actor='qc'`` rows to ``audit.jsonl``.
@@ -1682,7 +1679,7 @@ def _validate_config(config: ABConfig) -> None:
         raise ABHarnessInvalidConfigError(
             f"replicates={config.replicates}; must be ≥ 1"
         )
-    # Nemo Blocker 2 close-out (2026-05-19): arm values for boolean
+    # Arm values for boolean
     # dimensions must be ACTUAL bools. Without this guard, a loosely
     # typed config (a JSON/YAML/CLI string ``"False"``, or an int like
     # ``0``) gets coerced by ``bool(...)`` to True and silently runs
@@ -1717,7 +1714,7 @@ def _apply_arm_override(
     import copy
     effective = copy.deepcopy(base_config)
     if varied_dimension in _BOOLEAN_DIMENSIONS:
-        # Nemo Blocker 2 (2026-05-19): direct assign, NOT ``bool(...)``.
+        # Direct assign, NOT ``bool(...)``.
         # ``_validate_config`` has already enforced ``type(...) is bool``
         # for boolean-dimension arm values, so a non-bool reaching this
         # point is a programmer error and should fault on the dict op, not
@@ -1749,8 +1746,8 @@ def run_experiment(
     ``(project, runners, kickoff_callable, plan_record_or_None,
       reflect_runner_or_None, usage_log_path_or_None)``. The factory
     is responsible for ``vault.init_project`` + ``vault.init_run``
-    per replicate (fresh ``run_id`` is the isolation boundary —
-    Nemo Round-1 implementation seam). The SAME factory shape works
+    per replicate (fresh ``run_id`` is the isolation boundary). The
+    SAME factory shape works
     for both modes; what differs is whether the runners are
     hand-crafted (stub) or real LLM-backed (live). The harness is
     mode-agnostic at this seam.
@@ -1824,8 +1821,8 @@ def run_experiment(
         replicates=config.replicates, order_seed=config.order_seed,
     )
 
-    # Persist config.json with the actual order stamped in (Nemo
-    # Round-1 #5 — order seed lands in config.json for reproducibility).
+    # Persist config.json with the actual order stamped in — order
+    # seed lands in config.json for reproducibility.
     _write_artifact_0600(
         experiment_dir / "config.json",
         json.dumps(
@@ -1944,7 +1941,7 @@ def run_experiment(
             replicate_finished_at = _utcnow_iso()
             wall_clock = _wall_clock_now() - replicate_started_wall
 
-            # Nemo Medium 1 (2026-05-19): pull the replicate's Task
+            # Pull the replicate's Task
             # records so the snapshot can read QC verdicts from
             # ``Task.transitions`` (the engine's actual persistence
             # surface) rather than ``audit.jsonl`` (where they never

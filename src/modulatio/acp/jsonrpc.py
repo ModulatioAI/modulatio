@@ -3,7 +3,7 @@
 """JSON-RPC 2.0 transport + framing for the ACP server — no Modulatio knowledge.
 
 Newline-delimited JSON (ndjson) over two file objects (stdin/stdout), the framing
-Zed-class ACP clients use. Stdlib only (``json`` + ``threading``). The one subtle
+ACP clients use. Stdlib only (``json`` + ``threading``). The one subtle
 piece is correlating *server-initiated* requests (the agent asking the client to
 approve a tool call, or answer an input prompt) with the client's response, by
 JSON-RPC id — handled by :class:`PendingRequests`.

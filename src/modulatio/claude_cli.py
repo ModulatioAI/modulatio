@@ -53,8 +53,8 @@ _DEFAULT_SYSTEM = (
 #:    ``Task``, folding N hidden attempts into one seat call. The CLI has no
 #:    "max N sub-agents" knob, so the only bound that binds is zero.
 #: 2. The shell — ``Bash`` + its background-shell management (``BashOutput`` /
-#:    ``KillShell``). Leaving the shell in defeated class 1 by another route
-#:    (Wild Bill HIGH): a seat could use Bash to locate the running claude binary
+#:    ``KillShell``). Leaving the shell in defeated class 1 by another route:
+#:    a seat could use Bash to locate the running claude binary
 #:    (e.g. ``/proc/$PPID/exe``) and re-exec ``claude -p`` WITHOUT
 #:    ``--disallowedTools`` — the nested process regains Workflow/Task/Agent.
 #:    Removing every process-exec tool leaves no surface to launch a nested CLI at
@@ -64,12 +64,12 @@ _DEFAULT_SYSTEM = (
 #: Removing the tools makes the dodge impossible, not just discouraged ("engine
 #: binds, prose only bends"). DELIBERATELY NOT applied to the interactive HARNESS
 #: lane (Leader converse / solo coding, the chat runner): there, orchestrating AND
-#: running code IS the job, so the Leader keeps its full agentic loadout (Clif:
-#: "yes in a kickoff, no in the harness").
+#: running code IS the job, so the Leader keeps its full agentic loadout
+#: (kickoff seats are confined; the harness lane is not).
 _DISALLOWED_TOOLS = ("Workflow", "Task", "Agent", "Bash", "BashOutput", "KillShell")
 
-#: Fail-closed available-tool SET for confined kickoff seats (Wild Bill R2/R3
-#: HIGH). A denylist of built-in names is not fail-closed: a confined ``claude
+#: Fail-closed available-tool SET for confined kickoff seats. A denylist of
+#: built-in names is not fail-closed: a confined ``claude
 #: -p`` still loads user/project MCP servers, hooks, and plugins — any of which
 #: can execute a process and re-launch the claude binary. So confined seats run
 #: with ``--safe-mode`` (disables ALL customizations: CLAUDE.md, skills, plugins,
@@ -127,7 +127,7 @@ def build_claude_argv(
         # SET ("Specify the list of available tools from the built-in set"), so an
         # omitted built-in (Bash, a spawner, …) is simply not present — and that
         # holds under ``--permission-mode bypassPermissions``. (``--allowedTools``
-        # is only a PERMISSION list, inert under bypassPermissions — Wild Bill R3 —
+        # is only a PERMISSION list, inert under bypassPermissions —
         # so it is deliberately NOT emitted; ``--disallowedTools`` is the explicit
         # named belt.) Variadic: a flag MUST follow so it can't swallow the prompt.
         argv += ["--tools", *allowed_tools]
@@ -329,8 +329,8 @@ def _claude_error_reason(returncode: int, result: str) -> "str | None":
         first = head.splitlines()[0][:160] if head else "(no output)"
         return f"claude -p exited {returncode}: {first}"
     if not head:
-        # Empty-reply guard (arc #3): a runtime hiccup can exit 0 with no
-        # assistant text (observed live post-B5). An empty reply is a failed
+        # Empty-reply guard: a runtime hiccup can exit 0 with no
+        # assistant text. An empty reply is a failed
         # call, not a completion — never hand "" downstream as a message.
         return "empty reply (exit 0, no assistant text)"
     return None
@@ -380,8 +380,8 @@ def run_claude(
     resolved = Path(claude_bin).resolve()  # follow symlinks → real ELF path
     # READ-ONLY grants (B5 deliverable visibility) are VISIBLE to Clay (--add-dir)
     # but mounted read-only in the sandbox — so a Clay leader can inspect a run's
-    # deliverables without being able to mutate them (cadre BLOCK: Wild Bill +
-    # Lovecraft). The operator-approved ``add_dirs`` stay read-write.
+    # deliverables without being able to mutate them. The operator-approved
+    # ``add_dirs`` stay read-write.
     ro_dirs = read_only_dirs or []
     argv = build_claude_argv(
         claude_bin=str(resolved), model=model, prompt=prompt, system=system,
@@ -394,7 +394,7 @@ def run_claude(
     # which the sandbox masks with --tmpfs /home.  We exec the RESOLVED ELF directly
     # (no symlink path needed inside the sandbox) and bind only what's required.
     # SECURITY: NEVER bind $HOME itself or any ancestor — that re-exposes the whole
-    # home tree (dotfile secrets) after the /home mask (Wild Bill BLOCK).
+    # home tree (dotfile secrets) after the /home mask.
     home = Path.home()
     extra_ro: list[Path] = []
     if resolved.is_relative_to(home):

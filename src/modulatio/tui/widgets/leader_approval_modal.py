@@ -5,7 +5,7 @@
 This is the single approval surface for every gated Leader request (folder
 widening first; ``exec`` / ``network`` / ``spend`` later). It renders ONLY
 engine-parsed ``SecurityRequest`` fields — action, canonical resource, why —
-NEVER model-narrated prose (Wild Bill MED-5), so the Leader cannot prompt-inject
+NEVER model-narrated prose, so the Leader cannot prompt-inject
 the operator into granting "always". It offers exactly the scopes in
 ``request.available_scopes``; each button dismisses with its scope string, and
 Escape dismisses with ``deny`` (fail-closed).

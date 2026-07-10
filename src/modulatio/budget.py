@@ -8,8 +8,7 @@ ContextVar. Runners (currently litellm-backed) call ``record_usage``
 after each completion; the tracker accumulates totals and ``over_cap``
 returns a halt reason when a cap is exceeded.
 
-**Cap enforcement semantics — POST-CALL (third-party review note,
-2026-05-02):** caps are checked at the TOP of each sub-objective
+**Cap enforcement semantics — POST-CALL:** caps are checked at the TOP of each sub-objective
 iteration in ``project_execution.start_execution``, AFTER the previous
 sub-objective's kickoff has already run. A single large sub-objective
 that consumes more than the remaining budget will overrun before
@@ -33,8 +32,7 @@ report 0 USD. Token accounting works for any provider that surfaces
 the tracker stays at zero, and caps simply never trip.
 
 Together with the wall-clock cap shipped earlier, this is the
-bounded-mode primitive's instrumentation layer. See
-``feedback_modulatio_design_for_both_budget_modes.md`` (memory) for the
+bounded-mode primitive's instrumentation layer, part of the
 two-mode framing — bounded honesty + unbounded capability are both
 first-class; structural ceilings (not money) are the unbounded blocker.
 """
@@ -76,7 +74,7 @@ class BudgetTracker:
     input_tokens_used: int = 0
     output_tokens_used: int = 0
     log_path: Path | None = None
-    # re-sweep (Opus R2 MED/race): one tracker is intentionally shared
+    # One tracker is intentionally shared
     # across the default-on concurrent wave workers (orchestration.py copies
     # the ContextVar binding, not the object, into each future). The ``+=``
     # accumulation in record() is a non-atomic read-modify-write, so without
@@ -100,7 +98,7 @@ class BudgetTracker:
         callers that don't have it (tests, future stub paths) leave
         it None and the log line records ``"model": null``.
         """
-        # re-sweep: hold the lock across BOTH accumulations and the log
+        # Hold the lock across BOTH accumulations and the log
         # append so the running totals captured per JSONL line come from a
         # consistent snapshot and concurrent writers can't interleave.
         with self._lock:

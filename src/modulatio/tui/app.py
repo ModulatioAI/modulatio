@@ -79,11 +79,9 @@ def _build_kickoff_orchestrator(
 ):
     """Build an Orchestrator wired for a TUI direct kickoff.
 
-     factored out of ``_kickoff_worker`` so
-    construction is testable without spinning up a Textual app
-    context. Mirrors the CLI / daemon / plan-mode wiring — Round 3
-    caught that the TUI path was the one remaining surface where
-    Round 2's F11 / F15 / F12 fixes weren't applied:
+    Factored out of ``_kickoff_worker`` so construction is testable
+    without spinning up a Textual app context. Mirrors the CLI / daemon /
+    plan-mode wiring so the same fixes apply across every kickoff path:
 
     - ``tool_calls_dir`` flows into ``tools.build_registry`` so the
       ``read_tool_result`` recovery tool is in the registry once
@@ -140,7 +138,7 @@ def _build_kickoff_orchestrator(
     return Orchestrator(
         project, runners,
         activity_callback=activity_callback,
-        # Brick C: the TUI is the interactive surface — a human is watching, so
+        # The TUI is the interactive surface — a human is watching, so
         # the Leader DEFERS (vs JUDGE when headless). The one operator-present
         # construction site today.
         operator_present=True,
@@ -157,7 +155,7 @@ def _build_kickoff_orchestrator(
     )
 
 
-#: Per-tick byte cap on the audit read (WB gauges-arc BLOCK #2a): the tally
+#: Per-tick byte cap on the audit read: the tally
 #: runs on the 1s UI tick, so a huge append must never stall the event loop —
 #: anything past the cap is picked up by subsequent ticks.
 _AUDIT_READ_CAP = 8 * 1024 * 1024
@@ -318,7 +316,7 @@ class ModulatioApp(App):
     }
 
     /* ── Buttons: rounded light-blue frame, no fill, amber on focus.
-          No square corners (Clif: "no square buttons"). ── */
+          No square corners. ── */
     Button {
         background: transparent;
         border: round $frame-dim;
@@ -667,7 +665,7 @@ class ModulatioApp(App):
             mode=mode,
             activity_callback=self._record_activity,
         )
-        # Fix C: expose this run's orchestrator so the STOP key (action_stop_job)
+        # Expose this run's orchestrator so the STOP key (action_stop_job)
         # can signal its abort_event from the main thread while we run here.
         self._kickoff_orch = orch
         # Bind a run-level budget tracker so record_usage accounts this
@@ -688,7 +686,7 @@ class ModulatioApp(App):
         # Honest outcome (no hollow success): a run that RETURNS is not the same as
         # a run that DELIVERED. Count what actually landed vs what blocked / never
         # finished, so the verdict can't claim "deliverables are in" over a blocked,
-        # empty run (HRWT 2026-06-05).
+        # empty run.
         from modulatio.types import GoalStatus
         # A blocked task under a COMPLETED goal was superseded (the goal shipped
         # its objective another way) — it isn't a run-level reservation, so a
@@ -745,7 +743,7 @@ class ModulatioApp(App):
             elif event.state == WorkerState.ERROR:
                 self._on_kickoff_done(None, event.worker.error)
             elif event.state == WorkerState.CANCELLED:
-                # re-sweep (LOW resource-leak): a cancelled kickoff worker (app
+                # a cancelled kickoff worker (app
                 # teardown / Textual cancel) never reaches SUCCESS or ERROR, so
                 # without this branch ``_on_kickoff_done`` never runs — the
                 # elapsed-time interval keeps ticking, ``_kickoff_pending`` stays
@@ -759,7 +757,7 @@ class ModulatioApp(App):
             elif event.state == WorkerState.ERROR:
                 self._on_converse_done(f"(error talking to the Leader: {event.worker.error})")
             elif event.state == WorkerState.CANCELLED:
-                # re-sweep (LOW resource-leak): an exclusive converse worker is
+                # an exclusive converse worker is
                 # cancelled when a second chat message is sent while the Leader is
                 # still thinking. The replacement worker re-arms "leader_thinking"
                 # and settles it on its own done, but a cancel with NO replacement
@@ -787,7 +785,7 @@ class ModulatioApp(App):
         delivered = (result or {}).get("drafts", 0)
         blocked = (result or {}).get("blocked_tasks", 0)
         incomplete = (result or {}).get("incomplete_goals", 0)
-        # re-sweep (LOW): a CANCELLED worker routes here with result AND error
+        # a CANCELLED worker routes here with result AND error
         # both None (there is no summary dict to render). Treat that as its own
         # honest "cancelled" outcome — the no_deliver / completed branches below
         # both subscript ``result`` and would crash on None.
@@ -1081,7 +1079,7 @@ class ModulatioApp(App):
                 team_status.set_done()
 
     def _on_converse_cancelled(self) -> None:
-        """re-sweep (LOW resource-leak): settle the converse lanes after a worker
+        """settle the converse lanes after a worker
         is CANCELLED, without posting a chat reply. If a replacement converse
         worker is already in flight (the usual case — a second message cancels
         the first), that worker re-armed ``leader_thinking`` and will settle the
@@ -1451,7 +1449,7 @@ class ModulatioApp(App):
         # operator can SEE the concurrency (invisible parallelism isn't shippable).
         if is_leader_role(event.role) and not getattr(self, "_run_ended", False):
             if event.phase.endswith("_call_failed"):
-                # Op C: a wedged/timed-out leader call — show an HONEST error, not
+                # A wedged/timed-out leader call — show an HONEST error, not
                 # a perpetual "working" spinner stuck on its last *_started phase.
                 self._set_lane_status_error(
                     "stream-leader-status", "call timed out — see the feed"
@@ -1459,11 +1457,11 @@ class ModulatioApp(App):
             else:
                 self._set_lane_status("stream-leader-status", event.phase)
         elif is_team_role(event.role) and not getattr(self, "_run_ended", False):
-            # The _run_ended gate mirrors the leader branch (WB gauges-arc
-            # BLOCK #1): a straggler team event after kickoff_ended must not
-            # repopulate the floor verbs/counters, re-light the lamps, or
-            # flip the rested rail back to running. The event still reaches
-            # the streams above — only the run telemetry stays down.
+            # The _run_ended gate mirrors the leader branch: a straggler team
+            # event after kickoff_ended must not repopulate the floor
+            # verbs/counters, re-light the lamps, or flip the rested rail back
+            # to running. The event still reaches the streams above — only the
+            # run telemetry stays down.
             actor = self._agent_name(event.agent_id or event.role) or _humanize(
                 event.agent_id or event.role
             )
@@ -1707,7 +1705,7 @@ class ModulatioApp(App):
         return active
 
     def _running_job_orchestrator(self):
-        """Fix C: the Orchestrator of the job running right now (via converse
+        """The Orchestrator of the job running right now (via converse
         run_job OR a direct kickoff), or None when nothing is in flight."""
         active = self._active_job_orchestrators()
         return active[0] if active else None
@@ -1734,7 +1732,7 @@ class ModulatioApp(App):
         # only the first would leave the other running past an F8.
         for orch in active:
             orch.abort_event.set()  # thread-safe; the worker's loop reads it
-        # F8 blows out the pipes (Clif 2026-06-05): clear the TEAM TV now for instant
+        # F8 blows out the pipes: clear the TEAM TV now for instant
         # kill feedback (and again when the run fully unwinds, so no late event re-
         # fills it). The engine teardown finalizes goals/tasks/tickets at run-end.
         # The LEADER chat is never touched.
@@ -1972,7 +1970,7 @@ class ModulatioApp(App):
             pass
 
     def _set_lane_status_error(self, status_id: str, message: str) -> None:
-        """Op C: drive a lane status into an HONEST error state (no spinner) when a
+        """Drive a lane status into an HONEST error state (no spinner) when a
         call wedged/timed out, instead of leaving it stuck on "working"."""
         try:
             self.query_one(f"#{status_id}", StreamStatus).set_error(message)

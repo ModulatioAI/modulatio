@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""ModulatioCommands — Textual command-palette Provider for #27.
+"""ModulatioCommands — Textual command-palette Provider.
 
-F1 used to call ``action_show_commands`` (a placeholder that just rang
-the bell). After #31a reassigned F1 to Leader pane focus, the
-placeholder became dead code. Textual ships a command palette already
+F1 used to call ``action_show_commands``, a placeholder that just rang
+the bell; once F1 was reassigned to Leader pane focus, the placeholder
+became dead code. Textual ships a command palette already
 (default key Ctrl+P / Cmd+P) — this Provider exposes Modulatio's
 tab-switch commands through it.
 

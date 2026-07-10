@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Comptroller — authorization layer for producer escalations (slice #9d).
+"""Comptroller — authorization layer for producer escalations.
 
 Deterministic, non-LLM business function: given a project's declared
 daily budget per cost_class, authorize or deny a producer escalation
@@ -83,7 +83,7 @@ class Authorization:
     is a short human-readable explanation for the ticket body / audit
     trail.
 
-    ``idempotent_reuse`` (re-sweep MEDIUM/cost): set True only on the metered
+    ``idempotent_reuse``: set True only on the metered
     idempotent-replay branch — the SAME (cost_class, task, key) call already
     authorized today, allowed-but-not-re-charged. It is a STRUCTURED signal so
     the tool runner can short-circuit the provider re-invoke (reuse the prior
@@ -479,7 +479,7 @@ def _scan_metered_today(
         # cap bounds runaway loops within ONE budget, not across budgets.
         if entry_cost == cost_class and entry_task == task_id:
             task_count += 1
-        # Nemo B4 #1: idempotency is scoped to THIS (cost_class, task, key) — a
+        # Idempotency is scoped to THIS (cost_class, task, key) — a
         # DIFFERENT task with the same pinned inputs is a separate, chargeable spend
         # (else a shared key would let task after task replay free past the daily
         # cap). Only a same-task replay of the identical call is free.
@@ -512,7 +512,7 @@ def authorize_metered_tool(
     """Gate ONE metered (paid-cloud / premium-cloud) tool call before it spends.
 
     Unlike ``authorize_escalation`` (agent escalation, which degrades OPEN), the
-    metered-tool path **fails CLOSED** per the Part B review (Nemo #7) — real money
+    metered-tool path **fails CLOSED** — real money
     flows through it and the LLM controls when a tool fires:
 
     - Unknown / missing ``cost_class`` (not paid-cloud/premium-cloud) → **DENY**.
@@ -572,7 +572,7 @@ def authorize_metered_tool(
             project_code, cost_class, task_id, idempotency_key
         )
         if key_seen:
-            # re-sweep MEDIUM/cost: idempotent replay stays ALLOW-not-re-charged
+            # Idempotent replay stays ALLOW-not-re-charged
             # (the contract — same call adds no ledger entry, so it can never
             # spend past a cap). We flag it structurally so the runner can skip
             # the provider re-invoke; the per-task cap still bounds DISTINCT

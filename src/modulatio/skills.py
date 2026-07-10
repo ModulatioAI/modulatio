@@ -44,7 +44,7 @@ logger = logging.getLogger("modulatio.skills")
 #: matching standards.py / constitution.py / qc_persona.py, which never freeze
 #: the path at import. Set to a concrete ``Path`` only to pin the directory
 #: (tests do this via ``monkeypatch.setattr(skills, "_SKILLS_ROOT", ...)``).
-#: re-sweep (0.9.0 MEDIUM): was frozen at import — diverged from the sibling
+#: Was frozen at import — diverged from the sibling
 #: resolvers and went stale after a config reload.
 _SKILLS_ROOT: Path | None = None
 
@@ -71,7 +71,7 @@ _OWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 def _fm(value: object) -> str:
     """Collapse any CR/LF in a front-matter SCALAR value to a single space so
-    a value can never forge an extra front-matter line (security audit H2).
+    a value can never forge an extra front-matter line.
 
     The front-matter parser is line-based (``key: value`` per line), so a
     Leader-supplied ``description`` containing ``"\\nneeds_network: true"``
@@ -153,8 +153,8 @@ class Skill:
     #: (pre-#84 / legacy) is preserved as-is; it gets stamped the next time
     #: it's re-codified.
     base_seed_hash: str | None = None
-    #: Explicit "this is a HUMAN override, keep it sacred" marker (task #90,
-    #: Nemo's shadow-fix sharp edge). The seed→supersede rule treats any skill
+    #: Explicit "this is a HUMAN override, keep it sacred" marker. The
+    #: seed→supersede rule treats any skill
     #: carrying a ``version``/``base_seed_hash`` as machine-codified and may
     #: supersede it on a seed change. But a human who EDITS a codified shared
     #: skill and leaves that frontmatter would get silently superseded. Setting
@@ -162,16 +162,16 @@ class Skill:
     #: never superseded — regardless of leftover codification stamps. (Removing
     #: ``version``/``base_seed_hash`` does the same; this is the explicit way.)
     user_override: bool = False
-    #: Codification provenance (#81 Fix F): ``"fail"`` (codified from repeated QC
+    #: Codification provenance: ``"fail"`` (codified from repeated QC
     #: rejections — independently validated), ``"win"`` (codified from a QC-authored
     #: RECOVERY — the same mind judged + wrote the fix, so NON-independent and most
     #: worth a spot-check), or ``"user"``. ``None`` for seeds. Load-bearing for
     #: honesty: it lets a reader tell an independently-validated lesson from a
     #: non-independent one — without it, codifying from a QC fix would launder the
-    #: source (Hero R1 / #81).
+    #: source.
     provenance: str | None = None
-    #: The recovery cluster SIGNATURES already codified into this skill (#81 Fix F,
-    #: Nemo r2 #3). The win loop appends a signature here as it codifies; before
+    #: The recovery cluster SIGNATURES already codified into this skill. The
+    #: win loop appends a signature here as it codifies; before
     #: appending a ``## Learned (from recovery)`` block it checks this list and SKIPS
     #: if the signature is present — so a replay after a consume-after-commit failure
     #: is idempotent (the applied-signature guard). Empty for seeds / fail-only skills.
@@ -310,7 +310,7 @@ def load_with_metadata(name: str, project_code: str | None = None) -> Skill:
     preserved as-is (we can't prove it stale); it gets stamped the next time
     it's re-codified.
     """
-    # H1: a traversal name resolves to the empty skill (safe not-found) rather
+    # A traversal name resolves to the empty skill (safe not-found) rather
     # than a read outside the registry root. Trusted internal names (the task
     # graph) always pass; only a hostile name is short-circuited.
     try:
@@ -335,7 +335,7 @@ def _maybe_supersede(name: str, override: Skill, seed_path: Path) -> Skill:
     codification whose stamped ``base_seed_hash`` no longer matches the
     current bundled seed — in which case return the seed (task #84).
 
-    A WIN/USER codification (``provenance in ('win', 'user')``, #81/#H18) is
+    A WIN/USER codification (``provenance in ('win', 'user')``) is
     EXEMPT: it carries genuinely-learned content (a ``## Learned (from
     recovery)`` technique block) appended on top of the seed, so a seed bump
     must never discard it. Only a mechanical FAIL codification is refreshable
@@ -399,7 +399,7 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
     Routing fields are serialized as comma-separated values in
     front-matter. Body is the prompt template. Returns the written path.
     """
-    validate_registry_name(skill.name)  # H1: no path-traversal write
+    validate_registry_name(skill.name)  # no path-traversal write
     if project_code is not None:
         root = project_dir(project_code) / "skills"
     else:
@@ -407,7 +407,7 @@ def save(skill: Skill, project_code: str | None = None) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{skill.name}.md"
 
-    # H2: every interpolated value is newline-collapsed (``_fm``) so a scalar
+    # Every interpolated value is newline-collapsed (``_fm``) so a scalar
     # field can't forge a privilege-granting front-matter key.
     fm_lines: list[str] = [
         f"name: {skill.name}",
@@ -460,7 +460,7 @@ def delete_skill(name: str, project_code: str | None = None) -> bool:
     never deletable here, so a codification can be removed but the seed it
     derives from survives. The name is path-validated (no traversal) and a
     symlinked skill file is refused rather than followed."""
-    validate_registry_name(name)  # H1: no path-traversal delete
+    validate_registry_name(name)  # no path-traversal delete
     if project_code is not None:
         root = project_dir(project_code) / "skills"
     else:
@@ -502,7 +502,7 @@ def create_skill(
     name already exists at the target scope — wizards should validate
     against ``list_skills`` before calling.
     """
-    validate_registry_name(name)  # H1: no path-traversal write
+    validate_registry_name(name)  # no path-traversal write
     if project_code is not None:
         root = project_dir(project_code) / "skills"
     else:

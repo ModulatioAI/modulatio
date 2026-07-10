@@ -208,7 +208,7 @@ def _service_request(
         data = _json.dumps(json_body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     elif form_body is not None:
-        # The other common POST dialect (OCR.space et al.): form fields.
+        # The other common POST dialect: form fields.
         data = urllib.parse.urlencode(form_body).encode("utf-8")
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     req = urllib.request.Request(

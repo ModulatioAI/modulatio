@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - non-POSIX
 TELEGRAM_RATE_LIMIT_SEC = 3600
 
 
-# re-sweep (MEDIUM/race): raise_alert/clear_alert/clear_all each do
+# raise_alert/clear_alert/clear_all each do
 # load_alerts() -> mutate -> save_alerts(), and save_alerts is an atomic
 # *replace* (config.write_secret_file), not an atomic read-modify-write. The
 # daemon runs heartbeat + cron + Telegram listener concurrently, and the wave
@@ -167,7 +167,7 @@ def raise_alert(
     now = int(time.time())
     fix = suggested_fix(auth_type, auth_config)
 
-    # re-sweep: read-merge-write under the lock so a concurrent raise/clear on a
+    # Read-merge-write under the lock so a concurrent raise/clear on a
     # DIFFERENT provider can't clobber this entry via the atomic file replace.
     with _alerts_single_flight():
         alerts = load_alerts()
@@ -215,7 +215,7 @@ def raise_alert(
 def clear_alert(provider_id: str) -> bool:
     """Clear an alert (next successful call, or manual user action). Returns
     True if anything was cleared, False if there was no active alert."""
-    # re-sweep: read-modify-write under the lock so clearing provider B doesn't
+    # Read-modify-write under the lock so clearing provider B doesn't
     # resurrect a concurrent raise(provider A) (or vice versa).
     with _alerts_single_flight():
         alerts = load_alerts()
@@ -228,7 +228,7 @@ def clear_alert(provider_id: str) -> bool:
 
 def clear_all() -> int:
     """Clear all active alerts. Returns count cleared."""
-    # re-sweep: count + clear under the lock so the returned count matches what
+    # Count + clear under the lock so the returned count matches what
     # was actually wiped and a concurrent raise isn't silently dropped/double-counted.
     with _alerts_single_flight():
         alerts = load_alerts()

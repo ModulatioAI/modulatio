@@ -131,7 +131,7 @@ def start(*, stub: bool = True) -> int:
 def _child_main(*, stub: bool) -> None:
     """Post-fork child body. Always terminates via os._exit(); never returns.
 
-    re-sweep (#1): any failure setting up the detached child (log open, PID
+    Any failure setting up the detached child (log open, PID
     write, dup2, etc.) calls os._exit(1) rather than raising back out of the
     fork, which would otherwise run parent-side CLI/atexit teardown inside the
     forked child.

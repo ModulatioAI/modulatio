@@ -135,7 +135,7 @@ def validate_remediation(data: dict, goal_task_ids: "set[str]") -> Remediation:
     # Fail closed on a PRESENT-but-malformed target_task_ids — distinguish absent
     # (default []) from present (must be a list of strings). A falsey non-list
     # ("" / 0 / false) is an INVALID declaration, not a silent rebind to the safe
-    # shape. (Nemo code-review finding.)
+    # shape.
     if "target_task_ids" in raw:
         targets_raw = raw["target_task_ids"]
         if not isinstance(targets_raw, list) or any(
@@ -157,7 +157,7 @@ def validate_remediation(data: dict, goal_task_ids: "set[str]") -> Remediation:
         reason_code=reason,
         target_task_ids=targets,
         # Only a real JSON `true` requests the window — `bool("false")` is True, so a
-        # malformed string must NOT open a window. (Nemo code-review finding.)
+        # malformed string must NOT open a window.
         window_requested=raw.get("window_requested") is True,
     )
 
@@ -195,7 +195,7 @@ _PUMP_TICK_S = 2.0
 
 #: Bounded backoff between redo attempts when the failure is AVAILABILITY-class
 #: (provider down / model crashed) — without it a dead endpoint burns a task's
-#: whole retry budget in ~1s (live run 2026-07-04). The ``claude_cli.
+#: whole retry budget in ~1s. The ``claude_cli.
 #: _CLAUDE_RETRY_BACKOFF_S`` idiom; waited on ``abort_event`` so F8 stays live.
 _AVAILABILITY_RETRY_BACKOFF_S = (2.0, 8.0, 20.0)
 
@@ -205,7 +205,7 @@ _AVAILABILITY_RETRY_BACKOFF_S = (2.0, 8.0, 20.0)
 _SEAT_COOLDOWN_S = 180.0
 
 #: Block-reason markers shared by the BLOCK writers and the QC-sweep
-#: discriminator (Jenny cadre MED: a discriminator must bind on a constant
+#: discriminator (a discriminator must bind on a constant
 #: both sides reference, never on free-form rationale prose that can drift).
 _ENV_BLOCK_RATIONALE_PREFIX = "environmental defect:"
 _PATH_CONFLICT_MARKER = "artifact-path conflict"
@@ -220,7 +220,7 @@ _CONVERSE_TASK_ID = "conversation"
 #: the producer's task-scoped spend counter, so on a cap-1 service the
 #: producer's own call starves QC (and QC-as-fixer, the shipping default)
 #: to zero. 5x-with-a-floor-of-5 leaves room for verify + fix + re-verify
-#: with the producer's spend already counted (operator call, 2026-07-06).
+#: with the producer's spend already counted.
 _QC_METERED_CAP_MULTIPLIER = 5
 _QC_METERED_CAP_FLOOR = 5
 
@@ -249,7 +249,7 @@ def _codification_timeout() -> float:
 #: raise at import time. Tests monkeypatch this attribute directly.
 _CODIFICATION_TIMEOUT_S = _codification_timeout()
 
-#: Cancellation boundary for the bounded codify daemon (cadre: Wild Bill BLOCK). On
+#: Cancellation boundary for the bounded codify daemon. On
 #: timeout the wrapper SETS this Event; the persist seams (`_persist_codification`,
 #: `_persist_jt_codification`) check it and refuse to write — so an orphaned daemon
 #: resuming after the run already returned can't race a late skill/JT write against
@@ -292,14 +292,14 @@ class RunSummary:
     #: separation. Surfaced distinctly so a human report never presents
     #: them as clean producer wins.
     qc_authored_fixes: list[str] = field(default_factory=list)
-    #: Leader's reservations FOR THE HUMAN (2026-05-30) — caveats it can't
+    #: Leader's reservations FOR THE HUMAN — caveats it can't
     #: resolve inside the swarm (e.g. "couldn't verify these citations are
     #: authentic", "no plagiarism scan was run"). These do NOT fail a goal,
     #: loop the swarm, edit the work, or open a ticket — they are gathered
     #: into the human-addressed "Product Quality Report" that ships beside
     #: the deliverables. Each item: {goal_id, concern, suggestion}.
     recommendations: list[dict] = field(default_factory=list)
-    #: Iteration mode (2026-05-30): artifacts-relative names of files pinned
+    #: Iteration mode: artifacts-relative names of files pinned
     #: via ``--attach`` for in-place improvement. Delivery uses this to ship
     #: the improved file under its real name, REPLACING the prior copy rather
     #: than accumulating disambiguated duplicates.
@@ -326,7 +326,7 @@ class RunSummary:
     #: no greenfield substitute runs, this records the refused template name so the
     #: pipeline/operator sees the visible gap. None on a normal (or greenfield) run.
     skipped_refused_jt: str | None = None
-    #: #97 Hero m1 — the WHY behind the skip (the fit-gate's reason, e.g. "missing
+    #: The WHY behind the skip (the fit-gate's reason, e.g. "missing
     #: required parameter(s): topic"). A skipped cron slot recurs every cycle until a
     #: human fixes it, so the reason is the single most useful debugging string; it
     #: rides the skip surface (activity detail + dispatch result) alongside the name.
@@ -334,11 +334,11 @@ class RunSummary:
 
 
 # ── Core rebuild B3: isolated-worker result + deterministic merge ───────
-# Per Nemo + Lovecraft round-1: a concurrent task worker must NOT mutate
+# A concurrent task worker must NOT mutate
 # shared orchestrator/run state directly. It runs the task in isolation and
 # returns this structured result; the MAIN THREAD merges results back in
-# deterministic (task-id) order. This is the contract (B3a); the worker that
-# populates it (B3b) + the concurrent loop that merges (B4) build on it.
+# deterministic (task-id) order. This is the contract; the worker that
+# populates it and the concurrent loop that merges build on it.
 
 
 @dataclass
@@ -353,7 +353,7 @@ class TaskExecutionResult:
     MAIN THREAD runs them at merge so worker threads never write the store.
     (Activity events are NOT carried here — workers stream them live, Fix B.)
 
-    Isolation contract (Nemo impl-sweep B3): the worker does not mutate
+    Isolation contract: the worker does not mutate
     shared orchestrator/run state. The ONE exception is the locked
     ``qc_history.append_verdict`` (best-effort precedent log) — it is held
     under ``self._store_lock`` and is a documented locked shared sink, NOT
@@ -394,7 +394,7 @@ def _merge_task_result(
 ) -> None:
     """Fold one worker ``result`` into shared state on the MAIN THREAD.
 
-    Idempotent by ``task.id`` (Lovecraft round-1): re-merging the same
+    Idempotent by ``task.id``: re-merging the same
     task is a no-op, so a retried/redelivered result can't double-write.
     The caller invokes this for each result in deterministic (task-id /
     scheduler) order so audit + summary are reproducible — NOT in worker
@@ -578,7 +578,7 @@ def _select_assembler_skill(tasks: "list[Task]", project_code: str | None) -> No
             continue
         target = entry.assembler_skill
         if target and target in _ASSEMBLER_SKILLS:
-            # ALWAYS canonicalize the target to FIRST (Nemo hull #4): if the
+            # ALWAYS canonicalize the target to FIRST: if the
             # planner emitted mixed assembler skills (e.g. [document-assembly,
             # code-assembly]) the target may already be present but NOT first, and
             # _assembly_strategy_for_task picks the first — so code could route to
@@ -607,8 +607,7 @@ def _wire_assembler_dependencies(tasks: list["Task"]) -> None:
     # (no place in the assembled deliverable; they'd defeat the cheap structural
     # check). UNION them into each assembler's deps (not just when empty) so the
     # dep set is the AUTHORITATIVE COMPLETE unit set — a planner that declared a
-    # partial dep set can't then cheap-pass an under-scoped assembly (review
-    # 2026-06-04).
+    # partial dep set can't then cheap-pass an under-scoped assembly.
     unit_ids = [t.id for t in tasks if t.deliverable and not _is_assembler_task(t)]
     if not unit_ids:
         return
@@ -627,7 +626,7 @@ def _build_requirement(raw: dict, *, family: str = "document") -> EvidenceRequir
     an empty/unknown ``family`` (e.g. at decompose, before artifact_kind exists)
     also skips the rewrite — it's deferred to the per-task call where the family
     is known. The rewrite never touches evidence ``kind``/count (the planner's
-    artifact-count cardinality gate stays intact — Nemo)."""
+    artifact-count cardinality gate stays intact)."""
     _norm = _normalize_render_paths if family == "document" else (lambda x: x)
     return EvidenceRequirement(
         kind=_coerce_evidence_kind(raw.get("kind", "report")),
@@ -649,7 +648,7 @@ _FENCED_BLOCK_RE = re.compile(r"```(?:\w+)?\n(.*?)\n```", re.DOTALL)
 
 def _strip_code_fences(text: str) -> str:
     """Strip an outer ```<lang>...``` markdown wrapper from a producer
-    response, if present. Surfaced 2026-04-28: drafter wrote a Python
+    response, if present. A drafter wrote a Python
     script wrapped in ```python...``` and the orchestrator saved the
     fences as the first/last lines of the .py file, breaking it with
     a SyntaxError.
@@ -703,7 +702,7 @@ def _trim_leading_prose_from_code(text: str) -> str:
     "Let me produce:", "I can't use redirection..."), find the first
     code-shaped line and chop everything before it.
 
-    Surfaced 2026-04-28 in the STR end-to-end test: an engineer LLM
+    In the STR end-to-end test, an engineer LLM
     emitted prose preamble + blank + correct code, but the prose
     survived all existing strip steps because there were no fences
     wrapping the body. add.py and test_add.py contained valid Python
@@ -741,7 +740,7 @@ def _extract_code_from_prose(text: str) -> str | None:
     no fenced blocks, or (b) prose surrounding the fences is minimal
     (so the body is already mostly-code and shouldn't be re-extracted).
 
-    Surfaced 2026-04-28 in the CDE end-to-end test: an engineer LLM
+    In the CDE end-to-end test, an engineer LLM
     emitted an ``add.py`` artifact as 'I see — the passive profile is
     restricted. Let me produce: ```code```' — the em-dash on line 1
     broke ``python3 -c 'import add'`` and crashed QC's verify probe.
@@ -789,7 +788,7 @@ def _with_operation_card(task: "Task", raw_standards: str) -> str:
     never a loose generic. Card rides the existing ``{standards}`` slot."""
     from modulatio import operation_cards
 
-    if raw_standards is None:  # Nemo R1: fail-closed against the str|None signature,
+    if raw_standards is None:  # fail-closed against the str|None signature,
         raw_standards = ""     # independent of caller discipline.
     card = operation_cards.render(getattr(task, "operation", ""))
     return f"{card}\n\n{raw_standards}" if raw_standards.strip() else card
@@ -887,7 +886,7 @@ def _format_kickoff_attachments(attachments: list) -> str:
                 f"— vision content blocks for kickoff are a future slice"
             )
         else:  # document
-            # re-sweep #3: a path-only document (content=None) must not inline as an
+            # A path-only document (content=None) must not inline as an
             # empty block — the Leader would see the filename but plan blind. Mirror
             # _pin_attachments' resilience: best-effort read att.path before falling
             # back to ''. A binary file fails to decode (UnicodeDecodeError <: ValueError).
@@ -897,11 +896,11 @@ def _format_kickoff_attachments(attachments: list) -> str:
                     # Strict decode (matches attachments.build_attachment's
                     # "binary fails fast" contract): a binary file raises
                     # UnicodeDecodeError (a ValueError) → caught below → no body,
-                    # NOT a garbled errors="replace" inline (cadre audit F2-3).
+                    # not a garbled errors="replace" inline.
                     body = Path(att.path).read_text(encoding="utf-8")
                 except (OSError, ValueError):
                     body = None
-            # re-sweep R4 #2: fence the document body with a backtick run longer
+            # Fence the document body with a backtick run longer
             # than any run inside it (min 3), so a document whose own content
             # carries a ``` line can't break out of the wrapper and bleed into the
             # Leader's instruction context (prompt-injection / context-bleed). This
@@ -978,7 +977,7 @@ def _format_available_skills(names: list[str]) -> str:
 
 
 def _format_team_capacity(agents: list) -> str:
-    """Sizing guidance for both planning layers (2026-06-26): task SIZE follows
+    """Sizing guidance for both planning layers: task SIZE follows
     the WORK and the per-task CONTEXT BUDGET, never the producer headcount. Each
     task should finish comfortably BELOW its producer's compression trigger (the
     engine soft-compresses near the top of the window), with headroom for tool
@@ -1075,7 +1074,7 @@ def _audit_class_qc_fallback(
       then also falls through, accepting role-keyed self-review as
       least-bad).
 
-    Lifted out of the dispatch loop in 2026-05-02 so the audit-class
+    Lifted out of the dispatch loop so the audit-class
     fallback policy is unit-testable without driving a full Orchestrator
     kickoff.
     """
@@ -1124,7 +1123,7 @@ def _format_team_canvas(raw: str) -> str:
     wrapper adds the section delimiters AND the untrusted-evidence
     framing.
 
-    **Injection guard (third-party review 2026-05-02):** the file heads
+    **Injection guard:** the file heads
     in the digest are output from prior producer LLM calls; a misbehaving
     or adversarial producer can write text that reads as instructions
     for the next producer ("ignore design intent", "output JSON-only
@@ -1250,7 +1249,7 @@ class _PlanError(Exception):
     """
 
 
-# The fixed per-sub-objective task COUNT cap was removed 2026-06-26: task count
+# The fixed per-sub-objective task COUNT cap was removed: task count
 # follows the WORK and the per-task CONTEXT BUDGET (the real ceiling — each task
 # runs under its budget_role window with a runtime compression-churn backstop),
 # never a magic number. Over-decomposition is now a soft YAGNI discipline in the
@@ -1262,13 +1261,13 @@ class _PlanError(Exception):
 # The Leader may NOT create a goal whose job is to verify/review/audit other
 # work. Prose guidance bends the LLM but does not bind it — observed live, a
 # minted verify goal starved the research (off-topic output), invented an
-# impossible Turnitin plagiarism gate (ticket death-loop), and "verify ALL
+# impossible plagiarism-detection gate (ticket death-loop), and "verify ALL
 # claims" decompose-stormed (20 tickets, nothing shipped). QC already verifies
 # every PRODUCING task and repairs it; a separate reviewer can only report.
-# Since the per-sub-objective count cap was removed (2026-06-26), this is now the
+# Since the per-sub-objective count cap was removed, this is now the
 # SOLE HARD guard against the catastrophic verify-storm — task-level verify-padding
 # is a soft YAGNI concern in the planning prompts, but a verify-GOAL is impossible.
-# RULE (Clif 2026-05-30): the Leader MAY require producing goals to draw on
+# RULE: the Leader MAY require producing goals to draw on
 # rigorous, credible sources — that's a quality spec on production — but it
 # MAY NOT request verification as its own goal/task. Distrust of a source or
 # claim belongs in the end-of-run Product Quality Report, never a swarm goal.
@@ -1284,7 +1283,7 @@ _VERIFY_GOAL_RE = re.compile(
     # "test / playtest / play through" is the same anti-pattern as "verify":
     # running a finished deliverable to confirm it works is QC's job, never a
     # standalone goal — and for an interactive/GUI artifact no agent can do it
-    # at all (it asks the team to *watch a game play*). Live repro 2026-05-30:
+    # at all (it asks the team to *watch a game play*). Observed live:
     # a "Test the game on a clean env" goal blocked on a capability gap and
     # wedged a finished game behind a CRITICAL human-punt ticket. The
     # production-verb guard still keeps "write a test suite" / "build tests".
@@ -1321,8 +1320,7 @@ def _goal_emits_artifact(item: dict) -> bool:
     work. Used as a second gate on the verify-goal drop: a verb-ambiguous
     goal that actually makes something ("Validate the dataset schema" →
     produces validator.py; "Review article" as a content type) is KEPT;
-    only a verify-led goal that emits no deliverable is dropped. (Nemo hull
-    note 2026-05-30 — a false-positive drop of real producing work is the
+    only a verify-led goal that emits no deliverable is dropped. (A false-positive drop of real producing work is the
     worse error.)"""
     return any(
         isinstance(r, dict) and str(r.get("kind", "")).strip().lower() == "artifact"
@@ -1333,7 +1331,7 @@ def _goal_emits_artifact(item: dict) -> bool:
 # Size-band parsing (#size-floor → QC-judges-with-tolerance) — a deliverable's
 # expected size is a JUDGMENT call ("is this complete at this length?"), not a
 # deterministic truth, so the engine MEASURES + surfaces it and QC JUDGES within
-# a tolerance band — it does NOT mechanically gate. (Live 2026-06-02: a rigid
+# a tolerance band — it does NOT mechanically gate. (A rigid
 # `token_count < floor` gate flogged producers into shrink-spirals — a 0-byte
 # tombstone, a 5,767w overshoot — because length adequacy is exactly the kind of
 # judgment "prose bends, engine binds" says to leave to the model.) The engine
@@ -1359,7 +1357,7 @@ _SIZE_ATLEAST_RE = re.compile(
 _SIZE_FIRST_INT_RE = re.compile(r"([\d,]{2,})")
 
 #: Default fractional discretion margin QC may exercise around a declared size
-#: band before it must act (Clif's calibration, 2026-06-02). Env-overridable.
+#: band before it must act. Env-overridable.
 _SIZE_TOLERANCE = 0.10
 
 
@@ -1460,7 +1458,7 @@ def _normalize_output_path_sugar(candidate: str) -> str:
     Shared with the size-split plan-time duplicate invariant so a sugared
     duplicate (``artifacts/drafts/x.md`` vs ``drafts/x.md``) cannot slip past
     a raw-string comparison and canonicalize into a collision at task
-    creation (Wild Bill BLOCK, code review 2026-07-02)."""
+    creation."""
     s = (candidate or "").strip().replace("\\", "/")
     while s.startswith("./"):
         s = s[2:]
@@ -1634,8 +1632,7 @@ def _unknown_deps(
     dependency edge. Non-empty → the caller must fail closed (block), never run a
     task against an unresolved dependency. The initial-pass topo-sort already
     rejects these via store-validation; the iterate-style resume path skips that
-    validation (to avoid #10755), so it enforces the invariant here instead
-    (Nemo HIGH)."""
+    validation (to avoid #10755), so it enforces the invariant here instead."""
     cg = cross_goal_status or {}
     return [d for d in task.depends_on if d not in task_map and d not in cg]
 
@@ -1857,8 +1854,7 @@ def _split_leader_report_body(raw: str) -> str:
     for i, line in enumerate(lines):
         stripped = line.strip()
         # Must be a HEADING line (Markdown `#`/`*` decoration) — a prose line that
-        # merely STARTS WITH the heading text is not the section (cadre: Jenny/
-        # Lovecraft/Nemo). Gate on the decoration, THEN match the heading text.
+        # merely STARTS WITH the heading text is not the section. Gate on the decoration, THEN match the heading text.
         if not (stripped.startswith("#") or stripped.startswith("*")):
             continue
         if stripped.strip("#*").strip().lower().startswith(
@@ -1986,8 +1982,8 @@ def _parse_diff_blocks(response: str) -> dict[str, str]:
     return blocks
 
 
-#: Increment 3 (2026-05-30): SEARCH/REPLACE patch blocks for in-place iteration.
-#: ``<<<<<<< SEARCH`` / ``=======`` / ``>>>>>>> REPLACE`` (aider-style). The
+#: SEARCH/REPLACE patch blocks for in-place iteration.
+#: ``<<<<<<< SEARCH`` / ``=======`` / ``>>>>>>> REPLACE``. The
 #: SEARCH text must match the current file EXACTLY; the engine replaces it and
 #: keeps every other byte. That is what a prose "preserve everything" contract
 #: cannot guarantee — a regen drops untouched code; a patch structurally can't.
@@ -2090,8 +2086,7 @@ def _next_producer_mode(
 ) -> str:
     """Pick the producer mode for the NEXT retry after a QC reject.
 
-    QC-as-fixer Slice 1 (Nemo's mechanical definitions, design-review
-    sign-off 2026-05-20). Replaces the prior one-line
+    Replaces the prior one-line
     ``mechanical → edit / else generate`` ternary with an explicit,
     testable policy so a patch is only attempted when it's safe:
 
@@ -2109,8 +2104,7 @@ def _next_producer_mode(
     upstream by ``_block_for_environmental`` (the redo loop returns
     before routing a next mode).
 
-    §3b (2026-06-03, Clif: "I don't want the Leader OR QC throwing things
-    away — fix in place"): the prior policy regenerated from scratch on a
+    The prior policy regenerated from scratch on a
     SUBSTANTIVE defect or when QC named nothing locatable. That threw away
     the draft AND the reviewer's judgment. Now the ONLY clean regenerate is
     a genuinely-absent draft (nothing to build on — and a missing artifact
@@ -2393,7 +2387,7 @@ class Orchestrator:
         #: /yolo //goal //yolo-goal //default command; persists across turns).
         from modulatio.permissions import RunMode as _RunMode
         self._session_mode = _RunMode.DEFAULT
-        #: Fix B (2026-06-03): serializes the activity_callback so concurrent wave
+        #: Serializes the activity_callback so concurrent wave
         #: workers can fire ActivityEvents LIVE (not buffer-til-merge) without
         #: racing a non-thread-safe subscriber — the operator sees producers work
         #: in parallel as it happens. Held only for the quick callback enqueue
@@ -2401,22 +2395,22 @@ class Orchestrator:
         #: path. Display events stream live; STORE/artifact writes still buffer
         #: for the deterministic merge (correctness needs order; the TV needs now).
         self._activity_lock = threading.Lock()
-        #: Fix C (2026-06-03): the operator's kill-switch. The TUI (or any caller)
+        #: The operator's kill-switch. The TUI (or any caller)
         #: sets this from another thread to STOP a running job; the kickoff loops
         #: check it at safe points (top of the goal loop, the wave loop, before a
         #: sequential dispatch) and bail cleanly with a partial summary. In-flight
         #: model calls finish (a blocking HTTP call can't be cut mid-stream) — no
         #: NEW work launches. A fresh, unset Event per Orchestrator.
         self.abort_event = threading.Event()
-        #: Capability-floor caches (slice #9b) — instance-scoped so the
+        #: Capability-floor caches — instance-scoped so the
         #: plan-dispatch loop AND the concurrent wave scheduler share one
-        #: floor lookup (Nemo impl-sweep B2: the wave scheduler must apply
+        #: floor lookup (the wave scheduler must apply
         #: the same skill/domain floors as plan-dispatch, or a capacity
         #: rebalance could pick an under-floor agent). Floors don't change
         #: within a run, so an instance cache is correct + cheaper.
         self._skill_floor_cache: dict[str, tuple[str, ...]] = {}
         self._domain_floor_cache: dict[str, tuple[str, ...]] = {}
-        #: Iteration mode (2026-05-30): names (artifacts-relative) of files
+        #: Iteration mode: names (artifacts-relative) of files
         #: pinned into the workspace at kickoff via ``--attach``. Non-empty
         #: ⇒ this run IMPROVES existing work rather than building greenfield,
         #: and ``_iteration_contract_block()`` injects the edit-in-place /
@@ -2523,7 +2517,7 @@ class Orchestrator:
                 try:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     tmp = path.with_suffix(".json.tmp")
-                    # L2 (Nemo round-2 sweep): create the temp file with
+                    # Create the temp file with
                     # 0o600 from the outset instead of writing-then-chmod-
                     # after-rename. The temp file content is just a turn
                     # integer (not sensitive on its own), but the file
@@ -2946,12 +2940,12 @@ class Orchestrator:
     ) -> None:
         """Fire an ActivityEvent to the subscriber if one is registered.
 
-        Slice #17. No-op when ``activity_callback`` is None (the CLI path),
-        so back-compat for every pre-#17 caller is guaranteed by construction.
+        No-op when ``activity_callback`` is None (the CLI path),
+        so callers that don't register a callback are unaffected.
         ``agent_id`` defaults to the role key when the caller doesn't have
         a more specific identifier on hand.
 
-        Fix B (2026-06-03): activity events stream LIVE, even from a concurrent
+        Activity events stream LIVE, even from a concurrent
         wave worker — so the operator watches producers work in parallel as it
         happens, not as a burst at merge (the §5 default-on buffering left the
         TEAM TV dark while workers ran). The callback fires under
@@ -3013,7 +3007,7 @@ class Orchestrator:
             # Deadline hit — the daemon thread's eventual answer is dead on arrival.
             decision, reason = WindowDecision.PROCEED, "timeout"
         elif "error" in box or not isinstance(box.get("decision"), WindowDecision):
-            # M1 (Hero): a callback that raised or returned a non-decision proceeds,
+            # A callback that raised or returned a non-decision proceeds,
             # but the audit must NOT report an operator "proceed" that never happened.
             decision, reason = WindowDecision.PROCEED, "callback_error"
         else:
@@ -3111,7 +3105,7 @@ class Orchestrator:
         The converse side is resolved from the ROSTER (``model_for_tier``), NOT
         from ``chat_runner_models`` keyed by agent id — so a Leader agent renamed
         away from the literal ``"leader"`` and the headless CLI flag path are BOTH
-        caught (cadre HIGH/MED: the id-keyed check silently passed on those).
+        caught (the id-keyed check silently passed on those).
 
         ``skip_leader_model_guard`` is the EXPLICIT opt-out for the deliberate
         headless override (CLI ``--leader-model`` choosing a model that differs
@@ -3178,12 +3172,12 @@ class Orchestrator:
         # conceptual default, since the Leader's preferences rule task
         # generation. CLI / daemon / TUI all wire "planner" explicitly.
         #
-        # The legacy "coordinator" runner fallthrough (a transitional shim
-        # from the Step-0 rename, with a DeprecationWarning) was RETIRED in
-        # V2.2 (#143): the "coordinator" role no longer exists and every
-        # caller + test fixture now wires "planner" directly.
+        # The legacy "coordinator" runner fallthrough (a transitional shim,
+        # with a DeprecationWarning) was retired: the "coordinator" role no
+        # longer exists and every caller + test fixture now wires "planner"
+        # directly.
         if runner is None and (role == "planner" or role.endswith("-planner")):
-            # Producer-agnostic robustness (cadre F1-1): a project that names its
+            # Producer-agnostic robustness: a project that names its
             # planner-class role (e.g. "task-planner") but doesn't wire it gets
             # the leader runner rather than a KeyError — the planner is a
             # leader-class ENGINE function, not a producer.
@@ -3225,14 +3219,14 @@ class Orchestrator:
             user_override=user_override or self._user_override_for(effective_budget_role),
             project_overrides=project_overrides,
             audit_path=self._scope_root() / "audit.jsonl",
-            # Concurrency (#151/e2e, Nemo Blocker 1): serialize the
+            # Concurrency: serialize the
             # context-budget audit append with the orchestrator's other
             # shared-run-file writes under concurrent wave workers.
             audit_write_lock=self._store_lock,
         ):
             # Clay: confine a claude-CLI seat to its workspace + widen grants,
             # threading the single-shot tool-call sink so the seat's in-sandbox
-            # tool calls reach the activity feed (Wild Bill MED).
+            # tool calls reach the activity feed.
             with self._seat_context(
                 on_tool_call=self._seat_tool_sink(role, task_id, agent_id)
             ):
@@ -3304,10 +3298,10 @@ class Orchestrator:
                         agent_override_tokens=selected.context_budget,
                         project_overrides=project_overrides,
                         audit_path=self._scope_root() / "audit.jsonl",
-                        audit_write_lock=self._store_lock,  # #151/e2e Blocker 1
+                        audit_write_lock=self._store_lock,
                     ):
                         # Clay: confine a claude-CLI producer/QC seat, threading
-                        # the single-shot tool-call sink (Wild Bill MED).
+                        # the single-shot tool-call sink.
                         with self._seat_context(
                             on_tool_call=self._seat_tool_sink(role, task_id, agent_id)
                         ):
@@ -3370,7 +3364,7 @@ class Orchestrator:
         if not isinstance(values, (list, tuple)):
             return data
         norm_values = [str(v).strip().lower() for v in values if str(v).strip()]
-        # Value-safety (Nemo B1 #2): short values over-match even with a word
+        # Value-safety: short values over-match even with a word
         # boundary ("A", "B"); without ≥2 distinct, safely-matchable values there
         # is no precise per-item signal → fall back to the prose contract.
         if len(norm_values) < 2 or any(len(v) < 3 for v in norm_values):
@@ -3380,7 +3374,7 @@ class Orchestrator:
 
         def _values_in(item: dict) -> "set[str]":
             """The DISTINCT per-item values this goal references by WORD-BOUNDARY
-            match (Nemo B1 #2: not raw substring — so "A" doesn't match "Atlas")."""
+            match (not raw substring — so "A" doesn't match "Atlas")."""
             hay = (
                 str(item.get("description", "")) + " "
                 + str(item.get("success_criteria", ""))
@@ -3391,7 +3385,7 @@ class Orchestrator:
                     found.add(v)
             return found
 
-        # Proof-of-partition (Nemo B1 #1): an ITEM goal EMITS an artifact AND
+        # Proof-of-partition: an ITEM goal EMITS an artifact AND
         # references EXACTLY ONE distinct value. An assembly/synthesis goal names
         # MULTIPLE values → excluded; front matter names zero → excluded. Collapse
         # ONLY when the item goals form a clean BIJECTION onto the full value set
@@ -3517,7 +3511,7 @@ class Orchestrator:
             jn = data.get("job_name")
             self._decomposed_job_name = jn.strip() if isinstance(jn, str) else None
             # No default: a dict that OMITS "goals" is malformed → falls through
-            # to the raise below (don't silently run an empty plan — Nemo). An
+            # to the raise below (don't silently run an empty plan). An
             # explicit "goals": [] is the Leader deliberately producing none.
             data = data.get("goals")
         if not isinstance(data, list):
@@ -3529,7 +3523,7 @@ class Orchestrator:
         # loops / decompose-storms). A goal is dropped ONLY when its primary
         # verb is verification AND it emits no artifact deliverable — a
         # verb-ambiguous goal that actually produces something is kept
-        # (Nemo hull note: a false-positive drop of real work is the worse
+        # (a false-positive drop of real work is the worse
         # error). Only drop while PRODUCING goals remain — never leave the run
         # with nothing to do (degenerate all-verify plan falls through).
         def _is_drop(it: dict) -> bool:
@@ -3618,7 +3612,7 @@ class Orchestrator:
         from modulatio.operation_bars import normalize_operation
 
         def _key(spec: dict) -> tuple:
-            # Nemo P1.5 #1/#2: the key must include EVERY field the artifacts
+            # The key must include EVERY field the artifacts
             # expansion copies from the parent spec onto each sub-task —
             # artifact_kind / required_skills / required_capabilities / deliverable
             # AND research_topics / tool_args / evidence_required AND operation.
@@ -3707,7 +3701,7 @@ class Orchestrator:
         return new_data
 
     def _split_oversized_gathers(self, data: "list") -> "list":
-        """Context-size-driven fan (design 2026-07-01) — the inverse twin of
+        """Context-size-driven fan — the inverse twin of
         :meth:`_bind_wide_artifacts`, run right after it.
 
         A gather-class spec (operation ∈ research/comprehend/evaluate — the ops
@@ -3727,8 +3721,8 @@ class Orchestrator:
         operations (bounded by their inputs). A ``{{fits}}``/single-chunk/
         malformed reply leaves the spec unchanged — fail-open; the runtime
         ``RecoverableContextError → decompose`` keystone backstops an estimate
-        that ran low. The engine LOGS the chunk count prominently (Wild Bill F2
-        condition) and never gates on it — no count limiter.
+        that ran low. The engine LOGS the chunk count prominently and never
+        gates on it — no count limiter.
         """
         if not isinstance(data, list) or not data:
             return data
@@ -3880,17 +3874,17 @@ class Orchestrator:
         # instead of N redundant separate specs (the live anthology shape: 8 story
         # tasks the planner emitted separately + a compile). The task-level twin of
         # the goal collapse: prose steers the planner to use `artifacts`; the engine
-        # binds it. (The old per-goal count cap was removed 2026-06-26.)
+        # binds it. (The old per-goal count cap was removed.)
         data = self._bind_wide_artifacts(data)
 
-        # Context-size-driven fan (2026-07-01): the inverse transform — one
+        # Context-size-driven fan: the inverse transform — one
         # OVERSIZED gather spec splits into an artifacts-fan of size-bounded
         # chunks, because the planner structures the fan only ~50% of the time
         # even when it enumerates the pieces in prose. Size decides the cut;
         # the engine binds the fan.
         data = self._split_oversized_gathers(data)
 
-        # (The fixed work-task count cap was removed 2026-06-26 — task count
+        # (The fixed work-task count cap was removed — task count
         # follows the work + the per-task context budget, not a magic number.
         # Over-decomposition is a soft YAGNI concern in the planning prompts now;
         # the runtime context-budget/churn cap bounds an oversized task, and the
@@ -4045,8 +4039,8 @@ class Orchestrator:
         # units live in an earlier goal, e.g. an "assemble the anthology" goal that
         # follows the "write the 8 stories" goal) gets no deps from the same-goal
         # wiring above — leaving the engine blind and the producer to pull every
-        # unit into context (overflow → decompose-spiral → fabricated deliverable,
-        # HRWT 2026-06-05). Resolve those units from the store so the engine always
+        # unit into context (overflow → decompose-spiral → fabricated deliverable).
+        # Resolve those units from the store so the engine always
         # has an authoritative unit set to bind from. The serial goal loop means the
         # producing goal's tasks already exist here.
         self._wire_cross_goal_assembler_deps(tasks)
@@ -4063,13 +4057,13 @@ class Orchestrator:
         )
         return tasks
 
-    # ── Leader between-task reflection (Slice #82, PR-B) ──────────
+    # ── Leader between-task reflection ──────────
     #
-    # Step 0 (2026-05-15): the iterative continue/revise/drop judgment
+    # The iterative continue/revise/drop judgment
     # moved from a Coordinator-keyed runner call to the Leader's runner.
     # Conceptually this is the Leader's job — between-task reflection is
     # preference-driven course-correction, the same axis as goal-level
-    # Leader-reflect. PIANO: leadership = influence over preferences.
+    # Leader-reflect: leadership = influence over preferences.
 
     def _leader_iterate(
         self,
@@ -4359,7 +4353,7 @@ class Orchestrator:
             )
         except Exception:
             return ""
-        # Reuse observability (run-arc fix 2026-07-02): one audit row per digest
+        # Reuse observability: one audit row per digest
         # build, so cross-run reuse is a MEASURED fact (runs 1→2 of the live
         # test halved fetches, but nothing on disk proved prior-run material
         # reached the producers). File entries are parsed from the digest's own
@@ -4432,7 +4426,7 @@ class Orchestrator:
 
         Only call when ``_assembly_manifest_from_deps(task) is not None`` — i.e. the
         engine can resolve the units. A producer never sees the units, so the
-        deliverable can't be a fabricated digest (the HRWT failure)."""
+        deliverable can't be a fabricated digest."""
         import shutil as _shutil
 
         assembled = self._apply_assembly_manifest(task, "")
@@ -4451,7 +4445,7 @@ class Orchestrator:
                 except OSError:
                     pass
             self._record_artifact_write(path)
-            # Rehash the DESTINATION after the move (Nemo hull #10) so the returned
+            # Rehash the DESTINATION after the move so the returned
             # checksum is provably of the bytes now ON the deliverable path, not the
             # pre-move temp render output.
             from modulatio import review_ledger as _rl
@@ -4521,7 +4515,7 @@ class Orchestrator:
         # multi-unit join the engine performs from disk — it must NEVER run a
         # producer LLM call, in ANY mode. The producer-mode dispatch below would
         # otherwise route a non-generate assembler into _producer_patch/_diff
-        # (which fabricated a "# Collected Stories" digest in the HRWT run, masking
+        # (which fabricated a "# Collected Stories" digest in one run, masking
         # the real stories). Bind from the authoritative deps up front, before any
         # mode branch, so the deliverable is always the real units, never a
         # producer's invention. (No resolvable deps → falls through to the producer
@@ -4543,7 +4537,7 @@ class Orchestrator:
             )
             if primary_skill.executor == "tool":
                 return self._tool_execute(task, primary_skill, path)
-            # Phase 2A + skill-library brick (2026-05-31): a producer reasons
+            # A producer reasons
             # WHILE holding the tools its TASK needs — the UNION of every
             # required skill's loadout, not just the primary's. So a task with
             # required_skills [researcher, web-search] gets http_get + web_search
@@ -4554,8 +4548,8 @@ class Orchestrator:
             if primary_skill.executor == "llm" and task_loadout:
                 # The corrective notes MUST ride this early-return too —
                 # dropping them here ran every skill-routed retry blind
-                # (superhero forensics 2026-07-07: producer prompts byte-
-                # identical across 3 redos while QC's recipe sat in a ticket).
+                # (producer prompts stayed byte-identical across redos while
+                # QC's corrective recipe never reached the next attempt).
                 return self._llm_with_tools_execute(
                     task, primary_skill, path, tool_loadout=task_loadout,
                     corrective_notes=corrective_notes,
@@ -4623,7 +4617,7 @@ class Orchestrator:
         if producer_role_for_inbox not in self.runners:
             producer_role_for_inbox = self.default_producer_role
 
-        # Increment 3 (2026-05-30): iteration PATCH mode. A generate-pass task
+        # Iteration PATCH mode. A generate-pass task
         # that improves a PINNED file emits surgical search/replace blocks; the
         # engine applies them and keeps every untouched line byte-identical, so
         # a cheap producer can't silently drop working code (the live regression
@@ -4685,7 +4679,7 @@ class Orchestrator:
                 existing_draft = None
 
         if task.producer_mode == "revise" and existing_draft is not None:
-            # §3b (2026-06-03): SUBSTANTIVE defect → build on the existing draft
+            # SUBSTANTIVE defect → build on the existing draft
             # with the reviewer's critique as the instruction. Never start from
             # scratch — keep the prior work AND the judgment that's already been
             # formed; the producer reworks/extends in place (cheap recovery, not
@@ -4775,7 +4769,7 @@ class Orchestrator:
             task.assigned_agent_id, producer_role, prompt,
             budget_role=self._producer_budget_role(task),
         )
-        # (c11): extract producer inbox_proposals BEFORE the
+        # Extract producer inbox_proposals BEFORE the
         # summary parser runs. The summary parser takes everything
         # after the LAST summary heading; if inbox_proposals lives
         # after summary in the producer's response, the summary
@@ -4873,7 +4867,7 @@ class Orchestrator:
         shared state under the concurrent wave path. ``task`` (when known)
         carries the artifact FAMILY so the prose-tuned repetition heuristic
         doesn't false-trip on a legitimately-repetitive code/data/media
-        deliverable (R2).
+        deliverable.
         """
         from modulatio import dispatch_breaker
 
@@ -5090,7 +5084,7 @@ class Orchestrator:
         raw_response = self._run_agent_call(
             task.assigned_agent_id, producer_role, prompt
         )
-        # (c11): extract producer inbox_proposals FIRST so
+        # Extract producer inbox_proposals FIRST so
         # the JSON shape never gets read as either a summary trailer
         # tail or a `=== FILE: ===` block.
         raw_response = self._extract_producer_proposals(
@@ -5123,7 +5117,7 @@ class Orchestrator:
             primary_path.parent.mkdir(parents=True, exist_ok=True)
             primary_path.write_text(cleaned, encoding="utf-8")
             self._record_artifact_write(primary_path)  # staging merge
-            # QC-as-fixer Slice 2 (Nemo impl-sweep B1): diff-mode is a
+            # Diff-mode is a
             # producer dispatch and Slice 1 routes code/multi-file fixes
             # here — bind it with the breaker too. Contract-miss (no FILE
             # blocks): committed = the body we wrote.
@@ -5196,11 +5190,11 @@ class Orchestrator:
         checksum = (
             f"sha256:{hashlib.sha256(actual_primary.encode()).hexdigest()}"
         )
-        # QC-as-fixer Slice 2 (Nemo impl-sweep B1): breaker bound for the
+        # Breaker bound for the
         # block-writing path. ``committed`` is the AGGREGATE of all
         # successfully-written block content (primary + sidecars) so a
         # valid sidecar-only diff is NOT falsely flagged no-commit just
-        # because the primary marker is small (Nemo's explicit caution).
+        # because the primary marker is small.
         self._maybe_trip_breaker(
             producer_role, raw_response, "".join(written_parts), task=task
         )
@@ -5258,7 +5252,7 @@ class Orchestrator:
         it in the Config tab). Callers that resolve the leader's chat runner by
         the string ``"leader"`` would then MISS a renamed Leader and silently fall
         back to the shared producer/QC default — running converse/verify on the
-        wrong model with no guard trip (cadre HIGH). So when asked for ``"leader"``
+        wrong model with no guard trip. So when asked for ``"leader"``
         and there's no literal ``"leader"`` entry, resolve the role to the
         Leader-tier agent's real id. Any other ``agent_id`` passes through."""
         if agent_id == "leader" and "leader" not in self.chat_runners:
@@ -5289,7 +5283,7 @@ class Orchestrator:
         per-agent chat runner (its model can't build one — ``build_chat_runners``
         skips it), return ``None`` so the caller degrades to the single-shot
         ``runners["leader"]`` path (the roster Leader model), never a flag-sourced
-        producer/QC default (cadre HIGH)."""
+        producer/QC default."""
         is_leader = self._is_leader_chat_role(agent_id)
         agent_id = self._leader_chat_key(agent_id)
         if agent_id and agent_id in self.chat_runners:
@@ -5384,7 +5378,7 @@ class Orchestrator:
         Lanes not explicitly named here (converse / qc) fall through to the
         service cap — the producer default. That is the correct default (a
         new lane is a producer lane until proven otherwise); add an explicit
-        case if a future lane needs different headroom (Jenny F2)."""
+        case if a future lane needs different headroom."""
         from modulatio import services as _services
         if task_id == _CONVERSE_TASK_ID:
             return None
@@ -5456,7 +5450,7 @@ class Orchestrator:
             # api_call is ONE metered tool over many services, so its
             # cost_class is fixed paid-cloud at build time when any service
             # is paid. A call TARGETING a free_tier service must not be gated
-            # by the paid-cloud budget (Jenny F1) — resolve the named service
+            # by the paid-cloud budget — resolve the named service
             # and skip the meter when it's free. api_call reaches only the
             # service it names, so a free target can never mask a paid host.
             if name == "api_call":
@@ -5565,7 +5559,7 @@ class Orchestrator:
         # budget_role from the caller-supplied kwarg first, else map
         # from role: qc -> qc, leader -> leader-chat, all other roles
         # (drafter/engineer/analyst/etc.) -> producer.
-        # NOTE (cadre F1-2): these are budget-POOL KEYS, not behavior gates —
+        # NOTE: these are budget-POOL KEYS, not behavior gates —
         # the engine never branches on producer IDENTITY; ANY non-qc/non-leader
         # role is a producer-capable model endpoint and shares the "producer"
         # pool (producer-agnostic).
@@ -5610,7 +5604,7 @@ class Orchestrator:
             # tests that exercise the gates set it explicitly.
             primary_model = self._resolve_chat_runner_model(agent_id)
 
-            # Service-API pool (spec 2026-07-05): metered tools in this
+            # Service-API pool: metered tools in this
             # loadout get a fail-closed spend authorizer. One authorizer per
             # metered tool (the name guard's contract), dispatched by name.
             # pinned_units is empty: generation-class calls have no artifact
@@ -5728,13 +5722,13 @@ class Orchestrator:
     def _append_conversation(
         self, role: str, content: str, *, interrupted: bool = False
     ) -> None:
-        # SEC-03 (security audit, Nemo): the Leader↔operator log is durable and
+        # The Leader↔operator log is durable and
         # was written world-default-mode + verbatim. Create it 0600 (owner-only,
         # like the tool-call transcripts) and sweep token-shaped secrets from the
         # content so a pasted/echoed key doesn't persist in the clear.
         #
         # ``interrupted`` marks a turn the operator cut short (ESC) as a
-        # first-class outcome (Jenny F1): the prose reads like a normal Leader
+        # first-class outcome: the prose reads like a normal Leader
         # reply, so without this flag a downstream reader (undo, goal-evidence
         # filter, a TUI affordance) would have to string-match the sentinel.
         # Opt-in metadata — the field is written only when True, so ordinary
@@ -5957,7 +5951,7 @@ class Orchestrator:
             enum/default — so the fit-gate can refuse a bind this template can't run."""
             from modulatio.job_templates import OutputSpec
             # Normalize the cardinality to the engine's grammar — CASE-INSENSITIVE
-            # and space-tolerant (Nemo hull #12: "Fixed:8" / "fixed: 8" must not slip
+            # and space-tolerant ("Fixed:8" / "fixed: 8" must not slip
             # through as an unrecognized literal). Tolerate the Leader's phrasings:
             # a bare count "8" → "fixed:8"; "per-item:stories" splits the param out.
             raw = str(cardinality).strip()
@@ -6747,7 +6741,7 @@ class Orchestrator:
                     # callable from claude -p). NOT the vault root: Clay's
                     # native tools include a shell and carry no dotfile floor,
                     # and the vault root contains the ``.env`` secret store
-                    # (Wild Bill, vision-night BLOCK — same class as the
+                    # (same class as the
                     # litellm shell-root fix). The PROJECT dir covers every
                     # run's deliverables without reaching the secret store.
                     from modulatio import config as _config
@@ -6784,7 +6778,7 @@ class Orchestrator:
                 raise
 
             # An operator ESC returns the interrupt sentinel BY IDENTITY — record
-            # the turn as a first-class interrupt (Jenny F1) so a future reader
+            # the turn as a first-class interrupt so a future reader
             # can distinguish it from a real reply without string-matching the
             # prose. Compare before the None-coalesce below (which preserves the
             # sentinel's identity for a non-None reply anyway).
@@ -7016,7 +7010,7 @@ class Orchestrator:
             budget_role=self._producer_budget_role(task),
         )
 
-        # (c11): extract producer inbox_proposals BEFORE the
+        # Extract producer inbox_proposals BEFORE the
         # summary parser runs (same ordering as the non-tool path).
         response = self._extract_producer_proposals(
             response,
@@ -7041,7 +7035,7 @@ class Orchestrator:
         assembled = self._apply_assembly_manifest(task, body_text)
         _asm_rec = self._assembly_records.get(task.id)
         if _asm_rec is not None and getattr(_asm_rec, "output_file", None) is not None:
-            # re-sweep R4 #1: binary (media) deliverable — the engine composited a
+            # Binary (media) deliverable — the engine composited a
             # file in the vault (ffmpeg/ImageMagick/zip). Mirror the other two
             # assembly callers (_engine_assemble_deliverable, _producer_execute):
             # move that file onto the deliverable path (NOT a text write of the
@@ -7077,7 +7071,7 @@ class Orchestrator:
             return self._note_regression_kept(task, path, cleaned)
         path.write_text(cleaned, encoding="utf-8")
         self._record_artifact_write(path)  # #151/e2e Blocker 2 staging merge
-        # QC-as-fixer Slice 2 (Nemo impl-sweep B2): the tool-loop producer
+        # The tool-loop producer
         # is part of the producer surface — bind it with the same post-hoc
         # circuit breaker as the plain path. ``response`` is the full final
         # body (incl. any thinking); ``cleaned`` is what committed.
@@ -7089,7 +7083,7 @@ class Orchestrator:
 
     def _regression_blocked(self, task: Task, path: Path, new_content: str) -> bool:
         """True if writing ``new_content`` to ``path`` would clobber a QC-passed
-        deliverable with a suspiciously-smaller one (Part A / A3, #86) — the
+        deliverable with a suspiciously-smaller one — the
         western-anthology case where a drifted retry overwrote a complete 49KB
         book with a 348-byte stub.
 
@@ -7101,7 +7095,7 @@ class Orchestrator:
         Deliberately narrow to GENERATE-mode full rewrites — a drifted from-scratch
         regeneration. ``edit``/``revise`` carry the reviewer's critique (an
         intentional, possibly-shrinking change) and reach these same write sites,
-        so they are excluded here (security/debug review 2026-06-04): the guard
+        so they are excluded here — the guard
         must never re-pass content the Leader or QC explicitly asked to change.
         Re-opening a passed task also clears its mark (``_leader_auto_redo``), so
         the guard only ever fires on an un-re-opened drift.
@@ -7121,7 +7115,7 @@ class Orchestrator:
             prior = prior_bytes.decode()
         except UnicodeDecodeError:
             return False
-        # re-sweep F1: measure the size in TOKENS, not whitespace word-count.
+        # Measure the size in TOKENS, not whitespace word-count.
         # Modulatio is artifact-agnostic — a compact/minified data or code
         # deliverable (e.g. a single-line JSON object) has near-zero whitespace,
         # so ``.split()`` collapses hundreds of tokens to ~1 "word" and the guard
@@ -7138,10 +7132,10 @@ class Orchestrator:
     def _note_regression_kept(self, task: Task, path: Path, new_content: str) -> tuple:
         """Keep the QC-passed version on disk (already there — just don't clobber
         it), record the refusal, and return this attempt's (path, checksum,
-        token_count) as the PASSED version so QC re-affirms it. #86."""
+        token_count) as the PASSED version so QC re-affirms it."""
         kept_bytes = path.read_bytes()
         kept = kept_bytes.decode(errors="replace")
-        # re-sweep #6: the audit rationale must report the TOKEN measure the gate
+        # The audit rationale must report the TOKEN measure the gate
         # (_regression_blocked) actually decides on, not whitespace word-count. A
         # compact/minified data/code deliverable has near-zero whitespace, so .split()
         # logged "1 → 1 tokens" while hundreds of real tokens shrank — making the audit
@@ -7155,7 +7149,7 @@ class Orchestrator:
             to_state=task.status.value,
             actor="orchestrator",
             rationale=(
-                f"no-regress (#86): refused a generate write shrinking the "
+                f"no-regress: refused a generate write shrinking the "
                 f"QC-passed deliverable {kept_tokens} → "
                 f"{new_tokens} tokens; kept the passed version"
             ),
@@ -7199,7 +7193,7 @@ class Orchestrator:
         one goal — Phase 1A/1.5). A research/support deliverable goal is a singleton
         or mixed-kind, so it can NEVER qualify as a unit source.
 
-        SEALED INVARIANT (Nemo BLOCKER, close-out re-review): among the PRIOR goals
+        SEALED INVARIANT: among the PRIOR goals
         (id < the assembler's; plan order = goal-id order), wire the assembler ONLY
         when EXACTLY ONE goal carries the fan-out signature. Zero or multiple →
         FAIL-CLOSED (deps stay empty → the producer-manifest path, P5/QC-backstopped)
@@ -7261,13 +7255,13 @@ class Orchestrator:
             dep = by_id.get(dep_id)
             if dep is None:
                 continue
-            # Run-4 root cause (2026-07-03): a dep with no declared output_path
+            # A dep with no declared output_path
             # (a fits-whole gather) writes to the drafts fallback convention —
             # dropping it here omitted its content from the join AND made the
-            # #85 recipe-verify's unit set mismatch the authoritative deps,
+            # recipe-verify's unit set mismatch the authoritative deps,
             # fail-closing QC to the byte-read that overflowed. ONE resolver
             # (families.task_output_rel_path) shared with the allowlist and
-            # the ledger verifier — Wild Bill's close-out condition.
+            # the ledger verifier.
             units.append(_task_output_rel_path(dep))
         if not units:
             return None
@@ -7318,7 +7312,7 @@ class Orchestrator:
             manifest = self._assembly_manifest_from_deps(task)
             if manifest is None:
                 return None
-        # Nemo hull #8 (+ close-out): pre-filter manifest units to the AUTHORITATIVE
+        # Pre-filter manifest units to the AUTHORITATIVE
         # dependency output paths BEFORE reading them — an in-root file that isn't a
         # declared unit must not be copied into the draft (pre-QC exposure), even
         # though verify_assembly would reject it afterward. The gate is the task's
@@ -7330,13 +7324,13 @@ class Orchestrator:
         # fallback; verify_assembly then fails closed on its empty dep set.
         filtered_units: list[str] = []
         if task.depends_on:
-            # re-sweep F9: normalize with the CANONICAL _norm_unit (prefix strip),
+            # normalize with the CANONICAL _norm_unit (prefix strip),
             # not `.lstrip("./")` (a char-set strip that mangles a leading-dot run,
             # e.g. `.config.json` -> `config.json`). The char-set strip would let an
             # undeclared in-root dotfile collide with a declared `config.json` and
             # sneak past the allowlist — exactly the pre-QC exposure hull #8 closes.
             # Share ONE definition of unit identity with verify_assembly.
-            # Wild Bill BLOCK (assembler arc): the allowlist must resolve the
+            # The allowlist must resolve the
             # SAME fallback path the manifest builder emits for a null-path
             # dep, or the unit is added upstream then filtered out here.
             allowed = {
@@ -7394,10 +7388,10 @@ class Orchestrator:
             final_checksum = (
                 f"sha256:{hashlib.sha256(result.content.encode()).hexdigest()}"
             )
-        # #101 Part 0: give the verifier EYES. Persist a readable text twin (binary
+        # Give the verifier EYES. Persist a readable text twin (binary
         # deliverables only — a text deliverable is already its own readable twin) and
         # attach the engine-extracted structural digest, so QC/Leader-verify can judge
-        # the WHOLE without reading binary bytes they can't (the HRWT blind-verify).
+        # the WHOLE without reading binary bytes they can't.
         if binary_out is not None:
             text_twin_rel = _assembly.write_text_twin(
                 result.content, self._artifacts_root(), task.id
@@ -7408,7 +7402,7 @@ class Orchestrator:
             # .staging/<task>/.twins/, never copied, then deleted with staging —
             # and post-merge Leader-verify reads an absent twin (OSError → '') and
             # silently drops the readable block, so the verifier goes blind on
-            # binary deliverables (Opus R2 H2, #101 Part 0 regression). Record the
+            # binary deliverables. Record the
             # EXACT path, not the whole .twins/ subtree (avoids dragging stale
             # seeded twins). No-op on the sequential path (no staging buffer).
             self._record_artifact_write(self._artifacts_root() / text_twin_rel)
@@ -7435,7 +7429,7 @@ class Orchestrator:
         if result.errors:
             bits.append("errors: " + "; ".join(result.errors[:3]))
         if filtered_units:
-            # Nemo #8 close-out: units the producer named that are NOT in the
+            # Units the producer named that are NOT in the
             # task's authoritative dependency outputs were dropped UNREAD — a
             # stale/unresolved dep binding (or an attempt to pull in a
             # non-dependency in-root file). Surface it so the empty/partial
@@ -7454,7 +7448,7 @@ class Orchestrator:
     def _qc_media_verdict(
         self, task: "Task", draft_path: "Path", record: "Any"
     ) -> "tuple[AssertionEvidence, str, str | None]":
-        """Binary-aware QC for a MEDIA composite (Nemo B4 #2). No text read of the
+        """Binary-aware QC for a MEDIA composite. No text read of the
         bytes. We verify the MECHANICAL provenance the engine can stand behind —
         the composite exists, is non-empty + within cap, and still hashes to the
         engine-recorded checksum (the join of QC-passed units, untampered) — and we
@@ -7498,7 +7492,7 @@ class Orchestrator:
             # Consistent with the missing/empty branch: a media-integrity failure is
             # ENVIRONMENTAL (a human looks) — a binary composite has no content oracle
             # to blind-retry against, so we don't loop a re-composite on a corruption
-            # we can't diagnose (Nemo B4 close-out).
+            # we can't diagnose.
             return (
                 AssertionEvidence(
                     producer="qc", primary=False,
@@ -7589,7 +7583,7 @@ class Orchestrator:
                 f"does this when the toolchain is present) or correct the declared "
                 f"output format — do not ship text under a binary extension."
             ), "environmental"
-        # Deterministic scaffolding gate (run-arc fix 2026-07-02): a
+        # Deterministic scaffolding gate: a
         # document-family draft whose pre-heading head carries the
         # producer-runbook markers is leaked reply scaffolding, not content —
         # run-1 shipped one past FIVE LLM QC passes. Prose bends; the engine
@@ -7655,7 +7649,7 @@ class Orchestrator:
                 record, task, tasks_by_id, self._artifacts_root()
             )
             if ok:
-                # Hero f1: when a metered oracle was denied/unauthorizable/crashed and a
+                # When a metered oracle was denied/unauthorizable/crashed and a
                 # free-local oracle vouched instead, `reason` carries that witness even on
                 # PASS — thread it into the mark so a misconfigured authorizer is visible.
                 note = f" — {reason}" if reason else ""
@@ -7670,7 +7664,7 @@ class Orchestrator:
                     passed=True,
                 )
                 return verdict, "", None
-            # Nemo B4 #2: a MEDIA deliverable is BINARY — never read_text() it (a zip/
+            # A MEDIA deliverable is BINARY — never read_text() it (a zip/
             # mp4 raises UnicodeDecodeError or feeds garbage to the text QC contract).
             # Media isn't cheap-pass eligible (verify_assembly already returned False),
             # but its "full review" must be binary-aware: confirm the engine
@@ -7678,7 +7672,7 @@ class Orchestrator:
             # that perceptual CONTENT is not machine-verifiable (human spot-check).
             if record.strategy == "media":
                 media_verdict = self._qc_media_verdict(task, draft_path, record)
-                # Visual review (2026-07-07): when the mechanical checks PASS,
+                # Visual review: when the mechanical checks PASS,
                 # the composite is a raster image, and the QC seat has vision,
                 # fall through to the full review in image mode — a perceptual
                 # look replaces the "NOT machine-verifiable" disclaimer. A
@@ -7696,7 +7690,7 @@ class Orchestrator:
                 agent_id=task.qc_agent_id,
             )
             # fall through to a normal full review (fail-closed): {reason}
-        # Visual review (2026-07-07): when the QC seat's model has vision and
+        # Visual review: when the QC seat's model has vision and
         # the artifact is visual (a raster, or an SVG with a renderer on
         # PATH), the review DELIVERS THE IMAGE as a content block — pixels,
         # not just markup/checksums. The SVG render temp lives under the
@@ -7747,7 +7741,7 @@ class Orchestrator:
             else:
                 # Defensive backstop: ANY binary/undecodable artifact reaching QC (a
                 # media output with no record, an opaque blob) gets an environmental
-                # verdict instead of crashing the review (Nemo B4 #2).
+                # verdict instead of crashing the review.
                 verdict = AssertionEvidence(
                     producer="qc", primary=False,
                     check=f"binary/undecodable artifact — QC cannot text-review ({type(exc).__name__})",
@@ -7829,7 +7823,7 @@ class Orchestrator:
         domain_standards = standards.load(task.artifact_kind, project_code=self.project.code)
         history_hits: list[tuple[qc_history.VerdictRecord, float]] = []
         if self.qc_history_embedder is not None:
-            # re-sweep #2: advisory precedent must NEVER fail or retry a task.
+            # advisory precedent must NEVER fail or retry a task.
             # similar_verdicts can raise (embed_text on a pathological body, or a
             # lancedb error during the destructive _ensure_verdict_vectors rebuild);
             # mirror _recall_team_memory's defensive contract and fall back to none.
@@ -8058,7 +8052,7 @@ class Orchestrator:
                     rationale=str(raw_team_mem.get("rationale", "") or ""),
                 )
                 try:
-                    # B3 (Nemo close-out): defer this durable team-memory
+                    # Defer this durable team-memory
                     # proposal write to the main-thread merge when isolated,
                     # same as proposed_standard. Default-bound kwargs so the
                     # callable captures stable values.
@@ -8073,8 +8067,8 @@ class Orchestrator:
     # ── Per-task redo loop (slice #3) ────────────────────────────────────
     def _store_write_deferrable(self, fn: "Callable[[], None]") -> None:
         """Run a shared-store write now, or buffer it for the main-thread
-        merge when an isolated worker is active (Nemo impl-sweep B3 — full
-        deferral). ``fn`` is a 0-arg callable performing the write (+ any
+        merge when an isolated worker is active — full
+        deferral. ``fn`` is a 0-arg callable performing the write (+ any
         emit). Sequential path is unchanged (no buffer → runs immediately)."""
         buf = getattr(self._tls, "deferred_writes", None)
         if buf is not None:
@@ -8084,8 +8078,8 @@ class Orchestrator:
 
     def _save_task_deferrable(self, task: Task) -> None:
         """Persist a task — but skip in an isolated worker, where the
-        main-thread merge persists ``result.task`` for us (Nemo B3: no
-        worker-side store.save_task)."""
+        main-thread merge persists ``result.task`` for us — no
+        worker-side store.save_task."""
         if getattr(self._tls, "deferred_writes", None) is not None:
             return
         store.save_task(self.project.code, task, run_id=self.project.run_id)
@@ -8109,11 +8103,11 @@ class Orchestrator:
     def _execute_task_isolated(
         self, t: Task, initial_corrective_notes: str = "",
     ) -> TaskExecutionResult:
-        """Core rebuild B3b/B3: run one task in ISOLATION and return a
+        """Run one task in ISOLATION and return a
         ``TaskExecutionResult`` for the main thread to merge — the worker
-        entrypoint the concurrent loop (B4) submits to the thread pool.
+        entrypoint the concurrent loop submits to the thread pool.
 
-        Isolation contract (Nemo + Lovecraft):
+        Isolation contract:
         - drafts/errors land in a PER-TASK local ``RunSummary``, ride back;
         - activity events stream LIVE under ``self._activity_lock`` (Fix B) so
           the operator sees the producers work in parallel — NOT buffered;
@@ -8128,13 +8122,13 @@ class Orchestrator:
         - the locked ``qc_history.append_verdict`` (a best-effort precedent log
           held under ``self._store_lock``);
         - ``self._assembly_records[task.id] = ...`` in ``_apply_assembly_manifest``
-          (re-sweep F7). This is safe WITHOUT a lock: the key is the worker's own
+          This is safe WITHOUT a lock: the key is the worker's own
           unique task id (no two workers touch the same slot) and a dict
           ``__setitem__`` is atomic under the GIL, so concurrent inserts can't
           corrupt the dict. The main thread only reads these records AFTER the wave
           merge (verify paths), by which point every worker has joined.
         """
-        # Fix C hardening (Nemo BLOCK): the whole wave is submitted to the pool
+        # The whole wave is submitted to the pool
         # at once, so a task QUEUED behind the pool ceiling can start AFTER the
         # operator hits F8. Bail before any producer/QC work — return the task
         # untouched (stays PENDING) so a stopped run launches NO new model calls.
@@ -8228,7 +8222,7 @@ class Orchestrator:
 
     @staticmethod
     def _concurrent_waves_enabled(project: "Project | None" = None) -> bool:
-        """§5 (2026-06-03): the concurrent wave executor is now ON BY DEFAULT —
+        """The concurrent wave executor is now ON BY DEFAULT —
         parallelism is the point of a swarm. The isolation/deferral/deterministic-
         merge machinery is hardened (per-task staging + main-thread merge, every
         worker-path store write deferred incl. decompose children), so the
@@ -8279,7 +8273,7 @@ class Orchestrator:
 
     def _skill_floor_for(self, skill_name: str) -> tuple[str, ...]:
         """Slice #9b skill capability floor, instance-cached. Shared by the
-        plan-dispatch loop and the concurrent wave scheduler (Nemo B2)."""
+        plan-dispatch loop and the concurrent wave scheduler."""
         cached = self._skill_floor_cache.get(skill_name)
         if cached is not None:
             return cached
@@ -8402,7 +8396,7 @@ class Orchestrator:
             (r for r in _config.list_folders() if r["name"] == name), None)
         if rec is None:
             return None
-        # The pick runs the SAME safety floor as seat grants (Wild Bill MED): a
+        # The pick runs the SAME safety floor as seat grants: a
         # hand-edited defaults.json can't make the engine deliver into the vault
         # or a secrets dir just because the pick skips the grant classifier.
         if _config.folder_root_refusal(rec["path"]) is not None:
@@ -8431,7 +8425,7 @@ class Orchestrator:
             project_code=self.project.code,
             # Record worker write_artifact() calls for the merge — else a
             # tool-written file in staging passes QC there, then is deleted with
-            # staging and never copied to the shared tree (Nemo R2 HIGH).
+            # staging and never copied to the shared tree.
             on_artifact_write=self._record_artifact_write,
             # Registered FOLDERS: rw folders are read/edit/shell-reachable;
             # ro/output folders are READ-only (never a writable bwrap bind).
@@ -8452,10 +8446,10 @@ class Orchestrator:
         return ws
 
     def _harness_roots(self) -> "tuple[str, ...]":
-        """The modulatio harness as the converse Leader's standing home
-        (two-lane resolution, 2026-07-06): the vault, the shared resources
+        """The modulatio harness as the converse Leader's standing home:
+        the vault, the shared resources
         (skills/standards/templates), and the config dir — his to read and
-        change directly, Claude-Code-like, no gate. This retired the old
+        change directly, no gate. This retired the old
         blocked-subtrees fence (runs/artifacts/delivery): the operator chose
         a fully-trusted Leader over the self-grading fence. Only the converse
         lane gets these roots; the swarm lanes keep their sandboxes, and the
@@ -8523,7 +8517,7 @@ class Orchestrator:
         # hint: leader-verify/converse grant the whole run dir so a Clay-backed
         # reviewer SEES the harness (artifacts, reports, logs, tickets) like any
         # model in it. This is a READ widen — routed as ``read_only_roots`` so the
-        # seat is bound --ro-bind (cadre BLOCK: a rw grant let Clay mutate the very
+        # seat is bound --ro-bind (a rw grant let Clay mutate the very
         # deliverables it was meant to inspect). Writes stay in the operator-widen
         # gate's rw ``grants``. Unset (and thus a no-op) on every other seat path.
         extra = tuple(getattr(self._tls, "seat_extra_grants", ()) or ())
@@ -8540,8 +8534,8 @@ class Orchestrator:
         agent_id: "str | None" = None,
     ) -> "Callable[[str, dict, str], None]":
         """Build the ``(name, args, result)`` tool-call sink for a SINGLE-SHOT
-        Clay seat. It does BOTH halves of what the chat-loop sink does (Wild Bill
-        R2 MED): it appends a durable owner-only (0600) JSONL **audit** record —
+        Clay seat. It does BOTH halves of what the chat-loop sink does: it
+        appends a durable owner-only (0600) JSONL **audit** record —
         task/role/agent/tool/args/result/timestamp — to the run's ``tool_calls/``
         dir, AND independently emits the live **activity** event (Team TV). The
         audit write does NOT depend on an activity subscriber: Team TV is
@@ -8601,14 +8595,14 @@ class Orchestrator:
             project_code=self.project.code,
             # PATH-granted roots reach the file tools (read/edit/write); EXEC-
             # granted roots reach run_shell (a separate, sharper grant class —
-            # a folder widen never confers exec, Wild Bill HIGH-2). Registered
+            # a folder widen never confers exec). Registered
             # rw FOLDERS join both: a registered read-write folder is the
             # operator's standing write grant (the FOLDERS tab is the
             # permission decision — no prompt); ro/output folders are
             # read-class only. The HARNESS roots are the Leader's standing
             # home (see _harness_roots) — file tools get all three (their
             # in-process dotfile floor holds), but the VAULT ROOT must NEVER
-            # be a shell root (Wild Bill, vision-night BLOCK): the floor
+            # be a shell root: the floor
             # checks path ARGS and cwd components, while arbitrary code
             # (``python3 -c``) reads ``.env`` BY NAME from inside a bound
             # root — the operator's provider keys would reach the Leader's
@@ -8721,7 +8715,7 @@ class Orchestrator:
                 claimed[pk] = tid
                 _copy(r.staging_root, pk)
 
-        # re-sweep R4 #4: reserve EVERY task's declared primary path up front —
+        # Reserve EVERY task's declared primary path up front —
         # even one that pass 1 never claimed because the task didn't actually
         # write it (empty/failed producer). The pass-2 guard below only skips a
         # task's OWN primary (``k == pk``), so without this a SIBLING task's
@@ -8820,7 +8814,7 @@ class Orchestrator:
     def _block_wave_path_conflict(
         self, group: list[Task], path_key: str, summary: RunSummary,
     ) -> None:
-        """Nemo impl-sweep Blocker 1: two tasks in a concurrent wave target
+        """Two tasks in a concurrent wave target
         the same artifact path — a plan conflict, not a race to win by
         last-writer. Block every task in the group deterministically and
         open ONE CRITICAL plan-conflict ticket so the human disambiguates."""
@@ -8943,7 +8937,7 @@ class Orchestrator:
         ``.staging/<tid>`` sweep) on an UNEXPECTED worker exception (an engine bug;
         real producer failures are caught INSIDE the worker and returned as a
         result). Does NOT subsume the worker's INNER handler in
-        ``_execute_task_isolated`` — a different escape shape (Nemo F3)."""
+        ``_execute_task_isolated`` — a different escape shape."""
         from concurrent.futures import CancelledError as _FuturesCancelled
         if fut.cancelled():
             return None
@@ -9020,8 +9014,7 @@ class Orchestrator:
         gating, producer isolation, and deterministic main-thread merge — with NO
         wave barrier: one long-lived pool + a ``wait(FIRST_COMPLETED)`` loop, so a
         freed producer pulls the next ready task immediately instead of idling behind
-        a wave's slowest task. 4-lens cadre-signed design:
-        ``docs/design/2026-06-27-continuous-pull-dispatch.md``."""
+        a wave's slowest task."""
         from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
         merged_ids: set = set()
@@ -9242,7 +9235,7 @@ class Orchestrator:
                     and isinstance(new_skills, list)
                     and all(isinstance(s, str) for s in new_skills)
                 ):
-                    # re-sweep #8: _select_assembler_skill canonicalization and the
+                    # _select_assembler_skill canonicalization and the
                     # #73 evidence-family normalization run ONCE in _plan_tasks. A
                     # reflect 'revise' that introduces/swaps an ASSEMBLER skill would
                     # leave the executed assembly route diverged from the already-built
@@ -9290,15 +9283,15 @@ class Orchestrator:
         concurrent worker, decompose children, goal-redo) records one
         deterministic episodic entry per party when the task reaches a
         terminal status. Agents accrue memory from the jobs they actually
-        work — the MEMORY tab's standing promise (W5b, 2026-07-03)."""
+        work — the MEMORY tab's standing promise."""
         try:
             self._run_task_with_redo_inner(t, summary, initial_corrective_notes)
         finally:
             # All FOUR terminal states — incl. ABANDONED (a Leader-iterate
-            # drop): the producer still worked the task and remembers it
-            # (Jenny MED, arc cadre). Best-effort: a memory-write failure
-            # must never change a settled task's outcome or crash the run
-            # (Wild Bill BLOCK #1) — same posture as the team-memory
+            # drop): the producer still worked the task and remembers it.
+            # Best-effort: a memory-write failure
+            # must never change a settled task's outcome or crash the run —
+            # same posture as the team-memory
             # proposal side-channel.
             if t.status in (
                 TaskStatus.COMPLETED, TaskStatus.QC_REJECTED,
@@ -9326,7 +9319,7 @@ class Orchestrator:
 
         def _best_effort_episode(agent_id: str, body: str, entry_type: str) -> None:
             # Best-effort on BOTH paths — immediate AND the deferred-merge
-            # execution (Wild Bill BLOCK #1): a memory failure logs, never
+            # execution: a memory failure logs, never
             # raises into the run.
             try:
                 agent_memory.add_episodic(
@@ -9402,7 +9395,7 @@ class Orchestrator:
         retry_budget = max(t.max_retries, 0)
         remaining = max(0, (retry_budget + 1) - t.lifetime_attempts)
         for attempt in range(remaining):
-            # Fix C hardening (Nemo BLOCK): the operator stopped the run — do not
+            # The operator stopped the run — do not
             # launch another producer/QC attempt on an already-started task. The
             # in-flight call (if any) finishes; we bail before the NEXT one.
             if self.abort_event.is_set():
@@ -9509,7 +9502,7 @@ class Orchestrator:
                 # QC rejected — prepare corrective notes for next attempt. ``last_qc``
                 # stays a 2-tuple (the escalation helper depends on that shape); the
                 # parsed defect_type rides to the recovery witness as a separate param
-                # (Hero code BLOCKER 2 — no instance state, race-free across waves).
+                # — no instance state, race-free across waves.
                 last_qc = (qc_verdict, qc_notes)
                 last_exc = None
                 rescue_defect_type = defect_type
@@ -9574,7 +9567,7 @@ class Orchestrator:
             except _ctx_budget_module.RecoverableContextError as ctx_exc:
                 # Context-budget exhaustion is NOT producer-retriable (same
                 # prompt → same wall; compression already failed). The right
-                # move is to SPLIT the task. 2026-05-30: hand it back to the
+                # move is to SPLIT the task — hand it back to the
                 # planner's existing decompose skill and run the children
                 # inline (the parent becomes a completed container). Only if
                 # that genuinely can't help (recursion cap, planner can't
@@ -9612,7 +9605,7 @@ class Orchestrator:
         if last_exc is not None:
             # Producer EXHAUSTION is recoverable — same shape as QC-reject
             # exhaustion — so route it to the QC-as-fixer backstop before settling
-            # (Clif 2026-06-22: the job lands, whatever the failure shape). Two
+            # — the job lands, whatever the failure shape. Two
             # cases: max_iters (the tool-loop never committed a final answer) and a
             # Clay provider failure that survived its own wait-retries + the model-
             # fallback chain (the producer's model is unavailable). A GENUINE
@@ -9633,8 +9626,8 @@ class Orchestrator:
                 last_error=last_exc, defect_type="runtime",
             ):
                 return
-            # B7: a compression-churn that SURVIVED its retry-with-feedback chain
-            # (Clif's 2026-06-25 plan A — retry first, don't decompose one-and-done)
+            # A compression-churn that SURVIVED its retry-with-feedback chain
+            # (retry first, don't decompose one-and-done)
             # is genuine over-scale, not a sloppy producer the feedback could fix.
             # Split it via the same decompose seam a hard context-refuse uses,
             # before dead-ending at a ticket. Falls through to BLOCKED only when
@@ -9692,7 +9685,7 @@ class Orchestrator:
         # max_iters it settled BLOCKED, bypassing this very fixer (#17). QC now fixes
         # the last rejected draft in place, or builds from the contract when nothing's
         # salvageable. The producer budget belongs to the TASK, not the model.
-        # Fix C hardening (Nemo BLOCK): if the operator stopped the run, do NOT run the
+        # If the operator stopped the run, do NOT run the
         # fixer (more model work) — leave the task on its last state; the run halts.
         if self.abort_event.is_set():
             self._record_abort(summary)
@@ -9718,7 +9711,7 @@ class Orchestrator:
             qc_notes = ""
 
         # On a budget-spent re-entry (last_qc is None) the loop ran zero attempts this
-        # pass, so "after N retries" would read "after 0 retries" — misleading (Nemo M1).
+        # pass, so "after N retries" would read "after 0 retries" — misleading.
         reject_rationale = (
             f"QC rejected after {t.retry_count} retries: {qc_verdict.check}"
             if last_qc is not None
@@ -9753,7 +9746,7 @@ class Orchestrator:
         # existence check + appends that path; the main-thread merge remaps
         # it to the shared post-merge location. Sequential → shared directly.
         try:
-            # REVIEWER NOTE (cadre agnostic audit F3-2): this drafts-surface
+            # This drafts-surface
             # lookup is family-aware via _draft_fallback_name (the .md assumption
             # is gone) and is a best-effort BOOKKEEPING surface — it no-ops
             # safely if the file isn't there. Confirmed functionally safe, NOT a
@@ -9878,8 +9871,7 @@ class Orchestrator:
         the shared artifacts tree can't attribute writes, so it reports
         False (header test still guards the bundle form there).
 
-        The ``resolve()`` comparison FOLLOWS SYMLINKS by design (Jenny,
-        vision-night cadre): a staged symlink pointing AT the primary counts
+        The ``resolve()`` comparison FOLLOWS SYMLINKS by design: a staged symlink pointing AT the primary counts
         as the primary — deliberately, since patching the primary patches
         what the link shows, so a single-file rescue is still complete. A
         sibling with its own content resolves to its own path and correctly
@@ -9931,7 +9923,7 @@ class Orchestrator:
             return False
         # Determine the patchable body, if any. A missing/empty primary is NOT a
         # dead end anymore — it routes to the BUILD rung (QC authors from scratch)
-        # below (Clif 2026-06-22). Only genuinely-unauthorable shapes still
+        # below. Only genuinely-unauthorable shapes still
         # decline: a binary/media artifact (not text-patchable) and a multi-file
         # staging set (a single-file rescue reads/writes ONLY the primary, so a
         # sibling defect would survive while the task stamps COMPLETED — a partial
@@ -9942,7 +9934,7 @@ class Orchestrator:
                 body = draft_path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 return False  # binary/media — not text-authorable
-            # Fix B (2026-07-07): decline on the draft's ACTUAL shape, never the
+            # Decline on the draft's ACTUAL shape, never the
             # kind/mode label. ``_draft_is_multifile`` answers a different
             # question (which patch FORMAT the producer retry should use) and
             # says True for every artifact_kind=="code" task — which silently
@@ -9957,7 +9949,7 @@ class Orchestrator:
             if self._task_staged_siblings(t, draft_path):
                 return False  # split multi-file set on disk
         target_path = draft_path if draft_path is not None else self._resolve_draft_path(t)
-        # WB cadre (self-heal arc): the planner path validates model-produced
+        # The planner path validates model-produced
         # output_path, but this LOWER-LEVEL recovery path trusts the persisted
         # Task record — a hostile/stale/hand-edited absolute or traversal path
         # would let a QC-authored write land OUTSIDE the artifacts root.
@@ -9975,7 +9967,7 @@ class Orchestrator:
             return False
 
         # Assemble the defects the QC fixer should target. ``last_qc`` is the 2-tuple
-        # ``(verdict, notes)``; the real QC ``defect_type`` (Hero code BLOCKER 2) rides
+        # ``(verdict, notes)``; the real QC ``defect_type`` rides
         # the separate ``defect_type`` param — AssertionEvidence has no such field, and
         # widening last_qc would break the escalation helper that shares its shape.
         if last_qc is not None:
@@ -9984,7 +9976,7 @@ class Orchestrator:
         else:
             qc_verdict, qc_notes = None, ""
             # Give the QC fixer the REAL reason the producer couldn't converge so its
-            # build/patch prompt isn't blind (Nemo H2): the breaker summary, else the
+            # build/patch prompt isn't blind: the breaker summary, else the
             # exhaustion exception ("max_iters 16 exceeded", "API Error: 529 …"), else
             # a generic fallback.
             reason = (
@@ -10003,7 +9995,7 @@ class Orchestrator:
             )
 
         # PATCH the existing body if there is one; otherwise BUILD it from the
-        # contract (Clif: patch if present, build if absent — the job lands).
+        # contract — patch if present, build if absent; the job lands.
         try:
             if body is not None and body.strip():
                 authored = self._qc_patch_artifact(t, target_path, defects, body)
@@ -10018,7 +10010,7 @@ class Orchestrator:
             summary.errors.append(f"{t.id}: QC-fix attempt failed: {exc}")
             return False
 
-        # QC is the authority on these defects (Clif 2026-05-21): an artifact
+        # QC is the authority on these defects: an artifact
         # QC wrote-to-pass is at-bar by definition — "if it's good enough for
         # the producer it's good enough for the QC; the QC is the last word on
         # those types of errors." So a QC-authored fix COMPLETES the task
@@ -10031,12 +10023,12 @@ class Orchestrator:
         # #81 codify-the-win: witness the recovery — the before(body)/defects/after
         # triple is the TECHNIQUE the cheap producer lacked. The task is ALREADY
         # COMPLETED above; this is pure upside capture, so it is GUARDED at the call
-        # site (Nemo r1 #5) — a recovery-logging throw must NEVER reverse a
-        # completion. record_recovery truncates every field at write time (Nemo #6).
+        # site — a recovery-logging throw must NEVER reverse a
+        # completion. record_recovery truncates every field at write time.
         try:
             from modulatio import recoveries as _recoveries
 
-            # Serialize the append like its sibling qc-history log (Hero MINOR 5) —
+            # Serialize the append like its sibling qc-history log —
             # wave-parallel rescues must not interleave a multi-KB JSON line.
             with self._store_lock:
                 _recoveries.record_recovery(
@@ -10085,7 +10077,7 @@ class Orchestrator:
     def _qc_build_artifact(self, t: Task, draft_path: "Path", defects: str) -> str:
         """QC authors the artifact FROM SCRATCH when the producer committed
         nothing patchable (empty/absent draft) — the build-when-absent rung of
-        the backstop (Clif 2026-06-22). Same persist + format-integrity as the
+        the backstop. Same persist + format-integrity as the
         patch path; differs only in the prompt (build-from-contract, no body)."""
         domain_standards = standards.load(
             t.artifact_kind, project_code=self.project.code
@@ -10182,7 +10174,7 @@ class Orchestrator:
             role="qc", phase="qc_authored_fix",
             task_id=t.id, agent_id=t.qc_agent_id,
         )
-        # The recovery is a first-class COMPLETION (Clif 2026-06-22): emit
+        # The recovery is a first-class COMPLETION: emit
         # task_completed so the producer leaves the TV board ("N working"
         # decrements) and downstream deps unblock — the wedge clears. Without
         # this, a QC-recovered task stayed on the board (only qc_authored_fix,
@@ -10200,8 +10192,8 @@ class Orchestrator:
     ) -> bool:
         """QC produces the goal's missing pieces before it may ship
         "disappointed over a hole" — the producer-of-last-resort doctrine
-        applied at GOAL END (Clif 2026-07-04: "the main thing is the QC
-        repairs non-passing tasks and produces the missing tasks").
+        applied at GOAL END: QC repairs non-passing tasks and produces the
+        missing tasks.
 
         Drives the existing ``_attempt_qc_fix_forward`` (BUILD rung authors
         from the contract when no draft exists) over the goal's unfinished
@@ -10228,11 +10220,11 @@ class Orchestrator:
         def _sweepable(t: Task) -> bool:
             if t.status is TaskStatus.COMPLETED:
                 return False
-            # WB cadre: scan the WHOLE history, not transitions[-1] — an
+            # Scan the WHOLE history, not transitions[-1] — an
             # environmental/path-conflict block earlier in the history must
             # not be laundered by a later transition (e.g. a subsequent
             # cascade block). Markers are the shared constants the writers
-            # stamp (Jenny MED: bind on constants, not rationale prose).
+            # stamp — bind on constants, not rationale prose.
             for tr in t.transitions:
                 if tr.actor == "qc" and tr.rationale.startswith(
                         _ENV_BLOCK_RATIONALE_PREFIX):
@@ -10314,7 +10306,7 @@ class Orchestrator:
     def _ticket_for_failed_task(self, t: Task, reason: str) -> None:
         """Open an operator ticket when a task terminates FAILED (BLOCKED /
         QC_REJECTED) so the wedge surfaces in the Tickets tab — not only the error
-        log (Clif 2026-06-22: failures landed in logs but were never ticketed, and
+        log — failures landed in logs but were never ticketed, and
         the Leader can't read logs either). Environmental defects open their own
         dedicated ticket; this is the generic terminal-failure path. Best-effort +
         wave-safe (deferred to the merge phase when isolated)."""
@@ -10455,7 +10447,7 @@ class Orchestrator:
         )
         self._save_task_deferrable(task)
 
-    # ── Overflow → decompose (2026-05-30) — re-invoke the planner's existing
+    # ── Overflow → decompose — re-invoke the planner's existing
     #    decompose skill on an over-budget task instead of ticketing out of
     #    confusion. LLM-first: the planner already knows how to split ("each
     #    within cap"); we wire the trigger + run the children, nothing more. ─
@@ -10502,7 +10494,7 @@ class Orchestrator:
         cap reached, planner errored, or fewer than 2 usable children). ``None``
         falls through to the genuine-stuck ticket."""
         if _is_assembler_task(t):
-            # Run-4 T-016 cascade (2026-07-03): decomposing a MECHANICAL JOIN
+            # Decomposing a MECHANICAL JOIN
             # yields partial assemblies — children inherit the assembly skill +
             # the full dep set, each re-attempts a smaller hand-join of the same
             # units, and re-overflows (14 children over 2 recursion levels,
@@ -10530,7 +10522,7 @@ class Orchestrator:
         # granted a producer attempt; any beyond that fall straight to the forced
         # QC-as-fixer floor. Total producer attempts across a split therefore never
         # exceed what the parent had left — a split cannot multiply the budget by
-        # the child count (M1, Nemo hull).
+        # the child count.
         retry_budget = max(t.max_retries, 0)
         parent_remaining = max(0, (retry_budget + 1) - t.lifetime_attempts)
         children: "list[Task]" = []
@@ -10846,7 +10838,7 @@ class Orchestrator:
               goal (the final ``else`` below). The run is never blocked on
               the Leader's reservations; the human reads them in the
               Product Quality Report and decides what to double-check. No
-              retry-budget BLOCKER fires anymore (re-sweep #4: the old
+              retry-budget BLOCKER fires anymore (the old
               budget-exhausted ticket + cross-day auto-resume-from-retry-
               budget path is retired — ``_open_budget_exhausted_ticket`` is
               now dead in production, retained only for its plain-English
@@ -10865,7 +10857,7 @@ class Orchestrator:
         )
         task_summary_lines = []
         artifact_blocks: list[str] = []
-        # Visual review (2026-07-07): when the Leader seat's model has vision,
+        # Visual review: when the Leader seat's model has vision,
         # image deliverables (rasters, or SVGs with a renderer on PATH) are
         # DELIVERED as content blocks alongside the text blocks — the verdict
         # judges pixels, not coordinate-inference. Capped at 4 images; render
@@ -10895,8 +10887,7 @@ class Orchestrator:
                 line += f" (agent: {t.assigned_agent_id})"
             task_summary_lines.append(line)
             # Artifacts from COMPLETED tasks are the ones Leader
-            # actually gets to review. Two-tier discovery (fix from
-            # 2026-04-28 WLT post-mortem): respect the task's declared
+            # actually gets to review. Two-tier discovery: respect the task's declared
             # output_path first (it's the canonical location for
             # producer output), fall back to the drafts/<task-id>.md
             # convention when output_path is unset.
@@ -11209,7 +11200,7 @@ class Orchestrator:
         )
 
         # Reservations are ADVISORY — gather them for the human-facing
-        # Product Quality Report (2026-05-30). They never fail a goal, loop
+        # Product Quality Report. They never fail a goal, loop
         # the swarm, edit the work, or block the run; they ride out beside
         # the deliverables. Done for every verdict, including disappointed.
         self._record_recommendations(goal, data.get("recommendations"), summary)
@@ -11220,7 +11211,7 @@ class Orchestrator:
         # ticket to the human and do NOT block the run — we ship the best
         # result and record the unresolved gap as a recommendation.
         if verdict == "disappointed":
-            # HARD INVARIANT (2026-05-31): the redo loop must terminate — an
+            # HARD INVARIANT: the redo loop must terminate — an
             # infinite redo is not a possibility; the goal always exits to the
             # Product Quality Report. So within a single run retry_count is an
             # ABSOLUTE counter (climbs to max_retries, never reset). We do NOT
@@ -11229,7 +11220,7 @@ class Orchestrator:
             # crossed midnight reset its own budget and grind on. The daily
             # refresh is for RESUMING a blocked goal in a LATER run/day, and
             # lives only at kickoff (_auto_resume_refreshable_goals).
-            # fix-is-final + deadlock guard (2026-05-31): if QC already had to
+            # fix-is-final + deadlock guard: if QC already had to
             # AUTHOR the fix this round (the producer exhausted its own budget)
             # AND we've already redone at least once, another pass won't help —
             # QC's authored fix IS final. Bow out and ship with a reservation
@@ -11241,7 +11232,7 @@ class Orchestrator:
                 getattr(t, "qc_authored_fix", False) for t in tasks
             )
             deadlocked = qc_authored_round and goal.retry_count >= 1
-            # §3b (2026-06-03): the redo now REVISES in place — it builds on the
+            # The redo now REVISES in place — it builds on the
             # existing draft with the Leader's critique as the instruction, never
             # destroys-and-regenerates (see _leader_auto_redo). So a present
             # deliverable the Leader is unhappy with is RECOVERED cheaply (apply
@@ -11341,7 +11332,7 @@ class Orchestrator:
                 # falls through to the common completion (the elif chain is skipped
                 # because can_redo was taken).
                 if goal_spec_issues:
-                    # H1 (Hero code review): the operator blocked the FIX, not the BRIEF.
+                    # The operator blocked the FIX, not the BRIEF.
                     # A measured HARD violation must still NOT ship clean — withhold the
                     # deliverable (the operator can retrieve it from artifacts to ship
                     # as-is). This keeps both authorities: their veto on the fix AND the
@@ -11384,7 +11375,7 @@ class Orchestrator:
                 # deliverable does not go out clean. HARD means the engine binds.
                 # Store TASK IDs (the identifier the delivery pass keys on) so the
                 # policy withhold survives _deliver_finished_products by id, not a
-                # fragile path match. (Nemo code-review finding.)
+                # fragile path match.
                 summary.withheld_deliverables.extend(
                     t.id for t in tasks if getattr(t, "deliverable", False)
                 )
@@ -11550,7 +11541,7 @@ class Orchestrator:
         declared ``DeliverableSpec`` against the engine-extracted digest. Empty spec →
         no issues (today's behavior — the verifier just judges fitness as before).
 
-        Hero's two seams (the engine stays product-agnostic — it names NO family's
+        Two seams (the engine stays product-agnostic — it names NO family's
         unit): (1) the per-unit floor is judged in the deliverable's OWN native unit,
         whatever the family counts. The spec's ``size_unit`` is an OPTIONAL assertion;
         left unset it just rides the digest's unit. Only when the spec asserts a unit
@@ -11663,7 +11654,7 @@ class Orchestrator:
         authoritatively, so fall back conservatively to finished-product
         (``deliverable``) tasks only — and log that fallback. ``deliverable=True`` is the
         FALLBACK gate, not the primary, so a forgotten flag can't silently re-broaden the
-        stamp to every same-kind task (the Nemo BLOCK #2 over-stamp). A no-op when nothing
+        stamp to every same-kind task (an over-stamp). A no-op when nothing
         is bound/declared — an empty spec leaves today's behavior untouched."""
         metric = self._spec_size_metric()
         if metric is None:
@@ -11744,8 +11735,7 @@ class Orchestrator:
         NOT be left permanently IN_PROGRESS — without this it strands forever:
         the driving ticket is already closed/resolved, the wind-down loop won't
         re-pick it, and the next kickoff's auto-resume only scans OPEN tickets,
-        so only an F8 teardown ever finalizes it (Opus R2 H1, cross-verified by
-        Nemo + MiniMax). Settle it COMPLETED with a PQR reservation so it
+        so only an F8 teardown ever finalizes it. Settle it COMPLETED with a PQR reservation so it
         surfaces for human review instead of silently hanging the run. No-op if
         already terminal. Shared by all three redo lanes (leader auto-redo,
         decline reexecute, budget auto-resume) so the wording + the PQR
@@ -11767,7 +11757,7 @@ class Orchestrator:
             )
         )
         goal.status = GoalStatus.COMPLETED
-        # re-sweep F6: this is the shared terminalizer for ALL redo lanes (leader
+        # this is the shared terminalizer for ALL redo lanes (leader
         # auto-redo / decline reexecute / budget auto-resume). The normal terminal-
         # COMPLETED path pops the redo loop-breaker fingerprint; a zero-settled
         # redone goal must too, or it strands a stale entry in the per-run dict.
@@ -11797,7 +11787,7 @@ class Orchestrator:
         for each task's per-task redo loop, so producers see an
         aggregate-level critique in addition to any per-task QC notes.
 
-        §3b (2026-06-03, Clif: "fix in place, don't throw it away"): the redo
+        Fix in place, don't throw it away: the redo
         does NOT delete the prior artifacts and regenerate from scratch. Each
         task whose draft is on disk is set to REVISE mode (or DIFF for a
         multi-file code draft) so the producer builds on the existing work with
@@ -11806,7 +11796,7 @@ class Orchestrator:
         control-flow — the artifact FILE stays on disk for the producer to
         revise.
         """
-        # Fix C hardening (Nemo BLOCK): the operator stopped the run — do not
+        # The operator stopped the run — do not
         # reset tasks and relaunch a whole producer pass. Bail before consuming a
         # retry slot or touching task state.
         if self.abort_event.is_set():
@@ -11880,7 +11870,7 @@ class Orchestrator:
             if set(t.required_skills) - set(_orig_required_skills):
                 t.required_skills = _orig_required_skills  # never widen on redo
             t.evidence_provided = []
-            # Security/debug review (2026-06-04): a re-opened task has NO live QC
+            # A re-opened task has NO live QC
             # pass-mark — the Leader is overriding the prior pass. Clearing it stops
             # the content-addressed short-circuit and the no-regress guard from
             # re-affirming/protecting the very content the Leader asked to redo
@@ -11914,7 +11904,7 @@ class Orchestrator:
                 )
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
 
-        # Fix C hardening (Nemo close-out residual): if F8 fired mid-redo, don't
+        # If F8 fired mid-redo, don't
         # spend even ONE more Leader verify call — the kill-switch contract is
         # zero model calls after stop.
         if self.abort_event.is_set():
@@ -12201,7 +12191,7 @@ class Orchestrator:
                     f"higher-tier agent to the roster.\n"
                 ),
                 affected_task_id=task.id,
-                # re-sweep #1: also bind the goal so _auto_resume_refreshable_goals
+                # also bind the goal so _auto_resume_refreshable_goals
                 # (which skips affected_goal_id-only tickets) can actually fulfil the
                 # ticket's "next kickoff past refresh auto-resumes" promise — without
                 # it the BLOCKER's refresh_at was dead and recovery never fired.
@@ -12312,14 +12302,14 @@ class Orchestrator:
 
         - **required-presence** (strict, ``unfilled_required``): every required
           param supplied AND non-empty (catches the ``""`` / ``[]`` bypass);
-        - **enum conformance** (Hero R1, ``enum_violations``): every supplied
+        - **enum conformance** (``enum_violations``): every supplied
           value within its declared ``enum``;
         - **per-driver shape**: a ``per-item`` JT's fan-out driver param is a
           present, non-empty list (the only shape fact derivable here).
 
         Returns ``(ok, reason)``; ``reason`` names the misfit for the refusal.
         A legacy JT with no ``param_schema`` has nothing required → fit passes
-        (back-compat). TOTAL over its inputs (Nemo code-hull BLOCKER 1): a
+        (back-compat). TOTAL over its inputs: a
         non-mapping ``params`` is itself a malformed bind → a clean misfit, never
         an exception that escapes into the best-effort reset and loses the refusal."""
         if not isinstance(params, dict):
@@ -12354,7 +12344,7 @@ class Orchestrator:
         we return without binding, so the run derives/skips rather than
         mis-running a wedge every cycle.
 
-        Nemo code-hull BLOCKER 1: a malformed (non-mapping) ``bound_params`` is
+        A malformed (non-mapping) ``bound_params`` is
         gated BEFORE the interview — it can't be interviewed or fit-checked, so we
         refuse it cleanly here rather than letting an ``AttributeError`` escape
         into ``_resolve_job_template``'s best-effort catch (which would reset
@@ -12426,7 +12416,7 @@ class Orchestrator:
         default. When absent (headless / cron *run-as-always*), the defaults
         stand and nothing is asked. A broken callback can't break a run.
 
-        Defensive (belt for Nemo BLOCKER 1): a non-mapping ``provided`` is treated
+        Defensive: a non-mapping ``provided`` is treated
         as no pre-binds rather than throwing — the gate already refuses a malformed
         bind upstream, but the interview never crashes on weird input."""
         provided = provided if isinstance(provided, dict) else {}
@@ -12539,10 +12529,10 @@ class Orchestrator:
         ContextVars reach it (the ThreadPoolExecutor dispatch idiom — threads do NOT
         inherit ContextVars; see ``_run_concurrent_wave``. NOT the fix-window callback,
         which spawns a bare target). On timeout the caller proceeds; the wrapper sets a
-        CANCEL boundary so the orphaned daemon, when it resumes, writes nothing (cadre:
-        Wild Bill) — and emits NO phase-blind skip, leaving the cut phase to report its
-        own ``*_codification_skipped:timeout`` at its persist seam (cadre: Nemo Q2).
-        TODO(cadre Nemo Q1): a daemon mid-``skills.save``→``commit_paths`` can still race
+        CANCEL boundary so the orphaned daemon, when it resumes, writes nothing —
+        and emits NO phase-blind skip, leaving the cut phase to report its
+        own ``*_codification_skipped:timeout`` at its persist seam.
+        TODO: a daemon mid-``skills.save``→``commit_paths`` can still race
         interpreter shutdown; best-effort + recodify-next-run is the safety net."""
         cancelled = threading.Event()
 
@@ -12580,7 +12570,7 @@ class Orchestrator:
         Kill-switch: ``MODULATIO_SKILL_CODIFICATION=0``.
 
         The swallow paths emit a ``skill_codification_skipped:<reason>``
-        breadcrumb before returning (Nemo's Brick-4 hull review): the silence is
+        breadcrumb before returning: the silence is
         intentional — never raise — but a swallowed error (bad key, network,
         config drift) must be distinguishable from "nothing recurred," or the
         Alfred loop dies silently across runs and nobody knows."""
@@ -12596,9 +12586,9 @@ class Orchestrator:
         # #81: the kill-switch + abort guard run ONCE here, then the fail phase and the
         # win phase run INDEPENDENTLY. The fail phase's early returns (load error, <3
         # fails) must NOT suppress the win phase — a clean run with no fails but ≥floor
-        # QC recoveries still learns its win (Nemo r1 #7). Each phase is wrapped in its
+        # QC recoveries still learns its win. Each phase is wrapped in its
         # OWN guard so an unguarded raise inside one phase can neither suppress the other
-        # nor propagate out of this best-effort hook to the caller (Nemo code #1 — the
+        # nor propagate out of this best-effort hook to the caller (the
         # phase-independence promise must be SEALED at the seam, not just asserted).
         try:
             self._post_run_fail_codification(summary)
@@ -12661,8 +12651,8 @@ class Orchestrator:
         cheap producer lacked. The ENGINE binds recurrence (clusters by a deterministic
         false-merge-resistant signature, only ≥floor clusters surface); the LEADER
         judges coherence. Because a win is NON-independent (the same mind judged + wrote
-        the fix), it writes PROJECT-LOCAL (Hero R2), carries ``provenance: win``, and
-        surfaces a LOUDER spot-check recommendation (Hero R1b). Best-effort."""
+        the fix), it writes PROJECT-LOCAL, carries ``provenance: win``, and
+        surfaces a LOUDER spot-check recommendation. Best-effort."""
         try:
             recs = recoveries.unconsumed_recoveries(self.project.code)
             clusters = recoveries.cluster_recoveries(recs, floor=_win_codify_floor())
@@ -12714,7 +12704,7 @@ class Orchestrator:
                         persist_failed = True
                         continue
             # Consume the cluster only when it was JUDGED and no spec FAILED to persist
-            # (Hero MODERATE 3). A DECLINED cluster (empty decision) consumes — bounds
+            # A DECLINED cluster (empty decision) consumes — bounds
             # re-prompting; new same-signature recoveries can still re-cluster. But a
             # transient persist failure (git/disk) must NOT consume — else the skill
             # never lands yet the evidence is gone (technique lost). Retain → retry next
@@ -12764,7 +12754,7 @@ class Orchestrator:
         (``consume_fn``), guards against replay via the durable ``learned_from``
         applied-signature (``cluster_signature``), and surfaces a louder spot-check
         recommendation. Defaults reproduce the FAIL path byte-for-byte."""
-        if self._codify_cancelled():  # cadre: bounded wrapper timed out — write nothing late
+        if self._codify_cancelled():  # bounded wrapper timed out — write nothing late
             self._codification_skipped("timeout")
             return
         consume = consume_fn or lessons.mark_consumed
@@ -12808,7 +12798,7 @@ class Orchestrator:
                 project_code=project_code,
             )
         else:  # improve — append the learned guidance, bump the version.
-            # Hero code BLOCKER 1 — the base read MUST match the write scope, or a
+            # The base read MUST match the write scope, or a
             # FAIL improve (write-shared, project_code=None) that names a project-local
             # WIN skill would load the win body as its base and lift it — provenance,
             # learned_from, recovery content and all — into the SHARED library, voiding
@@ -12824,7 +12814,7 @@ class Orchestrator:
                 # project-local content into shared, never shallow-create. Breadcrumb.
                 self._codification_skipped(f"improve_base_absent_at_scope:{name}")
                 return
-            # Replay guard (Nemo r2 #3): if this recovery cluster was already codified
+            # Replay guard: if this recovery cluster was already codified
             # into the skill, do NOT append again — idempotent across a consume-after-
             # commit failure. Still consume (the lesson IS applied), then return.
             if is_win and cluster_signature and cluster_signature in base.learned_from:
@@ -13014,7 +13004,7 @@ class Orchestrator:
         )
         try:
             existing_index, existing_names = self._existing_jt_index()
-        except Exception:  # noqa: BLE001 — symmetry with the other swallow paths (Nemo gap #3)
+        except Exception:  # noqa: BLE001 — symmetry with the other swallow paths
             self._jt_codification_skipped("existing_jt_index_failed")
             return
         prompt_body = job_templates.load_interview("jt-create") or _JT_CREATE_PROMPT
@@ -13085,11 +13075,11 @@ class Orchestrator:
         judgment is authoritative; the engine binds the invariants (version,
         git, consume) + the version-skew guard. Mirrors ``_persist_codification``.
 
-        ``recurring_keys`` (Nemo gap #4): only evidence slugs that are REAL
+        ``recurring_keys``: only evidence slugs that are REAL
         recurring group keys are consumed — a paraphrased/typoed slug can't
         silently consume the wrong shape, and a valid one reliably stops the
         templated shape re-firing."""
-        if self._codify_cancelled():  # cadre: bounded wrapper timed out — write nothing late
+        if self._codify_cancelled():  # bounded wrapper timed out — write nothing late
             self._jt_codification_skipped("timeout")
             return
         action = str(spec.get("action", "")).strip().lower()
@@ -13215,7 +13205,7 @@ class Orchestrator:
         skill-creation proposal). Both are advisory; the task still runs."""
         notes: list[str] = []
         if result.capability_shortfall:
-            # Clif directive (2026-07-07): the engine NEVER complains about a
+            # The engine NEVER complains about a
             # model missing innate capabilities (vision, tool use, reasoning)
             # — especially on producers. A shortfall entry is by construction
             # a model-fit tag (the planner's soft preference), so routing
@@ -13295,7 +13285,7 @@ class Orchestrator:
                 f"missing {missing} not in registry"
             )
         else:  # ROSTER_GAP
-            # Priority semantics (locked 2026-04-21): BLOCKER is reserved
+            # Priority semantics: BLOCKER is reserved
             # for exhausted budgets that auto-resume via refresh_at. A
             # capability gap blocks this one task but other goals keep
             # moving — that's CRITICAL territory ("might need intervention,
@@ -13429,10 +13419,9 @@ class Orchestrator:
             # approval-required ticket (the user-is-the-verdict
             # semantic). Notification tickets (approval_required=False)
             # don't carry that semantic — the user might have approved
-            # them just to acknowledge / dismiss the alert. Surfaced
-            # 2026-04-28 in the WLT run where a retry-budget
-            # notification ticket got 'approved' and the drain
-            # incorrectly closed the goal as completed.
+            # them just to acknowledge / dismiss the alert. A retry-budget
+            # notification ticket getting 'approved' once incorrectly closed
+            # the drain's goal as completed.
             if (
                 decision == "approved"
                 and ticket.affected_goal_id
@@ -13567,7 +13556,7 @@ class Orchestrator:
             # initial-pass topo store-validates and rejects these; the resume
             # topo skips that validation (to avoid #10755), so enforce the
             # invariant here — never run a reopened task against an unresolved
-            # dependency (Nemo HIGH).
+            # dependency.
             unknown = _unknown_deps(t, task_map, cross_goal_status)
             if unknown:
                 t.transitions.append(StateTransition(
@@ -13632,11 +13621,11 @@ class Orchestrator:
 
         # Re-run the reopened tasks dependency-ordered (topo-sort + dep-gate),
         # still serially through _run_task_with_redo — the original redo
-        # semantics, just no longer in arbitrary store-list order (re-filed #1).
+        # semantics, just no longer in arbitrary store-list order.
         # Pass the FULL task list (not just the PENDING subset) so the dep-gate
         # has complete context — _run_reopened_tasks only executes the runnable
         # (reopened) ones and treats already-COMPLETED deps as satisfied
-        # (Opus R2 MED: PENDING-subset defeated dep ordering).
+        # (a PENDING-only subset previously defeated dep ordering).
         self._run_reopened_tasks(goal, tasks, summary)
 
         # Reload tasks to reflect status changes from execution.
@@ -13645,7 +13634,7 @@ class Orchestrator:
             self._leader_verify_goal(goal, tasks, summary)
         else:
             # Zero-completed decline redo — settle terminal with a reservation so
-            # the goal can't strand IN_PROGRESS forever (Opus R2 H1). Decline-
+            # the goal can't strand IN_PROGRESS forever. Decline-
             # specific wording so PQR/audit distinguishes it from auto-redo.
             self._settle_zero_completed(
                 goal, summary,
@@ -13686,7 +13675,7 @@ class Orchestrator:
 
             goal = store.get_goal(self.project.code, ticket.affected_goal_id, run_id=self.project.run_id)
             if goal is None or goal.status in (GoalStatus.COMPLETED, GoalStatus.ABANDONED):
-                # re-sweep #5: the goal already terminalized (e.g. a sibling/duplicate
+                # the goal already terminalized (e.g. a sibling/duplicate
                 # ticket for the same goal recovered it first, or it completed in the
                 # producing run). Retire this stale ticket instead of leaving it OPEN
                 # forever with a past refresh_at — no lane else reprocesses it.
@@ -13761,10 +13750,10 @@ class Orchestrator:
                 t.assigned_agent_id = None
                 t.qc_agent_id = None
                 t.evidence_provided = []
-                # Re-opened task has no live pass-mark (review 2026-06-04).
+                # Re-opened task has no live pass-mark.
                 t.qc_passed_checksum = None
                 self._assembly_records.pop(t.id, None)
-                # Mirror _leader_auto_redo's mode selection (Nemo hull #7): build
+                # Mirror _leader_auto_redo's mode selection: build
                 # IN PLACE on an existing artifact (diff multi-file, else revise)
                 # so a stale `generate` can't full-rewrite a prior deliverable.
                 draft_path = self._task_artifact_path(t)
@@ -13777,7 +13766,7 @@ class Orchestrator:
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
 
             # Re-run all the goal's reset tasks dependency-ordered, serially
-            # (re-filed #1) — same execution path as the original serial redo.
+            # — same execution path as the original serial redo.
             self._run_reopened_tasks(goal, tasks, summary)
 
             if any(t.status == TaskStatus.COMPLETED for t in tasks):
@@ -13861,7 +13850,7 @@ class Orchestrator:
                         stack.extend(getattr(dt, "depends_on", None) or [])
                 return True
 
-            # #80 (Nemo BLOCKER): a pre-existing POLICY withhold (the verify-time
+            # A pre-existing POLICY withhold (the verify-time
             # HARD-violation withhold) MUST survive this pass — never ship a deliverable
             # the engine already withheld, and never blindly reassign over the list.
             # Exclude policy-withheld task ids from `grounded`, then UNION them into the
@@ -13971,7 +13960,7 @@ class Orchestrator:
             # a leader-decision call (decompose/verify) on the single-shot path has
             # no fallback to fall over to, so it surfaces here. FAIL LOUDLY: a
             # CRITICAL ticket + an actionable "change your Leader's primary model"
-            # message, never a traceback to the operator (Clif 2026-06-22).
+            # message, never a traceback to the operator.
             return self._fail_kickoff_provider_unavailable(exc)
         finally:
             self._kickoff_active = False
@@ -13982,7 +13971,7 @@ class Orchestrator:
         The single-shot Leader path (decompose/verify) has no fallback to fall over
         to, so the run can't start. Rather than fail silently, surface a clear,
         actionable message + a CRITICAL ticket telling the operator to change the
-        Leader's primary model (Clif 2026-06-22) — never a traceback."""
+        Leader's primary model — never a traceback."""
         from modulatio import logstore
 
         loud = ("The Leader's primary model is unavailable and has no fallback to take "
@@ -14106,7 +14095,7 @@ class Orchestrator:
         Engine half of the iteration mode: the trigger is deterministic (a
         pinned file is present), and the contract bends the LLM toward
         edit-in-place / stay-in-the-file / small-plan — the exact failure modes
-        a single-file improvement hit live (2026-05-30: a 'higher jump' change
+        a single-file improvement hit live (a 'higher jump' change
         landed in an orphan module because the producer scattered a one-file
         game; three 'fix X' asks ballooned into six implement+report tasks)."""
         if not self._pinned_files:
@@ -14271,7 +14260,7 @@ class Orchestrator:
                 role="orchestrator",
                 phase=f"jt_slot_skipped:{summary.skipped_refused_jt}",
                 agent_id="orchestrator",
-                detail=summary.skipped_refused_reason,  # Hero m1: the WHY, not just the name
+                detail=summary.skipped_refused_reason,  # the WHY, not just the name
             )
             return summary
         # Iteration: pin any --attach'd files into the workspace BEFORE
@@ -14414,7 +14403,7 @@ class Orchestrator:
             # Slice #9b skill + domain capability floors — shared,
             # instance-cached lookups (self._skill_floor_for /
             # self._domain_floor_for) so the concurrent wave scheduler
-            # applies the SAME floors as plan-dispatch (Nemo impl-sweep B2).
+            # applies the SAME floors as plan-dispatch.
 
             # Per-task note threaded into the single DISPATCHED
             # transition below — avoids emitting two transitions for
@@ -14617,7 +14606,7 @@ class Orchestrator:
                     store.save_task(self.project.code, t, run_id=self.project.run_id)
                     continue
 
-                # Three-path parity (Nemo): an UNVALIDATED dep fails closed
+                # Three-path parity: an UNVALIDATED dep fails closed
                 # (defense-in-depth — the initial-pass topo already store-validated
                 # this plan, but the gate matches the resume path exactly)…
                 unknown = _unknown_deps(t, task_map, cross_goal_status)
@@ -14769,14 +14758,14 @@ class Orchestrator:
         # §2: render finished products in the ENGINE (so every run path delivers,
         # not just the CLI command). Gated so stub/test kickoffs never touch the
         # real delivery dir; the real run paths construct with deliver_products=True.
-        # B1 (2026-06-25): delivery + the kickoff_ended completion signal run
+        # Delivery + the kickoff_ended completion signal run
         # BEFORE the best-effort post-run codification below — the codification
         # makes a leader call (slow, and unbounded on the Clay subprocess path)
         # that must NOT be able to block or delay the user's deliverable + end
         # report. The user gets their result first; codification runs after.
         if self._deliver_products:
             self._deliver_finished_products(summary)
-        # F8-ONLY teardown (Clif 2026-06-05: only the kill-switch blows out the
+        # F8-ONLY teardown (only the kill-switch blows out the
         # pipes — a NORMAL finish leaves the run's final state + records intact).
         # On an operator kill, finalize every non-terminal goal/task + close open
         # tickets so no wedge residue carries into the next run. Runs AFTER delivery
@@ -15367,8 +15356,8 @@ Omit only when no size was given — never invent one.
 
 # Emergency fallback. Production loads the seed body at
 # src/modulatio/_seed_skills/leader-iterate.md (richer prose, full
-# PIANO/open-ended framing). This constant fires only when the seed
-# is missing or empty. Step 0 M6 (the security audit, 2026-05-15) cut
+# open-ended framing). This constant fires only when the seed
+# is missing or empty. An earlier security audit cut
 # the previous constant's invalid `"a" | "b"` JSON pseudo-syntax and
 # the standalone `"revise_task"` / `"drop_task"` fragments that were
 # not parseable as top-level JSON; it also narrowed the revise-task
@@ -16045,7 +16034,7 @@ Emit the corrected artifact now.
 """
 
 
-# QC-as-fixer build-when-absent (Clif 2026-06-22): the producer committed
+# QC-as-fixer build-when-absent: the producer committed
 # NOTHING patchable (empty/absent artifact). The task must still land, so as a
 # last resort QC AUTHORS the artifact from scratch against the task contract.
 _QC_BUILD_PROMPT = """\
@@ -16079,7 +16068,7 @@ Emit the complete artifact now.
 
 
 def _qc_fixer_enabled() -> bool:
-    """True unless ``MODULATIO_QC_FIXER=0``. ON by default (Clif 2026-05-21):
+    """True unless ``MODULATIO_QC_FIXER=0``. ON by default:
     jobs must not ship broken — when a producer can't clear QC, QC authors the
     fix from its own findings and the task completes (flagged qc_authored).
     Opt OUT with ``MODULATIO_QC_FIXER=0``."""
@@ -16196,7 +16185,7 @@ _WIN_CODIFY_FLOOR_DEFAULT = 3
 def _win_codify_floor() -> int:
     """The win-codify recurrence floor, read from ``MODULATIO_WIN_CODIFY_FLOOR``.
 
-    re-sweep F3: this MUST NOT crash on a malformed value. ``orchestration`` is
+    this MUST NOT crash on a malformed value. ``orchestration`` is
     imported unconditionally by ``cli.py``, so an unguarded ``int(...)`` at module
     scope on e.g. ``MODULATIO_WIN_CODIFY_FLOOR=foo`` raised ``ValueError`` at IMPORT
     and bricked the whole CLI/TUI. Mirror ``_wave_global_cap``: try/except with a

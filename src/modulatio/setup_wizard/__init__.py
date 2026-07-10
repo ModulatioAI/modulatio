@@ -23,7 +23,7 @@ Wizard step order (8 steps; step 5 added 2026-04-30 for budget caps):
     6. first project capture (code + objective for the auto-launch handoff)
     7. embedded LLM prefetch (silent if cached, default-yes if missing) —
        runs before confirm so the prefetch (a pure cache warm) can't sit
-       between a confirmed save and the commit write (finding #348)
+       between a confirmed save and the commit write
     8. confirm + finalize (writes defaults.json + model_presets.json +
        team_template.json + .env); commit fires immediately after confirm
 
@@ -82,7 +82,7 @@ _STEP_TITLES = {
     # Models + agents are configured in the TUI Config tab now, not here.
     "budget": "3. Budget defaults (optional)",
     "first_project": "4. Your first project",
-    # re-sweep (finding #348): embedded_llm now runs before confirm so the
+    # embedded_llm now runs before confirm so the
     # confirmed save commits immediately — labels follow the new order.
     "embedded_llm": "5. Prefetch embedded LLM",
     "confirm": "6. Review and finalize",
@@ -282,8 +282,8 @@ def _embedded_model_snapshot() -> tuple[str, bool]:
     """The active embedding model id + whether it's already in the fastembed
     cache.
 
-    re-sweep (Finding 1): the embedded_llm prefetch step (now step 7, before
-    confirm — finding #348) calls ``prefetch()``, which downloads the routing
+    The embedded_llm prefetch step (now step 7, before
+    confirm) calls ``prefetch()``, which downloads the routing
     embedder (potentially hundreds of MB) into fastembed's cache — a durable,
     reusable on-disk side effect. The abort message must not paper that over
     with "No changes written" on a run where the on-disk presets / system tools
@@ -323,7 +323,7 @@ def _run_setup_body() -> bool:
     tools_at_start = _system_tools_snapshot()
     embed_model, embed_cached_at_start = _embedded_model_snapshot()
 
-    # re-sweep (finding #348): embedded_llm runs BEFORE confirm. The confirm
+    # embedded_llm runs BEFORE confirm. The confirm
     # step prompts "Save and complete setup?" and ``commit`` fires the instant
     # the machine finishes — so nothing slow may sit between confirm and the
     # write. The embedded-LLM prefetch is a pure, reusable cache warm with no
@@ -382,7 +382,7 @@ def _run_setup_body() -> bool:
         # dropped a preexisting preset — comparing key sets tells them apart.
         presets_removed = bool(set(presets_at_start) - set(presets_at_end))
 
-        # re-sweep (Finding 1): the embedded-LLM prefetch can download the
+        # The embedded-LLM prefetch can download the
         # routing embedder into fastembed's cache before confirm. If it flipped
         # from not-cached to cached during this run, the abort message must own
         # that durable (but reusable) on-disk side effect rather than claim "No
@@ -426,7 +426,7 @@ def _run_setup_body() -> bool:
             # name verbatim ("pandoc was installed ..."). The preset clause and
             # an embed-led clause (cache warm with no preset/install ahead of
             # it) are prose, so they get capitalized.
-            # re-sweep (Finding 2): an embed-cache-only abort used to read
+            # An embed-cache-only abort used to read
             # "Setup aborted. the embedded routing model ..." because the lead
             # was only capitalized on presets_changed.
             tool_install_leads = bool(newly_installed) and not presets_changed

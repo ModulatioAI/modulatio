@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Cron tab — scheduled-job management (slice 7, Phase 2.5 merge).
+"""Cron tab — scheduled-job management.
 
 Read-only viewer + per-row [Enable]/[Disable]/[Run now]/[Remove] actions.
 Adding new jobs goes through the CLI (``modulatio cron add ...``) so the
@@ -158,7 +158,7 @@ class CronScreen(Vertical):
         if not jid:
             return
         # Removing a cron job deletes the schedule — guard it (consistent with
-        # the other destructive deletes, cadre 2026-06-16).
+        # the other destructive deletes).
         self.app.push_screen(
             ConfirmModal(f"Remove cron job '{jid}'?\n\nThe schedule is deleted."),
             lambda ok: self._do_remove(jid) if ok else None,

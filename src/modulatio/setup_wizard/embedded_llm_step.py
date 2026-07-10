@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Embedded LLM prefetch — final wizard step (silent if cache present).
 
-Pre-downloads the embedder used by skill-routing (slice #6e) and
+Pre-downloads the embedder used by skill-routing and
 qc-history retrieval so the first task doesn't block on a cold
 fetch. Auto-detects cache; if present → skip silently. If missing →
 download + report progress.

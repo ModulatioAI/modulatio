@@ -1,6 +1,6 @@
 ---
 name: long-form
-description: Producer skill for producing ONE unit of a multi-unit deliverable. Unit-scoped — not whole-deliverable. Reads neighboring units from team_canvas, anchors to outline position from task description, produces unit content at the unit's per-call budget. Artifact-agnostic — what a "unit" is is defined by the standards file for the task's artifact_kind. Slice #83 PR-A.
+description: Producer skill for producing ONE unit of a multi-unit deliverable. Unit-scoped — not whole-deliverable. Reads neighboring units from team_canvas, anchors to outline position from task description, produces unit content at the unit's per-call budget. Artifact-agnostic — what a "unit" is is defined by the standards file for the task's artifact_kind.
 executor: llm
 capability_tags: long-form, multi-unit-producer, structured-output
 required_capabilities: writing
@@ -55,7 +55,7 @@ Same rules as the regular `drafter` skill. Your response IS the unit's literal c
 
 For multi-file deliverables where standards specify a per-unit file (one file per unit), the task's `output_path` names your specific file. Standards drive what `output_path` looks like; you produce the body.
 
-## Producer self-claim trailer (Slice 1)
+## Producer self-claim trailer
 
 AFTER the unit body, add a single trailing block:
 

@@ -3,13 +3,12 @@
 """Modulatio configuration — paths, defaults, persistence.
 
 All filesystem paths in Modulatio source MUST be resolved through this
-module. Hardcoded paths violate the no-hardcoded-paths principle (see
-`feedback_modulatio_no_hardcoded_paths.md`).
+module. Hardcoded paths violate the no-hardcoded-paths principle.
 
 Storage:
     ~/.config/modulatio/defaults.json    — paths + default models
     ~/.config/modulatio/preferences.json — user preferences (see preferences.py)
-    ~/.config/modulatio/model_presets.json — model presets (slice 2)
+    ~/.config/modulatio/model_presets.json — model presets
 
 Defaults schema (filled in by the setup wizard from the user's
 choices — Modulatio is model-agnostic, no role-to-model bindings
@@ -94,14 +93,14 @@ def _xdg_cache_home() -> Path:
 # ``$XDG_DATA_HOME/modulatio/`` and cache under ``$XDG_CACHE_HOME/modulatio/``.
 # That respects the XDG Base Directory Specification on Linux/macOS and
 # keeps Modulatio out of ``~/modulatio/`` (a magic top-level dir name that
-# reads as a hardcode per ``feedback_modulatio_no_hardcoded_paths.md``).
+# reads as a hardcode).
 #
 # Late-bound: the helpers below are called on every accessor, so a test
 # that scrubs ``XDG_*`` env vars (or a runtime that exports them after
 # import) sees the right path immediately. Module-import-time constants
 # would freeze the env at import and force test gymnastics.
 #
-# Wizard suggestions still propose Obsidian vaults when detected; these
+# Wizard suggestions still propose known vault directories when detected; these
 # paths only matter when the wizard hasn't run.
 def _fallback_vault_root() -> str:
     return str(_xdg_data_home() / "modulatio" / "projects")
@@ -161,8 +160,7 @@ def write_secret_file(path: Path, content: str) -> None:
     The naive ``path.write_text(..., encoding="utf-8"); path.chmod(0o600)`` pattern leaves
     the file briefly world-readable between create-with-default-umask
     and the explicit chmod. On a multi-user host, that window is enough
-    to leak credentials; the pre-V2 security audit (2026-05-02) flagged
-    six call sites doing exactly this for tokens, OAuth credentials,
+    to leak credentials across six call sites doing exactly this for tokens, OAuth credentials,
     .env files, telegram config, and backups.
 
     This helper opens the temp file with mode 0o600 directly, writes to
@@ -391,7 +389,7 @@ def apply_env_overrides() -> None:
     for key, value in overrides.items():
         key = str(key)
         if key not in ENV_OVERRIDE_ALLOWLIST:
-            # Backend allowlist (Wild Bill BLOCK): unknown keys are refused
+            # Unknown keys are refused
             # loudly, not injected — never a persistent sandbox/loader hijack.
             logger.warning(
                 "env_overrides: refusing non-allowlisted key %r", key)

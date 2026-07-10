@@ -12,10 +12,9 @@ inventing ones.
 NOT a substitute for the iterative planning + repo-map skill.
 This is "give the team peripheral vision" — file existence + interface
 hints — without the the iterative replanning work + true repo-map
-extraction. Cross-ref ``project_modulatio_self_modification_gap.md``
-items #1, #3, and #5; the full fix lives in the planning slice.
+extraction. The full fix lives in future planning work.
 
-Naming: ``team_canvas`` per user 2026-04-30 — what the team is
+Naming: ``team_canvas`` — what the team is
 collectively painting on right now. Distinct from ``team_memory``
 (curated cross-run wisdom) which already exists.
 """
@@ -61,7 +60,7 @@ TEXT_EXTENSIONS: frozenset[str] = frozenset({
 def _within_tree(path: Path, root_resolved: Path) -> bool:
     """True iff ``path``'s real location stays inside ``root_resolved``.
 
-    re-sweep (Finding 1, security): ``rglob('*')`` filtered by ``is_file()``
+    ``rglob('*')`` filtered by ``is_file()``
     follows symlinks, and ``is_file()`` is True for a symlink whose target is
     a regular file. A producer holding a shell tool could plant a symlink in
     ``artifacts/`` pointing at ``/etc/passwd`` or another project's vault, and
@@ -112,7 +111,7 @@ def build_digest(artifacts_root: Path, *, hoist_run_id: str | None = None) -> st
     files = [
         p
         for p in artifacts_root.rglob("*")
-        # re-sweep (Finding 1): skip symlinks and any path whose real
+        # Skip symlinks and any path whose real
         # location escapes the artifacts tree, so a planted symlink can't
         # leak an out-of-tree file into the next producer's prompt.
         if not p.is_symlink()

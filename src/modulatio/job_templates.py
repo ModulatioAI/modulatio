@@ -21,7 +21,7 @@ A JT has two states:
 Files live in three locations, searched in order (project > shared > seed),
 exactly like skills — a project-local JT fully replaces the shared one.
 
-This module (Brick B1a) is the artifact format + loaders ONLY. No call sites;
+This module is the artifact format + loaders ONLY. No call sites;
 the library/index, the interview, cron-binding, and self-codification land in
 later bricks.
 """
@@ -42,13 +42,13 @@ _JT_ROOT = config.get_shared_resources_path() / "job_templates"
 
 def _fm(value: object) -> str:
     """Collapse CR/LF in a front-matter SCALAR value to a space so a value
-    can't forge an extra front-matter line (security audit H2). The parser is
+    can't forge an extra front-matter line. The parser is
     line-based; a newline in a Leader-supplied ``description`` would otherwise
     inject a forged ``version`` / ``last_verified_at`` key."""
     return str(value).replace("\r", " ").replace("\n", " ")
 
 #: Package-bundled seed JTs (read-only canonical defaults — e.g. the Leader's
-#: ``jt-create`` drafting template, added in Brick B4). Resolved last, after the
+#: ``jt-create`` drafting template). Resolved last, after the
 #: user's shared + project-local copies, mirroring the skill seed dir.
 _SEED_JT_ROOT = Path(__file__).parent / "_seed_job_templates"
 
@@ -114,7 +114,7 @@ class JobTemplate:
     Team-AGNOSTIC: ``capability_preferences`` expresses *preferences* only
     (free tags), never a pinned model — the engine always runs best-available
     with whatever Team exists (the never-block routing contract). ``version``
-    is the self-codification marker (Brick B4): ``None`` for hand/seed JTs,
+    is the self-codification marker: ``None`` for hand/seed JTs,
     ``"1"`` for the first autonomously-codified one, bumped on improvement; the
     full history is kept by git (the JT library is a git repo)."""
 
@@ -137,19 +137,19 @@ class JobTemplate:
 
     def missing_required(self, params: dict[str, Any]) -> list[str]:
         """Names of required params absent (or None) in ``params`` — the
-        validation a cron-bind must pass before a headless run (Brick B3)."""
+        validation a cron-bind must pass before a headless run."""
         return [
             p.name for p in self.param_schema
             if p.required and params.get(p.name) is None
         ]
 
     def unfilled_required(self, params: dict[str, Any]) -> list[str]:
-        """STRICT required check for the #97 fit-gate: names of required params that
+        """STRICT required check for the fit-gate: names of required params that
         are absent, None, an empty/whitespace-only string, or — for a list/tuple value
         — empty. Unlike :meth:`missing_required` (absent/None only, kept for cron.add's
         existing semantics), this catches the present-but-empty bypass (``{"topic": ""}``
         / ``{"competitors": []}``) so an explicit cron/operator bind that literally can't
-        run is refused, not bound. Total over ``params`` (Nemo code-hull belt):
+        run is refused, not bound. Total over ``params``:
         a non-mapping is treated as "nothing supplied" → every required field is
         unfilled, never an ``AttributeError``."""
         if not isinstance(params, dict):
@@ -168,7 +168,7 @@ class JobTemplate:
         return unfilled
 
     def enum_violations(self, params: dict[str, Any]) -> list[str]:
-        """#97 R1 (Hero): names of SUPPLIED params whose value falls outside a declared
+        """Names of SUPPLIED params whose value falls outside a declared
         non-empty ``enum`` — a present-but-out-of-contract misfit a cron would mis-run
         every cycle. For a list/tuple value (a per-driver or list-typed field), any
         non-member item flags the field. Absence and emptiness are the presence check's
@@ -405,7 +405,7 @@ def load_with_metadata(name: str, project_code: str | None = None) -> JobTemplat
 
     Missing in all three → empty JT (``.name == ""``), not an error.
     """
-    # H1: a traversal name resolves to the empty JT (safe not-found) rather
+    # A traversal name resolves to the empty JT (safe not-found) rather
     # than a read outside the registry root.
     try:
         validate_registry_name(name)
@@ -446,7 +446,7 @@ def list_job_templates(project_code: str | None = None) -> list[str]:
 def save(jt: JobTemplate, project_code: str | None = None) -> Path:
     """Write a JT to shared (no project_code) or the project's override dir.
     Nested schema/output written as single-line JSON. Returns the written path."""
-    validate_registry_name(jt.name)  # H1: no path-traversal write
+    validate_registry_name(jt.name)  # no path-traversal write
     if project_code is not None:
         root = project_dir(project_code) / "job_templates"
     else:
@@ -454,7 +454,7 @@ def save(jt: JobTemplate, project_code: str | None = None) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{jt.name}.md"
 
-    # H2: scalar values are newline-collapsed (``_fm``) so a Leader-supplied
+    # Scalar values are newline-collapsed (``_fm``) so a Leader-supplied
     # field can't forge a front-matter key. The nested specs are single-line
     # JSON (newlines already escaped), so they're injection-safe as-is.
     fm_lines: list[str] = [
@@ -491,9 +491,9 @@ def create_job_template(
     """Create a new JT file, shared or project-local.
 
     Idempotency: raises ``FileExistsError`` if a JT with the same name exists
-    at the target scope (the name-dedup hard guard; Brick B4's codification
+    at the target scope (the name-dedup hard guard; codification
     flips create→improve on collision rather than colliding here)."""
-    validate_registry_name(name)  # H1: no path-traversal write
+    validate_registry_name(name)  # no path-traversal write
     if project_code is not None:
         root = project_dir(project_code) / "job_templates"
     else:

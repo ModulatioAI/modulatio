@@ -470,9 +470,9 @@ class AgentBuilderScreen(Vertical):
 
     async def _remove_selected(self) -> None:
         # Any agent is removable (Leader/QC included — remove + re-add). All
-        # removals are guarded by a ConfirmModal (cadre 2026-06-16 — standardise
-        # destructive ops); removing the Leader/QC is load-bearing, so its
-        # message warns that kickoffs degrade until you re-add one.
+        # removals are guarded by a ConfirmModal; removing the Leader/QC is
+        # load-bearing, so its message warns that kickoffs degrade until you
+        # re-add one.
         agent_id = self._selected_agent_id()
         if not agent_id:
             return

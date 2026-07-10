@@ -6,12 +6,12 @@ Templates are markdown files with frontmatter — same format as skills and
 standards. Two locations, searched in order:
 
 1. **Shared defaults** at ``<shared_resources>/templates/<template_id>.md``
-   — user-installed overrides (placed by setup wizard, slice 3).
+   — user-installed overrides (placed by the setup wizard).
 2. **Bundled defaults** in this package directory — the templates that
    ship with Modulatio. Loaded when the user hasn't installed a custom
    override.
 
-Skills-first (#143):
+Skills-first:
 - The **Leader** is the one required structural role — exactly one per install.
   **QC** (`qc`) is structural too (the verifier) but OPTIONAL: a solo-Leader
   setup can skip it. (The legacy `coordinator` triad template was removed —
@@ -50,7 +50,7 @@ class Template:
     cost_class: str
     mandatory: bool  # True = structural template (Leader/QC); False = worker.
                      # "structural", NOT "must be in every roster" — QC is
-                     # skippable in setup (#13); only the Leader is required.
+                     # skippable in setup; only the Leader is required.
     description: str
     identity: str  # the body — used as Agent.identity
     source_path: Path | None = None

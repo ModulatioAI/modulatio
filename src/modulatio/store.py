@@ -135,7 +135,7 @@ def _quarantine_corrupt(
         except OSError:
             pass  # unreadable now (vanished/perm) — let the rename below decide
         else:
-            # re-sweep: a writer replaced the corrupt bytes with a valid record
+            # a writer replaced the corrupt bytes with a valid record
             # between our parse-fail and now; don't rename the good file aside.
             _log.info(
                 "entity file %s parses cleanly on re-sweep; a concurrent write "
@@ -175,7 +175,7 @@ def _normalize_entity_text(text: str) -> str:
     """Normalize an entity file's text before frontmatter parsing: strip a
     leading UTF-8 BOM and fold CRLF/CR line endings to LF.
 
-    External tools (Excel, Notepad, PowerShell ``Out-File``) routinely emit a
+    External tools (spreadsheet apps, plain-text editors, shell redirection) routinely emit a
     BOM and/or CRLF. Without this, the ``^---\\n``-anchored ``_FRONTMATTER_RE``
     misses, the file is read as a bodyless record, validation fails on the
     missing required fields, and a *well-formed* entity is wrongly quarantined

@@ -72,7 +72,7 @@ class AuthStep(Vertical):
         super().__init__(**kwargs)
         self.provider = provider
         self._selected = provider.auth_options[0]
-        # re-sweep (Finding 1): serialize body rebuilds. remove_children() +
+        # Serialize body rebuilds. remove_children() +
         # mount() can't be made atomic on their own (each awaits, yielding the
         # loop), so two fast RadioSet.Changed events could interleave and mount
         # duplicate ids (auth-key, ...) -> DuplicateIds. The lock makes each
@@ -101,7 +101,7 @@ class AuthStep(Vertical):
         await self._render_body()
 
     async def _render_body(self) -> None:
-        # re-sweep (Finding 1): serialize so a rebuild runs to completion before
+        # Serialize so a rebuild runs to completion before
         # the next begins. remove_children() + mount() each yield the loop, so
         # without the lock two fast RadioSet.Changed events interleave and mount
         # duplicate ids -> DuplicateIds. Collect the children first, then under

@@ -154,7 +154,7 @@ class LogsScreen(Vertical):
             )
             return
         # Confirm first — a captured log is gone for good, and the send side
-        # already requires a review step (L1, Nemo/Cowboy review 2026-06-14).
+        # already requires a review step.
         self.app.push_screen(
             ConfirmModal(f"Delete this {entry.label}?\n\n{entry.summary[:80]}"),
             lambda ok: self._do_delete(entry) if ok else None,

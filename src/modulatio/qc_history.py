@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""QC history — precedent log for recursive learning (slice #8.1).
+"""QC history — precedent log for recursive learning.
 
 Every QC verdict is appended to ``<project_vault>/qc-history/<domain>/``
 as one markdown file per verdict (entry_id + timestamp in the filename
@@ -51,7 +51,7 @@ from modulatio.vault import project_dir
 # two QC workers of the SAME artifact_kind (== same qc-history domain) can both
 # rebuild at once (create_table races) or one can drop/recreate the table while
 # another is mid-search — raise or garbled precedent. This is the exact hazard
-# 5bce6a2 fixed in team_memory; the structurally-identical sibling was missed.
+# fixed in team_memory; the structurally-identical sibling was missed.
 # Keyed per-(project, domain) so unrelated artifact kinds don't contend (domain
 # == LanceDB table granularity). Reentrant so similar_verdicts() can hold it
 # across both _ensure_verdict_vectors() and its own read.

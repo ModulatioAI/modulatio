@@ -225,7 +225,7 @@ export function mountConsole(page, ctx) {
 
   // Operator "clear screen" — wipe both activity logs AND every repaint
   // source, so neither a reconnect nor a tab-return brings the cleared log
-  // back (Clif 2026-07-09, twice): the server replay buffer is dropped, and
+  // back: the server replay buffer is dropped, and
   // the conversation history — which the boot paint replays in full — gets a
   // turn-count watermark so remounts skip what was cleared. The thread itself
   // stays intact (reset is the destructive verb); telemetry and any live run

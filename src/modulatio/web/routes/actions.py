@@ -37,8 +37,8 @@ def _valid_run(code: str, run_id: str) -> str:
 
 
 def _require_job(code: str, job_id: str) -> dict:
-    """Fetch a cron job, refusing one that belongs to a DIFFERENT project
-    (WB-2): the job id is global, but a verb reached under ``/api/{project}``
+    """Fetch a cron job, refusing one that belongs to a DIFFERENT project:
+    the job id is global, but a verb reached under ``/api/{project}``
     must only touch that project's own schedule. Cron stores project_code
     uppercased (``cron.add``), so compare against ``code.upper()``."""
     job = cron.get(job_id)
@@ -97,7 +97,7 @@ def ticket_delete(project: str, ticket_id: str) -> dict:
 @router.delete("/{project}/runs/{run_id}")
 def run_delete(project: str, run_id: str, request: Request) -> dict:
     code = valid_project(project)
-    # WB-1: never delete a run folder while the engine is writing one — the
+    # Never delete a run folder while the engine is writing one — the
     # TUI Jobs screen refuses deletion while any job is in flight. Mirror that:
     # a live kickoff on this project's actor blocks deletion (409).
     if get_actor(code, stub=bool(request.app.state.stub)).kickoff_active():
@@ -336,7 +336,7 @@ class ScheduleBody(BaseModel):
     @classmethod
     def _positive_count(cls, v: int | None) -> int | None:
         # A crafted count:0 must NOT slip through and become an unlimited
-        # schedule (Wild Bill) — the builder floors at 1; enforce it server-side.
+        # schedule — the builder floors at 1; enforce it server-side.
         if v is not None and v < 1:
             raise ValueError("count must be at least 1 (omit it for unlimited)")
         return v
@@ -489,7 +489,7 @@ def artifact_export(project: str, body: ExportBody) -> dict:
         export.export_artifact(source, dest, body.format)
     except export.ExportError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # WB-3: the absolute host path (folder/share name) never crosses the
+    # The absolute host path (folder/share name) never crosses the
     # boundary — return only the folder name asked for + the filename.
     return {"folder": body.folder, "filename": dest.name}
 

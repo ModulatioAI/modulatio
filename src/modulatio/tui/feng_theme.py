@@ -24,8 +24,8 @@ _BASE = "#E0E0E0"
 _ERROR = "#FF5555"
 
 #: The Leader's speech block in the converse TV: a NEUTRAL dark highlight
-#: behind his reply lines so they read apart from the operator's at a glance
-#: (Clif, 2026-07-06). Neutral gray, not an accent fill — it must sit calm
+#: behind its reply lines so they read apart from the operator's at a glance.
+#: Neutral gray, not an accent fill — it must sit calm
 #: under all four variants and keep the near-white base text at high contrast
 #: (#E0E0E0 on #262626 ≈ 11:1); same subtle-dark register as the block cursor.
 LEADER_HIGHLIGHT_BG = "#262626"
@@ -88,7 +88,7 @@ def theme_tiers(app) -> tuple[str, str, str, str]:
 FENG_AMBER = _feng("feng-amber", "#FFC933", "#FFB300")
 FENG_GREEN = _feng("feng-green", "#7DFF9C", "#44FF77")
 FENG_CYAN = _feng("feng-cyan", "#80EEFF", "#44E8FF")
-#: Retro mainframe meets Tron (2026-07-03): hot neon red — error moves to an
+#: Hot neon red theme: error moves to an
 #: amber alarm so a failure still jumps out of a red screen.
 FENG_RED = _feng("feng-red", "#FF3344", "#D01030", error="#FFB000")
 #: Neon phosphor violet.

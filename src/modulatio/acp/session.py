@@ -33,8 +33,8 @@ def _permission_allows(result) -> bool:
 
 def _decision_from_result(result):
     """Map an ACP ``session/request_permission`` response to a four-way
-    ``Decision`` (§2.3). Accepts the nested ACP shape + a flat one; cancelled,
-    missing, or unrecognized → DENY (§6.C fail-closed)."""
+    ``Decision``. Accepts the nested ACP shape + a flat one; cancelled,
+    missing, or unrecognized → DENY (fail-closed)."""
     from modulatio.permissions import Decision
     if not isinstance(result, dict):
         return Decision.DENY
@@ -101,7 +101,7 @@ class ACPSession:
                     {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
                 ],
             },
-            # re-sweep: a cancel can fire between the guard above and the rid
+            # a cancel can fire between the guard above and the rid
             # registering; the server re-checks this atomically vs cancel's
             # snapshot so we fail closed promptly instead of blocking the timeout.
             cancel_check=lambda: self.cancelled,
@@ -109,10 +109,10 @@ class ACPSession:
         return _permission_allows(result)
 
     def ask_capability(self, cap):
-        """§2.3 — the PermissionBroker's four-option ask surface. Offers
+        """The PermissionBroker's four-option ask surface. Offers
         once/session/always/deny carrying the capability's plain-language label +
         detail; maps the chosen optionId → ``Decision``. Cancelled / unknown /
-        no answer → DENY (§6.C fail-closed). Supplied to ``converse(ask=...)`` so
+        no answer → DENY (fail-closed). Supplied to ``converse(ask=...)`` so
         the broker can route a capability question to the ACP client."""
         from modulatio.permissions import Decision
         if self.cancelled:
@@ -139,7 +139,7 @@ class ACPSession:
     # ── ask_operator → input request (kickoff/JT path only in v1) ───────
     def ask_operator(self, prompt: str):
         if self.cancelled:
-            return None  # re-sweep: entry guard parity with permission_cb
+            return None  # entry guard parity with permission_cb
         result = self._server.request_and_wait(
             "session/request_input", {"sessionId": self.id, "prompt": prompt},
             cancel_check=lambda: self.cancelled)

@@ -51,7 +51,7 @@ def load_constitution(project_code: str | None = None) -> str:
         try:
             candidates.append(project_dir(project_code) / "constitution.md")
         except ValueError:
-            # re-sweep: an invalid project_code (validate_project_code) shouldn't
+            # An invalid project_code (validate_project_code) shouldn't
             # crash the loader — fall through to the shared/seed constitution.
             # Mirrors qc_persona.load_qc_persona.
             pass

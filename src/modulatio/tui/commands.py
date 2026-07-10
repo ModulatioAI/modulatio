@@ -395,7 +395,7 @@ COMMANDS: tuple[Command, ...] = (
         category="Help",
         handler=_handle_bug,
     ),
-    # opencode-parity harness commands (where a Modulatio backend exists).
+    # Coding-agent-harness-parity commands (where a Modulatio backend exists).
     Command(
         shortcut="/models",
         name="Switch model",

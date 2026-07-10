@@ -13,7 +13,7 @@ import {
 const post = (path, body) => api(path, { method: "POST", body });
 const del = (path) => api(path, { method: "DELETE" });
 
-// ── the schedule builder (Teams-style: date · time · recurrence · ends) ──
+// ── the schedule builder (date · time · recurrence · ends) ──
 const _WD = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 const _WD_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
   "Friday", "Saturday"];

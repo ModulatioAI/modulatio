@@ -1,11 +1,11 @@
-"""Deterministic oracles for the ``code`` and ``media`` assembly families (#100).
+"""Deterministic oracles for the ``code`` and ``media`` assembly families.
 
 ``review_ledger.verify_assembly`` lets an assembly PASS QC *cheaply* — without
 re-reading the assembled bytes back into the model — when it is PROVABLY correct
 (the QC-speculative-decoding economics). The ``document`` and ``data`` families
 have such a structural oracle; ``code`` and ``media`` historically did not, so
 they always paid for a full smart-model review. This module supplies the missing
-oracles, under one governing rule from Nemo's hull review:
+oracles, under one governing rule:
 
     **An oracle proves the composite CONTAINS the declared units — not merely that
     it has their SHAPE.** Cheap PASS only where containment is *provably* attainable;
@@ -24,9 +24,9 @@ Families:
     so they honestly fall back to the full review this cut.
 
 Every entrypoint is TOTAL: it catches every environmental/tool/parser failure and
-converts it to ``(False, reason, "")`` so ``verify_assembly`` never throws (Nemo #6).
+converts it to ``(False, reason, "")`` so ``verify_assembly`` never throws.
 
-The **delegated-oracle** seam (Hero R1): an oracle resolved to a metered/API-key'd
+The **delegated-oracle** seam: an oracle resolved to a metered/API-key'd
 tool must authorize through the Comptroller before it spends, and the verify mark
 records *whose word* a PASS rested on (the ``oracle`` provenance id). Free-local
 oracles (``zipfile``/``ast``) are ``cost_class`` free and never authorize.
@@ -72,7 +72,7 @@ def run_oracle(
     authorize: "Callable[[], Authorization] | None" = None,
     fallback: Oracle | None = None,
 ) -> tuple[bool, str, str]:
-    """Run ``oracle`` under the delegated-oracle contract (Hero R1a).
+    """Run ``oracle`` under the delegated-oracle contract.
 
     * **free-local** (or ``None`` cost_class) → run directly, no authorization.
     * **metered** (paid-cloud/premium-cloud) → it is a verify-time SPEND, so it must
@@ -85,7 +85,7 @@ def run_oracle(
     oracle that vouched (the provenance recorded in the verify mark, R1b); on any
     fall-back it is ``""`` (no cheap pass was granted on this oracle's word).
 
-    **Hero f1 — the fallback CARRIES the deny/crash context, never swallows it.** When a
+    **The fallback CARRIES the deny/crash context, never swallows it.** When a
     metered oracle is denied / unauthorizable / crashes the authorizer and we fall back to
     the free-local oracle, the deny note rides in ``reason`` *even on a fallback PASS* (the
     field is otherwise ``""`` on pass, so this is additive) — the caller threads it into the
@@ -123,7 +123,7 @@ def _fallback_or_full_review(
 ) -> tuple[bool, str, str]:
     """A metered oracle could not run (deny/no-authorizer/crash). Fall back to the
     free-local ``fallback`` if present, ELSE full review — carrying ``deny`` so the
-    context is never swallowed (Hero f1). On a fallback PASS the deny note rides in
+    context is never swallowed. On a fallback PASS the deny note rides in
     ``reason``; on a fallback FAIL it is prefixed; with no fallback it IS the reason."""
     if fallback is None:
         return False, f"{deny} — full review", ""
@@ -138,7 +138,7 @@ def _run_free_local(oracle: Oracle) -> tuple[bool, str, str]:
     oracle's provenance id; a fail/crash carries ``""`` (no cheap pass)."""
     try:
         ok, reason = oracle.run()
-    except Exception as exc:  # noqa: BLE001 — total entrypoint (Nemo #6)
+    except Exception as exc:  # noqa: BLE001 — total entrypoint
         return False, f"validator crashed: {type(exc).__name__}({exc}) — full review", ""
     if ok:
         return True, "", oracle.name
@@ -150,7 +150,7 @@ def _run_free_local(oracle: Oracle) -> tuple[bool, str, str]:
 
 def _is_trivial_body(tree: ast.Module) -> bool:
     """True iff the module body has NO substantive statement — only docstring /
-    ``pass`` / ``...`` / **imports** (Nemo code #3: an import-only ``main.py`` is
+    ``pass`` / ``...`` / **imports** (an import-only ``main.py`` is
     dependency wiring, not "an app here"). A real body needs a def/class/assignment/
     call/``if __name__`` guard — *something that does work*. Runnability beyond that
     is semantic (#101)."""
@@ -222,7 +222,7 @@ def _member_resolves(
     pkg_parts: "list[str]", name: str, py_units: set[str], sources: "dict[str, str]"
 ) -> bool:
     """Does ``name`` resolve under local package ``pkg_parts`` — as a submodule file
-    OR a top-level name bound in the package ``__init__`` (Nemo code #1/#2: prove the
+    OR a top-level name bound in the package ``__init__`` (prove the
     member of a ``from pkg import name`` or fall back, never cheap-PASS it unproven)."""
     sub = "/".join([*pkg_parts, name]) if pkg_parts else name
     if f"{sub}.py" in py_units or f"{sub}/__init__.py" in py_units:
@@ -234,7 +234,7 @@ def _dangling_ref(
     unit_rel: str, sources: "dict[str, str]", py_units: set[str]
 ) -> str | None:
     """Return a reason iff the Python unit at ``unit_rel`` has a PROVABLE intra-package
-    dangling reference (Nemo #5 + code #1/#2 — the exact local-vs-external rule):
+    dangling reference (the exact local-vs-external rule):
 
       * a **relative** import (``from .[mod] import names``) resolving inside the
         package root whose target module OR named member is absent, OR
@@ -355,7 +355,7 @@ def _validate_code(
     if not units:
         return False, "code assembly: no units to validate"
 
-    # Python-first + fail-OPEN (Nemo): a non-Python unit we cannot parse means we
+    # Python-first + fail-OPEN: a non-Python unit we cannot parse means we
     # cannot prove wiring → full review (never a false cheap-PASS).
     if any(not u.endswith(".py") for u in units):
         return False, "code assembly: non-Python unit(s) present — full review (no parser)"
@@ -372,8 +372,8 @@ def _validate_code(
         except (OSError, UnicodeDecodeError) as exc:
             return False, f"code assembly: unit {norm!r} unreadable: {exc}"
 
-    # 1. entrypoint exists AND is non-trivial (not a path-present empty shell, Nemo
-    #    #4; not an import-only shell, Nemo code #3).
+    # 1. entrypoint exists AND is non-trivial (not a path-present empty shell;
+    #    not an import-only shell).
     entry = record.manifest.get("entrypoint")
     if not (isinstance(entry, str) and entry.strip()):
         return False, "code assembly: no entrypoint declared — full review"
@@ -461,8 +461,8 @@ def _validate_bundle(
 ) -> tuple[bool, str]:
     """The bundle oracle (free-local, stdlib ``zipfile``). Proves CONTAINMENT, not
     shape: member-name set == normalized unit set (no dupes), no traversal/absolute
-    archive paths, and each member's BYTES equal its resolved unit file (Nemo #1,
-    Hero m1). ``zipfile`` is byte-preserving so this is exact, not tolerance-based.
+    archive paths, and each member's BYTES equal its resolved unit file. ``zipfile``
+    is byte-preserving so this is exact, not tolerance-based.
 
     The composite is read from the DELIVERABLE at ``assembly_task.output_path``
     (under ``artifacts_root``), NOT ``record.output_file``: the engine MOVES the
@@ -495,7 +495,7 @@ def _validate_bundle(
                     f"bundle: member set != unit set "
                     f"(missing={sorted(missing)}, extra={sorted(extra)})"
                 )
-            # each member's BYTES equal its unit file (m1: equality is the spec; the
+            # each member's BYTES equal its unit file (equality is the spec; the
             # zip CRC is only a fast pre-screen that gates which members to read).
             norm_to_member = {_norm_unit(m): m for m in members}
             for norm, unit_path in by_name.items():
@@ -518,7 +518,7 @@ def _validate_media(
     if kind == "bundle":
         return _validate_bundle(record, assembly_task, artifacts_root)
     # video/audio/image: lossy composites with no cheap post-hoc containment proof —
-    # honest fall-back to the full review this cut (Nemo #2/#3). The only exact cheap
+    # honest fall-back to the full review this cut. The only exact cheap
     # oracle is an assembler-emitted provenance sidecar at composition time (deferred).
     return False, (
         f"media assembly ({kind}): no cheap containment oracle — full review "

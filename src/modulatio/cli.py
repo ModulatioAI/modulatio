@@ -438,7 +438,7 @@ def kickoff(
     for _p in (attach or []):
         _path = Path(_p).expanduser()
         _kind = _infer_attachment_kind(_path)
-        # re-sweep (edge-case): a directory (or FIFO/device) whose name ends
+        # a directory (or FIFO/device) whose name ends
         # in an image extension routes to kind='image', which never read_text()s
         # — so it slips past build_attachment's fail-fast and crashes later at
         # multimodal dispatch. The document branch is protected (read_text on a
@@ -493,7 +493,7 @@ def kickoff(
     # (above); on an existing project the roster is authoritative — so the team/
     # decompose lane and the Leader chat/verify lane resolve to ONE Leader model.
     # (Was: built from the flags here, a SECOND source that could split the Leader
-    # across lanes — cadre HIGH.)
+    # across lanes.)
     if stub:
         runners = default_generic_stub_runners()
     else:
@@ -864,7 +864,7 @@ def _capture_stdout(fn) -> str:
 
     # Subclass TextIOBase so the tee answers the full stdout protocol
     # (isatty/fileno/writable/...) — a doctor check or a library it calls that
-    # introspects sys.stdout would otherwise hit AttributeError (Nemo M1).
+    # introspects sys.stdout would otherwise hit AttributeError.
     class _Tee(io.TextIOBase):
         def write(self, s: str) -> int:
             real.write(s)
@@ -1074,7 +1074,7 @@ def _run_doctor_checks() -> None:
         typer.echo("  TOS violation. For unattended / production workloads, prefer")
         typer.echo("  the api_key path with a billed API key.")
 
-    # Sandbox (audit Wave 2, F2: distinguish absent vs unusable)
+    # Sandbox (distinguish absent vs unusable)
     from modulatio import sandbox as _sandbox
     _profile = _sandbox.current_profile()
     typer.echo("\nSandbox (run_shell isolation):")
@@ -1177,8 +1177,7 @@ def _run_doctor_checks() -> None:
         "via a custom skill, or wait for the roadmap's build-test smoke skill."
     )
 
-    # Toggles (opt-in env vars). Step 0 round-2 M2 (Lovecraft audit,
-    # 2026-05-16): MODULATIO_LEADER_ITERATE was previously only
+    # Toggles (opt-in env vars). MODULATIO_LEADER_ITERATE was previously only
     # documented in the _leader_iterate docstring; report its state
     # here so operators can see which opt-in paths are active without
     # grep'ing the source.
@@ -1396,7 +1395,7 @@ def heartbeat_run_once(
 ) -> None:
     """Run a single heartbeat tick — recover stale tasks + dispatch the
     next pending task. Useful for cron-style external scheduling."""
-    # re-sweep (finding 1): reject --no-stub at the CLI layer BEFORE any
+    # Reject --no-stub at the CLI layer BEFORE any
     # queue mutation. Otherwise the NotImplementedError below is swallowed by
     # Heartbeat._run_task's catch-all (logged to the daemon log, not here),
     # the task is marked failed / its retries burned, and the CLI prints a
@@ -2004,7 +2003,7 @@ def project_show(
     run_id: str = typer.Option(..., help="Run id (from `modulatio project runs`)"),
 ) -> None:
     """Show a run folder's contents (artifact + ticket counts)."""
-    # vault.run_dir validates run_id (audit Wave 2, F8). Surface
+    # vault.run_dir validates run_id. Surface
     # the validation error as a clean CLI message rather than a
     # crash-handler stack trace.
     try:

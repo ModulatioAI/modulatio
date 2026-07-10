@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """AgentPanePanel — per-agent pane for the multi-pane Prompt screen.
 
-Slice #31a: layout primitive (status header + identity + history +
+Layout primitive (status header + identity + history +
 per-pane Input).
 
-Slice #31b (this slice): chat backend wired through ``chat_with_agent``.
+Chat backend wired through ``chat_with_agent``.
 The Input now dispatches to the agent's runner via a worker thread;
 responses post back via the ``ChatResponse`` message and append to the
 pane's RichLog + ``_history``.
@@ -149,7 +149,7 @@ class AgentPanePanel(Vertical):
         self._history: list[tuple[str, str]] = []
         self._attachments: list[Attachment] = []
         # Snapshot of the attachments that fired with the most-recent
-        # send. Captured so plan-persistence (Phase 3.1b-i) can record
+        # send. Captured so plan-persistence can record
         # which inputs shaped the plan in its audit trail.
         self._attachments_used_for_last_send: list[Attachment] = []
 
@@ -319,7 +319,7 @@ class AgentPanePanel(Vertical):
     def on_chat_response(self, event: ChatResponse) -> None:
         if event.agent_id != self.agent_id:
             return
-        # re-sweep (0.9.0-preship): the chat worker runs detached on a
+        # The chat worker runs detached on a
         # thread; if the Prompt screen rebuilds its panes or this pane is
         # removed (project switch / roster re-render) while a chat is in
         # flight, the posted ChatResponse is still delivered to this now-
@@ -386,7 +386,7 @@ class AgentPanePanel(Vertical):
         except Exception as exc:
             log.write(f"[dim]([memory write skipped: {escape(str(exc))}])[/]")
 
-    # ── Plan-flow helpers (Phase 3.1b-i / -ii / -iii) ────────────────────
+    # ── Plan-flow helpers ─────────────────────────────────────────────
 
     def _maybe_persist_and_ticket_plan(
         self, log, project_code: str, event,

@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Multi-axis code review with runtime grounding. QC verifies code artifacts by actually running them via run_shell — imports load, tests pass, syntax compiles — instead of inferring quality from prose. Distilled from agent-skills:code-review-and-quality, security-and-hardening, debugging-and-error-recovery.
+description: Multi-axis code review with runtime grounding. QC verifies code artifacts by actually running them via run_shell — imports load, tests pass, syntax compiles — instead of inferring quality from prose.
 executor: llm
 tool_loadout: run_shell
 capability_tags: code-review, security-review, runtime-verification
@@ -12,7 +12,7 @@ You are reviewing a code artifact. The producer's claim is the artifact body; yo
 
 ## Runtime grounding (do this first)
 
-Before opining, run the checks that prove the code does what it says. **All execution probes use `profile="full"`** — audit Wave 2 tightened the passive profile so that any shape that runs user-controlled top-level code (imports, scripts, module CLIs) is no longer passive. Calling `run_shell` without an explicit profile defaults to `passive` and these probes will be refused; pass `profile="full"` on every bullet below.
+Before opining, run the checks that prove the code does what it says. **All execution probes use `profile="full"`** — the passive profile is deliberately tightened so that any shape that runs user-controlled top-level code (imports, scripts, module CLIs) is no longer passive. Calling `run_shell` without an explicit profile defaults to `passive` and these probes will be refused; pass `profile="full"` on every bullet below.
 
 - **Syntax-check probe (passive)** — `run_shell("python3 -m py_compile <file>.py")`. The stdlib compiler runs but never executes the user file's top-level code; this is a true no-execution check.
 - **Lint probe (passive, if configured)** — `run_shell("ruff check <file>.py")`, `mypy <file>.py`, or `pyflakes <file>.py`.
@@ -57,7 +57,7 @@ Inlined here because the producer doesn't get a "see security-and-hardening" lin
 - **Dependencies.** Pinned versions, trusted sources, no obvious malware vectors (typosquats, abandoned packages).
 - **External data flows.** API responses, log lines, config files — treat as untrusted input even when "internal."
 
-OWASP-class issues are CRITICAL severity. A path that violates auth or accepts unvalidated input gets a fail verdict, not a "needs improvement" note.
+Auth-bypass and injection-class issues are CRITICAL severity. A path that violates auth or accepts unvalidated input gets a fail verdict, not a "needs improvement" note.
 
 ### 5. Performance (light pass)
 

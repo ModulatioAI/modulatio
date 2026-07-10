@@ -59,7 +59,7 @@ def _attachment_roots() -> list[Path]:
 
 
 def _validate_attachment_path(raw_path: str) -> Path:
-    """SEC-02 (security audit, Nemo): an ACP client supplies a local file path
+    """An ACP client supplies a local file path
     that the server reads into model context. Confine it — resolve symlinks,
     require the result inside an allowed root, and reject any dotfile/secret
     component (``.env`` / ``.ssh`` / ``.netrc`` / ``.git`` …) below that root.
@@ -78,7 +78,7 @@ def _validate_attachment_path(raw_path: str) -> Path:
             raise ValueError(
                 f"attachment path rejected (dotfile/secret component): {raw_path!r}"
             )
-        # re-sweep (LOW/resource-leak): confinement + dotfile checks pass a FIFO
+        # Confinement + dotfile checks pass a FIFO
         # / character device sitting inside an allowed root. build_attachment
         # then stat()s it (size 0) and read_text()s it — an open/read on a named
         # pipe or device BLOCKS the worker thread indefinitely. Require a regular
@@ -123,7 +123,7 @@ def _parse_prompt(params: dict) -> tuple[str, list]:
             elif block.get("path"):
                 kind = "image" if btype == "image" else "document"
                 try:
-                    safe_path = _validate_attachment_path(block["path"])  # SEC-02
+                    safe_path = _validate_attachment_path(block["path"])
                     attachments.append(
                         build_attachment(safe_path, kind=kind))
                 except Exception as exc:  # a bad attachment shouldn't sink the turn
@@ -154,7 +154,7 @@ class ACPServer:
         self._idgen = rpc.IdGen()
         # Per-session ownership of in-flight server-initiated request ids, so
         # session/cancel only unblocks ITS OWN permission/input requests — not
-        # every session's (H1: cancel_all() across the shared _pending would
+        # every session's (cancel_all() across the shared _pending would
         # fail-closed-deny unrelated, in-flight prompts in other sessions).
         self._session_pending_lock = threading.Lock()
         self._session_pending: dict[str, set] = {}
@@ -184,9 +184,9 @@ class ACPServer:
 
         The request id is registered to the owning session (``sessionId`` in
         ``params``) so that ``session/cancel`` only unblocks that session's own
-        in-flight requests (H1).
+        in-flight requests.
 
-        ``cancel_check`` closes a TOCTOU window (MEDIUM/race): a caller checks
+        ``cancel_check`` closes a TOCTOU window: a caller checks
         ``session.cancelled`` then calls here, but a ``session/cancel`` can fire
         between that check and the rid landing in ``_session_pending`` — leaving
         the rid invisible to cancel's snapshot, so it blocks the full timeout.
@@ -200,7 +200,7 @@ class ACPServer:
         if sid is not None:
             with self._session_pending_lock:
                 self._session_pending.setdefault(sid, set()).add(rid)
-                # re-sweep: observe a cancel that raced our caller's pre-check,
+                # Observe a cancel that raced our caller's pre-check,
                 # atomically vs the cancel snapshot.
                 cancelled = bool(cancel_check()) if cancel_check is not None \
                     else False
@@ -315,7 +315,7 @@ class ACPServer:
             return
         # Once the lock is held, ONLY the worker's finally releases it. If
         # _parse_prompt or Thread.start() raises before the worker exists, the
-        # lock would leak and wedge the session forever — release it here (H2).
+        # lock would leak and wedge the session forever — release it here.
         try:
             session.cancelled = False
             message, attachments = _parse_prompt(params)
@@ -334,7 +334,7 @@ class ACPServer:
                 message,
                 attachments=attachments,
                 permission_callback=session.permission_cb,
-                # §2.3: the four-option capability ask — routes the broker's access
+                # The four-option capability ask — routes the broker's access
                 # questions (network/shell) to the ACP client (once/session/always/
                 # deny). The leader_gate fence stays on permission_callback above.
                 ask=session.ask_capability,
@@ -351,7 +351,7 @@ class ACPServer:
         if session is not None:
             session.cancelled = True
         # Unblock only THIS session's in-flight permission/input requests →
-        # they fail closed. Other sessions' pending requests are untouched (H1).
+        # they fail closed. Other sessions' pending requests are untouched.
         with self._session_pending_lock:
             ids = list(self._session_pending.get(sid, ()))
         for rid in ids:
@@ -420,7 +420,7 @@ class ACPServer:
             project, runners,
             activity_callback=session.on_activity,
             operator_present=True,
-            deliver_products=not self.stub,  # §2: render products on real runs
+            deliver_products=not self.stub,  # render products on real runs
             chat_runners=chat_runners,
             chat_runner_models=chat_runner_models,
             tool_registry=registry,

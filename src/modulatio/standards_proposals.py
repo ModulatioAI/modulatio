@@ -129,7 +129,7 @@ def _parse_file(path: Path) -> Proposal:
     # text that approve() appends verbatim into the project standards — NOT a
     # rebuildable cache. Decoding with replacement would let a corrupt proposal
     # stay listable + approvable and graft mojibake (U+FFFD) into standards. So
-    # decode strictly and let list_proposals SKIP a malformed file (Nemo).
+    # decode strictly and let list_proposals SKIP a malformed file.
     raw = path.read_text(encoding="utf-8")
     m = _FRONTMATTER_RE.match(raw)
     meta: dict[str, str] = {}

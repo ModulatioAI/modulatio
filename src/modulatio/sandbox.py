@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Bubblewrap-based sandbox layer for ``run_shell`` (SEC-001 + SEC-002).
+"""Bubblewrap-based sandbox layer for ``run_shell``.
 
 The argv-allowlist in ``tools.py`` is defense in depth, NOT the trust
 boundary. Any argv shape it admits — `python3 -c '<body>'`, `bash
@@ -145,7 +145,7 @@ _SAFE_ENV_KEYS: frozenset[str] = frozenset({
 #: ``pass_env`` mistakenly includes one of these names, the sandbox
 #: still strips it. Any env var matching one of these regexes is
 #: considered sensitive and never crosses the boundary.
-#: Security audit M1: the original list was suffix/prefix-specific and missed
+#: The original list was suffix/prefix-specific and missed
 #: whole classes of secret env var — ``SECRET_KEY`` / ``PRIVATE_KEY`` /
 #: ``SSH_*`` keys, ``GH_PAT`` / ``GITHUB_TOKEN`` PATs, ``DATABASE_URL`` /
 #: ``*_DSN`` connection strings (which embed creds), ``~/.netrc`` pointers.
@@ -160,7 +160,7 @@ _DENY_ENV_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"PASSWD", re.IGNORECASE),
     re.compile(r"PASSPHRASE", re.IGNORECASE),
     re.compile(r"CREDENTIAL", re.IGNORECASE),
-    # re-sweep #163: the old rules were exact-suffix (`_API_KEY$` / `_KEY$`)
+    # The old rules were exact-suffix (`_API_KEY$` / `_KEY$`)
     # and let secret-shaped names slip through when the `KEY` lacked that exact
     # `_KEY` shape — ``MISTRAL_APIKEY`` (no separator), ``DEPLOY_KEYS`` (plural),
     # ``API-KEY`` (hyphen), ``SOMEKEY`` (bare suffix). Broadened to a
@@ -222,7 +222,7 @@ _SANDBOX_REQUIRED_ENV = "MODULATIO_REQUIRE_SANDBOX"
 
 def is_sandbox_required() -> bool:
     """True if the operator demands a working sandbox via
-    ``MODULATIO_REQUIRE_SANDBOX=1`` (security audit H3c).
+    ``MODULATIO_REQUIRE_SANDBOX=1``.
 
     The default ``run_shell`` policy *soft-falls* to unsandboxed execution
     when ``bwrap`` is missing or non-functional — deliberate, so macOS/CI
@@ -318,15 +318,14 @@ def warn_unsandboxed_once() -> None:
             "user.max_user_namespaces=0). Producer LLMs have full "
             "user-context code execution. To restore the security "
             "boundary, run on a host that permits unprivileged user "
-            "namespaces. See SEC-001 in the security audit."
+            "namespaces."
         )
     else:
         logger.warning(
             "run_shell is running UNSANDBOXED (bwrap not found on PATH). "
             "Producer LLMs have full user-context code execution. Install "
             "bubblewrap (apt: bubblewrap, dnf: bubblewrap, pacman: "
-            "bubblewrap) to restore the security boundary. See SEC-001 in "
-            "the security audit."
+            "bubblewrap) to restore the security boundary."
         )
 
 
@@ -439,14 +438,14 @@ def build_sandboxed_argv(
     test tree via the read-only ``--ro-bind / /``, so no extra mount is
     needed today. The parameter is kept (default ``()``) for a future caller
     that genuinely needs an extra writable/visible path; passing values still
-    adds ``--ro-bind-try`` mounts (re-sweep #418).
+    adds ``--ro-bind-try`` mounts.
 
     ``profile`` selects the operator posture (see ``current_profile``);
     ``None`` reads the ``MODULATIO_SANDBOX_PROFILE`` env. ``trusted``
     forces network on (an agent that needs to fetch shouldn't be blocked)
     while keeping the secret-stripping floor; ``off`` is handled by the
     caller (no bwrap) and never reaches here. The active interpreter/venv
-    is ALWAYS bound read-only so code execs in every profile (the #82 fix).
+    is ALWAYS bound read-only so code execs in every profile.
     """
     if profile is None:
         profile = current_profile()

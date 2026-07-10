@@ -351,7 +351,7 @@ def _ensure_parent_0700(path: Path) -> None:
     """Create the parent directory at mode 0700 if it doesn't exist.
     Idempotent. Mirrors the ``audit.jsonl`` parent handling.
 
-    L1 (Nemo round-2 sweep): the helper now actually applies ``0o700``
+    The helper now actually applies ``0o700``
     rather than relying on the umask. ``mkdir(mode=...)`` only takes
     effect on the leaf-most directory it CREATES, so we walk each
     new ancestor with an explicit ``chmod`` to be sure. Best-effort
@@ -412,7 +412,7 @@ def _load_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
     rows: list[dict] = []
-    # re-sweep (0.9.0): errors="replace" so a non-UTF-8 byte from a Latin-1
+    # errors="replace" so a non-UTF-8 byte from a Latin-1
     # hand-edit or a torn write degrades to U+FFFD on that line (caught below
     # as a JSONDecodeError) instead of raising UnicodeDecodeError during
     # iteration and making the whole inbox unreadable. Matches the sibling
@@ -481,7 +481,7 @@ def _load_tombstoned_ids(path: Path) -> set[str]:
     """Return the set of note_ids that already have a tombstone row.
     Used to suppress duplicate tombstones on repeated reads.
 
-    re-sweep: per-row best-effort, mirroring :func:`_load_notes` and the
+    Per-row best-effort, mirroring :func:`_load_notes` and the
     candidate readers. ``_load_jsonl`` only skips JSON-decode errors — a
     WELL-FORMED row missing ``note_id`` (schema drift, a hand-edit, a
     future tombstone format, a field rename across versions) would
@@ -951,7 +951,7 @@ def _validate_content_and_reason(content: str, reason: str) -> None:
 
 
 def _validate_priority(priority: str) -> None:
-    # re-sweep finding 1: gate priority at API entry, mirroring the
+    # Gate priority at API entry, mirroring the
     # closed-reason check above. Without this an invalid/hallucinated
     # priority (e.g. "URGENT", "P5") was persisted as a durable candidate
     # and only blew up later as a raw KeyError in PRIORITY_DECAY_DEFAULTS/
@@ -1071,7 +1071,7 @@ def enqueue(
         raise InboxAuthorityError(
             "broadcast (target_scope='all') is Leader-only."
         )
-    _validate_priority(priority)  # re-sweep finding 1
+    _validate_priority(priority)
     _validate_content_and_reason(content, reason)
 
     _soft, hard_cap, decay_after = _resolve_caps_and_decay(
@@ -1269,7 +1269,7 @@ def propose(
         target_agent_id=target_agent_id,
         target_runner_role=target_runner_role,
     )
-    _validate_priority(priority)  # re-sweep finding 1
+    _validate_priority(priority)
     _validate_content_and_reason(content, reason)
     candidate = InboxCandidate(
         candidate_id=_make_candidate_id(),
@@ -1332,7 +1332,7 @@ def _candidate_terminal_ids(
     file existed). Used to compute the pending set:
     ``all_candidates - terminal``. Missing both files → empty set.
 
-    M1 (Nemo round-2 sweep): audit rows are best-effort telemetry —
+    Audit rows are best-effort telemetry —
     write failures are swallowed so the LLM call that triggered the
     event isn't broken. That's the right policy for forensic data
     but the wrong policy for *state*: a candidate that was accepted
@@ -1347,7 +1347,7 @@ def _candidate_terminal_ids(
             if cid:
                 terminal.add(cid)
         return terminal
-    # Legacy fall-back: pre-M1 runs only recorded terminals in the
+    # Legacy fall-back: older runs (before the state file existed) only recorded terminals in the
     # audit log. Honor the historical record so a mid-flight upgrade
     # doesn't resurrect already-acted candidates.
     if audit_path is None or not audit_path.exists():
@@ -1389,7 +1389,7 @@ def _abandon_candidate_once(
             run_dir=run_dir, audit_path=audit_path
         ):
             return False
-        # M1: durable terminal-state write first; audit row second.
+        # Durable terminal-state write first; audit row second.
         _record_candidate_terminal(
             run_dir=run_dir, candidate_id=candidate.candidate_id,
             terminal="abandoned", current_turn=current_turn,
@@ -1556,14 +1556,14 @@ def accept_candidate(
         project_inbox_caps=project_inbox_caps,
         project_decay_overrides=project_decay_overrides,
     )
-    # M1: durable terminal-state write AFTER the side-effect (note
+    # Durable terminal-state write AFTER the side-effect (note
     # enqueue) succeeds and BEFORE the best-effort audit row. If the
     # terminal write fails, the candidate stays pending on the next
     # scan — Leader can see + re-act, which is the right behavior:
     # the durable note IS in the inbox, but the candidate-state
     # bookkeeping is the source of truth for "already acted on?".
     #
-    # re-sweep finding 2: a rare double-accept appends a genuine
+    # A rare double-accept appends a genuine
     # DUPLICATE note (a fresh note_id, no supersedes link) — accept
     # passes the candidate's content through verbatim with no
     # supersedes_note_id, so the second note does NOT tombstone the
@@ -1604,7 +1604,7 @@ def reject_candidate(
     candidate = next((c for c in pending if c.candidate_id == candidate_id), None)
     if candidate is None:
         return False
-    # M1: durable terminal-state first; audit row best-effort after.
+    # Durable terminal-state first; audit row best-effort after.
     _record_candidate_terminal(
         run_dir=run_dir, candidate_id=candidate.candidate_id,
         terminal="rejected", current_turn=current_turn,
@@ -1681,7 +1681,7 @@ def parse_inbox_proposals(text: str) -> "tuple[str, list[dict]]":
     if fm is None:
         # No fenced block IMMEDIATELY follows the heading. Two sub-cases:
         #
-        #   (a) re-sweep finding 3: there is NO fenced JSON block anywhere
+        #   (a) there is NO fenced JSON block anywhere
         #       downstream either — the heading is just legitimate prose
         #       in the producer's deliverable (e.g. documentation OF the
         #       feature). Stripping the bare heading silently deletes real
@@ -1728,7 +1728,7 @@ def render_candidates_for_prompt(
         return "(no pending candidates this turn)"
     lines: list[str] = ["## Pending inbox-note candidates\n"]
     for c in candidates:
-        # B1 (Lovecraft round-1): render the contract literal names
+        # Render the contract literal names
         # (target_scope=agent / target_scope=runner_role) rather than
         # short forms (agent= / role=). Keeps the prompt-side contract
         # symmetric with the JSON shape Leader emits in

@@ -35,7 +35,7 @@ What makes Modulatio different from "spin up a chat" or single-agent tools:
 
 **[v0.8.1 release notes](/v0-8-1/)** — product-aware familial assemblers (document / code / data) and a content-addressed review-ledger so QC verifies the marks instead of re-reading the finished work.
 
-**[v0.8.0 release notes](/v0-8-0/)** — an Agent Client Protocol (ACP) server: drive the same conversational Leader from a Zed-class editor over stdio, with client-approved tool calls.
+**[v0.8.0 release notes](/v0-8-0/)** — an Agent Client Protocol (ACP) server: drive the same conversational Leader from an editor over stdio, with client-approved tool calls.
 
 **[v0.7.2 release notes](/v0-7-2/)** — conversation-first: approvals via the Leader (he asks before he touches anything), the Job-Template Library, attachments, and the constitution.
 

@@ -17,7 +17,7 @@ Schema:
     }
 
 Used by:
-- TUI app on launch — if no setup-state, push wizard before tabs (slice 5)
+- TUI app on launch — if no setup-state, push wizard before tabs
 - ``modulatio kickoff`` — if no setup-state, suggest running ``modulatio setup`` first
 - ``modulatio setup`` itself — re-invocation pre-populates from existing state
 """

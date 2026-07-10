@@ -50,7 +50,7 @@ def web_requirements() -> list[str]:
         # backend — accept either.
         if "extra ==" in marker and ("'web'" in marker or '"web"' in marker):
             spec = spec.strip()
-            # WB-4: a spec starting with '-' would land in the install argv as
+            # A spec starting with '-' would land in the install argv as
             # a pip OPTION (e.g. a rogue --index-url from hostile/broken
             # dist-info). Only real requirement names reach the command.
             if spec and not spec.startswith("-"):

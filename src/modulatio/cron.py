@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Cron — thin scheduling shim that converts cron-strings → heartbeat task adds.
 
-Locked Option C (project_modulatio_cron_revisit.md, 2026-04-24).
-
 Architectural separation:
   - **Cron** = scheduling primitive — "when should this run?"
   - **Heartbeat** (slice 6) = execution primitive — queue + dispatch.
@@ -88,7 +86,7 @@ def _dispatch_lock_file() -> Path:
     return _config_file().with_suffix(".json.lock")
 
 
-# re-sweep: the cross-process flock must be RE-ENTRANT within a thread. The
+# The cross-process flock must be RE-ENTRANT within a thread. The
 # dispatch path holds the flock across its window and then calls _dispatch_one ->
 # update(), which now ALSO takes the flock; the mutators are likewise the lock for
 # their own RMW. A POSIX flock is keyed to the open file description, so two
@@ -137,7 +135,7 @@ def _cross_process_dispatch_lock() -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:  # pragma: no cover — best-effort release
             pass
-        os.close(fd)  # re-sweep: close the fd (mirrors heartbeat) — the mutators
+        os.close(fd)  # Close the fd (mirrors heartbeat) — the mutators
         # now take this lock on every add/update/remove, so a leaked fd per call
         # would exhaust the descriptor table.
 
@@ -157,7 +155,7 @@ def _load() -> list[dict]:
 def _save(jobs: list[dict]) -> None:
     cf = _config_file()
     cf.parent.mkdir(parents=True, exist_ok=True)
-    # re-sweep: a pid-unique tmp name keeps two processes writing the config from
+    # A pid-unique tmp name keeps two processes writing the config from
     # clobbering each other's tmp before the atomic rename (the cross-process
     # mutator lock serializes the RMW, but the tmp name must still be unique so a
     # crash mid-write can't leave a half-written tmp that another pid then
@@ -179,8 +177,7 @@ def _now_iso() -> str:
 
 
 def _strict_int(value) -> int:
-    """The integer contract means exactly a Python ``int`` (Wild Bill
-    close-out R2/R3): ``bool`` (an int subclass), floats — including integral
+    """The integer contract means exactly a Python ``int``: ``bool`` (an int subclass), floats — including integral
     ``1.0`` — strings, and exotic numerics (``Decimal("1")``) are all REJECTED,
     never coerced or truncated. A positive type gate is smaller and closes the
     whole class instead of chasing each numeric tower member."""
@@ -196,7 +193,7 @@ def _parse_aware(iso: Optional[str]) -> Optional[datetime]:
     ``2099-01-05T09:00:00``, or a hand-edited config) must be made comparable
     rather than crash the sweep: comparing an offset-naive to the daemon's
     offset-aware ``now`` raises ``TypeError`` and would abort every later due
-    job (Wild Bill CRITICAL). Fail-safe: unparseable → ``None`` (caller skips)."""
+    job. Fail-safe: unparseable → ``None`` (caller skips)."""
     if not iso:
         return None
     try:
@@ -394,7 +391,7 @@ def add(
     parsed = parse_schedule(schedule)
     if parsed is None:
         raise ValueError(f"Could not parse schedule: {schedule!r}")
-    # re-sweep (finding 2): validate the project code WHILE THE OPERATOR IS HERE,
+    # Validate the project code WHILE THE OPERATOR IS HERE,
     # exactly as heartbeat.add_task does — a malformed/path-hostile/typo'd code
     # was previously only .upper()'d and stored, then rejected on every headless
     # dispatch (heartbeat.add_task raises), invisible until the daemon logs. Be
@@ -409,7 +406,7 @@ def add(
         if not jt.name:
             raise ValueError(f"Job template {jt_id!r} not found for project {project_code!r}")
         # Mirror the run-time bind EXACTLY so the add-time gate neither
-        # over- nor under-rejects relative to the headless dispatch's #97
+        # over- nor under-rejects relative to the headless dispatch's
         # fit-gate. `_run_jt_interview` starts from the JT's standing
         # `defaults()` and overlays only the non-None supplied params; the
         # fit-gate (`_jt_fit`) then runs against that MERGED dict. Gating the
@@ -427,7 +424,7 @@ def add(
                 f"{', '.join(missing)}. Bind them so the headless run isn't "
                 f"under-specified."
             )
-        # The run-time #97 fit-gate (`_jt_fit`) refuses on TWO more conditions
+        # The run-time fit-gate (`_jt_fit`) refuses on TWO more conditions
         # the operator must fix here, not at a headless 3am dispatch: a supplied
         # value outside its declared `enum`, and a `per-item` JT whose fan-out
         # driver param is empty/not-a-list. Mirror both so an add that the
@@ -450,7 +447,7 @@ def add(
                 )
     # Validate the stop-metadata HERE, while the operator is present, so a bad
     # value surfaces now instead of silently becoming an unlimited schedule or
-    # crashing a headless 3am dispatch (Wild Bill). count must be a positive int
+    # crashing a headless 3am dispatch. count must be a positive int
     # (0/negative → error, NOT the old silent "infinite"); until must be an ISO
     # date; both stay None when absent.
     if count is not None:
@@ -471,7 +468,7 @@ def add(
     # the next matching slot after now, exactly as before. A one-off needs one.
     # A browser-picked start_at is timezone-naive; normalize it to UTC (the DSL
     # is UTC) so the stored next_run is comparable and a bad string is rejected
-    # here rather than wedging the daemon later (Wild Bill CRITICAL).
+    # here rather than wedging the daemon later.
     if start_at:
         nxt = _parse_aware(start_at)
         if nxt is None:
@@ -492,7 +489,7 @@ def add(
         "enabled": enabled,
         "jt_id": jt_id or None,
         "jt_params": dict(jt_params) if jt_params else None,
-        "on_refused": on_refused or None,  # #97 R2: per-cron refusal policy override
+        "on_refused": on_refused or None,  # Per-cron refusal policy override
         "start_at": start_at or None,
         "count": count,                            # validated: positive int, or None = infinite
         "until": until or None,                    # validated ISO end date (inclusive), or None
@@ -502,7 +499,7 @@ def add(
         "last_run": None,
         "last_status": None,
     }
-    # re-sweep: cross-process lock OUTER, _cron_lock INNER — same ordering the
+    # Cross-process lock OUTER, _cron_lock INNER — same ordering the
     # dispatch path uses, so the CLI-facing RMW can't interleave with a
     # concurrent daemon dispatch's load/update/save and lose a write.
     with _cross_process_dispatch_lock(), _cron_lock:
@@ -529,7 +526,7 @@ def list_jobs(*, enabled_only: bool = False, project_code: Optional[str] = None)
 
 
 def update(job_id: str, **fields) -> Optional[dict]:
-    # re-sweep: cross-process lock OUTER (re-entrant when _dispatch_one already
+    # Cross-process lock OUTER (re-entrant when _dispatch_one already
     # holds it), _cron_lock INNER.
     with _cross_process_dispatch_lock(), _cron_lock:
         jobs = _load()
@@ -548,7 +545,7 @@ def update(job_id: str, **fields) -> Optional[dict]:
 
 
 def remove(job_id: str) -> bool:
-    # re-sweep: cross-process lock OUTER, _cron_lock INNER.
+    # Cross-process lock OUTER, _cron_lock INNER.
     with _cross_process_dispatch_lock(), _cron_lock:
         jobs = _load()
         before = len(jobs)
@@ -598,7 +595,7 @@ def dispatch_due(*, now: Optional[datetime] = None) -> list[dict]:
     """
     now = now or _now()
     fired: list[dict] = []
-    # re-sweep: hold the cross-process flock across the ENTIRE select →
+    # Hold the cross-process flock across the ENTIRE select →
     # add_task → advance window. check_due re-reads the on-disk config INSIDE the
     # lock, so a concurrent process that already won the lock (and advanced
     # next_run past `now`) leaves the loser seeing nothing due — exactly one fire
@@ -656,13 +653,13 @@ def _coerce_stop_meta(
     A hand-edited cron-config can carry ``count: 'garbage'`` or ``until:
     'not-a-date'``. Reading those lazily inside the advance tail — AFTER the
     heartbeat side-effect fires — let a ``ValueError`` abort the whole
-    ``dispatch_due`` sweep and re-fire the poisoned job every tick (Wild Bill
-    HIGH), while a bad ``until`` was silently ignored so the job ran forever
-    (Wild Bill MEDIUM). Coerce everything HERE, up front, so the caller can
+    ``dispatch_due`` sweep and re-fire the poisoned job every tick,
+    while a bad ``until`` was silently ignored so the job ran forever.
+    Coerce everything HERE, up front, so the caller can
     disable a malformed job fail-closed BEFORE dispatching and the sweep
     always continues.
 
-    ``None`` is the SOLE absent sentinel (Wild Bill close-out): a falsy-but-
+    ``None`` is the SOLE absent sentinel: a falsy-but-
     present value (``runs: ""``, ``until: ""``) is malformed, not absent —
     truthiness tests silently re-opened the fail-closed contract for it."""
     runs_raw = job.get("runs")
@@ -672,7 +669,7 @@ def _coerce_stop_meta(
         return None
     if runs < 0:
         # A hand-edited negative runs would under-count fires and buy extra
-        # runs past the count cap (Wild Bill R2) — malformed, fail closed.
+        # runs past the count cap — malformed, fail closed.
         return None
     count = job.get("count")
     if count is not None:
@@ -703,9 +700,9 @@ def _dispatch_one(job: dict, now: datetime) -> bool:
     # raise ValueError — do NOT fire it. Firing would resurrect an empty project
     # shell and run on a DEFAULT team (not the deleted project's own), losing the
     # JT too. The ValueError must be CAUGHT here, not allowed to abort the whole
-    # dispatch_due sweep (Wild Bill) — a single poisoned cron would otherwise
+    # dispatch_due sweep — a single poisoned cron would otherwise
     # block every later valid due job. Disable FIRST so the job can't be
-    # re-selected next tick even if the ticket write fails (storm guard — Nemo);
+    # re-selected next tick even if the ticket write fails (storm guard);
     # the SYSTEM ticket is best-effort.
     from modulatio import vault
     try:
@@ -718,7 +715,7 @@ def _dispatch_one(job: dict, now: datetime) -> bool:
                last_status="error:project-deleted")
         _open_orphan_cron_ticket(job)
         return False
-    # Coerce stop-metadata BEFORE the heartbeat side-effect (Wild Bill): a
+    # Coerce stop-metadata BEFORE the heartbeat side-effect: a
     # malformed count/runs/until must disable the job fail-closed — not fire it,
     # raise mid-advance, and re-fire every tick. The sweep continues either way.
     meta = _coerce_stop_meta(job)
@@ -731,8 +728,8 @@ def _dispatch_one(job: dict, now: datetime) -> bool:
                last_status="error:invalid-stop-metadata")
         return False
     runs_before, count, until_date = meta
-    # A count is an UPPER LIMIT, not an after-the-fact stop signal (Wild Bill
-    # R3): the normal path disables ON the Nth fire, so an enabled job whose
+    # A count is an UPPER LIMIT, not an after-the-fact stop signal:
+    # the normal path disables ON the Nth fire, so an enabled job whose
     # stored counter already meets the cap is hand-edited state — it must NOT
     # buy one more fire while the tail catches up. Disable pre-dispatch.
     if count is not None and runs_before >= count:
@@ -806,7 +803,7 @@ def run_now(job_id: str) -> Optional[dict]:
             tags=["cron", "manual", job.get("name", "")],
             jt_id=job.get("jt_id"),
             jt_params=job.get("jt_params"),
-            on_refused=job.get("on_refused"),  # #97 R2: manual run honors the stored policy too
+            on_refused=job.get("on_refused"),  # Manual run honors the stored policy too
         )
     except Exception as e:
         logger.warning("cron run_now: heartbeat add_task failed for job %s",

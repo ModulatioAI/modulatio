@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Agent wizard (inline panel) — slice #24.
+"""Agent wizard (inline panel).
 
-Same inline-panel pattern as slice #23's ExportDialog. Hidden by
+Same inline-panel pattern as ExportDialog. Hidden by
 default; reveal by removing the ``hidden`` class. Fields mirror
 ``roster.add_agent``'s kwargs so Submit is a thin wrapper.
 
-Scope: Add only. Edit-via-prepopulation is deferred — slice #18's
-add_agent raises on duplicates and has no update variant for agents
+Scope: Add only. Edit-via-prepopulation is deferred — add_agent
+raises on duplicates and has no update variant for agents
 (only add_model). A future slice can introduce that semantics cleanly.
 """
 from __future__ import annotations
@@ -138,7 +138,7 @@ class AgentWizard(Vertical):
                 tier=tier,
             )
         except FileExistsError as exc:
-            # re-sweep: escape — exc embeds the operator-typed agent id/path
+            # Escape — exc embeds the operator-typed agent id/path
             status.update(f"[red]Agent already exists: {escape(str(exc))}[/red]")
             return None
         except Exception as exc:
@@ -146,7 +146,7 @@ class AgentWizard(Vertical):
             return None
 
         self.last_created = agent
-        # re-sweep: escape — agent.id is operator-typed, may contain markup
+        # Escape — agent.id is operator-typed, may contain markup
         status.update(f"[green]Created {escape(str(agent.id))}[/green]")
         return agent
 

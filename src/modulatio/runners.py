@@ -311,7 +311,7 @@ def _resolve_model_call_args(
     auth_config = preset.get("auth_config") or {}
     # NOTE: a pooled preset (auth_config.pool) resolves to its BASE key here.
     # Rotation is NOT done at resolve time — the runners are built once and
-    # reused, so rotating here would pin one key forever (Nemo, hull 2026-06-02).
+    # reused, so rotating here would pin one key forever.
     # The runners call `_rotated_pool_key(_pool_base(model))` PER request.
     try:
         strategy = auth_strategies.build_strategy(auth_type, auth_config)
@@ -377,7 +377,7 @@ def _rotated_pool_key(pool_base: str | None) -> str | None:
     or None when not pooled / the pool is empty. Crucially, an empty pool
     returns None rather than falling back to the base var — the base var may be
     SET but PINNED, and a pooled model must never borrow a key that was pinned
-    for isolated metering (Nemo, hull 2026-06-02)."""
+    for isolated metering."""
     if pool_base is None:
         return None
     import os
@@ -464,7 +464,7 @@ def _record_call_usage(resp, model: str) -> None:
 class SeatCallHardTimeout(Exception):
     """The hard kill-boundary fired: a seat's model call outlived its
     wall-clock deadline — a spin or C-stall no transport timeout reached
-    (the cb6c0d shape: 17 minutes of silence at ~32% CPU). The guarded
+    (17 minutes of silence at ~32% CPU is one observed shape). The guarded
     call's thread is ABANDONED (CPython can't kill a thread); the caller is
     released with this availability-class failure so the recovery train
     (fallback chain → backoff → seat cooldown → QC backstop) takes over."""
@@ -730,7 +730,7 @@ def _accepts_reasoning_disable(model: str) -> bool:
     Anthropic's low/medium/high-only enum; ``openai/*`` shim strings) —
     drop_params is off, so the caller must skip the param rather than crash.
 
-    HONESTY NOTE (spike 2026-07-05): this probes SERIALIZATION, not whether
+    Note: this probes SERIALIZATION, not whether
     the DESTINATION honors the param — an OpenAI-compat shim can drop or
     reject it (ollama.com/v1 → 400). Destination efficacy is what
     ``model_capabilities.thinking_off_effective`` judges. Probed once per
@@ -848,7 +848,7 @@ def litellm_runner(
         ctx_cfg = _ctx_budget.current_config()
         if ctx_cfg is not None and ctx_cfg.enabled:
             preflight_msgs = [{"role": "user", "content": body}]
-            # Concurrency (#151/e2e, Nemo conditional): a UNIQUE call_id per
+            # Concurrency: a UNIQUE call_id per
             # invocation — the overflow-checkpoint path is
             # ``<checkpoints_dir>/<call_id>.json``, so a fixed "single-shot"
             # let two concurrent overflowing workers clobber the same
@@ -1061,7 +1061,7 @@ def litellm_runner(
         except AuthenticationError as e:
             # Use the REFRESHED token directly. xAI's refresh is in-memory (it
             # does NOT rewrite the Grok CLI creds file), so a disk re-resolve
-            # would read the STALE token (Nemo, 2026-06-02). For a pooled
+            # would read the STALE token. For a pooled
             # api_key preset, ``_refreshed_retry_kwargs`` re-draws from the
             # unpinned pool (the refreshed base var may be PINNED).
             retry_call_kwargs = _refreshed_retry_kwargs()
@@ -1142,7 +1142,7 @@ def _agent_label(agent: object) -> str:
 
 def _warn_if_dangling_preset(model: str, who: str) -> None:
     """Surface a CLEAR signal when an agent points at a preset that was
-    removed (Nemo, hull 2026-06-02). A registered preset key is a bare slug
+    removed. A registered preset key is a bare slug
     (e.g. ``google-gemini-pool``); a raw model id carries a provider prefix
     (``openrouter/auto``). So a bare slug that is NOT in the registry is almost
     certainly a deleted preset — without this, the value falls through to
@@ -1204,10 +1204,10 @@ def build_chat_runners(
             override if override is not None
             else getattr(agent, "tier", "producer") == "producer"
         )
-        # Honesty at build time (#16): a thinking-off seat whose lane can't
+        # Honesty at build time: a thinking-off seat whose lane can't
         # actually be quieted (reasoning-heavy family on an opaque shim) gets
         # ONE warning per (project, seat, model) — repeated runner builds in
-        # a long-lived process must not re-warn (WB cadre) — so headless runs
+        # a long-lived process must not re-warn — so headless runs
         # learn the truth without log noise.
         warn_key = (project_code, agent.id, agent.model)
         if (
@@ -1302,7 +1302,7 @@ def _fire_auth_alert(model_or_preset_key: str, message: str, alert_id: str | Non
             auth_type = preset.get("auth_type", "api_key")
             auth_config = preset.get("auth_config") or {}
     final_id = alert_id or model_or_preset_key
-    # Audit M2: a provider's AuthenticationError string can echo the request
+    # A provider's AuthenticationError string can echo the request
     # (Bearer header / api_key) back. The alert is surfaced (stderr / file /
     # Telegram), so redact any token-shaped substring at this single chokepoint
     # before it leaves the process.
@@ -1518,7 +1518,7 @@ def run_llm_with_tools(
             )
 
     tools_schema = build_tools_schema(tool_loadout, tool_registry)
-    # SEC-01 (security audit, Nemo): the skill's tool_loadout is the authority
+    # The skill's tool_loadout is the authority
     # boundary, not registry membership. build_tools_schema only HIDES the other
     # tools from a well-behaved model; a prompt-injected/hostile model can still
     # emit a tool_call for any registered tool. Dispatch must refuse a call whose
@@ -1534,7 +1534,7 @@ def run_llm_with_tools(
         # axis) — they are SEPARATE deny-chain arms, both must pass (gate-reconcile
         # design: the broker never shadows the gate). Fail-closed: any broker-side
         # exception (e.g. the sandbox-availability probe doing I/O) is a DENY,
-        # mirroring the metered arm (Nemo). No broker wired → no capability check.
+        # mirroring the metered arm. No broker wired → no capability check.
         if permission_broker is None:
             return False
         try:
@@ -1543,7 +1543,7 @@ def run_llm_with_tools(
             return True
 
     messages: list[dict] = [{"role": "user", "content": prompt}]
-    # W5-lite F9 audit follow-up: a 20-iteration tool loop that
+    # A 20-iteration tool loop that
     # sits in the soft-warn band would otherwise emit 20 identical
     # WARNINGs. Track whether we've already warned in this invocation
     # so the gate fires once per loop instead of once per iteration.
@@ -1553,7 +1553,7 @@ def run_llm_with_tools(
     # check_and_compress returns a NEW list only when it actually compressed
     # (same reference when in-band), so identity is the "did compress" signal.
     compressions = 0
-    # re-sweep (metered Finding 1): cache each metered tool's successful result
+    # Cache each metered tool's successful result
     # keyed by (name, canonical args) so an idempotent replay — flagged
     # structurally by the authorizer (``idempotent_reuse``) — reuses the prior
     # result instead of re-invoking (and re-paying) the provider.
@@ -1652,7 +1652,7 @@ def run_llm_with_tools(
             iter_suffix = ""
 
         for call in response.tool_calls:
-            # SEC-01: enforce the loadout authority boundary. An unlisted tool
+            # Enforce the loadout authority boundary. An unlisted tool
             # resolves to the same safe deny path as an unknown one — refused,
             # never executed, fed back so the model can re-plan within its tools.
             tool = tool_registry.get(call.name) if call.name in allowed_tools else None
@@ -1696,7 +1696,7 @@ def run_llm_with_tools(
                     try:
                         auth = metered_authorizer(call.name, dict(call.args))
                         allowed, why = auth[0], auth[1]
-                        # re-sweep (metered Finding 1): read the structured
+                        # Read the structured
                         # idempotent-replay signal (back-compat: defaults False
                         # for a plain 2-tuple authorizer).
                         idempotent_reuse = bool(getattr(auth, "idempotent_reuse", False))
@@ -1793,7 +1793,7 @@ def run_llm_with_tools(
                             # Summarizer failed — TRUNCATE, don't keep verbatim:
                             # verbatim accumulation is exactly what storms the
                             # loop. Raw is on disk for read_tool_result.
-                            # re-sweep (Finding 2): budget the kept head with the
+                            # Budget the kept head with the
                             # MAIN model's tokenizer (``model``), not the
                             # summarizer's (``count_model``). The truncated text
                             # lands in the main model's context, so the head must
@@ -1809,8 +1809,8 @@ def run_llm_with_tools(
                         # No summarizer configured → model-free truncation so a
                         # multi-fetch producer can't accumulate raw results past
                         # its role budget. The producer extracts + cites what it
-                        # needs; the bulky raw never piles up (2026-05-30).
-                        # re-sweep (Finding 1, sibling of Finding 2 above): budget
+                        # needs; the bulky raw never piles up.
+                        # Budget
                         # the kept head with the MAIN model's tokenizer (``model``),
                         # not ``count_model`` (= summarizer_model or model). The
                         # truncated head lands in the MAIN model's context
@@ -1895,7 +1895,7 @@ def _build_codex_chat_runner(
                 model=litellm_model, instructions=instructions, input=inp,
                 store=False, stream=True, **_with_codex_reasoning(ck),
             )
-            # Bound the stream-consume loop too (cadre MED): the transport read
+            # Bound the stream-consume loop too: the transport read
             # timeout in ``kwargs`` only catches a SILENT socket; a Codex
             # tool-loop/converse stream that trickles keepalives forever would
             # otherwise wedge this lane. Mirrors the single-shot ``_codex_call``.
@@ -1971,7 +1971,7 @@ def _build_claude_cli_chat_runner(
 #: In-band thinking-off toggles by model FAMILY. The prefix rides the message
 #: TEXT, so no OpenAI-compat shim can drop it — unlike request params, which
 #: ollama.com's /v1 rejects (reasoning_effort → 400) or ignores
-#: (chat_template_kwargs; spike 2026-07-05, scripts/smoke/thinking-off/).
+#: (chat_template_kwargs; see scripts/smoke/thinking-off/).
 #: Only families whose chat templates implement a toggle are listed; unknown
 #: families get NO prefix — inert toggle prose in every producer prompt was
 #: noise pretending to be a control. Qwen is live-proven (0.9.8.5 validation);
@@ -1988,7 +1988,7 @@ def _thinking_toggle_for(model: str) -> "str | None":
     """The family's in-band thinking-off token for a litellm model string,
     or None when the family has no known toggle. The family name must be a
     TOKEN — starting the id or following a separator — not a bare substring
-    (WB cadre: ``notqwen-model`` must not read as Qwen and earn a false
+    (``notqwen-model`` must not read as Qwen and earn a false
     "quietable" verdict; a genuine derivative like ``my-qwen-distill``
     still matches). The token-boundary posture mirrors
     ``model_capabilities._OPENAI_O_SERIES``."""
@@ -2012,7 +2012,7 @@ def thinking_off_effective(
     - a PROVEN in-band toggle: Qwen's ``/no_think`` is implemented by the
       model's own chat template, so it survives any shim (0.9.8.5 live
       validation). GLM's ``/nothink`` is NOT counted — hosted shims don't
-      re-implement Zhipu's template (spike 2026-07-05: ollama.com's GLM
+      re-implement the model's own template (ollama.com's GLM
       reasons straight through it);
     - a litellm-TRANSLATED provider control on a first-party lane (the
       ``_accepts_reasoning_disable`` probe — gemini → thinking-budget 0 …).
@@ -2036,7 +2036,7 @@ def thinking_off_effective(
 
 #: (project_code, agent_id, model) triples already warned about an
 #: unquietable thinking-off seat this process — the build warning is
-#: once-per-seat, not once-per-build (WB cadre).
+#: once-per-seat, not once-per-build.
 _WARNED_UNQUIETABLE_SEATS: set[tuple[str, str, str]] = set()
 
 
@@ -2086,7 +2086,7 @@ def litellm_chat_runner(
     ``MODULATIO_CALL_TIMEOUT`` knob) exactly like the single-shot path —
     this used to default to a hardcoded 1800s that no production site
     overrode, so the idle-stall bound never applied to the tool-loop seam
-    (the cb6c0d wedge sat under it for 17 minutes).
+    (a stall once sat under it for 17 minutes).
 
     Note: this runner only supports the chat-completions endpoint. The
     Responses API (xAI multi-agent, etc.) doesn't yet have tool-calling
@@ -2104,7 +2104,7 @@ def litellm_chat_runner(
         kwargs["api_key"] = api_key
 
     # Pooled presets rotate the key per request on the tool-loop path too — the
-    # runner is built once and reused (Nemo, hull 2026-06-02).
+    # runner is built once and reused.
     pool_base = _pool_base(model) if api_key is None else None
 
     from modulatio import model_presets
@@ -2184,7 +2184,7 @@ def litellm_chat_runner(
         try:
             resp = _call()
         except AuthenticationError as e:
-            # re-sweep (Finding 1): the tool-loop is the PRIMARY producer path,
+            # The tool-loop is the PRIMARY producer path,
             # yet it had NO 401 recovery — an expired OAuth access token (they
             # die ~24h) killed every tool-using producer overnight while the
             # single-shot litellm_runner self-healed. Mirror its refresh-once /
@@ -2222,7 +2222,7 @@ def litellm_chat_runner(
                     continue
             if resp is None:
                 raise last_err
-        # re-sweep (Finding 1): clear any prior auth alert on a successful
+        # Clear any prior auth alert on a successful
         # dispatch so the banner self-heals once creds are good again — same
         # contract as litellm_runner.
         _clear_auth_alert(provider_id_for_alerts)
@@ -2257,7 +2257,7 @@ def litellm_chat_runner(
         content = getattr(msg, "content", None) or ""
         return ChatResponse(content=content, tool_calls=tuple(parsed))
 
-    # The hard kill-boundary: the WEDGE seam (cb6c0d — a tool-loop completion
+    # The hard kill-boundary: the WEDGE seam (a tool-loop completion
     # spun 17 minutes with nothing bounding it). Wrapping the factory return
     # covers the completion + its retry dance in the deadline thread while
     # tool dispatch and the compression preflight stay on the caller thread

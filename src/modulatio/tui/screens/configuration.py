@@ -129,7 +129,7 @@ class ConfigScreen(Vertical):
         return self.query_one("#cfg-list", Vertical)
 
     def _reset_flow_state(self) -> None:
-        """Drop every accumulated wizard input (Jenny F3) so a cancelled flow
+        """Drop every accumulated wizard input so a cancelled flow
         never leaks half-entered provider/auth/model state into the next one."""
         self._provider_id = self._auth_type = None
         self._env_var = self._base_url = None
@@ -186,7 +186,7 @@ class ConfigScreen(Vertical):
             provlist.add_option(Option(
                 f"{prov.name:20}  {n} key(s)", id=prov.id))
         await lst.mount(provlist)
-        # ── SERVICES: the outside-service API pool (spec 2026-07-05) ──────
+        # ── SERVICES: the outside-service API pool ────────────────────────
         await lst.mount(Static(
             "SERVICES — outside APIs (image, video, speech, research, "
             "custom); keys pool like provider keys", classes="cfg-section"))
@@ -266,7 +266,7 @@ class ConfigScreen(Vertical):
             if not key:
                 self._set_list_status("Select a model row first, then Remove.")
                 return
-            # Guard the delete (cadre 2026-06-16 — standardise destructive ops).
+            # Guard the delete (destructive op).
             self.app.push_screen(
                 ConfirmModal(f"Remove model '{key}'?"),
                 lambda ok: self._do_remove_model(key) if ok else None,
@@ -493,8 +493,8 @@ class ConfigScreen(Vertical):
         keylist = OptionList(id="cfg-provkeylist")
         for slot in provider_keys.list_keys(base):
             keylist.add_option(Option(self._key_row_label(slot), id=slot["env_var"]))
-        # An opaque SVCKEY_ handle is meaningless to the operator (and #4 says
-        # never surface it) — show the note alone; a real provider env var
+        # An opaque SVCKEY_ handle is meaningless to the operator, so never
+        # surface it — show the note alone; a real provider env var
         # (OPENAI_API_KEY) is meaningful, so keep it.
         where = "" if base.startswith("SVCKEY_") else f"  ({base})"
         await self.query_one(Configurator).swap_companion(
@@ -510,7 +510,7 @@ class ConfigScreen(Vertical):
                 id="cfg-provkey-buttons",
             ),
             # `message` set on the FRESH status widget (a remount discards the old
-            # one, so a status set before this would be lost — Wild Bill L3).
+            # one, so a status set before this would be lost).
             Static(message, id="cfg-status"),
             Button("Back", id="cfg-cancel"),
         )
@@ -527,10 +527,10 @@ class ConfigScreen(Vertical):
         # The left-list count is stale until we re-read it (a tab flip won't
         # rebuild the cached screen) — refresh SERVICES/PROVIDERS in place.
         self._refresh_key_counts()
-        # Status into the remount (the old #cfg-status is discarded — Wild Bill L3).
+        # Status into the remount (the old #cfg-status is discarded).
         await self._show_provider_keys(
             self._prov_id, message="Added a key to the shared pool.")
-        # Refresh AGAIN after the awaited remount settles (vision-night gate):
+        # Refresh AGAIN after the awaited remount settles:
         # _refresh_key_counts swallows a query failure by design, so if the
         # pre-remount refresh caught the table mid-remount it silently
         # no-opped and NOTHING ever repainted the count — the full-suite
@@ -578,7 +578,7 @@ class ConfigScreen(Vertical):
             self._refresh_key_counts()
         self.run_worker(_remount_then_refresh())
 
-    # ── SERVICES (the outside-service API pool — spec 2026-07-05) ────────
+    # ── SERVICES (the outside-service API pool) ──────────────────────────
 
     def _fill_services_table(self, table: DataTable) -> None:
         """(Re)populate the service rows — row key = the service id. Painted
@@ -751,7 +751,7 @@ class ConfigScreen(Vertical):
             name=name,
             kind="custom",
             capabilities=capabilities,
-            # #4: an OPAQUE, generated handle — the vault .env never carries a
+            # An OPAQUE, generated handle — the vault .env never carries a
             # service-named key, and the operator never sees or types it.
             env_var=services.new_key_handle(),
             base_url=_val("#cfg-csvc-url"),
@@ -766,7 +766,7 @@ class ConfigScreen(Vertical):
             # input) so the half-typed fields survive for a correction.
             self._set_status(escape(str(exc)))
             return
-        # #2: two-step by design — land back on the list and tell them to
+        # Two-step by design — land back on the list and tell them to
         # select the new row to add its key.
         await self.show_list(
             f"Added '{escape(name)}'. Select it below and press Keys to add "

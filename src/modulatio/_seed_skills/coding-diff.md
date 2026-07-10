@@ -1,6 +1,6 @@
 ---
 name: coding-diff
-description: Multi-file producer mode (Slice #82 PR-C). Single LLM call emits new full contents for N files via `=== FILE: <path> ===` blocks; the orchestrator's diff-mode writer applies them under the artifacts/ tree with the same path-safety gate write_artifact uses. Use when a single change spans multiple files (signature change + caller update, new module + its test, etc.) and one-shot multi-file emission is cheaper / more coherent than N separate generate-mode tasks.
+description: Multi-file producer mode. Single LLM call emits new full contents for N files via `=== FILE: <path> ===` blocks; the orchestrator's diff-mode writer applies them under the artifacts/ tree with the same path-safety gate write_artifact uses. Use when a single change spans multiple files (signature change + caller update, new module + its test, etc.) and one-shot multi-file emission is cheaper / more coherent than N separate generate-mode tasks.
 executor: llm
 capability_tags: code-production, multi-file-diff, structured-output
 required_capabilities: code-production

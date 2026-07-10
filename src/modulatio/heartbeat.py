@@ -89,7 +89,7 @@ _queue_lock = threading.RLock()
 # `cancel_task`→`update_task`) would self-deadlock if each opened its own fd.
 # We instead open+lock the fd ONCE at the outermost acquisition and reuse it
 # for inner ones, guarded by `_queue_lock` (an RLock, so reentrant per thread).
-# R1 (cadre): the depth/fd bookkeeping is held in a ``threading.local`` (the
+# The depth/fd bookkeeping is held in a ``threading.local`` (the
 # same idiom cron uses) so it is genuinely PER-THREAD — robust even if the
 # ``_queue_lock`` serialization that already makes it safe were ever weakened.
 _claim_lock_local = threading.local()
@@ -117,7 +117,7 @@ def _cross_process_claim_lock() -> Iterator[None]:
         return
     # `_queue_lock` (RLock) guards the depth/fd bookkeeping so it is consistent
     # across threads; it is reentrant, so holding it here AND inside the wrapped
-    # mutator is fine. Depth/fd live in a thread-local (R1) so the reentrancy
+    # mutator is fine. Depth/fd live in a thread-local so the reentrancy
     # counter is per-thread by construction.
     with _queue_lock:
         depth = getattr(_claim_lock_local, "depth", 0)
@@ -223,11 +223,11 @@ def add_task(
     ``depends_on`` is a list of task id suffixes; this task waits until at
     least one done task ends with each suffix.
 
-    ``jt_id`` (+ ``jt_params``) — B3: a bound Job Template to run headless. They
+    ``jt_id`` (+ ``jt_params``) — a bound Job Template to run headless. They
     ride on the task and are handed to ``kickoff(bound_jt_name=, bound_jt_params=)``
     by the dispatch callback. ``None`` ⇒ a plain objective run (unchanged).
 
-    ``on_refused`` (#97 R2) — what a JT-bound task does when the fit-gate refuses
+    ``on_refused`` — what a JT-bound task does when the fit-gate refuses
     its bind: ``"skip"`` (the cron default — skip the slot, no greenfield
     substitute) or ``"greenfield"`` (a per-cron override — run the objective
     greenfield). ``None`` ⇒ the dispatch callback's default ("skip" for cron).
@@ -599,7 +599,7 @@ def requeue_recurring(task: dict) -> Optional[dict]:
         # preserves these — this seals the heartbeat-native path.)
         jt_id=task.get("jt_id"),
         jt_params=task.get("jt_params"),
-        on_refused=task.get("on_refused"),  # #97 R2: carry the refusal policy too
+        on_refused=task.get("on_refused"),  # carry the refusal policy too
         next_run=next_run,
     )
 
@@ -639,7 +639,7 @@ class Heartbeat:
     daemon (slice 8) can wrap it with custom semantics (telegram notify,
     backoff, etc.).
 
-    B3: a JT-bound task additionally passes ``jt_id=`` / ``jt_params=`` kwargs —
+    A JT-bound task additionally passes ``jt_id=`` / ``jt_params=`` kwargs —
     but only when present, so a plain task still calls a 2-arg callback (every
     existing callback keeps working). A callback that wants the cron-bound
     template accepts the two optional kwargs.
@@ -715,7 +715,7 @@ class Heartbeat:
         """
         update_task(task["id"], status="running", started=_now_iso())
         try:
-            # B3: a JT-bound task (cron) passes its template through to the
+            # A JT-bound task (cron) passes its template through to the
             # callback. Pass the kwargs ONLY when present so every plain task
             # still calls a 2-arg callback unchanged (back-compat for all
             # existing dispatch callbacks + test stubs).
@@ -724,7 +724,7 @@ class Heartbeat:
                 jt_extra = {
                     "jt_id": task["jt_id"],
                     "jt_params": task.get("jt_params"),
-                    # #97 R2: a JT-bound (cron) dispatch skips a refused bind by
+                    # A JT-bound (cron) dispatch skips a refused bind by
                     # default; a stored override ("greenfield") rides through.
                     "on_refused": task.get("on_refused") or "skip",
                 }
@@ -737,7 +737,7 @@ class Heartbeat:
             max_retries = int(task.get("max_retries") or 1)
             if retries < max_retries:
                 # Bump retries; remain pending so next tick picks it up — but
-                # re-sweep: honor a mid-dispatch cancel (requeue_task skips the
+                # honor a mid-dispatch cancel (requeue_task skips the
                 # re-arm when the task was already flipped to 'cancelled').
                 requeue_task(task["id"], retries=retries, started=None)
             else:

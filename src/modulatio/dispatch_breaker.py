@@ -4,7 +4,7 @@
 
 The context-budget primitive (``context_budget.py``) bounds **input**
 tokens before a call. It does NOT bound how much a producer *generates*
-in one dispatch. Live evidence (2026-05-20 sweep): a sparse local MoE
+in one dispatch. In observed cases, a sparse local MoE
 producer ran away inside a SINGLE dispatch — ~36K output tokens, zero
 ``write_artifact`` calls, never committed an artifact. Nothing stopped it.
 
@@ -19,7 +19,7 @@ This module is the missing output-side bound. It is deliberately:
   tokens of *monotonic* growth and must NOT be killed. A storm *churns*:
   degenerate repetition, or huge output with nothing committed. The soft
   output ceiling ALONE never trips — only repetition, no-commit, or the
-  absolute hard backstop do (design sign-off, Nemo amendment 1).
+  absolute hard backstop do.
 - **Worker-local + pure.** No shared mutable state; safe to run inside an
   isolated concurrent worker without violating the merge-authoritative
   contract. The orchestrator decides what to do with a returned abort.
@@ -36,12 +36,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 #: Per-role per-dispatch OUTPUT-token budget. DISTINCT from the input-only
-#: ``ContextBudgetConfig`` (Nemo: do not overload ``max_input_tokens``).
+#: ``ContextBudgetConfig`` (do not overload ``max_input_tokens``).
 #: ``soft_cap`` is an observe/pair-only threshold (never trips alone); the
 #: hard backstop derives as ``soft_cap * 2`` (so the default 30K → 60K hard).
 _DEFAULT_SOFT_CAP = 30_000
-#: Built-in per-role overrides of the soft cap (~30K producer default per
-#: Clif). Project/agent overrides (Project.output_budgets) layer ON TOP of
+#: Built-in per-role overrides of the soft cap (~30K producer default).
+#: Project/agent overrides (Project.output_budgets) layer ON TOP of
 #: this at resolve time and win.
 _ROLE_SOFT_CAPS: dict[str, int] = {}
 #: Validation bounds for a Project.output_budgets soft-cap override
@@ -93,7 +93,7 @@ class OutputBudget:
 class DispatchAbort(Exception):
     """A producer dispatch was bound by the circuit breaker.
 
-    STRUCTURED, not a bare string (Nemo amendment): carries the reason,
+    STRUCTURED, not a bare string: carries the reason,
     the role, the output-token count, a human detail, and the committed
     partial text (for Slice-3 salvage). The orchestrator catches this
     SEPARATELY from generic exceptions so a bound dispatch enters the
@@ -158,10 +158,10 @@ def _output_token_count(text: str) -> int:
     estimate and never undercounts whitespace-light output; the word-count floor
     keeps it sane on the rare token-dense-but-space-light edge.
 
-    REVIEWER NOTE (cadre agnostic audit): the ``len(text.split())`` arm inside
+    Note: the ``len(text.split())`` arm inside
     the ``max()`` is INTENTIONAL, not a residual word-unit gate — ``max()`` picks
     the HIGHER (more conservative) estimate, so this never undercounts a backstop.
-    Confirmed NOT a violation (Nemo signed it clean). Do not "simplify" to
+    Do not "simplify" to
     char/4-only — that would undercount space-heavy short-word text."""
     return max(len(text) // 4, len(text.split()))
 

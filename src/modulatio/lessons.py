@@ -6,8 +6,7 @@ Skill codification is **judgment, not a mechanical count.** A live trigger pass
 proved a QC-emitted defect tag is unreliable (the model just drops the optional
 field), so recurrence-judgment is left to the model that *reads the log* —
 not to an engine counter or an
-embedding-cluster. ("Don't over-mechanize judgment — leave judgment to the
-model"; the engine binds invariants.)
+embedding-cluster. Judgment stays with the model; the engine binds invariants.
 
 So this module does NOT detect recurrence. It only feeds the Leader the raw
 material — un-consumed QC FAIL verdicts from ``qc_history`` (reliably logged on

@@ -15,7 +15,7 @@ and the Responses API:
   result into a ``ChatResponse`` (text + tool_calls).
 
 All pure (no I/O, no litellm), so the runner stays thin and a future web surface
-can reuse it. Recipe validated live 2026-06-19 (see the reference engram).
+can reuse it.
 """
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ def chat_response_from_codex_stream(stream: Any, *, timeout: "float | None" = No
     ``arguments``). Event types are matched on their string form so a litellm
     enum-rename can't silently break parsing.
 
-    ``timeout`` (Op B): a wall-clock deadline on the stream-consume loop. The
+    ``timeout``: a wall-clock deadline on the stream-consume loop. The
     per-call watchdog bounds request INITIATION, not stream ITERATION — a server
     that trickles keepalives forever would otherwise spin this loop indefinitely at
     high CPU, uncatchable by the watchdog and unkillable (worker thread). With a

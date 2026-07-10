@@ -177,7 +177,7 @@ def clear_plan(*, agents: bool = False, secrets: bool = False,
                                             "projects", user_data=True))
     # Validate the hand-built plan through the SAME assert_safe gate build_plan
     # uses, so every Target returned is catastrophic-path-safe at plan time —
-    # not only re-checked at delete time (Jenny F3).
+    # not only re-checked at delete time.
     return uninstall.validated_plan(targets)
 
 

@@ -32,7 +32,7 @@ Scope of run_shell phase 1:
   supplied (project opt-in by construction).
 
 Out of scope (later phases / slices):
-- LLM-driven tool selection (OpenAI function-calling schema).
+- LLM-driven tool selection (function-calling schema).
 - Multi-step tool chains inside a single task.
 - Per-project enabled flag in config (today's surface is opt-in via
   the registry factory; explicit project config gating is phase 2).
@@ -83,7 +83,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 _no_redirect_opener = urllib.request.build_opener(_NoRedirectHandler())
 
-#: A polite, identifying User-Agent. Without one, courteous sources (Wikipedia,
+#: A polite, identifying User-Agent. Without one, courteous sources (reference sites,
 #: many news/docs sites) reject the request with 403 — which silently starved
 #: research and pushed producers back onto stale training-data claims. An
 #: identifying UA that names the project + a contact URL is the well-behaved
@@ -149,7 +149,7 @@ _DEFAULT_HTTP_TIMEOUT_SECONDS = 10.0
 #     multi-GB endpoint can't OOM the orchestrator before we even cap.
 #   * return ceiling — after HTML→text extraction, the returned body is
 #     truncated to this many chars (~8k tokens — half the smallest
-#     producer budget). The PIANO discipline: small bounded context; one
+#     producer budget). Small bounded context by discipline; one
 #     raw web page (we measured a live 1.24M-char fetch) is not allowed
 #     to become 310k tokens in a 16k window.
 _HTTP_GET_READ_LIMIT_BYTES = 4 * 1024 * 1024  # 4 MiB socket-read ceiling
@@ -369,7 +369,7 @@ _PYTHON_BINS = ("python", "python3", "python3.11", "python3.12")
 _DEFAULT_RUN_SHELL_TIMEOUT_SECONDS = 30.0
 _RUN_SHELL_MAX_OUTPUT_BYTES = 8000
 
-# Security audit SEC-04 (Nemo): the model/tool caller supplies `timeout`. Left
+# The model/tool caller supplies `timeout`. Left
 # unclamped, a hostile model can pass a huge (or non-finite) value to tie up a
 # worker/turn far past the intended bound. Clamp to a sane range and reject
 # NaN/inf — the ceilings are generous enough for legitimate QC builds / fetches.
@@ -390,7 +390,7 @@ def _clamp_timeout(value: object, *, lo: float, hi: float, default: float) -> fl
         return default
     return max(lo, min(hi, v))
 
-# Security audit H3a — resource ceilings applied to every run_shell child
+# Resource ceilings applied to every run_shell child
 # (and inherited by its sandboxed grandchildren). bwrap confines the
 # filesystem + network but does NOT bound memory / disk / core dumps, so a
 # skill that opted into run_shell could exhaust them from inside the sandbox.
@@ -416,7 +416,7 @@ def _apply_rlimits_to_pid(pid: int) -> None:
     ``exec()``; in a multithreaded process (the concurrent-wave workers, or any
     caller on a worker thread) a lock another thread holds at fork time can
     deadlock the child — and that wedged the PARENT's own thread creation in
-    turn, hanging the process (0.9.0 full-suite hang). ``prlimit`` from the
+    turn, hanging the process. ``prlimit`` from the
     parent has no fork hazard, so ``run_shell`` is safe to call from a thread.
 
     Best-effort + Linux-only: a non-Linux host (no ``resource.prlimit``) or an
@@ -456,7 +456,7 @@ def _prlimit_wrapper_prefix() -> list[str]:
     to the *payload itself* at exec time, or ``[]`` when ``prlimit`` is
     unavailable (non-Linux, util-linux absent).
 
-    H3a re-sweep: the parent-side ``_apply_rlimits_to_pid`` clamps the PID
+    The parent-side ``_apply_rlimits_to_pid`` clamps the PID
     that ``Popen`` returns. On the UNSANDBOXED path that is the payload and
     the clamp lands. On the SANDBOXED (production) path that PID is the
     ``bwrap`` MONITOR — bwrap then forks/execs the real payload into its own
@@ -533,8 +533,7 @@ def _is_safe_file_arg(arg: str, root: Path | None, extra_roots=()) -> bool:
         return False
     # A bare ``-`` means STDIN to cat/head/tail/grep/wc — never a legitimate
     # file in the confined producer context (stdin is /dev/null there), and it
-    # would otherwise slip past as a "file" arg. Reject it (Nemo hull note,
-    # 2026-05-31).
+    # would otherwise slip past as a "file" arg. Reject it.
     if arg == "-":
         return False
     # A leading dash is a flag, not a file. The passive ls/cat/head/tail
@@ -556,7 +555,7 @@ def _is_safe_file_arg(arg: str, root: Path | None, extra_roots=()) -> bool:
             return False
         # Safe if it resolves under the primary root OR any granted extra_root
         # (exec-widen), with the SAME dotfile secret-floor on every root — a
-        # `.env`/`.ssh` BELOW the matched root stays refused (Nemo #2).
+        # `.env`/`.ssh` BELOW the matched root stays refused.
         roots = [root] if root is not None else []
         roots += list(extra_roots)
         for r in roots:
@@ -655,7 +654,7 @@ def _check_passive(argv: list[str], root: Path | None = None, extra_roots=()) ->
     script, or invokes a user-package's argparse handlers (whose
     top-level imports execute before the parser sees ``--help``).
 
-    Tightened 2026-05-04 (audit Wave 2, F1) after the security audit's
+    Tightened after the security audit's
     review confirmed the prior allowlist let ``python3 -c 'import X'``
     and ``python3 -m <module> --help/--version`` execute import-time
     code despite the comments calling them "no-execution." Same logic
@@ -1024,7 +1023,7 @@ def _validate_run_shell_cwd(cwd_str: str, artifacts_root: Path, extra_roots=()) 
     (exec-widen) and return the absolute Path. Empty string → root itself.
     Raises ``ValueError`` on traversal escape (under no allowed root), dotfile
     component, or missing dir. The dotfile secret-floor applies under EVERY
-    allowed root (Nemo #2 — both run_shell confinement helpers share the rule).
+    allowed root (both run_shell confinement helpers share the rule).
     """
     root_resolved = artifacts_root.resolve()
     if not cwd_str:
@@ -1070,7 +1069,7 @@ def _resolve_payload_binary(head: str) -> str | None:
     """Return the resolved executable path for ``head`` (the first real
     payload token), or ``None`` when it isn't installed on this host.
 
-    re-sweep (prlimit-masks-INFO): the ``prlimit`` wrapper prefix means
+    The ``prlimit`` wrapper prefix means
     ``Popen`` execs ``prlimit`` (which exists) for a standalone payload like
     ``ruby``/``go``/``node``, so a missing payload no longer raises
     ``FileNotFoundError`` — ``prlimit`` runs and exits 127, and the friendly
@@ -1172,7 +1171,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
         # a transparent execution helper that lets ``pytest`` /
         # ``python3`` find their package home.
         exec_argv = _rewrite_argv_to_running_python(argv)
-        # re-sweep (prlimit-masks-INFO): pre-check the real payload binary
+        # Pre-check the real payload binary
         # BEFORE wrapping it in the prlimit prefix. Once exec_argv is wrapped,
         # Popen execs `prlimit` (which exists) and a missing standalone payload
         # (ruby/go/node/bash/rubocop/...) makes prlimit exit 127 rather than
@@ -1185,7 +1184,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
             return _format_run_shell_result(
                 -1, "", _not_installed_body(exec_argv[0])
             )
-        # SEC-001 + SEC-002: sandbox the child process.
+        # Sandbox the child process.
         # The argv allowlist above is defense in depth; the trust
         # boundary is here. Three paths:
         #   1. Bypass requested explicitly (test suite, CI, opted-out
@@ -1199,7 +1198,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
         from modulatio import sandbox as _sandbox
 
         run_env: dict[str, str] | None = None
-        # H3a re-sweep: wrap the PAYLOAD argv in a prlimit prefix so the
+        # Wrap the PAYLOAD argv in a prlimit prefix so the
         # mem/disk/core caps are established on the payload's own PID at exec
         # time. On the sandboxed path this prefix is built BEFORE bwrap so it
         # lands INSIDE the sandbox (after `--`) and clamps the real payload —
@@ -1210,7 +1209,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
         _payload_argv = _prlimit_wrapper_prefix() + list(exec_argv)
         run_argv = _payload_argv
         _profile = _sandbox.current_profile()
-        # exec-widen HIGH-3 (Wild Bill): a WIDENED-root run requires a FUNCTIONAL
+        # A WIDENED-root run requires a FUNCTIONAL
         # sandbox, fail-closed — checked BEFORE the bypass/off branch, so the
         # global dev/test bypass (MODULATIO_RUN_SHELL_UNSAFE / profile=off) does
         # NOT reach widened exec (that would leak the parent env + provider keys
@@ -1222,7 +1221,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
             return p == root or root in p.parents
 
         _wd_widened = not _under(wd, _art_resolved)
-        # exec-widen HIGH-3, code-review r1 BLOCK (Wild Bill): widening also
+        # Widening also
         # enters via a path-bearing ARGV token — e.g. `python3 /granted/script.py`
         # with a WORKSPACE cwd. The cwd-only check above misses that, so the
         # global bypass below would run it UNSANDBOXED with the parent env,
@@ -1256,7 +1255,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
         if (_sandbox.is_bypass_requested() or _profile == "off") and not _widened:
             # Explicit opt-out (UNSAFE env or profile=off), run as-is — but ONLY
             # for a WORKSPACE run. The global dev/test bypass must NEVER apply to
-            # a widened run (Wild Bill HIGH-3): a widened run reaching here has a
+            # a widened run: a widened run reaching here has a
             # functional sandbox (the raise above caught the no-sandbox case), so
             # it falls through to the sandboxed branch and is confined, not run
             # unsandboxed with the parent env.
@@ -1267,7 +1266,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
                 extra_rw_roots=tuple(Path(r) for r in extra_roots),
             )
         elif _sandbox.is_sandbox_required():
-            # H3c: operator demanded a working sandbox (MODULATIO_REQUIRE_SANDBOX=1)
+            # Operator demanded a working sandbox (MODULATIO_REQUIRE_SANDBOX=1)
             # but bwrap is missing/non-functional and no explicit bypass was set.
             # Fail CLOSED — refuse to run unconfined rather than fall open.
             raise RuntimeError(
@@ -1279,7 +1278,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
         else:
             _sandbox.warn_unsandboxed_once()
         try:
-            # H3a/H3b: own process group (start_new_session) + child rlimits so a
+            # Own process group (start_new_session) + child rlimits so a
             # wall-clock timeout reaps the WHOLE tree (orphaned background
             # grandchildren included), and a memory/disk bomb is bounded. We use
             # Popen+communicate rather than subprocess.run because run() SIGKILLs
@@ -1307,7 +1306,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
                 start_new_session=True,
             )
             # Apply the resource caps from the PARENT (fork-safe), not a
-            # preexec_fn (fork-from-multithreaded deadlock hazard — the 0.9.0 hang).
+            # preexec_fn (fork-from-multithreaded deadlock hazard).
             _apply_rlimits_to_pid(proc.pid)
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
@@ -1349,7 +1348,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
                                     _pipe.close()
                                 except OSError:
                                     pass
-                        # re-sweep: killpg already SIGKILL'd the group, so the
+                        # killpg already SIGKILL'd the group, so the
                         # child is dead — but nothing here reaped it, leaving a
                         # zombie until Popen.__del__ runs under the chat loop's
                         # GC. Reap it now with a non-blocking poll() (the group
@@ -1385,7 +1384,7 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
 
 # ── builtin: write_artifact ────────────────────────────────────────────────
 #
-# Surfaced 2026-04-28 in the FIN/STR end-to-end tests: engineer LLMs
+# Surfaced in end-to-end tests: engineer LLMs
 # repeatedly tried ``cat > add.py << 'EOF'`` to write files iteratively
 # during the chat loop. shell=False in run_shell rejected the redirect
 # (correctly — that's the safety surface). But the engineer's INTENT —
@@ -1412,7 +1411,7 @@ def make_write_artifact(
     ``_record_artifact_write`` here so a tool-written file in the per-task
     staging tree is recorded for the merge — without it, a producer's
     ``write_artifact`` sidecar is written to staging, passes QC there, then
-    deleted with staging and never copied to the shared tree (Nemo R2 HIGH).
+    deleted with staging and never copied to the shared tree.
     None (the sequential path / CLI) makes it a no-op; those writes already land
     directly in the shared artifacts root.
 
@@ -1963,8 +1962,7 @@ def build_registry(
                 "(module's __init__.py imports before argparse)\n"
                 "  • node file.js --help / [args]\n"
                 "  • ruby file.rb --help / [args]\n"
-                "Use profile='full' for those — see audit Wave 2 "
-                "F1 for the security rationale.\n"
+                "Use profile='full' for those.\n"
                 "\n"
                 "Profile 'full' (passive + actual execution) ALSO accepts:\n"
                 "  Python:\n"
@@ -2156,7 +2154,7 @@ def build_registry(
                 "required": ["call_id"],
             },
         )
-    # Service-API pool (spec 2026-07-05): capability tools + api_call for
+    # Service-API pool: capability tools + api_call for
     # operator-configured outside services. Lazy import — service_tools
     # imports tools at module level (Tool/_urlopen), so the reverse edge
     # must stay inside the function body.

@@ -378,7 +378,7 @@ class PromptScreen(Vertical):
         so paste-to-attach (``try_paste_attachment``) and tests can drive it."""
         try:
             att = build_attachment(path, kind=kind)
-        # re-sweep: also catch ValueError (size cap) / OSError so an oversized
+        # also catch ValueError (size cap) / OSError so an oversized
         # or unreadable chat attachment surfaces as a status, not a crash.
         except (FileNotFoundError, UnicodeDecodeError, ValueError, OSError) as exc:
             self.query_one("#prompt-response", Static).update(
@@ -403,7 +403,7 @@ class PromptScreen(Vertical):
             widget.update(self._AFFORDANCE)
             return
         names = [
-            # re-sweep: att.name is operator-chosen Path.name; escape so a
+            # att.name is operator-chosen Path.name; escape so a
             # filename like `notes[/].md` can't crash the TUI via MarkupError.
             f"📎 {escape(att.name)}" if att.kind == "document" else f"🖼  {escape(att.name)}"
             for att in self._chatbox_attachments

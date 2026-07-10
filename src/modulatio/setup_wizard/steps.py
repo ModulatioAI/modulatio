@@ -70,8 +70,8 @@ def contains_manager(value: str) -> bool:
 
     Legacy naming convention kept for clarity: agent ids, names, and
     roles containing 'manager' are refused by the wizard. The rule
-    originated as a workaround for the CrewAI library (now removed
-    in audit Wave 2 / F6); the convention persists because
+    originated as a workaround for a since-removed dependency; the
+    convention persists because
     "manager" overlaps confusingly with the Leader/planning role and
     user-defined tool agents.
     """

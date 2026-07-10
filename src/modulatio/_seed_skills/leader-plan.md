@@ -77,7 +77,7 @@ When you decompose into multiple files, name them for the *machine* and for the 
 
 When the deliverable is sequential prose (novel, report, multi-section document), continuity is *the team's responsibility*, not something the user has to fix in post:
 
-- **Page numbers flow.** Chapter 2 begins on the page after chapter 1 ended. Producers see prior chapters via team_canvas (Slice C); they should pick up the page count and continue.
+- **Page numbers flow.** Chapter 2 begins on the page after chapter 1 ended. Producers see prior chapters via team_canvas; they should pick up the page count and continue.
 - **Names spelled identically.** "Captain Idar" stays "Captain Idar" — never "Iddar." When in doubt, the team_canvas digest of prior files is the canonical source.
 - **References resolve.** "As shown in Chapter 1" should be true; "this builds on the magic system from chapter 0" should reference content that actually exists.
 

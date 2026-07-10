@@ -1,6 +1,6 @@
 ---
 name: continuity-check
-description: Cross-unit verification skill for multi-unit deliverables. Reads units already produced (visible in team_canvas + repo_map), identifies drift across units (named-item inconsistency, broken numbering, convention violations, recurring elements that didn't pay off, restating-prior). Emits structured JSON verdict with specific drift cases. NOT a single-unit quality gate — that's QC's job. This skill is the cross-unit gate. Slice #83 PR-B.
+description: Cross-unit verification skill for multi-unit deliverables. Reads units already produced (visible in team_canvas + repo_map), identifies drift across units (named-item inconsistency, broken numbering, convention violations, recurring elements that didn't pay off, restating-prior). Emits structured JSON verdict with specific drift cases. NOT a single-unit quality gate — that's QC's job. This skill is the cross-unit gate.
 executor: llm
 capability_tags: continuity-check, cross-unit-verification, conformance-check, structured-output
 required_capabilities: cross-unit-verification

@@ -364,7 +364,7 @@ def list_proposals(project_code: str) -> list[Proposal]:
 def _find_proposal_path(dir_: Path, proposal_id: str) -> Path | None:
     """Locate the proposal file whose embedded id == ``proposal_id`` exactly.
 
-    re-sweep: ``proposal_id`` is a caller/operator-supplied argument. A prior
+    ``proposal_id`` is a caller/operator-supplied argument. A prior
     substring ``glob(f"*{proposal_id}*.json")`` treated it as a glob pattern, so
     a metacharacter (``*``/``?``/``[``) or a bare substring matched unintended
     proposals and acted on a non-deterministic ``matching[0]``. Iterate plain
@@ -622,7 +622,7 @@ def recall(
         by_id = {r.entry_id: r for r in filtered}
 
         query_vec = embedder.embed_text(task_description)
-        # re-sweep (finding 1): the search ranks GLOBAL body-similarity over the
+        # the search ranks GLOBAL body-similarity over the
         # full pool, but the metadata filter is applied in Python AFTER. A fixed
         # top_k*4 slice can be saturated by non-matching bodies that rank higher,
         # dropping every valid metadata-matched precedent even though it clears

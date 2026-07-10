@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Telegram notifications — outbound message + document send.
 
-Carried from v1.3.1 ``telegram_notify.py`` (~400 LOC) and adapted for
-v2's standalone-business-harness design:
+Standalone outbound notification helpers:
 
-- Config lives at ``~/.config/modulatio/telegram-config.json`` (per
-  ``feedback_modulatio_no_hardcoded_paths.md``: zero hardcoded values
-  in source; bot token + chat IDs come from the config file or env vars).
+- Config lives at ``~/.config/modulatio/telegram-config.json``: zero
+  hardcoded values in source; bot token + chat IDs come from the config
+  file or env vars.
 - No hardcoded brand/sender strings — v2 is product-agnostic.
 - Notification helpers receive their content as parameters; nothing
   about the calling context is assumed.
@@ -41,7 +40,7 @@ CONFIG_FILE = config.CONFIG_DIR / "telegram-config.json"
 
 # Multi-message split threshold — Telegram's API hard-caps at 4096 *UTF-16
 # code units* (NOT Python code points), leave headroom for our framing.
-# re-sweep: each non-BMP char (most emoji, CJK-ext) costs 2 UTF-16 units,
+# Each non-BMP char (most emoji, CJK-ext) costs 2 UTF-16 units,
 # so an emoji-heavy chunk measured in code points could be ~2x the real
 # wire size and 400 against the 4096 cap. _split_chunks budgets in UTF-16.
 _MAX_MESSAGE_LENGTH = 4000
@@ -86,7 +85,7 @@ def _default_config() -> dict:
         "enabled": False,
         "bot_token": "",
         "chat_id": "",
-        # SEC-003: empty list = single-user mode (only the chat_id holder
+        # Empty list = single-user mode (only the chat_id holder
         # in a private 1:1 chat). Populate with Telegram user ids (ints)
         # to authorize a bot in a group chat. Single-user mode is the
         # default since most users run the bot as a personal assistant.
@@ -96,7 +95,7 @@ def _default_config() -> dict:
             "kickoff_failed": True,
             "task_error": False,
             "cron_fired": False,
-            # Plan lifecycle (Phase 3.1b-iv-γ-3). Defaults are tuned for
+            # Plan lifecycle. Defaults are tuned for
             # "tell me when something needs my attention" — proposed
             # (review needed) and paused (input needed) default ON;
             # approved/completed/cancelled default ON because they're
@@ -161,7 +160,7 @@ def _post(url: str, data: dict, *, timeout: float = 10.0) -> tuple[bool, str]:
 def _hard_split_utf16(line: str, max_len: int) -> tuple[list[str], str]:
     """Hard-split ``line`` so no piece exceeds ``max_len`` UTF-16 code units.
 
-    re-sweep: a code-point slice (``line[:max_len]``) can still exceed the
+    A code-point slice (``line[:max_len]``) can still exceed the
     UTF-16 cap when the slice is emoji-heavy. Walk by character, accumulating
     UTF-16 cost, and cut before a character would push the piece over the cap
     — which also guarantees we never split a surrogate pair (each Python char
@@ -265,7 +264,7 @@ def _sanitize_multipart_filename(name: str) -> str:
 def _sanitize_multipart_caption(caption: str) -> str:
     """Make a caption safe to interpolate into a multipart body part.
 
-    re-sweep: the caption lands in a non-quoted ``name="caption"`` part, so
+    The caption lands in a non-quoted ``name="caption"`` part, so
     quotes/backslashes are harmless body text and are preserved. The only
     injection vector is CR/LF: a caption carrying ``\\r\\n`` plus the fixed
     boundary token could otherwise inject an additional multipart part.
@@ -323,7 +322,7 @@ def send_document(
     # (RFC 2388 / HTML5 form-encoding). Strip control chars and percent-encode
     # the quote + backslash, matching how browsers escape these in the header.
     safe_filename = _sanitize_multipart_filename(path.name)
-    # re-sweep: the caption is interpolated into a multipart part too; strip
+    # The caption is interpolated into a multipart part too; strip
     # CR/LF so an attacker/LLM-influenced caption can't inject extra parts.
     safe_caption = _sanitize_multipart_caption(caption)
 
@@ -406,7 +405,7 @@ def notify_plan_event(
     note: str | None = None,
     extra: str | None = None,
 ) -> bool:
-    """Plan-lifecycle notification dispatcher (Phase 3.1b-iv-γ-3).
+    """Plan-lifecycle notification dispatcher.
 
     ``event`` is the notify_on key — one of:
       ``plan_proposed`` — a Leader plan was just persisted; awaits review

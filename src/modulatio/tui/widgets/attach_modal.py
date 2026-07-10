@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """AttachPathModal — simple text-input file path picker for attachments.
 
-Slice #31c. Pushed by AgentPanePanel when the user hits Ctrl+I (image)
+Pushed by AgentPanePanel when the user hits Ctrl+I (image)
 or Ctrl+D (document). User pastes / types a path, Enter or [Attach]
 dismisses with ``Path``; Esc / [Cancel] dismisses with ``None``.
 

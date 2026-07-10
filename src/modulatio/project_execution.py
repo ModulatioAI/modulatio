@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Project execution + Leader reflection (Phase 3.1b-iv-α).
+"""Project execution + Leader reflection.
 
 When a plan is approved (status flips to 'approved' via either the
 formal ticket UI or the conversational marker), the team begins
@@ -20,8 +20,8 @@ executing it. This module owns the synchronous loop:
   4. Repeat until status flips to a terminal state.
 
 Synchronous execution: callers spawn this from a worker thread (TUI
-worker, daemon worker, etc.). Phase 3.1b-iv-β replaces the in-process
-loop with daemon-tick-driven progress so campaigns survive restarts
+worker, daemon worker, etc.). A future daemon-tick-driven progress model
+will replace the in-process loop so campaigns survive restarts
 and long horizons.
 
 Project IS the unit of execution. The plan file's frontmatter carries
@@ -58,7 +58,7 @@ def _claim_plan_lock(plan_id: str, project_code: str, *, timeout: float = 5.0):
     blocks, then re-reads inside the critical section, sees status is
     no longer 'approved', and bails out cleanly.
 
-    re-sweep (F2): delegates to ``plans._plan_lock`` so the CAS lock and
+    Delegates to ``plans._plan_lock`` so the CAS lock and
     the plan-file mutators (``set_status`` / ``update_execution_state``,
     which this CAS calls WHILE holding the lock) share ONE re-entrant lock
     registry. Without that the nested mutators would open a second file
@@ -75,7 +75,7 @@ def _claim_plan_lock(plan_id: str, project_code: str, *, timeout: float = 5.0):
 # Tolerant JSON-block parser for Leader's reflection response.
 _REFLECT_JSON_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
-# Slice 1 (#88): Leader's reflection response also carries an
+# Leader's reflection response also carries an
 # optional state-doc markdown block. Distinct fence (``state-doc``) so
 # it doesn't compete with the existing JSON-block extractor. Missing
 # block is non-fatal — the engine writes through to the next sub-
@@ -99,9 +99,9 @@ def build_emit_state_tool_schema() -> dict:
 
     Replaces the model-fragile two-fenced-block free-text contract
     (a ```` ```state-doc ```` JSON block + a ```` ```json ```` decision
-    block) that real models each fumbled differently — Grok malformed
-    the fence label, DeepSeek invented an out-of-enum ``reason_code``
-    and used the wrong decision field name. With a tool schema the
+    block) that real models each fumbled differently — malformed
+    fence labels, invented out-of-enum ``reason_code``
+    values, and wrong decision field names. With a tool schema the
     Leader calls ``emit_state`` ONCE and the engine reads the args:
 
     - ``args["state"]`` is the compressed-state dict consumed UNCHANGED
@@ -323,7 +323,7 @@ def run_structured_reflect(
     reads the tool-call args — no fenced-text parsing, no model-format
     gamble.
 
-    Two robustness measures (added 2026-05-19 after a live run showed
+    Two robustness measures (added after a live run showed
     ~half the reflect turns breaking):
 
     1. **Empty-able defaults** — an omitted optional field is defaulted
@@ -408,8 +408,8 @@ def _leader_inbox_block(project: Project) -> str:
     try:
         from modulatio import inboxes as _inboxes
         run_dir = vault.run_dir(project.code, project.run_id)
-        # Persisted turn counter is the source of truth for inbox decay
-        # (see c7 design). Missing / malformed file → turn 0, which
+        # Persisted turn counter is the source of truth for inbox decay.
+        # Missing / malformed file → turn 0, which
         # means notes have just-issued decay deltas — strictly safer
         # than over-decaying.
         current_turn = 0
@@ -453,7 +453,7 @@ def _build_reflection_prompt(
     - the just-completed sub-objective's kickoff result (artifact /
       QC / failure text)
     - prior reflection log so Leader sees the trajectory
-    - Slice 1 (#88): prior team-state doc body (Leader-rendered
+    - Prior team-state doc body (Leader-rendered
       between sub-objectives), per-task producer self-claims captured
       at producer dispatch, and per-task QC verdicts. Leader compares
       claims against verdicts to emit ``divergence_notes`` in its JSON
@@ -534,9 +534,9 @@ def _build_reflection_prompt(
         lines.append("  (no verdicts available — kickoff did not return tasks)")
     lines.append("")
 
-    # (#c9): per-call inbox notes scoped to Leader. Read-
+    # Per-call inbox notes scoped to Leader. Read-
     # only here — Leader-reflect's accept/reject of producer candidates
-    # is a separate path (Leader-iterate, c10). Empty render → omit the
+    # is a separate path. Empty render → omit the
     # section so the prompt stays terse on first-turn / disabled cases.
     inbox_block = _leader_inbox_block(project)
     if inbox_block.strip() and "(no inbox notes this turn)" not in inbox_block:
@@ -551,8 +551,7 @@ def _build_reflection_prompt(
         "continue. Major revisions pause the team for human ack."
     )
     lines.append("")
-    # (Nemo Round-2 implementation guard): the
-    # `state-doc` fence body shape depends on
+    # The `state-doc` fence body shape depends on
     # ``project.compression_enabled``. When True (default), Leader
     # MUST emit the structured JSON contract — the engine
     # routes that through ``compression.emit_compaction`` for the
@@ -564,7 +563,7 @@ def _build_reflection_prompt(
     # markdown into ``current_state.md`` (not actually
     # behavior).
     if project.compression_enabled:
-        # structured contract (Nemo M4 close-out wording)
+        # structured contract
         lines.append(
             "The `state-doc` fence body MUST be a JSON object matching "
             "the structured schema in the leader-reflect skill: "
@@ -834,7 +833,7 @@ def start_execution(
 
     Synchronous: runs the entire loop in the calling thread. Callers
     that need async (TUI workers, daemon ticks) wrap in their own
-    threading. Phase 3.1b-iv-β will replace this with daemon-driven
+    threading. A future iteration will replace this with daemon-driven
     progress that survives across sessions.
 
     Args:
@@ -940,7 +939,7 @@ def start_execution(
             ),
         )
 
-    # Atomic claim (third-party review fix 2026-05-02): hold a POSIX
+    # Atomic claim: hold a POSIX
     # exclusive lock across the read-and-flip CAS so two daemons can't
     # both transition the same approved plan into 'executing'. The
     # lock is released as soon as status flips; tick()'s reload-and-skip
@@ -1049,7 +1048,7 @@ def start_execution(
     )
     tracker_token = budget.bind(tracker)
 
-    # Alpha (F1): bind Layer 1 + Layer 2 working-memory configs
+    # Bind Layer 1 + Layer 2 working-memory configs
     # so the leader-reflect call (which goes through ``reflect_runner``,
     # NOT Orchestrator.kickoff) participates in the gate. Without this
     # binding the entire context-budget primitive falls back to no-op
@@ -1123,7 +1122,7 @@ def _run_execution_loop(
     extra ContextVar lookup per iteration.
     """
     while completed < len(sub_objectives):
-        # Phase 3.1b-iv-γ-2: cancellation check. If the user cancelled
+        # Cancellation check. If the user cancelled
         # the plan via the Plans tab while we were running (or another
         # path flipped status to a terminal state), halt the loop
         # cleanly here rather than firing the next sub-objective.
@@ -1152,7 +1151,7 @@ def _run_execution_loop(
                 started_dt = datetime.fromisoformat(plan_started_at)
             except (TypeError, ValueError):
                 started_dt = None
-            # re-sweep: ``execution_started_at`` may be hand-edited in the
+            # ``execution_started_at`` may be hand-edited in the
             # frontmatter to a timezone-NAIVE value (no offset), which
             # parses fine but then explodes the aware-minus-naive
             # subtraction below with a TypeError. Coerce naive → UTC so the
@@ -1302,11 +1301,11 @@ def _run_execution_loop(
             qc_verdicts=qc_verdicts,
         )
         reflect_response: str = ""
-        # (c7 / Nemo B2): bind a dispatch_context around the
+        # Bind a dispatch_context around the
         # reflect call so the telemetry chain (call_scope_id,
         # budget_role="leader-reflect") propagates to whatever
         # actor='context_budget' rows fire inside the runner AND to
-        # the new actor='compression' rows the writer in c8 emits.
+        # the new actor='compression' rows the writer emits.
         # Best-effort — when run_id is None (test fixtures / legacy
         # paths), skip the bind and pass through.
         reflect_dispatch_run_dir = None
@@ -1331,7 +1330,7 @@ def _run_execution_loop(
         # block exits) can stamp it on its audit rows. The ContextVar
         # is reset on exit; we snapshot it before that happens.
         reflect_call_scope_id: str | None = None
-        reflect_effective_cap: int | None = None  # #151 conditional compression
+        reflect_effective_cap: int | None = None  # conditional compression
         structured_state: dict | None = None
         used_structured = reflect_chat_runner is not None
 
@@ -1365,7 +1364,7 @@ def _run_execution_loop(
                     _tel = context_budget.current_telemetry_context()
                     if _tel is not None:
                         reflect_call_scope_id = _tel.call_scope_id
-                        # #151 conditional compression: capture the model's
+                        # Conditional compression: capture the model's
                         # effective input cap INSIDE the scope (ContextVar
                         # resets on exit) so the pressure gate below can
                         # compare accumulated state size against it.
@@ -1374,7 +1373,7 @@ def _run_execution_loop(
                 # No run scope — pre-fallback path.
                 reflect_response, decision, structured_state = _invoke_reflect()
         except context_budget.RecoverableContextError as ctx_exc:
-            # Alpha (F2): Leader-reflect's own LLM call overflowed
+            # Leader-reflect's own LLM call overflowed
             # the budget. Distinct from a parse failure — the model
             # never even got the prompt cleanly. Re-running won't help
             # (same prompt, same wall). The right move is the same as
@@ -1484,7 +1483,7 @@ def _run_execution_loop(
                 error=str(exc),
             )
 
-        # (Nemo Round-2 implementation guard) — write-back
+        # Write-back
         # dispatcher branches on project.compression_enabled. The
         # branch must move in lock-step with the prompt-contract
         # branch in _build_reflection_prompt — without both flipping,
@@ -1495,7 +1494,7 @@ def _run_execution_loop(
         # Leader-reflect turn routes through compression.emit_compaction,
         # including no-fence and malformed-JSON cases — those emit
         # compaction_skipped audit rows with the right skip_reason
-        # and leave prior state untouched (Nemo Round-2 sweep B1).
+        # and leave prior state untouched.
         #
         # compression_enabled=False: path restored under the
         # explicit flag. Leader emits free-markdown state-doc;
@@ -1538,7 +1537,7 @@ def _run_execution_loop(
                             None if parse_result.reason == "ok"
                             else parse_result.reason
                         )
-                    # #151 conditional compression: when a threshold is set,
+                    # Conditional compression: when a threshold is set,
                     # compact only on context-pressure (long-horizon). Pressure
                     # = accumulated state-doc tokens / model effective cap. Below
                     # threshold, compaction is net-negative overhead (break-even
@@ -1792,7 +1791,7 @@ def _make_default_kickoff(
     ``agent.model``) plus a ``tool_registry`` bound to this run's
     artifacts dir, so tool-using skills (e.g. QC's ``code-review`` →
     ``run_shell``) can dispatch. Without this both surfaces blow up at
-    first use — see TST-6 from the 2026-04-30 stress test.
+    first use.
     """
     def _do(sub_objective_text: str, _so: dict) -> Any:
         from modulatio import tools as _tools, vault as _vault

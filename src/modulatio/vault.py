@@ -55,8 +55,8 @@ def validate_project_code(code: str) -> str:
 #: ``<root>/<name>.md``. The name therefore must be a plain slug — anything
 #: with a path separator, ``..``, an absolute prefix, a leading dot, or a
 #: control character would let a Leader-supplied (or upstream-artifact-driven)
-#: name escape the registry root and write/read another project's library
-#: (security audit H1). Hyphens + mixed case + underscores are allowed because
+#: name escape the registry root and write/read another project's library.
+#: Hyphens + mixed case + underscores are allowed because
 #: every legitimate skill/JT name (seeds, ``_slug_skill`` codifications, user
 #: skills) already fits — so this never rejects a real name.
 _REGISTRY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -67,7 +67,7 @@ def validate_registry_name(name: str) -> str:
     unchanged on success; raise ``ValueError`` on anything that could escape
     the registry root.
 
-    This is the engine-bound half of the H1 fix: callers that accept a name
+    This is the engine-bound half of the fix: callers that accept a name
     from the Leader (the ``create_skill`` / ``create_job_template`` tools) slug
     it first for usability, but every registry write/read also routes through
     here so a path-traversal name is *impossible*, not merely discouraged. A
@@ -251,7 +251,7 @@ def validate_run_id(run_id: str) -> None:
     callers had already validated. Most callers pass values from
     ``generate_run_id`` or ``list_runs`` (trusted), but ``modulatio
     project show --run-id <X>`` accepts ``run_id`` directly from the
-    user/CLI surface and was flagged in the security audit.
+    user/CLI surface.
 
     The check is character-based, not format-based — legacy on-disk
     run ids and test fixtures use a variety of shapes (4-hex suffix,

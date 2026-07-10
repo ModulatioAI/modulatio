@@ -3,8 +3,7 @@
 """User preferences — small JSON file outside the install dir so it survives
 reinstalls. Currently just stores backup_dir; extend as needed.
 
-Carried from v1.3.1 setup_wizard's `preferences.py` (drop-in, paths use the
-v2 ``config.CONFIG_DIR`` location for consistency).
+Paths use ``config.CONFIG_DIR`` for consistency with the rest of the app.
 """
 
 from __future__ import annotations

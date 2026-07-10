@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Semantic routing fallback — slice #6e.
+"""Semantic routing fallback.
 
 Decoupled from any memory/knowledge stack per v1's lesson
 (``SPEC-routing-embedder.md``): the routing embedder is its own thing,
@@ -144,7 +144,7 @@ class FastEmbedder:
 
     def __init__(self) -> None:
         self._model = None
-        # re-sweep (Finding 1): resolve the embedding model LIVE at load
+        # Resolve the embedding model LIVE at load
         # time, not at module import. ``_EMBED_MODEL``/``_EMBED_DIM`` were
         # pinned at import while qc_history/team_memory resolve
         # ``config.get_embedding_model()`` per call to honor a mid-process
@@ -333,7 +333,7 @@ def ensure_agent_vectors(project_code: str, embedder: Embedder) -> bool:
     agents = roster.list_agents(project_code)
     new_hash = _config_hash(agents)
     meta = _load_meta(project_code)
-    # re-sweep (Finding 1): resolve the model live so a wizard swap
+    # resolve the model live so a wizard swap
     # invalidates the cache (matches _config_hash + qc_history/team_memory).
     active_model = _embed_model()
 

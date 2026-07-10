@@ -63,7 +63,7 @@ def _prompt_axis(
     Returns the parsed value (float/int/None) OR a nav sentinel
     (``steps.BACK`` / ``steps.QUIT``).
 
-    Re-sweep fix: the prior value is shown as a *hint*, never passed as
+    The prior value is shown as a *hint*, never passed as
     ``prompt_nav``'s ``default``. ``prompt_nav`` returns its ``default``
     on blank input (steps.py:133), which made blank Enter silently KEEP
     the prior cap — contradicting the "blank = unbounded" copy and making

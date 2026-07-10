@@ -211,7 +211,7 @@ Alongside the JSON outcome block, emit a second fenced block in the `state-doc` 
 - `no_material_change` — nothing changed since last state; engine may skip the write
 - `malformed_skipped` — engine-emitted; Leader should not pick this
 
-**`deferred_items[].source` provenance enum** (Nemo Q1):
+**`deferred_items[].source` provenance enum**:
 
 - `producer_claim` — surfaced by producer self-claim trailer
 - `qc_verdict` — surfaced by QC verdict notes
@@ -220,9 +220,9 @@ Alongside the JSON outcome block, emit a second fenced block in the `state-doc` 
 
 Use `linked_task_id` / `linked_goal_id` / `candidate_id` where the deferral cites a specific task, goal, or proposal candidate. Use `null` when no link applies. Don't invent IDs.
 
-**`non_goals` rationale (Nemo Q2):** every `non_goals` entry must include a `because` field — one sentence on **why** the team is explicitly not doing this. "Out of scope" alone is not a rationale; cite the actual constraint (user said so, plan excluded it, conflicts with goal X).
+**`non_goals` rationale:** every `non_goals` entry must include a `because` field — one sentence on **why** the team is explicitly not doing this. "Out of scope" alone is not a rationale; cite the actual constraint (user said so, plan excluded it, conflicts with goal X).
 
-**Inbox-evidence discipline (Lovecraft L4):** if any `scope_clarification` / `constraint_discovered` / `decomposition_advisory` proposals were accepted this turn (visible in your inputs as inbox notes), they are **evidence to consider** when shaping `compressed_active_goal`, `deferred_items`, or `non_goals`. They do not auto-feed any field — you decide whether the accepted note changes scope, surfaces a deferral, or names a non-goal. Cite via `source: "inbox_note"` when an inbox proposal motivates a deferred item.
+**Inbox-evidence discipline:** if any `scope_clarification` / `constraint_discovered` / `decomposition_advisory` proposals were accepted this turn (visible in your inputs as inbox notes), they are **evidence to consider** when shaping `compressed_active_goal`, `deferred_items`, or `non_goals`. They do not auto-feed any field — you decide whether the accepted note changes scope, surfaces a deferral, or names a non-goal. Cite via `source: "inbox_note"` when an inbox proposal motivates a deferred item.
 
 **Recent Activity discipline:** push each producer self-claim from this turn as `{"at": "HH:MM", "agent": "<name>", "claim": "<verbatim>"}`. FIFO max 8 — drop oldest. Quote verbatim, don't paraphrase.
 

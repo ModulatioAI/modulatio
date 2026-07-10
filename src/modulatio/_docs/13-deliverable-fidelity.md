@@ -95,10 +95,3 @@ other family a graceful no-op until it grows its own renderer:
 
 The engine passes declared *data*; each family renders. That is what keeps a feature
 this product-shaped from quietly making "document" the privileged class.
-
-> **Reviewed**
->
-> The arc cleared fresh **hull + coherence** reviews. The hull pass found and blocked a
-> real over-stamp bug (a same-kind auxiliary task inheriting the part floor) and a
-> documentation defect (a smoke command that didn't run from a clean checkout); both
-> were fixed before sign-off.

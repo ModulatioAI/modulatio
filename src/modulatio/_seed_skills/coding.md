@@ -1,6 +1,6 @@
 ---
 name: coding
-description: Production-grade code production for software-engineer agents. The full working discipline, in order — first name the operation and commit the bar it must clear (build runs / fix's symptom gone / refactor preserves behavior), verifying by observed reality; then reuse before writing (grep for an existing seam, smallest correct change); then the craft — slice incrementally, write tests, ground in source docs, write iteratively via write_artifact, smoke-test via run_shell (passive profile) before submitting. Distilled from agent-skills:incremental-implementation, source-driven-development, test-driven-development.
+description: Production-grade code production for software-engineer agents. The full working discipline, in order — first name the operation and commit the bar it must clear (build runs / fix's symptom gone / refactor preserves behavior), verifying by observed reality; then reuse before writing (grep for an existing seam, smallest correct change); then the craft — slice incrementally, write tests, ground in source docs, write iteratively via write_artifact, smoke-test via run_shell (passive profile) before submitting.
 executor: llm
 tool_loadout: run_shell, write_artifact
 capability_tags: code-production, python-coding, smoke-testing
@@ -86,7 +86,7 @@ After you've written a file (or to verify environment state), run probes via `ru
 - **`cat <file>.py`** — inspect what you (or a prior step) wrote.
 - **`ls`**, **`ls -la`** — see workspace state.
 
-Probes that are **NOT** passive (audit Wave 2 tightened these — they execute user-controlled code at import or top-level):
+Probes that are **NOT** passive (they execute user-controlled code at import or top-level):
 
 - `python3 -c '<body>'` — even `'import X'` runs X's import-time code.
 - `python3 <file>.py --help` — the script's top-level runs before `--help` is honored.

@@ -51,7 +51,7 @@ it never tracebacks at launch.
   delivery stars), Skills, Memory, Jobs, Cron, Logs and Docs, each a
   list + detail over the same data the TUI tabs read.
 - **The scheduler** — the JT Library's **Schedule** builds a real
-  schedule, Teams-style: pick a date and time, one-off or recurring
+  schedule: pick a date and time, one-off or recurring
   (daily / weekly / monthly / every N days or weeks), ending never,
   after N runs, or on a date, with a live plain-English preview. The
   daemon holds the stop rules fail-closed — a one-off fires once and a

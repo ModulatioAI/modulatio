@@ -636,7 +636,7 @@ def _load_picklist(picklist_key: str) -> list[str]:
         return []
     if not isinstance(data, dict):
         return []
-    # re-sweep: a corrupt seed value that isn't a list (a str/dict for a provider
+    # a corrupt seed value that isn't a list (a str/dict for a provider
     # key) must degrade to empty — never `list("claude-opus-4-8")` → one model id
     # per character, nor a dict's keys. Keep only the well-formed str entries.
     v = data.get(picklist_key)
@@ -848,7 +848,7 @@ def preset_kwargs(
         if pool:  # rotate across the provider's numbered keys at call time
             auth_config["pool"] = True
     elif pool:
-        # re-sweep: pooling derives numbered variants (FOO_API_KEY_2, …) from a
+        # pooling derives numbered variants (FOO_API_KEY_2, …) from a
         # named base env var. Without one (e.g. CUSTOM's keyed AuthOption has
         # env_var=None, or a non-api_key auth) the request can't be honored —
         # fail loud rather than silently drop it and surprise the operator.

@@ -86,7 +86,7 @@ _PHASE: dict[str, tuple[str, str]] = {
     "task_settled": ("■■", "wrapped up a task"),
     "ticket_opened": ("!!", "opened a ticket"),
     "scope_drift_warning": ("!!", "flagged scope drift"),
-    # W3 (2026-07-03): richer vocabulary so the feed reads as work, not raw
+    # Richer vocabulary so the feed reads as work, not raw
     # phase strings. Planning/thinking wear the ◆ "mind" mark.
     "leader_thinking": ("◆◆", "is thinking"),
     "leader_answered": ("◆◆", "answered"),
@@ -112,7 +112,7 @@ def _humanize(token: str) -> str:
 
 #: Per-TOOL glyph + verb for ``tool_call_ended`` events (the tool name rides
 #: in ``event.detail["tool"]``). Themed glyphs, never color emoji — the mark
-#: tints in the active phosphor accent like every other line (W3).
+#: tints in the active phosphor accent like every other line.
 _TOOL: dict[str, tuple[str, str]] = {
     "web_search": ("◉◉", "is searching the web"),
     "http_get": ("▼▼", "is reading a page"),
@@ -195,7 +195,7 @@ class StreamView(VerticalScroll):
         #: working: …" wave marker into the feed (concurrency the operator would
         #: otherwise read as fast-serial). Reset with the board.
         self._last_producer_count = 0
-        #: W3b repeat-coalescing: (agent, glyph, verb, task) of the last event
+        #: Repeat-coalescing: (agent, glyph, verb, task) of the last event
         #: line, its base Text and widget, and the live (×N) counter. Any
         #: non-event append (message, wave marker) breaks the chain in _append.
         self._coalesce_sig: tuple | None = None
@@ -358,7 +358,7 @@ class StreamView(VerticalScroll):
         name = self._display_name(event.agent_id, event.role)
         # Coalesce a repeat: the same agent doing the same thing again updates
         # the previous line's (×N) counter instead of stacking a wall of
-        # identical lines — every CHANGE of icon stays a visible event (W3b).
+        # identical lines — every CHANGE of icon stays a visible event.
         sig = (event.agent_id, glyph, verb, event.task_id)
         if sig == self._coalesce_sig and self._coalesce_widget is not None:
             self._coalesce_count += 1

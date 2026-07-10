@@ -89,7 +89,7 @@ def _load_json(path: Path) -> list:
 
 def _save_json(path: Path, data: list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # re-sweep: atomic, crash-safe write (mirror of store._write_entity). A plain
+    # atomic, crash-safe write (mirror of store._write_entity). A plain
     # path.write_text truncates-then-streams, so the lock-free readers (get_semantic,
     # search, stats, promote_candidates — they don't take _file_lock) can observe a
     # half-written file mid-rewrite; _load_json then swallows the JSONDecodeError and
@@ -433,8 +433,7 @@ def update_entry(
 
 
 def export_markdown(agent_id: str, *, project_code: str) -> str:
-    """Render an agent's episodic + semantic memory as markdown (Clif's
-    exportable-memory decision). Read-only: reads the raw JSON directly so it
+    """Render an agent's episodic + semantic memory as markdown. Read-only: reads the raw JSON directly so it
     never bumps access bookkeeping the way ``get_episodic`` does."""
     def _section(title: str, path: Path) -> list[str]:
         rows = [MemoryEntry.from_dict(e) for e in _load_json(path)]

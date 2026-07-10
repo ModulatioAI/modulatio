@@ -19,7 +19,7 @@ resolving (the reskin stays layout-only). The detail column is 40% by default; p
 The divider colour is ``$frame-dim``, which the active Feng-Tui theme drives — so the
 divider tracks the amber/green/cyan accent automatically.
 
-Contract (reviewer-pinned — keep it explicit during the tab fan-out):
+Contract:
   • Use this ONLY for true master-detail archetype tabs (LOGS, TICKETS, ARTIFACTS, JT
     LIBRARY, SKILLS, MEMORY, CRON, DOCS). The CONSOLE and the configurator wizards have
     dense, bespoke layouts — do NOT force them into MasterDetail.

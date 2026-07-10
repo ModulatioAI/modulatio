@@ -224,9 +224,9 @@ Ollama runs models locally — free, slower than cloud, no API costs.
 - **`ollama/glm-5.1:cloud`** — GLM-5.1 quality, runs through Ollama's cloud gateway (still requires auth at the cloud layer; check Ollama Pro)
 - **`ollama/llama3.3:70b`** — strong if you have the VRAM
 
-> **Bartowski GGUFs need a tool template**
+> **Some GGUFs need a tool template**
 >
-> If you pull a bartowski-published GGUF that doesn't ship a tool-calling template, tool-using producers (research, run_shell) will fail silently. Either pull an alternative quant that includes the template, or set `supports_tools: false` on the model entry so dispatch never routes tool-loadout tasks to it.
+> If you pull a GGUF that doesn't ship a tool-calling template, tool-using producers (research, run_shell) will fail silently. Either pull an alternative quant that includes the template, or set `supports_tools: false` on the model entry so dispatch never routes tool-loadout tasks to it.
 
 ### LM Studio
 

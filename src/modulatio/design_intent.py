@@ -13,8 +13,7 @@ Lives at ``<project>/standards/design-intent.md`` with frontmatter
 ``type: design-intent``. Read at producer / task-plan / QC / Leader
 prompt-build time and injected as a ``{design_intent}`` slot.
 
-Cross-references the design-intent ✕ wisdom complementary-axis design
-captured 2026-04-30 (memory: project_modulatio_design_intent_grounding_gap.md).
+Cross-references the design-intent ✕ wisdom complementary-axis design.
 The dual-layer model: design-intent BINDS this project; wisdom (cross-
 project) ADVISES. Wisdom isn't yet built; design-intent is the first
 half of the axis.

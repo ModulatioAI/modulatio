@@ -56,8 +56,7 @@ class Knob:
 
 
 # Defaults + range come FROM the engine's own table/constants, never copied by
-# hand — the qc default drifted stale here (64000 while the engine moved to
-# 96000 on 2026-07-06) and the copied 64000 range cap then REFUSED the engine's
+# hand — a hand-copied value can drift stale and then reject the engine's own
 # real default. One source of truth; the registry can't lie again.
 _BUDGET_ROLE_NAMES = (
     "producer", "qc", "planner", "leader-decompose", "leader-iterate",

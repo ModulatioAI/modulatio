@@ -43,8 +43,8 @@ def _read_frontmatter(path: Path) -> dict[str, str]:
 
     Deliberately the same naive ``key: value`` shape as
     :func:`skills._parse_file` — good enough for the flat fields the index
-    needs (name, description, capability_tags). The ClawHub ``metadata:``
-    JSON line (Brick 5) is not indexed, so its embedded colons are harmless
+    needs (name, description, capability_tags). The ``metadata:``
+    JSON line is not indexed, so its embedded colons are harmless
     here.
     """
     meta: dict[str, str] = {}

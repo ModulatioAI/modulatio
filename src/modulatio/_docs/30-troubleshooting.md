@@ -110,9 +110,9 @@ curl http://localhost:1234/v1/models
 
 If both work but the wizard doesn't auto-detect, add manually via `modulatio models add` with the explicit URL.
 
-### "Bartowski GGUF tool calls fail silently"
+### "GGUF tool calls fail silently"
 
-Some bartowski-published GGUFs ship without a tool-calling chat template, so tool-using producers (research, run_shell) appear to work but emit no tool calls.
+Some GGUFs ship without a tool-calling chat template, so tool-using producers (research, run_shell) appear to work but emit no tool calls.
 
 Fix:
 

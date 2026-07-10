@@ -264,7 +264,7 @@ def save(
         fm_lines.extend(f"- {s}" for s in sources)
 
     content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + body.rstrip() + "\n"
-    # re-sweep (#151 follow-up): write atomically. The cache READ path
+    # write atomically. The cache READ path
     # (load_with_metadata → _parse_file → read_text) is intentionally
     # unlocked while the WRITE is serialized under the orchestrator's
     # store lock, so a plain truncate-then-write here lets a concurrent

@@ -6,7 +6,7 @@ Each entry IS a complete model definition: label + endpoint + auth + the
 bare model id. The runner reads the entry once at dispatch and assembles
 the LiteLLM call (``api_format/model`` prefix, ``api_base``, ``api_key``).
 
-Per locked design (2026-04-26 redesign): no provider/model split. The
+By design: no provider/model split. The
 prior two-step wizard (providers + models) collapsed into one flow per
 user UX feedback ("Feng Shui — minimalist, functionality, flow"). Two
 models from the same vendor = two entries; auth fields duplicated by
@@ -89,7 +89,7 @@ def save_presets(presets: dict[str, dict[str, Any]]) -> None:
 
 
 def _reject_secret_auth_config(auth_config: Any) -> None:
-    """Security keel (Nemo, hull 2026-06-02): a preset stores an env-var
+    """A preset stores an env-var
     *reference* (``env_var``), never a secret value. Reject any auth_config
     field that looks like a raw key/token/secret so a stray value can't get
     persisted into model_presets.json (chmod 600, but still never values).

@@ -1,6 +1,6 @@
 ---
 name: task-plan
-description: Plan a goal into concrete tasks. Scope discipline, structured-output discipline, anti-confusion rules for required_skills vs required_capabilities. Bundled as the canonical task-planning prompt — invoked as a utility LLM call from orchestration code (Step 0, 2026-05-15).
+description: Plan a goal into concrete tasks. Scope discipline, structured-output discipline, anti-confusion rules for required_skills vs required_capabilities. Bundled as the canonical task-planning prompt — invoked as a utility LLM call from orchestration code.
 executor: llm
 capability_tags: task-breakdown, dispatch, structured-output
 freshness_class: stable

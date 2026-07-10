@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""The recovery feed — the win-codification source (#81 / Fix F).
+"""The recovery feed — the win-codification source.
 
 The fail-loop (:mod:`modulatio.lessons`) learns from what QC REJECTED. This module
 is its symmetric twin: it learns from what QC FIXED. When the smart QC rescues a
@@ -10,13 +10,13 @@ that patch encodes a TECHNIQUE the cheap producer lacked. We witness it as a
 loop clusters recoveries behind an ENGINE recurrence floor so the Leader codifies a
 recurring technique, not a one-off incident.
 
-Two disciplines are load-bearing (both from the #81 hull review):
+Two disciplines are load-bearing:
 
-* **Write-time truncation (Nemo #6).** Every text field is clipped to
+* **Write-time truncation.** Every text field is clipped to
   ``MAX_RECOVERY_EXCERPT_CHARS`` *inside* :func:`record_recovery`, regardless of the
   caller — the technique lives in the delta, and a 300k-token artifact must not land
   in the log.
-* **A false-merge-resistant signature (Hero R3).** Two recoveries cluster only when
+* **A false-merge-resistant signature.** Two recoveries cluster only when
   BOTH their rationale-key AND their artifact-kind-aware change-shape agree. Anything
   the engine cannot cheaply classify gets a UNIQUE ``unclassified:<id>`` change-shape
   — a permanent singleton that can never reach the floor (fail-open to *split*, never
@@ -40,7 +40,7 @@ from pathlib import Path
 
 from modulatio.vault import project_dir
 
-#: Hard write-time cap on every stored text field (Nemo #6) — chars, not tokens.
+#: Hard write-time cap on every stored text field — chars, not tokens.
 MAX_RECOVERY_EXCERPT_CHARS = 2000
 
 #: Bound on the delta-window the change-shape fingerprint is computed over (chars).
@@ -58,7 +58,7 @@ _STOPWORDS = frozenset(
     "this that these those it its as at by from into out over under no not".split()
 )
 
-#: Token families a code change-shape distinguishes (Hero R3).
+#: Token families a code change-shape distinguishes.
 _CTRL_KEYWORDS = frozenset(
     "if elif else for while try except finally with return raise break continue "
     "yield match case assert".split()
@@ -85,7 +85,7 @@ class RecoveryRecord:
     """A witnessed QC recovery — the teaching triple, bounded. ``signature`` is the
     deterministic cluster key (computed at write time)."""
 
-    # Every field carries a default (#81): a future schema addition must not make
+    # Every field carries a default: a future schema addition must not make
     # historical lines (which lack the new key) raise TypeError on load and silently
     # drop the ENTIRE recovery feed. Defaults + known-key filtering in
     # load_recoveries make the record forward- AND backward-compatible.
@@ -133,7 +133,7 @@ def _delta_window(before: object, after: object) -> "tuple[str, str]":
     return bw[:_MAX_SHAPE_WINDOW_CHARS], aw[:_MAX_SHAPE_WINDOW_CHARS]
 
 
-# ── change-shape fingerprint (artifact-kind-aware, Hero R3) ────────────────────
+# ── change-shape fingerprint (artifact-kind-aware) ────────────────────
 
 
 def _kind_tokens(artifact_kind: str) -> list[str]:
@@ -180,7 +180,7 @@ def _count_literals(lines: "list[str]") -> int:
 def _count_identifiers(lines: "list[str]") -> int:
     """Identifier-like tokens (names) in the diff lines, EXCLUDING control-flow
     keywords (counted separately as ``ctrl``). The third token class the design
-    pins (Hero MINOR 4 — omitting it coarsens the signature toward false-merge)."""
+    pins (omitting it coarsens the signature toward false-merge)."""
     return sum(
         1
         for ln in lines
@@ -229,7 +229,7 @@ def change_shape(before: object, after: object, artifact_kind: str) -> "str | No
         b, a = str(before), str(after)
         # A no-delta "recovery" taught nothing (empty→empty, or before == after):
         # there is no technique to fingerprint, so fail open to a unique singleton
-        # (#80) rather than emit a stable shape that could false-merge across tasks.
+        # rather than emit a stable shape that could false-merge across tasks.
         if b == a:
             return None
         if any(t in _CODE_KIND_TOKENS for t in toks):
@@ -261,7 +261,7 @@ def recovery_signature(
     """``(artifact_kind, defect_type, rationale-key, change-shape)`` — two recoveries
     cluster only when ALL FOUR agree. Biased to false-split (safe) over false-merge.
 
-    Commas are stripped from every component (Hero note): the signature round-trips
+    Commas are stripped from every component: the signature round-trips
     through the skill's ``learned_from`` frontmatter as a COMMA-separated list, so a
     comma inside a component would split the entry and silently disarm the replay guard
     for that skill."""
@@ -284,7 +284,7 @@ def _log_path(project_code: str) -> Path:
 
 
 def _consumed_path(project_code: str) -> Path:
-    # SEPARATE from lessons/_consumed (Nemo #2) — a recovery id must never be
+    # SEPARATE from lessons/_consumed — a recovery id must never be
     # consumed against the fail ledger's namespace.
     return project_dir(project_code) / "recoveries" / "_consumed_recoveries"
 
@@ -303,21 +303,21 @@ def record_recovery(
     entry_id: "str | None" = None,
     timestamp: "str | None" = None,
 ) -> RecoveryRecord:
-    """Witness a QC recovery. Truncates every text field at write time (Nemo #6),
-    computes the false-merge-resistant signature (Hero R3 — unclassifiable kind →
+    """Witness a QC recovery. Truncates every text field at write time,
+    computes the false-merge-resistant signature (unclassifiable kind →
     a unique ``unclassified:<id>`` singleton), appends one JSON line, returns the
     record. The caller guards this; it is pure upside capture."""
     eid = entry_id or uuid.uuid4().hex
     ts = timestamp or datetime.now(timezone.utc).isoformat()
     # Truncate EVERY text field up front, and compute the signature from the TRUNCATED
-    # rationale (Nemo code #2 — the signature's rationale-key must derive from the
+    # rationale (the signature's rationale-key must derive from the
     # bounded stored text, not the raw input that could carry a sentinel past the cap).
     before_x = _truncate(before)
     after_x = _truncate(after)
     defects_x = _truncate(defects)
     qc_rationale_x = _truncate(qc_rationale)
     # Fingerprint the CHANGED region of the FULL artifact, not a head-truncated copy
-    # (R2 edge-case): a tail-only fix on a >MAX_RECOVERY_EXCERPT_CHARS artifact leaves
+    # since a tail-only fix on a >MAX_RECOVERY_EXCERPT_CHARS artifact leaves
     # before_x == after_x, which would flip a real recurring technique to a permanent
     # ``unclassified`` singleton that never clusters. The window is delta-centered and
     # bounded, so the stored excerpts stay clipped while the shape stays meaningful.
@@ -361,7 +361,7 @@ def load_recoveries(project_code: str) -> "list[RecoveryRecord]":
                 if not isinstance(obj, dict):
                     continue
                 # Drop only UNKNOWN keys (a since-removed schema field); missing keys
-                # fall back to field defaults (#81). The historical feed survives any
+                # fall back to field defaults. The historical feed survives any
                 # schema add/remove instead of being wholesale discarded.
                 out.append(RecoveryRecord(**{k: v for k, v in obj.items() if k in known}))
             except (ValueError, TypeError):
@@ -412,7 +412,7 @@ def unconsumed_recoveries(
 
     ``limit`` defaults to ``None`` (the FULL unconsumed feed). The recurrence count is
     computed by :func:`cluster_recoveries` over whatever this returns, so a hard cap
-    here can STARVE a genuinely recurring technique (R2 correctness): with >cap diverse
+    here can STARVE a genuinely recurring technique: with >cap diverse
     signatures, an older technique with ``>= floor`` members can be sliced out of the
     window and never reach the floor. Apply the display/evidence cap at the SURFACE
     (per-cluster), not here. A positive ``limit`` still caps for callers that want a
@@ -434,7 +434,7 @@ def cluster_recoveries(
     """Group recoveries by signature; return ONLY clusters with ``>= floor`` members
     (the engine binds recurrence). An ``unclassified:<id>`` signature is unique per
     record, so it is a permanent singleton and can never reach the floor — the
-    fail-open-to-split default (Hero R3). The Leader judges coherence *within* a
+    fail-open-to-split default. The Leader judges coherence *within* a
     surfaced cluster; the engine never claims a one-off is a technique."""
     by_sig: dict[str, list[RecoveryRecord]] = {}
     for r in records:

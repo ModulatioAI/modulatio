@@ -96,7 +96,7 @@ def _now() -> datetime:
 def scrub_and_cap(text: str) -> str:
     """Redact secrets, then truncate to GitHub's issue-body ceiling. The single
     safe-for-public transform — used by ``compose_issue`` AND re-applied to a
-    user-EDITED body before it is sent (Nemo M3: edits otherwise bypass both)."""
+    user-EDITED body before it is sent (edits otherwise bypass both)."""
     text = scrub_secrets(text)
     if len(text) > _MAX_ISSUE_BODY:
         text = text[:_MAX_ISSUE_BODY] + "\n\n…[truncated]"
@@ -105,7 +105,7 @@ def scrub_and_cap(text: str) -> str:
 
 def format_timestamp(stamp: str) -> str:
     """``20260615T035914_718851Z`` → ``2026-06-15 03:59`` (best-effort). Shared by
-    the LOGS tab and ``modulatio logs list`` so both columns align (Nemo L3)."""
+    the LOGS tab and ``modulatio logs list`` so both columns align."""
     try:
         core = stamp.split("_", 1)[0]
         return datetime.strptime(core, "%Y%m%dT%H%M%S").strftime("%Y-%m-%d %H:%M")
@@ -164,13 +164,13 @@ def _write(kind: str, summary: str, body: str) -> Path:
     text = scrub_secrets(text)
     # O_EXCL + microsecond-bump retry: two wave-worker THREADS in one process can
     # hit the same pid+microsecond filename; a plain O_TRUNC would silently lose
-    # the first error log (Nemo hull review 2026-06-14, H1).
+    # the first error log.
     fd, path = open_unique_0600(lambda n: d / _log_filename(kind, n), now)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(text)
     # Prune AFTER the file is safely written, and never let a prune failure
     # change the write outcome — a non-OSError prune raise would otherwise make
-    # the caller return a sentinel path for a log that IS on disk (Nemo M4).
+    # the caller return a sentinel path for a log that IS on disk.
     try:
         _prune(kind)
     except Exception:  # noqa: BLE001 — best-effort retention; the write succeeded
@@ -262,7 +262,7 @@ def _parse_stamp_pid(path: Path) -> "tuple[str, int | None]":
 def _summary_of(path: Path, kind: str) -> str:
     """A one-line gist, REDACTED — it feeds the issue TITLE (and the TUI/CLI
     list), and a run log's first line is raw user content that could carry a
-    secret (Wild Bill H1: the title was never scrubbed)."""
+    secret (the title was never scrubbed)."""
     return scrub_secrets(_raw_summary_of(path, kind))
 
 
@@ -326,7 +326,7 @@ def list_logs() -> list[LogEntry]:
 
 def match_logs(log_id: str) -> list[LogEntry]:
     """Every entry matching a CLI-supplied id — an exact stem wins, else every
-    prefix match (so the caller can tell "no match" from "ambiguous", Nemo L2)."""
+    prefix match (so the caller can tell "no match" from "ambiguous")."""
     entries = list_logs()
     exact = [e for e in entries if e.id == log_id]
     return exact or [e for e in entries if e.id.startswith(log_id)]
@@ -367,7 +367,7 @@ def compose_issue(entry: LogEntry) -> "tuple[str, str]":
     user's own review.
     """
     # Scrub the TITLE too — entry.summary is already redacted at source, but the
-    # prefix-join is re-scrubbed as defence in depth (Wild Bill H1: the title
+    # prefix-join is re-scrubbed as defence in depth (the title
     # flows verbatim into the prefilled URL query AND the API payload).
     title = scrub_secrets(
         f"{_ISSUE_TITLE_PREFIX.get(entry.kind, '[Log]')} {entry.summary}"

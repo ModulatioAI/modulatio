@@ -2,7 +2,7 @@
 
 Modulatio's conversational Leader isn't only reachable inside the TUI. The
 **Agent Client Protocol (ACP)** server exposes him over JSON-RPC-on-stdio, so any
-ACP-speaking client — a Zed-class editor — can drive him: send a prompt, watch
+ACP-speaking client — an editor — can drive him: send a prompt, watch
 the activity, and approve the tools he wants to run.
 
 It's the same Leader, the same per-project memory: a turn over ACP and a turn in

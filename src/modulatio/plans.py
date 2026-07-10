@@ -165,7 +165,7 @@ def _plan_lock_timeout() -> float:
 def _atomic_overwrite(target: Path, text: str) -> None:
     """Overwrite ``target`` with ``text`` atomically.
 
-    re-sweep (F2b): the per-plan lock serializes the read-modify-WRITE
+    The per-plan lock serializes the read-modify-WRITE
     *mutators* against one another, but pure *readers* (``load``, and
     ``list_plans`` through it) run lock-free. A plain ``Path.write_text`` opens
     in ``"w"`` mode, which TRUNCATES the file before writing — so a lock-free
@@ -247,7 +247,7 @@ def _plan_lock(plan_id: str, project_code: str, *, timeout: float | None = None)
     """Hold a POSIX exclusive file lock serializing ALL read-modify-write
     mutations of a plan's YAML frontmatter.
 
-    re-sweep (F2): ``set_status`` / ``update_execution_state`` (and
+    ``set_status`` / ``update_execution_state`` (and
     ``cancel`` through ``set_status``) each do a read-YAML / modify /
     write-YAML cycle. Unguarded, a user ``cancel`` flipping status to
     ``declined`` can be clobbered by the dispatcher loop's
@@ -274,7 +274,7 @@ def _plan_lock(plan_id: str, project_code: str, *, timeout: float | None = None)
         timeout = _plan_lock_timeout()
     code = validate_project_code(project_code.lower())
     lock_path = _plans_dir(code) / f"{plan_id}.lock"
-    # re-sweep (F1): the re-entrancy key MUST be identical between the
+    # The re-entrancy key MUST be identical between the
     # outer acquisition (lock file not yet created — it's touch()ed below)
     # and a nested re-entrant acquisition (file now exists). Gating
     # resolve() on .exists() made the outer key the UNRESOLVED path and the
@@ -505,7 +505,7 @@ def persist(
             # Atomic create (temp + os.link): the plan appears fully-formed, so
             # a concurrent lock-free load() never catches the empty-create
             # window — while os.link still raises FileExistsError on an id
-            # collision, preserving the O_EXCL retry below (re-sweep F2b).
+            # collision, preserving the O_EXCL retry below.
             _atomic_create(target, text)
             break
         except FileExistsError:
@@ -557,7 +557,7 @@ def _coerce_cap(value: Any, kind: type) -> int | float | None:
       first usage record (``0 > -1``), bricking the plan with a confusing
       "cap exceeded" before any work runs. Mirror ``comptroller._parse_int``'s
       negative-cap rejection: degrade a typo'd negative cap to unbounded
-      rather than instant-halt. (re-sweep F2.)
+      rather than instant-halt.
     """
     if value is None or isinstance(value, bool):
         return None
@@ -587,7 +587,7 @@ def load(plan_id: str, project_code: str) -> Optional[PlanRecord]:
     except UnicodeDecodeError:
         # A corrupt / non-UTF-8 plan is UNLOADABLE — skip it (the malformed-file
         # contract list_plans relies on). Never decode-with-replacement: that
-        # would surface mojibake as a real operator-approved plan (Nemo).
+        # would surface mojibake as a real operator-approved plan.
         return None
     m = _FRONTMATTER_RE.match(raw)
     if m is None:
@@ -662,7 +662,7 @@ _SUB_OBJECTIVE_ITEM_RE = re.compile(
     # The separator class deliberately excludes newline whitespace
     # (uses [ \t] not \s) so a title-only line never borrows the
     # next item's line as its description and swallows it.
-    # re-sweep (F1): the title closes at the ``**`` that PRECEDES the
+    # The title closes at the ``**`` that PRECEDES the
     # separator boundary, not the last ``**`` on the line. The old greedy
     # ``(.+)\*\*`` bound the closing ``**`` to the LAST ``**``, so bold in
     # the DESCRIPTION (after the em-dash) corrupted the title — e.g.
@@ -738,7 +738,7 @@ def extract_sub_objectives(plan_body: str) -> list[dict]:
         return []
     for i, m in enumerate(items):
         title = m.group(2).strip()
-        # re-sweep (F1): group(3) is the separator char (— – - :), group(4)
+        # group(3) is the separator char (— – - :), group(4)
         # the same-line description (both None for a title-only item).
         first_line = (m.group(4) or "").strip()
         chunk_start = m.start()
@@ -829,7 +829,7 @@ def set_status(
     target = _plans_dir(code) / f"{plan_id}.md"
     if not target.exists():
         raise FileNotFoundError(f"plan file not found: {target}")
-    # re-sweep (F2): read-modify-write under the per-plan lock so a
+    # Read-modify-write under the per-plan lock so a
     # concurrent update_execution_state can't clobber this status flip
     # (lost update). Read happens INSIDE the lock to see the latest state.
     with _plan_lock(plan_id, code):
@@ -839,7 +839,7 @@ def set_status(
             raw = target.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
             # Fail CLEAN — never read-with-replacement and write U+FFFD back into
-            # an operator-approved plan during a read-modify-write (Nemo).
+            # an operator-approved plan during a read-modify-write.
             raise ValueError(
                 f"plan file {target} is not valid UTF-8; refusing to rewrite"
             ) from exc
@@ -864,7 +864,7 @@ def set_status(
             meta, sort_keys=False, allow_unicode=True,
         ) + "---\n\n" + body + "\n"
         # Atomic overwrite so a concurrent lock-free load() can't observe a
-        # torn/empty file mid-write (re-sweep F2b — the cancel-vs-update flake).
+        # torn/empty file mid-write (the cancel-vs-update flake).
         _atomic_overwrite(target, text)
 
     # Return the up-to-date record
@@ -1041,7 +1041,7 @@ def update_execution_state(
     target = _plans_dir(code) / f"{plan_id}.md"
     if not target.exists():
         raise FileNotFoundError(f"plan file not found: {target}")
-    # re-sweep (F2): read-modify-write under the per-plan lock and read
+    # Read-modify-write under the per-plan lock and read
     # INSIDE it, so a concurrent cancel()/set_status flip to 'declined'
     # is never clobbered by this update writing back its pre-cancel meta.
     with _plan_lock(plan_id, code):
@@ -1051,7 +1051,7 @@ def update_execution_state(
             raw = target.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
             # Fail CLEAN — never read-with-replacement and write U+FFFD back into
-            # an operator-approved plan during a read-modify-write (Nemo).
+            # an operator-approved plan during a read-modify-write.
             raise ValueError(
                 f"plan file {target} is not valid UTF-8; refusing to rewrite"
             ) from exc
@@ -1082,7 +1082,7 @@ def update_execution_state(
             meta, sort_keys=False, allow_unicode=True,
         ) + "---\n\n" + body + "\n"
         # Atomic overwrite so a concurrent lock-free load() can't observe a
-        # torn/empty file mid-write (re-sweep F2b — the cancel-vs-update flake).
+        # torn/empty file mid-write (the cancel-vs-update flake).
         _atomic_overwrite(target, text)
 
     record = load(plan_id, code)

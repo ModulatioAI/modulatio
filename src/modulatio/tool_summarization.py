@@ -71,7 +71,7 @@ class ToolSummarizationConfig:
     threshold_tokens: int = 2000
     summarizer_model: str | None = None
     keep_recent: int = 3
-    # 2026-06-03: aligned to the context-budget call-boundary prune (0.85) so
+    # Aligned to the context-budget call-boundary prune (0.85) so
     # there's a single coherent "compress at 85%" threshold — the doubled role
     # caps gave the headroom; we don't want the in-loop sliding-window prune
     # trimming tool outputs at 80% while the boundary gate waits for 85%.
@@ -270,7 +270,7 @@ def truncate_tool_result(
     summarized goes into the agent's context VERBATIM. A producer that fetches
     several sources then accumulates several such results and blows its role
     context budget — which decomposes, and the children re-accumulate, into a
-    storm (observed live 2026-05-30). Truncating on arrival bounds how much a
+    storm. Truncating on arrival bounds how much a
     single raw fetch can occupy; the full raw is persisted on disk and the
     agent can pull it back with ``read_tool_result`` when it needs more."""
     if count_tokens(model, text=text) <= max_tokens:
@@ -279,7 +279,7 @@ def truncate_tool_result(
     # read_tool_result hint) ahead of the kept head. Those header tokens count
     # against the agent's context too, so budget the head against ``max_tokens``
     # MINUS the header cost — otherwise the return systematically overshoots
-    # ``max_tokens`` by the un-counted header (opus r2 finding). The header text
+    # ``max_tokens`` by the un-counted header. The header text
     # is fixed except for ``call_id`` and the ``dropped`` count; the latter only
     # shrinks the head further, so counting the header alone (with a ``dropped``
     # placeholder no shorter than the real value) is a safe upper bound.
@@ -341,12 +341,12 @@ def prune_messages_sliding_window(
     ``[summarized:`` marker) are not re-pruned. Callers can invoke this
     every iteration without churn.
 
-    Layer 2 (#90 budget primitive) calls this ad-hoc when its pre-call
+    Layer 2 (the budget primitive) calls this ad-hoc when its pre-call
     estimate hits the 80-100% band. Layer 1 (this module) calls it from
     inside the tool loop after each tool-result append. Same function,
     two trigger sites.
 
-    Recoverability (0.9.0 re-sweep, finding 1): the tool loop only persists
+    Recoverability: the tool loop only persists
     a raw result to ``<tool_calls_dir>/<call_id>.txt`` when it crosses
     ``threshold_tokens``. A SUB-threshold result lands verbatim with no disk
     copy. Pruning such a message to a ``read_tool_result`` promise dangled a
@@ -370,7 +370,7 @@ def prune_messages_sliding_window(
         return list(messages), 0
 
     # Resolve where raw results live: explicit arg wins, else the bound
-    # config's dir (the #90 budget call site doesn't pass one).
+    # config's dir (the budget-primitive call site doesn't pass one).
     if tool_calls_dir is None:
         _cfg = current_config()
         if _cfg is not None:
@@ -393,7 +393,7 @@ def prune_messages_sliding_window(
 
         # Is the raw already on disk? Either the tool loop persisted it (the
         # inline content carries a persist marker) or a file already exists.
-        # re-sweep finding 1: `[summarized:` content already `continue`d above,
+        # `[summarized:` content already `continue`d above,
         # so `[truncated:` is the only persist marker reachable here.
         already_persisted = content.startswith("[truncated:")
         if not already_persisted and tool_calls_dir is not None:

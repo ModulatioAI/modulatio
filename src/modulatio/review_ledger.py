@@ -60,7 +60,7 @@ _MAX_TRAILER_CHARS = 4000
 _MAX_SEPARATOR_CHARS = 200
 
 #: #100 oracle provenance ids — recorded in the verify mark so a cheap PASS names
-#: WHOSE word it rested on (Hero R1b). Canonical here (the low-level module) so
+#: WHOSE word it rested on. Canonical here (the low-level module) so
 #: ``assembly_validate`` imports them without a cycle.
 ORACLE_DOCUMENT = "document-structural"
 ORACLE_DATA = "data-structural"
@@ -103,8 +103,8 @@ def file_checksum(path: Path) -> str:
 
 
 #: P5 — declared-format magic bytes, the SHARED deliverable-integrity gate for
-#: EVERY assembler family (document, media, future), not a document-only check
-#: (Nemo hull #4, Lovecraft Q2/Q6). A deliverable whose extension names a known
+#: EVERY assembler family (document, media, future), not a document-only check.
+#: A deliverable whose extension names a known
 #: binary format MUST carry that format's signature.
 #:
 #: HONEST SCOPE — this is a magic-byte FAMILY gate, not a deep format validator:
@@ -199,7 +199,7 @@ def verify_unit(task: "Task", artifacts_root: Path) -> UnitVerdict:
     """
     tid = task.id
     expected = qc_passed_checksum(task)
-    # Wild Bill BLOCK (assembler arc, 2026-07-03): a null-output_path dep is
+    # A null-output_path dep is
     # NOT unverifiable — its artifact lives at the drafts fallback convention.
     # ONE resolver (families.task_output_rel_path), shared with the manifest
     # builder and the assembly allowlist, so the cheap path can pass the
@@ -238,7 +238,7 @@ def verify_assembly(
     Returns ``(True, "", oracle_id)`` only when the assembly is PROVABLY correct —
     safe to PASS QC without re-reading the assembled bytes into the model — where
     ``oracle_id`` names which deterministic oracle vouched (recorded in the verify
-    mark, Hero R1b: ``document-structural`` / ``data-structural`` /
+    mark: ``document-structural`` / ``data-structural`` /
     ``code-wiring:ast`` / ``stdlib-zipfile-bytes``). Returns ``(False, reason, "")``
     for anything not provably correct, and the caller then FALLS BACK to a normal
     full review (fail-closed). The ``code`` and ``media`` families gained their
@@ -246,7 +246,7 @@ def verify_assembly(
     av/image sub-kinds honestly fall back (no cheap post-hoc containment proof). It never *fails* a task on
     its own — a genuinely-broken assembly simply gets the full review, which
     rejects it. This both kills the #85 false-reject (a complete book passes
-    cheaply) and Nemo's tautology hole (the expected unit SET is the task graph's
+    cheaply) and the tautology hole (the expected unit SET is the task graph's
     ``depends_on``, not the producer's manifest).
 
     Checks, in order:
@@ -272,11 +272,11 @@ def verify_assembly(
     # review. document/data carry their existing structural oracle. The family
     # validators are already total; this call is wrapped as a final bulkhead so a
     # bug outside the oracle still degrades to a fall-back, never a throw — the
-    # caller invokes verify_assembly naked (Nemo #6, Hero m3).
+    # caller invokes verify_assembly naked.
     oracle_id = ORACLE_BY_STRATEGY.get(record.strategy, f"{record.strategy}-structural")
-    oracle_note = ""  # Hero f1: a delegated-oracle deny/fallback witness, carried on PASS
+    oracle_note = ""  # a delegated-oracle deny/fallback witness, carried on PASS
     if record.strategy in ("code", "media"):
-        # The IMPORT is inside the bulkhead too (Nemo code #4): a packaging skew where
+        # The IMPORT is inside the bulkhead too: a packaging skew where
         # assembly_validate is absent / fails at import time must degrade to a
         # fall-back, not propagate through the naked caller (orchestration.py:5858).
         try:
@@ -298,7 +298,7 @@ def verify_assembly(
         if not fam_ok:
             return False, fam_reason, ""
         oracle_id = fam_oracle
-        oracle_note = fam_reason  # nonempty only when a metered oracle fell back (Hero f1)
+        oracle_note = fam_reason  # nonempty only when a metered oracle fell back
 
     if not record.complete:
         return False, "assembly incomplete (missing or errored units)", ""

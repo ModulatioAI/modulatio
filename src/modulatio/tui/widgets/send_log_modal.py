@@ -131,7 +131,7 @@ class SendLogModal(ModalScreen[bool]):
             return
         # Re-apply the redaction + size cap to whatever the user EDITED. The
         # prefilled body was already safe, but free-text edits bypass both, and
-        # the "auto-redacted" promise must hold for the filed bytes (Nemo M3).
+        # the "auto-redacted" promise must hold for the filed bytes.
         title = logstore.scrub_secrets(title)[:240]
         body = logstore.scrub_and_cap(body)
         opened, url = bug_report.open_issue(title, body)

@@ -1,6 +1,6 @@
 ---
 name: task-split
-description: Size ONE planned gather task against its prudent context cap — return it whole if it fits, else the fewest self-contained chunks that each fit. Invoked as a utility LLM call from the plan post-process (context-size-driven fan, 2026-07-01).
+description: Size ONE planned gather task against its prudent context cap — return it whole if it fits, else the fewest self-contained chunks that each fit. Invoked as a utility LLM call from the plan post-process.
 executor: llm
 capability_tags: task-breakdown, structured-output
 freshness_class: stable

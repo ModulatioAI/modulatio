@@ -2,15 +2,14 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Telegram listener — bidirectional bot for Modulatio slash-commands.
 
-Carried from v1.3.1 ``telegram_listener.py`` (~487 LOC), adapted for v2:
+Bidirectional Telegram bot:
 
 - Polls Telegram getUpdates API in a background thread
 - Routes incoming `/cmd args` messages to a Telegram-side dispatcher that
-  mirrors the TUI's slash-command surface (slice 5) plus extras specific
+  mirrors the TUI's slash-command surface plus extras specific
   to remote control: `/kickoff`, `/heartbeat`, `/projects`, `/agents`
 - All credentials user-supplied via ``modulatio telegram setup`` or the
-  setup wizard; nothing hardcoded (per
-  ``feedback_modulatio_no_hardcoded_paths.md``)
+  setup wizard; nothing hardcoded
 
 Commands surface (`/help` shows the live list):
   Inspection:
@@ -107,7 +106,7 @@ class TelegramListener:
         if not bot_token:
             raise ValueError("bot_token is required")
         self.bot_token = bot_token
-        # SEC-003: chat_id is necessary but not sufficient — in a group
+        # chat_id is necessary but not sufficient — in a group
         # chat every member shares the same chat.id. We also require
         # either (a) the chat is type=private (1:1 with the bot, the
         # default single-user mode) or (b) the sender's user id is in
@@ -207,7 +206,7 @@ class TelegramListener:
             sender_chat_id = str(chat.get("id", ""))
             chat_type = chat.get("type") or ""
             sender_user_id = sender.get("id")
-            # SEC-003 layered check.
+            # Layered authorization check.
             # 1. chat.id must equal the configured chat_id.
             if sender_chat_id != self.chat_id:
                 logger.warning(
@@ -490,8 +489,8 @@ def _cmd_cron(args: str) -> str:
 
 def _cmd_kickoff(args: str) -> str:
     """`/kickoff <code> <objective...>` — runs one GSD pass synchronously
-    (in stub mode for now; daemon-managed real-model kickoff arrives in
-    Phase 3 when the daemon is wired to model-flag persistence).
+    (in stub mode for now; daemon-managed real-model kickoff arrives once
+    the daemon is wired to model-flag persistence).
     """
     parts = args.strip().split(maxsplit=1)
     if len(parts) < 2:

@@ -10,7 +10,7 @@ honest. It is injected ONLY into the QC review prompt (``_qc_review`` / the
 
 This is engineering, not nicety: QC's corrective notes ARE the producer's next
 prompt, so a harsh register collapses a capable model inward (the retreat /
-shrink-spiral observed live 2026-06-02). A constructive register gets better
+shrink-spiral observed live). A constructive register gets better
 work — the same lever a good editor uses on a capable writer.
 
 Resolution mirrors :mod:`modulatio.constitution` — highest-precedence-wins (one

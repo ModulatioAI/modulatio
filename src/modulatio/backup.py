@@ -38,11 +38,8 @@ To produce a self-contained backup that re-imports without re-auth
 ``--include-secrets`` from the CLI). The CLI prints a visible
 warning to stderr when ``--include-secrets`` is used.
 
-Default flipped 2026-05-04 in audit-wave2 after the security audit's
-review found backups defaulting to include `.env` + token while the
-docs claimed exclusion. Per ``feedback_no_github_push.md`` and
-``SECURITY.md``: secrets-by-default is a leak vector; explicit opt-in
-is the safer contract.
+Secrets-by-default is a leak vector; explicit opt-in
+is the safer contract. See ``SECURITY.md``.
 """
 
 from __future__ import annotations
@@ -161,7 +158,7 @@ def _walk_vault(vault_root: Path, code: str) -> tuple[dict[str, str], list[str]]
         except ValueError:
             skipped.append(rel)
             continue
-        # re-sweep (F1): scope the cache-dir skip to the PROJECT tree, not
+        # Scope the cache-dir skip to the PROJECT tree, not
         # the absolute path. f.parts includes every ancestor up to "/", so
         # a vault root mounted under a dir named .cache/_proposals/lance.db
         # (e.g. ~/.cache/...) would match on the ancestor and silently drop
@@ -508,7 +505,7 @@ def import_backup(
             if target.exists() and not overwrite:
                 summary["vault_files_skipped"] += 1
                 continue
-            # re-sweep (F2): a corrupt/hand-crafted backup may carry a
+            # A corrupt/hand-crafted backup may carry a
             # non-string value for a file entry (dict, number, null).
             # write_text would raise TypeError mid-restore; fail closed with
             # a clean ValueError matching the other malformed-input guards.

@@ -58,7 +58,6 @@ _EMBEDDED_SECRET = re.compile(
 # `Authorization: Bearer sk-...` / `Authorization: Basic dXNlcjpwYXNz` in the
 # traceback body; the `key=value` form above won't catch the space-delimited
 # credential, so this is a second pass applied alongside `_scrub_embedded_secrets`.
-# (Nemo/Wild Bill hull review 2026-06-14: `Basic` was missed.)
 _BEARER_TOKEN = re.compile(
     r"(?P<scheme>\b(?:Bearer|Basic))\s+(?P<val>[A-Za-z0-9._\-+/=~]+)",
     re.IGNORECASE,
@@ -68,7 +67,7 @@ _BEARER_TOKEN = re.compile(
 # follow the separator and the label may be multi-word (`API key: sk-...`,
 # `token: abc`, `client secret = ...`). `_EMBEDDED_SECRET` above only catches
 # the no-whitespace `key=value` form; this catches the spaced/labelled form that
-# routinely appears in error-message prose (Wild Bill hull review 2026-06-14).
+# routinely appears in error-message prose.
 # Deliberately EXCLUDES `auth`/`bearer` labels — those are handled by
 # `_BEARER_TOKEN` above, and including them here would consume the scheme word
 # (`Bearer`) as the "value" and re-expose the real credential.
@@ -151,7 +150,7 @@ def open_unique_0600(path_for: "Callable[[datetime], Path]", now: datetime) -> "
     """Create a 0600 file with ``O_EXCL``, retrying with a bumped microsecond on a
     name collision. Two THREADS in one process can hit the same pid + same
     microsecond → the same filename; a plain ``O_TRUNC`` open would silently
-    overwrite the first thread's bytes (Nemo hull review 2026-06-14, H1). Returns
+    overwrite the first thread's bytes. Returns
     ``(fd, path)``. After many retries it falls back to ``O_TRUNC`` — a clobber
     then is astronomically unlikely and still beats raising into a failure path."""
     candidate = now

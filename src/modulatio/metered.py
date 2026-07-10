@@ -6,8 +6,7 @@ The free-local default (ddgs ``web_search``, ``http_get``, ``run_shell``) runs
 unmetered. A tool that costs real money per call sets ``Tool.cost_class`` to
 ``paid-cloud`` / ``premium-cloud``; the engine then gates every such call BEFORE it
 spends. This module builds the gate the producer tool-loop calls
-(``runners.run_llm_with_tools(metered_authorizer=...)``), enforcing the contract the
-Part B review required (Nemo #6/#7):
+(``runners.run_llm_with_tools(metered_authorizer=...)``), enforcing the contract:
 
   1. **Narrow params.** A metered tool's args may name pinned artifacts + options —
      never an arbitrary URL / endpoint / body / headers (no LLM-controlled SSRF or
@@ -38,7 +37,7 @@ from modulatio import comptroller, review_ledger
 class AuthorizerResult(tuple):
     """The metered authorizer's return value.
 
-    re-sweep MEDIUM/integration (Finding 1): the comptroller flags an
+    (Finding 1): the comptroller flags an
     idempotent replay structurally (``Authorization.idempotent_reuse``) so the
     tool runner can short-circuit the provider re-invoke (reuse the prior
     result) instead of paying again. ``build_metered_authorizer`` previously
@@ -161,7 +160,7 @@ def build_metered_authorizer(
     """
 
     def authorize(called_name: str, args: dict) -> "tuple[bool, str]":
-        # 0. Name guard (Nemo B4 #3): this authorizer is bound to ONE tool's
+        # 0. Name guard: this authorizer is bound to ONE tool's
         # cost_class/accounting. If the same authorizer is wired across a loadout
         # with another metered tool, a different tool must NOT be billed as this one.
         if called_name != tool_name:
@@ -170,7 +169,7 @@ def build_metered_authorizer(
                 f"metered authorizer for {tool_name!r} cannot authorize a different "
                 f"tool {called_name!r} — wire one authorizer per metered tool",
             )
-        # 1. Narrow-param contract (Nemo B4 #4) — no arbitrary network target/payload,
+        # 1. Narrow-param contract — no arbitrary network target/payload,
         # checked recursively + by token + by URL-like value (not just top-level keys).
         bad = _scan_for_network_params(args)
         if allowed_keys and bad:
@@ -210,7 +209,7 @@ def build_metered_authorizer(
             project_code, cost_class, tool_name, task_id, key, agent_id,
             per_task_cap=per_task_cap,
         )
-        # re-sweep (Finding 1): thread the structured idempotent-replay signal
+        # thread the structured idempotent-replay signal
         # through to the runner (length-2 (allowed, reason) for back-compat).
         return AuthorizerResult(auth.allowed, auth.reason, auth.idempotent_reuse)
 

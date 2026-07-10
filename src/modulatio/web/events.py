@@ -31,7 +31,7 @@ _SUBSCRIBER_DEPTH = 1000
 #: (``_SUBSCRIBER_DEPTH``): a reconnect can only be handed that many frames, so
 #: retaining more is undeliverable weight — and iterating a larger buffer
 #: oldest-first would fill the queue with stale head frames and DROP the newest,
-#: including a possible ``run_done`` (Wild Bill). ``subscribe`` replays the
+#: including a possible ``run_done``. ``subscribe`` replays the
 #: newest suffix, not the oldest prefix.
 _REPLAY_DEPTH = _SUBSCRIBER_DEPTH
 
@@ -50,8 +50,8 @@ class EventBus:
             # both under the lock so no live frame slips in between. Hand over
             # the NEWEST frames that fit (leaving one slot for the latest
             # telemetry), so a long run's tail — the current producer burst and
-            # run_done — survives instead of being dropped for stale head frames
-            # (Wild Bill). The deque is already capped at _SUBSCRIBER_DEPTH.
+            # run_done — survives instead of being dropped for stale head frames.
+            # The deque is already capped at _SUBSCRIBER_DEPTH.
             for frame in list(self._replay)[-(_SUBSCRIBER_DEPTH - 1):]:
                 try:
                     q.put_nowait(frame)

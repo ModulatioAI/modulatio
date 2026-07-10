@@ -108,7 +108,7 @@ class BugReportModal(ModalScreen[None]):
     def _report_on_github(self) -> None:
         """Open the project's issue tracker, prefilled, in the user's browser —
         the universal no-token path. Headless / no browser: copy the issue link
-        so they can paste it elsewhere, and spell out the email + exit (B3)."""
+        so they can paste it elsewhere, and spell out the email + exit."""
         report = self._compose_report()
         if report is None:
             return

@@ -64,10 +64,8 @@ from pathlib import Path
 from typing import Any, Iterator, Literal, Sequence
 
 
-# 2026-06-04: doubled from the 8K guardrail per Clif's "double the litellm
-# fallback" directive (still conservative for UNKNOWN models — the floor stays,
-# just doubled). NOTE: the original 70dfafe commit claimed this change but the
-# edit never landed; corrected here after Nemo's hull review caught the mismatch.
+# Doubled from the 8K guardrail (still conservative for UNKNOWN models — the
+# floor stays, just doubled).
 _DEFAULT_FALLBACK_MAX_INPUT_TOKENS = 16384
 
 _LOGGER = logging.getLogger("modulatio.context_budget")
@@ -92,22 +90,21 @@ _WARNED_UNBOUND_GATE_FIRE: list[bool] = []
 # budget_role per semantically-distinct LLM call pattern — same
 # runner_role (e.g. "leader") may map to multiple budget_roles
 # depending on the call site (decompose vs iterate vs reflect vs chat).
-# 2026-06-04: DOUBLED from the original 8K-baseline presets (Clif's call, Nemo
-# concurred up to 32K). The engine was designed to operate + compress at 8K and
-# the original presets capped the heavy roles at 16K — too tight for synthesis
-# (a 6-story assembly / the Leader reading 6 deliverables ≈15K tokens crashed).
-# Every model in use has ≥32K real window, so the heavy roles now land at 32K
-# with headroom; same compress/operate behavior, just more room. Reversible.
-# 2026-06-25: +16K per role (Clif's call). A live sourcing producer fired 19
+# DOUBLED from the original 8K-baseline presets. The engine was designed to
+# operate + compress at 8K and the original presets capped the heavy roles at
+# 16K — too tight for synthesis (a 6-story assembly / the Leader reading 6
+# deliverables ≈15K tokens crashed). Every model in use has ≥32K real window,
+# so the heavy roles now land at 32K with headroom; same compress/operate
+# behavior, just more room. Reversible.
+# +16K per role. A live sourcing producer fired 19
 # compressions in one attempt at the 32K producer cap — lossy churn the models'
 # real windows (cloud 128K+, local gemma 262K) have ample room to avoid. Kept
 # deliberately conservative: an INCH, not a leap — inch up again if the churn
 # persists. Same compress/operate behavior, just more room. Reversible.
 EXPERIMENTAL_DEFAULTS: dict[str, int] = {
     "producer":        48_000,
-    # 32K→64K (Clif, 2026-07-03, run-4 evidence): a reviewer squeezed below
-    # the producer's canvas forces compressed partial-view judgments (the
-    # #85 scar's origin). 64K→96K (Clif, 2026-07-06): QC must sit GENEROUSLY
+    # 32K→64K: a reviewer squeezed below the producer's canvas, forcing
+    # compressed partial-view judgments. 64K→96K: QC must sit GENEROUSLY
     # above the producers — 2x the producer tier — to read the whole canvas
     # + standards + its own tool results without churn. Tracks the hard
     # ceiling (raised with it). The assembly cheap-path stays the primary
@@ -127,13 +124,12 @@ EXPERIMENTAL_DEFAULTS: dict[str, int] = {
 
 #: Fallback for unknown budget_roles. Producer-class default so custom
 #: agents have a reasonable starting point until they explicitly opt into
-#: a different budget. (Doubled 2026-06-04; +16K 2026-06-25 with the rest —
-#: tracks the producer default.)
+#: a different budget (tracks the producer default).
 CUSTOM_WORKER_DEFAULT = 48_000
 
 #: Hard ceiling for ANY single LLM call's resolved budget. Discipline
 #: lever, not a model-capability claim — raising it requires an explicit
-#: project/admin configuration change. 64K→96K (Clif, 2026-07-06): raised
+#: project/admin configuration change. 64K→96K: raised
 #: with the QC tier so the reviewer's 2x-producer window isn't silently
 #: clamped back to the producer's size.
 HARD_GLOBAL_CEILING = 96_000
@@ -240,7 +236,7 @@ class ContextBudgetConfig:
     enabled: bool = True
     max_input_tokens: int | None = None
     soft_warn_at_pct: float = 0.70
-    # 2026-06-03: with the role caps doubled (8K-era → 16-32K), prune at 85%
+    # With the role caps doubled (8K-era → 16-32K), prune at 85%
     # rather than 80%. Higher trip = ride the doubled headroom for synthesis
     # calls (the assembler reading N deliverables) WITHOUT compressing away the
     # very artifacts it's reading, while keeping a 15% soft-compress band before
@@ -266,8 +262,8 @@ class ContextBudgetConfig:
     #: attempt is treated as thrashing the budget and aborted (raises
     #: CompressionChurnExceeded). One ``_producer_execute`` runs a whole tool
     #: loop; without this a single attempt can compress many times — grinding
-    #: invisibly, since the redo counter only moves between attempts. Default 3
-    #: (Clif 2026-06-25): a couple of compressions is healthy long-task
+    #: invisibly, since the redo counter only moves between attempts. Default 3:
+    #: a couple of compressions is healthy long-task
     #: behavior; persistent churn is not. ``<= 0`` disables the guard. Tunable
     #: like the other knobs.
     max_compressions_per_attempt: int = 3
@@ -375,13 +371,13 @@ def get_known_max_input_tokens(model: str | None) -> int | None:
       - the lookup raises for any reason
 
     ``None`` is the model-agnostic signal — callers must NOT invent a cap
-    for an unknown model. Context is allocated BY ROLE (the per-role PIANO
+    for an unknown model. Context is allocated BY ROLE (the per-role
     budgets in :data:`EXPERIMENTAL_DEFAULTS`, resolved by
     :func:`resolve_for_dispatch`), never by which LLM backs the agent. A
     model window only ever *lowers* a role budget when we genuinely know the
     model's window is smaller (see :func:`dispatch_context`); when it's
     unknown the role budget governs unchanged. This is the tested
-    Project-Sid/PIANO discipline — large windows broke the engine, small
+    role-bounded-window discipline — large windows broke the engine, small
     role-bounded windows are the design — so an unrecognized model must fall
     back to the ROLE budget, not to an arbitrary token floor.
     """
@@ -421,7 +417,7 @@ def get_max_input_tokens_for_model(model: str | None) -> int:
 
 
 def _redact_messages_for_checkpoint(messages: Sequence[dict]) -> list[dict]:
-    """Alpha (F3 + F14 audit follow-up): redact channels in the
+    """Redact channels in the
     persisted message list that are most likely to carry secrets
     before writing the checkpoint.
 
@@ -432,14 +428,13 @@ def _redact_messages_for_checkpoint(messages: Sequence[dict]) -> list[dict]:
        customer rows from a query, OAuth tokens carried back through
        a callback.
 
-    2. **Assistant ``tool_calls[*].function.arguments``** (F14, Wild
-       Bill Round 2). The model serializes its tool invocation
-       arguments here — URLs with tokens, shell commands with
+    2. **Assistant ``tool_calls[*].function.arguments``**. The model serializes
+       its tool invocation arguments here — URLs with tokens, shell commands with
        passwords on the line, file paths with PII, customer
-       identifiers. Pre-F14 only role==tool was redacted; assistant
+       identifiers. Previously only role==tool was redacted; assistant
        turns went through verbatim and the arguments leaked.
 
-    SEC-03 (security audit, Nemo): assistant / user *prose* is additionally
+    Assistant / user *prose* is additionally
     swept with the shared token redactor (``oauth_refresh._redact_secrets``) —
     only token-SHAPED substrings (``sk-…`` / ``Bearer …`` / JWTs / provider
     keys) are masked, so the prompt shape Leader's recovery pass reasons over is
@@ -708,7 +703,7 @@ def check_and_compress(
     padded_after = int(raw_after * (1 + cfg.pad_pct))
 
     if padded_after < cap:
-        # re-sweep (#611): pre_compression_tokens carries the pre-prune
+        # pre_compression_tokens carries the pre-prune
         # estimate; post_compression_tokens carries the padded post-prune
         # estimate so a downstream join can compute the compression ratio
         # (post/pre) directly off the row instead of guessing padded_after.
@@ -741,7 +736,7 @@ def check_and_compress(
             # signal — surface the budget breach regardless.
             cp_path = None
     # Emit BEFORE the raise so the row lands even on the failure path.
-    # re-sweep (#611): the refusal path also pruned, so carry the
+    # the refusal path also pruned, so carry the
     # post-prune estimate that still overflowed.
     _emit_context_budget_event(
         model=model,
@@ -844,7 +839,7 @@ class ContextBudgetTelemetryContext:
     audit_path: Path | None = None
     effective_cap: int | None = None
     status: BudgetStatus = "active"
-    #: Concurrency (#151/e2e, Nemo Blocker 1): a lock the orchestrator binds
+    #: Concurrency: a lock the orchestrator binds
     #: per-dispatch so the audit append below serializes with the
     #: orchestrator's OTHER shared-run-file writes (inbox, turn, research)
     #: under concurrent wave workers. ``None`` (sequential / unbound) → no
@@ -884,7 +879,7 @@ def _budget_role_for_role(role: str) -> str:
     # Producer-agnostic: there is NO canonical producer-role set. Any role that
     # is not a core ENGINE function (leader/planner/qc/research) is a producer —
     # a model endpoint that composes skills — and correctly buckets to the
-    # "producer" budget pool. (Cadre agnostic audit: removed the hardcoded
+    # "producer" budget pool. (This removes a hardcoded
     # "known producer roles" allowlist + its "unknown role" warning, which baked
     # in a fixed-role assumption for no behavioral gain.)
     return "producer"
@@ -1233,7 +1228,7 @@ def _emit_context_budget_event(
     """Append one ``actor="context_budget"`` row to the bound telemetry
     audit log.
 
-    ``post_compression_tokens`` (re-sweep #611) is the padded post-prune
+    ``post_compression_tokens`` is the padded post-prune
     token estimate; it's set on the compression branches (success +
     refusal) so the row carries both ends of the prune and a derived
     ``compression_ratio``. ``None`` on the no-prune branches.
@@ -1295,7 +1290,7 @@ def _emit_context_budget_event(
         if tel.effective_cap and tel.effective_cap > 0
         else 0.0
     )
-    # re-sweep (#611): carry the post-prune token count (and the ratio
+    # carry the post-prune token count (and the ratio
     # off it) on the compression branches so the documented
     # compression-ratio join is computable from the row alone. None on
     # the no-compression branches (under-threshold / soft-warn / disabled
@@ -1335,7 +1330,7 @@ def _emit_context_budget_event(
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
     }
 
-    # Concurrency (#151/e2e, Nemo Blocker 1): serialize the shared
+    # Concurrency: serialize the shared
     # audit.jsonl append under the orchestrator-bound write_lock when one is
     # present (concurrent wave workers). nullcontext when unbound (sequential
     # path) → behavior unchanged.

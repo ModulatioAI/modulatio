@@ -37,7 +37,7 @@ from modulatio.tui.widgets.schedule_modal import ScheduleModal
 
 
 def kickoff_template_now(name: str, project_code: str) -> tuple[bool, str]:
-    """Pre-flight a one-click JT kickoff from the library (Clif 2026-07-07).
+    """Pre-flight a one-click JT kickoff from the library.
     Mirrors ``cron.add``'s add-time gate: the template must exist and its
     required params must be satisfiable from its own defaults — validate NOW,
     while the operator is here, instead of letting the run refuse the bind.

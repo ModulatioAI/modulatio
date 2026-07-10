@@ -182,7 +182,7 @@ def select_agent(
     """Pick the best PRODUCER for ``task`` — capability-and-availability
     routing. Returns ``None`` only when no producer exists at all.
 
-    A producer is NEVER picked for OWNING a skill (Clif 2026-06-28): it JIT-loads
+    A producer is NEVER picked for OWNING a skill: it JIT-loads
     whatever skill its task needs from the floating library, so any producer can
     run any task — including a task with NO required_skills, which routes by
     capability + load-balance like any other (no special funnel). Skills route
@@ -247,7 +247,7 @@ class WaveSchedule:
       THIS wave (capacity reserved).
     - ``deferred``: ``(task_id, blocking_agent_id, agent_capacity_cap)`` —
       DEFERRED_CAPACITY tasks, retry next wave. Distinct from a roster gap
-      (Lovecraft round-1: keep capacity contention vs capability gap
+      (capacity contention and capability gap are kept
       separate for later tuning). When the run-wide GLOBAL in-flight cap is
       the limiter (not any one producer's per-agent capacity), the blocking
       fields are a sentinel ``("", 0)`` rather than a specific producer —
@@ -270,7 +270,7 @@ def schedule_wave(
     domain_floor_for: DomainFloorLookup | None = None,
 ) -> WaveSchedule:
     """Allocate one concurrent wave's tasks to agents with capacity IN
-    selection (core rebuild B2, per Nemo's round-1 correction: a
+    selection (a
     post-selection batch limiter would assign five ready tasks that all
     fit the cheapest producer to that ONE agent, then serialize them).
 
@@ -305,7 +305,7 @@ def schedule_wave(
 
     for task in sorted(wave_tasks, key=lambda t: t.id):
         # Every task is scheduled by capability + load-balance — skills never
-        # route (Clif 2026-06-28), so a task with NO required_skills is handled
+        # route, so a task with NO required_skills is handled
         # here too, not skipped to a caller legacy path.
         candidates = _qualifying_candidates(
             task, agents, skill_floor_for, domain_floor_for
@@ -640,8 +640,7 @@ def select_qc_agent(
 #: rosters — the standard "QC must be a different agent" filter returns
 #: no peer, and the role-keyed fallback silently lets the producer
 #: self-verify its own audit. Orchestrator routes verification to
-#: Leader instead for these kinds; see issue #5/#6 from the 2026-04-30
-#: smoke test (memory: project_modulatio_qc_as_producer_gap.md).
+#: Leader instead for these kinds.
 AUDIT_CLASS_ARTIFACT_KINDS: frozenset[str] = frozenset({
     "audit",
     "audit-report",

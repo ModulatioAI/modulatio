@@ -95,7 +95,7 @@ REASON_NOTE_MAX_CHARS = 140
 ECHO_EXCERPT_CHARS = 80
 
 
-#: Closed enum of compaction reason codes. Mirrors's
+#: Closed enum of compaction reason codes. Mirrors the inbox layer's
 #: ``INBOX_REASON_LITERALS`` shape — adding a value is a deliberate
 #: CHANGELOG entry, never free text.
 REASON_CODE_LITERALS = (
@@ -113,8 +113,7 @@ REASON_CODE_LITERALS = (
 )
 
 #: Closed enum of deferred-item provenance sources. Tracks how a
-#: deferred item entered the state doc — anti-drift ballast per
-#: Nemo's Q1 disposition.
+#: deferred item entered the state doc — anti-drift ballast.
 DEFERRED_SOURCE_LITERALS = (
     "producer_claim",
     "qc_verdict",
@@ -207,7 +206,7 @@ class DeferredItem:
 @dataclass(frozen=True)
 class NonGoal:
     """One row in the ``non_goals[]`` list. Each carries an explicit
-    ``because`` rationale per Nemo's Q2 disposition — Leader may not
+    ``because`` rationale — Leader may not
     invent constraints; every non-goal needs cited evidence."""
 
     text: str
@@ -246,7 +245,7 @@ class CompactionRecord:
 @dataclass(frozen=True)
 class DiffPayload:
     """Structured diff between two adjacent compaction versions.
-    Pure JSON envelope per Nemo M3 — no comments in JSON; the
+    Pure JSON envelope — no comments in JSON; the
     ``unified_diff`` string is a separate field, not embedded in
     structured data."""
 
@@ -324,8 +323,8 @@ def parsed_state_path(run_dir: Path, version: int) -> Path:
     """Return ``<run>/compressed_state/parsed/<NNN>.json`` — the
     structured dict the engine compacted on. Persisted alongside the
     canonical markdown so the NEXT compaction can load ``prev_parsed``
-    cleanly and produce a real adjacent-version structured diff. M1
-    close-out (Nemo Round-2 implementation sweep) — without this,
+    cleanly and produce a real adjacent-version structured diff —
+    without this,
     every diff after v001 falsely shows "everything added from
     scratch" because the rendered markdown can't be cleanly parsed
     back into the parsed dict shape."""
@@ -398,7 +397,7 @@ def _compaction_lock(run_dir: Path) -> Iterator[None]:
 
 def _ensure_parent_0700(path: Path) -> None:
     """Create the parent directory at mode 0o700 if it doesn't exist.
-    Mirrors the inbox layer's L1 fix: ``mkdir(mode=...)`` only
+    Mirrors the inbox layer's fix: ``mkdir(mode=...)`` only
     affects the leaf-most newly-created directory, so we walk new
     ancestors with an explicit chmod. Best-effort chmod (some
     platforms / mounts disallow)."""
@@ -429,9 +428,8 @@ def _atomic_write_0600(path: Path, content: str) -> None:
     fsync the data → close → ``Path.replace`` (atomic rename) →
     fsync the parent directory. The file is created with 0o600 from
     the start (no umask window); the data fsync ensures the bytes
-    are on disk before the rename commits; the directory fsync (L1
-    close-out, Nemo Round-2 implementation sweep) ensures the rename
-    itself is durable across power loss.
+    are on disk before the rename commits; the directory fsync
+    ensures the rename itself is durable across power loss.
 
     Crash semantics:
 
@@ -613,8 +611,8 @@ def _write_parsed_state(
 ) -> Path:
     """Persist the structured parsed-state dict at
     ``<run>/compressed_state/parsed/<NNN>.json``. Sort keys + UTF-8
-    safe so subsequent reads diff cleanly across instances. M1
-    close-out: enables real adjacent-version structured diffs."""
+    safe so subsequent reads diff cleanly across instances —
+    enables real adjacent-version structured diffs."""
     payload = json.dumps(
         parsed_state, ensure_ascii=True, indent=2, sort_keys=True,
     )
@@ -715,19 +713,19 @@ def compute_diff(
 
     ``prev_state`` is the parsed dict from the prior version, loaded
     by :func:`emit_compaction` via :func:`_read_parsed_state` against
-    the prior version's persisted ``compressed_state/parsed/NNN.json``
-    (M1 close-out, c16). When non-None, the structured diff carries
+    the prior version's persisted ``compressed_state/parsed/NNN.json``.
+    When non-None, the structured diff carries
     real ``added`` / ``removed`` / ``modified`` entries between v(N-1)
     and v(N).
 
     ``prev_state=None`` happens in two cases:
       - First compaction of a run (no prior version exists).
-      - Legacy back-compat: a run that started before c16 has no
+      - Legacy back-compat: a run predating parsed-state persistence has no
         ``parsed/NNN.json`` on disk; the engine treats prior state as
         unknown and falls back to first-turn shape — every section
         ``added`` relative to nothing, no ``removed`` / ``modified``.
 
-    Output shape (Nemo Round-1 M3):
+    Output shape:
       - ``added[section] = [items_in_curr_not_in_prev]`` for list
         sections; for scalar sections, present only when the field
         is non-empty in curr and absent in prev.
@@ -1081,7 +1079,7 @@ def emit_echo_corrected(
     write_lock: Any = None,
 ) -> None:
     """Append a ``compression_echo_corrected`` row. Carries hashes
-    + short excerpts (Nemo M5), never the raw divergent text."""
+    + short excerpts, never the raw divergent text."""
     row = _base_audit_row(
         event="compression_echo_corrected",
         project_code=project_code, run_id=run_id, plan_id=plan_id,
@@ -1115,8 +1113,7 @@ def validate_state_doc(parsed: dict | None) -> list[str]:
     owned echoes (``original_user_goal``) are NOT validated here —
     those get auto-corrected, not skip-on-missing.
 
-    M3 close-out (Nemo Round-2 implementation sweep): item-level
-    validation now matches the seed contract's "must" claims:
+    Item-level validation matches the seed contract's "must" claims:
 
       - ``reason_note`` length ≤ :data:`REASON_NOTE_MAX_CHARS`
         (overlong notes return ``"reason_note"`` so caller skips).
@@ -1196,7 +1193,7 @@ def _is_well_formed_non_goal(item) -> bool:
     """A non_goals[] entry needs:
       - dict
       - non-empty ``text: str``
-      - non-empty ``because: str`` rationale (Nemo Q2 — "out of
+      - non-empty ``because: str`` rationale ("out of
         scope" alone is not a rationale)."""
     if not isinstance(item, dict):
         return False
@@ -1310,11 +1307,10 @@ def emit_compaction(
 ) -> CompactionOutcome:
     """Run one compaction attempt end-to-end.
 
-    Sequence (normative, mirrors the §3.2 write order in
-    the prior design-review letter):
+    Sequence (normative):
 
       1. If ``parsed_state is None`` → emit ``compaction_skipped``.
-         When ``parse_failure_reason`` is set (B1+M5 fix), it drives
+         When ``parse_failure_reason`` is set, it drives
          the right skip_reason via :data:`_PARSE_REASON_TO_SKIP_REASON`:
          ``no_fence``/``empty_fence`` → ``missing_state_doc``;
          ``malformed_json``/``non_dict`` → ``malformed_state_doc``.
@@ -1350,7 +1346,7 @@ def emit_compaction(
     """
     # Step 1: missing or malformed state-doc routing.
     if parsed_state is None:
-        # B1 + M5 fix: pick the right skip_reason from the typed
+        # Pick the right skip_reason from the typed
         # parse-failure hint. Unknown / absent hint defaults to the
         # legacy "missing_state_doc" so callers without the hint stay
         # back-compatible.
@@ -1441,13 +1437,13 @@ def emit_compaction(
         version = _next_version(run_dir)
 
         # Step 5: load previous state markdown + parsed dict for diffing.
-        # M1 close-out (Nemo Round-2 implementation sweep): the parsed
+        # The parsed
         # dict is read from the persisted compressed_state/parsed/NNN.json
         # so the structured diff against the prior version is REAL, not
         # a "everything added from scratch" placeholder. Legacy runs from
         # before this commit have no parsed.json on disk — _read_parsed_state
         # returns None there, and compute_diff falls back to its first-
-        # turn shape (added-only) as before. New runs from c16 onward
+        # turn shape (added-only) as before. New runs going forward
         # always have parsed.json available because every emit writes it.
         prev_state_body: str | None = None
         prev_parsed: dict | None = None
@@ -1470,7 +1466,7 @@ def emit_compaction(
         )
 
         # Step 7: no-material-change detection.
-        # M2 close-out (Nemo Round-2 implementation sweep): if Leader
+        # If Leader
         # emitted a divergent original_user_goal echo on the SAME turn
         # that produces a no_material_change skip, the echo correction
         # is still a forensic event worth recording. Emit
@@ -1506,7 +1502,7 @@ def emit_compaction(
         # order). Manifest stays LAST: a crash before manifest leaves
         # orphan state/diff/parsed for the next attempt to overwrite;
         # a crash after manifest leaves the new triple as the live
-        # version. M1 (Nemo Round-2): parsed.json lands between diff
+        # version. parsed.json lands between diff
         # and manifest so the next compaction's _read_parsed_state finds
         # it cleanly.
         state_path = _write_state_version(run_dir, version, curr_body)
@@ -1600,7 +1596,7 @@ def _make_compaction_id() -> str:
 
 
 def _utcnow_iso() -> str:
-    """ISO8601 timestamp with second precision. Mirrors's
+    """ISO8601 timestamp with second precision. Matches the
     audit-row timestamp shape."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
