@@ -372,8 +372,6 @@ def test_dispatch_due_interval_catches_up_past_now_after_downtime():
 
 # === builder extensions: one-off, start_at anchor, count, until ===
 
-from datetime import date  # noqa: E402
-
 
 def _iso(y, mo, d, h=0, mi=0):
     return datetime(y, mo, d, h, mi, tzinfo=timezone.utc).isoformat(timespec="seconds")
