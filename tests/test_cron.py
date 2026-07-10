@@ -491,6 +491,33 @@ def test_poisoned_until_disables_rather_than_running_forever():
     assert after["last_status"] == "error:invalid-stop-metadata"
 
 
+def test_falsy_stop_metadata_is_malformed_not_absent():
+    """WB close-out MEDIUM: None is the SOLE absent sentinel — a hand-edited
+    ``until: ""`` or ``runs: ""`` is malformed and must disable fail-closed
+    before the heartbeat fires, not be truthiness-skipped as 'absent'."""
+    vault.init_project("cronx", "Cron X", "o")
+    for poison in ({"until": ""}, {"runs": ""}):
+        job = cron.add(name="j", schedule="1h", project_code="CRONX",
+                       objective="x", start_at=_iso(2000, 1, 1, 0, 0))
+        cron.update(job["id"], **poison)  # hand-edited falsy poison
+        fired = cron.dispatch_due(now=datetime(2000, 1, 1, 0, 1, tzinfo=timezone.utc))
+        after = cron.get(job["id"])
+        assert job["id"] not in {j["id"] for j in fired}, poison  # never fired
+        assert after["enabled"] is False, poison
+        assert after["last_status"] == "error:invalid-stop-metadata", poison
+        cron.remove(job["id"])
+
+
+def test_add_rejects_fractional_and_bool_count():
+    """WB close-out LOW: the positive-integer contract must reject, not
+    truncate — count=1.5 silently persisting as 1 breaks it."""
+    vault.init_project("cronx", "Cron X", "o")
+    for bad in (1.5, True):
+        with pytest.raises(ValueError):
+            cron.add(name="j", schedule="1d", project_code="CRONX",
+                     objective="x", start_at=_iso(2000, 1, 1, 9, 0), count=bad)
+
+
 def test_add_rejects_nonpositive_count_and_bad_stop_metadata():
     """WB MEDIUM: count must be a positive int (0/negative is an error, not a
     silent unlimited schedule); start_at/until must parse — validated while the

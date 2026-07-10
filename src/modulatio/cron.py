@@ -178,6 +178,20 @@ def _now_iso() -> str:
     return _now().isoformat(timespec="seconds")
 
 
+def _strict_int(value) -> int:
+    """``int()`` with the positive-integer contract enforced: ``bool`` and
+    fractional values are REJECTED, not truncated (Wild Bill close-out — a
+    ``count=1.5`` silently persisting as ``1`` breaks the stated contract).
+    Raises ``ValueError``/``TypeError`` on anything that isn't exactly an
+    integer value."""
+    if isinstance(value, bool):
+        raise ValueError(f"not an integer: {value!r}")
+    coerced = int(value)  # ValueError/TypeError on garbage
+    if coerced != value:  # 1.5 → 1 would silently truncate; "5" is not an int
+        raise ValueError(f"not an integer: {value!r}")
+    return coerced
+
+
 def _parse_aware(iso: Optional[str]) -> Optional[datetime]:
     """Parse an ISO datetime and guarantee it's UTC-aware, or ``None`` if it
     doesn't parse. A NAIVE value (no offset) is interpreted as UTC — the whole
@@ -444,7 +458,7 @@ def add(
     # date; both stay None when absent.
     if count is not None:
         try:
-            count = int(count)
+            count = _strict_int(count)  # bool/fractional REJECTED, not truncated
         except (ValueError, TypeError) as exc:
             raise ValueError(f"count must be a positive integer, got {count!r}") from exc
         if count < 1:
@@ -649,22 +663,27 @@ def _coerce_stop_meta(
     HIGH), while a bad ``until`` was silently ignored so the job ran forever
     (Wild Bill MEDIUM). Coerce everything HERE, up front, so the caller can
     disable a malformed job fail-closed BEFORE dispatching and the sweep
-    always continues."""
+    always continues.
+
+    ``None`` is the SOLE absent sentinel (Wild Bill close-out): a falsy-but-
+    present value (``runs: ""``, ``until: ""``) is malformed, not absent —
+    truthiness tests silently re-opened the fail-closed contract for it."""
+    runs_raw = job.get("runs")
     try:
-        runs = int(job.get("runs") or 0)
+        runs = 0 if runs_raw is None else _strict_int(runs_raw)
     except (ValueError, TypeError):
         return None
     count = job.get("count")
     if count is not None:
         try:
-            count = int(count)
+            count = _strict_int(count)
         except (ValueError, TypeError):
             return None
         if count < 1:
             return None
     until_raw = job.get("until")
     until_date: Optional[date] = None
-    if until_raw:
+    if until_raw is not None:
         try:
             until_date = date.fromisoformat(str(until_raw))
         except (ValueError, TypeError):
