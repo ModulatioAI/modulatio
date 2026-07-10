@@ -6528,6 +6528,13 @@ class Orchestrator:
         remainder = (parts[1] if len(parts) > 1 else "").strip()
         return (True, remainder)
 
+    def session_mode_value(self) -> str:
+        """The conversational session's autonomy mode as its command value
+        (``"default"`` / ``"yolo"`` / ``"goal"`` / ``"yolo-goal"``) — the
+        read-only seam the surfaces' mode pill shows. Mode is SET only by the
+        operator's leading /-command in converse; never by the engine."""
+        return self._session_mode.value
+
     def _mode_ack(self, mode) -> str:
         """The reply to a BARE mode command — a mode-set acknowledgement, not an
         empty turn. Each ack surfaces the fence invariant: a new folder always

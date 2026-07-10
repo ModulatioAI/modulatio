@@ -120,13 +120,27 @@ class OrchestratorActor:
 
     # ── converse lane ─────────────────────────────────────────────
 
+    def session_mode(self) -> str:
+        """The converse Leader's autonomy mode ("default" until the operator
+        sets one) — feeds the console's mode pill."""
+        orch = self._converse_orch
+        return orch.session_mode_value() if orch is not None else "default"
+
     def converse(self, message: str, *, attachments: list | None = None) -> str:
         orch = self._ensure_converse_orch()
-        return orch.converse(
-            message,
-            attachments=attachments,
-            permission_callback=self.broker.request,
-        )
+        before = orch.session_mode_value()
+        try:
+            return orch.converse(
+                message,
+                attachments=attachments,
+                permission_callback=self.broker.request,
+            )
+        finally:
+            # A leading /yolo //goal //yolo-goal //default flips the session
+            # mode inside converse — tell the console so the pill tracks live.
+            after = orch.session_mode_value()
+            if after != before:
+                self._bus.publish({"type": "mode", "data": {"mode": after}})
 
     def reset_thread(self):
         """Archive the Leader conversation (the operator's /new). Returns

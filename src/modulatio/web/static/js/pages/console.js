@@ -95,6 +95,7 @@ export function mountConsole(page, ctx) {
 
   const state = {
     lane: "leader",
+    mode: "default", // the converse Leader's autonomy mode (/yolo //goal …)
     running: false,
     producers: new Map(), // agent_id → {name, glyph, verb}
     tokens: 0,
@@ -179,6 +180,10 @@ export function mountConsole(page, ctx) {
     const ss = String(Math.floor(state.elapsed % 60)).padStart(2, "0");
     lamps.replaceChildren(
       lamp("●", "leader"), " · ",
+      // The autonomy pill — the converse Leader's mode; attention when the
+      // operator has handed anything over (any non-default mode).
+      lamp(state.mode === "default" ? "◌" : "◉", state.mode,
+        { attention: state.mode !== "default" }), " · ",
       lamp("◇", `${state.producers.size} mods`), " · ",
       state.running ? lamp("▸", "running", { attention: true }) : lamp("▸", "idle"),
       " · ",
@@ -358,6 +363,9 @@ export function mountConsole(page, ctx) {
         : `■■ ${frame.data.run_id} — ${frame.data.digest || "run complete"}`;
       appendLine(tvLeader, el("div", { class: "stream-line mono" }, note));
       appendLine(tvTeam, el("div", { class: "stream-line mono" }, note));
+    } else if (frame.type === "mode") {
+      state.mode = frame.data.mode || "default";
+      renderLamps();
     } else if (frame.type === "approval_request") {
       modal.dataset.rid = frame.data.id;
       showApproval(frame.data);
@@ -444,6 +452,10 @@ export function mountConsole(page, ctx) {
       const { tickets } = await api(`/${ctx.project}/tickets`);
       state.tickets = tickets.filter((t) => t.status === "open").length;
     } catch { /* lamp stays 0 */ }
+    try {
+      const { mode } = await api(`/${ctx.project}/mode`);
+      state.mode = mode || "default";
+    } catch { /* pill stays default */ }
     renderLamps();
     renderRail();
     flip("leader");

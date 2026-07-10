@@ -103,6 +103,14 @@ def converse(project: str, body: ConverseBody, request: Request) -> dict:
     return {"reply": reply}
 
 
+@router.get("/{project}/mode")
+def session_mode(project: str, request: Request) -> dict:
+    """The converse Leader's autonomy mode — the console pill's mount-time
+    read (live changes ride the `mode` SSE frame)."""
+    code = valid_project(project)
+    return {"mode": _actor(request, code).session_mode()}
+
+
 @router.post("/{project}/conversation/reset")
 def reset_conversation(project: str, request: Request) -> dict:
     code = valid_project(project)
