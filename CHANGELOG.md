@@ -6,6 +6,48 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.9.4] — 2026-07-10
+
+A **stability + housekeeping** release: no new features, no behavior change for
+a normal run. A line-by-line audit of the shipped source hardened the engine's
+failure paths and cleaned the code's comments down to code-only context.
+
+### Fixed
+
+- **Silent failures now leave a trace.** A line-by-line stability pass found
+  ~30 spots where a real error (disk fault, corruption, a genuine bug) was
+  swallowed with no log — on load-bearing paths (skill loading, fallback-chain
+  build, deferred writes, telemetry, memory reads, the heartbeat queue read).
+  Each still degrades gracefully, but now logs the failure so a problem is
+  visible instead of vanishing.
+- **A per-request write race in the SERVICES config.** Two concurrent WebOS
+  requests editing services could lost-update; the four config mutators now
+  serialize their read-modify-write.
+- **A missing timeout on the multimodal model call.** The image/attachment
+  chat path now carries the same per-completion deadline as every other model
+  call, so it can't hang without bound.
+- **A dead permission field.** A `_denied_this_session` set was written but
+  never read — a "deny backoff" that never existed. Removed.
+- **A heartbeat data-loss precursor.** An unreadable queue file was treated as
+  empty silently; a following save would have overwritten it. Now it logs
+  loudly first.
+
+### Changed
+
+- **The code carries only code-context.** A sweep removed decision-history,
+  review-round labels, dates, ticket IDs, and person/project names from
+  comments and docstrings across the source — every comment now states only
+  what the code does and why, on a strictly functional basis. No behavior
+  change; ~850 comment/docstring edits.
+- The low-credibility web-search domain list ships **empty** — the product
+  carries no built-in opinion about specific third-party sites; a deployment
+  supplies its own via `MODULATIO_LOW_CREDIBILITY_DOMAINS` (mechanism
+  unchanged).
+- The test suite was **consolidated** — 156 wave-era duplicate test files
+  folded into their topic suites (395 → 239 files) with zero coverage loss;
+  live-provider round-trip tests are opt-in (`pytest -m live`) so the default
+  run stays deterministic.
+
 ## [0.9.9.3] — 2026-07-09
 
 ### Added
