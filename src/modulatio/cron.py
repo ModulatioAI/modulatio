@@ -179,18 +179,14 @@ def _now_iso() -> str:
 
 
 def _strict_int(value) -> int:
-    """``int()`` with the positive-integer contract enforced: ``bool`` and
-    fractional values are REJECTED, not truncated (Wild Bill close-out — a
-    ``count=1.5`` silently persisting as ``1`` breaks the stated contract).
-    "Integer" means a Python ``int``: ALL floats are rejected, including
-    integral ones like ``1.0`` (Wild Bill R2 contract note). Raises
-    ``ValueError``/``TypeError`` on anything else."""
-    if isinstance(value, (bool, float)):
+    """The integer contract means exactly a Python ``int`` (Wild Bill
+    close-out R2/R3): ``bool`` (an int subclass), floats — including integral
+    ``1.0`` — strings, and exotic numerics (``Decimal("1")``) are all REJECTED,
+    never coerced or truncated. A positive type gate is smaller and closes the
+    whole class instead of chasing each numeric tower member."""
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"not an integer: {value!r}")
-    coerced = int(value)  # ValueError/TypeError on garbage
-    if coerced != value:  # "5" is not an int
-        raise ValueError(f"not an integer: {value!r}")
-    return coerced
+    return value
 
 
 def _parse_aware(iso: Optional[str]) -> Optional[datetime]:
@@ -735,6 +731,15 @@ def _dispatch_one(job: dict, now: datetime) -> bool:
                last_status="error:invalid-stop-metadata")
         return False
     runs_before, count, until_date = meta
+    # A count is an UPPER LIMIT, not an after-the-fact stop signal (Wild Bill
+    # R3): the normal path disables ON the Nth fire, so an enabled job whose
+    # stored counter already meets the cap is hand-edited state — it must NOT
+    # buy one more fire while the tail catches up. Disable pre-dispatch.
+    if count is not None and runs_before >= count:
+        update(job["id"], enabled=False,
+               last_run=now.isoformat(timespec="seconds"),
+               last_status="error:count-exhausted")
+        return False
     dispatch_ok = True
     status = "ok"
     try:

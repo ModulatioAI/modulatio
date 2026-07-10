@@ -518,6 +518,34 @@ def test_add_rejects_fractional_and_bool_count():
                      objective="x", start_at=_iso(2000, 1, 1, 9, 0), count=bad)
 
 
+def test_exhausted_stored_runs_never_buys_an_extra_fire():
+    """WB R3 MEDIUM: a count is an upper LIMIT — an enabled job hand-edited to
+    ``count: 1, runs: 1`` (already at the cap) must disable pre-dispatch, not
+    fire once more while the advance tail catches up."""
+    vault.init_project("cronx", "Cron X", "o")
+    job = cron.add(name="j", schedule="1h", project_code="CRONX",
+                   objective="x", start_at=_iso(2000, 1, 1, 0, 0), count=1)
+    cron.update(job["id"], runs=1)  # hand-edited: counter already at the cap
+    fired = cron.dispatch_due(now=datetime(2000, 1, 1, 0, 1, tzinfo=timezone.utc))
+    after = cron.get(job["id"])
+    assert job["id"] not in {j["id"] for j in fired}  # no extra fire
+    assert after["enabled"] is False
+    assert after["runs"] == 1  # the counter did NOT tick to 2
+    assert after["last_status"] == "error:count-exhausted"
+
+
+def test_add_rejects_non_int_numerics():
+    """WB R3 contract note: the count contract is exactly a Python int — an
+    exotic integral numeric (Decimal) is rejected too, closing the class."""
+    from decimal import Decimal
+
+    vault.init_project("cronx", "Cron X", "o")
+    with pytest.raises(ValueError):
+        cron.add(name="j", schedule="1d", project_code="CRONX",
+                 objective="x", start_at=_iso(2000, 1, 1, 9, 0),
+                 count=Decimal("1"))
+
+
 def test_negative_stored_runs_disables_fail_closed():
     """WB R2 MEDIUM: a hand-edited ``runs: -1`` on a ``count: 1`` job would
     under-count fires and buy an extra run past the cap — malformed, so it
