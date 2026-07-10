@@ -122,6 +122,18 @@ def reset_conversation(project: str, request: Request) -> dict:
     return {"archived": str(archived) if archived else None}
 
 
+@router.post("/{project}/console/clear")
+def console_clear(project: str) -> dict:
+    """Operator 'clear screen' — drop the run's replay buffer so a tab-return
+    or reconnect doesn't repaint what was deliberately cleared. Telemetry
+    survives (the rail is not part of the log)."""
+    from modulatio.web.events import get_bus
+
+    code = valid_project(project)
+    get_bus(code).clear_replay()
+    return {"cleared": True}
+
+
 @router.post("/{project}/kickoff")
 def kickoff(project: str, body: KickoffBody, request: Request) -> dict:
     code = valid_project(project)

@@ -44,6 +44,19 @@ def test_converse_replies_and_history_shows_the_turns(client):
     assert any(t["role"] == "leader" for t in turns)
 
 
+def test_console_clear_drops_the_replay_buffer(client):
+    """The CLEAR button's server half: POST console/clear empties the bus
+    replay so a tab-return doesn't repaint the cleared log."""
+    from modulatio.web.events import get_bus
+
+    bus = get_bus("web")  # bus keys are the validated (lowercase) code
+    bus.publish({"type": "event", "data": {"n": 1}})
+    resp = client.post("/api/web/console/clear")
+    assert resp.status_code == 200 and resp.json() == {"cleared": True}
+    q = bus.subscribe()
+    assert q.empty()  # nothing replays after the clear
+
+
 def test_conversation_empty_when_no_thread(client):
     resp = client.get("/api/web/conversation")
     assert resp.status_code == 200

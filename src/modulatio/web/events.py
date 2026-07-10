@@ -65,6 +65,13 @@ class EventBus:
             self._subscribers.append(q)
         return q
 
+    def clear_replay(self) -> None:
+        """Operator 'clear screen' — drop the buffered run frames so a
+        reconnect/tab-return doesn't repaint what was deliberately cleared.
+        The latest telemetry survives (the rail is not part of the log)."""
+        with self._lock:
+            self._replay.clear()
+
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
             if q in self._subscribers:

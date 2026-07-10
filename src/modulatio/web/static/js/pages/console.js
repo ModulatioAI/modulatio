@@ -223,11 +223,13 @@ export function mountConsole(page, ctx) {
     renderRail();
   }
 
-  // Operator "clear screen" — wipe both activity logs; leaves the telemetry
-  // rail and any live run alone. A reconnect repaints from the server replay.
+  // Operator "clear screen" — wipe both activity logs AND the server-side
+  // replay buffer, so a tab-flip/reconnect doesn't repaint what was cleared
+  // (Clif 2026-07-09). Telemetry rail and any live run stay untouched.
   function clearScreen() {
     tvLeader.replaceChildren();
     tvTeam.replaceChildren();
+    api(`/${ctx.project}/console/clear`, { method: "POST" }).catch(() => {});
   }
 
   function appendLine(tv, node) {

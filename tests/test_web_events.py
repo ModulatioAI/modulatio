@@ -134,6 +134,27 @@ def test_replay_delivers_newest_frames_including_run_done():
     assert ns and max(ns) == _SUBSCRIBER_DEPTH + 500 - 1  # newest activity, not oldest
 
 
+def test_clear_replay_makes_the_clear_stick_across_resubscribe():
+    """Clif 2026-07-09: clearing the TV then flipping tabs brought everything
+    back — the DOM wipe was cosmetic while the replay buffer survived. CLEAR
+    now drops the buffer: a re-subscribe repaints nothing cleared, but the
+    latest telemetry (the rail, not the log) still arrives."""
+    from modulatio.web.events import EventBus
+
+    bus = EventBus()
+    bus.publish({"type": "run_started", "data": {"run_id": "r"}})
+    bus.publish({"type": "event", "data": {"n": 1}})
+    bus.publish({"type": "telemetry", "data": {"tokens": 5}})
+    bus.clear_replay()
+    q = bus.subscribe()
+    drained = []
+    while not q.empty():
+        drained.append(q.get_nowait())
+    assert [f["type"] for f in drained] == ["telemetry"]  # log gone, rail kept
+    bus.publish({"type": "event", "data": {"n": 2}})  # live frames still flow
+    assert q.get(timeout=2) == {"type": "event", "data": {"n": 2}}
+
+
 def test_get_bus_is_per_project_singleton():
     from modulatio.web.events import get_bus
 
