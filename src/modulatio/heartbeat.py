@@ -225,7 +225,7 @@ def add_task(
 
     ``on_refused`` (#97 R2) — what a JT-bound task does when the fit-gate refuses
     its bind: ``"skip"`` (the cron default — skip the slot, no greenfield
-    substitute) or ``"greenfield"`` (Clif's per-cron override — run the objective
+    substitute) or ``"greenfield"`` (a per-cron override — run the objective
     greenfield). ``None`` ⇒ the dispatch callback's default ("skip" for cron).
 
     ``next_run`` — pre-set the eligibility timestamp ATOMICALLY at create time so
@@ -589,11 +589,10 @@ def requeue_recurring(task: dict) -> Optional[dict]:
         every=every,
         depends_on=task.get("depends_on") or [],
         max_retries=task.get("max_retries", 1),
-        # Carry a JT binding across heartbeat-native recurrence (Nemo B3+B4 hull
-        # gap #8): without this, a recurring JT-bound task's 2nd run would
-        # silently go greenfield. (Cron's own recurrence re-enqueues from
-        # cron-config.json, which already preserves these — this seals the
-        # heartbeat-native path.)
+        # Carry a JT binding across heartbeat-native recurrence: without this, a
+        # recurring JT-bound task's 2nd run would silently go greenfield. (Cron's
+        # own recurrence re-enqueues from cron-config.json, which already
+        # preserves these — this seals the heartbeat-native path.)
         jt_id=task.get("jt_id"),
         jt_params=task.get("jt_params"),
         on_refused=task.get("on_refused"),  # #97 R2: carry the refusal policy too

@@ -58,7 +58,7 @@ LEADER_ROLES: frozenset[str] = frozenset({"leader", "planner"})
 def is_leader_role(role: str) -> bool:
     """The Leader's own surfaces — ``leader`` itself, the ``leader-*`` phase
     suffixes (``leader-decompose`` / ``-reflect`` / ``-iterate`` / ``-chat``), and
-    ``planner``. The hyphen is required (Nemo B1 #4) so a producer SKILL role like
+    ``planner``. The hyphen is required so a producer SKILL role like
     ``leaderboard-generator`` / ``leadership-coach`` is NOT mis-routed here — the
     team lane stays the true complement."""
     return role in ("leader", "planner") or (role or "").startswith("leader-")
@@ -335,8 +335,8 @@ class StreamView(VerticalScroll):
         # Phase 1 (parallel-execution): the moment a wave forms (distinct producers
         # cross from <2 to ≥2), drop ONE honest marker naming who's running in
         # parallel — so concurrent work reads as concurrent, not fast-serial. Only
-        # on the RISE THROUGH the threshold (Nemo B1 #3 — not again as the wave
-        # grows 2→3→4), so it marks the wave once, not each new producer.
+        # on the RISE THROUGH the threshold (not again as the wave grows 2→3→4),
+        # so it marks the wave once, not each new producer.
         accent, dim, base, _err = theme_tiers(self.app)
         count = len(self.active_producer_names())
         if self._last_producer_count < 2 <= count:

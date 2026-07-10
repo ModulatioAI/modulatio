@@ -17,7 +17,7 @@ THREAD (``@work(thread=True)`` in app.py). Textual modals live on the UI thread.
     or the scope is empty, the request is refused.
 
 The modal's warning is ENGINE-computed here (``dangerous_widen_root``), never
-model-narrated (Wild Bill MED-5).
+model-narrated.
 """
 from __future__ import annotations
 

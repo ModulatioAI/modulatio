@@ -1931,34 +1931,40 @@ def test_http_get_sends_identifying_user_agent(monkeypatch):
 # ── source-credibility discipline (flag content-farm slop, don't drop) ──
 
 def test_web_search_flags_and_sinks_low_credibility(monkeypatch):
+    # The shipped seed is empty; a deployment configures its own list. Seed a
+    # synthetic low-cred domain via the env to exercise the flag+re-rank path.
+    monkeypatch.setenv("MODULATIO_LOW_CREDIBILITY_DOMAINS", "slop-farm.example")
+
     class FakeDDGS:
         def text(self, q, max_results):
             return [
-                {"title": "Slop", "href": "https://grokipedia.com/x", "body": "fabricated"},
+                {"title": "Slop", "href": "https://slop-farm.example/x", "body": "fabricated"},
                 {"title": "Real", "href": "https://www.reuters.com/y", "body": "reported"},
             ]
     monkeypatch.setattr("ddgs.DDGS", FakeDDGS)
     out = tools.web_search("israel iran 2026", max_results=2)
     assert out.index("Real") < out.index("Slop")          # credible re-ranked first
     assert "LOW-CREDIBILITY" in out                         # slop flagged
-    assert "grokipedia.com/x" in out                        # but NOT dropped
+    assert "slop-farm.example/x" in out                     # but NOT dropped
 
 
-def test_is_low_credibility_matches_subdomains():
-    assert tools._is_low_credibility("https://grokipedia.com/p")
-    assert tools._is_low_credibility("https://www.kennelbiscotti.com/a")
+def test_is_low_credibility_matches_subdomains(monkeypatch):
+    monkeypatch.setenv("MODULATIO_LOW_CREDIBILITY_DOMAINS", "slop-farm.example, biscotti.test")
+    assert tools._is_low_credibility("https://slop-farm.example/p")
+    assert tools._is_low_credibility("https://www.biscotti.test/a")
     assert not tools._is_low_credibility("https://www.aljazeera.com/n")
     assert not tools._is_low_credibility("not-a-url")
 
 
-def test_low_credibility_domains_env_extensible(monkeypatch):
-    """Nemo hull note: the seed set will bit-rot, so it's extensible per-
-    deployment via MODULATIO_LOW_CREDIBILITY_DOMAINS (no code change)."""
+def test_low_credibility_domains_ships_empty_and_is_env_extensible(monkeypatch):
+    """The product carries no opinion about specific third-party sites — the
+    seed ships empty and a deployment supplies its own list (no code change)
+    via MODULATIO_LOW_CREDIBILITY_DOMAINS."""
+    assert tools._LOW_CREDIBILITY_DOMAINS == frozenset()    # nothing named in-tree
     assert not tools._is_low_credibility("https://made-up-farm.example/x")
     monkeypatch.setenv("MODULATIO_LOW_CREDIBILITY_DOMAINS", "made-up-farm.example, another.test")
     assert tools._is_low_credibility("https://made-up-farm.example/x")
     assert tools._is_low_credibility("https://sub.another.test/y")  # subdomain too
-    assert tools._is_low_credibility("https://grokipedia.com/z")    # seed still applies
 
 
 # ── §4: resolve_under_roots — the read-only Leader access choke point ─────────

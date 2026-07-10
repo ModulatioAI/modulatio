@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """StreamStatus — a live "what's happening right now" line under a TV.
 
-Mirrors the Claude Code / Hermes feel: a spinner + a human verb for the
-current activity (``⠹ decomposing the objective…``), with a few touches:
+A spinner + a human verb for the current activity
+(``⠹ decomposing the objective…``), with a few touches:
 
   - an **elapsed counter** once an activity runs a few seconds, so a long
     step reads as *working*, not frozen;

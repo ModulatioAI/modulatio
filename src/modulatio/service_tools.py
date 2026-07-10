@@ -68,8 +68,8 @@ def _redact_key(text: str, key: str) -> str:
     query-auth server can reflect the request URL, where the key rides
     escaped. Raw (exact), form-encoded (``quote_plus`` — spaces as ``+``), and
     percent-encoded (``quote(safe="")`` — spaces as ``%20``); the two encoded
-    forms are scrubbed with case-insensitive percent hex (Wild Bill BLOCK: a
-    lower/mixed-case ``%2f`` echo is reversible and survived an exact match)."""
+    forms are scrubbed with case-insensitive percent hex, since a lower/mixed-case
+    ``%2f`` echo is reversible and would survive an exact match."""
     if not key:  # never replace("") — that would inject [REDACTED] everywhere
         return text
     text = text.replace(key, "[REDACTED]")  # raw is case-sensitive

@@ -1614,20 +1614,16 @@ _WEB_SEARCH_MAX_RESULTS = 12
 _WEB_SEARCH_RETURN_CHARS = 8_000
 
 #: Low-credibility domains — AI-content-farms / unvetted wikis that fabricate
-#: plausible-looking "facts" (esp. current events). We FLAG, never drop: the
-#: producer + audit still see what was found and why it's suspect, and the
-#: producer is told (web-search / rigorous-sourcing skills) not to cite a
-#: flagged hit on its own.
+#: plausible-looking "facts" (esp. current events). Matched hits are FLAGGED,
+#: never dropped: the producer + audit still see what was found and why it's
+#: suspect, and the producer is told (web-search / rigorous-sourcing skills) not
+#: to cite a flagged hit on its own.
 #:
-#: This seed set WILL bit-rot — content farms proliferate faster than code
-#: ships (Nemo hull note, 2026-05-31). It is a COMMUNITY-MAINTAINED SURFACE:
-#: extend it here via PR, OR per-deployment without a code change by setting
-#: ``MODULATIO_LOW_CREDIBILITY_DOMAINS`` (comma-separated) — merged in at call
+#: Ships EMPTY — the product carries no opinion about which specific third-party
+#: sites are untrustworthy. A deployment supplies its own list (no code change)
+#: via ``MODULATIO_LOW_CREDIBILITY_DOMAINS`` (comma-separated), merged in at call
 #: time by :func:`_low_credibility_domains`.
-_LOW_CREDIBILITY_DOMAINS: frozenset[str] = frozenset({
-    "grokipedia.com",
-    "kennelbiscotti.com",
-})
+_LOW_CREDIBILITY_DOMAINS: frozenset[str] = frozenset()
 
 _LOW_CREDIBILITY_ENV = "MODULATIO_LOW_CREDIBILITY_DOMAINS"
 

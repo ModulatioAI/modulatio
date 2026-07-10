@@ -89,9 +89,9 @@ def fastembed_cache_dirs() -> list[Path]:
 
     Modulatio passes no explicit ``cache_dir`` to fastembed, so the model lands
     in fastembed's default location, which varies by version/env. We target all
-    plausible ones. These are fastembed-namespaced (NOT the HuggingFace hub where
-    cowboy-memory's bge-small lives), so removing them never touches other tools'
-    models. Re-downloads on next routing use.
+    plausible ones. These are fastembed-namespaced (NOT the shared HuggingFace
+    hub cache), so removing them never touches other tools' models. Re-downloads
+    on next routing use.
     """
     out: list[Path] = []
     seen: set[Path] = set()
@@ -250,9 +250,8 @@ def validated_plan(candidates: list[Target]) -> list[Target]:
     """Keep the candidates that exist AND pass ``assert_safe`` (catastrophic-path
     guard — raises loud on a bad one). The single plan-validation site shared by
     ``build_plan`` and ``repair.clear_plan`` so every returned plan carries the
-    same invariant: a caller may delete any Target in it without re-checking
-    (Jenny F3 — repair's hand-built plan now has the same guarantee build_plan's
-    does, not just the delete-time re-check in ``remove_target``)."""
+    same invariant: a caller may delete any Target in it without re-checking —
+    the delete-time re-check in ``remove_target`` is not the only guard."""
     plan: list[Target] = []
     for t in candidates:
         if not t.path.exists():

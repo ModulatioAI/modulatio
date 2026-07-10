@@ -337,10 +337,10 @@ def load_modulatio_env() -> None:
 
 #: The ONLY keys apply_env_overrides will inject — the same curated set the
 #: SETTINGS tab exposes, enforced at the BACKEND so a hand-edited
-#: defaults.json can't become a persistent environment injector (Wild Bill
-#: BLOCK, arc cadre 2026-07-04: an unrestricted block could set
-#: MODULATIO_RUN_SHELL_UNSAFE / MODULATIO_SANDBOX_PROFILE / LD_PRELOAD
-#: forever). Widening this list is a deliberate, reviewed act.
+#: defaults.json can't become a persistent environment injector: an
+#: unrestricted block could otherwise set MODULATIO_RUN_SHELL_UNSAFE /
+#: MODULATIO_SANDBOX_PROFILE / LD_PRELOAD forever. Widening this list is a
+#: deliberate act.
 ENV_OVERRIDE_ALLOWLIST: frozenset[str] = frozenset({
     "MODULATIO_TASK_MAX_RETRIES",
     "MODULATIO_GOAL_MAX_RETRIES",

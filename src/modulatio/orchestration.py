@@ -7549,10 +7549,10 @@ class Orchestrator:
         - ``None`` — verdict passed, or legacy QC that didn't classify
           (the orchestrator defaults absent classification to substantive).
         """
-        # #14 observability: surface that QC TOUCHED this task. Without it the
-        # operator sees the producer "wrap up" but no sign QC reviewed it ("did it
-        # even get checked?", Clif live 2026-06-22) — and the later qc_authored rescue
-        # is the only QC trace. One emit at the top covers every review path.
+        # Observability: surface that QC TOUCHED this task. Without it the
+        # operator sees the producer "wrap up" but no sign QC reviewed it — and
+        # the later qc_authored rescue is the only QC trace. One emit at the top
+        # covers every review path.
         self._emit_activity(
             role="qc", phase="qc_review",
             task_id=task.id, agent_id=task.qc_agent_id,
@@ -8862,9 +8862,9 @@ class Orchestrator:
             summary.errors.append(msg)
 
     def _teardown_run(self, summary: RunSummary) -> None:
-        """Blow the live pipeline out of the pipes — the F8 KILL-SWITCH ONLY (Clif
-        2026-06-05: only the kill blows the pipes; a normal finish, or closing
-        Modulatio, leaves the run's final state + records intact). Every non-terminal
+        """Blow the live pipeline out of the pipes — the F8 KILL-SWITCH ONLY
+        (only the kill blows the pipes; a normal finish, or closing Modulatio,
+        leaves the run's final state + records intact). Every non-terminal
         goal/task is finalized to ABANDONED and every open ticket is CLOSED, so the
         killed run reads as DONE and NO residue — a blocked goal, an open ticket, a
         parked queue — carries into or blocks the next run.

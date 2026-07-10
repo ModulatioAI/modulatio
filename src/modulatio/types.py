@@ -169,7 +169,7 @@ class Goal(BaseModel):
     # Exhaustion → BLOCKER ticket with refresh_at=tomorrow-midnight-UTC;
     # auto-resume picks it up on next kickoff past the refresh time.
     retry_count: int = 0
-    #: ABSOLUTE per-run redo budget (Clif: 3 → 7 → 4). The team gets up to this
+    #: ABSOLUTE per-run redo budget. The team gets up to this
     #: many Leader-led reflect-and-redo attempts to get a goal right within a
     #: single run; on exhaustion the goal SHIPS with a Product Quality Report
     #: reservation (never an infinite loop). retry_count only climbs within a
@@ -622,8 +622,8 @@ class Project(BaseModel):
     def _validate_inbox_caps(
         cls, v: dict[str, dict[str, int]],
     ) -> dict[str, dict[str, int]]:
-        """Validate partial cap overrides. M2 (Nemo round-2 sweep):
-        the documented contract is that ``inbox_caps[role]`` may carry
+        """Validate partial cap overrides.
+        The documented contract is that ``inbox_caps[role]`` may carry
         ``soft_cap`` and/or ``hard_cap``; missing keys inherit from
         :data:`inboxes.INBOX_DEFAULTS`. Previous validator read missing
         keys as ``0`` and rejected them, breaking partial overrides like

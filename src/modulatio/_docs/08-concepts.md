@@ -118,7 +118,7 @@ Standards have **three layers**, modeled on **Total Quality Management** (TQM) �
 
 1. **Universal axes** — general TQM dimensions (conformance, standards compliance, fitness for purpose, process integrity). Built into the QC prompt.
 2. **Per-artifact-kind standards** — shared rules for an artifact class. E.g., "essays standards" defines voice, length range, citation style; "code standards" defines formatting, error handling, security boundaries.
-3. **Per-team / per-project overrides** — vault-specific or project-specific tightening. E.g., "Phantazein essays must avoid first-person narrator," or "this project requires every claim to have a citation."
+3. **Per-team / per-project overrides** — vault-specific or project-specific tightening. E.g., "this project's essays must avoid a first-person narrator," or "this project requires every claim to have a citation."
 
 Layer 1 is in the QC system prompt. Layer 2 lives in `<vault>/standards/<artifact-kind>.md`. Layer 3 lives in `<vault>/projects/<code>/standards.md` and overrides layer 2.
 
