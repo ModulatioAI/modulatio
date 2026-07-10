@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from modulatio import config, roster, vault
+from modulatio.roster import Agent
 
 PROJECT_CODE = "TST"
 
@@ -706,3 +707,95 @@ def test_remove_agent_blocks_planted_frontmatter_traversal(tmp_path, monkeypatch
     with pytest.raises(ValueError):
         roster.remove_agent(project_code="planted", agent_id=bad_id)
     assert victim.exists()
+
+
+# ═══ fold: test_roster_resweep.py ═══
+# 0.9.0 pre-ship re-sweep regressions for ``modulatio.roster``.
+#
+# Dedicated file (own-the-file contract): does not touch ``test_roster.py``
+# or ``test_roster_r2_audit.py``.
+
+
+def test_capacity_cap_floored_on_direct_construction() -> None:
+    """Baseline: the field_validator floors ctor/parse paths (pre-existing)."""
+    assert Agent(id="a", name="a", capacity_cap=0).capacity_cap == 1
+    assert Agent(id="a", name="a", capacity_cap=-5).capacity_cap == 1
+    assert Agent(id="a", name="a", capacity_cap=3).capacity_cap == 3
+
+
+def test_capacity_cap_floored_on_model_copy_update_zero() -> None:
+    """re-sweep finding 1: a sub-1 cap must not enter the roster via the
+    ``model_copy(update=...)`` path. Pydantic v2 field_validators do NOT
+    fire on model_copy, so before the override this returned 0 (a silent
+    non-dispatchable producer)."""
+    base = Agent(id="a", name="a", capacity_cap=4)
+    copied = base.model_copy(update={"capacity_cap": 0})
+    assert copied.capacity_cap == 1
+
+
+def test_capacity_cap_floored_on_model_copy_update_negative() -> None:
+    """re-sweep finding 1: negative caps via copy are floored too."""
+    base = Agent(id="a", name="a", capacity_cap=4)
+    assert base.model_copy(update={"capacity_cap": -7}).capacity_cap == 1
+
+
+def test_model_copy_preserves_valid_capacity_cap() -> None:
+    """The override must not clobber legitimate caps — only floor sub-1."""
+    base = Agent(id="a", name="a", capacity_cap=8)
+    assert base.model_copy().capacity_cap == 8
+    assert base.model_copy(update={"capacity_cap": 5}).capacity_cap == 5
+
+
+def test_model_copy_update_unrelated_field_keeps_cap() -> None:
+    """The common real call sites (``add_model``/``clear_model``) copy with an
+    update that does not touch capacity_cap; the cap must round-trip."""
+    base = Agent(id="a", name="a", capacity_cap=2, model="m1")
+    assert base.model_copy(update={"model": "m2"}).capacity_cap == 2
+
+
+# ═══ fold: roster r2_audit ═══
+# Round fixtures (isolate_config/project_vault/PROJECT_CODE) were copies.
+
+
+@pytest.mark.parametrize("bad", [0, -1, -10])
+def test_agent_capacity_cap_floored_to_one_on_direct_construction(bad):
+    agent = roster.Agent(id="p", name="P", capacity_cap=bad)
+    assert agent.capacity_cap == 1
+
+
+@pytest.mark.parametrize("good", [1, 2, 8])
+def test_agent_capacity_cap_legitimate_values_preserved(good):
+    agent = roster.Agent(id="p", name="P", capacity_cap=good)
+    assert agent.capacity_cap == good
+
+
+def test_agent_capacity_cap_zero_in_frontmatter_floored_on_load(project_vault):
+    """A hand-written / corrupt roster file declaring capacity_cap: 0 must
+    not produce a non-dispatchable producer — the loader floors it to 1."""
+    agents_dir = project_vault / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "stuck.md").write_text(
+        "---\n"
+        "id: stuck\n"
+        "name: Stuck\n"
+        "tier: producer\n"
+        "capacity_cap: 0\n"
+        "---\n\n"
+        "A producer that would otherwise stall every wave it qualifies for.\n"
+    )
+
+    loaded = roster.load("stuck", project_code=PROJECT_CODE)
+    assert loaded is not None
+    assert loaded.capacity_cap == 1
+
+
+def test_agent_capacity_cap_default_is_one(project_vault):
+    """Omitting capacity_cap entirely stays at the dispatchable default."""
+    agents_dir = project_vault / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "plain.md").write_text(
+        "---\nid: plain\nname: Plain\ntier: producer\n---\n\nbody\n"
+    )
+    loaded = roster.load("plain", project_code=PROJECT_CODE)
+    assert loaded is not None
+    assert loaded.capacity_cap == 1

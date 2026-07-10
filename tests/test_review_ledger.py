@@ -117,6 +117,7 @@ def test_task_default_mark_is_none():
 # ── verify_assembly — the cheap structural check (#85) ────────────────────
 
 from modulatio.assembly import AssemblyRecord  # noqa: E402
+from modulatio.review_ledger import _norm_unit  # noqa: E402
 
 
 def _assembly_fixture(tmp_path, *, units=("01.txt", "02.txt", "03.txt"),
@@ -458,3 +459,82 @@ def test_verify_assembly_accepts_fallback_path_units(tmp_path):
     ok, reason, _ = review_ledger.verify_assembly(
         rec, asm, {"U-9": d, "A-9": asm}, tmp_path)
     assert ok, reason
+
+
+# ═══ fold: test_review_ledger_r2_audit.py ═══
+# r2 audit regressions for review_ledger._norm_unit.
+#
+# Finding: ``_norm_unit`` used ``lstrip("./")`` — a CHARACTER-SET strip that
+# mangles leading-dot filenames (``.config`` -> ``config``), so a dotfile unit
+# would never set-equal its own dependency record and a clean assembly would
+# silently fall back to a full review (or worse, mis-compare).
+
+
+def test_norm_unit_preserves_leading_dot_filename():
+    # Before the fix lstrip("./") stripped the leading dot -> "config".
+    assert _norm_unit(".config") == ".config"
+    assert _norm_unit("..hidden") == "..hidden"
+
+
+def test_norm_unit_preserves_dotfile_in_subdir():
+    assert _norm_unit("sub/.env") == "sub/.env"
+    assert _norm_unit("./sub/.gitignore") == "sub/.gitignore"
+
+
+def test_norm_unit_strips_single_dot_slash_prefix():
+    assert _norm_unit("./chapter1.md") == "chapter1.md"
+    assert _norm_unit("chapter1.md") == "chapter1.md"
+
+
+def test_norm_unit_strips_leading_slashes_but_not_dots():
+    assert _norm_unit("/abs/.dotfile") == "abs/.dotfile"
+    assert _norm_unit("  ./x.md  ") == "x.md"
+
+
+def test_norm_unit_dotfile_set_equality_roundtrip():
+    # The set-comparison use-site: a dep path and the manifest entry for the
+    # SAME dotfile must normalize equal.
+    dep = "./out/.report"
+    manifest_entry = "out/.report"
+    assert _norm_unit(dep) == _norm_unit(manifest_entry) == "out/.report"
+
+
+# ═══ fold: review_ledger resweep_r3 (cross-goal wiring docs + fallback) ═══
+# The round file's _assembly_fixture/_engine_checksum/_task were copies of
+# this suite's (its 2-unit fixture default subsumed by the 3-unit superset).
+
+
+def test_cross_goal_assembler_with_wired_deps_passes_cheaply(tmp_path):
+    """Behavioral contract the corrected docstring documents: a cross-goal
+    assembler whose depends_on was engine-wired proceeds through the real
+    structural check and passes cheaply — it does NOT inherently fall back."""
+    rec, asm, by_id, root = _assembly_fixture(tmp_path)
+    ok, _reason, oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert ok
+    assert oracle == review_ledger.ORACLE_DOCUMENT
+
+
+def test_empty_deps_fall_back_reason_no_longer_says_cross_goal(tmp_path):
+    """The fall-back now fires for an assembler with no RESOLVABLE deps, not for
+    "cross-goal" per se — the reason string must not mislabel it as cross-goal."""
+    rec, asm, by_id, root = _assembly_fixture(tmp_path)
+    asm.depends_on = []  # genuinely no resolvable deps
+    ok, reason, _oracle = review_ledger.verify_assembly(rec, asm, by_id, root)
+    assert not ok
+    assert "authoritative dependency set" in reason
+    assert "cross-goal" not in reason.lower()
+
+
+def test_verify_assembly_docstring_documents_engine_wiring():
+    """Finding 1: the docstring must reference the engine wiring rather than the
+    stale 'cross-goal assemblies have none and fall back' claim."""
+    doc = review_ledger.verify_assembly.__doc__ or ""
+    assert "_wire_cross_goal_assembler_deps" in doc
+    assert "have none and fall back" not in doc
+
+
+def test_module_docstring_documents_engine_wiring():
+    """Finding 1: the module docstring's depends_on note must point at the engine
+    wiring (same-goal AND cross-goal), not imply cross-goal assemblers lack deps."""
+    doc = review_ledger.__doc__ or ""
+    assert "_wire_cross_goal_assembler_deps" in doc
