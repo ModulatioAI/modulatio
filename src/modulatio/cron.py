@@ -182,12 +182,13 @@ def _strict_int(value) -> int:
     """``int()`` with the positive-integer contract enforced: ``bool`` and
     fractional values are REJECTED, not truncated (Wild Bill close-out — a
     ``count=1.5`` silently persisting as ``1`` breaks the stated contract).
-    Raises ``ValueError``/``TypeError`` on anything that isn't exactly an
-    integer value."""
-    if isinstance(value, bool):
+    "Integer" means a Python ``int``: ALL floats are rejected, including
+    integral ones like ``1.0`` (Wild Bill R2 contract note). Raises
+    ``ValueError``/``TypeError`` on anything else."""
+    if isinstance(value, (bool, float)):
         raise ValueError(f"not an integer: {value!r}")
     coerced = int(value)  # ValueError/TypeError on garbage
-    if coerced != value:  # 1.5 → 1 would silently truncate; "5" is not an int
+    if coerced != value:  # "5" is not an int
         raise ValueError(f"not an integer: {value!r}")
     return coerced
 
@@ -672,6 +673,10 @@ def _coerce_stop_meta(
     try:
         runs = 0 if runs_raw is None else _strict_int(runs_raw)
     except (ValueError, TypeError):
+        return None
+    if runs < 0:
+        # A hand-edited negative runs would under-count fires and buy extra
+        # runs past the count cap (Wild Bill R2) — malformed, fail closed.
         return None
     count = job.get("count")
     if count is not None:

@@ -509,13 +509,28 @@ def test_falsy_stop_metadata_is_malformed_not_absent():
 
 
 def test_add_rejects_fractional_and_bool_count():
-    """WB close-out LOW: the positive-integer contract must reject, not
-    truncate — count=1.5 silently persisting as 1 breaks it."""
+    """WB close-out LOW + R2 note: the count contract means a Python int —
+    fractional, bool, AND integral floats (1.0) are rejected, not truncated."""
     vault.init_project("cronx", "Cron X", "o")
-    for bad in (1.5, True):
+    for bad in (1.5, True, 1.0):
         with pytest.raises(ValueError):
             cron.add(name="j", schedule="1d", project_code="CRONX",
                      objective="x", start_at=_iso(2000, 1, 1, 9, 0), count=bad)
+
+
+def test_negative_stored_runs_disables_fail_closed():
+    """WB R2 MEDIUM: a hand-edited ``runs: -1`` on a ``count: 1`` job would
+    under-count fires and buy an extra run past the cap — malformed, so it
+    must disable fail-closed before the heartbeat fires."""
+    vault.init_project("cronx", "Cron X", "o")
+    job = cron.add(name="j", schedule="1h", project_code="CRONX",
+                   objective="x", start_at=_iso(2000, 1, 1, 0, 0), count=1)
+    cron.update(job["id"], runs=-1)  # hand-edited poison
+    fired = cron.dispatch_due(now=datetime(2000, 1, 1, 0, 1, tzinfo=timezone.utc))
+    after = cron.get(job["id"])
+    assert job["id"] not in {j["id"] for j in fired}  # never fired
+    assert after["enabled"] is False
+    assert after["last_status"] == "error:invalid-stop-metadata"
 
 
 def test_add_rejects_nonpositive_count_and_bad_stop_metadata():
