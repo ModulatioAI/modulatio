@@ -682,6 +682,8 @@ def auth_status(
     try:
         strat = auth_strategies.build_strategy(auth.auth_type, cfg)
     except Exception:
+        # An unknown/misconfigured auth type is "not available" with the
+        # provider's setup hint — never a crash in the configurator.
         return False, auth.oauth_hint or ""
     ok = strat.is_available(extra_env)
     return ok, ("" if ok else strat.fix_hint())

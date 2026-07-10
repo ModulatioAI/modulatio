@@ -809,6 +809,8 @@ def run_now(job_id: str) -> Optional[dict]:
             on_refused=job.get("on_refused"),  # #97 R2: manual run honors the stored policy too
         )
     except Exception as e:
+        logger.warning("cron run_now: heartbeat add_task failed for job %s",
+                       job_id, exc_info=True)
         update(job_id, last_run=_now_iso(), last_status=f"error:{e}")
         return None
     update(job_id, last_run=_now_iso(), last_status="ok-manual")

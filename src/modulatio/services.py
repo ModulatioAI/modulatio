@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import threading
 from dataclasses import asdict, dataclass
 from typing import Optional
 
@@ -80,6 +81,14 @@ def _load_raw() -> dict:
         return {}
 
 
+#: Serializes the load->mutate->save cycles below within one process (the
+#: WebOS server's concurrent request threads are the realistic race). Each
+#: individual write is already atomic (write_secret_file); without this two
+#: in-process writers could read the same base state and silently drop one
+#: update. Cross-process edits remain last-write-wins.
+_services_lock = threading.Lock()
+
+
 def _save_raw(data: dict) -> None:
     config.write_secret_file(SERVICES_FILE, json.dumps(data, indent=2))
 
@@ -126,38 +135,41 @@ def new_key_handle() -> str:
 
 def add_service(svc: Service) -> None:
     _validate(svc)
-    data = _load_raw()
-    entry = asdict(svc)
-    entry.pop("id")
-    entry["capabilities"] = list(svc.capabilities)
-    data.setdefault("services", {})[svc.id] = entry
-    _save_raw(data)
+    with _services_lock:
+        data = _load_raw()
+        entry = asdict(svc)
+        entry.pop("id")
+        entry["capabilities"] = list(svc.capabilities)
+        data.setdefault("services", {})[svc.id] = entry
+        _save_raw(data)
 
 
 def remove_service(service_id: str) -> bool:
-    data = _load_raw()
-    if service_id not in data.get("services", {}):
-        return False
-    del data["services"][service_id]
-    # Drop any capability default pointing at the removed service.
-    defaults = data.get("capability_defaults", {})
-    for cap in [c for c, s in defaults.items() if s == service_id]:
-        del defaults[cap]
-    _save_raw(data)
-    return True
+    with _services_lock:
+        data = _load_raw()
+        if service_id not in data.get("services", {}):
+            return False
+        del data["services"][service_id]
+        # Drop any capability default pointing at the removed service.
+        defaults = data.get("capability_defaults", {})
+        for cap in [c for c, s in defaults.items() if s == service_id]:
+            del defaults[cap]
+        _save_raw(data)
+        return True
 
 
 def set_capability_default(capability: str, service_id: str) -> None:
-    data = _load_raw()
-    entry = data.get("services", {}).get(service_id)
-    if not isinstance(entry, dict):
-        raise ValueError(f"no service {service_id!r} configured")
-    if capability not in (entry.get("capabilities") or ()):
-        raise ValueError(
-            f"service {service_id!r} does not back capability {capability!r}"
-        )
-    data.setdefault("capability_defaults", {})[capability] = service_id
-    _save_raw(data)
+    with _services_lock:
+        data = _load_raw()
+        entry = data.get("services", {}).get(service_id)
+        if not isinstance(entry, dict):
+            raise ValueError(f"no service {service_id!r} configured")
+        if capability not in (entry.get("capabilities") or ()):
+            raise ValueError(
+                f"service {service_id!r} does not back capability {capability!r}"
+            )
+        data.setdefault("capability_defaults", {})[capability] = service_id
+        _save_raw(data)
 
 
 def capability_default(capability: str) -> Optional[str]:
@@ -167,11 +179,12 @@ def capability_default(capability: str) -> Optional[str]:
 
 
 def clear_capability_default(capability: str) -> None:
-    data = _load_raw()
-    defaults = data.get("capability_defaults", {})
-    if capability in defaults:
-        del defaults[capability]
-        _save_raw(data)
+    with _services_lock:
+        data = _load_raw()
+        defaults = data.get("capability_defaults", {})
+        if capability in defaults:
+            del defaults[capability]
+            _save_raw(data)
 
 
 def resolve_for_capability(capability: str) -> Optional[Service]:

@@ -13,6 +13,8 @@ and the F1 command modal land in later Phase 2 + Phase 3 slices.
 """
 from __future__ import annotations
 
+import logging
+
 from rich.markup import escape
 from textual import work
 from textual.app import App, ComposeResult
@@ -614,6 +616,9 @@ class ModulatioApp(App):
             attachments = screen.chatbox_attachments
             screen.clear_chatbox_attachments()
         except Exception:
+            logging.getLogger("modulatio").warning(
+                "kickoff: could not read chat attachments — proceeding "
+                "without them", exc_info=True)
             attachments = []
 
         # Mark a kickoff in flight on the MAIN thread, before the worker is

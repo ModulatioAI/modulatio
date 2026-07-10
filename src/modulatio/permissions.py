@@ -404,7 +404,6 @@ class PermissionBroker:
         self.unsafe_posture = unsafe_posture
         self.fail_closed = fail_closed
         self.on_decision = on_decision
-        self._denied_this_session: set[str] = set()  # §1 deny backoff
 
     def authorize(self, tool_name: str, args: "dict | None" = None) -> bool:
         """Return True iff this tool call may proceed. Top-level fail-closed guard
@@ -448,7 +447,6 @@ class PermissionBroker:
         except Exception:
             decision = Decision.DENY  # §6.C: an ask-bridge crash is a deterministic DENY
         if not decision.allows:
-            self._denied_this_session.add(cap.scoped_key(Decision.ALLOW_ONCE))
             self._emit(cap, Decision.DENY)
             return False
         # §6.D: record happens ONLY here, as the result of the operator's answer.

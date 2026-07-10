@@ -18,6 +18,10 @@ from typing import Any
 
 from textual.command import Hits, Provider
 
+import logging
+
+_logger = logging.getLogger("modulatio.tui.command_palette")
+
 
 #: Each entry: (label shown in palette, tab id to switch to, help text).
 _TAB_COMMANDS: tuple[tuple[str, str, str], ...] = (
@@ -82,7 +86,8 @@ class ModulatioCommands(Provider):
                 tabs = self.app.query_one("#app-tabs", TabbedContent)
                 tabs.active = tab_id
             except Exception:
-                pass
+                _logger.warning("command palette: tab switch to %r failed",
+                                tab_id, exc_info=True)
 
         return Hit(
             score=score,

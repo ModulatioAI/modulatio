@@ -41,6 +41,10 @@ from typing import Any, Callable
 from modulatio import budget, context_budget, plans, tool_summarization, vault
 from modulatio.types import Project, TicketPriority
 
+import logging
+
+_logger = logging.getLogger("modulatio.project_execution")
+
 
 @contextlib.contextmanager
 def _claim_plan_lock(plan_id: str, project_code: str, *, timeout: float = 5.0):
@@ -1255,6 +1259,9 @@ def _run_execution_loop(
         try:
             summary = kickoff_callable(sub_objective_text, so)
         except Exception as exc:
+            # The failure is persisted to execution state below; keep the full
+            # traceback in the log so a bug isn't reduced to a name+message.
+            _logger.warning("sub-objective kickoff failed", exc_info=True)
             kickoff_summary = f"FAILED: {type(exc).__name__}: {exc}"
         else:
             kickoff_summary = _summarize_kickoff_result(summary)
@@ -1610,7 +1617,8 @@ def _run_execution_loop(
                         skip_reason="disabled_by_config",
                     )
             except Exception:
-                pass  # best-effort
+                _logger.warning("compaction-skip audit emit failed "
+                                "(best-effort)", exc_info=True)
         else:
             # No run scope — early fallback. No state write
             # at all (matches pre-Slice-1 behavior).
@@ -1861,7 +1869,9 @@ def find_approved_plans(
                 if record.status == "approved":
                     out.append((code, record))
         except Exception:
-            # A malformed project shouldn't break the tick — skip it.
+            # A malformed project shouldn't break the tick — skip it, loudly.
+            _logger.warning("plan scan failed for project %s — skipped this "
+                            "tick", code, exc_info=True)
             continue
     return out
 

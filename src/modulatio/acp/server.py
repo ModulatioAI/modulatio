@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import os
 import stat
 import threading
@@ -22,6 +23,8 @@ from typing import Callable
 
 from modulatio.acp import jsonrpc as rpc
 from modulatio.acp.session import ACPSession
+
+_logger = logging.getLogger("modulatio.acp")
 
 #: ACP protocol version this server speaks.
 PROTOCOL_VERSION = 1
@@ -43,9 +46,15 @@ def _attachment_roots() -> list[Path]:
                 try:
                     roots.append(Path(p).expanduser().resolve())
                 except (OSError, RuntimeError):
+                    _logger.warning("ACP attachment root %r dropped (unresolvable)", p)
                     continue
         if roots:
             return roots
+        # Every configured root failed to resolve — say so before silently
+        # narrowing the attachment surface to the CWD default.
+        _logger.warning(
+            "MODULATIO_ACP_ATTACHMENT_ROOTS set but no entry resolved; "
+            "falling back to the server CWD")
     return [Path.cwd().resolve()]
 
 
@@ -118,9 +127,8 @@ def _parse_prompt(params: dict) -> tuple[str, list]:
                     attachments.append(
                         build_attachment(safe_path, kind=kind))
                 except Exception as exc:  # a bad attachment shouldn't sink the turn
-                    import sys
-                    print(f"acp: dropped attachment {block.get('path')!r}: "
-                          f"{type(exc).__name__}", file=sys.stderr)
+                    _logger.warning("acp: dropped attachment %r: %s",
+                                    block.get("path"), type(exc).__name__)
     return ("\n".join(t for t in text_parts if t), attachments)
 
 

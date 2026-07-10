@@ -440,7 +440,8 @@ def _merge_task_result(
         try:
             write()
         except Exception:  # noqa: BLE001 — best-effort, mirrors worker-side
-            pass
+            _logger.warning("deferred write failed (ticket/proposal may be "
+                           "missing)", exc_info=True)
 
 
 # ─── JSON parsing helpers ───────────────────────────────────────────────────
@@ -571,6 +572,9 @@ def _select_assembler_skill(tasks: "list[Task]", project_code: str | None) -> No
                 t.artifact_kind, project_code=project_code
             )
         except Exception:  # noqa: BLE001 — keep the planner's skill on error
+            _logger.warning("assembler routing: standards load failed for "
+                           "kind %r — keeping the planner's skill",
+                           t.artifact_kind, exc_info=True)
             continue
         target = entry.assembler_skill
         if target and target in _ASSEMBLER_SKILLS:
@@ -5349,6 +5353,8 @@ class Orchestrator:
         try:
             agent = roster.load(agent_id, self.project.code)
         except Exception:
+            _logger.warning("fallback chain: roster load failed for %s — "
+                           "primary-only", agent_id, exc_info=True)
             return chain
         raw = list(getattr(agent, "fallbacks", None) or [])
         if not raw:
@@ -5357,6 +5363,8 @@ class Orchestrator:
             try:
                 runner = factory(key)
             except Exception:
+                _logger.warning("fallback chain: runner build failed for %s — "
+                               "dropped from the chain", key, exc_info=True)
                 runner = None
             if runner is not None:
                 chain.append((key, runner))
@@ -6881,6 +6889,9 @@ class Orchestrator:
                     name, project_code=self.project.code,
                 )
             except Exception:
+                _logger.warning("task %s: required skill %r failed to load — "
+                               "its tools are not granted", task.id, name,
+                               exc_info=True)
                 continue
             for tool in extra.tool_loadout:
                 if tool not in seen:
@@ -10508,6 +10519,8 @@ class Orchestrator:
                 task_id=t.id, goal_id=t.goal_id, agent_id="planner",
             )
         except Exception:
+            _logger.warning("re-decompose planner call failed for task %s — "
+                           "escalating as stuck", t.id, exc_info=True)
             return None
         specs = _parse_redecompose_specs(resp)
         # Keystone #18 (task-bound, no reset): the split SHARES the parent's

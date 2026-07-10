@@ -21,6 +21,10 @@ from modulatio import cron, docs, logstore, store, vault
 from modulatio.web.routes.console import valid_project
 from modulatio.web.serialize import json_safe
 
+import logging
+
+_logger = logging.getLogger("modulatio.web.data")
+
 router = APIRouter(prefix="/api")
 
 #: Preview cap — same 2000-char truncation the TUI's Artifacts pane uses.
@@ -179,6 +183,8 @@ def memory(project: str) -> dict:
                     agent.id, project_code=code, limit=_AGENT_MEMORY_LIMIT
                 )
             except Exception:  # noqa: BLE001 — one bad layer never blanks the page
+                _logger.warning("memory page: %s layer failed for agent %s",
+                                layer, agent.id, exc_info=True)
                 entries = []
             agent_entries.extend(
                 json_safe({"agent_id": agent.id, "layer": layer, **e.to_dict()})

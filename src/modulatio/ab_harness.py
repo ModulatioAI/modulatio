@@ -1957,6 +1957,8 @@ def run_experiment(
                     project.code, run_id=project.run_id,
                 )
             except Exception:  # noqa: BLE001 — best-effort QC source
+                _logger.warning("replicate QC source: task list failed — "
+                                "metrics degrade", exc_info=True)
                 replicate_tasks = []
 
             # Build the metric snapshot from the engine's audit log
@@ -2080,7 +2082,12 @@ def run_experiment(
                     ),
                 )
             except Exception:
-                pass
+                # Best-effort: the manifest is forensic garnish — its write
+                # failure must never mask the replicate's ORIGINAL failure.
+                # But log it, or a disk-full here is invisible.
+                _logger.warning(
+                    "replicate %s/%s: failure-manifest write failed",
+                    arm, replicate_index, exc_info=True)
 
             emit_replicate_failed(
                 audit_path=experiment_audit,

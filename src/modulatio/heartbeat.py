@@ -151,6 +151,10 @@ def _load_queue() -> list:
         try:
             return json.loads(qf.read_text(encoding="utf-8", errors="replace")) or []
         except (OSError, json.JSONDecodeError):
+            # LOUD: a caller's load-mutate-save cycle would persist this empty
+            # list over the (corrupt but possibly recoverable) queue file.
+            logger.error("heartbeat queue %s unreadable — treating as empty; "
+                         "a following save will overwrite it", qf, exc_info=True)
             return []
 
 

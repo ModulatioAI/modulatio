@@ -27,6 +27,10 @@ from typing import Any, Callable
 from modulatio.attachments import Attachment
 from modulatio.roster import Agent
 
+import logging
+
+logger = logging.getLogger("modulatio.chat")
+
 #: Type of the runner factory: takes a model id, returns a single-shot
 #: prompt-to-response callable. Matches ``runners.litellm_runner``.
 RunnerFactory = Callable[[str], Callable[[str], str]]
@@ -237,6 +241,10 @@ def _load_agent_skill_bodies(
         try:
             skill = _skills.load_with_metadata(skill_name, project_code=project_code)
         except Exception:
+            # A broken skill must not sink the whole prompt build — but a
+            # silently dropped skill is an invisible capability loss.
+            logger.warning("chat: skill %r failed to load; dropped from the "
+                           "prompt", skill_name, exc_info=True)
             continue
         body = (skill.prompt_template or "").strip()
         if not body:

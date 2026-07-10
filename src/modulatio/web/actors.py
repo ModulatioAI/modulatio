@@ -32,6 +32,10 @@ from modulatio.types import Project, ProjectState, TaskStatus
 from modulatio.web.events import get_bus
 from modulatio.web.serialize import event_to_json, json_safe
 
+import logging
+
+_logger = logging.getLogger("modulatio.web.actors")
+
 #: Fail-closed ceiling on a pending approval: no decision from any
 #: paired browser within this window → DENY.
 _APPROVAL_TIMEOUT_S = 300.0
@@ -335,6 +339,8 @@ class OrchestratorActor:
         try:
             tasks = store.list_tasks(self.code, run_id=run_id)
         except Exception:  # noqa: BLE001 — telemetry must never kill the run
+            _logger.warning("telemetry: task list failed for run %s",
+                            run_id, exc_info=True)
             tasks = []
         total = len(tasks)
         done = sum(

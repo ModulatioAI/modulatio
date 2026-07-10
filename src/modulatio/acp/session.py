@@ -11,6 +11,10 @@ from __future__ import annotations
 
 import threading
 
+import logging
+
+_logger = logging.getLogger("modulatio.acp")
+
 
 def _permission_allows(result) -> bool:
     """Map an ACP ``session/request_permission`` response to allow/deny.
@@ -79,7 +83,9 @@ class ACPSession:
                 },
             })
         except Exception:
-            pass  # the activity relay must never break a turn
+            # The activity relay must never break a turn — but a persistently
+            # broken pipe should leave a trace (debug: this fires per event).
+            _logger.debug("acp: activity relay drop", exc_info=True)
 
     # ── tool call → session/request_permission (blocking) ───────────────
     def permission_cb(self, name: str, args: dict) -> bool:

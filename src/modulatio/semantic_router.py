@@ -42,6 +42,10 @@ from modulatio.types import Task
 
 from modulatio import config as _config
 
+import logging
+
+_logger = logging.getLogger("modulatio.semantic_router")
+
 def _cache_root() -> Path:
     """Resolve the semantic-routing cache root from current config.
     Honors the wizard's ``cache_root`` override and ``$XDG_CACHE_HOME``;
@@ -93,7 +97,9 @@ def _embed_dim_for_model(model_name: str) -> int:
                     return dim
                 break
     except Exception:
-        pass
+        _logger.warning("embed-dim catalog lookup failed for %r — using "
+                        "default %d", model_name, _DEFAULT_EMBED_DIM,
+                        exc_info=True)
     return _DEFAULT_EMBED_DIM
 
 

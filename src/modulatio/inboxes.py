@@ -1488,6 +1488,8 @@ def sweep_abandoned_candidates(
         try:
             cand = _row_to_candidate(row)
         except Exception:
+            _LOGGER.warning("sweep: malformed candidate row skipped",
+                            exc_info=True)
             continue
         if (current_turn - cand.created_at_turn
                 < INBOX_CANDIDATE_ABANDON_AFTER_TURNS):

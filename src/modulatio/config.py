@@ -325,14 +325,18 @@ def load_modulatio_env() -> None:
         if vault_env.exists():
             load_dotenv(vault_env, override=False)
     except Exception:
-        pass  # never block startup on env-load failure
+        # Never block startup on env-load failure — but leave a trace.
+        logger.warning("vault .env load failed; continuing without it",
+                       exc_info=True)
     _DOTENV_LOADED = True
     # SETTINGS-tab overrides layer AFTER the dotenv layers, same
     # shell-wins contract (see apply_env_overrides).
     try:
         apply_env_overrides()
     except Exception:
-        pass  # never block startup on a malformed overrides block
+        # Never block startup on a malformed overrides block — but leave a trace.
+        logger.warning("settings env-overrides apply failed; continuing",
+                       exc_info=True)
 
 
 #: The ONLY keys apply_env_overrides will inject — the same curated set the

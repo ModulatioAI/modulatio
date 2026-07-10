@@ -32,6 +32,10 @@ from textual.widgets import Button, RichLog, Static, TextArea
 from modulatio.attachments import Attachment, AttachmentKind, build_attachment
 from modulatio.roster import Agent
 
+import logging
+
+_logger = logging.getLogger("modulatio.tui.agent_pane")
+
 
 class ChatResponse(Message):
     """Posted by the chat worker back to the main thread when an
@@ -459,6 +463,8 @@ class AgentPanePanel(Vertical):
                 wiki_path=str(wiki),
             )
         except Exception:
+            _logger.warning("could not build a Project for ticket attribution "
+                            "(%s)", project_code, exc_info=True)
             return None
 
     def _route_conversational_decision(

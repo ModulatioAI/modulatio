@@ -213,7 +213,11 @@ def chat_with_agent_multimodal(
         agent=agent, message=message, history=history,
         attachments=attachments,
     )
-    response = chat_completion(model=agent.model, messages=messages)
+    from modulatio.runners import _default_call_timeout
+    response = chat_completion(
+        model=agent.model, messages=messages,
+        timeout=_default_call_timeout(),  # same per-completion cap as runners
+    )
     # LiteLLM mirrors the OpenAI response shape — choices[0].message.content
     # is the assistant text.
     return response.choices[0].message.content
