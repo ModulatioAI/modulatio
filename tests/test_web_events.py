@@ -113,6 +113,27 @@ def test_telemetry_replays_latest_only():
     assert q.empty()  # the latest only, never a backlog of ticks
 
 
+def test_replay_delivers_newest_frames_including_run_done():
+    """WB MEDIUM: a run longer than a fresh subscriber's queue depth must replay
+    its NEWEST frames (the current burst + run_done) on reconnect — not the
+    stale oldest that get iterated first and fill the queue, dropping run_done."""
+    from modulatio.web.events import _SUBSCRIBER_DEPTH, EventBus
+
+    bus = EventBus()
+    bus.publish({"type": "run_started", "data": {"run_id": "r"}})
+    for n in range(_SUBSCRIBER_DEPTH + 500):  # more activity than a queue holds
+        bus.publish({"type": "event", "data": {"n": n}})
+    bus.publish({"type": "run_done", "data": {"run_id": "r"}})  # MUST arrive
+    q = bus.subscribe()
+    drained = []
+    while not q.empty():
+        drained.append(q.get_nowait())
+    types = [f["type"] for f in drained]
+    assert "run_done" in types  # newest survives (the old oldest-first drop lost it)
+    ns = [f["data"]["n"] for f in drained if f["type"] == "event"]
+    assert ns and max(ns) == _SUBSCRIBER_DEPTH + 500 - 1  # newest activity, not oldest
+
+
 def test_get_bus_is_per_project_singleton():
     from modulatio.web.events import get_bus
 

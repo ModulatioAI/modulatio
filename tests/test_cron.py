@@ -428,3 +428,80 @@ def test_until_disables_when_next_run_passes_end_date():
     after = cron.get(job["id"])
     # fired once on the 1st; the next run (the 2nd) is past the until date → stop
     assert after["enabled"] is False and after["runs"] == 1
+
+
+# === Wild Bill beta-bundle findings: cron hardening (2026-07-09) ===
+
+
+def test_add_normalizes_naive_start_at_to_utc():
+    """WB CRITICAL (layer 1): a browser-picked naive start_at (no offset) is
+    stored UTC-aware so the daemon's aware-vs-aware comparison can't raise."""
+    vault.init_project("cronx", "Cron X", "o")
+    job = cron.add(name="browser", schedule="daily 09:00", project_code="CRONX",
+                   objective="x", start_at="2099-01-05T09:00:00")  # naive, no offset
+    assert job["next_run"].endswith("+00:00")
+    assert job["start_at"].endswith("+00:00")
+    cron.dispatch_due(now=datetime(2099, 1, 5, 10, tzinfo=timezone.utc))  # no raise
+
+
+def test_hand_edited_naive_next_run_does_not_wedge_sweep():
+    """WB CRITICAL (layer 2): a naive next_run that reaches disk anyway (a
+    hand-edited/legacy config) must fail safe in check_due, not raise and starve
+    every later valid job. Repro of the offset-naive-vs-aware TypeError."""
+    vault.init_project("cronx", "Cron X", "o")
+    poisoned = cron.add(name="poison", schedule="daily 09:00", project_code="CRONX",
+                        objective="x", start_at=_iso(2099, 1, 5, 9, 0))
+    cron.update(poisoned["id"], next_run="2099-01-05T09:00:00")  # force naive on disk
+    good = cron.add(name="good", schedule="daily 00:00", project_code="CRONX",
+                    objective="y", start_at=_iso(2000, 1, 1, 0, 0))  # already due
+    fired = cron.dispatch_due(now=datetime(2050, 1, 1, tzinfo=timezone.utc))  # no raise
+    assert good["id"] in {j["id"] for j in fired}  # not starved by the naive job
+
+
+def test_poisoned_count_disables_fail_closed_and_sweep_continues():
+    """WB HIGH: a hand-edited count:'garbage' must disable the job fail-closed —
+    not fire, raise mid-advance, abort the sweep, and re-fire every tick — and
+    must not starve later valid jobs."""
+    vault.init_project("cronx", "Cron X", "o")
+    bad = cron.add(name="bad", schedule="1h", project_code="CRONX",
+                   objective="x", start_at=_iso(2000, 1, 1, 0, 0))
+    good = cron.add(name="good", schedule="1h", project_code="CRONX",
+                    objective="y", start_at=_iso(2000, 1, 1, 0, 0))
+    cron.update(bad["id"], count="garbage")  # hand-edited poison
+    now = datetime(2000, 1, 1, 0, 1, tzinfo=timezone.utc)
+    fired = cron.dispatch_due(now=now)   # must not raise
+    fired2 = cron.dispatch_due(now=now)  # a second tick — bad must not re-fire
+    assert cron.get(bad["id"])["enabled"] is False
+    assert cron.get(bad["id"])["last_status"] == "error:invalid-stop-metadata"
+    assert good["id"] in {j["id"] for j in fired}   # good dispatched, not starved
+    assert bad["id"] not in {j["id"] for j in fired}   # bad never fired (disabled first)
+    assert bad["id"] not in {j["id"] for j in fired2}  # and stays disabled
+
+
+def test_poisoned_until_disables_rather_than_running_forever():
+    """WB MEDIUM: a malformed until must fail closed (disable), not be silently
+    ignored so the job runs indefinitely."""
+    vault.init_project("cronx", "Cron X", "o")
+    job = cron.add(name="j", schedule="1d", project_code="CRONX",
+                   objective="x", start_at=_iso(2000, 1, 1, 9, 0))
+    cron.update(job["id"], until="not-a-date")  # hand-edited poison
+    cron.dispatch_due(now=datetime(2000, 1, 1, 9, 1, tzinfo=timezone.utc))
+    after = cron.get(job["id"])
+    assert after["enabled"] is False
+    assert after["last_status"] == "error:invalid-stop-metadata"
+
+
+def test_add_rejects_nonpositive_count_and_bad_stop_metadata():
+    """WB MEDIUM: count must be a positive int (0/negative is an error, not a
+    silent unlimited schedule); start_at/until must parse — validated while the
+    operator is present."""
+    vault.init_project("cronx", "Cron X", "o")
+    with pytest.raises(ValueError):
+        cron.add(name="j", schedule="1d", project_code="CRONX", objective="x",
+                 start_at=_iso(2000, 1, 1, 9, 0), count=0)
+    with pytest.raises(ValueError):
+        cron.add(name="j", schedule="1d", project_code="CRONX", objective="x",
+                 start_at=_iso(2000, 1, 1, 9, 0), until="not-a-date")
+    with pytest.raises(ValueError):
+        cron.add(name="j", schedule="daily 09:00", project_code="CRONX",
+                 objective="x", start_at="totally-bogus")

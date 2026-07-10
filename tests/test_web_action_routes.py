@@ -307,9 +307,11 @@ def test_jt_schedule_builder_fields_reach_cron(client):
     assert resp.status_code == 200
     job = next(j for j in cron.list_jobs(project_code="web")
                if j.get("jt_id") == "weekly-report")
-    assert job["start_at"] == "2099-01-05T09:00:00"
+    # A browser-picked start_at is naive; cron.add normalizes it to UTC (the DSL
+    # is UTC) so the stored next_run is comparable and can't wedge the daemon.
+    assert job["start_at"] == "2099-01-05T09:00:00+00:00"
     assert job["count"] == 5
-    assert job["next_run"] == "2099-01-05T09:00:00"  # start_at IS the first run
+    assert job["next_run"] == "2099-01-05T09:00:00+00:00"  # start_at IS the first run
 
 
 def test_jt_schedule_once_builder(client):
@@ -321,12 +323,34 @@ def test_jt_schedule_once_builder(client):
     assert resp.status_code == 200
     job = next(j for j in cron.list_jobs(project_code="web")
                if j.get("schedule") == "once")
-    assert job["next_run"] == "2099-06-01T14:30:00"
+    assert job["next_run"] == "2099-06-01T14:30:00+00:00"  # normalized to UTC-aware
 
 
 def test_jt_schedule_unknown_template_400(client):
     resp = client.post("/api/web/jts/nope/schedule", json={"schedule": "7d"})
     assert resp.status_code == 400
+
+
+def test_jt_schedule_rejects_zero_count(client):
+    """WB MEDIUM: a crafted count:0 must be rejected at the route boundary (422),
+    not silently persisted as an unlimited schedule."""
+    _seed_jt()
+    resp = client.post("/api/web/jts/weekly-report/schedule", json={
+        "schedule": "daily 09:00", "start_at": "2099-01-05T09:00:00", "count": 0})
+    assert resp.status_code == 422
+
+
+def test_jt_schedule_rejects_bad_start_at_and_until(client):
+    """WB CRITICAL/MEDIUM: garbage start_at / until are rejected at the route
+    boundary rather than persisted to wedge or run-forever."""
+    _seed_jt()
+    bad_start = client.post("/api/web/jts/weekly-report/schedule", json={
+        "schedule": "daily 09:00", "start_at": "not-a-datetime"})
+    assert bad_start.status_code == 422
+    bad_until = client.post("/api/web/jts/weekly-report/schedule", json={
+        "schedule": "daily 09:00", "start_at": "2099-01-05T09:00:00",
+        "until": "not-a-date"})
+    assert bad_until.status_code == 422
 
 
 def test_jt_kickoff_unknown_template_404(client):

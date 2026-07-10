@@ -332,6 +332,37 @@ class ScheduleBody(BaseModel):
             raise ValueError("schedule must be non-blank")
         return v
 
+    @field_validator("count")
+    @classmethod
+    def _positive_count(cls, v: int | None) -> int | None:
+        # A crafted count:0 must NOT slip through and become an unlimited
+        # schedule (Wild Bill) — the builder floors at 1; enforce it server-side.
+        if v is not None and v < 1:
+            raise ValueError("count must be at least 1 (omit it for unlimited)")
+        return v
+
+    @field_validator("start_at")
+    @classmethod
+    def _iso_datetime(cls, v: str | None) -> str | None:
+        from datetime import datetime
+        if v is not None:
+            try:
+                datetime.fromisoformat(v)
+            except ValueError as exc:
+                raise ValueError("start_at must be an ISO datetime") from exc
+        return v
+
+    @field_validator("until")
+    @classmethod
+    def _iso_date(cls, v: str | None) -> str | None:
+        from datetime import date
+        if v is not None:
+            try:
+                date.fromisoformat(v)
+            except ValueError as exc:
+                raise ValueError("until must be an ISO date (YYYY-MM-DD)") from exc
+        return v
+
 
 def _valid_jt_name(name: str) -> str:
     try:

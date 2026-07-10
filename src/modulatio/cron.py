@@ -178,6 +178,23 @@ def _now_iso() -> str:
     return _now().isoformat(timespec="seconds")
 
 
+def _parse_aware(iso: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO datetime and guarantee it's UTC-aware, or ``None`` if it
+    doesn't parse. A NAIVE value (no offset) is interpreted as UTC — the whole
+    DSL is UTC, so a naive ``next_run`` (a browser-picked ``start_at`` such as
+    ``2099-01-05T09:00:00``, or a hand-edited config) must be made comparable
+    rather than crash the sweep: comparing an offset-naive to the daemon's
+    offset-aware ``now`` raises ``TypeError`` and would abort every later due
+    job (Wild Bill CRITICAL). Fail-safe: unparseable → ``None`` (caller skips)."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso)
+    except (ValueError, TypeError):
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def _new_id() -> str:
     # Full UTC timestamp (all 6 microsecond digits) keeps ids sortable by
     # creation time; a short random suffix makes them collision-resistant when
@@ -322,9 +339,8 @@ def _advance_next_run(parsed: dict, prev_next_run: Optional[str], now: datetime)
     # A zero/negative interval can't be anchored sanely — fall back to now+delta.
     if step <= 0 or not prev_next_run:
         return compute_next_run(parsed, after=now)
-    try:
-        anchor = datetime.fromisoformat(prev_next_run)
-    except (ValueError, TypeError):
+    anchor = _parse_aware(prev_next_run)
+    if anchor is None:  # unparseable prev_next_run — fall back to now+delta
         return compute_next_run(parsed, after=now)
 
     delta = timedelta(seconds=step)
@@ -421,11 +437,35 @@ def add(
                     f"parameter {spec.per!r} is empty. Bind a non-empty list so "
                     f"the headless run isn't refused."
                 )
+    # Validate the stop-metadata HERE, while the operator is present, so a bad
+    # value surfaces now instead of silently becoming an unlimited schedule or
+    # crashing a headless 3am dispatch (Wild Bill). count must be a positive int
+    # (0/negative → error, NOT the old silent "infinite"); until must be an ISO
+    # date; both stay None when absent.
+    if count is not None:
+        try:
+            count = int(count)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"count must be a positive integer, got {count!r}") from exc
+        if count < 1:
+            raise ValueError(
+                "count must be at least 1 (omit it for an unlimited schedule)")
+    if until is not None:
+        try:
+            date.fromisoformat(until)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"until must be an ISO date (YYYY-MM-DD), got {until!r}") from exc
     # start_at (the operator's picked date+time from the builder) IS the first
     # run — the recurrence advances from it. Absent (a raw DSL from the CLI) →
     # the next matching slot after now, exactly as before. A one-off needs one.
+    # A browser-picked start_at is timezone-naive; normalize it to UTC (the DSL
+    # is UTC) so the stored next_run is comparable and a bad string is rejected
+    # here rather than wedging the daemon later (Wild Bill CRITICAL).
     if start_at:
-        nxt = datetime.fromisoformat(start_at)
+        nxt = _parse_aware(start_at)
+        if nxt is None:
+            raise ValueError(f"start_at is not a valid ISO datetime: {start_at!r}")
+        start_at = nxt.isoformat(timespec="seconds")
     elif parsed["kind"] == "once":
         raise ValueError("a one-off schedule ('once') needs a start date/time")
     else:
@@ -443,8 +483,8 @@ def add(
         "jt_params": dict(jt_params) if jt_params else None,
         "on_refused": on_refused or None,  # #97 R2: per-cron refusal policy override
         "start_at": start_at or None,
-        "count": int(count) if count else None,   # None / 0 → infinite
-        "until": until or None,                    # end date (inclusive) or None
+        "count": count,                            # validated: positive int, or None = infinite
+        "until": until or None,                    # validated ISO end date (inclusive), or None
         "runs": 0,
         "created": _now_iso(),
         "next_run": nxt.isoformat(timespec="seconds"),
@@ -528,9 +568,10 @@ def check_due(*, now: Optional[datetime] = None) -> list[dict]:
         nr = j.get("next_run")
         if not nr:
             continue
-        try:
-            nrt = datetime.fromisoformat(nr)
-        except (ValueError, TypeError):
+        # `_parse_aware` normalizes a naive next_run to UTC so the comparison
+        # below can't raise offset-naive-vs-aware and abort the whole sweep.
+        nrt = _parse_aware(nr)
+        if nrt is None:
             logger.warning("Cron job %s: unparseable next_run=%r", j.get("id"), nr)
             continue
         if nrt <= now:
@@ -595,6 +636,42 @@ def _open_orphan_cron_ticket(job: dict) -> None:
         logger.exception("Cron %s: failed to open orphan-project ticket", job.get("id"))
 
 
+def _coerce_stop_meta(
+    job: dict,
+) -> Optional[tuple[int, Optional[int], Optional[date]]]:
+    """Coerce a job's stop-metadata (``runs``, ``count``, ``until``) to typed
+    values, or return ``None`` if any stored value is malformed.
+
+    A hand-edited cron-config can carry ``count: 'garbage'`` or ``until:
+    'not-a-date'``. Reading those lazily inside the advance tail — AFTER the
+    heartbeat side-effect fires — let a ``ValueError`` abort the whole
+    ``dispatch_due`` sweep and re-fire the poisoned job every tick (Wild Bill
+    HIGH), while a bad ``until`` was silently ignored so the job ran forever
+    (Wild Bill MEDIUM). Coerce everything HERE, up front, so the caller can
+    disable a malformed job fail-closed BEFORE dispatching and the sweep
+    always continues."""
+    try:
+        runs = int(job.get("runs") or 0)
+    except (ValueError, TypeError):
+        return None
+    count = job.get("count")
+    if count is not None:
+        try:
+            count = int(count)
+        except (ValueError, TypeError):
+            return None
+        if count < 1:
+            return None
+    until_raw = job.get("until")
+    until_date: Optional[date] = None
+    if until_raw:
+        try:
+            until_date = date.fromisoformat(str(until_raw))
+        except (ValueError, TypeError):
+            return None
+    return runs, count, until_date
+
+
 def _dispatch_one(job: dict, now: datetime) -> bool:
     """Add a heartbeat task for one due job and advance its next_run.
 
@@ -621,6 +698,19 @@ def _dispatch_one(job: dict, now: datetime) -> bool:
                last_status="error:project-deleted")
         _open_orphan_cron_ticket(job)
         return False
+    # Coerce stop-metadata BEFORE the heartbeat side-effect (Wild Bill): a
+    # malformed count/runs/until must disable the job fail-closed — not fire it,
+    # raise mid-advance, and re-fire every tick. The sweep continues either way.
+    meta = _coerce_stop_meta(job)
+    if meta is None:
+        logger.warning(
+            "Cron job %s: malformed stop metadata (count/runs/until); "
+            "disabling fail-closed", job.get("id"))
+        update(job["id"], enabled=False,
+               last_run=now.isoformat(timespec="seconds"),
+               last_status="error:invalid-stop-metadata")
+        return False
+    runs_before, count, until_date = meta
     dispatch_ok = True
     status = "ok"
     try:
@@ -647,7 +737,7 @@ def _dispatch_one(job: dict, now: datetime) -> bool:
     # we DISABLE the job fail-closed rather than leave it perpetually due —
     # this also stops a successful dispatch from re-firing every tick.
     parsed = parse_schedule(job["schedule"])
-    runs = int(job.get("runs") or 0) + 1
+    runs = runs_before + 1  # runs_before was coerced above; no raise here
     fields = {"last_run": now.isoformat(timespec="seconds"), "last_status": status,
               "runs": runs}
     if parsed is None:
@@ -660,14 +750,9 @@ def _dispatch_one(job: dict, now: datetime) -> bool:
         fields["enabled"] = False  # one-off fired — done.
     else:
         new_next = _advance_next_run(parsed, job.get("next_run"), now)
-        count = job.get("count")
-        stop = count is not None and runs >= int(count)  # ran the requested N
-        if not stop and job.get("until"):
-            try:
-                end = date.fromisoformat(str(job["until"]))
-                stop = new_next.date() > end  # next run would be past the end date
-            except (ValueError, TypeError):
-                pass
+        stop = count is not None and runs >= count  # ran the requested N
+        if not stop and until_date is not None:
+            stop = new_next.date() > until_date  # next run would be past the end date
         if stop:
             fields["enabled"] = False
         else:

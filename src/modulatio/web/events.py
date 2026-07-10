@@ -21,12 +21,19 @@ from collections import deque
 _SUBSCRIBER_DEPTH = 1000
 
 #: The current run's activity frames held for replay, so a (re)connecting
-#: browser rebuilds the whole stream instead of only what happens next. The
-#: SSE self-heals every 2s and a tab switch re-subscribes; without replay any
-#: event in the gap is lost (leader decompose, producer bursts). Telemetry is
-#: kept separately (latest-only) — it fires 1/s and is idempotent, so buffering
-#: every frame would evict the real events.
-_REPLAY_DEPTH = 4000
+#: browser rebuilds the stream instead of only what happens next. The SSE
+#: self-heals every 2s and a tab switch re-subscribes; without replay any event
+#: in the gap is lost (leader decompose, producer bursts). Telemetry is kept
+#: separately (latest-only) — it fires 1/s and is idempotent, so buffering every
+#: frame would evict the real events.
+#:
+#: Sized to what a fresh subscriber's queue can actually receive on connect
+#: (``_SUBSCRIBER_DEPTH``): a reconnect can only be handed that many frames, so
+#: retaining more is undeliverable weight — and iterating a larger buffer
+#: oldest-first would fill the queue with stale head frames and DROP the newest,
+#: including a possible ``run_done`` (Wild Bill). ``subscribe`` replays the
+#: newest suffix, not the oldest prefix.
+_REPLAY_DEPTH = _SUBSCRIBER_DEPTH
 
 
 class EventBus:
@@ -40,8 +47,12 @@ class EventBus:
         q: queue.Queue = queue.Queue(maxsize=_SUBSCRIBER_DEPTH)
         with self._lock:
             # Replay the current run first, then register for live frames —
-            # both under the lock so no live frame slips in between.
-            for frame in self._replay:
+            # both under the lock so no live frame slips in between. Hand over
+            # the NEWEST frames that fit (leaving one slot for the latest
+            # telemetry), so a long run's tail — the current producer burst and
+            # run_done — survives instead of being dropped for stale head frames
+            # (Wild Bill). The deque is already capped at _SUBSCRIBER_DEPTH.
+            for frame in list(self._replay)[-(_SUBSCRIBER_DEPTH - 1):]:
                 try:
                     q.put_nowait(frame)
                 except queue.Full:
