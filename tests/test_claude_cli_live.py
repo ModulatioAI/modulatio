@@ -8,6 +8,7 @@ import os
 import pytest
 
 
+@pytest.mark.live
 @pytest.mark.skipif(
     not os.path.exists(os.path.expanduser("~/.claude/.credentials.json")),
     reason="no Claude Code login (~/.claude) — live Clay test skipped",

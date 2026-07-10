@@ -85,6 +85,7 @@ def test_codex_chat_runner_builds_responses_shape_and_parses(monkeypatch):
     assert resp.tool_calls[0].args == {"city": "Paris"}
 
 
+@pytest.mark.live
 @pytest.mark.skipif(
     not os.path.exists(os.path.expanduser("~/.codex/auth.json")),
     reason="no Codex OAuth creds (~/.codex/auth.json) — live test skipped",
