@@ -39,7 +39,7 @@ import os
 import re
 import secrets
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -204,6 +204,11 @@ def parse_schedule(schedule_str: str) -> Optional[dict]:
     if not s:
         return None
 
+    # One-off: fires exactly once at the job's start_at, then disables. The
+    # recurrence pattern is "once"; the datetime rides on the job's start_at.
+    if s == "once":
+        return {"kind": "once"}
+
     # Interval — delegate to heartbeat.parse_interval
     delta = heartbeat.parse_interval(s)
     if delta is not None:
@@ -347,6 +352,9 @@ def add(
     jt_id: Optional[str] = None,
     jt_params: Optional[dict] = None,
     on_refused: Optional[str] = None,
+    start_at: Optional[str] = None,
+    count: Optional[int] = None,
+    until: Optional[str] = None,
 ) -> dict:
     """Add a cron job. Computes initial next_run from schedule. Raises
     ``ValueError`` if the schedule doesn't parse.
@@ -413,7 +421,15 @@ def add(
                     f"parameter {spec.per!r} is empty. Bind a non-empty list so "
                     f"the headless run isn't refused."
                 )
-    nxt = compute_next_run(parsed)
+    # start_at (the operator's picked date+time from the builder) IS the first
+    # run — the recurrence advances from it. Absent (a raw DSL from the CLI) →
+    # the next matching slot after now, exactly as before. A one-off needs one.
+    if start_at:
+        nxt = datetime.fromisoformat(start_at)
+    elif parsed["kind"] == "once":
+        raise ValueError("a one-off schedule ('once') needs a start date/time")
+    else:
+        nxt = compute_next_run(parsed)
     job = {
         "id": _new_id(),
         "name": name,
@@ -426,6 +442,10 @@ def add(
         "jt_id": jt_id or None,
         "jt_params": dict(jt_params) if jt_params else None,
         "on_refused": on_refused or None,  # #97 R2: per-cron refusal policy override
+        "start_at": start_at or None,
+        "count": int(count) if count else None,   # None / 0 → infinite
+        "until": until or None,                    # end date (inclusive) or None
+        "runs": 0,
         "created": _now_iso(),
         "next_run": nxt.isoformat(timespec="seconds"),
         "last_run": None,
@@ -627,16 +647,31 @@ def _dispatch_one(job: dict, now: datetime) -> bool:
     # we DISABLE the job fail-closed rather than leave it perpetually due —
     # this also stops a successful dispatch from re-firing every tick.
     parsed = parse_schedule(job["schedule"])
-    fields = {"last_run": now.isoformat(timespec="seconds"), "last_status": status}
-    if parsed is not None:
-        new_next = _advance_next_run(parsed, job.get("next_run"), now)
-        fields["next_run"] = new_next.isoformat(timespec="seconds")
-    else:
+    runs = int(job.get("runs") or 0) + 1
+    fields = {"last_run": now.isoformat(timespec="seconds"), "last_status": status,
+              "runs": runs}
+    if parsed is None:
         logger.warning(
             "Cron job %s: schedule %r no longer parses; disabling to stop "
             "perpetual re-dispatch", job.get("id"), job.get("schedule"))
         fields["enabled"] = False
         fields["last_status"] = "error:unparseable-schedule"
+    elif parsed["kind"] == "once":
+        fields["enabled"] = False  # one-off fired — done.
+    else:
+        new_next = _advance_next_run(parsed, job.get("next_run"), now)
+        count = job.get("count")
+        stop = count is not None and runs >= int(count)  # ran the requested N
+        if not stop and job.get("until"):
+            try:
+                end = date.fromisoformat(str(job["until"]))
+                stop = new_next.date() > end  # next run would be past the end date
+            except (ValueError, TypeError):
+                pass
+        if stop:
+            fields["enabled"] = False
+        else:
+            fields["next_run"] = new_next.isoformat(timespec="seconds")
     update(job["id"], **fields)
 
     return dispatch_ok

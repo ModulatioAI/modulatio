@@ -13,6 +13,126 @@ import {
 const post = (path, body) => api(path, { method: "POST", body });
 const del = (path) => api(path, { method: "DELETE" });
 
+// ── the schedule builder (Teams-style: date · time · recurrence · ends) ──
+const _WD = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const _WD_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
+  "Friday", "Saturday"];
+
+function _prettyDateTime(dateStr, timeStr) {
+  const d = new Date(`${dateStr}T${timeStr}`);
+  return d.toLocaleString(undefined,
+    { dateStyle: "medium", timeStyle: "short" });
+}
+
+// Resolve the builder's fields into {schedule, start_at, count, until} + a
+// human sentence. Returns { spec, sentence } or { error }.
+function _buildSchedule(f) {
+  if (!f.date || !f.time) return { error: "Pick a date and a time." };
+  const start_at = `${f.date}T${f.time}:00`;
+  const when = _prettyDateTime(f.date, f.time);
+  const d = new Date(`${f.date}T${f.time}`);
+  const [hh, mm] = f.time.split(":");
+  if (!f.recurring) {
+    return { spec: { schedule: "once", start_at, count: 1, until: null },
+      sentence: `Runs once on ${when}.` };
+  }
+  let schedule, freqText;
+  if (f.freq === "Daily") { schedule = `daily ${hh}:${mm}`; freqText = "daily"; }
+  else if (f.freq === "Weekly") {
+    schedule = `weekly ${_WD[d.getDay()]} ${hh}:${mm}`;
+    freqText = `weekly on ${_WD_LONG[d.getDay()]}s`;
+  } else if (f.freq === "Monthly") {
+    schedule = `monthly ${d.getDate()} ${hh}:${mm}`;
+    freqText = `monthly on day ${d.getDate()}`;
+  } else if (f.freq === "Every N days") {
+    const n = Math.max(1, parseInt(f.everyN, 10) || 1);
+    schedule = `${n}d`; freqText = n === 1 ? "every day" : `every ${n} days`;
+  } else { // Every N weeks
+    const n = Math.max(1, parseInt(f.everyN, 10) || 1);
+    schedule = `${n * 7}d`; freqText = n === 1 ? "every week" : `every ${n} weeks`;
+  }
+  let count = null, until = null, endsText = "";
+  if (f.ends === "After N runs") {
+    count = Math.max(1, parseInt(f.endsN, 10) || 1);
+    endsText = `, ${count} times`;
+  } else if (f.ends === "On date") {
+    if (!f.endsDate) return { error: "Pick an end date (or choose Never)." };
+    until = f.endsDate;
+    endsText = `, until ${new Date(f.endsDate + "T00:00").toLocaleDateString(undefined, { dateStyle: "medium" })}`;
+  }
+  return { spec: { schedule, start_at, count, until },
+    sentence: `Runs ${freqText} at ${hh}:${mm}, starting ${when}${endsText}.` };
+}
+
+function scheduleDialog(jtName) {
+  return new Promise((resolve) => {
+    const inp = (attrs) => el("input", { class: "form-input", ...attrs });
+    const opts = (arr) => arr.map((o) => el("option", {}, o));
+    const dateIn = inp({ type: "date" });
+    const timeIn = inp({ type: "time", value: "09:00" });
+    const recurCk = el("input", { type: "checkbox" });
+    const freqSel = el("select", { class: "form-input" },
+      ...opts(["Daily", "Weekly", "Monthly", "Every N days", "Every N weeks"]));
+    const everyN = inp({ type: "number", min: "1", value: "1" });
+    const endsSel = el("select", { class: "form-input" },
+      ...opts(["Never", "After N runs", "On date"]));
+    const endsN = inp({ type: "number", min: "1", value: "5" });
+    const endsDate = inp({ type: "date" });
+    const preview = el("p", { class: "soft mono" });
+
+    const field = (label, node) =>
+      el("label", { class: "form-field" }, el("span", {}, label), node);
+    const rRecur = field("Repeat", recurCk);
+    const rFreq = field("Frequency", freqSel);
+    const rEvery = field("Every (N)", everyN);
+    const rEnds = field("Ends", endsSel);
+    const rEndsN = field("After (runs)", endsN);
+    const rEndsDate = field("End date", endsDate);
+
+    const collect = () => ({
+      date: dateIn.value, time: timeIn.value, recurring: recurCk.checked,
+      freq: freqSel.value, everyN: everyN.value, ends: endsSel.value,
+      endsN: endsN.value, endsDate: endsDate.value,
+    });
+    const show = (node, on) => { node.hidden = !on; };
+    function refresh() {
+      const rec = recurCk.checked;
+      show(rFreq, rec);
+      show(rEvery, rec && freqSel.value.startsWith("Every"));
+      show(rEnds, rec);
+      show(rEndsN, rec && endsSel.value === "After N runs");
+      show(rEndsDate, rec && endsSel.value === "On date");
+      const r = _buildSchedule(collect());
+      preview.textContent = r.error ? `⚠ ${r.error}` : `↻ ${r.sentence}`;
+    }
+    for (const n of [dateIn, timeIn, recurCk, freqSel, everyN, endsSel, endsN, endsDate]) {
+      n.addEventListener("change", refresh);
+      n.addEventListener("input", refresh);
+    }
+
+    const dlg = el("dialog", { class: "approval card" },
+      el("h2", {}, `Schedule '${jtName}'`),
+      field("Date", dateIn), field("Time", timeIn),
+      rRecur, rFreq, rEvery, rEnds, rEndsN, rEndsDate,
+      preview,
+      el("div", { class: "row", style: "justify-content:flex-end" },
+        el("button", { class: "btn", onclick: () => { dlg.close(); resolve(null); } }, "Cancel"),
+        el("button", {
+          class: "btn btn--primary",
+          onclick: () => {
+            const r = _buildSchedule(collect());
+            if (r.error) { preview.textContent = `⚠ ${r.error}`; return; }
+            dlg.close();
+            resolve(r);
+          },
+        }, "Schedule")));
+    document.body.append(dlg);
+    dlg.addEventListener("close", () => dlg.remove());
+    refresh();
+    dlg.showModal();
+  });
+}
+
 const P = (ctx) => `/${ctx.project}`;
 
 function needsProject(page, ctx) {
@@ -39,12 +159,10 @@ export function mountJts(page, ctx) {
         return false;  // no list change
       } },
       { label: "Schedule…", run: async (j) => {
-        const f = await formDialog(`Schedule '${j.name}' as a cron job`, [
-          { name: "schedule", label: "Schedule (e.g. 7d · 6h · 0 9 * * 1)" }]);
-        if (!f) return false;
-        await post(`${P(ctx)}/jts/${encodeURIComponent(j.name)}/schedule`,
-          { schedule: f.schedule });
-        notify(`Scheduled '${j.name}' — ${f.schedule}.`);
+        const r = await scheduleDialog(j.name);
+        if (!r) return false;
+        await post(`${P(ctx)}/jts/${encodeURIComponent(j.name)}/schedule`, r.spec);
+        notify(`Scheduled '${j.name}' — ${r.sentence}`);
         return false;
       } },
     ],

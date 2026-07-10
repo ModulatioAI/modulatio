@@ -320,7 +320,10 @@ def memory_reject(project: str, proposal_id: str) -> dict:
 
 
 class ScheduleBody(BaseModel):
-    schedule: str
+    schedule: str                 # "once" or the recurrence DSL (daily/weekly/…)
+    start_at: str | None = None   # ISO datetime — the picked first run + anchor
+    count: int | None = None      # run N times, then stop (None = infinite)
+    until: str | None = None      # ISO end date (inclusive), or None
 
     @field_validator("schedule")
     @classmethod
@@ -369,7 +372,9 @@ def jt_schedule(project: str, name: str, body: ScheduleBody) -> dict:
 
     code = valid_project(project)
     _valid_jt_name(name)
-    ok, message = schedule_template_as_cron(name, body.schedule, code)
+    ok, message = schedule_template_as_cron(
+        name, body.schedule, code,
+        start_at=body.start_at, count=body.count, until=body.until)
     if not ok:
         raise HTTPException(status_code=400, detail=message)
     return {"scheduled": message}

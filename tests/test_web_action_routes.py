@@ -295,6 +295,35 @@ def test_jt_schedule_creates_bound_cron(client):
     assert any(j.get("jt_id") == "weekly-report" for j in jobs)
 
 
+def test_jt_schedule_builder_fields_reach_cron(client):
+    """The builder's date/count/until POST through the route → helper →
+    cron.add (wiring, not just the part)."""
+    from modulatio import cron
+
+    _seed_jt()
+    resp = client.post("/api/web/jts/weekly-report/schedule", json={
+        "schedule": "weekly mon 09:00", "start_at": "2099-01-05T09:00:00",
+        "count": 5, "until": None})
+    assert resp.status_code == 200
+    job = next(j for j in cron.list_jobs(project_code="web")
+               if j.get("jt_id") == "weekly-report")
+    assert job["start_at"] == "2099-01-05T09:00:00"
+    assert job["count"] == 5
+    assert job["next_run"] == "2099-01-05T09:00:00"  # start_at IS the first run
+
+
+def test_jt_schedule_once_builder(client):
+    from modulatio import cron
+
+    _seed_jt()
+    resp = client.post("/api/web/jts/weekly-report/schedule", json={
+        "schedule": "once", "start_at": "2099-06-01T14:30:00", "count": 1})
+    assert resp.status_code == 200
+    job = next(j for j in cron.list_jobs(project_code="web")
+               if j.get("schedule") == "once")
+    assert job["next_run"] == "2099-06-01T14:30:00"
+
+
 def test_jt_schedule_unknown_template_400(client):
     resp = client.post("/api/web/jts/nope/schedule", json={"schedule": "7d"})
     assert resp.status_code == 400

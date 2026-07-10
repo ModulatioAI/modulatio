@@ -368,3 +368,65 @@ def test_dispatch_due_interval_catches_up_past_now_after_downtime():
     # Still on the original 10-minute grid relative to the anchor.
     secs_from_anchor = (new_next - scheduled).total_seconds()
     assert secs_from_anchor % 600 == 0
+
+
+# === builder extensions: one-off, start_at anchor, count, until ===
+
+from datetime import date  # noqa: E402
+
+
+def _iso(y, mo, d, h=0, mi=0):
+    return datetime(y, mo, d, h, mi, tzinfo=timezone.utc).isoformat(timespec="seconds")
+
+
+def test_parse_schedule_once():
+    assert cron.parse_schedule("once") == {"kind": "once"}
+
+
+def test_add_once_requires_start_at():
+    vault.init_project("cronx", "Cron X", "o")
+    with pytest.raises(ValueError):
+        cron.add(name="j", schedule="once", project_code="CRONX", objective="x")
+
+
+def test_add_start_at_is_the_first_run():
+    vault.init_project("cronx", "Cron X", "o")
+    start = _iso(2099, 1, 15, 9, 0)
+    job = cron.add(name="j", schedule="daily 09:00", project_code="CRONX",
+                   objective="x", start_at=start)
+    assert job["next_run"] == start  # the picked date/time IS the first run
+    assert job["count"] is None and job["runs"] == 0
+
+
+def test_once_disables_after_one_fire():
+    vault.init_project("cronx", "Cron X", "o")
+    start = _iso(2000, 1, 1, 9, 0)  # already due
+    job = cron.add(name="j", schedule="once", project_code="CRONX",
+                   objective="x", start_at=start)
+    cron.dispatch_due(now=datetime(2000, 1, 1, 9, 1, tzinfo=timezone.utc))
+    after = cron.get(job["id"])
+    assert after["enabled"] is False and after["runs"] == 1
+
+
+def test_count_disables_after_n_fires():
+    vault.init_project("cronx", "Cron X", "o")
+    job = cron.add(name="j", schedule="1h", project_code="CRONX",
+                   objective="x", start_at=_iso(2000, 1, 1, 0, 0), count=2)
+    now = datetime(2000, 1, 1, 0, 1, tzinfo=timezone.utc)
+    cron.dispatch_due(now=now)
+    assert cron.get(job["id"])["enabled"] is True   # 1 of 2
+    now = datetime.fromisoformat(cron.get(job["id"])["next_run"]) + timedelta(minutes=1)
+    cron.dispatch_due(now=now)
+    end = cron.get(job["id"])
+    assert end["enabled"] is False and end["runs"] == 2  # count reached
+
+
+def test_until_disables_when_next_run_passes_end_date():
+    vault.init_project("cronx", "Cron X", "o")
+    job = cron.add(name="j", schedule="1d", project_code="CRONX",
+                   objective="x", start_at=_iso(2000, 1, 1, 9, 0),
+                   until="2000-01-01")  # end date = the start day
+    cron.dispatch_due(now=datetime(2000, 1, 1, 9, 1, tzinfo=timezone.utc))
+    after = cron.get(job["id"])
+    # fired once on the 1st; the next run (the 2nd) is past the until date → stop
+    assert after["enabled"] is False and after["runs"] == 1

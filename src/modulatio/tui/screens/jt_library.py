@@ -56,7 +56,9 @@ def kickoff_template_now(name: str, project_code: str) -> tuple[bool, str]:
 
 
 def schedule_template_as_cron(
-    name: str, schedule: str, project_code: str
+    name: str, schedule: str, project_code: str,
+    *, start_at: str | None = None, count: int | None = None,
+    until: str | None = None,
 ) -> tuple[bool, str]:
     """Schedule a Job Template as a recurring cron job from the TUI, using the
     template's own parameter defaults. Returns ``(ok, message)`` — the cron
@@ -71,6 +73,9 @@ def schedule_template_as_cron(
             project_code=project_code,
             objective=f"Run job template: {name}",
             jt_id=name,
+            start_at=start_at,
+            count=count,
+            until=until,
         )
     except ValueError as exc:
         return False, f"Couldn't schedule '{name}': {exc}"
