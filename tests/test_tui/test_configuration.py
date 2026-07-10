@@ -14,6 +14,10 @@ from modulatio.tui.screens.configuration import ConfigScreen
 from modulatio.tui.widgets.auth_step import AuthStep
 from modulatio.tui.widgets.model_picker import ModelPicker
 from modulatio.tui.widgets.provider_picker import ProviderPicker
+from rich.errors import MarkupError as RichMarkupError
+from textual.widgets._data_table import default_cell_formatter
+import json
+import pytest
 
 
 class _Host(App):
@@ -308,3 +312,180 @@ async def test_remove_deletes_the_selected_preset(tmp_path, monkeypatch):
         assert model_presets.get_preset("dead_one") is None
         assert model_presets.get_preset("op_free") is not None
         assert app.query_one("#cfg-models", DataTable).row_count == 1
+
+
+# ═══ fold: test_tui_screens_configuration_preship.py ═══
+# Regression: Configuration·Models list DataTable must not raise MarkupError
+# on an operator-authored custom model id / preset key containing markup-closer
+# brackets (preship sweep, configuration.py:118).
+#
+# ``_fill_table`` populates a textual ``DataTable``. Textual's
+# ``default_cell_formatter`` runs every ``str`` cell through ``Text.from_markup``,
+# which raises ``rich.errors.MarkupError`` on sequences like ``[/v2]`` at paint
+# time and crashes the TUI. The custom-provider flow lets the operator type an
+# arbitrary model id / preset key, so the painted cells (key, model, auth_type)
+# are escaped before they reach the table.
+#
+# We exercise the real ``_fill_table`` against a fake table that captures the
+# cells it would paint, then run each captured cell through the exact formatter
+# the DataTable uses — proving the escape keeps paint from raising while the
+# literal brackets survive.
+
+
+class _CapturingTable:
+    """Stand-in for DataTable that records the cells ``add_row`` is given —
+    no active-app context required (real DataTable.add_row needs one)."""
+
+    def __init__(self) -> None:
+        self.rows: list[tuple] = []
+
+    def add_row(self, *cells, key=None):  # noqa: D401 - mimics DataTable
+        self.rows.append(cells)
+
+
+def _render_cell(value: object) -> object:
+    """Render a cell the way DataTable paints it — raising MarkupError if the
+    cell's markup is invalid."""
+    return default_cell_formatter(value)
+
+
+def test_default_cell_formatter_raises_on_unescaped_bracket_closer():
+    """Sanity: the hazard is real — a raw bracket-closer string crashes the
+    formatter the DataTable uses to paint."""
+    try:
+        _render_cell("my-model[/v2]")
+    except RichMarkupError:
+        return
+    raise AssertionError("expected MarkupError on unescaped bracket closer")
+
+
+def test_fill_table_escapes_bracketed_custom_model(monkeypatch):
+    """The fix: a custom preset with bracket-bearing key / model / auth_type
+    is escaped, so every painted cell survives the formatter that crashes on
+    raw markup-closers — and the literal brackets are preserved."""
+    bad_presets = {
+        "my-key[/v2]": {
+            "model": "vendor/model[/x]",
+            "auth_type": "api_key[/oops]",
+        }
+    }
+    monkeypatch.setattr(model_presets, "load_presets", lambda: bad_presets)
+    monkeypatch.setattr(model_presets, "is_available", lambda key: False)
+
+    table = _CapturingTable()
+    # Bind the unbound method without constructing the full screen/app.
+    ConfigScreen._fill_table(object.__new__(ConfigScreen), table)
+
+    assert len(table.rows) == 1
+    for cell in table.rows[0]:
+        if isinstance(cell, str):
+            _render_cell(cell)  # must not raise
+
+    # Literal brackets preserved (escaped, not parsed away as markup).
+    assert "my-key[/v2]" in str(_render_cell(table.rows[0][0]))
+    assert "vendor/model[/x]" in str(_render_cell(table.rows[0][1]))
+
+
+# ═══ fold: test_tui_screens_configuration_r2_audit.py ═══
+# Regression tests for the configuration TUI screen (round-2 audit).
+#
+# Covers the `register()` error-handling defect: a ValueError raised by
+# ``model_presets.add_preset`` for a *validation/security* reason (bad
+# api_format/auth_type, or the secret-leak keel) was being swallowed and
+# re-interpreted as "already registered -> update in place", masking a genuine
+# rejection and routing it onto the update path (which skips the secret keel).
+#
+# The fix: only re-route to ``update_preset`` when the entry actually exists;
+# otherwise re-raise so the rejection surfaces.
+
+
+def _make_screen():
+    """Build a ConfigScreen without the Textual app/mount machinery.
+
+    `register()` only reads plain instance attributes + calls into
+    model_presets / provider_catalog, so a bare instance with the relevant
+    attrs set is enough to exercise it in isolation.
+    """
+    screen = object.__new__(ConfigScreen)
+    # A real catalog provider with a standard api-key auth path.
+    screen._provider_id = "openai"
+    screen._auth_type = "api_key"
+    screen._env_var = "OPENAI_API_KEY"
+    screen._base_url = None
+    screen._pool = False
+    return screen
+
+
+@pytest.fixture()
+def isolated_presets(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "model_presets.json")
+    return tmp_path
+
+
+def test_register_reraises_validation_error_for_nonexistent_key(
+    isolated_presets, monkeypatch
+):
+    """A validation/security ValueError on a key that does NOT exist must
+    surface, not be masked as a successful in-place update."""
+    screen = _make_screen()
+
+    update_calls = []
+
+    def fake_add_preset(key, **kwargs):
+        # Simulate the secret-leak keel / format-validation rejection: the key
+        # does not yet exist, so this is a genuine rejection.
+        raise ValueError("auth_config may not carry raw secret value(s)")
+
+    def fake_update_preset(key, **kwargs):
+        update_calls.append(key)
+        return {}
+
+    monkeypatch.setattr(model_presets, "add_preset", fake_add_preset)
+    monkeypatch.setattr(model_presets, "update_preset", fake_update_preset)
+
+    with pytest.raises(ValueError, match="raw secret"):
+        screen.register("gpt-4o")
+
+    # Crucially: the rejection was NOT silently re-routed to update_preset.
+    assert update_calls == []
+
+
+def test_register_routes_to_update_when_key_already_exists(isolated_presets):
+    """When the entry genuinely already exists, register() still updates it in
+    place (the intended pre-existing behavior is preserved)."""
+    screen = _make_screen()
+
+    # First registration creates the entry on disk.
+    key = screen.register("gpt-4o")
+    assert key is not None
+    assert model_presets.get_preset(key) is not None
+    first = model_presets.get_preset(key)
+
+    # Second registration hits the "already exists" ValueError -> update in
+    # place. It must succeed (no raise) and the entry must remain present.
+    key2 = screen.register("gpt-4o")
+    assert key2 == key
+    assert model_presets.get_preset(key) is not None
+    # Sanity: the label-bearing add path and the label-stripped update path both
+    # leave a coherent entry.
+    second = model_presets.get_preset(key)
+    assert second["model"] == first["model"]
+
+
+def test_register_does_not_create_entry_when_add_rejected(
+    isolated_presets, monkeypatch
+):
+    """A rejected registration must not leave any preset persisted on disk."""
+    screen = _make_screen()
+
+    def fake_add_preset(key, **kwargs):
+        raise ValueError("api_format must be one of ...")
+
+    monkeypatch.setattr(model_presets, "add_preset", fake_add_preset)
+
+    with pytest.raises(ValueError):
+        screen.register("gpt-4o")
+
+    presets_file = isolated_presets / "model_presets.json"
+    if presets_file.exists():
+        assert json.loads(presets_file.read_text()) == {}

@@ -17,6 +17,11 @@ import pytest
 
 from modulatio import roster, vault
 from modulatio.types import ActivityEvent
+from rich.errors import MarkupError as RichMarkupError
+from textual.markup import MarkupError as TextualMarkupError
+from textual.widgets import Static
+from rich.markup import escape
+import inspect
 
 
 PROJECT_CODE = "PRP"
@@ -1800,3 +1805,232 @@ async def test_attachment_only_send_still_registers_and_sends(
         assert screen.chatbox_attachments == []  # actually sent, not stranded
         tv = app.query_one("#stream-leader", StreamView)
         assert any("[attached: spec.md]" in m for m in tv.messages)
+
+
+# ═══ fold: test_tui_screens_prompt_preship.py ═══
+# Regression: the Attach-failed status Static in prompt.py must not raise
+# MarkupError on unescaped exception text (preship, prompt.py:234).
+#
+# ``attach_chat`` / ``attach_chat`` render a failure message into the
+# ``#prompt-response`` Static with markup enabled. A ``FileNotFoundError`` /
+# ``UnicodeDecodeError`` carries the offending path, which may contain ``[..]``
+# bracket sequences (a user-chosen filename). Interpolating that raw into the
+# markup string raises ``rich.errors.MarkupError`` at ``Static.update`` time
+# and crashes the TUI. The dynamic exception text is escaped.
+
+
+_MARKUP_ERRORS = (RichMarkupError, TextualMarkupError)
+
+
+def _status_text(value: str) -> str:
+    """Render a Static's markup the same way ``Static.update`` does and
+    return the plain text, raising MarkupError if the markup is invalid."""
+    from textual.visual import visualize
+
+    s = Static("")
+    visual = visualize(s, value, markup=s._render_markup)
+    return str(visual)
+
+
+def test_status_markup_raises_on_unescaped_bracket_closer():
+    """Sanity: an unescaped bracket-closer in the failure message DOES raise
+    — proving the hazard is real (this is what the fix prevents)."""
+    exc = FileNotFoundError("no such file: /tmp/report[/final].docx")
+    bad = f"[bold red]Attach failed:[/] {exc}"
+    try:
+        _status_text(bad)
+    except _MARKUP_ERRORS:
+        return
+    raise AssertionError("expected MarkupError on unescaped bracket closer")
+
+
+def test_attach_failed_message_with_bracket_exception_does_not_crash():
+    """The fix: escaping the exception text means a bracket-bearing error
+    message renders cleanly instead of raising."""
+    from rich.markup import escape
+
+    exc = FileNotFoundError("no such file: /tmp/report[/final].docx")
+    rendered = _status_text(f"[bold red]Attach failed:[/] {escape(str(exc))}")
+    # literal preserved, not parsed as markup
+    assert "report[/final].docx" in rendered
+
+
+def test_prompt_screen_source_escapes_attach_failed_status():
+    """Belt-and-suspenders: the chat attach path escapes the dynamic exception
+    text before updating the markup-enabled Static."""
+    import inspect
+
+    from modulatio.tui.screens import prompt
+
+    chat = inspect.getsource(prompt.PromptScreen.attach_chat)
+    assert "escape(str(exc))" in chat
+    # the raw, unescaped interpolation must be gone
+    assert "Attach failed:[/] {exc}" not in chat
+
+
+# ═══ fold: test_tui_screens_prompt_resweep_r3.py ═══
+# Re-sweep R3 regression: the chatbox attachment-list Static in prompt.py must
+# not raise MarkupError on an unescaped, operator-chosen filename.
+#
+# ``_refresh_chatbox_attachment_list`` interpolates ``att.name`` (which is
+# ``Path.name`` — fully operator-controlled; they pick the file) into a
+# Rich-markup string and calls ``Static.update``. A filename containing a markup
+# closing-tag sequence like ``notes[/].md`` parses as markup and raises
+# ``rich.errors.MarkupError`` at update time, crashing the TUI. The fix escapes
+# ``att.name`` in the refresh path. (The kickoff attachment list was retired with
+# the kickoff box — attachments now stage on the chatbox only.)
+
+
+
+# A filename a real operator can create: contains a markup closing-tag.
+_HOSTILE_NAME = "notes[/].md"
+
+
+
+
+def test_unescaped_attachment_name_raises_markup_error():
+    """Sanity: the OLD (unescaped) interpolation DOES raise on a hostile
+    filename — proving the hazard is real (this is what the fix prevents)."""
+    bad = f"[dim]attached:[/] 📎 {_HOSTILE_NAME}"
+    try:
+        _status_text(bad)
+    except _MARKUP_ERRORS:
+        return
+    raise AssertionError("expected MarkupError on unescaped bracket closer")
+
+
+def test_escaped_attachment_name_renders_cleanly():
+    """The fix: escaping ``att.name`` renders the literal filename instead of
+    raising, for the chatbox label prefix."""
+    chat = _status_text(f"[dim]attached:[/] 📎 {escape(_HOSTILE_NAME)}")
+    assert _HOSTILE_NAME in chat
+
+
+def test_refresh_method_escapes_attachment_name_in_source():
+    """Belt-and-suspenders: the chatbox refresh method escapes ``att.name``
+    before building the markup string, and the raw interpolation is gone."""
+    import inspect
+
+    from modulatio.tui.screens import prompt
+
+    chatbox = inspect.getsource(
+        prompt.PromptScreen._refresh_chatbox_attachment_list
+    )
+    assert "escape(att.name)" in chatbox
+    # the raw, unescaped interpolation must be gone
+    assert "{att.name}" not in chatbox
+
+
+# ═══ fold: test_tui_screens_prompt_resweep_r4.py ═══
+# Re-sweep R4 regression: attaching an oversized (or otherwise unreadable)
+# file must NOT crash the TUI.
+#
+# ``build_attachment`` raises ``ValueError`` when a file exceeds the active
+# size cap, and ``OSError`` (e.g. ``IsADirectoryError`` / permission) on an
+# unreadable path. The three TUI attach call sites previously caught only
+# ``(FileNotFoundError, UnicodeDecodeError)``, so an oversized attachment let
+# the ``ValueError`` propagate out of ``attach_chat`` / ``attach_chat`` and
+# took down the screen. The fix broadens both ``except`` clauses to also catch
+# ``ValueError`` and ``OSError`` and surfaces the message via the same escaped
+# status update used for the missing-file case.
+#
+# The cap is forced tiny here via ``MODULATIO_MAX_ATTACHMENT_BYTES`` so a
+# trivially small fixture trips it (no need to write a real megabyte).
+
+
+PROJECT_CODE_R4 = "PR4"
+
+
+@pytest.fixture
+def project_with_roster_r4(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(PROJECT_CODE_R4, "R4 attach fixture", "obj")
+    roster.add_agent(
+        project_code=PROJECT_CODE_R4, agent_id="leader",
+        name="Leader", identity="You are the Leader.",
+        skills=["leader"], model="stub", tier="leader",
+    )
+    return tmp_path
+
+
+async def test_oversized_kickoff_attachment_does_not_crash(
+    project_with_roster_r4, tmp_path, monkeypatch
+):
+    """An oversized kickoff attachment surfaces a status message instead of
+    raising ValueError out of attach_chat and crashing the screen."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    # Force a 4-byte cap; the fixture below is 16 bytes → over the cap.
+    monkeypatch.setenv("MODULATIO_MAX_ATTACHMENT_BYTES", "4")
+    big = tmp_path / "too_big.md"
+    big.write_text("0123456789ABCDEF", encoding="utf-8")
+
+    app = ModulatioApp(project_code=PROJECT_CODE_R4, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        # Without the fix this raises ValueError and the test errors out.
+        screen.attach_chat(big, kind="document")
+        await pilot.pause()
+        assert screen.chatbox_attachments == []  # nothing staged
+        from textual.widgets import Static
+        status = screen.query_one("#prompt-response", Static)
+        assert "Attach failed" in str(status.render())
+
+
+async def test_oversized_chat_attachment_does_not_crash(
+    project_with_roster_r4, tmp_path, monkeypatch
+):
+    """Symmetric: an oversized chat attachment is caught, not propagated."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    monkeypatch.setenv("MODULATIO_MAX_ATTACHMENT_BYTES", "4")
+    big = tmp_path / "huge.md"
+    big.write_text("way over the cap", encoding="utf-8")
+
+    app = ModulatioApp(project_code=PROJECT_CODE_R4, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        screen.attach_chat(big, kind="document")
+        await pilot.pause()
+        assert screen.chatbox_attachments == []
+        from textual.widgets import Static
+        status = screen.query_one("#prompt-response", Static)
+        assert "Attach failed" in str(status.render())
+
+
+async def test_directory_attachment_does_not_crash(
+    project_with_roster_r4, tmp_path, monkeypatch
+):
+    """A directory path raises OSError (IsADirectoryError) from read_text; it
+    too must be caught rather than crashing the TUI."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    a_dir = tmp_path / "a_directory"
+    a_dir.mkdir()
+
+    app = ModulatioApp(project_code=PROJECT_CODE_R4, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        screen.attach_chat(a_dir, kind="document")
+        await pilot.pause()
+        assert screen.chatbox_attachments == []
+        from textual.widgets import Static
+        status = screen.query_one("#prompt-response", Static)
+        assert "Attach failed" in str(status.render())
+
+
+def test_attach_chat_catches_value_and_os_errors():
+    """Belt-and-suspenders source guard: the attach method broadens the except
+    to ValueError + OSError (so the size cap / unreadable cases are handled),
+    not just the original FileNotFoundError/UnicodeDecodeError."""
+    from modulatio.tui.screens import prompt
+
+    src = inspect.getsource(prompt.PromptScreen.attach_chat)
+    assert "ValueError" in src
+    assert "OSError" in src
