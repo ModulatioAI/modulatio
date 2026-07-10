@@ -7,7 +7,12 @@ callback construction, telegram-listener gating.
 
 from __future__ import annotations
 
+import io
 import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -228,3 +233,334 @@ def test_make_dispatch_callback_real_mode_builds_and_passes_agent_runners(
         "daemon path did not pass per-agent chat runners — tool-using producers "
         "would collapse onto a single chat model regardless of dispatch"
     )
+
+
+# ═══ daemonize / start() lifecycle regressions (audit-family fold) ═══════
+# Folded from the 0.9.0-era round files (r2_audit / resweep / low_audit /
+# preship). The suite's autouse `isolate` supersedes their fixtures.
+
+
+DRIVER = textwrap.dedent(
+    """
+    import os, sys, json
+
+    config_dir = sys.argv[1]
+    result_path = sys.argv[2]
+
+    from pathlib import Path
+    from modulatio import config, daemon
+    config.CONFIG_DIR = Path(config_dir)
+
+    def _probe(*a, **k):
+        # Runs inside the detached child, after the fd redirection.
+        info = {}
+        for fd in (0, 1, 2):
+            try:
+                os.fstat(fd)
+                info[str(fd)] = "open"
+            except OSError as e:
+                info[str(fd)] = "closed:%s" % e.errno
+        # Where does fd 1 actually point? Resolve via /proc.
+        try:
+            info["fd1_target"] = os.readlink("/proc/self/fd/1")
+        except OSError:
+            info["fd1_target"] = "?"
+        try:
+            info["fd0_target"] = os.readlink("/proc/self/fd/0")
+        except OSError:
+            info["fd0_target"] = "?"
+        # A raw write to fd 1 must succeed (lands in the log).
+        try:
+            os.write(1, b"probe-fd1\\n")
+            info["write_fd1"] = "ok"
+        except OSError as e:
+            info["write_fd1"] = "err:%s" % e.errno
+        with open(result_path, "w") as fh:
+            json.dump(info, fh)
+        os._exit(0)
+
+    daemon._run_daemon = _probe
+    pid = daemon.start(stub=True)
+    # Parent: wait for the child to finish writing the result, then exit.
+    try:
+        os.waitpid(pid, 0)
+    except OSError:
+        pass
+    """
+)
+
+
+def _run_detach_probe(tmp_path: Path) -> dict:
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    result_path = tmp_path / "result.json"
+    driver = tmp_path / "driver.py"
+    driver.write_text(DRIVER)
+    repo_src = str(Path(__file__).resolve().parents[1] / "src")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = repo_src + os.pathsep + env.get("PYTHONPATH", "")
+    subprocess.run(
+        [sys.executable, str(driver), str(config_dir), str(result_path)],
+        env=env,
+        timeout=30,
+        check=True,
+        capture_output=True,
+    )
+    import json
+
+    assert result_path.exists(), "detached child never wrote its probe result"
+    return json.loads(result_path.read_text())
+
+
+def test_detach_keeps_fds_012_open_and_redirected(tmp_path):
+    info = _run_detach_probe(tmp_path)
+    # The bug: closing the old streams freed fds 0/1/2 and left them closed.
+    assert info["0"] == "open", f"fd 0 was not redirected: {info}"
+    assert info["1"] == "open", f"fd 1 was not redirected: {info}"
+    assert info["2"] == "open", f"fd 2 was not redirected: {info}"
+    # fd 1 must point at the daemon log; fd 0 at devnull.
+    assert "daemon.log" in info["fd1_target"], info
+    assert "null" in info["fd0_target"], info
+    # A raw fd-1 write (e.g. from a C extension) must not fail.
+    assert info["write_fd1"] == "ok", info
+
+
+def _run_child_in_subprocess(target) -> int:
+    """Fork, run ``target()`` in the child, and return the child's wait status
+    code. ``target`` is expected to terminate the child via os._exit(); if it
+    instead RETURNS (the pre-fix unwind behavior), we mark that distinctly so
+    the test can fail with a clear message.
+    """
+    pid = os.fork()
+    if pid == 0:
+        # Child. If target returns instead of os._exit()-ing, exit 99 to signal
+        # "control flowed back out of the child body" (the bug).
+        try:
+            target()
+        except BaseException:
+            os._exit(98)  # raised back into us without being caught (also a bug)
+        os._exit(99)  # returned normally without os._exit() (the unwind bug)
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
+
+
+def test_child_main_exits_1_when_log_open_fails(monkeypatch):
+    """A failing log open in the detached child must exit(1), not unwind.
+
+    Without the fix, _open_log_for_append's exception propagates out of the
+    child body; here it would surface as exit code 98 (raised back) since the
+    pre-fix code had no wrapping try/except around the log open. With the fix,
+    _child_main catches it and calls os._exit(1).
+    """
+    def boom():
+        raise OSError("simulated disk full opening daemon.log")
+
+    monkeypatch.setattr(daemon, "_open_log_for_append", boom)
+
+    code = _run_child_in_subprocess(lambda: daemon._child_main(stub=True))
+    assert code == 1, (
+        f"child should os._exit(1) on log-open failure, got exit code {code} "
+        "(98=raised out of child, 99=returned out of child — both are the "
+        "unwind-into-parent-teardown bug)"
+    )
+
+
+def test_child_main_exits_1_when_pid_write_fails(tmp_path, monkeypatch):
+    """A failing PID-file write in the detached child must exit(1), not unwind.
+
+    The PID write happens AFTER stdout has been redirected to the log, exercising
+    the later-failure path: logger.exception in _child_main must not itself crash
+    and the child must still exit(1). The log open returns a REAL file (with a
+    usable fileno() for the dup2 detach step) so the failure point is the PID
+    write, not the stream setup.
+    """
+    log_path = tmp_path / "daemon.log"
+
+    def open_real_log():
+        return open(log_path, "a", buffering=1)
+
+    monkeypatch.setattr(daemon, "_open_log_for_append", open_real_log)
+
+    real_write_text = daemon.Path.write_text
+
+    def write_text_guard(self, *args, **kwargs):
+        if self.name == "daemon.pid":
+            raise OSError("simulated read-only fs writing daemon.pid")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(daemon.Path, "write_text", write_text_guard)
+
+    code = _run_child_in_subprocess(lambda: daemon._child_main(stub=True))
+    assert code == 1, (
+        f"child should os._exit(1) on PID-write failure, got exit code {code}"
+    )
+
+
+# === #58: TOCTOU re-read guard ===
+
+def test_start_survives_pid_file_vanishing_after_is_running(monkeypatch):
+    """is_running() says True, but the PID file is gone by the re-read
+    (concurrent stop/daemon-exit). Pre-fix: int(read_text()) raised
+    FileNotFoundError. Post-fix: start() falls through and forks a fresh
+    daemon (we stub fork to the parent path) instead of crashing."""
+    monkeypatch.setattr(daemon, "is_running", lambda: True)
+    # PID file does NOT exist -> read_text() raises FileNotFoundError(OSError).
+    assert not daemon._pid_file().exists()
+    # Stub the fork so we take the parent branch and never spawn a child.
+    monkeypatch.setattr(os, "fork", lambda: 4321)
+    monkeypatch.setattr(daemon.time, "sleep", lambda *_a, **_k: None)
+
+    # Must NOT raise; falls through to the (stubbed) fork and returns its pid.
+    pid = daemon.start(stub=True)
+    assert pid == 4321
+
+
+def test_start_survives_malformed_pid_file_after_is_running(monkeypatch):
+    """is_running() True but the PID file is truncated/garbage at re-read
+    time -> int() would raise ValueError pre-fix. Post-fix: guarded."""
+    monkeypatch.setattr(daemon, "is_running", lambda: True)
+    pf = daemon._pid_file()
+    pf.parent.mkdir(parents=True, exist_ok=True)
+    pf.write_text("not-a-pid")
+    monkeypatch.setattr(os, "fork", lambda: 8765)
+    monkeypatch.setattr(daemon.time, "sleep", lambda *_a, **_k: None)
+
+    pid = daemon.start(stub=True)
+    assert pid == 8765
+
+
+def test_start_returns_existing_pid_when_running_and_readable(monkeypatch):
+    """Happy path preserved: running daemon with a valid PID file returns
+    that pid without forking."""
+    monkeypatch.setattr(daemon, "is_running", lambda: True)
+    pf = daemon._pid_file()
+    pf.parent.mkdir(parents=True, exist_ok=True)
+    pf.write_text("12345")
+
+    def _no_fork():
+        raise AssertionError("start() must NOT fork when daemon already running")
+
+    monkeypatch.setattr(os, "fork", _no_fork)
+    assert daemon.start(stub=True) == 12345
+
+
+# === #59: inherited stdio streams closed in the daemon child ===
+
+def test_child_closes_inherited_stdio_streams(tmp_path, monkeypatch):
+    """Drive start()'s child branch (fork -> 0) far enough to exercise the
+    redirect + close loop, then assert the inherited terminal streams were
+    closed. Pre-fix they leaked open."""
+    monkeypatch.setattr(daemon, "is_running", lambda: False)
+    monkeypatch.setattr(os, "fork", lambda: 0)  # child branch
+    monkeypatch.setattr(os, "setsid", lambda: None)
+    # The child opens the log file before mkdir-ing CONFIG_DIR; in production
+    # the dir already exists. Ensure it does here.
+    config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    old_in = io.StringIO()
+    old_out = io.StringIO()
+    old_err = io.StringIO()
+    monkeypatch.setattr(daemon.sys, "stdin", old_in)
+    monkeypatch.setattr(daemon.sys, "stdout", old_out)
+    monkeypatch.setattr(daemon.sys, "stderr", old_err)
+
+    # Stop the child before it actually runs the daemon loop / os._exit.
+    class _StopHere(Exception):
+        pass
+
+    def _boom(**_k):
+        raise _StopHere()
+
+    monkeypatch.setattr(daemon, "_run_daemon", _boom)
+    monkeypatch.setattr(os, "_exit", lambda *_a: (_ for _ in ()).throw(_StopHere()))
+
+    with pytest.raises(_StopHere):
+        daemon.start(stub=True)
+
+    assert old_in.closed, "inherited stdin was not closed (leak)"
+    assert old_out.closed, "inherited stdout was not closed (leak)"
+    assert old_err.closed, "inherited stderr was not closed (leak)"
+
+
+# === MEDIUM: log opened before CONFIG_DIR is created ===
+
+def test_open_log_for_append_creates_config_dir_first(tmp_path, monkeypatch):
+    """On a fresh install CONFIG_DIR does not exist. _open_log_for_append must
+    mkdir it BEFORE opening _log_file(), otherwise open() raises
+    FileNotFoundError in the forked daemon child while the parent has already
+    reported (false) success. This is the exact ordering the daemon child
+    relies on, factored out so it is testable without forking/stdio hijack.
+
+    The suite's autouse ``isolate`` creates CONFIG_DIR (save_defaults), so
+    re-point at a virgin dir to restore the fresh-install precondition."""
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "fresh-config")
+    assert not config.CONFIG_DIR.exists(), "precondition: fresh install"
+
+    # Before the fix this raised FileNotFoundError (mkdir came after the open).
+    f = daemon._open_log_for_append()
+    try:
+        assert config.CONFIG_DIR.exists(), "log open must create CONFIG_DIR first"
+        assert daemon._log_file().exists()
+        f.write("regression-marker\n")
+    finally:
+        f.close()
+
+    assert "regression-marker" in daemon._log_file().read_text(encoding="utf-8")
+
+
+# === LOW: _shutdown Event not cleared at _run_daemon entry ===
+
+def test_run_daemon_clears_stale_shutdown_flag(monkeypatch):
+    """A set() _shutdown from a prior run must not make a fresh _run_daemon
+    exit its loop immediately. _run_daemon should clear it on entry."""
+    # Simulate a leftover shutdown flag from a previous run.
+    daemon._shutdown.set()
+    assert daemon._shutdown.is_set()
+
+    # Stub everything _run_daemon touches so the loop body is inert and we can
+    # observe whether the flag was cleared. We capture the flag state at the
+    # moment the loop's wait() is first reached, then trip it to exit.
+    seen = {}
+
+    class _FakeHB:
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(daemon.signal, "signal", lambda *a, **k: None)
+    monkeypatch.setattr(daemon.heartbeat, "Heartbeat", lambda **kw: _FakeHB())
+    monkeypatch.setattr(daemon, "_make_dispatch_callback", lambda **kw: (lambda *a, **k: ""))
+    monkeypatch.setattr(daemon, "_maybe_start_telegram_listener", lambda: None)
+    monkeypatch.setattr(daemon.telegram_notify, "notify_event", lambda **kw: None)
+    monkeypatch.setattr(daemon.cron, "dispatch_due", lambda: [])
+
+    class _FakePE:
+        def tick(self, **kw):
+            return []
+
+    monkeypatch.setattr(daemon, "_project_execution_module", lambda: _FakePE())
+    monkeypatch.setattr(daemon, "_make_project_loader", lambda **kw: (lambda c: None))
+    monkeypatch.setattr(daemon, "_make_runners_for", lambda **kw: (lambda p: {}))
+
+    real_wait = daemon._shutdown.wait
+
+    def _wait(timeout=None):
+        # On the first loop iteration, record whether the stale flag survived,
+        # then set it so the loop terminates on the next is_set() check.
+        seen["was_set_at_loop_entry"] = daemon._shutdown.is_set()
+        daemon._shutdown.set()
+        return real_wait(0)
+
+    monkeypatch.setattr(daemon._shutdown, "wait", _wait)
+
+    daemon._run_daemon(stub=True)
+
+    # If the clear() were missing, the while-loop guard would have seen the
+    # stale set() flag and never entered the body, so _wait would not run.
+    assert "was_set_at_loop_entry" in seen, "loop body never ran — stale flag not cleared"
+    assert seen["was_set_at_loop_entry"] is False, "_shutdown should be cleared on entry"
+
+    # Leave the global in a clean state for other tests.
+    daemon._shutdown.clear()
