@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -72,7 +73,10 @@ class KickoffBody(BaseModel):
 
 
 class ApprovalBody(BaseModel):
-    approve: bool
+    #: The operator's chosen scope — the TUI modal's exact vocabulary. The
+    #: route validates the words; the broker clamps to the request's own
+    #: available_scopes (fail-closed) before the gate ever sees it.
+    scope: Literal["once", "session", "always", "deny"]
 
 
 @router.get("/{project}/conversation")
@@ -142,7 +146,7 @@ def approval_decision(
     project: str, rid: str, body: ApprovalBody, request: Request
 ) -> dict:
     code = valid_project(project)
-    if not _actor(request, code).broker.resolve(rid, body.approve):
+    if not _actor(request, code).broker.resolve(rid, body.scope):
         raise HTTPException(status_code=404, detail="unknown approval id")
     return {"resolved": True}
 

@@ -310,25 +310,40 @@ export function mountConsole(page, ctx) {
 
   // ── approval modal (fail-closed: Esc/close = deny) ───────────────
 
+  // The TUI modal's scope vocabulary, verbatim — buttons render only for the
+  // scopes THIS request offers (available_scopes), so the browser can never
+  // present a grant the gate wouldn't accept.
+  const SCOPE_LABELS = {
+    once: "Once", session: "This session", always: "Always", deny: "✗ Deny",
+  };
+
   function showApproval(data) {
+    const scopes = (data.available_scopes || ["once", "deny"])
+      .filter((s) => s in SCOPE_LABELS);
+    // Deny leads, Always sits rightmost — mirror the risk gradient.
+    const ordered = ["deny", "once", "session", "always"].filter((s) => scopes.includes(s));
+    const capLine = data.cap_value != null
+      ? el("p", { class: "mono soft" }, `cap: ${data.cap_value} ${data.cap_unit || ""}`)
+      : "";
     modal.replaceChildren(
       el("h2", {}, "Leader asks permission"),
-      el("p", { class: "mono" }, data.action),
-      el("pre", { class: "mono approval-detail" },
-        JSON.stringify(data.detail, null, 2)),
-      el("div", { class: "row", style: "justify-content:flex-end" },
-        el("button", { class: "btn", onclick: () => decide(data.id, false) }, "✗ Deny"),
-        el("button", {
-          class: "btn btn--primary", onclick: () => decide(data.id, true),
-        }, "✓ Approve once")),
+      el("p", { class: "mono" }, `${data.action}  ·  ${data.resource || ""}`),
+      el("p", {}, data.why || ""),
+      capLine,
+      el("div", { class: "row", style: "justify-content:flex-end; flex-wrap:wrap" },
+        ...ordered.map((s) => el("button", {
+          class: s === "deny" ? "btn btn--danger"
+            : s === "always" ? "btn btn--primary" : "btn",
+          onclick: () => decide(data.id, s),
+        }, SCOPE_LABELS[s]))),
     );
     modal.showModal();
   }
 
-  async function decide(rid, approve) {
+  async function decide(rid, scope) {
     modal.close();
     try {
-      await api(`/${ctx.project}/approvals/${rid}`, { method: "POST", body: { approve } });
+      await api(`/${ctx.project}/approvals/${rid}`, { method: "POST", body: { scope } });
     } catch {
       /* already resolved / timed out server-side — fail-closed either way */
     }
@@ -337,7 +352,7 @@ export function mountConsole(page, ctx) {
   modal.addEventListener("cancel", () => {
     // Esc — the deny is the server timeout's job too, but be explicit.
     const rid = modal.dataset.rid;
-    if (rid) decide(rid, false);
+    if (rid) decide(rid, "deny");
   });
 
   // ── frame routing ────────────────────────────────────────────────

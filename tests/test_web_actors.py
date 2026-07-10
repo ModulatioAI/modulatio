@@ -136,23 +136,40 @@ def test_kickoff_publishes_telemetry_frames(actor):
 # ── approval broker (fail-closed) ─────────────────────────────────────
 
 
-def test_approval_resolve_approve_and_deny():
+def _security_request(**over):
+    from modulatio import leader_gate as lg
+
+    base = dict(
+        action="write", resource="/home/user/notes", request_class="path",
+        why="the Leader wants to edit your notes",
+    )
+    base.update(over)
+    return lg.SecurityRequest(**base)
+
+
+def test_approval_prompt_carries_request_and_returns_scope():
     from modulatio.web.actors import ApprovalBroker
 
     bus_q = get_bus("web").subscribe()
     broker = ApprovalBroker("web", timeout_s=10)
-    results: list[bool] = []
+    results: list = []
 
     t = threading.Thread(
-        target=lambda: results.append(broker.request("run_shell", {"cmd": "ls"}))
+        target=lambda: results.append(broker.prompt(_security_request()))
     )
     t.start()
     frame = bus_q.get(timeout=5)
     assert frame["type"] == "approval_request"
-    rid = frame["data"]["id"]
-    assert broker.resolve(rid, True) is True
+    data = frame["data"]
+    # The engine-rendered request reaches the modal whole — resource, why,
+    # and the scopes this class may offer (the TUI-parity contract).
+    assert data["action"] == "write"
+    assert data["resource"] == "/home/user/notes"
+    assert data["why"]
+    assert data["available_scopes"] == ["once", "session", "always", "deny"]
+    assert broker.resolve(data["id"], "session") is True
     t.join(timeout=5)
-    assert results == [True]
+    assert [d.scope for d in results] == ["session"]
     get_bus("web").unsubscribe(bus_q)
 
 
@@ -160,13 +177,50 @@ def test_approval_times_out_to_deny():
     from modulatio.web.actors import ApprovalBroker
 
     broker = ApprovalBroker("web", timeout_s=0.05)
-    assert broker.request("run_shell", {"cmd": "rm -rf /"}) is False
+    assert broker.prompt(_security_request()).scope == "deny"
+
+
+def test_approval_scope_outside_available_denies():
+    """A scope the request never offered can't be granted from the browser —
+    clamped to deny BEFORE it reaches gate.decide (which would raise)."""
+    from modulatio.web.actors import ApprovalBroker
+
+    bus_q = get_bus("web").subscribe()
+    broker = ApprovalBroker("web", timeout_s=10)
+    results: list = []
+    req = _security_request(available_scopes=("once", "deny"))
+
+    t = threading.Thread(target=lambda: results.append(broker.prompt(req)))
+    t.start()
+    frame = bus_q.get(timeout=5)
+    rid = frame["data"]["id"]
+    assert frame["data"]["available_scopes"] == ["once", "deny"]
+    assert broker.resolve(rid, "always") is True  # lands, but…
+    t.join(timeout=5)
+    assert [d.scope for d in results] == ["deny"]  # …clamped, fail-closed
+    get_bus("web").unsubscribe(bus_q)
+
+
+def test_approval_bogus_scope_denies():
+    from modulatio.web.actors import ApprovalBroker
+
+    bus_q = get_bus("web").subscribe()
+    broker = ApprovalBroker("web", timeout_s=10)
+    results: list = []
+
+    t = threading.Thread(target=lambda: results.append(broker.prompt(_security_request())))
+    t.start()
+    rid = bus_q.get(timeout=5)["data"]["id"]
+    assert broker.resolve(rid, "sudo-everything") is True
+    t.join(timeout=5)
+    assert [d.scope for d in results] == ["deny"]
+    get_bus("web").unsubscribe(bus_q)
 
 
 def test_approval_resolve_unknown_id_is_false():
     from modulatio.web.actors import ApprovalBroker
 
-    assert ApprovalBroker("web", timeout_s=1).resolve("nope", True) is False
+    assert ApprovalBroker("web", timeout_s=1).resolve("nope", "once") is False
 
 
 # ── registry ──────────────────────────────────────────────────────────

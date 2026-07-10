@@ -102,13 +102,15 @@ def test_stop_when_idle_reports_false(client):
 
 
 def test_approval_decision_roundtrip(client):
+    from modulatio import leader_gate as lg
     from modulatio.web.actors import get_actor
 
     broker = get_actor("web", stub=True).broker
-    results: list[bool] = []
-    t = threading.Thread(
-        target=lambda: results.append(broker.request("run_shell", {"cmd": "ls"}))
-    )
+    req = lg.SecurityRequest(
+        action="write", resource="/home/user/notes", request_class="path",
+        why="the Leader wants to edit your notes")
+    results: list = []
+    t = threading.Thread(target=lambda: results.append(broker.prompt(req)))
     t.start()
     # The frame carries the id; here we grab it from the broker's pending set.
     for _ in range(100):
@@ -119,16 +121,23 @@ def test_approval_decision_roundtrip(client):
         threading.Event().wait(0.01)
     rid = pending[0]
 
-    resp = client.post(f"/api/web/approvals/{rid}", json={"approve": True})
+    resp = client.post(f"/api/web/approvals/{rid}", json={"scope": "session"})
     assert resp.status_code == 200
     assert resp.json() == {"resolved": True}
     t.join(timeout=5)
-    assert results == [True]
+    assert [d.scope for d in results] == ["session"]
 
 
 def test_approval_unknown_id_404(client):
-    resp = client.post("/api/web/approvals/deadbeef", json={"approve": True})
+    resp = client.post("/api/web/approvals/deadbeef", json={"scope": "once"})
     assert resp.status_code == 404
+
+
+def test_approval_invalid_scope_string_422(client):
+    """The route validates the scope vocabulary; garbage never reaches the
+    broker (clamping to available_scopes happens broker-side)."""
+    resp = client.post("/api/web/approvals/deadbeef", json={"scope": "yes"})
+    assert resp.status_code == 422
 
 
 def test_routes_validate_project_code(client):

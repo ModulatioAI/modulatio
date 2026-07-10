@@ -60,26 +60,47 @@ class ApprovalBroker:
         self._lock = threading.Lock()
         self._pending: dict[str, tuple[threading.Event, list[bool]]] = {}
 
-    def request(self, action: str, detail: dict) -> bool:
+    def prompt(self, request) -> "object":
+        """The web ``prompt_fn(SecurityRequest) -> ScopedDecision`` — the same
+        contract the TUI's modal bridge keeps, so the ENGINE's gate (refusal
+        floor, silent-allow, once/session/always persistence) runs identically
+        for a browser operator. Publishes the engine-rendered request whole;
+        blocks until a browser POSTs a scope; timeout or a scope outside
+        ``available_scopes`` → DENY (fail-closed, clamped here so an out-of-set
+        scope can never reach ``gate.decide``, which would raise)."""
+        from modulatio import leader_gate as lg
+        from modulatio import leader_permissions as lp
+
         rid = secrets.token_hex(8)
         done = threading.Event()
-        decision: list[bool] = []
+        decision: list[str] = []
         with self._lock:
             self._pending[rid] = (done, decision)
         get_bus(self._code).publish({
             "type": "approval_request",
-            "data": {"id": rid, "action": action, "detail": json_safe(detail)},
+            "data": {
+                "id": rid,
+                "action": request.action,
+                "resource": request.resource,
+                "why": request.why,
+                "available_scopes": list(request.available_scopes),
+                "cap_unit": request.cap_unit,
+                "cap_value": request.cap_value,
+            },
         })
         try:
             if not done.wait(self._timeout_s):
-                return False  # fail closed
-            return bool(decision and decision[0])
+                return lg.ScopedDecision(scope=lp.SCOPE_DENY)  # fail closed
+            scope = decision[0] if decision else lp.SCOPE_DENY
+            if scope not in request.available_scopes:
+                scope = lp.SCOPE_DENY
+            return lg.ScopedDecision(scope=scope)
         finally:
             with self._lock:
                 self._pending.pop(rid, None)
 
-    def resolve(self, rid: str, approve: bool) -> bool:
-        """Record a browser's decision. True when the id was pending and
+    def resolve(self, rid: str, scope: str) -> bool:
+        """Record a browser's chosen scope. True when the id was pending and
         the decision landed; False when it's unknown (already resolved,
         timed out, or never existed)."""
         with self._lock:
@@ -87,7 +108,7 @@ class ApprovalBroker:
             if entry is None:
                 return False
             done, decision = entry
-            decision.append(approve)
+            decision.append(scope)
         done.set()
         return True
 
@@ -130,10 +151,13 @@ class OrchestratorActor:
         orch = self._ensure_converse_orch()
         before = orch.session_mode_value()
         try:
+            # prompt_fn (not a raw permission_callback): the engine builds the
+            # gated chain itself — extraction, refusal floor, once/session/
+            # always persistence — identically to the TUI (gate parity).
             return orch.converse(
                 message,
                 attachments=attachments,
-                permission_callback=self.broker.request,
+                prompt_fn=self.broker.prompt,
             )
         finally:
             # A leading /yolo //goal //yolo-goal //default flips the session
