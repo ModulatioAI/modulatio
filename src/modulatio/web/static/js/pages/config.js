@@ -433,6 +433,7 @@ function mountServices(body) {
           await api(`/config/services/${encodeURIComponent(s.id)}`, { method: "DELETE" });
           notify(`Removed '${s.name}'.`);
         } },
+      { label: "Refresh", needsSelection: false, run: async () => {} },
     ],
     renderDetail: async (s) => {
       const slots = (await api(
