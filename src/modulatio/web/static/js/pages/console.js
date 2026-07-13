@@ -247,7 +247,9 @@ export function mountConsole(page, ctx) {
   }
 
   function operatorLine(text) {
-    appendLine(tvLeader, el("div", { class: "stream-line op mono" }, `▸ you  ${text}`));
+    // The accent marker alone distinguishes the operator's lines — no "you"
+    // label (the operator knows who they are). Mirrors the TUI's rendering.
+    appendLine(tvLeader, el("div", { class: "stream-line op mono" }, `▸ ${text}`));
   }
 
   function leaderSpeech(text) {

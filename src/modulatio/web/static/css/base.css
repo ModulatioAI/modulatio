@@ -272,7 +272,7 @@ footer#hints .key { font-family: var(--font-mono); font-weight: 600; color: var(
 
 .stream-line { padding: 2px 0; }
 .stream-line .glyph { margin-right: 6px; }
-/* Operator ("▸ you …") lines: full-strength text, not the muted soft —
+/* Operator ("▸ …") lines: full-strength text, not the muted soft —
    the user wants their own input prominent. `inherit` = the TV's normal
    text colour, so it darkens on Atelier's light card and stays readable on
    Vellum's dark panel (no highlight, unlike the Leader's speech block). */

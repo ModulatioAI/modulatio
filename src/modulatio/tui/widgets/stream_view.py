@@ -266,10 +266,11 @@ class StreamView(VerticalScroll):
 
     def add_operator_message(self, text: str) -> None:
         """Render the operator's own message in the conversation transcript
-        (the LEADER lane)."""
+        (the LEADER lane). The accent-colored marker alone distinguishes the
+        operator's lines — no "you" label (the operator knows who they are)."""
         accent, _dim, base, _err = theme_tiers(self.app)
         line = Text()
-        line.append("▸ you  ", style=f"bold {accent}")
+        line.append("▸ ", style=f"bold {accent}")
         line.append(text, style=base)
         self._append(line)
 
