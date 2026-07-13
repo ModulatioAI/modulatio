@@ -259,6 +259,13 @@ function mountAgents(body, ctx) {
             { method: "DELETE" });
           notify(`Removed '${a.id}'.`);
         } },
+      { label: "↻ Reload services", needsSelection: false, run: async () => {
+        // The TUI's /reload: apply config/roster changes to the live services.
+        // The server guards it (busy Leader or running job → 409 + reason,
+        // surfaced by the action runner's failure toast).
+        const r = await api(`${P}/config/reload`, { method: "POST", body: {} });
+        notify(r.message);
+      } },
     ],
     renderDetail: (a) => [
       el("h2", {}, `${a.tier} · ${a.id}`),

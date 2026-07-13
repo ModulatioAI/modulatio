@@ -133,6 +133,7 @@ class OrchestratorActor:
         self._bus = get_bus(self.code)
         self._converse_orch: Orchestrator | None = None
         self._converse_build_lock = threading.Lock()
+        self._converse_busy = False
         self._kickoff_lock = threading.Lock()
         self._kickoff_thread: threading.Thread | None = None
         self._kickoff_orch: Orchestrator | None = None
@@ -154,6 +155,7 @@ class OrchestratorActor:
     def converse(self, message: str, *, attachments: list | None = None) -> str:
         orch = self._ensure_converse_orch()
         before = orch.session_mode_value()
+        self._converse_busy = True
         try:
             # prompt_fn (not a raw permission_callback): the engine builds the
             # gated chain itself — extraction, refusal floor, once/session/
@@ -164,6 +166,7 @@ class OrchestratorActor:
                 prompt_fn=self.broker.prompt,
             )
         finally:
+            self._converse_busy = False
             # A leading /yolo //goal //yolo-goal //default flips the session
             # mode inside converse — tell the console so the pill tracks live.
             after = orch.session_mode_value()
@@ -174,6 +177,25 @@ class OrchestratorActor:
         """Archive the Leader conversation (the operator's /new). Returns
         the archive path or None when there was no thread yet."""
         return self._ensure_converse_orch().reset_conversation()
+
+    def reload_services(self) -> tuple[bool, str]:
+        """The TUI's ``reload_services``, mirrored (same guard, same seam):
+        refuses while the Leader or a job is busy (invalidating mid-turn would
+        race the worker), then refreshes the config cache and drops the cached
+        converse orchestrator — kickoff builds fresh per run, so that's the
+        only long-lived runner state. Held MCP server connections (and their
+        stdio subprocesses) are closed too, so the next use reconnects against
+        the current config. Returns ``(ok, toast)`` for the route to surface."""
+        if self.kickoff_active() or self._converse_busy:
+            return False, ("Can't reload while the Leader or a job is busy — "
+                           "finish or stop it first.")
+        from modulatio import config, mcp_client
+        config.reload()
+        with self._converse_build_lock:
+            self._converse_orch = None
+        mcp_client.shutdown()
+        return True, ("Services reloaded — model & config changes apply on "
+                      "your next message or run.")
 
     def _ensure_converse_orch(self) -> Orchestrator:
         with self._converse_build_lock:

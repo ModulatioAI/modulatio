@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, field_validator
 
 from modulatio.web.routes.console import valid_project
@@ -223,6 +223,20 @@ def agents_list(project: str) -> dict:
 
     code = valid_project(project)
     return {"agents": [_agent_json(a) for a in roster.list_agents(code)]}
+
+
+@router.post("/{project}/config/reload")
+def config_reload(project: str, request: Request) -> dict:
+    """The TUI's /reload, on the web: apply config/roster changes to the live
+    services without a server restart. The actor mirrors the TUI's guard —
+    busy Leader or a running job → 409, reload refused."""
+    from modulatio.web.actors import get_actor
+
+    code = valid_project(project)
+    ok, message = get_actor(code, stub=bool(request.app.state.stub)).reload_services()
+    if not ok:
+        raise HTTPException(status_code=409, detail=message)
+    return {"message": message}
 
 
 @router.post("/{project}/config/agents")

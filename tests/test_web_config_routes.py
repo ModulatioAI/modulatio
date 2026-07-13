@@ -178,6 +178,40 @@ def test_project_delete_refuses_while_in_flight(client, monkeypatch):
     assert "delta" in vault.list_projects()
 
 
+# ── RELOAD (the TUI's /reload, mirrored: guard + drop + toast) ─────────
+
+
+def test_config_reload_drops_cached_orchestrator(client):
+    """Reload refreshes the config cache and drops the actor's cached converse
+    orchestrator — the TUI's exact semantics — so the next message rebuilds
+    from disk."""
+    from modulatio.web.actors import get_actor
+
+    actor = get_actor("web", stub=True)
+    actor._converse_orch = object()          # a "live" cached orchestrator
+    r = client.post("/api/web/config/reload")
+    assert r.status_code == 200
+    assert "reloaded" in r.json()["message"].lower()
+    assert actor._converse_orch is None      # dropped — next use rebuilds
+
+
+def test_config_reload_refuses_while_busy(client, monkeypatch):
+    """The TUI's guard, ported: a running job (or busy Leader) refuses the
+    reload with the same message — invalidating mid-turn would race it."""
+    from modulatio.web.actors import get_actor
+
+    actor = get_actor("web", stub=True)
+    monkeypatch.setattr(actor, "kickoff_active", lambda: True)
+    r = client.post("/api/web/config/reload")
+    assert r.status_code == 409
+    assert "busy" in r.json()["detail"]
+
+    monkeypatch.setattr(actor, "kickoff_active", lambda: False)
+    monkeypatch.setattr(actor, "_converse_busy", True)
+    r = client.post("/api/web/config/reload")
+    assert r.status_code == 409
+
+
 # ── MODELS (read — the preset list agents pick from) ──────────────────
 
 

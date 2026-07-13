@@ -1012,9 +1012,12 @@ class ModulatioApp(App):
         ``(ok, toast)`` for the caller to surface."""
         if self._any_job_in_flight() or self._converse_worker_live():
             return False, "Can't reload while the Leader or a job is busy — finish or stop it first."
-        from modulatio import config
+        from modulatio import config, mcp_client
         config.reload()
         self._conv_orch = None
+        # Held MCP connections (and their stdio subprocesses) close too, so
+        # the next use reconnects against the current config.
+        mcp_client.shutdown()
         return True, "Services reloaded — model & config changes apply on your next message or run."
 
     def _operator_message(self, text: str, attachments=None) -> None:
