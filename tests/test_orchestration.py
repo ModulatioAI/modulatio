@@ -654,15 +654,21 @@ def test_leader_registry_does_not_disturb_run_registry(project: Project):
 
 
 def test_leader_gate_widen_honors_operator_choice_on_delivery(
-    project: Project, tmp_path, monkeypatch
+    project: Project, tmp_path, tmp_path_factory, monkeypatch
 ):
     """Two-lane option 3 (2026-07-06): the BLOCK-1 auto-deny subtrees are
     retired — the harness is the Leader's standing home, and for what lies
     outside it (e.g. the delivery folder) the OPERATOR's decision is final:
-    a widen granted ALWAYS is granted, not vetoed by a fence."""
+    a widen granted ALWAYS is granted, not vetoed by a fence.
+
+    The delivery dir must live OUTSIDE the vault root here: this fixture's
+    vault root IS tmp_path, and anything under the vault is the Leader's
+    standing home (silent-allow, no prompt) — the scenario under test is a
+    widen onto the world beyond the harness."""
     from modulatio import leader_gate as lg, leader_permissions as lp, delivery
 
-    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "delivered"))
+    outside = tmp_path_factory.mktemp("delivery-outside-the-vault")
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(outside))
     orch = Orchestrator(project, {"leader": _leader_stub})
     gate = orch.leader_gate()
     deliv = delivery.project_delivery_dir(project.code)

@@ -46,7 +46,11 @@ it never tracebacks at launch.
   tab switch or a dropped connection rebuilds the whole run, and
   **CLEAR** wipes both TVs and *stays* cleared across tab flips (the
   conversation thread itself is untouched; reset is the destructive
-  verb).
+  verb). **Copy works like the terminal's**: drag-select in a TV — the
+  view won't yank to the bottom mid-selection while a run streams
+  (auto-scroll only sticks when you're already at the bottom) — then
+  Ctrl+C / Ctrl+V as usual; **Ctrl+C with nothing selected copies the
+  Leader's last message** whole, never a dead key.
 - **The pages** — JT Library, Tickets, Artifacts (with previews and
   delivery stars), Skills, Memory, Jobs, Cron, Logs and Docs, each a
   list + detail over the same data the TUI tabs read.
