@@ -920,6 +920,43 @@ def _doctor_offer_logs(report: str) -> None:
         typer.echo(f"Or email the report to {bug_report.CONTACT_EMAIL}.")
 
 
+def _litellm_stack_doctor_check() -> None:
+    """The model-call stack: litellm must import AND its tools-carrying
+    completion path must import cleanly. Newer litellm versions lazily import
+    extra modules (with their own third-party dependencies) on the first
+    tools call — so a dependency gap passes import-time and still fails EVERY
+    agent call. Surface it here as a diagnosis instead."""
+    typer.echo("\nModel-call stack:")
+    try:
+        import importlib.metadata
+        import litellm  # noqa: F401 — the import IS the check
+        version = importlib.metadata.version("litellm")
+        typer.echo(f"  ✓ litellm {version}")
+    except Exception as e:  # noqa: BLE001 — doctor diagnoses; it must not crash
+        typer.echo(f"  ✗ litellm import failed: {type(e).__name__}: {e}")
+        return
+    # The lazy import a tools-carrying completion() performs (litellm >=1.92:
+    # its MCP chat-completions handler -> litellm.proxy -> orjson). Probe it
+    # now so a missing transitive dependency surfaces before the first call.
+    import importlib
+    try:
+        importlib.import_module("litellm.responses.mcp.chat_completions_handler")
+        typer.echo("  ✓ tools-call import path OK")
+    except ImportError as e:
+        missing = getattr(e, "name", "") or ""
+        if missing.startswith("litellm"):
+            # An older litellm without the lazy handler — nothing to probe.
+            typer.echo("  ✓ tools-call import path OK (no lazy handler in this litellm)")
+        else:
+            typer.echo(
+                f"  ✗ litellm's tools-call path needs {missing!r}, which is not "
+                "installed — EVERY agent model call will fail. Reinstall "
+                f"Modulatio, or:  pip install {missing}"
+            )
+    except Exception as e:  # noqa: BLE001 — doctor diagnoses; it must not crash
+        typer.echo(f"  ✗ tools-call path import failed: {type(e).__name__}: {e}")
+
+
 def _clay_doctor_check() -> None:
     """Clay (Claude avatar) availability — presence + login, reads NO secret."""
     from modulatio import oauth_helpers
@@ -951,6 +988,10 @@ def _run_doctor_checks() -> None:
             f"  {badge} {key:24s} {p.get('label', '')[:30]:30s} "
             f"({p.get('auth_type', '?')}, {p.get('api_format', '?')}/{p.get('model', '?')})"
         )
+
+    # The stack every model call rides — a litellm version drift can break all
+    # agent calls while every import-time check stays green.
+    _litellm_stack_doctor_check()
 
     # Vault + default project (0.9.4.2). The most common fresh-install breakage
     # is a vault_root that points nowhere (e.g. a stale path) or no default

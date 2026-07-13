@@ -159,6 +159,48 @@ def test_doctor_flags_missing_vault_root(capsys, tmp_path):
     assert "vault_root does not exist" in out
 
 
+def test_doctor_flags_missing_litellm_lazy_dep(capsys, monkeypatch):
+    """The model-call stack probe: a third-party module litellm's lazy
+    tools-call path needs but can't import reads ✗ with the module named —
+    the drift class where every agent call fails while imports stay green."""
+    import importlib
+
+    def _boom(name):
+        raise ModuleNotFoundError("No module named 'orjson'", name="orjson")
+
+    monkeypatch.setattr(importlib, "import_module", _boom)
+    cli._litellm_stack_doctor_check()
+    out = capsys.readouterr().out
+    assert "Model-call stack:" in out
+    assert "✗" in out and "orjson" in out and "pip install orjson" in out
+
+
+def test_doctor_accepts_litellm_without_lazy_handler(capsys, monkeypatch):
+    """An older litellm with no lazy MCP handler module reads ✓ — a missing
+    litellm-internal module is a version shape, not a breakage."""
+    import importlib
+
+    def _no_handler(name):
+        raise ModuleNotFoundError(
+            "No module named 'litellm.responses.mcp'",
+            name="litellm.responses.mcp")
+
+    monkeypatch.setattr(importlib, "import_module", _no_handler)
+    cli._litellm_stack_doctor_check()
+    out = capsys.readouterr().out
+    assert "✓ tools-call import path OK" in out
+
+
+def test_doctor_probes_real_litellm_stack(capsys):
+    """Against the REAL installed litellm: the probe must land all-✓ — the
+    live guard that this venv carries whatever litellm's lazy path needs
+    (i.e. the dev venv matches what installs resolve)."""
+    cli._litellm_stack_doctor_check()
+    out = capsys.readouterr().out
+    assert "✓ litellm" in out
+    assert "✗" not in out
+
+
 def test_doctor_reports_healthy_vault_and_default_project(capsys, tmp_path):
     """A real vault_root + a recorded project whose folder exists both read ✓."""
     from modulatio import config, vault
