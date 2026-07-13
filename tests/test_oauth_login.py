@@ -159,8 +159,9 @@ def test_login_xai_persists_tokens(monkeypatch):
 
 def test_exchange_error_never_echoes_grant_artifacts(monkeypatch):
     """A token endpoint that echoes the submitted code/verifier in a non-200
-    body must NOT reach the operator terminal — only the OAuth error fields,
-    redacted and sanitized."""
+    body must NOT reach the operator terminal. Contract: ONLY an allowlisted
+    OAuth error CODE renders — error_description (provider free text) never
+    does, in any form."""
     def _echoing_post(url, **kw):
         d = kw["data"]
         return _FakeResponse(400, {
@@ -176,7 +177,48 @@ def test_exchange_error_never_echoes_grant_artifacts(monkeypatch):
     msg = str(e.value)
     assert "SECRET-CODE-123" not in msg
     assert "SECRET-VERIFIER-456" not in msg
-    assert "invalid_grant" in msg            # the useful part survives
+    assert "bad code" not in msg             # the description NEVER renders
+    assert "invalid_grant" in msg            # the allowlisted code survives
+
+
+def test_exchange_error_truncation_cannot_leak_secret_prefixes(monkeypatch):
+    """The R4 shape: enough prefix text that a slice would end INSIDE an
+    echoed secret — under redact-after-truncate the secret's head printed.
+    Contract now: the description never renders, so no prefix can leak."""
+    verifier = "V" * 24 + "SECRETSECRETSECRETSECRETSECRETSECRETSECR"  # 64 chars
+
+    def _post(url, **kw):
+        return _FakeResponse(400, {
+            "error": "invalid_grant",
+            "error_description": ("p" * 80) + kw["data"]["code_verifier"],
+        })
+
+    monkeypatch.setattr(oauth_login.httpx, "post", _post)
+    with pytest.raises(oauth_login.LoginError) as e:
+        oauth_login.exchange_code(
+            "https://t/x", code="C", code_verifier=verifier,
+            code_challenge="CH")
+    msg = str(e.value)
+    assert verifier[:8] not in msg           # not even a prefix
+    assert "p" * 10 not in msg               # the free text is gone entirely
+
+
+def test_exchange_error_drops_provider_token_shapes(monkeypatch):
+    """A token-shaped value planted in error_description (or a non-standard
+    error code) never reaches the terminal — the code field renders only when
+    it fullmatches the RFC 6749 token shape."""
+    monkeypatch.setattr(
+        oauth_login.httpx, "post",
+        lambda url, **kw: _FakeResponse(400, {
+            "error": "xai-1234567890abcdef",      # token-shaped, NOT a code
+            "error_description": "use xai-abcdef1234567890 to authenticate",
+        }))
+    with pytest.raises(oauth_login.LoginError) as e:
+        oauth_login.exchange_code(
+            "https://t/x", code="C", code_verifier="V", code_challenge="CH")
+    msg = str(e.value)
+    assert "xai-" not in msg
+    assert msg.endswith("(HTTP 400)")         # nothing rendered but the status
 
 
 def test_forged_callback_cannot_abort_the_login():

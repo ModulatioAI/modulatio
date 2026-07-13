@@ -59,6 +59,10 @@ _LOGIN_TIMEOUT_SEC = 300.0
 #: bound for the operator terminal — provider/attacker-shaped strings are
 #: never rendered raw.
 _ERR_SAFE_CHARS = re.compile(r"[^A-Za-z0-9 ._:/\-]")
+#: The RFC 6749 error-code token shape (snake_case word). The token-exchange
+#: error path renders a code ONLY when it fullmatches this — free-text fields
+#: are never rendered there.
+_OAUTH_ERROR_CODE = re.compile(r"[a-z_]{1,40}")
 
 
 class LoginError(Exception):
@@ -138,25 +142,21 @@ def exchange_code(
     except httpx.HTTPError as e:
         raise LoginError(f"xAI token exchange failed: {e}") from e
     if resp.status_code != 200:
-        # NEVER render the raw error body: a token endpoint may echo the
-        # submitted grant (the code, the PKCE verifier/challenge) or carry
-        # token-shaped fields, and this message reaches the operator
-        # terminal. Surface only the standard OAuth error-code fields —
-        # exact-redacted of everything we sent, charset-sanitized, bounded.
+        # ONLY a standard OAuth error CODE is ever rendered — never the raw
+        # body and never ``error_description`` (provider-controlled free text
+        # can carry the echoed grant or token-shaped values, and any
+        # truncate-then-redact scheme leaks secret PREFIXES when the slice
+        # ends inside a secret). The code is validated to the RFC 6749 token
+        # shape before rendering; anything else renders nothing.
         detail = ""
         try:
             err = resp.json()
             if isinstance(err, dict):
-                detail = str(err.get("error", ""))[:60]
-                desc = str(err.get("error_description", ""))[:120]
-                if desc:
-                    detail = f"{detail}: {desc}" if detail else desc
+                code_field = str(err.get("error", ""))
+                if _OAUTH_ERROR_CODE.fullmatch(code_field):
+                    detail = code_field
         except ValueError:
             pass
-        for secret in (code, code_verifier, code_challenge):
-            if secret:
-                detail = detail.replace(secret, "[REDACTED]")
-        detail = _ERR_SAFE_CHARS.sub("", detail)
         raise LoginError(
             f"xAI token exchange failed (HTTP {resp.status_code})"
             + (f" — {detail}" if detail else "")

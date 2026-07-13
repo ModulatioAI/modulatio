@@ -371,3 +371,15 @@ def test_decide_fails_closed_on_overlong_direct_path(env, tmp_path):
     assert gate.is_granted(req) is False               # no raise
     d = gate.decide(req, prompt_fn=lambda r: lg.ScopedDecision(scope=lg.SCOPE_ALWAYS))
     assert d.scope == lg.SCOPE_DENY and d.granted_via == "refused"
+
+
+def test_permission_callback_denies_embedded_nul_path(env, tmp_path):
+    """R4: an embedded NUL in a model-supplied direct path raises ValueError
+    inside EXTRACTION — before decide()'s guards. The permission-callback
+    chokepoint fails closed: the call is denied, nothing raises, no prompt."""
+    gate = lg.LeaderPermissionGate(CODE, workspace=tmp_path / "ws")
+    cb = lg.build_permission_callback(
+        gate, root=tmp_path / "ws",
+        prompt_fn=lambda r: pytest.fail("must not prompt"))
+    assert cb("read_file", {"path": "bad\0path"}) is False
+    assert cb("read_file", {"path": "/tmp/" + "x" * 5000}) is False

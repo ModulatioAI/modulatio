@@ -334,9 +334,17 @@ def build_permission_callback(gate: LeaderPermissionGate, *, root, prompt_fn):
     bool; the once/session/always scope is honored inside the gate (Jenny-A)."""
 
     def permission_callback(name: str, args: dict) -> bool:
-        for req in extract_tool_requests(name, args, root=root):
-            if gate.decide(req, prompt_fn=prompt_fn).scope == SCOPE_DENY:
-                return False
+        # Fail CLOSED on any path-normalization failure: extraction resolves
+        # MODEL-SUPPLIED strings, and a pathological shape (an embedded NUL →
+        # ValueError, an overlong name → OSError, a platform normalization
+        # quirk → RuntimeError) must deny the call — never escape into the
+        # runner and crash the converse turn (the no-block invariant).
+        try:
+            for req in extract_tool_requests(name, args, root=root):
+                if gate.decide(req, prompt_fn=prompt_fn).scope == SCOPE_DENY:
+                    return False
+        except (OSError, ValueError, RuntimeError):
+            return False
         return True
 
     return permission_callback
