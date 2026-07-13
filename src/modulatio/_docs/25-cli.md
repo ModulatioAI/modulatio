@@ -113,7 +113,7 @@ Run a battery of health checks on the install + config, plus surface the engine-
 modulatio doctor
 ```
 
-Checks: Python version, dependency imports, vault detection, provider auth profiles, daemon socket, embedding cache, Telegram credentials, …
+Checks: Python version, dependency imports, the model-call stack (litellm + the extra modules its tools-call path lazily imports — a version drift here fails every agent call, so doctor names the missing module and the remedy), vault detection, provider auth profiles, daemon socket, embedding cache, Telegram credentials, …
 
 Output format: `[✓]`, `[!]`, or `[✗]` per check, with remediation hints for failures.
 

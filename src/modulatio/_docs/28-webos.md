@@ -71,6 +71,17 @@ write-only**: a value goes in and the interface only ever reports whether a
 slot *is set*, never the secret, and keys are allowlisted to configured
 model/service handles.
 
+- **Add model is the terminal's two-level picker**: pick the provider,
+  then pick from its **live model list** — fetched server-side with your
+  configured key (the key never crosses the web boundary), free models
+  flagged. A provider that can't be listed (no key yet, endpoint down,
+  custom) falls back to a typed model id.
+- **Reload services** (on the Agents sub-page) is the terminal's
+  `/reload`: apply model/roster/config changes to the live services
+  without a server restart. Same guard — it refuses while the Leader or
+  a job is busy — and it also closes any held MCP server connections so
+  the next use reconnects against the current config.
+
 ## The Feng-Web themes
 
 Two print-flavored siblings of the terminal's Feng-Tui, switched with

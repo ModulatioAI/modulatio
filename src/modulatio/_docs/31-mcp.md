@@ -31,7 +31,10 @@ modulatio mcp add-http hub --url https://mcp.example.com/api --auth bearer --tok
 ```
 
 The token is stored **write-only** in the vault; the server record never holds a
-secret. List, test, and manage them:
+secret. A server id is an ASCII slug (letters, digits, `-`, `_`), 32 chars or
+fewer, with no `__` — the id rides the `mcp__<server>__<tool>` function name,
+so those limits keep every tool name valid for the model providers. List,
+test, and manage them:
 
 ```bash
 modulatio mcp list
@@ -81,3 +84,7 @@ Each discovered tool is registered as `mcp__<server>__<tool>` (e.g.
   them.
 - If a server won't connect or a call fails, the tool returns a clear
   "unavailable" message — a bad server never crashes a run.
+- **Reload services** (the terminal's `/reload`, or the WebOS Agents
+  sub-page button) closes held MCP connections — and any stdio server
+  subprocesses — so the next use reconnects against the current config.
+  Edit a server's command or token, reload, done.
