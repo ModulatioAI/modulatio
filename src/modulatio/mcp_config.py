@@ -67,7 +67,7 @@ _ID_OK = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 
 def _validate(s: McpServer) -> None:
-    if not _ID_OK.match(s.id):
+    if not _ID_OK.fullmatch(s.id):
         raise ValueError(
             f"mcp server id {s.id!r} must be an ASCII slug (letters, digits, "
             "-, _), 32 chars or fewer")
@@ -79,7 +79,7 @@ def _validate(s: McpServer) -> None:
         raise ValueError(f"mcp transport {s.transport!r} must be stdio|http")
     if s.trust not in _TRUST:
         raise ValueError(f"mcp trust {s.trust!r} must be gated|trusted")
-    if s.env_var and not _ENV_VAR.match(s.env_var):
+    if s.env_var and not _ENV_VAR.fullmatch(s.env_var):
         raise ValueError(f"mcp server {s.id!r}: env_var {s.env_var!r} is not a valid slot name")
     if s.transport == "stdio":
         if not s.command:
@@ -92,7 +92,7 @@ def _validate(s: McpServer) -> None:
         shape = s.auth_shape
         if shape and shape != "bearer":
             name = shape.split(":", 1)[1] if shape.startswith("header:") else None
-            if name is None or not _HEADER_NAME.match(name):
+            if name is None or not _HEADER_NAME.fullmatch(name):
                 raise ValueError(
                     f"mcp server {s.id!r}: auth_shape {shape!r} must be "
                     "bearer or header:<Name>"

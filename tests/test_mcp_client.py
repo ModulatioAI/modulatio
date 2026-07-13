@@ -236,6 +236,19 @@ def test_discovery_skip_warnings_scrub_tool_names(monkeypatch, caplog):
     assert token not in caplog.text
 
 
+def test_trailing_newline_tool_name_is_skipped(monkeypatch):
+    """Python's ``$`` matches before a trailing newline — the name checks use
+    fullmatch, so an SDK-valid tool named ``read\\n`` never reaches the
+    registry (a provider-invalid name would poison every model request)."""
+    mcp_config.add_server(McpServer(id="safe", name="S", transport="stdio",
+                                    command="x"))
+    fake = _FakeConn([_spec("read\n"), _spec("ok")])
+    monkeypatch.setattr(mcp_client, "get_connection", lambda s: fake)
+    reg = mcp_client.build_mcp_tools()
+    assert set(reg) == {"mcp__safe__ok"}
+    assert not any("\n" in n for n in reg)
+
+
 def test_unicode_server_id_rejected_and_backstopped(monkeypatch):
     """A Unicode id passes str.isalnum but breaks the provider function-name
     charset: rejected at the operator boundary, AND the final-name backstop

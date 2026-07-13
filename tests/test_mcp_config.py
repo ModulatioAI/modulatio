@@ -59,6 +59,22 @@ def test_validation_rejects_bad_shape():
         mcp_config.add_server(_stdio(trust="maybe"))
 
 
+def test_validation_rejects_trailing_newline_everywhere():
+    """``$``-anchored match() stops before a final newline — the validators use
+    fullmatch, so a trailing LF fails the id, header-name, and env_var checks
+    (each is a boundary whose exact contract must hold)."""
+    with pytest.raises(ValueError):
+        mcp_config.add_server(_stdio("safe\n"))
+    with pytest.raises(ValueError):
+        mcp_config.add_server(McpServer(id="h", name="h", transport="http",
+                                        base_url="https://x",
+                                        auth_shape="header:X-Api-Key\n"))
+    with pytest.raises(ValueError):
+        mcp_config.add_server(McpServer(id="e", name="e", transport="http",
+                                        base_url="https://x",
+                                        env_var="MCPKEY_X\n"))
+
+
 def test_validation_rejects_namespace_delimiter_in_id():
     """'__' is the tool-namespace delimiter — an id containing it would make
     mcp__<id>__<tool> parse to a DIFFERENT (unconfigured) server and dodge the

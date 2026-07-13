@@ -404,7 +404,7 @@ def build_mcp_tools() -> dict[str, tools.Tool]:
             # would poison every model request carrying the registry); a
             # description is capped; an oversized/malformed schema skips the
             # tool (fail closed, never forwarded whole).
-            if not _TOOL_NAME_OK.match(spec.name):
+            if not _TOOL_NAME_OK.fullmatch(spec.name):
                 _logger.warning(
                     "MCP server %s: skipping tool with unsafe name %r",
                     sid, _safe_field(spec.name, server))
@@ -414,7 +414,7 @@ def build_mcp_tools() -> dict[str, tools.Tool]:
             # can still overflow, and an id the slug check let through must not
             # reach a model request).
             name = tool_name(sid, spec.name)
-            if not _TOOL_NAME_OK.match(name):
+            if not _TOOL_NAME_OK.fullmatch(name):
                 _logger.warning(
                     "MCP server %s: skipping tool %r — namespaced name is not "
                     "function-calling-safe (charset, or over %d chars — shorten "
