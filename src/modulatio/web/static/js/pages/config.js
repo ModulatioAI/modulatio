@@ -285,15 +285,32 @@ function mountModels(body) {
     emptyText: "no models yet — add one, then add its key",
     actions: [
       { label: "Add model", needsSelection: false, run: async () => {
+        // Two-level flow, same as the TUI: pick the provider, then pick from
+        // its LIVE model list (fetched with the configured key server-side).
+        // An unlistable provider (no key yet, endpoint down, custom) falls
+        // back to a typed model id.
         const providers = (await api("/config/providers")).providers;
-        const f = await formDialog("Add a model", [
+        const p = await formDialog("Add a model", [
           { name: "provider_id", label: "Provider",
-            options: providers.map((p) => p.id) },
-          { name: "model", label: "Model id (e.g. meta/llama-3, gpt-4o)" }]);
+            options: providers.map((x) => x.id) }]);
+        if (!p) return false;
+        let models = [];
+        try {
+          models = (await api(
+            `/config/providers/${encodeURIComponent(p.provider_id)}/models`)).models;
+        } catch { /* degrade to free-text */ }
+        const fields = models.length
+          ? [{ name: "model", label: `Model (${models.length} available)`,
+               options: models.map((m) =>
+                 ({ value: m.id, label: m.free ? `${m.id} — free` : m.id })) },
+             { name: "custom", label: "…or type a model id (overrides the pick)" }]
+          : [{ name: "model", label: "Model id (e.g. meta/llama-3, gpt-4o)" }];
+        const f = await formDialog(`Add a model · ${p.provider_id}`, fields);
         if (!f) return false;
+        const model = (f.custom || "").trim() || f.model;
         await api("/config/models/add",
-          { method: "POST", body: { provider_id: f.provider_id, model: f.model } });
-        notify(`Added model '${f.model}'.`);
+          { method: "POST", body: { provider_id: p.provider_id, model } });
+        notify(`Added model '${model}'.`);
       } },
       { label: "Set key", run: async (m) => {
         if (!m.env_var) {
