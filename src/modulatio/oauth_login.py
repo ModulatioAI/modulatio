@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import secrets
 import threading
 import webbrowser
@@ -53,6 +54,11 @@ _REDIRECT_PATH = "/callback"
 
 #: How long the loopback server waits for the browser to come back.
 _LOGIN_TIMEOUT_SEC = 300.0
+
+#: Anything outside this conservative charset is stripped from error text
+#: bound for the operator terminal — provider/attacker-shaped strings are
+#: never rendered raw.
+_ERR_SAFE_CHARS = re.compile(r"[^A-Za-z0-9 ._:/\-]")
 
 
 class LoginError(Exception):
@@ -132,8 +138,28 @@ def exchange_code(
     except httpx.HTTPError as e:
         raise LoginError(f"xAI token exchange failed: {e}") from e
     if resp.status_code != 200:
+        # NEVER render the raw error body: a token endpoint may echo the
+        # submitted grant (the code, the PKCE verifier/challenge) or carry
+        # token-shaped fields, and this message reaches the operator
+        # terminal. Surface only the standard OAuth error-code fields —
+        # exact-redacted of everything we sent, charset-sanitized, bounded.
+        detail = ""
+        try:
+            err = resp.json()
+            if isinstance(err, dict):
+                detail = str(err.get("error", ""))[:60]
+                desc = str(err.get("error_description", ""))[:120]
+                if desc:
+                    detail = f"{detail}: {desc}" if detail else desc
+        except ValueError:
+            pass
+        for secret in (code, code_verifier, code_challenge):
+            if secret:
+                detail = detail.replace(secret, "[REDACTED]")
+        detail = _ERR_SAFE_CHARS.sub("", detail)
         raise LoginError(
-            f"xAI token exchange failed (HTTP {resp.status_code}): {resp.text[:300]}"
+            f"xAI token exchange failed (HTTP {resp.status_code})"
+            + (f" — {detail}" if detail else "")
         )
     try:
         payload = resp.json()
@@ -144,9 +170,17 @@ def exchange_code(
     return payload
 
 
-def _wait_for_code(state: str, timeout: float) -> str:
-    """One-shot loopback server: wait for the consent redirect, validate
-    ``state``, return the authorization code."""
+def _wait_for_code(state: str, timeout: float, *, on_ready=None) -> str:
+    """Loopback server for the consent redirect. BINDS FIRST, then invokes
+    ``on_ready`` (the caller opens the browser there) — so the redirect can
+    never race an unbound port.
+
+    Only a request carrying the matching ``state`` terminates the wait — a
+    forged/other-state request (any local process can hit the loopback port)
+    gets a 400 and the server KEEPS WAITING for the legitimate callback; it
+    must not be able to abort the operator's sign-in. A provider ``error`` is
+    honored only WITH a matching state, and rendered charset-sanitized and
+    bounded — never attacker-shaped free text into the terminal."""
     box: dict[str, str] = {}
     done = threading.Event()
 
@@ -158,17 +192,23 @@ def _wait_for_code(state: str, timeout: float) -> str:
                 self.end_headers()
                 return
             q = parse_qs(parsed.query)
-            ok = q.get("state", [""])[0] == state and q.get("code", [""])[0]
-            if ok:
-                box["code"] = q["code"][0]
+            if q.get("state", [""])[0] != state:
+                # Not our flow — refuse, and DON'T stop waiting.
+                self.send_response(400)
+                self.end_headers()
+                return
+            code = q.get("code", [""])[0]
+            if code:
+                box["code"] = code
             else:
-                box["error"] = q.get("error", ["state mismatch or missing code"])[0]
+                raw = q.get("error", ["provider refused the sign-in"])[0]
+                box["error"] = _ERR_SAFE_CHARS.sub("", raw)[:120]
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             body = (
                 "<h2>Modulatio: signed in — you can close this tab.</h2>"
-                if ok else
+                if code else
                 "<h2>Modulatio: sign-in failed — return to the terminal.</h2>"
             )
             self.wfile.write(body.encode())
@@ -187,6 +227,8 @@ def _wait_for_code(state: str, timeout: float) -> str:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        if on_ready is not None:
+            on_ready()
         if not done.wait(timeout=timeout):
             raise LoginError("sign-in timed out — no browser callback arrived")
     finally:
@@ -210,14 +252,19 @@ def login_xai(*, echo=print, open_browser: bool = True) -> None:
         endpoints["authorization_endpoint"],
         code_challenge=challenge, state=state, nonce=nonce,
     )
-    echo("Opening the xAI sign-in page in your browser…")
-    echo(f"(If nothing opens, paste this URL yourself:)\n{url}\n")
-    if open_browser:
-        try:
-            webbrowser.open(url)
-        except Exception:  # noqa: BLE001 — the printed URL is the fallback
-            pass
-    code = _wait_for_code(state, _LOGIN_TIMEOUT_SEC)
+
+    def _open_consent():
+        # Invoked AFTER the callback port is bound — the consent redirect can
+        # never race an unbound listener.
+        echo("Opening the xAI sign-in page in your browser…")
+        echo(f"(If nothing opens, paste this URL yourself:)\n{url}\n")
+        if open_browser:
+            try:
+                webbrowser.open(url)
+            except Exception:  # noqa: BLE001 — the printed URL is the fallback
+                pass
+
+    code = _wait_for_code(state, _LOGIN_TIMEOUT_SEC, on_ready=_open_consent)
     payload = exchange_code(
         endpoints["token_endpoint"],
         code=code, code_verifier=verifier, code_challenge=challenge,

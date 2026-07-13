@@ -108,12 +108,14 @@ def test_wait_for_code_roundtrip():
 
 
 def test_wait_for_code_rejects_state_mismatch():
+    """A forged-state request is refused with a 400 — and per the close-out
+    contract it does NOT terminate the wait (the full scenario is pinned in
+    test_forged_callback_cannot_abort_the_login)."""
     box = {}
 
     def _run():
         try:
-            oauth_login._wait_for_code("GOOD-STATE", timeout=10.0)
-            box["ok"] = True
+            box["code"] = oauth_login._wait_for_code("GOOD-STATE", timeout=10.0)
         except oauth_login.LoginError as e:
             box["error"] = str(e)
 
@@ -121,10 +123,13 @@ def test_wait_for_code_rejects_state_mismatch():
     t.start()
     import time
     time.sleep(0.3)
-    httpx.get(
+    resp = httpx.get(
         "http://127.0.0.1:56121/callback?code=X&state=FORGED", timeout=5.0)
+    assert resp.status_code == 400                    # forged state refused
+    httpx.get(  # the real callback still lands — the wait survived
+        "http://127.0.0.1:56121/callback?code=OK&state=GOOD-STATE", timeout=5.0)
     t.join(timeout=10.0)
-    assert "error" in box and "ok" not in box          # forged state refused
+    assert box.get("code") == "OK"
 
 
 # === the whole login persists to Modulatio's own store ===
@@ -135,7 +140,8 @@ def test_login_xai_persists_tokens(monkeypatch):
         "token_endpoint": "https://t/x",
     })
     monkeypatch.setattr(
-        oauth_login, "_wait_for_code", lambda state, timeout: "THE-CODE")
+        oauth_login, "_wait_for_code",
+        lambda state, timeout, on_ready=None: "THE-CODE")
     monkeypatch.setattr(
         oauth_login.httpx, "post",
         lambda url, **kw: _FakeResponse(payload={
@@ -147,3 +153,111 @@ def test_login_xai_persists_tokens(monkeypatch):
     assert own["access_token"] == "minted-a"
     assert own["refresh_token"] == "minted-r"
     assert any("Signed in" in ln for ln in lines)
+
+
+# === close-out pins: error surfaces never carry auth artifacts ===
+
+def test_exchange_error_never_echoes_grant_artifacts(monkeypatch):
+    """A token endpoint that echoes the submitted code/verifier in a non-200
+    body must NOT reach the operator terminal — only the OAuth error fields,
+    redacted and sanitized."""
+    def _echoing_post(url, **kw):
+        d = kw["data"]
+        return _FakeResponse(400, {
+            "error": "invalid_grant",
+            "error_description": f"bad code {d['code']} verifier {d['code_verifier']}",
+        })
+
+    monkeypatch.setattr(oauth_login.httpx, "post", _echoing_post)
+    with pytest.raises(oauth_login.LoginError) as e:
+        oauth_login.exchange_code(
+            "https://t/x", code="SECRET-CODE-123",
+            code_verifier="SECRET-VERIFIER-456", code_challenge="CHAL-789")
+    msg = str(e.value)
+    assert "SECRET-CODE-123" not in msg
+    assert "SECRET-VERIFIER-456" not in msg
+    assert "invalid_grant" in msg            # the useful part survives
+
+
+def test_forged_callback_cannot_abort_the_login():
+    """A request WITHOUT the matching state (any local process can hit the
+    loopback port) gets a 400 and the server keeps waiting — the legitimate
+    callback still lands. Forged text never reaches the error path."""
+    box = {}
+
+    def _run():
+        try:
+            box["code"] = oauth_login._wait_for_code("GOOD-STATE", timeout=10.0)
+        except oauth_login.LoginError as e:
+            box["error"] = str(e)
+
+    t = threading.Thread(target=_run)
+    t.start()
+    import time
+    time.sleep(0.3)
+    # the forger strikes first — wrong state, attacker-shaped error text
+    forged = httpx.get(
+        "http://127.0.0.1:56121/callback"
+        "?state=BAD&code=fake&error=FORGED-CALLBACK-CONTROLS-THIS", timeout=5.0)
+    assert forged.status_code == 400          # refused...
+    # ...and the REAL callback still completes the login
+    httpx.get(
+        "http://127.0.0.1:56121/callback?code=REAL-CODE&state=GOOD-STATE",
+        timeout=5.0)
+    t.join(timeout=10.0)
+    assert box.get("code") == "REAL-CODE"
+    assert "error" not in box
+
+
+def test_provider_error_with_matching_state_is_sanitized():
+    """A provider error (matching state, no code) terminates the wait, but its
+    text is charset-sanitized + bounded before reaching the terminal."""
+    box = {}
+
+    def _run():
+        try:
+            oauth_login._wait_for_code("ST", timeout=10.0)
+        except oauth_login.LoginError as e:
+            box["error"] = str(e)
+
+    t = threading.Thread(target=_run)
+    t.start()
+    import time
+    time.sleep(0.3)
+    httpx.get(
+        "http://127.0.0.1:56121/callback?state=ST"
+        "&error=access_denied<script>alert(1)</script>", timeout=5.0)
+    t.join(timeout=10.0)
+    assert "access_denied" in box["error"]
+    assert "<script>" not in box["error"]
+
+
+def test_browser_opens_only_after_the_port_is_bound(monkeypatch):
+    """The consent URL is issued from on_ready — AFTER the callback listener
+    binds — so the redirect can never race an unbound port."""
+    order = []
+    monkeypatch.setattr(oauth_login, "_discover", lambda **kw: {
+        "authorization_endpoint": "https://a/x", "token_endpoint": "https://t/x"})
+
+    real_wait = oauth_login._wait_for_code
+
+    def _spy_wait(state, timeout, *, on_ready=None):
+        order.append("bound")               # stand-in for the real bind point
+        if on_ready:
+            on_ready()
+        return "CODE"
+
+    monkeypatch.setattr(oauth_login, "_wait_for_code", _spy_wait)
+    del real_wait
+    monkeypatch.setattr(
+        oauth_login.httpx, "post",
+        lambda url, **kw: _FakeResponse(payload={"access_token": "a"}))
+    lines = []
+
+    def _echo(s):
+        if "sign-in page" in s:
+            order.append("browser")
+        lines.append(s)
+
+    oauth_login.login_xai(echo=_echo, open_browser=False)
+    assert order == ["bound", "browser"]

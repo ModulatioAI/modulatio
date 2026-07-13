@@ -95,7 +95,16 @@ class LeaderPermissionGate:
         it's his bwrap-confined home; his STANDING roots (the harness) are
         auto-allowed for PATH actions. A WIDENED path grant (read/edit/write)
         does NOT cover exec (separate class). Non-filesystem
-        classes (network/spend) need an exact resource match (no workspace)."""
+        classes (network/spend) need an exact resource match (no workspace).
+
+        A pathologically-shaped resource (an overlong model-supplied path —
+        every stat/resolve raises OSError) fails CLOSED: not granted."""
+        try:
+            return self._is_granted(request)
+        except OSError:
+            return False
+
+    def _is_granted(self, request: SecurityRequest) -> bool:
         if request.request_class == lp.REQUEST_CLASS_PATH and self._in_standing(
                 request.resource):
             return True
@@ -172,7 +181,18 @@ class LeaderPermissionGate:
     # ── decide ───────────────────────────────────────────────────────────────
     def decide(self, request: SecurityRequest, *, prompt_fn) -> ScopedDecision:
         """Return a ``ScopedDecision``. Silent-allow if already granted; else
-        prompt the operator (``prompt_fn``) and record at the chosen scope."""
+        prompt the operator (``prompt_fn``) and record at the chosen scope.
+
+        Path classification stats/resolves the model-supplied resource — a
+        pathologically-shaped one (overlong name: OSError(ENAMETOOLONG) from
+        every stat) fails CLOSED as a deny, never a crash into the converse
+        turn (the no-block invariant)."""
+        try:
+            return self._decide(request, prompt_fn=prompt_fn)
+        except OSError:
+            return ScopedDecision(scope=SCOPE_DENY, granted_via="refused")
+
+    def _decide(self, request: SecurityRequest, *, prompt_fn) -> ScopedDecision:
         # STANDING roots first: the harness dirs are the Leader's home by
         # operator architecture — a PATH request there is not a widen ask, so
         # the refusal floor (which classifies model-asked widens) doesn't

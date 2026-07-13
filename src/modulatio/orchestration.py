@@ -11082,7 +11082,11 @@ class Orchestrator:
                         skill_name=leader_tool_skill.name,
                         needs_network=leader_tool_skill.needs_network,
                         pass_env=leader_tool_skill.pass_env,
-                        budget_role="leader-chat",
+                        # leader-reflect, NOT leader-chat: the model-window
+                        # exception is CONVERSATION-only. A tool-using goal
+                        # verify keeps the role-bounded discipline, in parity
+                        # with its multimodal + single-shot verify siblings.
+                        budget_role="leader-reflect",
                         goal_id=goal.id,
                     )
                 finally:

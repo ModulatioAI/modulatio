@@ -358,3 +358,16 @@ def test_extract_survives_overlong_shell_tokens(env, tmp_path):
     reqs = lg.extract_tool_requests(
         "run_shell", {"cmd": f"cat {long_path}", "cwd": "."}, root=tmp_path)
     assert isinstance(reqs, list)
+
+
+def test_decide_fails_closed_on_overlong_direct_path(env, tmp_path):
+    """A model-supplied read_file/edit_file path so long every stat raises
+    OSError(ENAMETOOLONG) must fail CLOSED as a deny — never crash the
+    converse turn (the no-block invariant). c27f26c covered shell-token
+    scanning; this covers the direct path-request classification."""
+    gate = lg.LeaderPermissionGate(CODE, workspace=tmp_path / "ws")
+    req = lg.SecurityRequest(action="read", resource="/tmp/" + "x" * 5000,
+                             request_class=lp.REQUEST_CLASS_PATH, why="t")
+    assert gate.is_granted(req) is False               # no raise
+    d = gate.decide(req, prompt_fn=lambda r: lg.ScopedDecision(scope=lg.SCOPE_ALWAYS))
+    assert d.scope == lg.SCOPE_DENY and d.granted_via == "refused"

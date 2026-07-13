@@ -258,3 +258,26 @@ def test_web_token_migrates_to_dotfile_name(tmp_path, monkeypatch):
     tok = server._ensure_web_token()
     assert (tmp_path / ".web_token").stat().st_mode & 0o777 == 0o600
     assert tok
+
+
+def test_web_token_is_0600_from_birth(tmp_path, monkeypatch):
+    """The bearer file must never exist at a looser mode — write_text +
+    chmod leaves a umask-mode window on a multi-user host. Generation goes
+    through the atomic secret writer; a chmod spy proves no tighten-after."""
+    from modulatio import config as cfg_mod
+    from modulatio.web import server
+
+    monkeypatch.setattr(cfg_mod, "CONFIG_DIR", tmp_path)
+    seen_modes = []
+    real_chmod = __import__("pathlib").Path.chmod
+
+    def _spy(self, mode, *a, **k):
+        seen_modes.append((self.name, self.stat().st_mode & 0o777))
+        return real_chmod(self, mode, *a, **k)
+
+    monkeypatch.setattr("pathlib.Path.chmod", _spy)
+    tok = server._ensure_web_token()
+    assert tok
+    assert (tmp_path / ".web_token").stat().st_mode & 0o777 == 0o600
+    # no chmod call ever observed a looser-than-0600 fresh token file
+    assert all(m == 0o600 for name, m in seen_modes if name == ".web_token")

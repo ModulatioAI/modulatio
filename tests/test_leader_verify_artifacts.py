@@ -289,6 +289,7 @@ def test_leader_verify_chat_loop_widens_registry_and_grants_run_dir(
     def _fake_loop(**kwargs):
         seen["registry"] = orch._active_tool_registry()  # capture mid-loop
         seen["grants"] = getattr(orch._tls, "seat_extra_grants", None)
+        seen["budget_role"] = kwargs.get("budget_role")
         return (
             "```json\n"
             + json.dumps(
@@ -315,6 +316,10 @@ def test_leader_verify_chat_loop_widens_registry_and_grants_run_dir(
     # both restored
     assert getattr(orch._tls, "tool_registry_override", None) is None
     assert getattr(orch._tls, "seat_extra_grants", None) is None
+    # (c) the model-window exception is CONVERSATION-only: a tool-using goal
+    # verify dispatches under leader-reflect (role-bounded), in parity with
+    # its multimodal + single-shot verify siblings — never leader-chat.
+    assert seen["budget_role"] == "leader-reflect"
 
 
 def test_seat_context_routes_tls_extra_grants_to_read_only(project: Project, monkeypatch):

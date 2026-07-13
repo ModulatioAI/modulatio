@@ -47,14 +47,16 @@ def _ensure_web_token() -> str:
     legacy = config.CONFIG_DIR / "web_token"
     if not token_file.exists() and legacy.exists():
         legacy.rename(token_file)  # one-time migration from the pre-dot name
+        token_file.chmod(0o600)    # tighten whatever the legacy file carried
     if token_file.exists():
         token = token_file.read_text(encoding="utf-8").strip()
         if token:
             return token
     token = secrets.token_urlsafe(32)
-    config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    token_file.write_text(token + "\n", encoding="utf-8")
-    token_file.chmod(0o600)
+    # Atomic 0600-from-birth via the secret writer — write_text + chmod has a
+    # umask-mode window (0644 under the ordinary 022) on a bearer that guards
+    # every non-loopback API call.
+    config.write_secret_file(token_file, token + "\n")
     return token
 
 
