@@ -121,6 +121,10 @@
     {
       "slug": "30-troubleshooting",
       "title": "Troubleshooting"
+    },
+    {
+      "slug": "31-mcp",
+      "title": "MCP servers"
     }
   ]
 }
