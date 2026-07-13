@@ -270,6 +270,63 @@ def test_providers_catalog(client):
     assert ps and all("id" in p and "base_url" in p and "api_format" in p for p in ps)
 
 
+def test_provider_models_live_list(client, monkeypatch):
+    """The add-model picker gets the provider's LIVE list — the same engine
+    fetch the TUI runs — filtered to text models, free-flagged."""
+    from modulatio import provider_catalog as pc
+
+    fake = [
+        pc.CatalogModel(id="m-free", name="MF", provider_id="openrouter", is_free=True),
+        pc.CatalogModel(id="m-paid", name="MP", provider_id="openrouter"),
+        pc.CatalogModel(id="m-img", name="MI", provider_id="openrouter",
+                        modality="image"),
+    ]
+    monkeypatch.setattr(pc, "fetch_models", lambda p, *, api_key=None, **kw: fake)
+    r = client.get("/api/config/providers/openrouter/models")
+    assert r.status_code == 200
+    models = r.json()["models"]
+    assert [m["id"] for m in models] == ["m-free", "m-paid"]   # image filtered out
+    assert models[0]["free"] is True and models[1]["free"] is False
+
+
+def test_provider_models_key_used_but_never_returned(client, monkeypatch):
+    """The listing key resolves server-side (the vault env var) and is passed
+    to the fetch — but the response body must never carry it."""
+    from modulatio import provider_catalog as pc
+
+    monkeypatch.setenv("XAI_API_KEY", "sk-LIST-NEVER-LEAK")
+    seen = {}
+
+    def _spy(provider, *, api_key=None, **kw):
+        seen["key"] = api_key
+        return [pc.CatalogModel(id="m", name="m", provider_id="xai")]
+
+    monkeypatch.setattr(pc, "fetch_models", _spy)
+    r = client.get("/api/config/providers/xai/models")
+    assert r.status_code == 200
+    assert seen["key"] == "sk-LIST-NEVER-LEAK"      # the fetch was key-authed
+    assert "sk-LIST-NEVER-LEAK" not in r.text        # ...and the key stayed in
+
+
+def test_provider_models_fetch_failure_degrades_empty(client, monkeypatch):
+    """A down endpoint / missing key degrades to [] (the form falls back to a
+    typed model id) — never a 500."""
+    from modulatio import provider_catalog as pc
+
+    def _boom(provider, *, api_key=None, **kw):
+        raise OSError("endpoint down")
+
+    monkeypatch.setattr(pc, "fetch_models", _boom)
+    r = client.get("/api/config/providers/openrouter/models")
+    assert r.status_code == 200
+    assert r.json()["models"] == []
+
+
+def test_provider_models_unknown_provider_422(client):
+    r = client.get("/api/config/providers/nope/models")
+    assert r.status_code == 422
+
+
 def test_model_add_and_remove(client):
     from modulatio import model_presets
 

@@ -23,6 +23,7 @@ same way as we build them out.
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.request
 from typing import Literal, Optional
@@ -703,6 +704,26 @@ def fetch_models(
     for src in [provider.models_source, *provider.extra_sources]:
         all_models.extend(_fetch_source(provider, src, api_key, timeout))
     return apply_pinned(provider, all_models)
+
+
+def listing_key(
+    *, env_var: Optional[str] = None, auth_type: Optional[str] = None
+) -> Optional[str]:
+    """Resolve the bearer used to live-list a provider's models, or ``None``
+    when nothing is set (public lists work keyless). API-key providers read
+    their env var; OAuth providers fall back to the auth strategy's token so
+    the live ``/models`` endpoint is reachable without a separate API key.
+    The one resolver shared by the TUI picker and the WebOS models route."""
+    key = os.environ.get(env_var) if env_var else None
+    if key:
+        return key
+    if auth_type and auth_type.startswith("oauth_"):
+        from modulatio import auth_strategies
+        try:
+            return auth_strategies.build_strategy(auth_type).load_token()
+        except Exception:
+            return None
+    return None
 
 
 # ── picker helpers: free / curated-default / search ──────────────────────────

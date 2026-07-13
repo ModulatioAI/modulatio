@@ -14,7 +14,6 @@ provider's truthful rate-limit caveat. Selecting one posts ``ModelChosen``.
 """
 from __future__ import annotations
 
-import os
 
 from rich.text import Text
 from textual import work
@@ -86,21 +85,9 @@ class ModelPicker(Vertical):
     # ── fetch (worker thread) ───────────────────────────────────────────
 
     def _listing_key(self) -> str | None:
-        """Resolve the bearer used to list models. API-key providers read
-        their env var; OAuth providers (e.g. xAI/Grok) fall back to the
-        selected auth strategy's token so the live ``/models`` endpoint is
-        reachable without a separate API key — the Grok OAuth token rides
-        the same ``api.x.ai/v1`` host as the key."""
-        key = os.environ.get(self._env_var) if self._env_var else None
-        if key:
-            return key
-        if self._auth_type and self._auth_type.startswith("oauth_"):
-            from modulatio import auth_strategies
-            try:
-                return auth_strategies.build_strategy(self._auth_type).load_token()
-            except Exception:
-                return None
-        return None
+        """The bearer used to list models — the engine's shared resolver, fed
+        the SELECTED auth option (its env var, or an OAuth strategy's token)."""
+        return pc.listing_key(env_var=self._env_var, auth_type=self._auth_type)
 
     @work(thread=True, exclusive=True)
     def _load(self) -> None:

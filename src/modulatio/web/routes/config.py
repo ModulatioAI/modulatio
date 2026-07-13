@@ -321,6 +321,32 @@ def providers_catalog() -> dict:
     return {"providers": out}
 
 
+@router.get("/config/providers/{provider_id}/models")
+def provider_models(provider_id: str) -> dict:
+    """The provider's LIVE model list for the add-model picker — the same
+    engine fetch the TUI picker runs (``fetch_models``), with the listing key
+    resolved server-side from the provider's default auth option. The key
+    itself never crosses the web boundary; an unreachable list degrades to
+    ``[]`` (the form falls back to a typed model id)."""
+    from modulatio import provider_catalog as pc
+
+    provider = pc.get_provider(provider_id)
+    if provider is None:
+        raise HTTPException(status_code=422, detail=f"unknown provider {provider_id}")
+    auth = next((a for a in provider.auth_options if a.auth_type == "api_key"),
+                provider.auth_options[0])
+    key = pc.listing_key(env_var=auth.env_var, auth_type=auth.auth_type)
+    try:
+        models = pc.fetch_models(provider, api_key=key)
+    except Exception:  # noqa: BLE001 — a down endpoint degrades to free-text entry
+        models = []
+    # Role-relevant text models, same as the TUI picker's default listing.
+    return {"models": [
+        {"id": m.id, "free": m.is_free}
+        for m in pc.of_modality(models, "text")
+    ]}
+
+
 @router.post("/config/models/add")
 def model_add(body: ModelAdd) -> dict:
     from modulatio import model_presets

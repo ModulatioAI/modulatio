@@ -195,8 +195,10 @@ export function formDialog(title, fields) {
     const inputs = fields.map((f) => {
       let node;
       if (f.options) {
+        // Options are plain strings, or {value, label} when the display text
+        // differs from the submitted value (e.g. a free-flagged model id).
         node = el("select", { class: "mono form-input" },
-          ...f.options.map((o) => el("option", { value: o }, o)));
+          ...f.options.map((o) => el("option", { value: o.value ?? o }, o.label ?? o)));
       } else if (f.textarea) {
         node = el("textarea", { class: "mono form-input", rows: "5" });
       } else {
