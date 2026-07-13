@@ -103,6 +103,7 @@ export function mountConsole(page, ctx) {
     tickets: 0,
     liveRun: null,
     telemetry: null, // last frame — the gauges land, they don't reset
+    lastLeader: "",  // the Leader's latest reply — Ctrl+C's no-selection copy
   };
 
   // — lamps —
@@ -241,9 +242,17 @@ export function mountConsole(page, ctx) {
   }
 
   function appendLine(tv, node) {
+    // Stick to the bottom ONLY when the operator is already there and isn't
+    // mid-selection in this pane — a streaming run must not yank the view
+    // while they read scrollback or drag-copy from the TV (the TUI's
+    // select-then-Ctrl+C contract).
+    const nearBottom =
+      tv.scrollHeight - tv.scrollTop - tv.clientHeight < 48;
+    const sel = window.getSelection();
+    const selecting = sel && !sel.isCollapsed && tv.contains(sel.anchorNode);
     tv.append(node);
     while (tv.childElementCount > MAX_LINES) tv.firstElementChild.remove();
-    tv.scrollTop = tv.scrollHeight;
+    if (nearBottom && !selecting) tv.scrollTop = tv.scrollHeight;
   }
 
   function operatorLine(text) {
@@ -253,6 +262,7 @@ export function mountConsole(page, ctx) {
   }
 
   function leaderSpeech(text) {
+    state.lastLeader = text;
     appendLine(tvLeader, el("div", { class: "leader-speech" }, text));
   }
 
@@ -461,6 +471,19 @@ export function mountConsole(page, ctx) {
     } else if (ev.key === "F8") {
       ev.preventDefault();
       stopRun();
+    } else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "c") {
+      // The TUI's copy contract: a drag selection copies natively; with
+      // NOTHING selected, Ctrl+C copies the Leader's last message — never a
+      // dead key. (Paste into the composer is the browser's own Ctrl+V.)
+      const sel = window.getSelection();
+      const composerSelected = document.activeElement === input
+        && input.selectionStart !== input.selectionEnd;
+      if (composerSelected || (sel && !sel.isCollapsed)) return; // native copy
+      if (!state.lastLeader || !navigator.clipboard) return;
+      ev.preventDefault();
+      navigator.clipboard.writeText(state.lastLeader).then(
+        () => { statusLine.textContent = "✓ copied the Leader's last message"; },
+        () => {});
     }
   }
   window.addEventListener("keydown", onKey);
