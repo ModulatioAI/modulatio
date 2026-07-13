@@ -343,3 +343,18 @@ def test_non_standing_dotfile_dir_still_refused(env, tmp_path):
                              request_class=lp.REQUEST_CLASS_PATH, why="t")
     d = gate.decide(req, prompt_fn=lambda r: pytest.fail("must not prompt"))
     assert d.scope == lg.SCOPE_DENY and d.granted_via == "refused"
+
+
+def test_extract_survives_overlong_shell_tokens(env, tmp_path):
+    """A pathologically long run_shell token (an inline script body) makes
+    every os.stat raise OSError(ENAMETOOLONG) — it must degrade to 'not a
+    path resource', never crash the converse turn (live 500, 2026-07-13)."""
+    long_tok = "x" * 5000
+    reqs = lg.extract_tool_requests(
+        "run_shell", {"cmd": f"python3 -c {long_tok}", "cwd": "."},
+        root=tmp_path)
+    assert isinstance(reqs, list)          # no raise — that's the defect
+    long_path = "/tmp/" + "y" * 5000
+    reqs = lg.extract_tool_requests(
+        "run_shell", {"cmd": f"cat {long_path}", "cwd": "."}, root=tmp_path)
+    assert isinstance(reqs, list)

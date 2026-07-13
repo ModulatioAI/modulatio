@@ -281,19 +281,25 @@ def extract_tool_requests(tool_name: str, args: dict, *, root) -> list[SecurityR
     for tok in tokens:
         if tok.startswith("-"):
             continue  # flags are not path resources
-        if "/" in tok:
-            resource = (str(Path(tok).resolve()) if os.path.isabs(tok)
-                        else str((exec_dir_path / tok).resolve()))
-        else:
-            # Bare filename (no slash): gate a dotfile-leading name (.env, .ssh)
-            # OR a name resolving to a REAL FILE under the cwd (so a bare
-            # `cat .env` must not ride the exec grant ungated). Plain command
-            # names (cat, make, pytest) and subcommands matching dir names are not
-            # files in the cwd, so they are not gated.
-            cand = exec_dir_path / tok
-            if not (tok.startswith(".") or cand.is_file()):
-                continue
-            resource = str(cand.resolve())
+        # Any token can be pathologically long (an inline script, a heredoc
+        # body) — every os.stat below raises OSError(ENAMETOOLONG) on one,
+        # which must degrade to "not a path resource", never crash the turn.
+        try:
+            if "/" in tok:
+                resource = (str(Path(tok).resolve()) if os.path.isabs(tok)
+                            else str((exec_dir_path / tok).resolve()))
+            else:
+                # Bare filename (no slash): gate a dotfile-leading name (.env,
+                # .ssh) OR a name resolving to a REAL FILE under the cwd (so a
+                # bare `cat .env` must not ride the exec grant ungated). Plain
+                # command names (cat, make, pytest) and subcommands matching
+                # dir names are not files in the cwd, so they are not gated.
+                cand = exec_dir_path / tok
+                if not (tok.startswith(".") or cand.is_file()):
+                    continue
+                resource = str(cand.resolve())
+        except OSError:
+            continue
         reqs.append(SecurityRequest(action="read", resource=resource,
                                     request_class=lp.REQUEST_CLASS_PATH,
                                     why=f"run_shell file arg {tok}"))
