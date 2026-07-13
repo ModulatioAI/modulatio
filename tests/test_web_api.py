@@ -227,3 +227,15 @@ def test_shell_assets_serve(client):
     app_js = client.get("/js/app.js")
     assert app_js.status_code == 200
     assert "javascript" in app_js.headers["content-type"]
+
+
+def test_statics_forbid_heuristic_caching(client):
+    """Every static response carries Cache-Control: no-cache — without it a
+    browser's heuristic cache pins stale SPA modules for hours (surviving a
+    full browser restart), so a shipped fix never reaches the operator. The
+    ETag keeps revalidation a cheap 304."""
+    for path in ("/", "/js/app.js", "/js/pages/config.js", "/css/base.css"):
+        resp = client.get(path)
+        assert resp.status_code == 200
+        assert resp.headers.get("cache-control") == "no-cache", path
+    assert "etag" in client.get("/js/app.js").headers  # revalidation stays cheap

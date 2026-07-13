@@ -65,6 +65,19 @@ def create_app(
         return await call_next(request)
 
     @app.middleware("http")
+    async def _no_stale_statics(request: Request, call_next):
+        # The SPA is served without a build step, so a browser's heuristic
+        # cache (no Cache-Control + an old Last-Modified) can pin STALE app
+        # modules for hours — surviving a full browser restart. no-cache
+        # forces revalidation; the ETag makes that a cheap 304, so the shell
+        # is always current at zero bandwidth cost. /api responses are
+        # dynamic (never cached) — statics are the only gap.
+        response = await call_next(request)
+        if not request.url.path.startswith(("/api", "/events")):
+            response.headers.setdefault("Cache-Control", "no-cache")
+        return response
+
+    @app.middleware("http")
     async def _csrf_guard(request: Request, call_next):
         # State-changing /api requests must carry the SPA's custom header.
         # Reads (GET/HEAD) and preflight (OPTIONS) pass; static assets pass.
