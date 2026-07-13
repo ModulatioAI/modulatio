@@ -293,6 +293,16 @@ footer#hints .key { font-family: var(--font-mono); font-weight: 600; color: var(
   background: var(--field);
   color: var(--ink);
 }
+/* Selection must stay VISIBLE inside the Leader's speech: the global
+   ink-on-field highlight disappears on Atelier's ink block (ink on ink —
+   "the leader text is not selectable"), so swap the pair there. Vellum's
+   block is already field-on-ink — keep the global pair explicitly so the
+   swap can't invert it back to invisible. */
+.leader-speech::selection { background: var(--field); color: var(--ink); }
+:root[data-theme="vellum"] .leader-speech::selection {
+  background: var(--ink);
+  color: var(--field);
+}
 
 .teamwrap {
   display: grid;
