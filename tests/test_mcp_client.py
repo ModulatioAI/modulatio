@@ -19,6 +19,13 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_config, "MCP_SERVERS_FILE", tmp_path / "mcp_servers.json")
     # never touch a real portal in unit tests
     monkeypatch.setattr(mcp_client, "_connections", {})
+    # These tests fake the SDK boundary (the connection is monkeypatched), so
+    # they exercise the adapter WITHOUT the `mcp` extra installed — but
+    # build_mcp_tools()/get_connection() gate on _have_sdk() first and would
+    # early-return {} on a lean install (the CI env, which carries [dev,web]
+    # not [mcp]). Force the flag on so the translation logic runs regardless;
+    # the one test that checks the SDK-absent path sets it False explicitly.
+    monkeypatch.setattr(mcp_client, "_have_sdk", lambda: True)
 
 
 # ── namespacing ─────────────────────────────────────────────────────────────
