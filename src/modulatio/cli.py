@@ -284,7 +284,7 @@ project_app = typer.Typer(help="Project workspace — list runs, clean prior run
 app.add_typer(project_app, name="project")
 logs_app = typer.Typer(help="Diagnostic logs — list captured crash/error/doctor logs, send one to the Modulatio team, or delete.")
 app.add_typer(logs_app, name="logs")
-mcp_app = typer.Typer(help="MCP servers — add/list/remove external Model Context Protocol servers whose tools the team can use (needs the [mcp] extra).")
+mcp_app = typer.Typer(help="MCP servers — add/list/remove external Model Context Protocol servers whose tools the team can use (needs the 'mcp' extra).")
 app.add_typer(mcp_app, name="mcp")
 
 
