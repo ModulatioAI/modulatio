@@ -36,11 +36,17 @@ def _ensure_web_token() -> str:
     """Return the WebOS bearer token, generating it on first use.
 
     Lives beside the rest of the operator config (0600 — it guards every
-    non-loopback API call).
+    non-loopback API call). DOT-prefixed name: the converse Leader has
+    standing file access to the config dir, and the tools' dotfile floor is
+    what keeps credential files out of an agent's reach — the name IS the
+    fence.
     """
     from modulatio import config
 
-    token_file = config.CONFIG_DIR / "web_token"
+    token_file = config.CONFIG_DIR / ".web_token"
+    legacy = config.CONFIG_DIR / "web_token"
+    if not token_file.exists() and legacy.exists():
+        legacy.rename(token_file)  # one-time migration from the pre-dot name
     if token_file.exists():
         token = token_file.read_text(encoding="utf-8").strip()
         if token:
@@ -94,7 +100,7 @@ def run(argv: list[str] | None = None) -> None:
         allowed_hosts.append(args.host)
         print(
             f"Non-loopback bind ({args.host}) — API calls require the bearer "
-            f"token from <config>/web_token. Pair the browser with:\n"
+            f"token from <config>/.web_token. Pair the browser with:\n"
             f"    {token}"
         )
 

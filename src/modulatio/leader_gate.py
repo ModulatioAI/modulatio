@@ -65,13 +65,24 @@ class LeaderPermissionGate:
     ``session`` grants are held here in memory. The ``workspace`` (the Leader's
     own folder) is silently allowed for any action."""
 
-    def __init__(self, code: str, *, workspace, blocked_subtrees=()):
+    def __init__(self, code: str, *, workspace, blocked_subtrees=(),
+                 standing_roots=()):
         self.code = code
         self.workspace = Path(workspace)
         # Swarm deliverable/run trees the Leader must never be widened over OR
         # into (the structural cheat-guard). Engine-enforced
         # in ``refusal_reason``, not merely warned about.
         self._blocked_subtrees = tuple(str(s) for s in blocked_subtrees)
+        # The Leader's STANDING HOME (the harness roots: vault, shared
+        # resources, config dir) — operator architecture, not model-asked
+        # widens, so PATH access there silent-allows ahead of the refusal
+        # floor (the floor exists to stop the MODEL widening into secrets
+        # dirs; the config dir's own path has a dotfile component and would
+        # otherwise be unreachable). Credential FILES inside these roots stay
+        # out of reach via the tools' below-root dotfile floor (.env,
+        # .web_token, .xai_oauth.json). PATH class only — exec never rides a
+        # standing root.
+        self._standing_roots = tuple(Path(s).resolve() for s in standing_roots)
         self._session: dict[str, list[dict]] = {}  # {request_class: [grant, ...]}
 
     # ── lookups ──────────────────────────────────────────────────────────────
@@ -81,9 +92,13 @@ class LeaderPermissionGate:
     def is_granted(self, request: SecurityRequest) -> bool:
         """Per-call check: is this request already covered? The Leader's own
         ``workspace`` is auto-allowed for any FILESYSTEM action (path + exec) —
-        it's his bwrap-confined home. A WIDENED path grant (read/edit/write) does
-        NOT cover exec (separate class). Non-filesystem
+        it's his bwrap-confined home; his STANDING roots (the harness) are
+        auto-allowed for PATH actions. A WIDENED path grant (read/edit/write)
+        does NOT cover exec (separate class). Non-filesystem
         classes (network/spend) need an exact resource match (no workspace)."""
+        if request.request_class == lp.REQUEST_CLASS_PATH and self._in_standing(
+                request.resource):
+            return True
         grants = self._grants(request.request_class)
         if request.request_class in _FS_CLASSES:
             return lp.is_action_allowed(
@@ -99,6 +114,10 @@ class LeaderPermissionGate:
         r = Path(resource).resolve()
         ws = self.workspace.resolve()
         return r == ws or ws in r.parents
+
+    def _in_standing(self, resource: str) -> bool:
+        r = Path(resource).resolve()
+        return any(r == s or s in r.parents for s in self._standing_roots)
 
     def refusal_reason(self, request: SecurityRequest) -> "str | None":
         """Engine-bound HARD refusal: a reason this request can NEVER be granted
@@ -154,6 +173,14 @@ class LeaderPermissionGate:
     def decide(self, request: SecurityRequest, *, prompt_fn) -> ScopedDecision:
         """Return a ``ScopedDecision``. Silent-allow if already granted; else
         prompt the operator (``prompt_fn``) and record at the chosen scope."""
+        # STANDING roots first: the harness dirs are the Leader's home by
+        # operator architecture — a PATH request there is not a widen ask, so
+        # the refusal floor (which classifies model-asked widens) doesn't
+        # apply. Credential files inside stay unreachable at the tools'
+        # below-root dotfile floor.
+        if (request.request_class == lp.REQUEST_CLASS_PATH
+                and self._in_standing(request.resource)):
+            return ScopedDecision(scope=SCOPE_SESSION, granted_via="standing")
         # Engine-bound refusal FIRST: a dangerous/deliverable-overlapping path or
         # an out-of-workspace exec can never be granted — the operator is never
         # even prompted, and any stale grant is ignored. Checked before is_granted

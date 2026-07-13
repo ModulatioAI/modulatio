@@ -2691,3 +2691,25 @@ def test_resolve_payload_binary_handles_bare_and_path_forms(tmp_path):
     # A path form pointing at a non-existent file.
     missing = str(tmp_path / "nope" / "ghost")
     assert tools._resolve_payload_binary(missing) is None
+
+
+# === the Leader's standing home: credential files stay behind the floor ===
+
+def test_credential_dotfiles_unreadable_under_standing_config_root(tmp_path):
+    """The converse Leader has standing file access to the config dir — the
+    below-root dotfile floor is what keeps the credential files there
+    (.web_token, .xai_oauth.json) out of model context. Plain config files
+    read; the dot-named credentials refuse."""
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "model_presets.json").write_text('{"ok": true}')
+    (cfg / ".web_token").write_text("SECRET-BEARER")
+    (cfg / ".xai_oauth.json").write_text('{"access_token": "SECRET-OAUTH"}')
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    reg = tools.build_registry(artifacts_root=ws, tool_calls_dir=ws / "tc",
+                               extra_roots=(str(cfg),))
+    assert '"ok"' in reg["read_file"].call(path=str(cfg / "model_presets.json"))
+    for name in (".web_token", ".xai_oauth.json"):
+        with pytest.raises(ValueError, match="dotfile"):
+            reg["read_file"].call(path=str(cfg / name))

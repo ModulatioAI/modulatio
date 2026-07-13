@@ -292,3 +292,54 @@ def test_dangerous_widen_root_flags_root_over_a_deliverable_tree(tmp_path):
     inside = deliv / "sub"
     inside.mkdir()
     assert lg.dangerous_widen_root(str(inside), blocked_subtrees=[str(deliv)]) is not None
+
+
+# === standing roots: the harness is the Leader's home, no gate ===
+
+def _standing_gate(tmp_path, standing):
+    return lg.LeaderPermissionGate(CODE, workspace=tmp_path / "ws",
+                                   standing_roots=standing)
+
+
+def test_standing_root_silent_allows_path_actions(env, tmp_path):
+    """A PATH request under a standing root (the config dir — which the
+    dotfile floor would otherwise refuse, since ``.config`` is a dot
+    component) silent-allows with no prompt: it's operator architecture,
+    not a model-asked widen. THE defect: 'I couldn't read the config files.'"""
+    cfg = tmp_path / ".config" / "modulatio"
+    cfg.mkdir(parents=True)
+    gate = _standing_gate(tmp_path, [cfg])
+    for action in ("read", "edit", "write"):
+        req = lg.SecurityRequest(action=action, resource=str(cfg / "model_presets.json"),
+                                 request_class=lp.REQUEST_CLASS_PATH, why="t")
+        assert gate.is_granted(req) is True
+        d = gate.decide(req, prompt_fn=lambda r: pytest.fail("must not prompt"))
+        assert d.scope != lg.SCOPE_DENY and d.granted_via == "standing"
+
+
+def test_standing_root_never_covers_exec(env, tmp_path):
+    """exec never rides a standing root — the config/vault dirs are
+    file-tools-only by design (arbitrary code inside a bound root could read
+    dotfile secrets BY NAME)."""
+    cfg = tmp_path / ".config" / "modulatio"
+    cfg.mkdir(parents=True)
+    gate = _standing_gate(tmp_path, [cfg])
+    req = lg.SecurityRequest(action="exec", resource=str(cfg),
+                             request_class="exec", why="t")
+    assert gate.is_granted(req) is False
+    d = gate.decide(req, prompt_fn=lambda r: lg.ScopedDecision(scope=lg.SCOPE_DENY))
+    assert d.scope == lg.SCOPE_DENY
+
+
+def test_non_standing_dotfile_dir_still_refused(env, tmp_path):
+    """The dotfile refusal floor is UNCHANGED for everything not standing:
+    a model-asked widen into ~/.ssh-shaped dirs never even prompts."""
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    cfg = tmp_path / ".config" / "modulatio"
+    cfg.mkdir(parents=True)
+    gate = _standing_gate(tmp_path, [cfg])
+    req = lg.SecurityRequest(action="read", resource=str(ssh / "id_ed25519"),
+                             request_class=lp.REQUEST_CLASS_PATH, why="t")
+    d = gate.decide(req, prompt_fn=lambda r: pytest.fail("must not prompt"))
+    assert d.scope == lg.SCOPE_DENY and d.granted_via == "refused"

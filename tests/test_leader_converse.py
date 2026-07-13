@@ -497,3 +497,24 @@ def test_run_shell_roots_exclude_the_vault_secret_store(
     reg = orch._leader_tool_registry()
     with pytest.raises(ValueError):
         reg["read_file"].call(path=str(vault.VAULT_ROOT / ".env"))
+
+
+def test_converse_leader_gate_carries_standing_harness_roots(project: Project):
+    """The harness roots (vault / shared resources / config dir) ride into the
+    gate as STANDING roots — a config read silent-allows instead of dying at
+    the dotfile refusal floor (the 'I couldn't read the config files' defect:
+    the registry granted the roots but the gate refused the ask)."""
+    from modulatio import config as config_mod
+    from modulatio import leader_gate as lg
+    from modulatio import leader_permissions as lp
+
+    orch = Orchestrator(project, _runners())
+    gate = orch.leader_gate()
+    assert gate._standing_roots  # wired, not empty
+    req = lg.SecurityRequest(
+        action="read",
+        resource=str(config_mod.CONFIG_DIR / "model_presets.json"),
+        request_class=lp.REQUEST_CLASS_PATH, why="t")
+    assert gate.is_granted(req) is True
+    d = gate.decide(req, prompt_fn=lambda r: pytest.fail("must not prompt"))
+    assert d.granted_via == "standing"

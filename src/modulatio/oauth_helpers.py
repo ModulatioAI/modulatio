@@ -34,7 +34,7 @@ XAI_GROK_CREDENTIALS_FILE = Path.home() / ".grok" / "auth.json"
 # Modulatio's OWN xAI OAuth store, minted by `modulatio auth login-xai`
 # (oauth_login.login_xai) and re-written on every refresh-token rotation
 # (oauth_refresh.refresh_xai_token). 0600, atomic writes.
-MODULATIO_XAI_OAUTH_FILE = config.CONFIG_DIR / "xai_oauth.json"
+MODULATIO_XAI_OAUTH_FILE = config.CONFIG_DIR / ".xai_oauth.json"
 
 
 # === Anthropic ===

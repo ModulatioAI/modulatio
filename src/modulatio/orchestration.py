@@ -8465,12 +8465,17 @@ class Orchestrator:
 
     def leader_gate(self):
         """The per-project cross-cutting permission gate (cached so in-memory
-        session grants persist across converse turns)."""
+        session grants persist across converse turns). The harness roots ride
+        in as STANDING roots — the registry already binds them as extra file
+        roots (``_leader_tool_registry``), and without the gate knowing them
+        too, every config/vault read was refused at the dotfile floor before
+        the tools ever ran (the "can't read the config files" defect)."""
         cached = getattr(self, "_leader_gate_cache", None)
         if cached is None:
             from modulatio import leader_gate as _lg
             cached = _lg.LeaderPermissionGate(
                 self.project.code, workspace=self._leader_workspace(),
+                standing_roots=self._harness_roots(),
             )
             self._leader_gate_cache = cached
         return cached

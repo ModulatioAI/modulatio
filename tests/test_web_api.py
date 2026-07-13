@@ -239,3 +239,22 @@ def test_statics_forbid_heuristic_caching(client):
         assert resp.status_code == 200
         assert resp.headers.get("cache-control") == "no-cache", path
     assert "etag" in client.get("/js/app.js").headers  # revalidation stays cheap
+
+
+def test_web_token_migrates_to_dotfile_name(tmp_path, monkeypatch):
+    """The bearer token file is dot-prefixed (the tools' dotfile floor is the
+    fence keeping it from the Leader's standing config access); a legacy
+    plain-named token migrates on first use, preserving the pairing."""
+    from modulatio import config as cfg_mod
+    from modulatio.web import server
+
+    monkeypatch.setattr(cfg_mod, "CONFIG_DIR", tmp_path)
+    (tmp_path / "web_token").write_text("legacy-token\n")
+    assert server._ensure_web_token() == "legacy-token"
+    assert not (tmp_path / "web_token").exists()        # migrated
+    assert (tmp_path / ".web_token").read_text().strip() == "legacy-token"
+    # fresh generation is dot-named + 0600
+    (tmp_path / ".web_token").unlink()
+    tok = server._ensure_web_token()
+    assert (tmp_path / ".web_token").stat().st_mode & 0o777 == 0o600
+    assert tok
