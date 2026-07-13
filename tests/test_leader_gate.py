@@ -399,3 +399,34 @@ def test_permission_callback_denies_non_string_shell_inputs(env, tmp_path, bad_a
         gate, root=tmp_path / "ws",
         prompt_fn=lambda r: pytest.fail("must not prompt"))
     assert cb("run_shell", bad_args) is False
+
+
+def test_prompt_errors_surface_through_the_callback(env, tmp_path):
+    """R6: a crashing approval UI (prompt_fn raising) must SURFACE — not be
+    silently converted into a deny. Policy is the operator's; exceptions are
+    the developer's."""
+    gate = lg.LeaderPermissionGate(CODE, workspace=tmp_path / "ws")
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+
+    def _broken_ui(req):
+        raise RuntimeError("approval UI failed")
+
+    cb = lg.build_permission_callback(
+        gate, root=tmp_path / "ws", prompt_fn=_broken_ui)
+    with pytest.raises(RuntimeError, match="approval UI failed"):
+        cb("read_file", {"path": str(outside / "f.md")})
+
+
+def test_scope_contract_violation_surfaces_through_the_callback(env, tmp_path):
+    """R6: the gate's deliberate ValueError — a prompt returning a scope the
+    request never offered (ALWAYS on an exec ask that excludes it) — must
+    propagate, not become a silent deny."""
+    gate = lg.LeaderPermissionGate(CODE, workspace=tmp_path / "ws")
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    cb = lg.build_permission_callback(
+        gate, root=tmp_path / "ws",
+        prompt_fn=lambda r: lg.ScopedDecision(scope=lg.SCOPE_ALWAYS))
+    with pytest.raises(ValueError, match="available_scopes"):
+        cb("run_shell", {"cmd": "ls", "cwd": str(outside)})

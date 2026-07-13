@@ -344,15 +344,15 @@ def build_permission_callback(gate: LeaderPermissionGate, *, root, prompt_fn):
             requests = extract_tool_requests(name, args, root=root)
         except Exception:  # noqa: BLE001 — model-shaped input, deny the call
             return False
-        # DECISION errors stay NARROW: only path-classification failures on
-        # the extracted resource fail closed. An implementation/UI bug in the
-        # prompt path must surface, not be silently converted into policy.
-        try:
-            for req in requests:
-                if gate.decide(req, prompt_fn=prompt_fn).scope == SCOPE_DENY:
-                    return False
-        except (OSError, ValueError, RuntimeError):
-            return False
+        # DECISION runs UNGUARDED: ``decide()`` already fails closed on real
+        # path-classification errors internally (its own OSError guard), and
+        # malformed input was contained by the extraction guard above. An
+        # implementation/UI error in the prompt path — or the gate's own
+        # scope-contract ValueError — must SURFACE, never be silently
+        # converted into a policy decision.
+        for req in requests:
+            if gate.decide(req, prompt_fn=prompt_fn).scope == SCOPE_DENY:
+                return False
         return True
 
     return permission_callback
