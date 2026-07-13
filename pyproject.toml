@@ -79,6 +79,13 @@ web = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
 ]
+# `[mcp]` ships the Model Context Protocol client SDK so Modulatio can
+# consume external MCP servers (their tools become first-class Modulatio
+# tools). Opt-in — the base install carries no MCP code path; without this
+# extra, configured MCP servers are inert with an install hint.
+mcp = [
+    "mcp>=1.0",
+]
 
 [project.scripts]
 modulatio = "modulatio.cli:main"

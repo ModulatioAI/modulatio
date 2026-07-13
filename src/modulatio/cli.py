@@ -284,6 +284,8 @@ project_app = typer.Typer(help="Project workspace — list runs, clean prior run
 app.add_typer(project_app, name="project")
 logs_app = typer.Typer(help="Diagnostic logs — list captured crash/error/doctor logs, send one to the Modulatio team, or delete.")
 app.add_typer(logs_app, name="logs")
+mcp_app = typer.Typer(help="MCP servers — add/list/remove external Model Context Protocol servers whose tools the team can use (needs the [mcp] extra).")
+app.add_typer(mcp_app, name="mcp")
 
 
 # === modulatio acp (Agent Client Protocol server over stdio) ===
@@ -2106,6 +2108,133 @@ def project_use(
         raise typer.Exit(code=2)
     config.set_default_project_code(code)
     typer.echo(f"Default project is now '{code}'.")
+
+
+# ── MCP servers ─────────────────────────────────────────────────────────────
+
+
+@mcp_app.command("list")
+def mcp_list() -> None:
+    """List configured MCP servers."""
+    from modulatio import mcp_config
+    servers = mcp_config.load_servers()
+    if not servers:
+        typer.echo("No MCP servers configured. Add one with `modulatio mcp add-stdio` "
+                   "or `add-http`.")
+        return
+    typer.echo("")
+    for sid in sorted(servers):
+        s = servers[sid]
+        where = (f"{s.command} {' '.join(s.args)}".strip() if s.transport == "stdio"
+                 else s.base_url)
+        flags = [s.transport, s.trust]
+        if s.metered:
+            flags.append("metered")
+        if not s.enabled:
+            flags.append("disabled")
+        typer.echo(f"  {sid:20s} {s.name}")
+        typer.echo(f"  {'':20s} {where}  [{', '.join(flags)}]")
+        typer.echo("")
+
+
+@mcp_app.command("add-stdio")
+def mcp_add_stdio(
+    server_id: str = typer.Argument(..., help="Slug id for this server"),
+    command: str = typer.Option(..., help="Executable to launch (e.g. npx, uvx, python)"),
+    name: str = typer.Option("", help="Human label (defaults to the id)"),
+    arg: list[str] = typer.Option([], "--arg", help="One command arg (repeatable)"),
+    trusted: bool = typer.Option(False, help="Run this server's tools without a per-call prompt"),
+    metered: bool = typer.Option(False, help="Route its tool calls through the spend gate"),
+) -> None:
+    """Add a local (stdio) MCP server Modulatio launches as a subprocess."""
+    from modulatio import mcp_config
+    mcp_config.add_server(mcp_config.McpServer(
+        id=server_id, name=name or server_id, transport="stdio",
+        command=command, args=tuple(arg),
+        trust="trusted" if trusted else "gated", metered=metered))
+    typer.echo(f"Added stdio MCP server '{server_id}'. Test it with `modulatio mcp test {server_id}`.")
+
+
+@mcp_app.command("add-http")
+def mcp_add_http(
+    server_id: str = typer.Argument(..., help="Slug id for this server"),
+    url: str = typer.Option(..., help="Absolute base URL of the MCP endpoint"),
+    name: str = typer.Option("", help="Human label (defaults to the id)"),
+    auth: str = typer.Option("", help="Auth shape: bearer | header:<Name> (blank = none)"),
+    token: str = typer.Option("", help="Auth token (stored write-only in the vault, never in the record)"),
+    trusted: bool = typer.Option(False, help="Run this server's tools without a per-call prompt"),
+    metered: bool = typer.Option(False, help="Route its tool calls through the spend gate"),
+) -> None:
+    """Add a remote (http) MCP server Modulatio connects out to."""
+    import secrets
+
+    from modulatio import config, mcp_config
+    env_var = ""
+    if token:
+        env_var = f"MCPKEY_{secrets.token_hex(3).upper()}"
+        config.set_env_secret(env_var, token)
+    mcp_config.add_server(mcp_config.McpServer(
+        id=server_id, name=name or server_id, transport="http",
+        base_url=url, auth_shape=auth, env_var=env_var,
+        trust="trusted" if trusted else "gated", metered=metered))
+    typer.echo(f"Added http MCP server '{server_id}'. Test it with `modulatio mcp test {server_id}`.")
+
+
+@mcp_app.command("remove")
+def mcp_remove(server_id: str = typer.Argument(..., help="Server id")) -> None:
+    """Remove an MCP server."""
+    from modulatio import mcp_config
+    typer.echo("Removed." if mcp_config.remove_server(server_id)
+               else f"No MCP server '{server_id}'.")
+
+
+@mcp_app.command("enable")
+def mcp_enable(server_id: str = typer.Argument(...)) -> None:
+    """Enable a disabled MCP server."""
+    from modulatio import mcp_config
+    typer.echo("Enabled." if mcp_config.set_enabled(server_id, True)
+               else f"No MCP server '{server_id}'.")
+
+
+@mcp_app.command("disable")
+def mcp_disable(server_id: str = typer.Argument(...)) -> None:
+    """Disable an MCP server without removing it."""
+    from modulatio import mcp_config
+    typer.echo("Disabled." if mcp_config.set_enabled(server_id, False)
+               else f"No MCP server '{server_id}'.")
+
+
+@mcp_app.command("trust")
+def mcp_trust(
+    server_id: str = typer.Argument(...),
+    posture: str = typer.Argument(..., help="gated | trusted"),
+) -> None:
+    """Set a server's trust posture (gated = prompt per call; trusted = no prompt)."""
+    from modulatio import mcp_config
+    try:
+        ok = mcp_config.set_trust(server_id, posture)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(f"Trust set to {posture}." if ok else f"No MCP server '{server_id}'.")
+
+
+@mcp_app.command("test")
+def mcp_test(server_id: str = typer.Argument(..., help="Server id")) -> None:
+    """Connect to a server and list the tools it offers."""
+    from modulatio import mcp_client, mcp_config
+    if mcp_config.get_server(server_id) is None:
+        typer.echo(f"No MCP server '{server_id}'.", err=True)
+        raise typer.Exit(code=1)
+    conn = mcp_client.get_connection(server_id)
+    if conn is None:
+        typer.echo(f"Could not connect to '{server_id}' (see logs; is the [mcp] extra "
+                   "installed and the server reachable?).", err=True)
+        raise typer.Exit(code=1)
+    tools = conn.list_tools()
+    typer.echo(f"Connected. {len(tools)} tool(s):")
+    for t in tools:
+        typer.echo(f"  mcp__{server_id}__{t.name}  — {(t.description or '').splitlines()[0][:70]}")
 
 
 def main() -> None:

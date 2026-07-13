@@ -2163,6 +2163,11 @@ def build_registry(
         artifacts_root=artifacts_root,
         on_artifact_write=on_artifact_write,
     ))
+    # MCP servers (opt-in [mcp] extra): discovered external tools, namespaced
+    # mcp__<server>__<tool>. Fast no-op when no server is configured; a
+    # configured server connects once (cached) and contributes its tools.
+    from modulatio import mcp_client as _mcp_client
+    registry.update(_mcp_client.build_mcp_tools())
     return registry
 
 
