@@ -46,6 +46,10 @@ _MAX_TOOLS = 128
 _MAX_DESC_CHARS = 2_000
 #: Function-calling-safe tool name — anything else is skipped at translation.
 _TOOL_NAME_OK = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+#: Provider ceiling for the FINAL namespaced function name (mcp__<id>__<tool>).
+_MAX_FUNC_NAME = 64
+#: Serialized input-schema ceiling — one tool must not bloat every request.
+_MAX_SCHEMA_CHARS = 16_000
 
 
 def _have_sdk() -> bool:
@@ -120,6 +124,13 @@ def _scrub(text: str, server: McpServer) -> str:
         for secret in secrets:
             text = _redact_key(text, secret)
     return tools._cap_http_body(text, over_read=False)
+
+
+def _safe_exc(exc: BaseException, server: McpServer) -> str:
+    """An exception rendered safe for the LOG: class + scrubbed message. Never
+    the raw exception/traceback (``exc_info``) — a protocol error can carry the
+    server's credential, and process logs are retained surfaces too."""
+    return _scrub(f"{type(exc).__name__}: {exc}", server)
 
 
 # ── the portal: one background event loop holding every live session ────────
@@ -259,18 +270,21 @@ def _result_text(result) -> str:
     """Flatten a CallToolResult's content blocks into text, bounded as it
     accumulates — a giant server-sent block is sliced at the budget instead of
     fully copied and joined before the return cap can act. The budget is 2× the
-    return ceiling so redaction still sees everything the model could see."""
+    return ceiling so redaction still sees everything the model could see.
+    Every block is charged at least its join separator, so block COUNT is
+    bounded by the same budget — a flood of empty blocks can't grow the parts
+    list or the joined output past it."""
     budget = 2 * tools._HTTP_GET_MAX_CHARS
     parts: list[str] = []
     total = 0
     for block in getattr(result, "content", None) or []:
-        t = getattr(block, "text", None)
-        piece = str(t) if t is not None else str(getattr(block, "type", block))
         remaining = budget - total
         if remaining <= 0:
             break
+        t = getattr(block, "text", None)
+        piece = str(t) if t is not None else str(getattr(block, "type", block))
         parts.append(piece[:remaining])
-        total += min(len(piece), remaining)
+        total += min(len(piece), remaining) + 1   # +1 charges the separator
     return "\n".join(parts)
 
 
@@ -295,8 +309,9 @@ def get_connection(server_id: str) -> "_Connection | None":
             return None
         try:
             conn = _Connection(server)
-        except Exception:  # noqa: BLE001 — degrade, never crash a run
-            _logger.warning("MCP server %s failed to connect", server_id, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — degrade, never crash a run
+            _logger.warning("MCP server %s failed to connect: %s",
+                            server_id, _safe_exc(exc, server))
             return None
         _connections[server_id] = conn
         return conn
@@ -311,7 +326,8 @@ def call_tool(server_id: str, tool_name: str, **kwargs) -> str:
     try:
         return conn.call(tool_name, kwargs)
     except Exception as exc:  # noqa: BLE001 — one bad call must not sink the run
-        _logger.warning("MCP call %s/%s failed", server_id, tool_name, exc_info=True)
+        _logger.warning("MCP call %s/%s failed: %s",
+                        server_id, tool_name, _safe_exc(exc, conn.server))
         # Drop the dead connection so the next call reconnects once.
         with _conn_lock:
             _connections.pop(server_id, None)
@@ -364,30 +380,57 @@ def build_mcp_tools() -> dict[str, tools.Tool]:
             continue
         try:
             specs = conn.list_tools()
-        except Exception:  # noqa: BLE001 — a bad server contributes nothing
-            _logger.warning("MCP server %s: tools/list failed", sid, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — a bad server contributes nothing
+            _logger.warning("MCP server %s: tools/list failed: %s",
+                            sid, _safe_exc(exc, server))
             continue
         cost = "paid-cloud" if server.metered else None
         for spec in specs:
-            # Server-supplied names/descriptions are untrusted: a name outside
-            # the function-calling-safe charset is skipped (it would poison
-            # every model request carrying the registry); a description is
-            # capped rather than forwarded whole.
+            # Server-supplied names/descriptions/schemas are untrusted: a name
+            # outside the function-calling-safe charset — or a FINAL namespaced
+            # name over the provider function-name ceiling — is skipped (it
+            # would poison every model request carrying the registry); a
+            # description is capped; an oversized/malformed schema skips the
+            # tool (fail closed, never forwarded whole).
             if not _TOOL_NAME_OK.match(spec.name):
                 _logger.warning(
                     "MCP server %s: skipping tool with unsafe name %.80r",
                     sid, spec.name)
                 continue
-            desc = (getattr(spec, "description", "") or f"{sid}:{spec.name}")
             name = tool_name(sid, spec.name)
+            if len(name) > _MAX_FUNC_NAME:
+                _logger.warning(
+                    "MCP server %s: skipping tool %s — namespaced name exceeds "
+                    "%d chars (shorten the server id)", sid, spec.name, _MAX_FUNC_NAME)
+                continue
+            schema = getattr(spec, "inputSchema", None) or {"type": "object"}
+            if not _schema_ok(schema):
+                _logger.warning(
+                    "MCP server %s: skipping tool %s — oversized or malformed "
+                    "input schema", sid, spec.name)
+                continue
+            desc = (getattr(spec, "description", "") or f"{sid}:{spec.name}")
             out[name] = tools.Tool(
                 name=name,
                 description=desc[:_MAX_DESC_CHARS],
                 call=_make_call(sid, spec.name),
-                params_schema=getattr(spec, "inputSchema", None) or {"type": "object"},
+                params_schema=schema,
                 cost_class=cost,
             )
     return out
+
+
+def _schema_ok(schema) -> bool:
+    """A server-supplied input schema is forwarded only if it is a dict whose
+    serialized size fits the ceiling — one tool must not be able to bloat every
+    model request (or blow the JSON encoder) with an unbounded/deep schema."""
+    if not isinstance(schema, dict):
+        return False
+    try:
+        import json
+        return len(json.dumps(schema)) <= _MAX_SCHEMA_CHARS
+    except (TypeError, ValueError, RecursionError):
+        return False
 
 
 def _make_call(server_id: str, mcp_tool: str):

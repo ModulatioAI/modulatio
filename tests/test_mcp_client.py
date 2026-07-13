@@ -166,6 +166,47 @@ def test_call_tool_failure_drops_connection(monkeypatch):
     assert "s" not in mcp_client._connections   # dropped so next call reconnects
 
 
+# ── secrets never reach the LOG either ──────────────────────────────────────
+
+def test_call_tool_failure_log_is_scrubbed(monkeypatch, caplog):
+    """The caught exception is scrubbed BEFORE logging too — the model result
+    and the process log are both retained surfaces."""
+    import logging
+    monkeypatch.setenv("MCPKEY_LG", "http-secret")
+    server = McpServer(id="s", name="s", transport="http", base_url="https://x",
+                       env_var="MCPKEY_LG")
+
+    class _Boom(_FakeConn):
+        def call(self, *a, **k):
+            raise RuntimeError("protocol input: http-secret")
+    boom = _Boom([])
+    boom.server = server
+    mcp_client._connections["s"] = boom
+    monkeypatch.setattr(mcp_client, "get_connection", lambda sid: boom)
+    with caplog.at_level(logging.WARNING, logger="modulatio.mcp"):
+        out = mcp_client.call_tool("s", "do")
+    assert "http-secret" not in out
+    assert "failed" in caplog.text            # the failure IS logged...
+    assert "http-secret" not in caplog.text   # ...without the credential
+
+
+def test_connect_failure_log_is_scrubbed(monkeypatch, caplog):
+    """Connect-path exceptions are scrubbed before logging as well."""
+    import logging
+    monkeypatch.setenv("MCPKEY_CN", "conn-secret")
+    mcp_config.add_server(McpServer(id="c", name="c", transport="http",
+                                    base_url="https://x", env_var="MCPKEY_CN"))
+
+    def _boom(server):
+        raise RuntimeError("handshake: conn-secret")
+    monkeypatch.setattr(mcp_client, "_have_sdk", lambda: True)
+    monkeypatch.setattr(mcp_client, "_Connection", _boom)
+    with caplog.at_level(logging.WARNING, logger="modulatio.mcp"):
+        assert mcp_client.get_connection("c") is None
+    assert "failed to connect" in caplog.text
+    assert "conn-secret" not in caplog.text
+
+
 # ── bounds: server-controlled data is bounded at translation ────────────────
 
 def test_result_text_bounded_accumulation():
@@ -209,6 +250,44 @@ def test_build_mcp_tools_skips_unsafe_names_and_caps_desc(monkeypatch):
     reg = mcp_client.build_mcp_tools()
     assert set(reg) == {"mcp__fs__ok_tool"}
     assert len(reg["mcp__fs__ok_tool"].description) <= mcp_client._MAX_DESC_CHARS
+
+
+def test_build_mcp_tools_final_name_ceiling(monkeypatch):
+    """The FINAL namespaced name (mcp__<id>__<tool>) rides the provider
+    64-char function-name ceiling — a per-part-valid combination that exceeds
+    it is skipped, not forwarded."""
+    sid = "s" * 32                                       # max-allowed id
+    mcp_config.add_server(McpServer(id=sid, name="S", transport="stdio", command="x"))
+    fake = _FakeConn([_spec("read"), _spec("t" * 60)])   # fits / overflows
+    monkeypatch.setattr(mcp_client, "get_connection", lambda s: fake)
+    reg = mcp_client.build_mcp_tools()
+    assert set(reg) == {f"mcp__{sid}__read"}
+    assert all(len(n) <= mcp_client._MAX_FUNC_NAME for n in reg)
+
+
+def test_build_mcp_tools_bounds_schema(monkeypatch):
+    """An oversized or malformed input schema skips the tool (fail closed) —
+    one tool can't bloat every model request."""
+    mcp_config.add_server(McpServer(id="fs", name="FS", transport="stdio", command="x"))
+    giant = {"type": "object", "description": "g" * 200_000}
+    fake = _FakeConn([
+        _spec("ok", schema={"type": "object", "properties": {}}),
+        _spec("fat", schema=giant),
+        _spec("weird", schema=["not", "a", "dict"]),
+    ])
+    monkeypatch.setattr(mcp_client, "get_connection", lambda sid: fake)
+    reg = mcp_client.build_mcp_tools()
+    assert set(reg) == {"mcp__fs__ok"}
+
+
+def test_result_text_charges_separators_and_empty_blocks():
+    """Empty text blocks are charged their join separator — a flood of them
+    can't grow the parts list or the joined output past the budget."""
+    budget = 2 * mcp_client.tools._HTTP_GET_MAX_CHARS
+    flood = SimpleNamespace(
+        content=[SimpleNamespace(text="") for _ in range(budget + 10_000)])
+    out = mcp_client._result_text(flood)
+    assert len(out) <= budget
 
 
 # ── the real round-trip (opt-in) ────────────────────────────────────────────

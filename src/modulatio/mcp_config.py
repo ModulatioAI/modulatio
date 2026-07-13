@@ -67,6 +67,10 @@ def _validate(s: McpServer) -> None:
         # "__" is the tool-namespace delimiter (mcp__<server>__<tool>) — an id
         # containing it makes the namespace ambiguous and the gate lookup miss.
         raise ValueError(f"mcp server id {s.id!r} must not contain '__'")
+    if len(s.id) > 32:
+        # The FINAL namespaced function name (mcp__<id>__<tool>) rides a
+        # provider 64-char ceiling — a long id would silently cost tool names.
+        raise ValueError(f"mcp server id {s.id!r} must be 32 chars or fewer")
     if s.transport not in _TRANSPORTS:
         raise ValueError(f"mcp transport {s.transport!r} must be stdio|http")
     if s.trust not in _TRUST:
