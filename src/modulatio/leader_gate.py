@@ -211,16 +211,20 @@ def extract_tool_requests(tool_name: str, args: dict, *, root) -> list[SecurityR
     # MCP tools (mcp__<server>__<tool>): a GATED server's call is an mcp-class
     # capability ask (once/session/always/deny, persisted per server:tool); a
     # TRUSTED server's tools run without a prompt (operator vetted it on add).
+    # An MCP-shaped name whose server is NOT configured fails CLOSED — it is
+    # still gated (never silently ungated), so a name that dodges the config
+    # lookup can't dodge the gate with it.
     from modulatio import mcp_client, mcp_config
     parsed = mcp_client.parse_tool_name(tool_name)
     if parsed is not None:
         server_id, mcp_tool = parsed
         server = mcp_config.get_server(server_id)
-        if server is None or server.trust == "trusted":
+        if server is not None and server.trust == "trusted":
             return []
+        label = server.name if server is not None else f"{server_id} (unknown server)"
         return [SecurityRequest(
             action="mcp-tool", resource=f"{server_id}:{mcp_tool}",
-            request_class="mcp", why=f"MCP tool {server.name}:{mcp_tool}")]
+            request_class="mcp", why=f"MCP tool {label}:{mcp_tool}")]
     if tool_name not in _GATED_TOOLS:
         return []
     if tool_name in _PATH_ACTION_BY_TOOL:

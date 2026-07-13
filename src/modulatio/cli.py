@@ -2140,7 +2140,7 @@ def mcp_list() -> None:
 @mcp_app.command("add-stdio")
 def mcp_add_stdio(
     server_id: str = typer.Argument(..., help="Slug id for this server"),
-    command: str = typer.Option(..., help="Executable to launch (e.g. npx, uvx, python)"),
+    command: str = typer.Option(..., help="Executable to launch (a program on this machine)"),
     name: str = typer.Option("", help="Human label (defaults to the id)"),
     arg: list[str] = typer.Option([], "--arg", help="One command arg (repeatable)"),
     trusted: bool = typer.Option(False, help="Run this server's tools without a per-call prompt"),

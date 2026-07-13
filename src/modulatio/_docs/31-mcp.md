@@ -24,7 +24,7 @@ machine; an **http** server is a hosted endpoint Modulatio connects out to.
 
 ```bash
 # local (stdio) — Modulatio spawns the subprocess
-modulatio mcp add-stdio files --command uvx --arg mcp-server-filesystem --arg /home/me/notes
+modulatio mcp add-stdio files --command /path/to/files-server --arg /home/me/notes
 
 # remote (http) — a hosted MCP endpoint, with an auth token
 modulatio mcp add-http hub --url https://mcp.example.com/api --auth bearer --token <TOKEN>

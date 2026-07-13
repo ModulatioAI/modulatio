@@ -24,8 +24,8 @@ def isolate(tmp_path, monkeypatch):
 # ── namespacing ─────────────────────────────────────────────────────────────
 
 def test_namespacing_roundtrip():
-    assert mcp_client.tool_name("github", "create_issue") == "mcp__github__create_issue"
-    assert mcp_client.parse_tool_name("mcp__github__create_issue") == ("github", "create_issue")
+    assert mcp_client.tool_name("tracker", "create_item") == "mcp__tracker__create_item"
+    assert mcp_client.parse_tool_name("mcp__tracker__create_item") == ("tracker", "create_item")
     assert mcp_client.parse_tool_name("web_search") is None
     assert mcp_client.parse_tool_name("mcp__nope") is None  # missing tool half
 
@@ -56,6 +56,36 @@ def test_scrub_removes_token(monkeypatch):
     assert "leakme" not in mcp_client._scrub("result with leakme in it", s)
 
 
+def test_scrub_removes_stdio_env_secrets(monkeypatch):
+    """A stdio server's vault-injected env secret echoed in a SUCCESS result
+    must be scrubbed — the http token slot is not the only secret."""
+    monkeypatch.setenv("MCPKEY_STDIO", "stdio-secret")
+    s = McpServer(id="s", name="s", transport="stdio", command="x",
+                  env={"TOKEN": "$MCPKEY_STDIO", "PLAIN": "not-secret"})
+    out = mcp_client._scrub("echo: stdio-secret", s)
+    assert "stdio-secret" not in out
+    # non-secret env values are NOT redacted (no over-scrub)
+    assert "not-secret" in mcp_client._scrub("has not-secret text", s)
+
+
+def test_call_tool_failure_text_is_scrubbed(monkeypatch):
+    """A protocol exception can carry the server's credential — the failure
+    string is scrubbed like a success result before reaching the model."""
+    monkeypatch.setenv("MCPKEY_F", "http-secret")
+    server = McpServer(id="s", name="s", transport="http", base_url="https://x",
+                       env_var="MCPKEY_F")
+
+    class _Boom(_FakeConn):
+        def call(self, *a, **k):
+            raise RuntimeError("protocol input: http-secret")
+    boom = _Boom([])
+    boom.server = server
+    mcp_client._connections["s"] = boom
+    monkeypatch.setattr(mcp_client, "get_connection", lambda sid: boom)
+    out = mcp_client.call_tool("s", "do")
+    assert "failed" in out and "http-secret" not in out
+
+
 # ── discovery -> Tool translation + call routing (fake connection) ──────────
 
 class _FakeConn:
@@ -63,6 +93,8 @@ class _FakeConn:
         self._specs = specs
         self.result = result
         self.calls = []
+        self.server = McpServer(id="fake", name="fake", transport="stdio",
+                                command="x")
 
     def list_tools(self):
         return self._specs
@@ -134,6 +166,51 @@ def test_call_tool_failure_drops_connection(monkeypatch):
     assert "s" not in mcp_client._connections   # dropped so next call reconnects
 
 
+# ── bounds: server-controlled data is bounded at translation ────────────────
+
+def test_result_text_bounded_accumulation():
+    """A giant server-sent content block is sliced at the accumulation budget
+    (2× the return cap) instead of fully copied before the cap can act."""
+    budget = 2 * mcp_client.tools._HTTP_GET_MAX_CHARS
+    giant = SimpleNamespace(content=[SimpleNamespace(text="x" * (budget * 10))])
+    out = mcp_client._result_text(giant)
+    assert len(out) <= budget
+    # many blocks stop accumulating at the budget too
+    many = SimpleNamespace(
+        content=[SimpleNamespace(text="y" * 10_000) for _ in range(100)])
+    assert len(mcp_client._result_text(many)) <= budget + 100  # + join seps
+
+
+def test_list_tools_caps_discovery():
+    """A hostile/buggy discovery list is bounded before registry translation."""
+    conn = mcp_client._Connection.__new__(mcp_client._Connection)
+    conn.server = McpServer(id="s", name="s", transport="stdio", command="x")
+
+    class _Sess:
+        def list_tools(self):
+            return "coro-stand-in"
+    conn._session = _Sess()
+    result = SimpleNamespace(tools=[_spec(f"t{i}") for i in range(300)])
+    conn._portal = SimpleNamespace(submit=lambda coro, timeout: result)
+    assert len(conn.list_tools()) == mcp_client._MAX_TOOLS
+
+
+def test_build_mcp_tools_skips_unsafe_names_and_caps_desc(monkeypatch):
+    """A server-supplied tool name outside the function-calling-safe charset
+    is skipped; a giant description is capped at translation."""
+    mcp_config.add_server(McpServer(id="fs", name="FS", transport="stdio", command="x"))
+    fake = _FakeConn([
+        _spec("ok_tool", desc="d" * 50_000),
+        _spec("bad name with spaces"),
+        _spec("bad\nnewline"),
+        _spec("x" * 200),                      # over-long name
+    ])
+    monkeypatch.setattr(mcp_client, "get_connection", lambda sid: fake)
+    reg = mcp_client.build_mcp_tools()
+    assert set(reg) == {"mcp__fs__ok_tool"}
+    assert len(reg["mcp__fs__ok_tool"].description) <= mcp_client._MAX_DESC_CHARS
+
+
 # ── the real round-trip (opt-in) ────────────────────────────────────────────
 
 @pytest.mark.live
@@ -168,5 +245,40 @@ def test_live_stdio_roundtrip(tmp_path, monkeypatch):
         assert conn is not None
         assert [s.name for s in conn.list_tools()] == ["echo"]
         assert conn.call("echo", {"msg": "hi"}) == "echo: hi"
+    finally:
+        mcp_client.shutdown()
+
+
+@pytest.mark.live
+def test_live_connect_timeout_reaps_the_child(tmp_path, monkeypatch):
+    """A server that starts but never answers ``initialize``: the connect
+    timeout must CANCEL the holder (unwinding the transport, terminating the
+    child) — not abandon a live subprocess per retry."""
+    pytest.importorskip("mcp")
+    import subprocess
+    import sys
+    monkeypatch.setattr(mcp_config, "MCP_SERVERS_FILE", tmp_path / "mcp.json")
+    monkeypatch.setattr(mcp_client, "_connections", {})
+    monkeypatch.setattr(mcp_client, "_CONNECT_TIMEOUT", 2.0)
+    marker = f"mcp-hang-marker-{tmp_path.name}"
+    hang_py = tmp_path / "hang.py"
+    hang_py.write_text(
+        f"# {marker}\n"
+        "import sys\n"
+        "sys.stdin.read()\n"   # consume forever, never reply
+    )
+    mcp_config.add_server(McpServer(id="hang", name="Hang", transport="stdio",
+                                    command=sys.executable, args=(str(hang_py),)))
+    try:
+        assert mcp_client.get_connection("hang") is None   # times out, degrades
+        # the cancelled holder unwinds the transport → the child is terminated
+        import time
+        for _ in range(25):                                # up to ~5s to reap
+            out = subprocess.run(["pgrep", "-f", marker],
+                                 capture_output=True, text=True).stdout.strip()
+            if not out:
+                break
+            time.sleep(0.2)
+        assert out == "", f"hung child left alive (pids: {out})"
     finally:
         mcp_client.shutdown()

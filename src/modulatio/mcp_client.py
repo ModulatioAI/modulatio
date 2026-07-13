@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import threading
 from typing import Optional
 
@@ -39,6 +40,12 @@ _logger = logging.getLogger("modulatio.mcp")
 _CALL_TIMEOUT = 60.0
 #: Handshake + discovery ceiling when opening a connection.
 _CONNECT_TIMEOUT = 30.0
+#: Discovery bound — tools past this are dropped (logged), not translated.
+_MAX_TOOLS = 128
+#: Description ceiling per translated tool (rides every model request).
+_MAX_DESC_CHARS = 2_000
+#: Function-calling-safe tool name — anything else is skipped at translation.
+_TOOL_NAME_OK = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _have_sdk() -> bool:
@@ -70,7 +77,7 @@ def _http_headers(server: McpServer) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
     if shape.startswith("header:"):
         return {shape.split(":", 1)[1]: token}
-    return {}  # query-auth is not applied to headers; handled by the SDK URL
+    return {}  # unreachable for a validated record (bearer|header:<Name> only)
 
 
 def _stdio_env(server: McpServer) -> dict[str, str]:
@@ -86,14 +93,32 @@ def _stdio_env(server: McpServer) -> dict[str, str]:
     return out
 
 
-def _scrub(text: str, server: McpServer) -> str:
-    """Strip the server's token from a tool result before it reaches the model
-    (query-auth servers can echo the request URL), then cap the length."""
+def _secret_values(server: McpServer) -> list[str]:
+    """EVERY secret injected for this server — the http token slot plus each
+    ``$VAULT_SLOT``-shaped stdio env value. The scrub set: anything a server
+    could echo back that must never reach the model."""
+    out: list[str] = []
     if server.env_var:
         token = (os.environ.get(server.env_var) or "").strip()
         if token:
-            from modulatio.service_tools import _redact_key
-            text = _redact_key(text, token)
+            out.append(token)
+    for v in server.env.values():
+        if isinstance(v, str) and v.startswith("$"):
+            secret = (os.environ.get(v[1:]) or "").strip()
+            if secret:
+                out.append(secret)
+    return out
+
+
+def _scrub(text: str, server: McpServer) -> str:
+    """Strip every one of the server's injected secrets from text bound for
+    the model — a success result OR a failure message (an auth'd server can
+    echo its own credential in either) — then cap the length."""
+    secrets = _secret_values(server)
+    if secrets:
+        from modulatio.service_tools import _redact_key
+        for secret in secrets:
+            text = _redact_key(text, secret)
     return tools._cap_http_body(text, over_read=False)
 
 
@@ -111,9 +136,15 @@ class _Portal:
         self.loop.run_forever()
 
     def submit(self, coro, timeout: float):
-        """Run ``coro`` on the portal loop and block for its result."""
+        """Run ``coro`` on the portal loop and block for its result. A timeout
+        CANCELS the submitted work — a hung call must not keep running on the
+        shared loop after its caller has given up (it would starve siblings)."""
         fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return fut.result(timeout=timeout)
+        try:
+            return fut.result(timeout=timeout)
+        except TimeoutError:
+            fut.cancel()
+            raise
 
     def stop(self) -> None:
         self.loop.call_soon_threadsafe(self.loop.stop)
@@ -128,6 +159,11 @@ def _get_portal() -> _Portal:
     with _portal_lock:
         if _portal is None:
             _portal = _Portal()
+            # First portal = first live session this process will hold. Close
+            # them on interpreter exit so stdio children are terminated by the
+            # SDK's transport teardown, not orphaned by a dying daemon thread.
+            import atexit
+            atexit.register(shutdown)
         return _portal
 
 
@@ -142,10 +178,14 @@ class _Connection:
         self._ready = threading.Event()
         self._error: "Optional[Exception]" = None
         self._box: dict = {}
-        # Schedule the long-lived holder; it parks until close().
-        asyncio.run_coroutine_threadsafe(
+        # Schedule the long-lived holder; it parks until close(). The future
+        # is RETAINED so a connect timeout CANCELS it — cancellation unwinds
+        # the transport stack (terminating a spawned stdio child) instead of
+        # abandoning a live holder + subprocess on the shared loop per retry.
+        self._holder = asyncio.run_coroutine_threadsafe(
             self._hold(), self._portal.loop)
         if not self._ready.wait(timeout=_CONNECT_TIMEOUT):
+            self._holder.cancel()
             raise TimeoutError("MCP connect timed out")
         if self._error is not None:
             raise self._error
@@ -188,10 +228,17 @@ class _Connection:
         return read, write
 
     def list_tools(self) -> list:
-        """The server's tool specs (mcp.types.Tool objects)."""
+        """The server's tool specs (mcp.types.Tool objects), capped at
+        ``_MAX_TOOLS`` — a hostile/buggy discovery list is bounded before any
+        registry translation."""
         result = self._portal.submit(
             self._session.list_tools(), _CONNECT_TIMEOUT)
-        return list(result.tools)
+        specs = list(result.tools[:_MAX_TOOLS])
+        if len(result.tools) > _MAX_TOOLS:
+            _logger.warning(
+                "MCP server %s offered %d tools; capped at %d",
+                self.server.id, len(result.tools), _MAX_TOOLS)
+        return specs
 
     def call(self, tool_name: str, arguments: dict) -> str:
         """Call one tool; return its text result (scrubbed + capped)."""
@@ -209,14 +256,21 @@ class _Connection:
 
 
 def _result_text(result) -> str:
-    """Flatten a CallToolResult's content blocks into text."""
+    """Flatten a CallToolResult's content blocks into text, bounded as it
+    accumulates — a giant server-sent block is sliced at the budget instead of
+    fully copied and joined before the return cap can act. The budget is 2× the
+    return ceiling so redaction still sees everything the model could see."""
+    budget = 2 * tools._HTTP_GET_MAX_CHARS
     parts: list[str] = []
+    total = 0
     for block in getattr(result, "content", None) or []:
         t = getattr(block, "text", None)
-        if t is not None:
-            parts.append(str(t))
-        else:
-            parts.append(str(getattr(block, "type", block)))
+        piece = str(t) if t is not None else str(getattr(block, "type", block))
+        remaining = budget - total
+        if remaining <= 0:
+            break
+        parts.append(piece[:remaining])
+        total += min(len(piece), remaining)
     return "\n".join(parts)
 
 
@@ -262,7 +316,13 @@ def call_tool(server_id: str, tool_name: str, **kwargs) -> str:
         with _conn_lock:
             _connections.pop(server_id, None)
         conn.close()
-        return f"MCP tool {server_id}:{tool_name} failed: {type(exc).__name__}: {exc}"
+        # A protocol exception can carry the server's own credential (an
+        # auth'd URL, an echoed header) — the failure text is scrubbed like a
+        # success result before it reaches the model.
+        return _scrub(
+            f"MCP tool {server_id}:{tool_name} failed: {type(exc).__name__}: {exc}",
+            conn.server,
+        )
 
 
 # ── tool-name namespacing (function-calling-safe charset) ───────────────────
@@ -309,10 +369,20 @@ def build_mcp_tools() -> dict[str, tools.Tool]:
             continue
         cost = "paid-cloud" if server.metered else None
         for spec in specs:
+            # Server-supplied names/descriptions are untrusted: a name outside
+            # the function-calling-safe charset is skipped (it would poison
+            # every model request carrying the registry); a description is
+            # capped rather than forwarded whole.
+            if not _TOOL_NAME_OK.match(spec.name):
+                _logger.warning(
+                    "MCP server %s: skipping tool with unsafe name %.80r",
+                    sid, spec.name)
+                continue
+            desc = (getattr(spec, "description", "") or f"{sid}:{spec.name}")
             name = tool_name(sid, spec.name)
             out[name] = tools.Tool(
                 name=name,
-                description=(getattr(spec, "description", "") or f"{sid}:{spec.name}"),
+                description=desc[:_MAX_DESC_CHARS],
                 call=_make_call(sid, spec.name),
                 params_schema=getattr(spec, "inputSchema", None) or {"type": "object"},
                 cost_class=cost,
@@ -327,7 +397,8 @@ def _make_call(server_id: str, mcp_tool: str):
 
 
 def shutdown() -> None:
-    """Close every open connection and stop the portal (best-effort)."""
+    """Close every open connection, AWAIT each holder's transport teardown
+    (so stdio children are terminated, not orphaned), then stop the portal."""
     global _portal
     with _conn_lock:
         conns = list(_connections.values())
@@ -337,6 +408,14 @@ def shutdown() -> None:
             c.close()
         except Exception:  # noqa: BLE001 — best-effort teardown
             pass
+    for c in conns:
+        try:
+            # The holder future completes once its AsyncExitStack has unwound
+            # (session closed, child reaped). Bounded — a wedged transport
+            # can't hang interpreter exit.
+            c._holder.result(timeout=5.0)
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            c._holder.cancel()
     with _portal_lock:
         if _portal is not None:
             _portal.stop()

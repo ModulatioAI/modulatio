@@ -36,10 +36,24 @@ def test_trusted_server_emits_nothing():
     assert leader_gate.extract_tool_requests("mcp__docs__search", {}, root="/tmp") == []
 
 
-def test_unknown_mcp_server_is_ungated():
-    # A namespaced tool whose server isn't configured emits no request (the
-    # tool won't be in the registry anyway; defensive [] rather than a crash).
-    assert leader_gate.extract_tool_requests("mcp__ghost__x", {}, root="/tmp") == []
+def test_unknown_mcp_server_fails_closed():
+    """An MCP-shaped name whose server is NOT configured is still GATED — a
+    name that dodges the config lookup must not dodge the gate with it."""
+    reqs = leader_gate.extract_tool_requests("mcp__ghost__x", {}, root="/tmp")
+    assert len(reqs) == 1
+    assert reqs[0].request_class == "mcp" and "unknown server" in reqs[0].why
+
+
+def test_namespace_delimiter_id_cannot_bypass_gate():
+    """The gate-bypass shape end to end: an id containing '__' can't be added,
+    can't be loaded from a hand-edited record, and its namespaced tool name
+    still gates (as an unknown server) rather than running silently ungated."""
+    with pytest.raises(ValueError):
+        mcp_config.add_server(McpServer(id="safe__aux", name="S", transport="stdio",
+                                        command="x", trust="gated"))
+    # even if the name somehow reached the registry, the gate stays closed
+    reqs = leader_gate.extract_tool_requests("mcp__safe__aux__read", {}, root="/tmp")
+    assert len(reqs) == 1 and reqs[0].request_class == "mcp"
 
 
 def test_native_tools_unaffected():

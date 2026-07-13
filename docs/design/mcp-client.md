@@ -60,7 +60,7 @@ discovered MCP tools into `Tool` objects, and routes calls.
     env: dict[str, str] = {} # non-secret env (secret-shaped keys go to the vault)
     # http:
     base_url: str = ""
-    auth_shape: str = ""    # "" | "bearer" | "header:<Name>" | "query:<name>"
+    auth_shape: str = ""    # "" | "bearer" | "header:<Name>"
     env_var: str = ""       # vault slot name for the token (reused from Service)
     # both:
     trust: str = "gated"    # "gated" | "trusted"

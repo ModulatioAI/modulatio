@@ -21,6 +21,7 @@ it (the loadout grant IS the authorization — jobs never block).
 from __future__ import annotations
 
 import json
+import re
 import threading
 from dataclasses import asdict, dataclass, field
 from typing import Optional
@@ -44,7 +45,7 @@ class McpServer:
     env: dict[str, str] = field(default_factory=dict)   # NON-secret env only
     # http:
     base_url: str = ""
-    auth_shape: str = ""   # "" | "bearer" | "header:<Name>" | "query:<name>"
+    auth_shape: str = ""   # "" | "bearer" | "header:<Name>"
     env_var: str = ""      # vault slot holding the http token (never the token)
     # both:
     trust: str = "gated"   # "gated" | "trusted"
@@ -52,13 +53,26 @@ class McpServer:
     enabled: bool = True
 
 
+#: HTTP header-name charset (alnum + hyphen) — anything else (whitespace, a
+#: CR/LF, a colon) is a framing hazard, rejected at the operator boundary.
+_HEADER_NAME = re.compile(r"^[A-Za-z0-9-]+$")
+#: Vault slot names — conventional env-var shape.
+_ENV_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def _validate(s: McpServer) -> None:
     if not s.id or not s.id.replace("-", "").replace("_", "").isalnum():
         raise ValueError(f"mcp server id {s.id!r} must be a simple slug")
+    if "__" in s.id:
+        # "__" is the tool-namespace delimiter (mcp__<server>__<tool>) — an id
+        # containing it makes the namespace ambiguous and the gate lookup miss.
+        raise ValueError(f"mcp server id {s.id!r} must not contain '__'")
     if s.transport not in _TRANSPORTS:
         raise ValueError(f"mcp transport {s.transport!r} must be stdio|http")
     if s.trust not in _TRUST:
         raise ValueError(f"mcp trust {s.trust!r} must be gated|trusted")
+    if s.env_var and not _ENV_VAR.match(s.env_var):
+        raise ValueError(f"mcp server {s.id!r}: env_var {s.env_var!r} is not a valid slot name")
     if s.transport == "stdio":
         if not s.command:
             raise ValueError(f"mcp server {s.id!r}: stdio needs a command")
@@ -67,6 +81,14 @@ def _validate(s: McpServer) -> None:
             raise ValueError(
                 f"mcp server {s.id!r}: http needs an absolute base_url"
             )
+        shape = s.auth_shape
+        if shape and shape != "bearer":
+            name = shape.split(":", 1)[1] if shape.startswith("header:") else None
+            if name is None or not _HEADER_NAME.match(name):
+                raise ValueError(
+                    f"mcp server {s.id!r}: auth_shape {shape!r} must be "
+                    "bearer or header:<Name>"
+                )
 
 
 def _load_raw() -> dict:
@@ -98,7 +120,7 @@ def load_servers() -> dict[str, McpServer]:
         if not isinstance(entry, dict):
             continue  # one corrupt entry must not hide the rest
         try:
-            out[sid] = McpServer(
+            server = McpServer(
                 id=sid,
                 name=str(entry.get("name", sid)),
                 transport=str(entry.get("transport", "stdio")),
@@ -112,6 +134,11 @@ def load_servers() -> dict[str, McpServer]:
                 metered=bool(entry.get("metered", False)),
                 enabled=bool(entry.get("enabled", True)),
             )
+            # A hand-edited record faces the same bar as add_server — an entry
+            # that would be rejected at add (an ambiguous "__" id, a malformed
+            # auth_shape) must not enter the run either.
+            _validate(server)
+            out[sid] = server
         except (TypeError, ValueError):
             continue  # one corrupt entry must not hide the rest
     return out
