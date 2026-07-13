@@ -383,3 +383,19 @@ def test_permission_callback_denies_embedded_nul_path(env, tmp_path):
         prompt_fn=lambda r: pytest.fail("must not prompt"))
     assert cb("read_file", {"path": "bad\0path"}) is False
     assert cb("read_file", {"path": "/tmp/" + "x" * 5000}) is False
+
+
+@pytest.mark.parametrize("bad_args", [
+    {"cmd": "ls", "cwd": {"model": "object"}},   # TypeError at Path(cwd)
+    {"cmd": {"model": "object"}, "cwd": "."},    # AttributeError in shlex.split
+])
+def test_permission_callback_denies_non_string_shell_inputs(env, tmp_path, bad_args):
+    """R5: call.args is model-generated JSON — non-string values where
+    strings belong raise TypeError/AttributeError inside extraction. The
+    chokepoint denies (broad catch on EXTRACTION only); nothing raises,
+    nothing prompts."""
+    gate = lg.LeaderPermissionGate(CODE, workspace=tmp_path / "ws")
+    cb = lg.build_permission_callback(
+        gate, root=tmp_path / "ws",
+        prompt_fn=lambda r: pytest.fail("must not prompt"))
+    assert cb("run_shell", bad_args) is False

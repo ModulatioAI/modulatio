@@ -334,13 +334,21 @@ def build_permission_callback(gate: LeaderPermissionGate, *, root, prompt_fn):
     bool; the once/session/always scope is honored inside the gate (Jenny-A)."""
 
     def permission_callback(name: str, args: dict) -> bool:
-        # Fail CLOSED on any path-normalization failure: extraction resolves
-        # MODEL-SUPPLIED strings, and a pathological shape (an embedded NUL →
-        # ValueError, an overlong name → OSError, a platform normalization
-        # quirk → RuntimeError) must deny the call — never escape into the
-        # runner and crash the converse turn (the no-block invariant).
+        # EXTRACTION parses wholly MODEL-CONTROLLED values (paths, shell
+        # strings — or non-strings where strings belong): ANY failure there
+        # is malformed model input and fails CLOSED as a deny (embedded NUL →
+        # ValueError, overlong name → OSError, a dict where a str belongs →
+        # TypeError/AttributeError, platform quirks → RuntimeError). The
+        # broad catch is deliberately scoped to extraction ONLY.
         try:
-            for req in extract_tool_requests(name, args, root=root):
+            requests = extract_tool_requests(name, args, root=root)
+        except Exception:  # noqa: BLE001 — model-shaped input, deny the call
+            return False
+        # DECISION errors stay NARROW: only path-classification failures on
+        # the extracted resource fail closed. An implementation/UI bug in the
+        # prompt path must surface, not be silently converted into policy.
+        try:
+            for req in requests:
                 if gate.decide(req, prompt_fn=prompt_fn).scope == SCOPE_DENY:
                     return False
         except (OSError, ValueError, RuntimeError):

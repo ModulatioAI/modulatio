@@ -59,10 +59,17 @@ _LOGIN_TIMEOUT_SEC = 300.0
 #: bound for the operator terminal — provider/attacker-shaped strings are
 #: never rendered raw.
 _ERR_SAFE_CHARS = re.compile(r"[^A-Za-z0-9 ._:/\-]")
-#: The RFC 6749 error-code token shape (snake_case word). The token-exchange
-#: error path renders a code ONLY when it fullmatches this — free-text fields
-#: are never rendered there.
-_OAUTH_ERROR_CODE = re.compile(r"[a-z_]{1,40}")
+#: The FINITE set of standard OAuth error codes the token-exchange error path
+#: may render (RFC 6749 §5.2 + the RFC 8628 device-flow extensions). A shape
+#: regex is NOT enough: authorization codes are opaque, and an all-lowercase
+#: one echoed in the ``error`` field would pass a charset/length filter —
+#: membership here is the allowlist.
+_OAUTH_ERROR_CODES = frozenset({
+    "invalid_request", "invalid_client", "invalid_grant",
+    "unauthorized_client", "unsupported_grant_type", "invalid_scope",
+    "access_denied", "server_error", "temporarily_unavailable",
+    "authorization_pending", "slow_down", "expired_token",
+})
 
 
 class LoginError(Exception):
@@ -146,14 +153,15 @@ def exchange_code(
         # body and never ``error_description`` (provider-controlled free text
         # can carry the echoed grant or token-shaped values, and any
         # truncate-then-redact scheme leaks secret PREFIXES when the slice
-        # ends inside a secret). The code is validated to the RFC 6749 token
-        # shape before rendering; anything else renders nothing.
+        # ends inside a secret). "Code" means MEMBERSHIP in the finite
+        # standard set — not a shape match, which an echoed opaque grant
+        # could satisfy. Anything else renders nothing but the HTTP status.
         detail = ""
         try:
             err = resp.json()
             if isinstance(err, dict):
-                code_field = str(err.get("error", ""))
-                if _OAUTH_ERROR_CODE.fullmatch(code_field):
+                code_field = err.get("error")
+                if isinstance(code_field, str) and code_field in _OAUTH_ERROR_CODES:
                     detail = code_field
         except ValueError:
             pass

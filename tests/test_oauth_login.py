@@ -303,3 +303,29 @@ def test_browser_opens_only_after_the_port_is_bound(monkeypatch):
 
     oauth_login.login_xai(echo=_echo, open_browser=False)
     assert order == ["bound", "browser"]
+
+
+def test_exchange_error_code_is_an_allowlist_not_a_shape(monkeypatch):
+    """R5: authorization codes are OPAQUE — an all-lowercase one echoed in
+    the ``error`` field passes any charset/length filter. Rendering requires
+    MEMBERSHIP in the finite standard OAuth code set."""
+    def _post(url, **kw):
+        # the endpoint echoes the submitted grant as the error "code"
+        return _FakeResponse(400, {"error": kw["data"]["code"]})
+
+    monkeypatch.setattr(oauth_login.httpx, "post", _post)
+    with pytest.raises(oauth_login.LoginError) as e:
+        oauth_login.exchange_code(
+            "https://t/x", code="authorizationcode",
+            code_verifier="V", code_challenge="CH")
+    msg = str(e.value)
+    assert "authorizationcode" not in msg
+    assert msg.endswith("(HTTP 400)")
+    # ...while a genuine standard code still renders
+    monkeypatch.setattr(
+        oauth_login.httpx, "post",
+        lambda url, **kw: _FakeResponse(400, {"error": "invalid_grant"}))
+    with pytest.raises(oauth_login.LoginError) as e2:
+        oauth_login.exchange_code(
+            "https://t/x", code="C", code_verifier="V", code_challenge="CH")
+    assert "invalid_grant" in str(e2.value)
