@@ -1202,3 +1202,104 @@ def test_refusal_row_carries_post_compression_tokens(tmp_path: Path) -> None:
     refusal = [r for r in rows if r.get("refusal_fired")]
     assert refusal, "no refusal row emitted"
     assert refusal[-1]["post_compression_tokens"] is not None
+
+
+# ── leader-chat rides the MODEL's window (operator may cap) ────────────────
+
+def _window(monkeypatch, tokens):
+    """Pin the model-window lookup for a dispatch test."""
+    monkeypatch.setattr(
+        cb, "get_known_max_input_tokens",
+        lambda model: tokens if model else None)
+
+
+def test_leader_chat_default_rides_the_model_window(monkeypatch) -> None:
+    """No explicit cap anywhere → the conversational Leader's effective cap
+    IS the model's inherent window, stamped budget_source='model_window'."""
+    monkeypatch.delenv("MODULATIO_CTX_BUDGET_LEADER_CHAT", raising=False)
+    _window(monkeypatch, 500_000)
+    with cb.dispatch_context(
+        budget_role="leader-chat", runner_role="leader",
+        model="big-window-model", project_code="P", run_id=None,
+    ) as resolution:
+        assert resolution.budget_source == "model_window"
+        assert resolution.resolved_budget_tokens == 500_000
+        cfg = cb.current_config()
+        assert cfg.max_input_tokens == 500_000
+
+
+def test_leader_chat_knob_caps_below_the_window(monkeypatch) -> None:
+    """The operator's knob LOWERS: effective = min(knob, model window)."""
+    monkeypatch.setenv("MODULATIO_CTX_BUDGET_LEADER_CHAT", "200000")
+    _window(monkeypatch, 500_000)
+    with cb.dispatch_context(
+        budget_role="leader-chat", runner_role="leader",
+        model="big-window-model", project_code="P", run_id=None,
+    ) as resolution:
+        assert resolution.budget_source == "default"   # explicit knob path
+        assert cb.current_config().max_input_tokens == 200_000
+
+
+def test_leader_chat_knob_above_window_clamps_to_window(monkeypatch) -> None:
+    monkeypatch.setenv("MODULATIO_CTX_BUDGET_LEADER_CHAT", "900000")
+    _window(monkeypatch, 500_000)
+    with cb.dispatch_context(
+        budget_role="leader-chat", runner_role="leader",
+        model="big-window-model", project_code="P", run_id=None,
+    ):
+        assert cb.current_config().max_input_tokens == 500_000
+
+
+def test_leader_chat_unknown_window_keeps_role_default(monkeypatch) -> None:
+    """A model litellm can't know (local server) keeps the conservative
+    table default — the knob is how the operator raises those."""
+    monkeypatch.delenv("MODULATIO_CTX_BUDGET_LEADER_CHAT", raising=False)
+    _window(monkeypatch, None)
+    with cb.dispatch_context(
+        budget_role="leader-chat", runner_role="leader",
+        model="mystery-local", project_code="P", run_id=None,
+    ) as resolution:
+        assert resolution.budget_source == "default"
+        assert cb.current_config().max_input_tokens == (
+            cb.EXPERIMENTAL_DEFAULTS["leader-chat"])
+
+
+def test_leader_chat_project_override_still_wins(monkeypatch) -> None:
+    """An explicit project cap beats the model window — operator intent."""
+    monkeypatch.delenv("MODULATIO_CTX_BUDGET_LEADER_CHAT", raising=False)
+    _window(monkeypatch, 500_000)
+    with cb.dispatch_context(
+        budget_role="leader-chat", runner_role="leader",
+        model="big-window-model", project_code="P", run_id=None,
+        project_overrides={"leader-chat": 30_000},
+    ) as resolution:
+        assert resolution.budget_source == "project"
+        assert cb.current_config().max_input_tokens == 30_000
+
+
+def test_other_roles_keep_role_bounded_discipline(monkeypatch) -> None:
+    """leader-decompose (and every non-chat role) is UNCHANGED: the role
+    budget governs even on a huge-window model."""
+    _window(monkeypatch, 1_000_000)
+    for role in ("leader-decompose", "producer", "qc"):
+        with cb.dispatch_context(
+            budget_role=role, runner_role="leader",
+            model="big-window-model", project_code="P", run_id=None,
+        ) as resolution:
+            assert resolution.budget_source == "default"
+            assert cb.current_config().max_input_tokens == (
+                cb.EXPERIMENTAL_DEFAULTS[role])
+
+
+def test_window_lookup_resolves_preset_keys(monkeypatch, tmp_path) -> None:
+    """Dispatch sites pass the house PRESET KEY, which litellm can't know —
+    the lookup resolves it to the preset's {api_format}/{model} id. Without
+    this, the model-window path could never fire on the main dispatch."""
+    from modulatio import model_presets
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "presets.json")
+    model_presets.add_preset(
+        "myslug", label="m", base_url="https://api.openai.com/v1",
+        api_format="openai", auth_type="api_key", model="gpt-4o")
+    direct = cb.get_known_max_input_tokens("openai/gpt-4o")
+    assert direct and direct > 0            # litellm knows the real id
+    assert cb.get_known_max_input_tokens("myslug") == direct

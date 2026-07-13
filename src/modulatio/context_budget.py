@@ -134,6 +134,13 @@ CUSTOM_WORKER_DEFAULT = 48_000
 #: clamped back to the producer's size.
 HARD_GLOBAL_CEILING = 96_000
 
+#: The conversational Leader is the exception to the discipline ceiling: its
+#: dispatch DEFAULT is the model's own window (see ``dispatch_context``), so
+#: its operator knob must be able to express any cap up to today's largest
+#: real windows. The knob still only ever LOWERS what the model allows —
+#: ``effective = min(knob, model window)`` at dispatch.
+LEADER_CHAT_KNOB_CEILING = 1_050_000
+
 #: Prudent fraction of a task's OWN window that its projected working context
 #: should stay under before the engine fans it into size-bounded chunks. At 0.20
 #: a task uses at most a fifth of its window, leaving ~80% free to gather AND
@@ -167,15 +174,29 @@ def default_window(budget_role: str) -> int:
     chain — user override, ``Agent.context_budget``, and the project
     ``context_budgets`` block all still win."""
     table = EXPERIMENTAL_DEFAULTS.get(budget_role, CUSTOM_WORKER_DEFAULT)
-    key = "MODULATIO_CTX_BUDGET_" + budget_role.upper().replace("-", "_")
-    raw = os.environ.get(key, "").strip()
+    raw = os.environ.get(role_knob_key(budget_role), "").strip()
     if not raw:
         return table
     try:
         value = int(raw)
     except ValueError:
         return table
-    return min(max(value, CTX_BUDGET_MIN_TOKENS), HARD_GLOBAL_CEILING)
+    # leader-chat's operator knob may CAP anywhere below the model window
+    # (its dispatch default is the window itself); the global discipline
+    # ceiling stays for every other role.
+    ceiling = (LEADER_CHAT_KNOB_CEILING if budget_role == "leader-chat"
+               else HARD_GLOBAL_CEILING)
+    return min(max(value, CTX_BUDGET_MIN_TOKENS), ceiling)
+
+
+def role_knob_key(budget_role: str) -> str:
+    """The SETTINGS env knob for a role's window (shared with settings_knobs)."""
+    return "MODULATIO_CTX_BUDGET_" + budget_role.upper().replace("-", "_")
+
+
+def _role_knob_set(budget_role: str) -> bool:
+    """True when the operator explicitly set the role's window knob."""
+    return bool(os.environ.get(role_knob_key(budget_role), "").strip())
 
 
 def prudent_context_cap(budget_role: str, *, pct: float | None = None) -> int:
@@ -383,12 +404,35 @@ def get_known_max_input_tokens(model: str | None) -> int | None:
     """
     if not model:
         return None
-    # Use the model's INPUT context window (get_model_info.max_input_tokens),
-    # NOT litellm.get_max_tokens — the latter returns max OUTPUT tokens for
-    # many models (e.g. gpt-4o: get_max_tokens()=16384 but the real context
-    # window is 128000), which would wrongly clamp a role budget to the
-    # model's output limit. An unmapped model raises → None → role budget
-    # governs.
+    window = _litellm_input_window(model)
+    if window is not None:
+        return window
+    # Dispatch sites pass the house PRESET KEY (e.g. a slugged model handle),
+    # which litellm can't know — resolve it to the preset's real
+    # ``{api_format}/{model}`` id and retry. Without this the model-window
+    # clamp could never fire for any preset-keyed dispatch.
+    try:
+        from modulatio import model_presets
+        rec = model_presets.load_presets().get(model)
+    except Exception:
+        rec = None
+    if isinstance(rec, dict):
+        api_format = rec.get("api_format") or ""
+        bare = rec.get("model") or ""
+        if api_format and bare:
+            return _litellm_input_window(f"{api_format}/{bare}")
+    return None
+
+
+def _litellm_input_window(model: str) -> int | None:
+    """One litellm window lookup; ``None`` on any miss.
+
+    Uses the model's INPUT context window (get_model_info.max_input_tokens),
+    NOT litellm.get_max_tokens — the latter returns max OUTPUT tokens for
+    many models (e.g. gpt-4o: get_max_tokens()=16384 but the real context
+    window is 128000), which would wrongly clamp a role budget to the
+    model's output limit. An unmapped model raises → None → role budget
+    governs."""
     try:
         from litellm import get_model_info
     except Exception:
@@ -765,7 +809,11 @@ def check_and_compress(
 # role-awareness lives in the dispatch layer.
 
 
-BudgetSource = Literal["default", "project", "agent", "user_override"]
+BudgetSource = Literal[
+    # "model_window": the conversational Leader riding the model's own
+    # window — no explicit cap was set, so the model's inherent limit governs.
+    "default", "project", "agent", "user_override", "model_window",
+]
 BudgetStatus = Literal[
     "active",
     "disabled",
@@ -1119,7 +1167,24 @@ def dispatch_context(
         # clamped e.g. a 24k researcher budget down to the fallback, blocking
         # the run. A genuinely smaller KNOWN window still clamps (correct).
         model_max = get_known_max_input_tokens(model)
-        if model_max:
+        if (budget_role == "leader-chat"
+                and resolution.budget_source == "default"
+                and not _role_knob_set(budget_role)
+                and model_max):
+            # The conversational Leader rides the MODEL's full window: no
+            # explicit cap anywhere (knob / project / agent / user), so the
+            # model's inherent limit governs. The compress/refuse bands
+            # apply to that window like any cap. Unknown-window models
+            # (local servers litellm can't know) keep the role default —
+            # the operator's knob can raise those. Every other role
+            # (leader-decompose included) keeps role-bounded discipline.
+            effective = model_max
+            resolution = dataclasses.replace(
+                resolution,
+                resolved_budget_tokens=model_max,
+                budget_source="model_window",
+            )
+        elif model_max:
             effective = min(resolution.resolved_budget_tokens, model_max)
             if effective < resolution.resolved_budget_tokens:
                 status = "model_cap_enforced"

@@ -115,6 +115,27 @@ KNOBS: "tuple[Knob, ...]" = tuple(
                        context_budget.HARD_GLOBAL_CEILING),
         )
         for role, default in _BUDGET_ROLES
+        if role != "leader-chat"
+    ]
+    + [
+        # leader-chat is the exception: its dispatch DEFAULT is the model's
+        # own full window, so this knob exists to CAP it (a conversation
+        # re-sends the whole thread every turn — cost scales with depth).
+        # ``effective = min(knob, model window)``; unknown-window models
+        # (local servers) default to the table value instead.
+        Knob(
+            "MODULATIO_CTX_BUDGET_LEADER_CHAT",
+            "Context window · leader-chat", "",
+            "Cap for the Leader's conversational window. UNSET (default) = "
+            "the model's own full context window. Set a value to cap the "
+            "conversation lower (cost control — every turn re-sends the "
+            "whole thread). Range "
+            f"{context_budget.CTX_BUDGET_MIN_TOKENS}–"
+            f"{context_budget.LEADER_CHAT_KNOB_CEILING}. "
+            "Applies on the next message.",
+            _int_range(context_budget.CTX_BUDGET_MIN_TOKENS,
+                       context_budget.LEADER_CHAT_KNOB_CEILING),
+        )
     ]
 )
 

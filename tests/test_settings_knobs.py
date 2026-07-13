@@ -83,6 +83,15 @@ def test_ctx_budget_knob_defaults_match_the_engine_table():
     for knob in settings_knobs.KNOBS:
         if not knob.key.startswith("MODULATIO_CTX_BUDGET_"):
             continue
+        if knob.key == "MODULATIO_CTX_BUDGET_LEADER_CHAT":
+            # leader-chat's dispatch default is the MODEL's own window — this
+            # knob exists to CAP it, so its default is unset and its ceiling
+            # is the leader-chat ceiling, not the role-discipline one.
+            assert knob.default == ""
+            assert knob.valid(str(context_budget.LEADER_CHAT_KNOB_CEILING))
+            assert not knob.valid(
+                str(context_budget.LEADER_CHAT_KNOB_CEILING + 1))
+            continue
         role = knob.key.removeprefix("MODULATIO_CTX_BUDGET_").lower().replace("_", "-")
         assert int(knob.default) == context_budget.EXPERIMENTAL_DEFAULTS[role], (
             f"{knob.key}: displayed default {knob.default} != engine default "
