@@ -259,7 +259,10 @@ def test_xai_oauth_reads_grok_cli_creds(tmp_path, monkeypatch):
     monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
     assert oauth_helpers.has_xai_credentials()
     assert oauth_helpers.read_xai_token() == "xai-tok"
-    assert oauth_helpers.read_xai_refresh_token() == "xai-ref"
+    # The CLI file is an ACCESS-token bootstrap only: xAI rotates refresh
+    # tokens per grant, so consuming the CLI's would break its session.
+    # Refresh tokens come from Modulatio's own store alone.
+    assert oauth_helpers.read_xai_refresh_token() is None
 
 
 def test_xai_oauth_reads_tokens_nested_under_a_wrapper(tmp_path, monkeypatch):
@@ -290,7 +293,8 @@ def test_xai_oauth_reads_real_grok_cli_format(tmp_path, monkeypatch):
     }))
     monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
     assert oauth_helpers.read_xai_token() == "grok-access-tok"
-    assert oauth_helpers.read_xai_refresh_token() == "grok-refresh-tok"
+    # never the CLI's refresh token (rotation-safe contract — own store only)
+    assert oauth_helpers.read_xai_refresh_token() is None
 
 
 def test_xai_oauth_auth_status_reflects_grok_login(tmp_path, monkeypatch):
@@ -301,7 +305,7 @@ def test_xai_oauth_auth_status_reflects_grok_login(tmp_path, monkeypatch):
         oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", tmp_path / "absent.json"
     )
     ok, hint = pc.auth_status(oauth)
-    assert not ok and "Grok CLI" in hint
+    assert not ok and "login-xai" in hint    # Modulatio's OWN sign-in command
     # logged in → ready
     cred = tmp_path / "auth.json"
     cred.write_text('{"access_token": "t"}')

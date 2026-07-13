@@ -457,6 +457,20 @@ def list_providers() -> list[Provider]:
     return list(PROVIDERS.values())
 
 
+def provider_for_base_url(base_url: "str | None") -> "Provider | None":
+    """The catalog provider serving ``base_url``, matched by host — or None
+    (loopback/unknown hosts). No network."""
+    if not base_url:
+        return None
+    from urllib.parse import urlparse
+    host = (urlparse(base_url).hostname or base_url).lower()
+    for p in list_providers():
+        ph = (urlparse(p.base_url).hostname or "").lower()
+        if ph and ph == host:
+            return p
+    return None
+
+
 def provider_name_for_base_url(base_url: "str | None") -> str:
     """Best-effort display name of the provider serving ``base_url`` — matched by
     host against the catalog, else ``local`` for loopback, else the bare host.
@@ -467,11 +481,8 @@ def provider_name_for_base_url(base_url: "str | None") -> str:
     host = (urlparse(base_url).hostname or base_url).lower()
     if host in ("127.0.0.1", "localhost", "0.0.0.0", "::1"):
         return "local"
-    for p in list_providers():
-        ph = (urlparse(p.base_url).hostname or "").lower()
-        if ph and ph == host:
-            return p.name
-    return host
+    p = provider_for_base_url(base_url)
+    return p.name if p is not None else host
 
 
 # ── model discovery (pure parse + thin HTTP wrapper) ─────────────────────────

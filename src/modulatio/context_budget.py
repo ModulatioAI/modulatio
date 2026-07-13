@@ -408,9 +408,17 @@ def get_known_max_input_tokens(model: str | None) -> int | None:
     if window is not None:
         return window
     # Dispatch sites pass the house PRESET KEY (e.g. a slugged model handle),
-    # which litellm can't know — resolve it to the preset's real
-    # ``{api_format}/{model}`` id and retry. Without this the model-window
-    # clamp could never fire for any preset-keyed dispatch.
+    # which litellm can't know — resolve the preset to a litellm id and
+    # retry. Without this the model-window clamp could never fire for any
+    # preset-keyed dispatch. Candidates, in order:
+    #   1. ``{api_format}/{model}`` — right when the api_format matches the
+    #      serving vendor (a real OpenAI/Anthropic endpoint).
+    #   2. the bare model id — litellm's cost map carries many unprefixed.
+    #   3. ``{catalog provider id}/{model}`` from the preset's base_url host —
+    #      right when the vendor serves an OpenAI-COMPATIBLE endpoint (an
+    #      api_format=openai preset pointed at another vendor's host).
+    # A total miss returns None → the role budget governs (correct for local
+    # servers and models litellm doesn't know).
     try:
         from modulatio import model_presets
         rec = model_presets.load_presets().get(model)
@@ -419,8 +427,22 @@ def get_known_max_input_tokens(model: str | None) -> int | None:
     if isinstance(rec, dict):
         api_format = rec.get("api_format") or ""
         bare = rec.get("model") or ""
-        if api_format and bare:
-            return _litellm_input_window(f"{api_format}/{bare}")
+        if bare:
+            candidates = []
+            if api_format:
+                candidates.append(f"{api_format}/{bare}")
+            candidates.append(bare)
+            try:
+                from modulatio import provider_catalog
+                p = provider_catalog.provider_for_base_url(rec.get("base_url"))
+            except Exception:
+                p = None
+            if p is not None and p.id != api_format:
+                candidates.append(f"{p.id}/{bare}")
+            for cand in candidates:
+                window = _litellm_input_window(cand)
+                if window is not None:
+                    return window
     return None
 
 

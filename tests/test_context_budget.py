@@ -1303,3 +1303,20 @@ def test_window_lookup_resolves_preset_keys(monkeypatch, tmp_path) -> None:
     direct = cb.get_known_max_input_tokens("openai/gpt-4o")
     assert direct and direct > 0            # litellm knows the real id
     assert cb.get_known_max_input_tokens("myslug") == direct
+
+
+def test_window_lookup_resolves_openai_compatible_vendor_presets(
+    monkeypatch, tmp_path,
+) -> None:
+    """A preset speaking OpenAI-COMPATIBLE format at another vendor's host
+    (api_format=openai, base_url on the vendor's API): the lookup derives the
+    vendor prefix from the base_url's catalog provider. The live-fire miss:
+    '{api_format}/{model}' alone built an id litellm can't know."""
+    from modulatio import model_presets
+    monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "presets.json")
+    model_presets.add_preset(
+        "grokslug", label="g", base_url="https://api.x.ai/v1",
+        api_format="openai", auth_type="api_key", model="grok-4.5")
+    direct = cb.get_known_max_input_tokens("xai/grok-4.5")
+    assert direct and direct > 0
+    assert cb.get_known_max_input_tokens("grokslug") == direct
