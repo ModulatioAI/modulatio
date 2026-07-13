@@ -61,6 +61,8 @@ Where Layer 1 catches tool-result inflow inside a single agent call, Layer 2 cat
 3. **In `[prune_at_pct, 100%)`** (default 80-100%) — invoke Layer 1's `prune_messages_sliding_window` ad-hoc. Re-estimate. If the compressed prompt fits, proceed.
 4. **At or above 100% after compression** — write a checkpoint to `<run>/checkpoints/<call_id>.json` and raise `RecoverableContextError`. The orchestrator catches this and lands the task as BLOCKED with a CRITICAL ticket carrying the checkpoint path and decompose-required framing.
 
+**Per-role budgets** govern each dispatch (producer / QC / planner / the Leader's decompose, iterate, reflect) — role-bounded windows are the tested discipline. **One exception: the conversational Leader (`leader-chat`).** Talking to the Leader rides the **model's own full context window** by default, so a long conversation isn't compressed away; the operator can cap it lower from the SETTINGS tab (`effective = min(cap, model window)`). A model whose window can't be resolved (a local server) keeps the conservative role default. Every other lane, decompose included, keeps its role-bounded window. The trade the default makes: each conversational turn re-sends the whole thread, so token cost per turn grows with conversation depth — the usage rail shows it, and `/new` resets it.
+
 ### Configuration shape
 
 ```python
@@ -76,8 +78,7 @@ class ContextBudgetConfig:
     checkpoint_redact_secrets: bool = True
 ```
 
-- `max_input_tokens = None` falls back to `litellm.get_max_tokens(model)` with a conservative `_DEFAULT_FALLBACK_MAX_INPUT_TOKENS` for unknowns.
-- **Per-role budgets** govern each dispatch (producer / qc / planner / the leader lanes) — role-bounded windows are the tested discipline. **One exception: `leader-chat`.** The conversational Leader rides the **model's own full context window** by default (`budget_source: "model_window"` in the audit trail) so a long conversation isn't compressed away; the operator may CAP it with the leader-chat window knob on the SETTINGS tab (`effective = min(cap, model window)`). A model whose window litellm can't know (a local server) keeps the conservative role default — raise it with the same knob. Every other lane, `leader-decompose` included, keeps its role-bounded window. The trade the default makes: each conversational turn re-sends the whole thread, so token cost per turn grows with conversation depth — the usage rail shows it, and `/new` resets it.
+- `max_input_tokens = None` falls back to `litellm.get_max_tokens(model)` with a conservative `_DEFAULT_FALLBACK_MAX_INPUT_TOKENS = 8192` for unknowns.
 - `pad_pct = 0.05` adds 5% padding to the raw token estimate — models tokenize slightly differently across providers, padding keeps us from clipping the cap by surprise.
 - `checkpoint_redact_secrets = True` redacts tool-role bodies AND assistant `tool_calls[*].function.arguments` before write. See the [Checkpoint format](#checkpoint-format) section below.
 

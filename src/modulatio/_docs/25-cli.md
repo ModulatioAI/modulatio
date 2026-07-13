@@ -113,7 +113,7 @@ Run a battery of health checks on the install + config, plus surface the engine-
 modulatio doctor
 ```
 
-Checks: Python version, dependency imports, the model-call stack (litellm + the extra modules its tools-call path lazily imports — a version drift here fails every agent call, so doctor names the missing module and the remedy), vault detection, provider auth profiles, daemon socket, embedding cache, Telegram credentials, …
+Checks: Python version, dependency imports, the **model-call stack** (litellm plus the extra modules its tools-call path lazily imports — a version drift here would fail every agent call, so `doctor` names the missing module and the fix), vault detection, provider auth profiles, daemon socket, embedding cache, Telegram credentials, …
 
 Output format: `[✓]`, `[!]`, or `[✗]` per check, with remediation hints for failures.
 
@@ -233,12 +233,7 @@ Clear all cached auth state. Nuclear option.
 modulatio auth login-xai
 ```
 
-Sign in to xAI (Grok) with a SuperGrok / X Premium+ subscription. Opens the
-consent page in your browser (which must run on this machine — the sign-in
-returns to a localhost callback) and stores the tokens in Modulatio's own
-credentials file, write-only, auto-refreshed from then on. If a later refresh
-returns 403, the subscription tier isn't authorized for API access — use an
-`api_key` entry instead.
+Sign in to xAI (Grok) with a **SuperGrok / X Premium+** subscription. Opens the consent page in your browser (which must run on this machine — the sign-in returns to a localhost callback) and stores the OAuth tokens in Modulatio's own credentials file, write-only and auto-refreshed. If a later refresh returns 403, your subscription tier isn't authorized for API access — use an `api_key` model entry instead.
 
 ## `modulatio heartbeat`
 

@@ -174,8 +174,6 @@ To test that the checkpoint hardening actually works on your host, run a kickoff
 
 ```python
 # In a Python session
-import stat
-
 from modulatio import context_budget
 from pathlib import Path
 
@@ -205,8 +203,6 @@ print(f"Mode: 0o{mode:o}")
 Same exercise for `persist_raw_result`:
 
 ```python
-import stat
-
 from modulatio import tool_summarization
 from pathlib import Path
 

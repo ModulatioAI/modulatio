@@ -46,11 +46,7 @@ it never tracebacks at launch.
   tab switch or a dropped connection rebuilds the whole run, and
   **CLEAR** wipes both TVs and *stays* cleared across tab flips (the
   conversation thread itself is untouched; reset is the destructive
-  verb). **Copy works like the terminal's**: drag-select in a TV — the
-  view won't yank to the bottom mid-selection while a run streams
-  (auto-scroll only sticks when you're already at the bottom) — then
-  Ctrl+C / Ctrl+V as usual; **Ctrl+C with nothing selected copies the
-  Leader's last message** whole, never a dead key.
+  verb).
 - **The pages** — JT Library, Tickets, Artifacts (with previews and
   delivery stars), Skills, Memory, Jobs, Cron, Logs and Docs, each a
   list + detail over the same data the TUI tabs read.
@@ -75,16 +71,20 @@ write-only**: a value goes in and the interface only ever reports whether a
 slot *is set*, never the secret, and keys are allowlisted to configured
 model/service handles.
 
-- **Add model is the terminal's two-level picker**: pick the provider,
-  then pick from its **live model list** — fetched server-side with your
-  configured key (the key never crosses the web boundary), free models
-  flagged. A provider that can't be listed (no key yet, endpoint down,
-  custom) falls back to a typed model id.
-- **Reload services** (on the Agents sub-page) is the terminal's
-  `/reload`: apply model/roster/config changes to the live services
-  without a server restart. Same guard — it refuses while the Leader or
-  a job is busy — and it also closes any held MCP server connections so
-  the next use reconnects against the current config.
+- **Add model is the terminal's two-level picker**: pick the provider, then pick
+  from its **live model list** — fetched server-side with your configured key
+  (the key never crosses the boundary), free models flagged, with a typed-id
+  fallback for anything unlisted.
+- **Reload services** (Agents sub-page) is the terminal's `/reload`: apply
+  model/roster/config changes to the live services without a server restart
+  (refused while the Leader or a job is busy), and reconnect any
+  [MCP servers](/reference/mcp/) against the current config.
+
+**Copy from the TVs works like the terminal.** Drag-select in a TV — the view
+won't yank to the bottom mid-selection while a run streams — then `Ctrl+C` /
+`Ctrl+V`; `Ctrl+C` with nothing selected copies the Leader's last message whole.
+Static assets carry `Cache-Control: no-cache`, so a shipped fix reaches the
+browser on the next load without a hard refresh.
 
 ## The Feng-Web themes
 

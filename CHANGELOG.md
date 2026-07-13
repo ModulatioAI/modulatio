@@ -6,6 +6,81 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.9.5] — 2026-07-13
+
+A **feature** release: Modulatio can now consume **MCP servers**, the
+conversational Leader remembers a whole conversation, and the WebOS console
+gained a batch of terminal-parity polish. Every new surface was cleared by a
+two-lens (security + quality) adversarial review before shipping.
+
+### Added
+
+- **MCP client — consume external MCP servers.** Modulatio can now act as a
+  Model Context Protocol client: plug in an MCP server (local `stdio`
+  subprocess or a remote `http` endpoint) and its tools become first-class
+  Modulatio tools — the Leader can call them, and a producer can when a skill
+  grants it. MCP is a fourth capability provider alongside the built-ins and
+  the service-API pool, so it reuses the whole control plane: the tool
+  registry, the write-only key vault, the Leader permission gate
+  (once/session/always), and the spend comptroller. Opt-in `[mcp]` extra keeps
+  the base install lean. Manage servers with `modulatio mcp` (add-stdio /
+  add-http / list / test / remove / enable / disable / trust). See the
+  **MCP servers** doc.
+- **WebOS add-model uses the terminal's live picker.** The browser's Add model
+  flow now fetches the provider's real model list (with your configured key,
+  server-side — the key never crosses the boundary), free models flagged, with
+  a typed-id fallback. Parity with the TUI's two-level picker.
+- **`modulatio auth login-xai`.** Sign in to xAI (Grok) with a SuperGrok /
+  X Premium+ subscription through a PKCE OAuth flow Modulatio owns end to end;
+  tokens are stored write-only and auto-refreshed (xAI rotates the refresh
+  token on every grant, so Modulatio persists each rotation).
+- **WebOS Reload services** (Agents tab) and **Refresh** (Services tab) — the
+  terminal's `/reload` mirrored to the browser, same busy guard, and it also
+  reconnects MCP servers against the current config.
+- **`doctor` model-call-stack probe.** The health check now exercises the
+  litellm tools-call import path and names any missing dependency with the
+  remedy — a version drift that would fail every agent call is surfaced as a
+  diagnosis instead of a traceback.
+
+### Changed
+
+- **The conversational Leader rides the model's full context window.** The
+  chat lane is no longer clamped to a role budget — a long conversation isn't
+  compressed away. The operator can cap it lower from the SETTINGS tab (cost
+  control: every turn re-sends the whole thread). Every other lane, decompose
+  included, keeps its role-bounded window.
+- **WebOS console copy works like the terminal.** Drag-select in a TV — the
+  view won't yank to the bottom mid-selection while a run streams — then
+  Ctrl+C / Ctrl+V; Ctrl+C with nothing selected copies the Leader's last
+  message whole. Selection is now visible inside the Leader's speech block.
+- The operator's own chat lines drop the redundant "you" label (both surfaces).
+- Static WebOS assets carry `Cache-Control: no-cache` so a browser can't pin a
+  stale SPA module across an upgrade (the ETag keeps revalidation a cheap 304).
+
+### Fixed
+
+- **The Leader can read and change its own configuration.** The two-lane
+  Leader's harness home (vault, shared resources, config dir) is now honored by
+  the permission gate as standing access, so "what models and agents do we
+  have" is answerable directly. Credential files inside that home stay fenced
+  behind the tools' secret floor.
+- Declared the `orjson` dependency litellm ≥1.92 requires on every
+  tools-carrying model call — a fresh install resolving the newer litellm no
+  longer fails every agent call.
+- Overlong or malformed tool arguments (a giant inline shell token, an
+  embedded-NUL path) can no longer crash a conversational turn — the
+  permission gate fails closed.
+
+### Security
+
+- The new MCP client and xAI OAuth surfaces were hardened through adversarial
+  review: MCP secrets (http and stdio) are scrubbed from tool results and
+  logs, MCP tool names and server ids are contract-validated, connections and
+  subprocesses are lifecycle-bounded; the OAuth sign-in binds its callback
+  before opening the browser, refuses forged callbacks, renders only
+  allowlisted error codes (never provider free text), and the token store is
+  0600-from-birth.
+
 ## [0.9.9.4] — 2026-07-10
 
 A **stability + housekeeping** release: no new features, no behavior change for
