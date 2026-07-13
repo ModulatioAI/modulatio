@@ -227,6 +227,19 @@ modulatio auth clear-all
 
 Clear all cached auth state. Nuclear option.
 
+### `auth login-xai`
+
+```
+modulatio auth login-xai
+```
+
+Sign in to xAI (Grok) with a SuperGrok / X Premium+ subscription. Opens the
+consent page in your browser (which must run on this machine — the sign-in
+returns to a localhost callback) and stores the tokens in Modulatio's own
+credentials file, write-only, auto-refreshed from then on. If a later refresh
+returns 403, the subscription tier isn't authorized for API access — use an
+`api_key` entry instead.
+
 ## `modulatio heartbeat`
 
 Manage one-shot scheduled tasks (think `at` for Modulatio). Different from `cron` (which is recurring).

@@ -387,30 +387,32 @@ def try_refresh(auth_type: str) -> str | None:
 
 
 def refresh_xai_token(*, timeout: float = 30.0) -> str:
-    """Exchange the stored Grok refresh token for a fresh access token.
+    """Exchange Modulatio's stored xAI refresh token for fresh tokens and
+    PERSIST the rotation.
 
-    BETA / PENDING LIVE VALIDATION — built to the standard OIDC refresh flow
-    without a SuperGrok account to test against. Reads the refresh token from
-    ``~/.grok/auth.json``, resolves the token endpoint via xAI's OIDC discovery,
-    posts a ``refresh_token`` grant, and returns the new access token **in
-    memory** — it deliberately does NOT write back into the Grok CLI's
-    credentials file (we won't clobber another tool's creds in a format we
-    haven't confirmed). Raises RefreshError on any failure."""
+    xAI ROTATES the refresh token on every grant — an un-persisted refresh
+    burns the stored grant: the next refresh posts a consumed token and is
+    rejected (and any other tool sharing the file breaks with it). So the
+    refresh token comes from Modulatio's OWN store only
+    (``modulatio auth login-xai`` mints it), and the rotated pair is written
+    back atomically on every success. Raises RefreshError on any failure."""
     refresh_token = oauth_helpers.read_xai_refresh_token()
     if not refresh_token:
         raise RefreshError(
-            "no xAI Grok refresh token found — sign in with the Grok CLI"
+            "no Modulatio xAI OAuth session — run `modulatio auth login-xai` "
+            "to sign in. (A Grok CLI login can't be refreshed from here: xAI "
+            "rotates refresh tokens, so consuming that one would break the "
+            "Grok CLI's own session.)"
         )
     # Serialize the exchange like Anthropic/OpenAI: the OIDC refresh_token grant
     # rotates (invalidates) the refresh token at the provider on each success.
     # With several daemon callers (heartbeat + cron + Telegram listener) hitting
     # a 401 at once, each would POST the SAME refresh token; the first consumes
     # it and the rest are rejected. The in-process lock + cross-process file lock
-    # serialize the exchanges. Because xAI doesn't write back the rotated token
-    # (the Grok file format is unvalidated), serialization alone would still let
-    # followers re-POST the consumed grant; the short-TTL in-memory cache below
-    # is what actually collapses the burst to a single exchange.
-    lock_path = str(oauth_helpers.XAI_GROK_CREDENTIALS_FILE) + ".lock"
+    # serialize the exchanges; followers re-read the store under the lock and see
+    # the leader's persisted rotation, and the short-TTL in-memory cache collapses
+    # same-instant bursts without touching disk.
+    lock_path = str(oauth_helpers.MODULATIO_XAI_OAUTH_FILE) + ".lock"
     with _single_flight("xai", lock_path):
         # Re-check under the lock: if the leader of this burst just minted an
         # access token from the SAME refresh token we hold, return it rather
@@ -418,6 +420,14 @@ def refresh_xai_token(*, timeout: float = 30.0) -> str:
         cached = _xai_cached_access(refresh_token)
         if cached is not None:
             return cached
+        # A follower that waited on the lock re-reads the store — the leader
+        # persisted a rotated pair, so our captured refresh_token is stale.
+        current = oauth_helpers.read_xai_refresh_token()
+        if current and current != refresh_token:
+            fresh = oauth_helpers.read_own_xai_credentials()
+            if fresh and fresh.get("access_token"):
+                return fresh["access_token"]
+            refresh_token = current
         access = _do_refresh_xai(refresh_token, timeout=timeout)
         _xai_cache_access(refresh_token, access)
         return access
@@ -446,8 +456,9 @@ def _xai_cache_access(refresh_token: str, access_token: str) -> None:
 
 
 def _do_refresh_xai(refresh_token: str, *, timeout: float) -> str:
-    """Perform the actual xAI OIDC discovery + token exchange. Caller holds the
-    single-flight lock. Returns the new access token (in memory only)."""
+    """Perform the actual xAI OIDC discovery + token exchange, persisting the
+    rotated token pair to Modulatio's own store. Caller holds the single-flight
+    lock. Returns the new access token."""
     try:
         disc = httpx.get(_XAI_OAUTH_DISCOVERY_URL, timeout=timeout)
         body = disc.json()
@@ -472,6 +483,17 @@ def _do_refresh_xai(refresh_token: str, *, timeout: float) -> str:
         )
     except httpx.HTTPError as e:
         raise RefreshError(f"xAI refresh request failed: {e}") from e
+    if response.status_code == 403:
+        # A 403 from this token endpoint is an entitlement gate, not a stale
+        # grant — the account's subscription tier isn't authorized for API
+        # access. Re-logging in won't change it; say so instead of looping
+        # the operator through sign-ins.
+        raise RefreshError(
+            "xAI refused the refresh (HTTP 403): this account's subscription "
+            "tier is not authorized for API access via OAuth. Re-signing in "
+            "won't help — use an xAI API key (api_key auth) or upgrade the "
+            "subscription."
+        )
     if response.status_code != 200:
         raise RefreshError(
             f"xAI refresh rejected (HTTP {response.status_code}): "
@@ -484,6 +506,16 @@ def _do_refresh_xai(refresh_token: str, *, timeout: float) -> str:
     new_access = payload.get("access_token")
     if not isinstance(new_access, str) or not new_access:
         raise RefreshError("xAI refresh response missing access_token")
+    # PERSIST the rotation: the refresh token in the response replaces the one
+    # just consumed (absent in the payload → the provider kept ours valid).
+    rotated = payload.get("refresh_token") or refresh_token
+    oauth_helpers.write_xai_credentials({
+        "access_token": new_access,
+        "refresh_token": rotated,
+        "id_token": payload.get("id_token", ""),
+        "token_type": payload.get("token_type", "Bearer"),
+        "expires_in": payload.get("expires_in"),
+    })
     return new_access
 
 

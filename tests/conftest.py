@@ -126,6 +126,13 @@ def _isolate_modulatio_config(tmp_path, monkeypatch):
     # developer's live services.json would inject api_call/generate_* into
     # unrelated registry tests.
     monkeypatch.setattr(services, "SERVICES_FILE", cfg / "services.json")
+    # Same frozen-at-import class: the MCP server registry (build_registry
+    # would CONNECT to a developer's live servers from unrelated tests) and
+    # Modulatio's own xAI OAuth store.
+    from modulatio import mcp_config, oauth_helpers
+    monkeypatch.setattr(mcp_config, "MCP_SERVERS_FILE", cfg / "mcp_servers.json")
+    monkeypatch.setattr(
+        oauth_helpers, "MODULATIO_XAI_OAUTH_FILE", cfg / "xai_oauth.json")
     # The crash/log store has its OWN hardcoded ~/.config/modulatio/crashes
     # (``_crash._DEFAULT_DIR``), NOT derived from CONFIG_DIR — so the CONFIG_DIR
     # redirect alone left crash/error/doctor logs leaking into the live config

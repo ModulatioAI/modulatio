@@ -840,6 +840,23 @@ def auth_clear_all() -> None:
     typer.echo(f"Cleared {n} alert(s).")
 
 
+@auth_app.command("login-xai")
+def auth_login_xai() -> None:
+    """Sign in to xAI (Grok) with a SuperGrok / X Premium+ subscription.
+
+    Opens the xAI consent page in your browser and stores the OAuth tokens in
+    Modulatio's own credentials file (write-only, auto-refreshed from then
+    on). The browser must run on THIS machine — the sign-in returns to a
+    localhost callback.
+    """
+    from modulatio import oauth_login
+    try:
+        oauth_login.login_xai(echo=typer.echo)
+    except oauth_login.LoginError as e:
+        typer.echo(f"Sign-in failed: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+
 # === modulatio doctor ===
 
 @app.command()

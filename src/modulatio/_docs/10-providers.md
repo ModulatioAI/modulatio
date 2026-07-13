@@ -62,7 +62,7 @@ Six auth types, picked per entry:
 - **`api_key`** — standard bearer key. Stored in `<vault>/.env` under a key you name (e.g. `XAI_API_KEY`); the model entry references it by name.
 - **`oauth_anthropic`** — Anthropic OAuth tokens. Refreshes automatically via `modulatio.oauth_refresh`. Pulls Pro/Max tier if your account has it.
 - **`oauth_openai`** — OpenAI OAuth tokens. The **"OpenAI Codex (subscription)"** provider uses this to reach **GPT-5.5** through the ChatGPT/Codex backend's Responses API (where a subscription token is valid), instead of the metered `api.openai.com`.
-- **`oauth_xai`** — xAI (Grok) OAuth tokens, read from the official Grok CLI's credentials.
+- **`oauth_xai`** — xAI (Grok) OAuth via Modulatio's own sign-in: run `modulatio auth login-xai` (SuperGrok / X Premium+). Tokens live in Modulatio's own credentials file and auto-refresh — xAI rotates the refresh token on every refresh, so Modulatio persists each rotation. A Grok CLI login is honored read-only as a bootstrap, but only Modulatio's own sign-in is refreshable (consuming another tool's refresh token would invalidate that tool's session).
 - **`claude_cli`** — the **Clay** avatar seat: Modulatio invokes the Claude Code CLI (`claude -p`) as a subprocess and reaches Claude through the official harness using your logged-in subscription — it never reads or stores the token. The TOS-safe path for subscription-tier access; Clay is treated like any other seat (confined to its folder, additive to the existing Anthropic API-key path).
 - **`none`** — unauthenticated (only used for local services like Ollama / LM Studio that don't require auth on localhost).
 
@@ -154,7 +154,7 @@ This invokes a fresh subprocess per call — slightly higher latency than direct
 
 API URL: `https://api.x.ai/v1`
 
-Auth: `api_key` only.
+Auth: `api_key`, or `oauth_xai` with a SuperGrok / X Premium+ subscription (`modulatio auth login-xai` — the browser must be on the same machine; a 403 on refresh means the subscription tier isn't authorized for API access, in which case use an API key).
 
 1. Get an API key at https://console.x.ai/
 2. Add entry:

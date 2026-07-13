@@ -15,6 +15,8 @@ def isolate_credential_paths(tmp_path, monkeypatch):
     user's real ~/.claude or ~/.codex during tests."""
     monkeypatch.setattr(oauth_helpers, "ANTHROPIC_CREDENTIALS_FILE", tmp_path / "anthropic.json")
     monkeypatch.setattr(oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "openai.json")
+    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", tmp_path / "grok.json")
+    monkeypatch.setattr(oauth_helpers, "MODULATIO_XAI_OAUTH_FILE", tmp_path / "xai_oauth.json")
 
 
 # === Anthropic ===
@@ -101,3 +103,48 @@ def test_write_openai_credentials_chmod_600():
     oauth_helpers.write_openai_credentials({"tokens": {"access_token": "x", "refresh_token": "r"}})
     mode = oauth_helpers.OPENAI_CODEX_CREDENTIALS_FILE.stat().st_mode & 0o777
     assert mode == 0o600
+
+
+# === xAI: Modulatio's own store vs the Grok CLI's file ===
+
+def test_xai_own_store_roundtrip_and_chmod():
+    oauth_helpers.write_xai_credentials(
+        {"access_token": "own-a", "refresh_token": "own-r"})
+    own = oauth_helpers.read_own_xai_credentials()
+    assert own["access_token"] == "own-a" and own["refresh_token"] == "own-r"
+    mode = oauth_helpers.MODULATIO_XAI_OAUTH_FILE.stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+def test_xai_access_token_prefers_own_store_over_grok_cli():
+    oauth_helpers.XAI_GROK_CREDENTIALS_FILE.write_text(json.dumps(
+        {"access_token": "cli-a", "refresh_token": "cli-r"}))
+    oauth_helpers.write_xai_credentials(
+        {"access_token": "own-a", "refresh_token": "own-r"})
+    assert oauth_helpers.read_xai_token() == "own-a"
+
+
+def test_xai_access_token_falls_back_to_grok_cli_read_only():
+    """No own store yet → the Grok CLI's ACCESS token is honored (harmless
+    read)..."""
+    oauth_helpers.XAI_GROK_CREDENTIALS_FILE.write_text(json.dumps(
+        {"access_token": "cli-a", "refresh_token": "cli-r"}))
+    assert oauth_helpers.read_xai_token() == "cli-a"
+
+
+def test_xai_refresh_token_never_comes_from_grok_cli():
+    """...but the REFRESH token never does: xAI rotates refresh tokens per
+    grant, so consuming the Grok CLI's would invalidate its stored session."""
+    oauth_helpers.XAI_GROK_CREDENTIALS_FILE.write_text(json.dumps(
+        {"access_token": "cli-a", "refresh_token": "cli-r"}))
+    assert oauth_helpers.read_xai_refresh_token() is None
+    oauth_helpers.write_xai_credentials(
+        {"access_token": "own-a", "refresh_token": "own-r"})
+    assert oauth_helpers.read_xai_refresh_token() == "own-r"
+
+
+def test_xai_has_credentials_sees_either_source():
+    assert oauth_helpers.has_xai_credentials() is False
+    oauth_helpers.XAI_GROK_CREDENTIALS_FILE.write_text(json.dumps(
+        {"access_token": "cli-a"}))
+    assert oauth_helpers.has_xai_credentials() is True

@@ -272,12 +272,12 @@ class OAuthOpenAIStrategy:
 
 
 class OAuthXaiStrategy:
-    """OAuth via the official Grok CLI's credentials file
-    (``~/.grok/auth.json``). Refresh delegates to
-    ``oauth_refresh.refresh_xai_token`` (in-memory only).
-
-    BETA — built to spec against the standard OIDC flow; pending live
-    validation by a SuperGrok / X Premium+ account. Token rides the same
+    """OAuth via Modulatio's OWN xAI sign-in (``modulatio auth login-xai`` →
+    the PKCE flow in ``oauth_login``), tokens in Modulatio's own store.
+    Refresh (``oauth_refresh.refresh_xai_token``) persists the rotation xAI
+    performs on every grant — the reason a shared credentials file can't
+    work. A Grok CLI login is honored read-only for its ACCESS token as a
+    bootstrap, but only our own store is refreshable. Token rides the same
     ``api.x.ai/v1`` endpoint as the API key, so no runner changes.
     """
 
@@ -307,11 +307,10 @@ class OAuthXaiStrategy:
 
     def fix_hint(self) -> str:
         return (
-            "Sign in with the official Grok CLI (install: "
-            "`curl -fsSL https://x.ai/cli/install.sh | bash`, then launch it "
-            "once and log in with a SuperGrok / X Premium+ account). OAuth is "
-            "beta; if it's unavailable for your tier, switch this provider to "
-            "api_key with an xAI API key."
+            "Run `modulatio auth login-xai` and sign in with a SuperGrok / "
+            "X Premium+ account (the browser must be on this machine). If "
+            "OAuth API access is unavailable for your tier, switch this "
+            "provider to api_key with an xAI API key."
         )
 
 

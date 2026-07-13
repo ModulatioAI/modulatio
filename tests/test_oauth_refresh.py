@@ -633,3 +633,55 @@ def test_within_ttl_follower_returns_cached_token(monkeypatch):
     assert oauth_refresh.refresh_xai_token() == "xai-fresh"
     assert oauth_refresh.refresh_xai_token() == "xai-fresh"
     assert post_count == 1
+
+
+# === xAI rotation persistence: an un-persisted refresh burns the grant ===
+
+def _seed_own_xai_store(access="old-a", refresh="rot-1"):
+    oauth_helpers.write_xai_credentials(
+        {"access_token": access, "refresh_token": refresh})
+
+
+def test_xai_refresh_persists_rotated_pair(monkeypatch):
+    """xAI rotates the refresh token on every grant — the refresh MUST write
+    the rotated pair back, or the next refresh posts a consumed token."""
+    _seed_own_xai_store(refresh="rot-persist-1")
+    monkeypatch.setattr(
+        oauth_refresh.httpx, "get",
+        lambda url, **kw: _FakeResponse(payload={"token_endpoint": "https://t/x"}))
+    monkeypatch.setattr(
+        oauth_refresh.httpx, "post",
+        lambda url, **kw: _FakeResponse(payload={
+            "access_token": "new-a", "refresh_token": "rot-persist-2"}))
+    assert oauth_refresh.refresh_xai_token() == "new-a"
+    own = oauth_helpers.read_own_xai_credentials()
+    assert own["access_token"] == "new-a"
+    assert own["refresh_token"] == "rot-persist-2"      # the rotation stuck
+
+
+def test_xai_refresh_requires_own_store_not_grok_cli(monkeypatch, tmp_path):
+    """A Grok CLI file alone is NOT refreshable — consuming its refresh token
+    would invalidate the CLI's session. The error names the login command."""
+    grok = tmp_path / "grok.json"
+    grok.write_text('{"access_token": "cli-a", "refresh_token": "cli-r"}')
+    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", grok)
+    with pytest.raises(oauth_refresh.RefreshError) as e:
+        oauth_refresh.refresh_xai_token()
+    assert "login-xai" in str(e.value)
+
+
+def test_xai_refresh_403_is_entitlement_gate_not_relogin(monkeypatch):
+    """403 from the token endpoint = subscription tier gate. The message says
+    so (re-login won't fix it) and the stored grant is NOT clobbered."""
+    _seed_own_xai_store(refresh="rot-tier-1")
+    monkeypatch.setattr(
+        oauth_refresh.httpx, "get",
+        lambda url, **kw: _FakeResponse(payload={"token_endpoint": "https://t/x"}))
+    monkeypatch.setattr(
+        oauth_refresh.httpx, "post",
+        lambda url, **kw: _FakeResponse(403, payload={"error": "forbidden"}))
+    with pytest.raises(oauth_refresh.RefreshError) as e:
+        oauth_refresh.refresh_xai_token()
+    msg = str(e.value).lower()
+    assert "tier" in msg and "api key" in msg
+    assert oauth_helpers.read_own_xai_credentials()["refresh_token"] == "rot-tier-1"

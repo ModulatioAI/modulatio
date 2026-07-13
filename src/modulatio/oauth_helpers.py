@@ -26,10 +26,15 @@ from modulatio import config
 ANTHROPIC_CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 OPENAI_CODEX_CREDENTIALS_FILE = Path.home() / ".codex" / "auth.json"
 # Written by the official Grok CLI's OAuth login (curl -fsSL https://x.ai/cli/
-# install.sh | bash). PENDING LIVE VALIDATION: built to the standard OIDC token
-# shape; the exact field layout is read defensively because we have no SuperGrok
-# account to confirm it against.
+# install.sh | bash). READ-ONLY fallback for the ACCESS token only: xAI rotates
+# the refresh token on every refresh grant, so consuming another tool's
+# refresh token invalidates that tool's copy — Modulatio never refreshes from
+# this file.
 XAI_GROK_CREDENTIALS_FILE = Path.home() / ".grok" / "auth.json"
+# Modulatio's OWN xAI OAuth store, minted by `modulatio auth login-xai`
+# (oauth_login.login_xai) and re-written on every refresh-token rotation
+# (oauth_refresh.refresh_xai_token). 0600, atomic writes.
+MODULATIO_XAI_OAUTH_FILE = config.CONFIG_DIR / "xai_oauth.json"
 
 
 # === Anthropic ===
@@ -165,11 +170,34 @@ def write_openai_credentials(updated: dict[str, Any]) -> None:
 
 
 def has_xai_credentials() -> bool:
-    """True if the Grok CLI OAuth credentials file exists and is readable."""
-    return (
+    """True if EITHER xAI OAuth source exists: Modulatio's own store (the
+    durable path — refresh works), or the Grok CLI's file (access-token-only
+    fallback until the operator runs ``modulatio auth login-xai``)."""
+    return read_own_xai_credentials() is not None or (
         XAI_GROK_CREDENTIALS_FILE.exists()
         and os.access(XAI_GROK_CREDENTIALS_FILE, os.R_OK)
     )
+
+
+def read_own_xai_credentials() -> dict[str, Any] | None:
+    """Modulatio's own xAI OAuth store, or None. Standard OIDC field names
+    (``access_token``/``refresh_token``) — we wrote it, no defensive shapes."""
+    try:
+        data = json.loads(
+            MODULATIO_XAI_OAUTH_FILE.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("access_token"), str):
+        return data
+    return None
+
+
+def write_xai_credentials(tokens: dict[str, Any]) -> None:
+    """Persist Modulatio's xAI OAuth tokens (0600, atomic). Called at login
+    and on EVERY refresh — xAI rotates the refresh token per grant, so a
+    refresh that isn't persisted burns the stored grant."""
+    config.write_secret_file(
+        MODULATIO_XAI_OAUTH_FILE, json.dumps(tokens, indent=2))
 
 
 def read_xai_credentials() -> dict[str, Any] | None:
@@ -211,7 +239,11 @@ def read_xai_credentials() -> dict[str, Any] | None:
 
 
 def read_xai_token() -> str | None:
-    """Return the current xAI Grok OAuth access token, or None if absent."""
+    """The current xAI OAuth access token: Modulatio's own store first, else
+    the Grok CLI file's (read-only fallback), else None."""
+    own = read_own_xai_credentials()
+    if own:
+        return own["access_token"]
     creds = read_xai_credentials()
     if not creds:
         return None
@@ -220,12 +252,16 @@ def read_xai_token() -> str | None:
 
 
 def read_xai_refresh_token() -> str | None:
-    """Return the stored refresh token, or None — used by oauth_refresh."""
-    creds = read_xai_credentials()
-    if not creds:
-        return None
-    token = creds.get("refresh_token")
-    return token if isinstance(token, str) and token else None
+    """The refresh token from Modulatio's OWN store only — never the Grok
+    CLI's. xAI rotates the refresh token on every grant, so refreshing from
+    another tool's file would invalidate that tool's stored copy (and, once
+    our un-persisted rotation aged out, ours too). No own store → None; the
+    fix is ``modulatio auth login-xai``."""
+    own = read_own_xai_credentials()
+    if own:
+        token = own.get("refresh_token")
+        return token if isinstance(token, str) and token else None
+    return None
 
 
 # === Claude Code CLI ===
@@ -256,6 +292,9 @@ __all__ = [
     "write_openai_credentials",
     "has_xai_credentials",
     "read_xai_credentials",
+    "read_own_xai_credentials",
+    "write_xai_credentials",
     "read_xai_token",
     "read_xai_refresh_token",
+    "MODULATIO_XAI_OAUTH_FILE",
 ]
