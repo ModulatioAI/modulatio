@@ -60,17 +60,21 @@ _HEADER_NAME = re.compile(r"^[A-Za-z0-9-]+$")
 _ENV_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+#: Server-id slug: ASCII letters/digits/-/_ only (str.isalnum is Unicode-aware
+#: and would admit ids that break the provider function-name charset), max 32
+#: so the FINAL mcp__<id>__<tool> name fits the provider 64-char ceiling.
+_ID_OK = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
 def _validate(s: McpServer) -> None:
-    if not s.id or not s.id.replace("-", "").replace("_", "").isalnum():
-        raise ValueError(f"mcp server id {s.id!r} must be a simple slug")
+    if not _ID_OK.match(s.id):
+        raise ValueError(
+            f"mcp server id {s.id!r} must be an ASCII slug (letters, digits, "
+            "-, _), 32 chars or fewer")
     if "__" in s.id:
         # "__" is the tool-namespace delimiter (mcp__<server>__<tool>) — an id
         # containing it makes the namespace ambiguous and the gate lookup miss.
         raise ValueError(f"mcp server id {s.id!r} must not contain '__'")
-    if len(s.id) > 32:
-        # The FINAL namespaced function name (mcp__<id>__<tool>) rides a
-        # provider 64-char ceiling — a long id would silently cost tool names.
-        raise ValueError(f"mcp server id {s.id!r} must be 32 chars or fewer")
     if s.transport not in _TRANSPORTS:
         raise ValueError(f"mcp transport {s.transport!r} must be stdio|http")
     if s.trust not in _TRUST:

@@ -114,16 +114,20 @@ def _secret_values(server: McpServer) -> list[str]:
     return out
 
 
-def _scrub(text: str, server: McpServer) -> str:
-    """Strip every one of the server's injected secrets from text bound for
-    the model — a success result OR a failure message (an auth'd server can
-    echo its own credential in either) — then cap the length."""
+def _redact(text: str, server: McpServer) -> str:
+    """Strip every one of the server's injected secrets from text."""
     secrets = _secret_values(server)
     if secrets:
         from modulatio.service_tools import _redact_key
         for secret in secrets:
             text = _redact_key(text, secret)
-    return tools._cap_http_body(text, over_read=False)
+    return text
+
+
+def _scrub(text: str, server: McpServer) -> str:
+    """Redact text bound for the model — a success result OR a failure message
+    (an auth'd server can echo its own credential in either) — then cap."""
+    return tools._cap_http_body(_redact(text, server), over_read=False)
 
 
 def _safe_exc(exc: BaseException, server: McpServer) -> str:
@@ -131,6 +135,13 @@ def _safe_exc(exc: BaseException, server: McpServer) -> str:
     the raw exception/traceback (``exc_info``) — a protocol error can carry the
     server's credential, and process logs are retained surfaces too."""
     return _scrub(f"{type(exc).__name__}: {exc}", server)
+
+
+def _safe_field(value, server: McpServer) -> str:
+    """A SERVER-SUPPLIED value (a tool name, a spec field) rendered safe for
+    the LOG: redacted with the server's scrub set and sliced short — a
+    credential-shaped tool name must not persist in a retained surface."""
+    return _redact(str(value), server)[:120]
 
 
 # ── the portal: one background event loop holding every live session ────────
@@ -327,7 +338,8 @@ def call_tool(server_id: str, tool_name: str, **kwargs) -> str:
         return conn.call(tool_name, kwargs)
     except Exception as exc:  # noqa: BLE001 — one bad call must not sink the run
         _logger.warning("MCP call %s/%s failed: %s",
-                        server_id, tool_name, _safe_exc(exc, conn.server))
+                        server_id, _safe_field(tool_name, conn.server),
+                        _safe_exc(exc, conn.server))
         # Drop the dead connection so the next call reconnects once.
         with _conn_lock:
             _connections.pop(server_id, None)
@@ -394,20 +406,26 @@ def build_mcp_tools() -> dict[str, tools.Tool]:
             # tool (fail closed, never forwarded whole).
             if not _TOOL_NAME_OK.match(spec.name):
                 _logger.warning(
-                    "MCP server %s: skipping tool with unsafe name %.80r",
-                    sid, spec.name)
+                    "MCP server %s: skipping tool with unsafe name %r",
+                    sid, _safe_field(spec.name, server))
                 continue
+            # The FINAL namespaced name is the provider contract — charset AND
+            # length are re-checked on the whole thing (a per-part-valid pair
+            # can still overflow, and an id the slug check let through must not
+            # reach a model request).
             name = tool_name(sid, spec.name)
-            if len(name) > _MAX_FUNC_NAME:
+            if not _TOOL_NAME_OK.match(name):
                 _logger.warning(
-                    "MCP server %s: skipping tool %s — namespaced name exceeds "
-                    "%d chars (shorten the server id)", sid, spec.name, _MAX_FUNC_NAME)
+                    "MCP server %s: skipping tool %r — namespaced name is not "
+                    "function-calling-safe (charset, or over %d chars — shorten "
+                    "the server id)", sid, _safe_field(spec.name, server),
+                    _MAX_FUNC_NAME)
                 continue
             schema = getattr(spec, "inputSchema", None) or {"type": "object"}
             if not _schema_ok(schema):
                 _logger.warning(
-                    "MCP server %s: skipping tool %s — oversized or malformed "
-                    "input schema", sid, spec.name)
+                    "MCP server %s: skipping tool %r — oversized or malformed "
+                    "input schema", sid, _safe_field(spec.name, server))
                 continue
             desc = (getattr(spec, "description", "") or f"{sid}:{spec.name}")
             out[name] = tools.Tool(

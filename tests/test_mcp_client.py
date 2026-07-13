@@ -190,6 +190,68 @@ def test_call_tool_failure_log_is_scrubbed(monkeypatch, caplog):
     assert "http-secret" not in caplog.text   # ...without the credential
 
 
+def test_call_log_scrubs_credential_shaped_tool_name(monkeypatch, caplog):
+    """A server can name a TOOL after its own credential — the tool-name log
+    field is scrubbed with the server's secret set, not just the exception."""
+    import logging
+    token = "sk-toolcredential1234"
+    monkeypatch.setenv("MCPKEY_TN", token)
+    server = McpServer(id="s", name="s", transport="http", base_url="https://x",
+                       env_var="MCPKEY_TN")
+
+    class _Boom(_FakeConn):
+        def call(self, *a, **k):
+            raise RuntimeError("generic failure")
+    boom = _Boom([])
+    boom.server = server
+    mcp_client._connections["s"] = boom
+    monkeypatch.setattr(mcp_client, "get_connection", lambda sid: boom)
+    with caplog.at_level(logging.WARNING, logger="modulatio.mcp"):
+        out = mcp_client.call_tool("s", token)   # the tool NAME is the token
+    assert token not in out
+    assert "failed" in caplog.text and token not in caplog.text
+
+
+def test_discovery_skip_warnings_scrub_tool_names(monkeypatch, caplog):
+    """Discovery-time skip warnings (unsafe name / final-name overflow / bad
+    schema) log server-supplied names scrubbed — a credential-shaped tool name
+    must not persist via a rejection message."""
+    import logging
+    token = "sk-testcredential1234567890"
+    monkeypatch.setenv("MCPKEY_DN", token)
+    sid = "s" * 32
+    mcp_config.add_server(McpServer(id=sid, name="S", transport="http",
+                                    base_url="https://x", env_var="MCPKEY_DN"))
+    fake = _FakeConn([
+        _spec(token),                              # forces final-name overflow
+        _spec(f"{token} x"),                       # unsafe charset (space)
+        _spec("okname", schema=["bad"]),           # bad schema branch
+    ])
+    fake.server = mcp_config.get_server(sid)
+    monkeypatch.setattr(mcp_client, "get_connection", lambda s: fake)
+    with caplog.at_level(logging.WARNING, logger="modulatio.mcp"):
+        reg = mcp_client.build_mcp_tools()
+    assert reg == {}
+    assert "skipping tool" in caplog.text
+    assert token not in caplog.text
+
+
+def test_unicode_server_id_rejected_and_backstopped(monkeypatch):
+    """A Unicode id passes str.isalnum but breaks the provider function-name
+    charset: rejected at the operator boundary, AND the final-name backstop
+    skips it if a record dodges validation entirely."""
+    with pytest.raises(ValueError):
+        mcp_config.add_server(McpServer(id="serveur-é", name="S",
+                                        transport="stdio", command="x"))
+    # backstop: a raw record that never saw _validate still can't register
+    rogue = McpServer(id="serveur-é", name="S", transport="stdio", command="x")
+    fake = _FakeConn([_spec("read")])
+    fake.server = rogue
+    monkeypatch.setattr(mcp_config, "enabled_servers", lambda: {"serveur-é": rogue})
+    monkeypatch.setattr(mcp_client, "get_connection", lambda s: fake)
+    assert mcp_client.build_mcp_tools() == {}
+
+
 def test_connect_failure_log_is_scrubbed(monkeypatch, caplog):
     """Connect-path exceptions are scrubbed before logging as well."""
     import logging
