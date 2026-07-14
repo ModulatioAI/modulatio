@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import re
 import secrets
 import threading
@@ -40,6 +41,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 from modulatio import oauth_helpers
+
+_log = logging.getLogger(__name__)
 
 #: Public OAuth client (the vendor's own CLI client id) + the OIDC issuer.
 XAI_OAUTH_ISSUER = "https://auth.x.ai"
@@ -178,7 +181,8 @@ def exchange_code(
     return payload
 
 
-def _wait_for_code(state: str, timeout: float, *, on_ready=None) -> str:
+def _wait_for_code(state: str, timeout: float, *, on_ready=None,
+                   cancel: threading.Event | None = None) -> str:
     """Loopback server for the consent redirect. BINDS FIRST, then invokes
     ``on_ready`` (the caller opens the browser there) — so the redirect can
     never race an unbound port.
@@ -237,8 +241,16 @@ def _wait_for_code(state: str, timeout: float, *, on_ready=None) -> str:
     try:
         if on_ready is not None:
             on_ready()
-        if not done.wait(timeout=timeout):
-            raise LoginError("sign-in timed out — no browser callback arrived")
+        # Sliced wait so a cancel releases the port within a beat, not at the
+        # timeout — the fixed callback port is the sign-in mutex, and an
+        # abandoned flow must not own it for the full window.
+        import time as _time
+        end = _time.monotonic() + timeout
+        while not done.wait(timeout=0.25):
+            if cancel is not None and cancel.is_set():
+                raise LoginError("sign-in cancelled by the operator")
+            if _time.monotonic() >= end:
+                raise LoginError("sign-in timed out — no browser callback arrived")
     finally:
         server.shutdown()
         server.server_close()
@@ -298,6 +310,9 @@ def login_xai(*, echo=print, open_browser: bool = True) -> None:
 
 _login_lock = threading.Lock()
 _login_state: dict = {"state": "idle", "error": ""}
+#: Cooperative cancel for the ONE in-flight login (xAI wait / OpenAI poll
+#: check it). Cleared by each begin_* under the pending claim.
+_login_cancel = threading.Event()
 
 
 def login_status() -> dict:
@@ -305,6 +320,19 @@ def login_status() -> dict:
     (+ ``error`` when failed). Snapshot copy — never the live dict."""
     with _login_lock:
         return dict(_login_state)
+
+
+def cancel_login() -> bool:
+    """Cancel the pending in-app sign-in, releasing the seam (and the xAI
+    callback port) within a poll interval. A pending login otherwise owns the
+    single sign-in slot for its whole timeout — an operator who abandoned the
+    browser tab shouldn't have to wait it out. Returns True when a pending
+    flow was told to stop, False when there was nothing to cancel."""
+    with _login_lock:
+        if _login_state["state"] != "pending":
+            return False
+    _login_cancel.set()
+    return True
 
 
 def begin_xai_login() -> str:
@@ -320,6 +348,7 @@ def begin_xai_login() -> str:
         if _login_state["state"] == "pending":
             raise LoginError("a sign-in is already in progress — finish or wait for it")
         _login_state.update(state="pending", error="")
+        _login_cancel.clear()
     try:
         endpoints = _discover()
         verifier, challenge = _pkce_pair()
@@ -337,7 +366,8 @@ def begin_xai_login() -> str:
         def _worker():
             try:
                 code = _wait_for_code(
-                    state, _LOGIN_TIMEOUT_SEC, on_ready=bound.set)
+                    state, _LOGIN_TIMEOUT_SEC, on_ready=bound.set,
+                    cancel=_login_cancel)
                 payload = exchange_code(
                     endpoints["token_endpoint"],
                     code=code, code_verifier=verifier, code_challenge=challenge,
@@ -355,9 +385,14 @@ def begin_xai_login() -> str:
                 with _login_lock:
                     _login_state.update(state="failed", error=str(exc))
             except Exception as exc:  # noqa: BLE001 — surface, never hang "pending"
+                # SCRUBBED for the status wire: a surprise exception's text can
+                # carry anything (an echoed token, a path). Class name only;
+                # the detail goes to the server log.
+                _log.exception("in-app xAI sign-in worker failed")
                 with _login_lock:
                     _login_state.update(
-                        state="failed", error=f"{type(exc).__name__}: {exc}")
+                        state="failed",
+                        error=f"unexpected sign-in failure ({type(exc).__name__})")
             finally:
                 bound.set()  # a bind failure must not strand begin()'s wait
 
@@ -478,6 +513,8 @@ def _openai_poll_and_persist(device: dict) -> None:
     start = _time.monotonic()
     code_resp = None
     while _time.monotonic() - start < _OPENAI_POLL_MAX_SEC:
+        if _login_cancel.is_set():
+            raise LoginError("sign-in cancelled by the operator")
         _time.sleep(device["interval"])
         try:
             poll = httpx.post(
@@ -494,6 +531,36 @@ def _openai_poll_and_persist(device: dict) -> None:
             break
         if poll.status_code in (403, 404):
             continue  # operator hasn't finished the page yet
+        if poll.status_code == 429:
+            # Same contract as the usercode mint: a throttle is not a failure.
+            # Honor Retry-After (bounded) and keep polling out the window.
+            try:
+                delay = min(
+                    int(poll.headers.get("Retry-After", device["interval"])), 60)
+            except (TypeError, ValueError):
+                delay = device["interval"]
+            _time.sleep(delay)
+            continue
+        # RFC 8628-shaped bodies: pending isn't failure, slow_down is an
+        # instruction, expiry/denial end the flow with a STABLE message
+        # (never body text — same no-render contract as the exchanges).
+        err_code = ""
+        try:
+            body = poll.json()
+            if isinstance(body, dict) and isinstance(body.get("error"), str):
+                err_code = body["error"]
+        except ValueError:
+            pass
+        if err_code == "authorization_pending":
+            continue
+        if err_code == "slow_down":
+            device["interval"] = min(device["interval"] + 5, 30)
+            continue
+        if err_code == "expired_token":
+            raise LoginError(
+                "the device code expired before the sign-in finished — start it again")
+        if err_code == "access_denied":
+            raise LoginError("the sign-in was refused on the verification page")
         raise LoginError(
             f"OpenAI device sign-in poll failed (HTTP {poll.status_code})")
     if code_resp is None:
@@ -558,6 +625,7 @@ def begin_openai_login() -> dict:
         if _login_state["state"] == "pending":
             raise LoginError("a sign-in is already in progress — finish or wait for it")
         _login_state.update(state="pending", error="")
+        _login_cancel.clear()
     try:
         device = _openai_request_user_code()
     except LoginError:
@@ -574,9 +642,12 @@ def begin_openai_login() -> dict:
             with _login_lock:
                 _login_state.update(state="failed", error=str(exc))
         except Exception as exc:  # noqa: BLE001 — surface, never hang "pending"
+            # Same scrub contract as the xAI worker: class name only.
+            _log.exception("in-app OpenAI sign-in worker failed")
             with _login_lock:
                 _login_state.update(
-                    state="failed", error=f"{type(exc).__name__}: {exc}")
+                    state="failed",
+                    error=f"unexpected sign-in failure ({type(exc).__name__})")
 
     threading.Thread(
         target=_worker, name="modulatio-openai-login", daemon=True).start()
@@ -591,15 +662,19 @@ def login_openai(*, echo=print) -> None:
     echo(f"  1. Open this page in any browser:  {info['url']}")
     echo(f"  2. Enter this code:  {info['user_code']}\n")
     echo("Waiting for the sign-in to complete…")
-    while True:
-        status = login_status()
-        if status["state"] == "done":
-            echo(f"Signed in. Tokens stored (write-only) in "
-                 f"{oauth_helpers.OPENAI_CODEX_CREDENTIALS_FILE}")
-            return
-        if status["state"] == "failed":
-            raise LoginError(status["error"] or "sign-in failed")
-        _time.sleep(2)
+    try:
+        while True:
+            status = login_status()
+            if status["state"] == "done":
+                echo(f"Signed in. Tokens stored (write-only) in "
+                     f"{oauth_helpers.OPENAI_CODEX_CREDENTIALS_FILE}")
+                return
+            if status["state"] == "failed":
+                raise LoginError(status["error"] or "sign-in failed")
+            _time.sleep(2)
+    except KeyboardInterrupt:
+        cancel_login()  # release the seam — don't strand the worker pending
+        raise
 
 
 __all__ = [

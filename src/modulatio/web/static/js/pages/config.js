@@ -8,7 +8,7 @@
 
 import { api } from "../api.js";
 import { el } from "../dom.js";
-import { formDialog, kv, masterDetail, notify } from "./masterdetail.js";
+import { confirmDialog, formDialog, kv, masterDetail, notify } from "./masterdetail.js";
 
 const SUBTABS = [
   ["models", "MODELS"],
@@ -287,8 +287,32 @@ async function signInOauth(authType, statusNote) {
     start = await api("/config/oauth-login",
       { method: "POST", body: { auth_type: authType } });
   } catch (e) {
-    notify(String(e.message || e), { error: true });
-    return false;
+    // 409 = another sign-in owns the single slot (maybe an abandoned tab, up
+    // to the flow's full timeout). Offer the supersede instead of a dead end.
+    const msg = String(e.message || e);
+    if (msg.includes("already in progress")) {
+      const takeover = await confirmDialog(
+        "A sign-in is already in progress. Cancel it and start over?");
+      if (!takeover) return false;
+      try {
+        await api("/config/oauth-login", { method: "DELETE" });
+        // The cancelled worker releases the slot within its poll beat —
+        // wait for it before re-claiming (bounded).
+        for (let i = 0; i < 20; i++) {
+          const st = await api("/config/oauth-login");
+          if (st.state !== "pending") break;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        start = await api("/config/oauth-login",
+          { method: "POST", body: { auth_type: authType } });
+      } catch (e2) {
+        notify(String(e2.message || e2), { error: true });
+        return false;
+      }
+    } else {
+      notify(msg, { error: true });
+      return false;
+    }
   }
   if (start.kind === "device") {
     window.open(start.url, "_blank", "noopener");
@@ -310,6 +334,9 @@ async function signInOauth(authType, statusNote) {
     if (statusNote) statusNote(start.kind === "device"
       ? `waiting — enter code ${start.user_code}` : "waiting for the sign-in…");
   }
+  // The surface gave up — release the server-side slot too, or the abandoned
+  // flow owns sign-in (and the xAI callback port) until ITS timeout.
+  try { await api("/config/oauth-login", { method: "DELETE" }); } catch { /* best-effort */ }
   notify("Sign-in timed out.", { error: true });
   return false;
 }

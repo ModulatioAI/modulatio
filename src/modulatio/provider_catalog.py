@@ -181,9 +181,9 @@ XAI = Provider(
             auth_type="oauth_xai",
             label="Sign in with Grok (OAuth — SuperGrok / X Premium+)",
             oauth_hint=(
-                "Run `modulatio auth login-xai` in a terminal on this machine "
-                "to sign in with a SuperGrok / X Premium+ subscription. If your "
-                "tier isn't authorized for API access, use the API key option."
+                "Sign in from this picker (or run `modulatio auth login-xai`) "
+                "with a SuperGrok / X Premium+ subscription. If your tier "
+                "isn't authorized for API access, use the API key option."
             ),
         ),
     ],

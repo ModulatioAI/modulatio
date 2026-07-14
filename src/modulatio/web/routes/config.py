@@ -380,6 +380,15 @@ def oauth_login_state() -> dict:
     return oauth_login.login_status()
 
 
+@router.delete("/config/oauth-login")
+def oauth_login_cancel() -> dict:
+    """Cancel the pending in-app sign-in. Without this, an abandoned flow
+    owns the single sign-in slot (and the xAI callback port) for its whole
+    timeout — up to 15 minutes on the device flow."""
+    from modulatio import oauth_login
+    return {"cancelled": oauth_login.cancel_login()}
+
+
 @router.get("/config/providers/{provider_id}/models")
 def provider_models(provider_id: str, auth_type: str = Query("")) -> dict:
     """The provider's LIVE model list for the add-model picker — the same

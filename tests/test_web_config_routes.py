@@ -603,3 +603,15 @@ def test_oauth_login_routes_start_and_status(client, monkeypatch):
         oauth_login, "login_status", lambda: {"state": "done", "error": ""})
     assert client.get("/api/config/oauth-login").json() == {
         "state": "done", "error": ""}
+
+def test_oauth_login_cancel_route(client, monkeypatch):
+    """DELETE releases an abandoned sign-in: pending →
+    cancelled True; nothing in flight → False. Never a token on the wire."""
+    from modulatio import oauth_login
+
+    monkeypatch.setattr(oauth_login, "cancel_login", lambda: True)
+    r = client.delete("/api/config/oauth-login")
+    assert r.status_code == 200 and r.json() == {"cancelled": True}
+
+    monkeypatch.setattr(oauth_login, "cancel_login", lambda: False)
+    assert client.delete("/api/config/oauth-login").json() == {"cancelled": False}

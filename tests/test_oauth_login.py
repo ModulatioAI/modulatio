@@ -20,10 +20,11 @@ def isolate_store(tmp_path, monkeypatch):
 
 
 class _FakeResponse:
-    def __init__(self, status_code=200, payload=None):
+    def __init__(self, status_code=200, payload=None, headers=None):
         self.status_code = status_code
         self._payload = payload
         self.text = json.dumps(payload) if isinstance(payload, dict) else ""
+        self.headers = headers or {}
 
     def json(self):
         if self._payload is None:
@@ -348,7 +349,7 @@ def test_begin_xai_login_returns_url_and_lands_done(monkeypatch):
     monkeypatch.setattr(oauth_login, "_discover", lambda **kw: {
         "authorization_endpoint": "https://a/x", "token_endpoint": "https://t/x"})
 
-    def _fake_wait(state, timeout, *, on_ready=None):
+    def _fake_wait(state, timeout, *, on_ready=None, cancel=None):
         if on_ready:
             on_ready()
         return "CODE"
@@ -439,3 +440,140 @@ def test_openai_device_flow_failure_lands_failed(monkeypatch):
     with pytest.raises(oauth_login.LoginError):
         oauth_login.begin_openai_login()
     assert oauth_login.login_status()["state"] == "failed"
+
+
+# === Poll robustness: the loop must survive throttles + RFC-shaped pending ===
+# (MED-1) The usercode mint backs off on 429; the poll loop must not hard-fail
+# a sign-in the operator can still complete.
+
+def _direct_device():
+    # interval 0 = direct-call tests skip the server-respecting floor
+    return {"user_code": "AB-12", "device_auth_id": "dev-1", "interval": 0}
+
+
+def test_openai_poll_survives_429_and_rfc_pending(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "auth.json")
+    seq = [
+        _FakeResponse(429, payload={}, headers={"Retry-After": "0"}),
+        _FakeResponse(400, payload={"error": "authorization_pending"}),
+        _FakeResponse(payload={"authorization_code": "AC", "code_verifier": "CV"}),
+        _FakeResponse(payload={"access_token": "acc"}),  # the exchange
+    ]
+    monkeypatch.setattr(
+        oauth_login.httpx, "post", lambda url, **kw: seq.pop(0))
+    oauth_login._openai_poll_and_persist(_direct_device())  # must not raise
+    assert not seq  # every wire step was consumed
+
+
+def test_openai_poll_slow_down_bumps_interval(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "auth.json")
+    device = _direct_device()
+    seq = [
+        _FakeResponse(400, payload={"error": "slow_down"}),
+        _FakeResponse(payload={"authorization_code": "AC", "code_verifier": "CV"}),
+        _FakeResponse(payload={"access_token": "acc"}),
+    ]
+    monkeypatch.setattr(
+        oauth_login.httpx, "post", lambda url, **kw: seq.pop(0))
+    oauth_login._openai_poll_and_persist(device)
+    assert device["interval"] > 0  # the server's slow_down was honored
+
+
+def test_openai_poll_expired_token_fails_clean(monkeypatch):
+    monkeypatch.setattr(
+        oauth_login.httpx, "post",
+        lambda url, **kw: _FakeResponse(
+            400, payload={"error": "expired_token",
+                          "error_description": "grant sk-LEAKY-echo"}))
+    with pytest.raises(oauth_login.LoginError) as exc:
+        oauth_login._openai_poll_and_persist(_direct_device())
+    assert "sk-LEAKY-echo" not in str(exc.value)   # stable message, no body text
+    assert "expired" in str(exc.value)
+
+
+def test_openai_poll_unknown_error_still_hard_fails(monkeypatch):
+    monkeypatch.setattr(
+        oauth_login.httpx, "post",
+        lambda url, **kw: _FakeResponse(500, payload={}))
+    with pytest.raises(oauth_login.LoginError, match="HTTP 500"):
+        oauth_login._openai_poll_and_persist(_direct_device())
+
+
+# === Cancel: a pending login must not own the machine ===
+
+def test_cancel_login_noop_when_idle():
+    assert oauth_login.cancel_login() is False
+    assert oauth_login.login_status()["state"] == "idle"
+
+
+def test_cancel_openai_poll_releases_the_seam(monkeypatch):
+    monkeypatch.setattr(
+        oauth_login.httpx, "post",
+        lambda url, **kw: _FakeResponse(404, payload={}))
+    oauth_login._login_cancel.clear()
+    with oauth_login._login_lock:
+        oauth_login._login_state.update(state="pending", error="")
+    assert oauth_login.cancel_login() is True
+    with pytest.raises(oauth_login.LoginError, match="cancelled"):
+        oauth_login._openai_poll_and_persist(_direct_device())
+
+
+def test_cancel_xai_login_frees_the_port(monkeypatch):
+    """Cancel while the loopback listener is waiting: the worker lands
+    ``failed``, the port is released, and a NEW begin succeeds immediately."""
+    monkeypatch.setattr(oauth_login, "_discover", lambda **kw: {
+        "authorization_endpoint": "https://a/x",
+        "token_endpoint": "https://a/t"})
+    oauth_login.begin_xai_login()
+    assert oauth_login.login_status()["state"] == "pending"
+    assert oauth_login.cancel_login() is True
+    import time
+    for _ in range(80):
+        if oauth_login.login_status()["state"] == "failed":
+            break
+        time.sleep(0.05)
+    status = oauth_login.login_status()
+    assert status["state"] == "failed" and "cancelled" in status["error"]
+    # the seam is free again: a fresh begin binds the same fixed port
+    url = oauth_login.begin_xai_login()
+    assert url.startswith("https://a/x?")
+    oauth_login.cancel_login()  # leave no listener behind for the next test
+    for _ in range(80):
+        if oauth_login.login_status()["state"] == "failed":
+            break
+        time.sleep(0.05)
+
+
+# === Unknown worker failures reach the wire scrubbed ===
+
+def test_worker_generic_exception_is_scrubbed_on_status(monkeypatch):
+    monkeypatch.setattr(oauth_login, "_discover", lambda **kw: {
+        "authorization_endpoint": "https://a/x",
+        "token_endpoint": "https://a/t"})
+    monkeypatch.setattr(
+        oauth_login, "_wait_for_code", lambda *a, **kw: "CODE-1")
+    monkeypatch.setattr(
+        oauth_login, "exchange_code",
+        lambda *a, **kw: {"access_token": "sk-SECRET-VALUE"})
+
+    def _boom(payload):
+        raise RuntimeError(f"disk full writing {payload['access_token']}")
+    monkeypatch.setattr(oauth_helpers, "write_xai_credentials", _boom)
+    # the instant-mocked worker may fail before begin() returns — the scrubbed
+    # message must hold on WHICHEVER surface carries it (raise or status)
+    try:
+        oauth_login.begin_xai_login()
+    except oauth_login.LoginError as exc:
+        assert "sk-SECRET-VALUE" not in str(exc)
+        return
+    import time
+    for _ in range(80):
+        if oauth_login.login_status()["state"] == "failed":
+            break
+        time.sleep(0.05)
+    status = oauth_login.login_status()
+    assert status["state"] == "failed"
+    assert "sk-SECRET-VALUE" not in status["error"]   # no raw exception text
+    assert "RuntimeError" in status["error"]          # the class name is enough
