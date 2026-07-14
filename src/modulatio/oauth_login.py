@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""OAuth login flows Modulatio runs itself — currently xAI (Grok).
+"""OAuth login flows Modulatio runs itself — xAI (Grok) and OpenAI (Codex).
 
 Why Modulatio owns this login instead of reading another tool's credentials:
 xAI ROTATES the refresh token on every refresh grant. Consuming a refresh
@@ -288,9 +288,327 @@ def login_xai(*, echo=print, open_browser: bool = True) -> None:
     echo("The xAI OAuth model path is ready — access tokens auto-refresh from here.")
 
 
+# ── in-app sign-in (the TUI button + the WebOS route drive this) ─────────────
+#
+# The CLI runs the whole login synchronously; an interactive SURFACE can't
+# block its event loop / request handler for minutes, so it needs the same
+# flow split in two: BEGIN (bind the callback listener, return the consent
+# URL for the surface to open) and a poll-able STATUS. One login at a time —
+# the fixed callback port is the natural mutex.
+
+_login_lock = threading.Lock()
+_login_state: dict = {"state": "idle", "error": ""}
+
+
+def login_status() -> dict:
+    """The in-app sign-in's current state: idle | pending | done | failed
+    (+ ``error`` when failed). Snapshot copy — never the live dict."""
+    with _login_lock:
+        return dict(_login_state)
+
+
+def begin_xai_login() -> str:
+    """Start the sign-in WITHOUT blocking: discovery + PKCE, bind the loopback
+    callback listener, then return the consent URL for the caller's surface to
+    open (the operator's browser must run on the server's machine — the
+    consent redirects to 127.0.0.1). A worker thread waits for the callback,
+    exchanges, and persists; poll ``login_status`` for the outcome.
+
+    Raises LoginError when a sign-in is already pending (the callback port is
+    single-occupancy) or when discovery/bind fails."""
+    with _login_lock:
+        if _login_state["state"] == "pending":
+            raise LoginError("a sign-in is already in progress — finish or wait for it")
+        _login_state.update(state="pending", error="")
+    try:
+        endpoints = _discover()
+        verifier, challenge = _pkce_pair()
+        state = secrets.token_urlsafe(24)
+        nonce = secrets.token_urlsafe(24)
+        url = build_authorize_url(
+            endpoints["authorization_endpoint"],
+            code_challenge=challenge, state=state, nonce=nonce,
+        )
+        # Bind-before-browse, split across the begin/worker boundary: the
+        # listener binds INSIDE _wait_for_code before on_ready fires; begin()
+        # returns the URL only once bound.
+        bound = threading.Event()
+
+        def _worker():
+            try:
+                code = _wait_for_code(
+                    state, _LOGIN_TIMEOUT_SEC, on_ready=bound.set)
+                payload = exchange_code(
+                    endpoints["token_endpoint"],
+                    code=code, code_verifier=verifier, code_challenge=challenge,
+                )
+                oauth_helpers.write_xai_credentials({
+                    "access_token": payload["access_token"],
+                    "refresh_token": payload.get("refresh_token", ""),
+                    "id_token": payload.get("id_token", ""),
+                    "token_type": payload.get("token_type", "Bearer"),
+                    "expires_in": payload.get("expires_in"),
+                })
+                with _login_lock:
+                    _login_state.update(state="done", error="")
+            except LoginError as exc:
+                with _login_lock:
+                    _login_state.update(state="failed", error=str(exc))
+            except Exception as exc:  # noqa: BLE001 — surface, never hang "pending"
+                with _login_lock:
+                    _login_state.update(
+                        state="failed", error=f"{type(exc).__name__}: {exc}")
+            finally:
+                bound.set()  # a bind failure must not strand begin()'s wait
+
+        threading.Thread(
+            target=_worker, name="modulatio-xai-login", daemon=True).start()
+        if not bound.wait(timeout=10.0):
+            raise LoginError("the sign-in listener did not start")
+        status = login_status()
+        if status["state"] == "failed":
+            raise LoginError(status["error"] or "the sign-in could not start")
+        return url
+    except LoginError:
+        with _login_lock:
+            if _login_state["state"] == "pending":
+                _login_state.update(state="failed", error="could not start")
+        raise
+
+
+
+
+# ── OpenAI (Codex) — the DEVICE-CODE flow ────────────────────────────────────
+#
+# A different shape from xAI's loopback flow, deliberately not forced into one
+# abstraction: OpenAI's device flow needs NO callback port (the operator opens
+# a verification page and types a short code; the auth server hands back the
+# authorization code AND the PKCE verifier on poll), so it works even when the
+# operator's browser is not on this machine. Tokens persist in the SAME file +
+# shape the existing read/refresh/runner pipeline already consumes — a
+# pre-existing Codex CLI login keeps working, but none is required.
+
+OPENAI_OAUTH_ISSUER = "https://auth.openai.com"
+OPENAI_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # the public Codex client
+#: Where the operator types the user code.
+OPENAI_DEVICE_VERIFY_URL = f"{OPENAI_OAUTH_ISSUER}/codex/device"
+_OPENAI_DEVICE_CODE_URL = f"{OPENAI_OAUTH_ISSUER}/api/accounts/deviceauth/usercode"
+_OPENAI_DEVICE_POLL_URL = f"{OPENAI_OAUTH_ISSUER}/api/accounts/deviceauth/token"
+_OPENAI_TOKEN_URL = f"{OPENAI_OAUTH_ISSUER}/oauth/token"
+#: The device flow's fixed exchange redirect (part of the client registration).
+_OPENAI_DEVICE_REDIRECT = f"{OPENAI_OAUTH_ISSUER}/deviceauth/callback"
+_OPENAI_POLL_MAX_SEC = 15 * 60
+
+
+def _openai_account_id(*jwts: str) -> str:
+    """The ChatGPT account id from a token's auth claim — the runner sends it
+    as a header when reaching the subscription backend. Defensive: any JWT
+    offered may be absent/opaque; first hit wins, else empty."""
+    import json as _json
+    for tok in jwts:
+        if not tok or tok.count(".") != 2:
+            continue
+        try:
+            pay = tok.split(".")[1]
+            pay += "=" * (-len(pay) % 4)
+            claims = _json.loads(base64.urlsafe_b64decode(pay))
+            auth = claims.get("https://api.openai.com/auth")
+            if isinstance(auth, dict) and auth.get("chatgpt_account_id"):
+                return str(auth["chatgpt_account_id"])
+        except Exception:  # noqa: BLE001 — opaque token, keep looking
+            continue
+    return ""
+
+
+def _openai_request_user_code(timeout: float = 15.0) -> dict:
+    """Step 1: mint a device user-code. Backs off on the auth server's 429
+    throttle (honoring Retry-After) before surfacing a clear message."""
+    import time as _time
+    resp = None
+    for attempt in range(1, 5):
+        try:
+            resp = httpx.post(
+                _OPENAI_DEVICE_CODE_URL,
+                json={"client_id": OPENAI_OAUTH_CLIENT_ID},
+                headers={"Content-Type": "application/json"},
+                timeout=timeout,
+            )
+        except httpx.HTTPError as e:
+            raise LoginError(f"OpenAI device-code request failed: {e}") from e
+        if resp.status_code != 429:
+            break
+        if attempt < 4:
+            try:
+                delay = int(resp.headers.get("Retry-After", 2 ** attempt))
+            except ValueError:
+                delay = 2 ** attempt
+            _time.sleep(max(1, min(delay, 60)))
+    if resp.status_code == 429:
+        raise LoginError(
+            "OpenAI is rate-limiting sign-in requests (HTTP 429) — a "
+            "temporary throttle on their side, not a credential problem. "
+            "Wait a minute and try again.")
+    if resp.status_code != 200:
+        raise LoginError(
+            f"OpenAI device-code request failed (HTTP {resp.status_code})")
+    try:
+        data = resp.json()
+        if not isinstance(data, dict):
+            data = {}
+    except ValueError:
+        data = {}
+    user_code = str(data.get("user_code", ""))
+    device_auth_id = str(data.get("device_auth_id", ""))
+    if not user_code or not device_auth_id:
+        raise LoginError("OpenAI device-code response is missing its fields")
+    try:
+        interval = max(3, int(data.get("interval", "5")))
+    except (TypeError, ValueError):
+        interval = 5
+    return {"user_code": user_code, "device_auth_id": device_auth_id,
+            "interval": interval}
+
+
+def _openai_poll_and_persist(device: dict) -> None:
+    """Steps 2-4: poll until the operator finishes the verification page,
+    exchange the returned code (the auth server supplies the PKCE verifier in
+    the device flow), persist to the Codex-shape store the existing
+    read/refresh pipeline consumes."""
+    import time as _time
+    start = _time.monotonic()
+    code_resp = None
+    while _time.monotonic() - start < _OPENAI_POLL_MAX_SEC:
+        _time.sleep(device["interval"])
+        try:
+            poll = httpx.post(
+                _OPENAI_DEVICE_POLL_URL,
+                json={"device_auth_id": device["device_auth_id"],
+                      "user_code": device["user_code"]},
+                headers={"Content-Type": "application/json"},
+                timeout=15.0,
+            )
+        except httpx.HTTPError:
+            continue  # transient — the poll loop is the retry
+        if poll.status_code == 200:
+            code_resp = poll.json()
+            break
+        if poll.status_code in (403, 404):
+            continue  # operator hasn't finished the page yet
+        raise LoginError(
+            f"OpenAI device sign-in poll failed (HTTP {poll.status_code})")
+    if code_resp is None:
+        raise LoginError("sign-in timed out — the verification page was never completed")
+    code = str(code_resp.get("authorization_code", ""))
+    verifier = str(code_resp.get("code_verifier", ""))
+    if not code or not verifier:
+        raise LoginError("OpenAI device sign-in response is missing its grant")
+    try:
+        resp = httpx.post(
+            _OPENAI_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": _OPENAI_DEVICE_REDIRECT,
+                "client_id": OPENAI_OAUTH_CLIENT_ID,
+                "code_verifier": verifier,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=20.0,
+        )
+    except httpx.HTTPError as e:
+        raise LoginError(f"OpenAI token exchange failed: {e}") from e
+    if resp.status_code != 200:
+        # Same contract as the xAI exchange: never render the raw body.
+        raise LoginError(
+            f"OpenAI token exchange failed (HTTP {resp.status_code})")
+    try:
+        tokens = resp.json()
+        if not isinstance(tokens, dict):
+            tokens = {}
+    except ValueError:
+        tokens = {}
+    access = str(tokens.get("access_token", ""))
+    if not access:
+        raise LoginError("OpenAI token exchange response is missing access_token")
+    refresh = str(tokens.get("refresh_token", ""))
+    id_token = str(tokens.get("id_token", ""))
+    from datetime import datetime, timezone
+    oauth_helpers.write_openai_credentials({
+        "tokens": {
+            "access_token": access,
+            "refresh_token": refresh,
+            "id_token": id_token,
+            # The subscription backend gates on the account header — extract
+            # it from the token claims so a Modulatio-minted login carries
+            # everything the runner needs.
+            "account_id": _openai_account_id(id_token, access),
+        },
+        "last_refresh": datetime.now(timezone.utc)
+            .isoformat().replace("+00:00", "Z"),
+        "auth_mode": "chatgpt",
+    })
+
+
+def begin_openai_login() -> dict:
+    """Start the OpenAI device sign-in WITHOUT blocking: mint the user code,
+    spawn the poll/exchange/persist worker, and return
+    ``{"url", "user_code"}`` for the surface to show. Poll ``login_status``
+    for the outcome. One sign-in at a time (shared with the xAI flow)."""
+    with _login_lock:
+        if _login_state["state"] == "pending":
+            raise LoginError("a sign-in is already in progress — finish or wait for it")
+        _login_state.update(state="pending", error="")
+    try:
+        device = _openai_request_user_code()
+    except LoginError:
+        with _login_lock:
+            _login_state.update(state="failed", error="could not start")
+        raise
+
+    def _worker():
+        try:
+            _openai_poll_and_persist(device)
+            with _login_lock:
+                _login_state.update(state="done", error="")
+        except LoginError as exc:
+            with _login_lock:
+                _login_state.update(state="failed", error=str(exc))
+        except Exception as exc:  # noqa: BLE001 — surface, never hang "pending"
+            with _login_lock:
+                _login_state.update(
+                    state="failed", error=f"{type(exc).__name__}: {exc}")
+
+    threading.Thread(
+        target=_worker, name="modulatio-openai-login", daemon=True).start()
+    return {"url": OPENAI_DEVICE_VERIFY_URL, "user_code": device["user_code"]}
+
+
+def login_openai(*, echo=print) -> None:
+    """The synchronous CLI wrapper: begin, show the page + code, wait."""
+    import time as _time
+    info = begin_openai_login()
+    echo("To sign in with your ChatGPT subscription:\n")
+    echo(f"  1. Open this page in any browser:  {info['url']}")
+    echo(f"  2. Enter this code:  {info['user_code']}\n")
+    echo("Waiting for the sign-in to complete…")
+    while True:
+        status = login_status()
+        if status["state"] == "done":
+            echo(f"Signed in. Tokens stored (write-only) in "
+                 f"{oauth_helpers.OPENAI_CODEX_CREDENTIALS_FILE}")
+            return
+        if status["state"] == "failed":
+            raise LoginError(status["error"] or "sign-in failed")
+        _time.sleep(2)
+
+
 __all__ = [
     "LoginError",
     "login_xai",
+    "login_openai",
+    "begin_xai_login",
+    "begin_openai_login",
+    "login_status",
     "build_authorize_url",
     "exchange_code",
     "XAI_OAUTH_CLIENT_ID",

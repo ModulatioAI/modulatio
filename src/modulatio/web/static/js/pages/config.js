@@ -278,6 +278,42 @@ function mountAgents(body, ctx) {
 
 // ── MODELS + the write-only key manager ───────────────────────────────
 
+async function signInOauth(authType, statusNote) {
+  // Modulatio's own in-app sign-in — the browser never sees a token, only a
+  // consent URL (redirect kind) or a verification page + short code (device
+  // kind). Poll until the server-side flow lands the tokens.
+  let start;
+  try {
+    start = await api("/config/oauth-login",
+      { method: "POST", body: { auth_type: authType } });
+  } catch (e) {
+    notify(String(e.message || e), { error: true });
+    return false;
+  }
+  if (start.kind === "device") {
+    window.open(start.url, "_blank", "noopener");
+    notify(`Enter code ${start.user_code} on the page that just opened.`);
+  } else {
+    window.open(start.url, "_blank", "noopener");
+    notify("Complete the sign-in in the tab that just opened…");
+  }
+  const deadline = Date.now() + 6 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    let st;
+    try { st = await api("/config/oauth-login"); } catch { continue; }
+    if (st.state === "done") { notify("Signed in ✓"); return true; }
+    if (st.state === "failed") {
+      notify(st.error || "sign-in failed", { error: true });
+      return false;
+    }
+    if (statusNote) statusNote(start.kind === "device"
+      ? `waiting — enter code ${start.user_code}` : "waiting for the sign-in…");
+  }
+  notify("Sign-in timed out.", { error: true });
+  return false;
+}
+
 function mountModels(body) {
   masterDetail(body, {
     title: "Models",
@@ -315,9 +351,11 @@ function mountModels(body) {
           if (!a) return false;
           authType = a.auth_type;
           const chosen = prov.auth.find((o) => o.auth_type === authType);
-          if (chosen && chosen.ready === false && chosen.hint) {
-            notify(chosen.hint, { error: true });
-            return false;
+          if (chosen && chosen.ready === false) {
+            // Not signed in — run Modulatio's own sign-in right here (the
+            // dead-end "go find a terminal" toast is retired).
+            const ok = await signInOauth(authType);
+            if (!ok) return false;
           }
         }
         let models = [];

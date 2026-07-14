@@ -25,6 +25,7 @@ import asyncio
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual import work
 from textual.message import Message
 from textual.widgets import (
     Button,
@@ -37,6 +38,10 @@ from textual.widgets import (
 from modulatio import config
 from modulatio import provider_catalog as pc
 from modulatio import provider_keys
+
+
+#: OAuth methods Modulatio can sign in ITSELF (no separate tooling).
+_IN_APP_SIGNIN = ("oauth_xai", "oauth_openai")
 
 
 class AuthStep(Vertical):
@@ -153,13 +158,17 @@ class AuthStep(Vertical):
         elif a.auth_type.startswith("oauth"):
             ready, hint = pc.auth_status(a)
             if a.beta:
-                # A beta OAuth method can be signed-in yet not actually usable
-                # (e.g. Grok: the CLI token isn't accepted by the xAI API) —
+                # A beta OAuth method can be signed-in yet not actually usable —
                 # show its caveat, never a misleading "signed in — ready".
                 widgets.append(Static(a.oauth_hint or "Beta — not functional yet."))
+            elif ready:
+                widgets.append(Static("✓ signed in — ready."))
             else:
-                widgets.append(Static("✓ signed in — ready." if ready
-                                      else f"Not signed in. {hint}"))
+                widgets.append(Static(f"Not signed in. {hint}"))
+                if a.auth_type in _IN_APP_SIGNIN:
+                    # Modulatio runs this sign-in itself — no separate tooling.
+                    widgets.append(Button(
+                        "Sign in now", id="auth-oauth-signin", variant="primary"))
         elif a.auth_type == "none" and not is_custom:
             widgets.append(Static("No auth needed — local server."))
         async with self._render_lock:
@@ -171,7 +180,55 @@ class AuthStep(Vertical):
     def _status(self, text: str) -> None:
         self.query_one("#auth-status", Static).update(text)
 
+    @work(thread=True, exclusive=True, group="oauth-signin")
+    def _run_in_app_signin(self, auth_type: str) -> None:
+        """Run Modulatio's own sign-in for the selected OAuth method on a
+        worker thread (the flows block for minutes), narrating through the
+        status line; the body re-renders to '✓ signed in' on success."""
+        import time
+        import webbrowser
+
+        from modulatio import oauth_login
+
+        try:
+            if auth_type == "oauth_xai":
+                url = oauth_login.begin_xai_login()
+                self.app.call_from_thread(
+                    self._status, "complete the sign-in in your browser…")
+                webbrowser.open(url)
+            else:  # oauth_openai — device flow, any browser works
+                info = oauth_login.begin_openai_login()
+                self.app.call_from_thread(
+                    self._status,
+                    f"enter code {info['user_code']} on the page that opened…")
+                webbrowser.open(info["url"])
+        except oauth_login.LoginError as exc:
+            self.app.call_from_thread(self._status, f"sign-in failed: {exc}")
+            return
+        deadline = time.monotonic() + 6 * 60
+        while time.monotonic() < deadline:
+            time.sleep(2)
+            state = oauth_login.login_status()
+            if state["state"] == "done":
+                self.app.call_from_thread(self._status, "✓ signed in")
+                self.app.call_from_thread(self._rerender_after_signin)
+                return
+            if state["state"] == "failed":
+                self.app.call_from_thread(
+                    self._status,
+                    f"sign-in failed: {state['error'] or 'unknown error'}")
+                return
+        self.app.call_from_thread(self._status, "sign-in timed out")
+
+    def _rerender_after_signin(self) -> None:
+        if self.is_mounted:
+            self.run_worker(self._render_body(), exclusive=False)
+
     async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "auth-oauth-signin":
+            event.stop()
+            self._run_in_app_signin(self._selected.auth_type)
+            return
         if event.button.id != "auth-continue":
             return
         a = self._selected

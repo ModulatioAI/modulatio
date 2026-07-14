@@ -329,3 +329,113 @@ def test_exchange_error_code_is_an_allowlist_not_a_shape(monkeypatch):
         oauth_login.exchange_code(
             "https://t/x", code="C", code_verifier="V", code_challenge="CH")
     assert "invalid_grant" in str(e2.value)
+
+
+# === the in-app sign-in seam (both providers) ===
+
+@pytest.fixture(autouse=True)
+def _reset_login_state():
+    with oauth_login._login_lock:
+        oauth_login._login_state.update(state="idle", error="")
+    yield
+    with oauth_login._login_lock:
+        oauth_login._login_state.update(state="idle", error="")
+
+
+def test_begin_xai_login_returns_url_and_lands_done(monkeypatch):
+    """begin binds first, returns the consent URL, and the worker's
+    callback→exchange→persist lands state=done with tokens stored."""
+    monkeypatch.setattr(oauth_login, "_discover", lambda **kw: {
+        "authorization_endpoint": "https://a/x", "token_endpoint": "https://t/x"})
+
+    def _fake_wait(state, timeout, *, on_ready=None):
+        if on_ready:
+            on_ready()
+        return "CODE"
+
+    monkeypatch.setattr(oauth_login, "_wait_for_code", _fake_wait)
+    monkeypatch.setattr(
+        oauth_login.httpx, "post",
+        lambda url, **kw: _FakeResponse(payload={
+            "access_token": "a", "refresh_token": "r"}))
+    url = oauth_login.begin_xai_login()
+    assert url.startswith("https://a/x?")
+    import time
+    for _ in range(50):
+        if oauth_login.login_status()["state"] == "done":
+            break
+        time.sleep(0.05)
+    assert oauth_login.login_status()["state"] == "done"
+    assert oauth_helpers.read_own_xai_credentials()["access_token"] == "a"
+
+
+def test_begin_login_refuses_concurrent():
+    with oauth_login._login_lock:
+        oauth_login._login_state.update(state="pending", error="")
+    with pytest.raises(oauth_login.LoginError, match="already in progress"):
+        oauth_login.begin_xai_login()
+
+
+def test_begin_openai_login_device_flow_persists_codex_shape(
+    monkeypatch, tmp_path,
+):
+    """The device flow end to end (faked wire): user-code minted, poll
+    pending → grant, exchange → tokens persisted in the EXACT shape the
+    existing read/refresh pipeline consumes — including the account id
+    extracted from the token claims."""
+    import base64 as b64
+    import json as js
+    monkeypatch.setattr(
+        oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "auth.json")
+
+    # an id_token whose claims carry the account id
+    claims = {"https://api.openai.com/auth": {"chatgpt_account_id": "acct-42"}}
+    pay = b64.urlsafe_b64encode(js.dumps(claims).encode()).decode().rstrip("=")
+    id_token = f"h.{pay}.s"
+
+    calls = {"poll": 0}
+
+    def _fake_post(url, **kw):
+        if url.endswith("/usercode"):
+            return _FakeResponse(payload={
+                "user_code": "AB-12", "device_auth_id": "dev-1", "interval": 0})
+        if url.endswith("/deviceauth/token"):
+            calls["poll"] += 1
+            if calls["poll"] < 2:
+                return _FakeResponse(404, payload={})
+            return _FakeResponse(payload={
+                "authorization_code": "AC", "code_verifier": "CV"})
+        if url.endswith("/oauth/token"):
+            assert kw["data"]["code"] == "AC"
+            assert kw["data"]["code_verifier"] == "CV"
+            return _FakeResponse(payload={
+                "access_token": "acc", "refresh_token": "ref",
+                "id_token": id_token})
+        raise AssertionError(f"unexpected POST {url}")
+
+    monkeypatch.setattr(oauth_login.httpx, "post", _fake_post)
+    monkeypatch.setattr(oauth_login, "_OPENAI_POLL_MAX_SEC", 30)
+    info = oauth_login.begin_openai_login()
+    assert info["user_code"] == "AB-12"
+    assert info["url"].endswith("/codex/device")
+    import time
+    # the poll interval floors at 3s (server-respecting), so two polls ≈ 6s
+    for _ in range(120):
+        if oauth_login.login_status()["state"] in ("done", "failed"):
+            break
+        time.sleep(0.1)
+    assert oauth_login.login_status() == {"state": "done", "error": ""}
+    stored = oauth_helpers.read_openai_credentials()
+    assert stored["tokens"]["access_token"] == "acc"
+    assert stored["tokens"]["refresh_token"] == "ref"
+    assert stored["tokens"]["account_id"] == "acct-42"   # from the claims
+    assert stored["auth_mode"] == "chatgpt"
+
+
+def test_openai_device_flow_failure_lands_failed(monkeypatch):
+    monkeypatch.setattr(
+        oauth_login.httpx, "post",
+        lambda url, **kw: _FakeResponse(500, payload={}))
+    with pytest.raises(oauth_login.LoginError):
+        oauth_login.begin_openai_login()
+    assert oauth_login.login_status()["state"] == "failed"

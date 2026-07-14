@@ -282,13 +282,13 @@ def refresh_openai_token(*, timeout: float = 30.0) -> str:
     """
     creds = oauth_helpers.read_openai_credentials()
     if not creds:
-        raise RefreshError("no OpenAI Codex credentials file found — run `codex login`")
+        raise RefreshError("no OpenAI credentials — run `modulatio auth login-openai`")
     tokens = creds.get("tokens")
     if not isinstance(tokens, dict):
-        raise RefreshError("OpenAI Codex credentials malformed — re-run `codex login`")
+        raise RefreshError("OpenAI credentials malformed — re-run `modulatio auth login-openai`")
     refresh_token = tokens.get("refresh_token")
     if not isinstance(refresh_token, str) or not refresh_token:
-        raise RefreshError("OpenAI Codex credentials lack a refresh token — re-run `codex login`")
+        raise RefreshError("OpenAI credentials lack a refresh token — re-run `modulatio auth login-openai`")
 
     lock_path = str(oauth_helpers.OPENAI_CODEX_CREDENTIALS_FILE) + ".lock"
     with _single_flight("openai", lock_path):

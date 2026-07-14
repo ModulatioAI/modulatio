@@ -74,7 +74,11 @@ model/service handles.
 - **Add model is the terminal's two-level picker**: pick the provider, then pick
   from its **live model list** — fetched server-side with your configured key
   (the key never crosses the boundary), free models flagged, with a typed-id
-  fallback for anything unlisted.
+  fallback for anything unlisted. Providers with more than one auth method ask
+  which to use, and an OAuth method that isn't signed in yet offers **Sign in
+  now** — the browser opens the provider's consent page (xAI) or a device-code
+  verification page (OpenAI) and the picker resumes once the tokens land,
+  server-side, in Modulatio's own credentials file.
 - **Reload services** (Agents sub-page) is the terminal's `/reload`: apply
   model/roster/config changes to the live services without a server restart
   (refused while the Leader or a job is busy), and reconnect any

@@ -348,6 +348,38 @@ def providers_catalog() -> dict:
     return {"providers": out}
 
 
+class OauthLoginStart(BaseModel):
+    auth_type: str
+
+
+@router.post("/config/oauth-login")
+def oauth_login_start(body: OauthLoginStart) -> dict:
+    """Start Modulatio's OWN OAuth sign-in for a provider method — no
+    separate tooling needed. Two shapes: ``redirect`` (a consent URL the
+    browser opens; the callback lands on this machine's loopback, so the
+    operator's browser must be local) and ``device`` (a verification page +
+    short code — works from any browser). Poll the GET twin for the outcome;
+    the minted tokens land in the vault-side stores, never in a response."""
+    from modulatio import oauth_login
+    try:
+        if body.auth_type == "oauth_xai":
+            return {"kind": "redirect", "url": oauth_login.begin_xai_login()}
+        if body.auth_type == "oauth_openai":
+            info = oauth_login.begin_openai_login()
+            return {"kind": "device", "url": info["url"],
+                    "user_code": info["user_code"]}
+    except oauth_login.LoginError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    raise HTTPException(
+        status_code=422, detail=f"no in-app sign-in for {body.auth_type!r}")
+
+
+@router.get("/config/oauth-login")
+def oauth_login_state() -> dict:
+    from modulatio import oauth_login
+    return oauth_login.login_status()
+
+
 @router.get("/config/providers/{provider_id}/models")
 def provider_models(provider_id: str, auth_type: str = Query("")) -> dict:
     """The provider's LIVE model list for the add-model picker — the same

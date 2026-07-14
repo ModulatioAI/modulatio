@@ -279,7 +279,12 @@ OPENAI_CODEX = Provider(
         AuthOption(
             auth_type="oauth_openai",
             label="Sign in with ChatGPT (OAuth)",
-            oauth_hint="run `codex login`",
+            # Modulatio runs the device sign-in itself — no separate tooling
+            # required (a pre-existing external login is still honored).
+            oauth_hint=(
+                "Sign in from this picker, or run `modulatio auth "
+                "login-openai` — a page opens and you enter a short code."
+            ),
         ),
     ],
     models_source=ModelsSource(

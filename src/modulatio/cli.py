@@ -840,6 +840,22 @@ def auth_clear_all() -> None:
     typer.echo(f"Cleared {n} alert(s).")
 
 
+@auth_app.command("login-openai")
+def auth_login_openai() -> None:
+    """Sign in to OpenAI (ChatGPT subscription) — no separate tooling needed.
+
+    Uses the device flow: a verification page opens in any browser (this
+    machine or another) and you enter a short code. Tokens are stored
+    write-only and auto-refreshed from then on.
+    """
+    from modulatio import oauth_login
+    try:
+        oauth_login.login_openai(echo=typer.echo)
+    except oauth_login.LoginError as e:
+        typer.echo(f"Sign-in failed: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+
 @auth_app.command("login-xai")
 def auth_login_xai() -> None:
     """Sign in to xAI (Grok) with a SuperGrok / X Premium+ subscription.

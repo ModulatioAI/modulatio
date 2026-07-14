@@ -235,6 +235,16 @@ modulatio auth login-xai
 
 Sign in to xAI (Grok) with a **SuperGrok / X Premium+** subscription. Opens the consent page in your browser (which must run on this machine — the sign-in returns to a localhost callback) and stores the OAuth tokens in Modulatio's own credentials file, write-only and auto-refreshed. If a later refresh returns 403, your subscription tier isn't authorized for API access — use an `api_key` model entry instead.
 
+### `auth login-openai`
+
+```
+modulatio auth login-openai
+```
+
+Sign in to OpenAI (ChatGPT / Codex subscription) with a device code — no separate tooling required. Prints a short code and opens the verification page in your browser (any browser, even on another machine — there's no localhost callback); enter the code, approve, and Modulatio polls until the tokens land in its own credentials file, auto-refreshed thereafter.
+
+Both sign-ins are also available **in-app**: the terminal and WebOS add-model pickers offer a "Sign in now" step when an OAuth method isn't ready yet.
+
 ## `modulatio heartbeat`
 
 Manage one-shot scheduled tasks (think `at` for Modulatio). Different from `cron` (which is recurring).

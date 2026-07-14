@@ -264,7 +264,9 @@ class OAuthOpenAIStrategy:
 
     def fix_hint(self) -> str:
         return (
-            "Run `codex login` to re-authenticate. If 401s persist, "
+            "Run `modulatio auth login-openai` to sign in (no separate "
+            "tooling needed; an existing external login also works). If "
+            "401s persist, "
             "this may be OpenAI restricting third-party use of "
             "ChatGPT/Codex OAuth tokens — switch this provider to "
             "api_key with an OpenAI API key."

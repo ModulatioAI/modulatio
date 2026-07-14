@@ -253,9 +253,10 @@ def test_oauth_openai_strategy_refresh_returns_none_on_error(monkeypatch):
     assert s.refresh_if_possible() is None
 
 
-def test_oauth_openai_strategy_fix_hint_mentions_codex_login():
+def test_oauth_openai_strategy_fix_hint_names_the_in_app_signin():
+    """The fix is Modulatio's OWN sign-in — no separate tooling required."""
     s = auth_strategies.OAuthOpenAIStrategy()
-    assert "codex login" in s.fix_hint()
+    assert "login-openai" in s.fix_hint()
 
 
 # ── Protocol surface ─────────────────────────────────────────────────────

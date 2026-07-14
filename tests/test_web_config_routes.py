@@ -570,3 +570,36 @@ def test_provider_models_lists_with_the_chosen_auth(client, monkeypatch):
     r = client.get("/api/config/providers/xai/models?auth_type=oauth_xai")
     assert r.status_code == 200
     assert seen["auth_type"] == "oauth_xai" and seen["env_var"] is None
+
+
+def test_oauth_login_routes_start_and_status(client, monkeypatch):
+    """The in-app sign-in, from the browser: xai = redirect kind, openai =
+    device kind (+ user code); unknown types 422; concurrent 409; the GET
+    twin surfaces the flow state. No token ever rides a response."""
+    from modulatio import oauth_login
+
+    monkeypatch.setattr(
+        oauth_login, "begin_xai_login", lambda: "https://consent.example/x")
+    r = client.post("/api/config/oauth-login", json={"auth_type": "oauth_xai"})
+    assert r.json() == {"kind": "redirect", "url": "https://consent.example/x"}
+
+    monkeypatch.setattr(
+        oauth_login, "begin_openai_login",
+        lambda: {"url": "https://verify.example/d", "user_code": "AB-12"})
+    r = client.post("/api/config/oauth-login", json={"auth_type": "oauth_openai"})
+    assert r.json() == {"kind": "device", "url": "https://verify.example/d",
+                        "user_code": "AB-12"}
+
+    assert client.post("/api/config/oauth-login",
+                       json={"auth_type": "made-up"}).status_code == 422
+
+    def _busy():
+        raise oauth_login.LoginError("a sign-in is already in progress")
+    monkeypatch.setattr(oauth_login, "begin_xai_login", _busy)
+    assert client.post("/api/config/oauth-login",
+                       json={"auth_type": "oauth_xai"}).status_code == 409
+
+    monkeypatch.setattr(
+        oauth_login, "login_status", lambda: {"state": "done", "error": ""})
+    assert client.get("/api/config/oauth-login").json() == {
+        "state": "done", "error": ""}
