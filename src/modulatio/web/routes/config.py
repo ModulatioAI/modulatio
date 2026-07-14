@@ -313,6 +313,10 @@ def agents_remove(project: str, agent_id: str) -> dict:
 class ModelAdd(BaseModel):
     provider_id: str
     model: str
+    # The operator's chosen auth method (the TUI's AuthStep radio, mirrored).
+    # Blank = the provider's api-key option, else its first — the pre-choice
+    # behavior, kept for back-compat.
+    auth_type: str = ""
 
 
 @router.get("/config/providers")
@@ -324,31 +328,50 @@ def providers_catalog() -> dict:
 
     out = []
     for p in pc.list_providers():
+        auth = []
+        for a in p.auth_options:
+            entry = {"auth_type": a.auth_type, "label": a.label,
+                     "env_var": a.env_var}
+            if a.auth_type.startswith("oauth"):
+                # The TUI's AuthStep shows an OAuth option's live signed-in
+                # status + setup hint — mirror it so the browser's method
+                # picker can too (file checks only; no network).
+                ready, hint = pc.auth_status(a)
+                entry["ready"] = ready
+                entry["hint"] = a.oauth_hint or hint
+            auth.append(entry)
         out.append({
             "id": p.id, "name": p.name, "base_url": p.base_url,
             "api_format": p.api_format, "signup_url": p.signup_url,
-            "auth": [
-                {"auth_type": a.auth_type, "label": a.label, "env_var": a.env_var}
-                for a in p.auth_options
-            ],
+            "auth": auth,
         })
     return {"providers": out}
 
 
 @router.get("/config/providers/{provider_id}/models")
-def provider_models(provider_id: str) -> dict:
+def provider_models(provider_id: str, auth_type: str = Query("")) -> dict:
     """The provider's LIVE model list for the add-model picker — the same
     engine fetch the TUI picker runs (``fetch_models``), with the listing key
-    resolved server-side from the provider's default auth option. The key
-    itself never crosses the web boundary; an unreachable list degrades to
-    ``[]`` (the form falls back to a typed model id)."""
+    resolved server-side from the CHOSEN auth option (the TUI passes its
+    AuthStep selection to the picker the same way); blank = the provider's
+    api-key option, else its first. The key itself never crosses the web
+    boundary; an unreachable list degrades to ``[]`` (the form falls back to
+    a typed model id)."""
     from modulatio import provider_catalog as pc
 
     provider = pc.get_provider(provider_id)
     if provider is None:
         raise HTTPException(status_code=422, detail=f"unknown provider {provider_id}")
-    auth = next((a for a in provider.auth_options if a.auth_type == "api_key"),
-                provider.auth_options[0])
+    if auth_type:
+        auth = next((a for a in provider.auth_options
+                     if a.auth_type == auth_type), None)
+        if auth is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"provider {provider_id} has no auth {auth_type!r}")
+    else:
+        auth = next((a for a in provider.auth_options if a.auth_type == "api_key"),
+                    provider.auth_options[0])
     key = pc.listing_key(env_var=auth.env_var, auth_type=auth.auth_type)
     try:
         models = pc.fetch_models(provider, api_key=key)
@@ -371,11 +394,20 @@ def model_add(body: ModelAdd) -> dict:
         raise HTTPException(status_code=422, detail=f"unknown provider {body.provider_id}")
     if not body.model.strip():
         raise HTTPException(status_code=422, detail="model id required")
-    # The default auth is the provider's api-key option (carries the env var),
-    # else its first option. The KEY itself is never handled here — it lives in
-    # the write-only key pool under that env var.
-    auth = next((a for a in provider.auth_options if a.auth_type == "api_key"),
-                provider.auth_options[0])
+    # The auth method: the operator's explicit choice when given (must be one
+    # of the provider's real options — never a caller-invented shape), else the
+    # provider's api-key option, else its first. The KEY itself is never
+    # handled here — it lives in the write-only key pool under that env var.
+    if body.auth_type:
+        auth = next((a for a in provider.auth_options
+                     if a.auth_type == body.auth_type), None)
+        if auth is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"provider {provider.id} has no auth {body.auth_type!r}")
+    else:
+        auth = next((a for a in provider.auth_options if a.auth_type == "api_key"),
+                    provider.auth_options[0])
     model = pc.CatalogModel(id=body.model, name=body.model, provider_id=provider.id)
     kwargs = pc.preset_kwargs(provider, model, auth)
     key = kwargs.pop("key")

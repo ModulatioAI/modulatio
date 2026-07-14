@@ -152,13 +152,33 @@ async def test_oauth_not_signed_in_blocks_with_hint(monkeypatch):
 
 
 async def test_beta_oauth_body_shows_caveat_not_misleading_ready(monkeypatch):
-    """A beta OAuth method (Grok) may be signed-in yet non-functional — the
-    body must show its caveat, never a misleading '✓ signed in — ready'."""
+    """A beta OAuth method may be signed-in yet non-functional — the body
+    must show its caveat, never a misleading '✓ signed in — ready'. (Pinned
+    against a synthetic beta provider: no CATALOG option is beta today — the
+    xai one graduated when Modulatio grew its own sign-in — but the guard
+    protects the next beta method.)"""
+    import dataclasses as _dc
+
     from textual.widgets import RadioButton, Static
+
+    beta_oauth = _dc.replace(
+        pc.XAI.auth_options[1], beta=True,
+        oauth_hint="Beta — not functional yet; use the api key path.",
+    ) if _dc.is_dataclass(pc.AuthOption) else None
+    if beta_oauth is None:  # AuthOption is a pydantic model
+        beta_oauth = pc.XAI.auth_options[1].model_copy(update={
+            "beta": True,
+            "oauth_hint": "Beta — not functional yet; use the api key path.",
+        })
+        provider = pc.XAI.model_copy(update={
+            "auth_options": [pc.XAI.auth_options[0], beta_oauth]})
+    else:
+        provider = _dc.replace(
+            pc.XAI, auth_options=[pc.XAI.auth_options[0], beta_oauth])
 
     # pretend signed in so the old code path would have shown "ready"
     monkeypatch.setattr(pc, "auth_status", lambda a, **k: (True, ""))
-    app = _Host(pc.XAI)  # options: [api_key, oauth_xai(beta)]
+    app = _Host(provider)  # options: [api_key, oauth(beta, synthetic)]
     async with app.run_test() as pilot:
         await pilot.pause()
         list(app.query(RadioButton))[1].value = True  # select the beta OAuth option

@@ -516,3 +516,57 @@ def test_service_set_capability_default(client):
                     json={"capability": "research", "service_id": "tavily"})
     assert r.status_code == 200
     assert services.capability_default("research") == "tavily"
+
+
+# ── RELOAD? no — the ADD-MODEL auth-method mirror (the TUI's AuthStep) ─
+
+
+def test_providers_catalog_carries_oauth_readiness(client, monkeypatch):
+    """An OAuth auth option reports its live signed-in status + hint, so the
+    browser's method picker can show what the TUI's AuthStep shows."""
+    from modulatio import provider_catalog as pc
+
+    monkeypatch.setattr(pc, "auth_status", lambda a, **k: (False, "sign in first"))
+    r = client.get("/api/config/providers")
+    xai = next(p for p in r.json()["providers"] if p["id"] == "xai")
+    oauth = next(a for a in xai["auth"] if a["auth_type"] == "oauth_xai")
+    assert oauth["ready"] is False
+    assert "login-xai" in oauth["hint"]        # the catalog hint names the fix
+    api = next(a for a in xai["auth"] if a["auth_type"] == "api_key")
+    assert "ready" not in api                  # non-oauth options stay plain
+
+
+def test_model_add_honors_chosen_oauth_auth(client):
+    """Adding an xAI model with auth_type=oauth_xai creates an OAuth preset —
+    the browser can finally reach the sign-in path the TUI offers."""
+    from modulatio import model_presets
+
+    r = client.post("/api/config/models/add", json={
+        "provider_id": "xai", "model": "grok-4.5", "auth_type": "oauth_xai"})
+    assert r.status_code == 200
+    rec = model_presets.load_presets()[r.json()["key"]]
+    assert rec["auth_type"] == "oauth_xai"
+
+
+def test_model_add_rejects_invented_auth(client):
+    r = client.post("/api/config/models/add", json={
+        "provider_id": "xai", "model": "grok-4.5", "auth_type": "made-up"})
+    assert r.status_code == 422
+
+
+def test_provider_models_lists_with_the_chosen_auth(client, monkeypatch):
+    """The live-list fetch resolves its credential from the CHOSEN method —
+    an OAuth pick must not silently fall back to the api-key env var."""
+    from modulatio import provider_catalog as pc
+
+    seen = {}
+
+    def _spy_listing_key(*, env_var=None, auth_type=None):
+        seen["env_var"], seen["auth_type"] = env_var, auth_type
+        return "tok"
+
+    monkeypatch.setattr(pc, "listing_key", _spy_listing_key)
+    monkeypatch.setattr(pc, "fetch_models", lambda p, *, api_key=None, **kw: [])
+    r = client.get("/api/config/providers/xai/models?auth_type=oauth_xai")
+    assert r.status_code == 200
+    assert seen["auth_type"] == "oauth_xai" and seen["env_var"] is None

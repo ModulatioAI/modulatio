@@ -292,19 +292,39 @@ function mountModels(body) {
     emptyText: "no models yet — add one, then add its key",
     actions: [
       { label: "Add model", needsSelection: false, run: async () => {
-        // Two-level flow, same as the TUI: pick the provider, then pick from
-        // its LIVE model list (fetched with the configured key server-side).
-        // An unlistable provider (no key yet, endpoint down, custom) falls
-        // back to a typed model id.
+        // The TUI's flow, mirrored: pick the provider, pick the AUTH METHOD
+        // when the provider offers more than one (the AuthStep radio — an
+        // OAuth option shows its live signed-in status), then pick from the
+        // LIVE model list (fetched with the chosen method's credential,
+        // server-side). An unlistable provider falls back to a typed id.
         const providers = (await api("/config/providers")).providers;
         const p = await formDialog("Add a model", [
           { name: "provider_id", label: "Provider",
             options: providers.map((x) => x.id) }]);
         if (!p) return false;
+        const prov = providers.find((x) => x.id === p.provider_id);
+        let authType = "";
+        if (prov && prov.auth.length > 1) {
+          const a = await formDialog(`Authenticate · ${p.provider_id}`, [
+            { name: "auth_type", label: "Method",
+              options: prov.auth.map((o) => ({
+                value: o.auth_type,
+                label: o.ready === undefined ? o.label
+                  : `${o.label} — ${o.ready ? "signed in ✓" : "not signed in"}`,
+              })) }]);
+          if (!a) return false;
+          authType = a.auth_type;
+          const chosen = prov.auth.find((o) => o.auth_type === authType);
+          if (chosen && chosen.ready === false && chosen.hint) {
+            notify(chosen.hint, { error: true });
+            return false;
+          }
+        }
         let models = [];
         try {
+          const q = authType ? `?auth_type=${encodeURIComponent(authType)}` : "";
           models = (await api(
-            `/config/providers/${encodeURIComponent(p.provider_id)}/models`)).models;
+            `/config/providers/${encodeURIComponent(p.provider_id)}/models${q}`)).models;
         } catch { /* degrade to free-text */ }
         const fields = models.length
           ? [{ name: "model", label: `Model (${models.length} available)`,
@@ -316,7 +336,8 @@ function mountModels(body) {
         if (!f) return false;
         const model = (f.custom || "").trim() || f.model;
         await api("/config/models/add",
-          { method: "POST", body: { provider_id: p.provider_id, model } });
+          { method: "POST",
+            body: { provider_id: p.provider_id, model, auth_type: authType } });
         notify(`Added model '${model}'.`);
       } },
       { label: "Set key", run: async (m) => {

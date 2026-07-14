@@ -224,27 +224,27 @@ def test_role_assignment_filters_to_text_models(monkeypatch):
     assert {m.id for m in text} == {"grok-4.3", "grok-build-0.1"}
 
 
-# ── xAI Grok OAuth (beta — reads the Grok CLI's ~/.grok/auth.json) ───────────
+# ── xAI Grok OAuth (Modulatio's own sign-in — `modulatio auth login-xai`) ────
 
 
-def test_xai_offers_both_api_key_and_beta_oauth():
+def test_xai_offers_both_api_key_and_oauth():
     p = pc.get_provider("xai")
     assert [a.auth_type for a in p.auth_options] == ["api_key", "oauth_xai"]
     oauth = p.auth_options[1]
-    assert oauth.beta is True  # surfaced as "(beta)" in the picker
+    # The OAuth path is FUNCTIONAL (Modulatio's own PKCE sign-in whose token
+    # carries API access) — the old borrowed-CLI-token placeholder era, when
+    # this option was beta-flagged non-functional, is over.
+    assert oauth.beta is False
 
 
-def test_xai_oauth_option_marked_non_functional():
-    """Grok OAuth can't list or run on api.x.ai — the Grok CLI token is the
-    wrong audience for the public xAI API (verified: 403 'could not be
-    validated'). The option is KEPT but clearly marked non-functional and
-    points users at the working API-key path (which is what Hermes uses)."""
+def test_xai_oauth_option_names_the_sign_in_command():
+    """The option's hint tells the operator HOW to sign in (the login
+    command) and never claims the path is unsupported."""
     p = pc.get_provider("xai")
     oauth = next(a for a in p.auth_options if a.auth_type == "oauth_xai")
     blurb = f"{oauth.label} {oauth.oauth_hint or ''}".lower()
-    assert any(w in blurb for w in ("not supported", "not functional", "doesn't work",
-                                    "does not work", "not yet"))
-    assert "api key" in blurb  # steer to the path that works
+    assert "login-xai" in blurb
+    assert "not supported" not in blurb and "not functional" not in blurb
 
 
 def test_oauth_xai_strategy_is_registered():

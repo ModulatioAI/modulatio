@@ -173,21 +173,18 @@ XAI = Provider(
     api_format="openai",
     auth_options=[
         AuthOption(auth_type="api_key", label="API key", env_var="XAI_API_KEY"),
-        # Grok OAuth (SuperGrok / X Premium+) via the official Grok CLI's
-        # ~/.grok/auth.json. Beta — pending live validation.
+        # Grok OAuth (SuperGrok / X Premium+) via Modulatio's OWN sign-in
+        # (`modulatio auth login-xai`): a PKCE flow whose token carries API
+        # access, stored write-only and refresh-rotation-safe. Functional —
+        # the old placeholder (a borrowed CLI token the API rejected) is gone.
         AuthOption(
             auth_type="oauth_xai",
-            label="Sign in with Grok (OAuth — not supported yet)",
-            # The Grok CLI's OAuth token is scoped to the CLI's own client, not
-            # the public xAI API — api.x.ai rejects it ("could not be validated"),
-            # so it can't list or run models. Kept as a placeholder; steer users
-            # to the working API-key path (which is what comparable tools use).
+            label="Sign in with Grok (OAuth — SuperGrok / X Premium+)",
             oauth_hint=(
-                "Not functional yet: the Grok CLI OAuth token isn't accepted by "
-                "the xAI model API, so this can't list or run models. Use the API "
-                "key option above (an XAI_API_KEY) to list and run Grok."
+                "Run `modulatio auth login-xai` in a terminal on this machine "
+                "to sign in with a SuperGrok / X Premium+ subscription. If your "
+                "tier isn't authorized for API access, use the API key option."
             ),
-            beta=True,
         ),
     ],
     # xAI splits modalities across endpoints; listing any of them needs the key.

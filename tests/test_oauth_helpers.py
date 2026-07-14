@@ -148,3 +148,34 @@ def test_xai_has_credentials_sees_either_source():
     oauth_helpers.XAI_GROK_CREDENTIALS_FILE.write_text(json.dumps(
         {"access_token": "cli-a"}))
     assert oauth_helpers.has_xai_credentials() is True
+
+
+def test_xai_expired_cli_token_is_not_a_credential():
+    """A stale Grok CLI login must not read as 'signed in' anywhere (its
+    refresh token is never ours to consume, so once the access token expires
+    the file is not a usable credential)."""
+    oauth_helpers.XAI_GROK_CREDENTIALS_FILE.write_text(json.dumps({
+        "access_token": "cli-a", "refresh_token": "cli-r",
+        "expires_at": "2020-01-01T00:00:00Z",
+    }))
+    assert oauth_helpers.has_xai_credentials() is False
+    assert oauth_helpers.read_xai_token() is None
+
+
+def test_xai_fresh_cli_token_still_bootstraps():
+    oauth_helpers.XAI_GROK_CREDENTIALS_FILE.write_text(json.dumps({
+        "access_token": "cli-a", "refresh_token": "cli-r",
+        "expires_at": "2099-01-01T00:00:00.123456789Z",   # nanosecond stamp
+    }))
+    assert oauth_helpers.has_xai_credentials() is True
+    assert oauth_helpers.read_xai_token() == "cli-a"
+
+
+def test_xai_own_store_counts_regardless_of_cli_expiry():
+    oauth_helpers.XAI_GROK_CREDENTIALS_FILE.write_text(json.dumps({
+        "access_token": "cli-a", "expires_at": "2020-01-01T00:00:00Z",
+    }))
+    oauth_helpers.write_xai_credentials(
+        {"access_token": "own-a", "refresh_token": "own-r"})
+    assert oauth_helpers.has_xai_credentials() is True
+    assert oauth_helpers.read_xai_token() == "own-a"

@@ -170,13 +170,35 @@ def write_openai_credentials(updated: dict[str, Any]) -> None:
 
 
 def has_xai_credentials() -> bool:
-    """True if EITHER xAI OAuth source exists: Modulatio's own store (the
-    durable path — refresh works), or the Grok CLI's file (access-token-only
-    fallback until the operator runs ``modulatio auth login-xai``)."""
-    return read_own_xai_credentials() is not None or (
-        XAI_GROK_CREDENTIALS_FILE.exists()
-        and os.access(XAI_GROK_CREDENTIALS_FILE, os.R_OK)
-    )
+    """True if a USABLE xAI OAuth source exists: Modulatio's own store (the
+    durable path — refresh works), or the Grok CLI's file with an UNEXPIRED
+    access token (the read-only bootstrap; its refresh token is never ours to
+    consume, so once expired it is not a credential — a stale CLI login must
+    not read as "signed in" in any picker)."""
+    if read_own_xai_credentials() is not None:
+        return True
+    return _xai_cli_token_fresh()
+
+
+def _xai_cli_token_fresh() -> bool:
+    """The Grok CLI file holds an access token that hasn't expired. Absent an
+    ``expires_at`` field, presence counts (can't prove it stale)."""
+    creds = read_xai_credentials()
+    if not creds or not creds.get("access_token"):
+        return False
+    raw = creds.get("expires_at")
+    if not isinstance(raw, str) or not raw:
+        return True
+    from datetime import datetime, timezone
+    try:
+        # ISO 8601 with a Z suffix and (possibly) nanosecond precision —
+        # trim sub-second digits fromisoformat can't parse.
+        import re as _re
+        cleaned = _re.sub(r"\.\d+", "", raw).replace("Z", "+00:00")
+        expires = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return True  # unparseable stamp — presence counts
+    return expires > datetime.now(timezone.utc)
 
 
 def read_own_xai_credentials() -> dict[str, Any] | None:
@@ -208,8 +230,12 @@ def read_xai_credentials() -> dict[str, Any] | None:
     Grok CLI layout: nested under a dynamic ``https://auth.x.ai::<uuid>``
     namespace key with the access token in a field named ``key`` (normalized
     to ``access_token`` for the readers below). Returns None on
-    missing/malformed/wrong-shape input."""
-    if not has_xai_credentials():
+    missing/malformed/wrong-shape input.
+
+    Guards on the FILE directly (not ``has_xai_credentials``, which now
+    consults the freshness check that reads through here — a cycle)."""
+    if not (XAI_GROK_CREDENTIALS_FILE.exists()
+            and os.access(XAI_GROK_CREDENTIALS_FILE, os.R_OK)):
         return None
     try:
         data = json.loads(XAI_GROK_CREDENTIALS_FILE.read_text(encoding="utf-8", errors="replace"))
@@ -240,13 +266,14 @@ def read_xai_credentials() -> dict[str, Any] | None:
 
 def read_xai_token() -> str | None:
     """The current xAI OAuth access token: Modulatio's own store first, else
-    the Grok CLI file's (read-only fallback), else None."""
+    the Grok CLI file's (read-only fallback, only while UNEXPIRED — a known-
+    stale token would just burn a doomed API call), else None."""
     own = read_own_xai_credentials()
     if own:
         return own["access_token"]
-    creds = read_xai_credentials()
-    if not creds:
+    if not _xai_cli_token_fresh():
         return None
+    creds = read_xai_credentials() or {}
     token = creds.get("access_token")
     return token if isinstance(token, str) and token else None
 
