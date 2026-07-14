@@ -336,11 +336,16 @@ def test_exchange_error_code_is_an_allowlist_not_a_shape(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_login_state():
+    # The cancel flag too: production begin_* always
+    # clears it, but a DIRECT _openai_poll_and_persist call after a cancel
+    # test would otherwise see a sticky cancel when tests run out of order.
     with oauth_login._login_lock:
         oauth_login._login_state.update(state="idle", error="")
+    oauth_login._login_cancel.clear()
     yield
     with oauth_login._login_lock:
         oauth_login._login_state.update(state="idle", error="")
+    oauth_login._login_cancel.clear()
 
 
 def test_begin_xai_login_returns_url_and_lands_done(monkeypatch):
