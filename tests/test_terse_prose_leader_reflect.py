@@ -115,7 +115,7 @@ def test_keeps_alpha5_reason_code_enum(skill_body: str) -> None:
 
 
 def test_keeps_alpha5_deferred_source_enum(skill_body: str) -> None:
-    """Closed `deferred_items[].source` provenance enum (Nemo Q1).
+    """Closed `deferred_items[].source` provenance enum.
     Must match :data:`compression.DEFERRED_SOURCE_LITERALS`."""
     from modulatio.compression import DEFERRED_SOURCE_LITERALS
 
@@ -126,7 +126,7 @@ def test_keeps_alpha5_deferred_source_enum(skill_body: str) -> None:
 
 
 def test_keeps_alpha5_non_goals_because_rule(skill_body: str) -> None:
-    """Nemo Q2: every non_goals entry must carry a `because`
+    """Every non_goals entry must carry a `because`
     rationale. The seed must teach that rule explicitly."""
     assert "because" in skill_body
     # Anchor the rule itself, not just the field name

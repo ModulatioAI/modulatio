@@ -197,7 +197,7 @@ def test_leader_judgment_is_authoritative_no_qc_consulted(proj):
 
 
 def test_swallowed_leader_error_emits_breadcrumb(proj):
-    """Nemo's Brick-4 hull gap: a swallowed error must be distinguishable from
+    """Brick-4 hull gap: a swallowed error must be distinguishable from
     'nothing recurred'. A Leader call that raises emits a
     skill_codification_skipped breadcrumb — and the hook still never raises."""
     for i in range(3):
@@ -248,7 +248,7 @@ def test_kill_switch_disables_codification(proj, monkeypatch):
     assert skills.load_with_metadata("nope").name == ""
 
 
-# ── #81 Fix F: provenance + learned_from round-trip (Nemo r3 / Hero R1·R2) ──────
+# ── #81 Fix F: provenance + learned_from round-trip ──────
 
 
 def test_skill_provenance_and_learned_from_roundtrip(tmp_path, monkeypatch):
@@ -312,18 +312,18 @@ def test_win_codifies_project_local_with_provenance_and_consumes_recovery_ledger
     sk = skills.load_with_metadata("null-guard-inputs", project_code=proj)
     assert sk.name == "null-guard-inputs" and sk.provenance == "win"
     assert len(sk.learned_from) == 1  # the cluster signature is recorded
-    # PROJECT-LOCAL, not the shared library (Hero R2)
+    # PROJECT-LOCAL, not the shared library
     assert not (skills._SKILLS_ROOT / "null-guard-inputs.md").exists()
-    # recovery ids consumed in the SEPARATE recovery ledger, never lessons (Nemo #2)
+    # recovery ids consumed in the SEPARATE recovery ledger, never lessons
     assert recoveries.unconsumed_recoveries(proj) == []
     assert lessons.consumed_ids(proj) == set()
-    # the loud, non-independent spot-check recommendation (Hero R1b)
+    # the loud, non-independent spot-check recommendation
     blob = " ".join(r["concern"] + r["suggestion"] for r in summary.recommendations)
     assert "NON-INDEPENDENT" in blob and "spot-check" in blob
 
 
 def test_clean_run_zero_fails_still_learns_the_win(proj):
-    """Nemo r1 #7: the fail phase's <3 early-return must NOT suppress the win phase.
+    """The fail phase's <3 early-return must NOT suppress the win phase.
     A run with ZERO fails but ≥floor recoveries still codifies its win."""
     for i in range(3):
         _seed_recovery(proj, task_id=f"R{i}")
@@ -338,7 +338,7 @@ def test_clean_run_zero_fails_still_learns_the_win(proj):
 
 
 def test_win_replay_guard_skips_duplicate_block(proj):
-    """Nemo r2 #3: if the cluster signature is already in the skill's learned_from,
+    """If the cluster signature is already in the skill's learned_from,
     the improve append is SKIPPED (idempotent across a consume-after-commit replay)."""
     sig = "python_code|substantive|missing-null-guard-input|code:add=S:rm=0:ctrl=+:lit=0"
     skills.create_skill(name="guarded", description="d", prompt_template="ORIGINAL BODY",
@@ -371,7 +371,7 @@ def test_win_below_floor_no_codify_no_consume(proj):
 
 
 def test_win_false_merge_never_reaches_leader(proj):
-    """Hero R3: three GENUINELY different fixes sharing a rationale-key do NOT cluster,
+    """Three GENUINELY different fixes sharing a rationale-key do NOT cluster,
     so no ≥floor cluster forms, the Leader is never called, and nothing is codified."""
     _seed_recovery(proj, task_id="R0", before=_GUARD_BEFORE, after=_GUARD_AFTER,
                    rationale="missing edge case handling here")
@@ -405,7 +405,7 @@ def test_win_kill_switch_disables_both_phases(proj, monkeypatch):
 
 
 def test_recovery_log_failure_never_reverses_completion(proj, monkeypatch):
-    """Nemo r1 #5: the recovery is logged AFTER the task completes, guarded at the
+    """The recovery is logged AFTER the task completes, guarded at the
     call site — a record_recovery throw must NOT reverse a completion."""
     from uuid import uuid4
 
@@ -439,7 +439,7 @@ def test_recovery_log_failure_never_reverses_completion(proj, monkeypatch):
 
 
 def test_fail_phase_exception_does_not_suppress_win(proj, monkeypatch):
-    """Nemo code #1: an unguarded raise in the fail phase must NOT suppress the win
+    """An unguarded raise in the fail phase must NOT suppress the win
     phase, and must not propagate out of the best-effort outer hook."""
     for i in range(3):
         _seed_recovery(proj, task_id=f"R{i}")
@@ -458,7 +458,7 @@ def test_fail_phase_exception_does_not_suppress_win(proj, monkeypatch):
 
 
 def test_fail_improve_of_project_local_win_skill_does_not_leak_to_shared(proj):
-    """Hero BLOCKER 1: a FAIL-loop improve (write-shared) that names a PROJECT-LOCAL
+    """A FAIL-loop improve (write-shared) that names a PROJECT-LOCAL
     win skill must NOT load the win body as its base and lift it into the shared
     library — the base read must match the write scope."""
     sig = "python_code|substantive|null-guard|code:add=s:rm=0:ctrl=+:lit=0:id=+"
@@ -482,7 +482,7 @@ def test_fail_improve_of_project_local_win_skill_does_not_leak_to_shared(proj):
 
 
 def test_recovery_records_real_defect_type_from_tuple(proj, monkeypatch):
-    """Hero BLOCKER 2: defect_type rides the last_qc tuple (AssertionEvidence has no
+    """defect_type rides the last_qc tuple (AssertionEvidence has no
     such field), so a witnessed recovery records the real QC defect class."""
     from uuid import uuid4
 
@@ -508,7 +508,7 @@ def test_recovery_records_real_defect_type_from_tuple(proj, monkeypatch):
 
 
 def test_win_persist_failure_does_not_consume_cluster(proj, monkeypatch):
-    """Hero MODERATE 3: a transient persist failure must NOT consume the cluster —
+    """A transient persist failure must NOT consume the cluster —
     the technique is retained for retry, not lost."""
     for i in range(3):
         _seed_recovery(proj, task_id=f"R{i}")
@@ -546,7 +546,7 @@ def test_post_run_codification_bounded_by_timeout(proj, monkeypatch):
     elapsed = time.monotonic() - start
 
     assert elapsed < 2.0, f"bounded codify must return ~at the timeout, not wait the 5s hang; took {elapsed:.1f}s"
-    # Nemo BLOCK (Q2): the wrapper must NOT emit a phase-blind skip. The stalled phase
+    # The wrapper must NOT emit a phase-blind skip. The stalled phase
     # never reached a persist seam, so NO breadcrumb fires here — the phase that is
     # actually cut reports for itself (see the gate tests below).
     assert skips == []
@@ -567,16 +567,16 @@ def test_post_run_codification_bounded_completes_when_fast(proj, monkeypatch):
     assert skips == []
 
 
-# ── cadre remediation: cancellation boundary + phase-aware skip (2026-06-28) ──
-# Wild Bill BLOCK (HIGH): a codifier that resumes AFTER the wrapper timed out must not
-# persist (no late skill/JT write racing the next run). Nemo BLOCK (Q2): the timeout
+# ── Timeout remediation: cancellation boundary + phase-aware skip ──
+# A codifier that resumes AFTER the wrapper timed out must not
+# persist (no late skill/JT write racing the next run), and the timeout
 # skip must be phase-aware (the cut phase reports), never the wrapper's blind skip.
 
 
 def test_no_skill_persist_after_wrapper_timeout(proj, monkeypatch):
-    """Wild Bill BLOCK: the wrapper times out and sets a cancel boundary; when the
+    """The wrapper times out and sets a cancel boundary; when the
     orphaned daemon resumes and reaches the skill persist seam, it must NOT write —
-    and the SKILL phase reports its own phase-aware `timeout` skip (Nemo Q2)."""
+    and the SKILL phase reports its own phase-aware `timeout` skip."""
     import threading
     import time
 
@@ -607,7 +607,7 @@ def test_no_skill_persist_after_wrapper_timeout(proj, monkeypatch):
 
 
 def test_persist_jt_codification_gated_after_cancel(proj, monkeypatch):
-    """Wild Bill BLOCK (JT half) + Nemo Q2: with the cancel boundary set, the JT persist
+    """With the cancel boundary set, the JT persist
     seam writes nothing and emits the phase-aware `jt_codification_skipped:timeout`."""
     import threading
 
@@ -635,7 +635,7 @@ def test_persist_jt_codification_gated_after_cancel(proj, monkeypatch):
 
 
 def test_daemon_raise_records_breadcrumb(proj, monkeypatch):
-    """Jenny LOW + Nemo Q4: an UNEXPECTED raise inside the daemon body must never
+    """An UNEXPECTED raise inside the daemon body must never
     surface to the caller and must leave an audit row (`daemon_raised`), not silence."""
     o, pr = _orch(proj, {"codifications": []})
 
@@ -653,7 +653,7 @@ def test_daemon_raise_records_breadcrumb(proj, monkeypatch):
 
 
 def test_codification_timeout_env_override(monkeypatch):
-    """Nemo suggestion A: MODULATIO_CODIFICATION_TIMEOUT_S retunes the bound (parallel
+    """MODULATIO_CODIFICATION_TIMEOUT_S retunes the bound (parallel
     to the other env knobs); empty/bad/degenerate falls back to the 180s default."""
     from modulatio import orchestration
     monkeypatch.setenv("MODULATIO_CODIFICATION_TIMEOUT_S", "42.5")

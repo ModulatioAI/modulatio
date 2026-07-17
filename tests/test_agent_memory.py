@@ -233,7 +233,7 @@ def test_export_markdown_does_not_bump_access_count():
     assert raw[0]["access_count"] == 0
 
 
-# === symlink-escape refusal (Wild Bill cadre BLOCK, 2026-06-24) =============
+# === symlink-escape refusal =================================================
 
 
 def _seed_outside(outside):
@@ -282,7 +282,7 @@ def test_symlinked_agent_dir_is_refused_on_delete(tmp_path):
 def test_symlinked_memory_root_is_refused(tmp_path):
     """A symlinked project memory/ ROOT must not be followed — the earlier fix
     anchored the bounds-check on memory/ itself, so a symlinked root blessed its
-    own target (Wild Bill close-out residual, 2026-06-24)."""
+    own target."""
     import pytest
 
     from modulatio import vault

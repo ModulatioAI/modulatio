@@ -114,7 +114,7 @@ def test_telemetry_replays_latest_only():
 
 
 def test_replay_delivers_newest_frames_including_run_done():
-    """WB MEDIUM: a run longer than a fresh subscriber's queue depth must replay
+    """A run longer than a fresh subscriber's queue depth must replay
     its NEWEST frames (the current burst + run_done) on reconnect — not the
     stale oldest that get iterated first and fill the queue, dropping run_done."""
     from modulatio.web.events import _SUBSCRIBER_DEPTH, EventBus

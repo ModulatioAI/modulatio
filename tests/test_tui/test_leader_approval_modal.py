@@ -2,7 +2,7 @@
 """LeaderApprovalModal — the engine-rendered permission prompt.
 
 The modal renders ONLY engine-parsed ``SecurityRequest`` fields (action /
-canonical resource / why) — never model-narrated text (Wild Bill MED-5) — and
+canonical resource / why) — never model-narrated text — and
 offers exactly the scope buttons in ``request.available_scopes`` (a destructive
 request that omits ``always`` shows no Always button). Each button dismisses the
 modal with its scope string; Escape / Deny dismisses with ``deny`` (fail-closed).

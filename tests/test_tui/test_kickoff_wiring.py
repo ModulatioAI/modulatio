@@ -1,11 +1,10 @@
 """ — TUI kickoff Orchestrator wiring.
 
-Wild Bill Round 3 caught: Round 2's F11 / F15 / F12 remediations
-landed in the CLI / daemon / plan-mode kickoff sites, but the TUI
-``_kickoff_worker`` was missed. Direct TUI kickoffs were still
-constructing the orchestrator without a model id, summarizer
-factory, or ``tool_calls_dir`` in the registry — so Layer 1 / Layer
-2 stayed silent on that path even after Round 2.
+The orchestrator-construction hardening landed in the CLI / daemon /
+plan-mode kickoff sites, but the TUI ``_kickoff_worker`` was missed.
+Direct TUI kickoffs were still constructing the orchestrator without
+a model id, summarizer factory, or ``tool_calls_dir`` in the
+registry — so Layer 1 / Layer 2 stayed silent on that path.
 
 The construction logic is now factored into
 ``_build_kickoff_orchestrator`` so it can be exercised without

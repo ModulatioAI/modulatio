@@ -390,7 +390,7 @@ _SECRET = "sk-DO-NOT-LEAK-abc123"
 def _allow_base(client):
     """Register an openrouter model so OPENROUTER_API_KEY becomes a legitimate
     (allowlisted) key handle — the key routes only target configured
-    model/service env vars (WB-1)."""
+    model/service env vars."""
     client.post("/api/config/models/add",
                 json={"provider_id": "openrouter", "model": "meta/llama-3"})
 

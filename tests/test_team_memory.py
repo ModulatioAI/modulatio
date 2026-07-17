@@ -348,7 +348,7 @@ def test_recall_concurrent_semantic_path_is_thread_safe():
     assert len(set(counts)) == 1, f"inconsistent results across threads: {set(counts)}"
 
 
-# === symlink-escape refusal (Wild Bill cadre BLOCK, 2026-06-24) =============
+# === symlink-escape refusal =================================================
 
 
 def test_symlinked_proposals_dir_is_refused(tmp_path):

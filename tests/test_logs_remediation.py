@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Cadre-review remediation (logs feature) — Nemo + Wild Bill hull findings.
+"""Logs-feature hardening regressions.
 
-Each test pins a specific reviewer finding so a regression can't silently
+Each test pins a specific hardening fix so a regression can't silently
 re-open a secret-leak / data-loss hole on the public-issue path.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ def _store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return tmp_path
 
 
-# ── Wild Bill H2 — the shared scrubber catches spaced / labelled / Basic forms ──
+# ── The shared scrubber catches spaced / labelled / Basic forms ──
 
 @pytest.mark.parametrize("text,secret", [
     ("API key: sk-APIKEYSECRET", "sk-APIKEYSECRET"),
@@ -45,7 +45,7 @@ def test_scrubber_does_not_overscrub_plain_labels(safe):
     assert scrub(safe) == safe
 
 
-# ── Wild Bill H1 — the issue TITLE is scrubbed (it flows into URL + API) ──
+# ── The issue TITLE is scrubbed (it flows into URL + API) ──
 
 def test_run_log_secret_does_not_leak_into_issue_title(_store: Path):
     # A run log's first line is raw user content with no summary header.
@@ -58,7 +58,7 @@ def test_run_log_secret_does_not_leak_into_issue_title(_store: Path):
     assert "sk-RUNSECRET123" not in body
 
 
-# ── Nemo H1 — concurrent writes don't overwrite (no silent error-log loss) ──
+# ── Concurrent writes don't overwrite (no silent error-log loss) ──
 
 def test_concurrent_writes_each_produce_a_file(_store: Path):
     fixed = datetime(2026, 6, 15, 4, 30, 0, 123456, tzinfo=timezone.utc)
@@ -73,7 +73,7 @@ def test_concurrent_writes_each_produce_a_file(_store: Path):
     assert len(list(_store.glob("error-*.log"))) == 8       # all 8, not 1
 
 
-# ── Nemo M4 — a prune failure must not hide a log that IS on disk ──
+# ── A prune failure must not hide a log that IS on disk ──
 
 def test_prune_failure_returns_real_path_not_sentinel(_store: Path):
     with patch.object(logstore, "_prune", side_effect=RuntimeError("boom")):
@@ -83,7 +83,7 @@ def test_prune_failure_returns_real_path_not_sentinel(_store: Path):
     assert path in [e.path for e in logstore.list_logs()]   # doctor send can find it
 
 
-# ── Nemo M3 — scrub_and_cap re-redacts + caps an edited body ──
+# ── scrub_and_cap re-redacts + caps an edited body ──
 
 def test_scrub_and_cap_redacts_and_truncates():
     out = logstore.scrub_and_cap("token=sk-EDITLEAK " + "Z" * (logstore._MAX_ISSUE_BODY + 100))
@@ -92,7 +92,7 @@ def test_scrub_and_cap_redacts_and_truncates():
     assert len(out) < logstore._MAX_ISSUE_BODY + 50
 
 
-# ── Nemo L4 — malformed filenames degrade cleanly ──
+# ── Malformed filenames degrade cleanly ──
 
 def test_malformed_filename_parses_without_crashing(_store: Path):
     bad = _store / "crash-foo.log"                          # no stamp_pid structure

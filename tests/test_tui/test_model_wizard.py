@@ -8,8 +8,7 @@ markup via ``Text.from_markup``, which raises ``MarkupError`` on a stray close
 tag, crashing the main-thread paint. The fix wraps every dynamic value in
 ``rich.markup.escape`` (the established TUI convention; see ``export_dialog``).
 
-Ledger: 2026-06-14 Cowboy-Opus-0.9.0-preship —
-model_wizard.py:104 (LOW/error-path).
+Covers model_wizard.py:104 (LOW/error-path).
 """
 
 from __future__ import annotations

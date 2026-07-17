@@ -197,7 +197,7 @@ def _project_for(tmp_path, code):
 
 
 def test_single_shot_run_threads_activity_sink(tmp_path, monkeypatch):
-    """Wild Bill MED: the single-shot ``_run`` path must thread a tool-call sink
+    """The single-shot ``_run`` path must thread a tool-call sink
     into the seat context so a Clay seat's in-sandbox tool calls reach the
     activity feed (Team TV) — not only the chat-loop path. Before the fix
     ``_seat_context()`` was entered with no sink, so ``seat_activity_var`` was
@@ -227,7 +227,7 @@ def test_single_shot_run_threads_activity_sink(tmp_path, monkeypatch):
 
 
 def test_single_shot_agent_call_threads_activity_sink(tmp_path, monkeypatch):
-    """Wild Bill MED, per-agent path: ``_run_agent_call`` (producer / QC-fixer
+    """Per-agent path: ``_run_agent_call`` (producer / QC-fixer
     direct dispatch) must thread the same sink."""
     from modulatio import claude_cli, roster, vault
     from modulatio.orchestration import Orchestrator
@@ -255,7 +255,7 @@ def test_single_shot_agent_call_threads_activity_sink(tmp_path, monkeypatch):
 
 
 def test_single_shot_seat_writes_durable_transcript_without_subscriber(tmp_path, monkeypatch):
-    """Wild Bill R2 MED: the single-shot seat sink must write a durable owner-only
+    """The single-shot seat sink must write a durable owner-only
     JSONL audit record (task/role/agent/tool/args/result/ts) — INDEPENDENT of any
     activity subscriber. Team TV is liveness; the transcript is the audit, and it
     must capture args + result, not just the tool name."""
@@ -310,7 +310,7 @@ def test_single_shot_qc_fixer_seat_writes_durable_transcript(tmp_path, monkeypat
 
 def test_single_shot_seat_sink_resets_on_exception(tmp_path, monkeypatch):
     """The seat activity sink must be cleared even if the runner raises, so a
-    later non-Clay call can't inherit a stale sink (Wild Bill: reset on success
+    later non-Clay call can't inherit a stale sink (reset on success
     AND exception)."""
     from modulatio import claude_cli, vault
     from modulatio.orchestration import Orchestrator

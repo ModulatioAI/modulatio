@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""R2 (cadre reservation): the dispatch breaker's repetition heuristic is
+"""The dispatch breaker's repetition heuristic is
 PROSE-tuned and false-trips on a legitimately-repetitive code/data/media
 deliverable (a markdown table, a repeated config block, a media layout),
 discarding committed-good work — a product-agnostic violation.

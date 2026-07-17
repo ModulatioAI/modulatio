@@ -182,7 +182,7 @@ def test_project_subdirs_and_run_subdirs_partition_subdirs(isolated_vault):
 
 
 def test_migrate_legacy_run_layout_lifts_tickets_and_artifacts(isolated_vault):
-    """One-time migration (M4, Nemo hull): pre-durable-layout data kept UNDER a
+    """One-time migration (M4): pre-durable-layout data kept UNDER a
     run folder (runs/<id>/{tickets,artifacts}) is lifted to the project-durable
     locations, without clobbering, and is idempotent (a no-op once done)."""
     vault.init_project("MIG", "Migrate", "obj")
@@ -225,7 +225,7 @@ def test_research_is_project_durable_not_run_scoped(isolated_vault):
     """The research CACHE is a project-durable library (research.py writes it to
     <project>/research), so ``research`` belongs to PROJECT_SUBDIRS, not
     RUN_SUBDIRS — otherwise the subdir list contracts a per-run location the
-    research module never uses (cadre: Jenny + Lovecraft MED)."""
+    research module never uses."""
     assert "research" in vault.PROJECT_SUBDIRS
     assert "research" not in vault.RUN_SUBDIRS
     vault.init_project("RES", "Research", "obj")

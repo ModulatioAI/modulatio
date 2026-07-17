@@ -125,7 +125,7 @@ def test_persist_raw_result_refuses_path_traversal(
 ) -> None:
     """F13: model-supplied call_id is hostile by default. Same
     bare-id validation as ``read_tool_result`` / ``write_checkpoint``.
-    Pre-fix Wild Bill confirmed ``persist_raw_result("../escaped",
+    Pre-fix, ``persist_raw_result("../escaped",
     "secret", dir)`` wrote outside the dir."""
     with pytest.raises(ValueError):
         tool_summarization.persist_raw_result(
@@ -134,7 +134,7 @@ def test_persist_raw_result_refuses_path_traversal(
 
 
 def test_persist_raw_result_repairs_existing_permissive_file(tmp_path: Path) -> None:
-    """F19 audit follow-up (Wild Bill Round 3): ``os.open(O_CREAT,
+    """F19 audit follow-up: ``os.open(O_CREAT,
     0o600)`` only applies the mode on creation. A pre-existing
     world-readable file at the same call_id (failed retry, manual
     edit, earlier build that didn't tighten perms) survives the
@@ -619,7 +619,7 @@ def test_truncate_tool_result_impossible_budget_drops_head(monkeypatch) -> None:
 
 
 def test_truncate_tool_result_total_return_fits_budget_with_header() -> None:
-    """Regression (opus r2): the composed return prepends a pointer header whose
+    """Regression: the composed return prepends a pointer header whose
     tokens also count against the agent's context. The function must budget the
     head against ``max_tokens`` MINUS the header cost so the WHOLE returned
     string fits ``max_tokens`` — not just the bare head. Before the fix the head

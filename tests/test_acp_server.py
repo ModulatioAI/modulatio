@@ -217,7 +217,7 @@ class _BlockingOrch:
 
 
 def test_overlapping_prompts_rejected(vault_root):
-    """One in-flight prompt per session (Nemo's hull blocker): a second
+    """One in-flight prompt per session: a second
     session/prompt while the first is running is rejected, not run concurrently."""
     orch = _BlockingOrch()
     client = _Client(lambda session: orch)

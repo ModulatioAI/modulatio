@@ -131,7 +131,7 @@ def test_folder_grant_roots_skips_missing_dirs(tmp_path):
 
 
 def test_folder_grant_roots_refuses_dotdir_root(tmp_path):
-    """Wild Bill BLOCK: a registered dot-directory (e.g. /.../.ssh) must never
+    """A registered dot-directory (e.g. /.../.ssh) must never
     become a grant — the secret floor extends to the ROOT itself, not just
     dotfiles below it (read_file's floor only checks components below the root)."""
     d = tmp_path / ".ssh"

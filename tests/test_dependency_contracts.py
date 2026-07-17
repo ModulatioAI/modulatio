@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Remediation of Nemo's 0.9.0 cadre-review BLOCK findings.
+"""Dependency-contract and encoding-decode hardening.
 
-- HIGH: the resume path ran a reopened task whose dependency was an unknown /
+- The resume path ran a reopened task whose dependency was an unknown /
   unvalidated id (a typo / malformed cross-goal edge) — now fails closed.
-- MED: the three execution paths now share one "COMPLETED-or-wait" + "unknown →
+- The three execution paths now share one "COMPLETED-or-wait" + "unknown →
   block" dependency contract (the sequential fallback had only the FAILED gate).
-- MED: durable control/policy docs (plans, standards proposals, team state) are
+- Durable control/policy docs (plans, standards proposals, team state) are
   decoded STRICTLY — never read-with-replacement-then-write-back (which persisted
   U+FFFD into operator-approved text).
 """
@@ -21,7 +21,7 @@ from modulatio.orchestration import _unknown_deps, _unready_deps
 from modulatio.types import Task, TaskStatus
 
 
-# ── cross-goal dependency contract helpers (Nemo HIGH + parity MED) ──────────
+# ── cross-goal dependency contract helpers ───────────────────────────────────
 
 def _task(tid, deps, goal="G", status=TaskStatus.PENDING):
     return Task(id=tid, project_id=uuid4(), goal_id=goal, description="x",
@@ -56,7 +56,7 @@ def test_unready_deps_waits_on_noncompleted_only():
                          {"G1-run": TaskStatus.IN_PROGRESS}) == ["G1-run"]
 
 
-# ── encoding-RMW: durable docs decode strictly (Nemo MED ×3) ─────────────────
+# ── encoding-RMW: durable docs decode strictly ───────────────────────────────
 
 PROJECT_CODE = "NRM"
 _NON_UTF8 = b"---\ntitle: caf\xe9\nstatus: draft\n---\n\nbody\n"

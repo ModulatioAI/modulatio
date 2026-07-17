@@ -7,7 +7,7 @@ and unseeded tests. The two MUST stay byte-identical or an edit to one silently
 diverges from the other — the only defense was a "keep in sync" comment.
 
 This guard turns that comment into an enforced invariant for EVERY seed/fallback
-pair, not just the runbook (Nemo, exec-widen code review 2026-06-19 — generalized).
+pair, not just the runbook.
 Constant-only prompts with no shipped seed (``qc-patch``, ``wave-reflect``) have
 nothing to sync and are intentionally absent.
 """
@@ -27,7 +27,7 @@ _FRONTMATTER = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
 # — the seed .md (source of truth, used when the vault is seeded = normal installs)
 # was iterated while the inline constant (the unseeded backstop, exercised by this
 # test suite + fresh-install edge cases) was left stale. This is a real
-# test-fidelity + maintenance hazard, surfaced by generalizing Nemo's runbook nit.
+# test-fidelity + maintenance hazard, surfaced when this guard was generalized.
 # The diverged pairs are marked xfail so this guard (a) protects the in-sync pairs
 # from future drift and (b) DOCUMENTS the debt rather than hiding it. Reconciling
 # them (pick source of truth per prompt → sync → re-review) is tracked separately;

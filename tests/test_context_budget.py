@@ -194,7 +194,7 @@ def test_write_checkpoint_redact_secrets_false_writes_verbatim(tmp_path: Path) -
 
 
 def test_write_checkpoint_repairs_existing_permissive_file(tmp_path: Path) -> None:
-    """F19 audit follow-up (Wild Bill Round 3): pre-existing
+    """F19 audit follow-up: pre-existing
     world-readable checkpoint files survived the truncate-and-rewrite
     with their original mode intact. The chmod after write closes
     that hole."""
@@ -237,7 +237,7 @@ def test_write_checkpoint_uses_0600_permissions(tmp_path: Path) -> None:
 def test_write_checkpoint_redacts_assistant_tool_call_arguments(
     tmp_path: Path,
 ) -> None:
-    """F14 audit follow-up (Wild Bill Round 2): the model's
+    """F14 audit follow-up: the model's
     tool_calls[*].function.arguments often carry secrets — URLs with
     tokens, shell commands with credentials on the line, customer
     PII as path segments. Pre-F14 only role==tool content was

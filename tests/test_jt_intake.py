@@ -63,7 +63,7 @@ def _create_tool(o):
 
 
 def test_create_job_template_tool_captures_param_schema(env):
-    """#97 Part 2 (Nemo hole 5 / Hero Q6): the Leader's create_job_template tool must
+    """#97 Part 2: the Leader's create_job_template tool must
     persist param_schema, or the engine's own JTs ship with no required blanks and the
     fit-gate is toothless on them forever. The library fn already accepts it; the tool
     wrapper must thread it through (it used to swallow extras via **_)."""
@@ -122,7 +122,7 @@ def test_explicit_bind_refused_when_required_param_unfillable(env):
 
 
 def test_explicit_bind_refused_when_value_out_of_enum(env):
-    """R1 (Hero): a supplied value outside a declared enum is refused (present-but-out-of-contract)."""
+    """A supplied value outside a declared enum is refused (present-but-out-of-contract)."""
     _make_jt(name="regional", schema=(
         jt.ParamField(name="region", type="enum", required=True, enum=("NA", "EU", "APAC")),
     ))
@@ -169,7 +169,7 @@ def test_legacy_no_schema_jt_still_binds(env):
 
 
 def test_cron_refused_bind_skips_the_slot(env):
-    """R2 (Hero): a refused explicit bind under on_refused='skip' (the cron default)
+    """A refused explicit bind under on_refused='skip' (the cron default)
     SKIPS the slot — no greenfield substitute runs, the refused template name is
     recorded for the visible gap, and the run does not decompose any goals."""
     _make_jt(name="brief", schema=(jt.ParamField(name="topic", required=True),))
@@ -179,14 +179,14 @@ def test_cron_refused_bind_skips_the_slot(env):
     assert summary.skipped_refused_jt == "brief"
     assert summary.goals == []                       # skipped before decompose
     assert o._bound_jt is None
-    # Hero m1: the skip surface must carry the WHY, not just the name — a slot skips
+    # The skip surface must carry the WHY, not just the name — a slot skips
     # every cycle until a human fixes it; the reason is the single most useful string.
     assert summary.skipped_refused_reason is not None
     assert "topic" in summary.skipped_refused_reason
 
 
 def test_engine_created_jt_is_gated_end_to_end(env):
-    """Hero Q6 build-order suite-property: create a JT via the engine's OWN
+    """Build-order suite-property: create a JT via the engine's OWN
     create_job_template tool, then bind it with the required param empty — the gate
     must REFUSE. This test cannot pass unless param_schema capture (Part 2) landed
     before the bind gate (Part 1), so the HARD build order is a suite invariant, not
@@ -205,7 +205,7 @@ def test_engine_created_jt_is_gated_end_to_end(env):
 
 
 def test_malformed_bind_params_refuse_not_swallowed(env):
-    """Nemo code-hull BLOCKER 1: malformed bound params (a non-dict) must become a CLEAN
+    """Malformed bound params (a non-dict) must become a CLEAN
     refusal — the engine binds the invariant. Previously an AttributeError escaped the
     interview/gate and the broad best-effort catch reset _jt_refusal to None, so a
     malformed cron bind silently greenfielded instead of skipping. The param path is now

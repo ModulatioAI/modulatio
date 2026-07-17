@@ -126,7 +126,7 @@ async def test_registry_list_stays_mounted_during_the_add_flow(tmp_path, monkeyp
 
 
 async def test_cancel_resets_accumulated_flow_state(tmp_path, monkeypatch):
-    """Jenny F3: cancelling a half-entered add flow clears every accumulated
+    """Cancelling a half-entered add flow clears every accumulated
     wizard input, so it can't leak into the next flow."""
     monkeypatch.setattr(model_presets, "PRESETS_FILE", tmp_path / "p.json")
     app = _Host()

@@ -184,7 +184,7 @@ def test_verify_assembly_unit_not_passed_falls_back(tmp_path):
 
 
 def test_verify_assembly_manifest_drops_a_unit(tmp_path):
-    """Nemo's tautology hole: manifest omits a required unit; all named
+    """Tautology hole: manifest omits a required unit; all named
     checksums still match — but the SET differs from the task graph → fail."""
     rec, asm, by_id, root = _assembly_fixture(
         tmp_path, manifest_units=["01.txt", "02.txt"],  # dropped 03.txt
@@ -351,7 +351,7 @@ def test_verify_assembly_bundle_wrong_member_falls_back(tmp_path):
 
 
 def test_verify_assembly_bulkhead_swallows_validator_crash(tmp_path, monkeypatch):
-    """Nemo #6 / Hero m3: verify_assembly is called NAKED by orchestration, so a
+    """verify_assembly is called NAKED by orchestration, so a
     validator that throws must degrade to (False, reason, '') — never propagate —
     and the reason must name the crash."""
     rec, asm, by_id, root = _code_e2e_fixture(tmp_path)
@@ -367,7 +367,7 @@ def test_verify_assembly_bulkhead_swallows_validator_crash(tmp_path, monkeypatch
 
 
 def test_verify_assembly_bulkhead_covers_import_failure(tmp_path, monkeypatch):
-    """Nemo code-review #4: the bulkhead must cover the assembly_validate IMPORT too —
+    """The bulkhead must cover the assembly_validate IMPORT too —
     a packaging skew where the module is absent at import time must degrade to a
     fall-back, not propagate through the naked caller."""
     import sys
@@ -424,7 +424,7 @@ def test_verify_declared_format_text_extensions_impose_nothing(tmp_path):
 
 
 def test_verify_declared_format_media_family(tmp_path):
-    """Nemo #4 / Lovecraft Q6: the gate is family-agnostic — media binaries get the
+    """The gate is family-agnostic — media binaries get the
     same fabrication check. A text blob named .mp4/.mp3 is rejected; a real ftyp
     (offset-4) mp4 and an ID3 mp3 pass."""
     from modulatio import review_ledger
@@ -440,7 +440,7 @@ def test_verify_declared_format_media_family(tmp_path):
 
 
 def test_verify_assembly_accepts_fallback_path_units(tmp_path):
-    """Wild Bill BLOCK #2 (assembler arc 2026-07-03): a null-output_path dep
+    """A null-output_path dep
     (fits-whole gather) writes to drafts/<task-id>.<ext>; the verifier must
     resolve the SAME fallback path the manifest builder and writer use — not
     call the unit unverifiable and fall back to the byte-read the arc kills."""

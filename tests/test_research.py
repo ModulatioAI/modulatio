@@ -208,8 +208,8 @@ def test_is_stale_undeterminable_age_is_not_stale():
 
 
 def test_is_stale_file_skips_symlink(tmp_path):
-    """A planted symlink must not be read through (out-of-tree leak, Wild Bill
-    MEDIUM) — is_stale_file returns False for a symlink instead of parsing its
+    """A planted symlink must not be read through (out-of-tree leak) —
+    is_stale_file returns False for a symlink instead of parsing its
     target."""
     secret = tmp_path / "secret.md"
     secret.write_text("---\nlast_verified_at: 2020-01-01\n---\nsensitive\n")
@@ -221,7 +221,7 @@ def test_is_stale_file_skips_symlink(tmp_path):
 def test_is_stale_rejects_future_last_verified_at():
     """A far-future last_verified_at (a producer-controlled file trying to look
     eternally fresh) must NOT defeat the reuse guard — a beyond-skew-future basis
-    is treated as STALE so it gets re-fetched (Wild Bill MEDIUM)."""
+    is treated as STALE so it gets re-fetched."""
     from datetime import datetime, timezone
     now = datetime(2026, 6, 1, tzinfo=timezone.utc)
     entry = research.ResearchEntry(

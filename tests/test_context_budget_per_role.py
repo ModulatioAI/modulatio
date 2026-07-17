@@ -261,7 +261,7 @@ def test_08_instance_overrides_applied_when_no_per_call(orch, project):
     assert matched[-1]["resolved_budget_tokens"] == 20_000
 
 
-# ─── 9. Per-agent tier producer mapping (Nemo B4: tier-driven) ─────────────
+# ─── 9. Per-agent tier producer mapping (tier-driven) ──────────────────────
 
 
 def test_09_agent_tier_producer_mapping():
@@ -901,7 +901,7 @@ def test_36_project_code_path_traversal_rejected(tmp_path):
         )
 
 
-# ─── Nemo round-2: M1/M2/L1/L3 close-outs ────────────────────────────────
+# ─── audit-mode / agent_id / warn-dedup guards ───────────────────────────
 
 
 def test_37_audit_jsonl_is_mode_0600(project, orch):
@@ -917,7 +917,7 @@ def test_37_audit_jsonl_is_mode_0600(project, orch):
 
 def test_38_run_dispatch_emits_agent_id_role(orch, project):
     """Role-keyed _run dispatch must populate agent_id with the role
-    string, not leave it null. Nemo M2."""
+    string, not leave it null."""
     orch._run("drafter", "hi")
     rows = _ctx_rows(project)
     drafter_rows = [r for r in rows if r["runner_role"] == "drafter"]
@@ -930,7 +930,7 @@ def test_38_run_dispatch_emits_agent_id_role(orch, project):
 
 def test_39_unknown_role_warn_dedups_after_first(caplog, tmp_path):
     """First load of a Project with an unknown context_budgets key
-    emits WARNING; subsequent loads drop to DEBUG. Nemo L1."""
+    emits WARNING; subsequent loads drop to DEBUG."""
     import logging as _logging
     # Reset module-level dedup set so test is repeatable.
     from modulatio import types as _types
@@ -960,7 +960,7 @@ def test_39_unknown_role_warn_dedups_after_first(caplog, tmp_path):
 
 def test_40_missing_run_id_audit_warn_once(caplog, tmp_path):
     """dispatch_context binding with audit_path set but run_id=None
-    emits a once-per-project WARNING. Nemo L3."""
+    emits a once-per-project WARNING."""
     import logging as _logging
     from modulatio import context_budget as _cb
     _cb._WARNED_MISSING_RUN_ID.clear()
@@ -983,11 +983,11 @@ def test_40_missing_run_id_audit_warn_once(caplog, tmp_path):
     assert len(warns) == 1, f"expected 1 WARN, got {len(warns)}"
 
 
-# ─── Lovecraft round-3: M1/M2/M3 close-outs ──────────────────────────────
+# ─── producer-agnostic bucketing + WARN-gate guards ──────────────────────
 
 
 def test_41_any_producer_role_buckets_to_producer_silently():
-    """Producer-agnostic (cadre agnostic audit): there is NO canonical
+    """Producer-agnostic: there is NO canonical
     producer-role allowlist. ANY non-core role — a first-party alias OR a
     project-specific custom name — buckets to the 'producer' budget pool with NO
     warning. (The old "unknown runner role" warn + the hardcoded
@@ -1004,7 +1004,7 @@ def test_41_any_producer_role_buckets_to_producer_silently():
 
 def test_42_unbound_gate_fire_warns_once(caplog):
     """Gate firing without a dispatch_context binding emits one
-    process-level WARN. Lovecraft M2."""
+    process-level WARN."""
     import logging as _logging
     cb._WARNED_UNBOUND_GATE_FIRE.clear()
     caplog.set_level(_logging.WARNING, logger="modulatio.context_budget")
@@ -1036,7 +1036,7 @@ def test_42_unbound_gate_fire_warns_once(caplog):
 def test_43_user_override_above_warn_threshold_logs_warning(caplog):
     """resolve_for_dispatch WARNs when user_override exceeds 48K
     so daemon/programmatic callers get the CLI's WARN-threshold
-    discipline too. Lovecraft M3."""
+    discipline too."""
     import logging as _logging
     caplog.set_level(_logging.WARNING, logger="modulatio.context_budget")
     res = cb.resolve_for_dispatch(
@@ -1075,7 +1075,7 @@ def test_44_user_override_under_warn_threshold_silent(caplog):
 
 
 def test_run_tolerates_renamed_planner_role(project):
-    """F1-1 (producer-agnostic robustness, cadre audit): a renamed planner-class
+    """Producer-agnostic robustness: a renamed planner-class
     role with no wired runner falls back to the leader runner — not a KeyError.
     An unrelated unconfigured role still fails closed (the guard is scoped to
     planner-class roles)."""

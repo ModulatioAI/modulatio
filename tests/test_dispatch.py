@@ -1408,7 +1408,7 @@ def test_schedule_wave_allocates_independent_tasks_to_distinct_agents():
 
 
 def test_schedule_wave_defers_when_one_cheapest_agent_overloaded():
-    """Nemo's hazard: 3 ready tasks all fit the SAME cheapest specialist
+    """Hazard: 3 ready tasks all fit the SAME cheapest specialist
     (cap=1). One is scheduled; the other two are DEFERRED_CAPACITY — NOT
     assigned to the same agent (which would silently serialize), and NOT
     a roster gap."""

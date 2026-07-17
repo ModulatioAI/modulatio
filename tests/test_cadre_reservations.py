@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Remediation of the MiniMax cadre LOW reservations.
+"""Low-severity hardening regressions for locking and attachments.
 
 - R1: the heartbeat cross-process claim-lock keeps its depth/fd in a
   ``threading.local`` (parity with cron) — nested acquisitions on the same

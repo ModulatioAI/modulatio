@@ -109,7 +109,7 @@ def test_converse_bails_when_abort_event_set_mid_loop(project: Project):
 
 
 def test_interrupted_turn_is_marked_in_durable_thread(project: Project):
-    """Jenny F1 WIRING: an interrupted turn must be DISTINGUISHABLE from a real
+    """An interrupted turn must be DISTINGUISHABLE from a real
     Leader reply in the durable jsonl. converse identity-compares the public
     sentinel and writes ``interrupted: true`` on that turn, so a future reader
     (an undo, a goal-evidence filter, a TUI 'interrupted' affordance) isn't left

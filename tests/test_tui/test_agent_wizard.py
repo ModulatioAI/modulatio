@@ -10,8 +10,7 @@ agent id/path). Static parses markup via ``Text.from_markup``, which raises
 wraps every dynamic value in ``rich.markup.escape`` (the established TUI
 convention; see ``model_wizard``).
 
-Ledger: 2026-06-14 Cowboy-Opus-0.9.0-preship —
-agent_wizard.py:140/143/147 (MEDIUM/product-agnostic).
+Covers agent_wizard.py:140/143/147 (MEDIUM/product-agnostic).
 """
 
 from __future__ import annotations

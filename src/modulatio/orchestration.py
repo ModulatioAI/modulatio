@@ -13784,8 +13784,8 @@ class Orchestrator:
                 # Zero completed on the refreshed budget — settle terminal with a
                 # reservation. Without this the goal strands IN_PROGRESS forever
                 # AND the already-RESOLVED ticket is orphaned (no lane reprocesses
-                # it), silently killing the budget-refresh recovery path (Opus R2
-                # H1 sibling). The settle + PQR reservation is the surfacing, so
+                # it), silently killing the budget-refresh recovery path (zero-completed
+                # sibling case). The settle + PQR reservation is the surfacing, so
                 # the RESOLVED ticket is correctly terminal.
                 self._settle_zero_completed(
                     goal, summary,

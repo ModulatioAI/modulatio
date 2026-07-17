@@ -3,7 +3,7 @@
 """Operator permissions + autonomy modes — the §6 binding invariants.
 
 Each test maps to a sealed seam in
-``docs/design/operator-permissions-and-autonomy.md`` (Nemo design sign-off):
+``docs/design/operator-permissions-and-autonomy.md``:
 §6.A substrate, §6.B typed keys, §6.C fail-closed, §6.D/E write authority,
 §6.F /goal orthogonality.
 """
@@ -206,7 +206,7 @@ def test_broker_goal_still_asks_capabilities():
 
 
 def test_broker_yolo_cannot_auto_run_shell_without_sandbox():
-    """§6.A (Nemo r1 Blocker A): the substrate is the HULL. run_shell
+    """§6.A: the substrate is the HULL. run_shell
     (requires_sandbox) on a host with no live sandbox is DENIED outright — not
     auto-granted, and not even surfaced as a grantable ask. Only an out-of-band
     unsafe posture overrides."""
@@ -334,7 +334,7 @@ def test_run_llm_with_tools_broker_yolo_allows(tmp_path):
     assert "RAN_OK" in results[0]
 
 
-# ── Nemo code-review r1 remediations ────────────────────────────────────────
+# ── substrate-gating remediations ────────────────────────────────────────────
 @pytest.mark.parametrize("answer", [
     Decision.ALLOW_ONCE, Decision.ALLOW_SESSION, Decision.ALLOW_ALWAYS,
     "once", "session", "always",

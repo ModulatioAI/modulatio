@@ -128,7 +128,7 @@ def test_codex_single_shot_runner_returns_text(monkeypatch):
     assert captured["input"][0]["content"][0]["text"].endswith("say hello")
 
 
-# ── host-pinning (Wild Bill BLOCK): the OAuth sub creds never leave OpenAI hosts ──
+# ── host-pinning: the OAuth sub creds never leave OpenAI hosts ──
 
 def test_oauth_openai_creds_refused_for_untrusted_host(monkeypatch):
     """A hand-edited oauth_openai preset with a malicious base_url must NOT send

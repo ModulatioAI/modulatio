@@ -1,9 +1,9 @@
 """Tests for the #100 deterministic code + media assembly oracles.
 
-The governing rule (Nemo hull): an oracle proves the composite CONTAINS the
+The governing rule: an oracle proves the composite CONTAINS the
 declared units, not just its SHAPE. Cheap PASS only where containment is provably
 attainable (code wiring; lossless bundle); honest fall-back elsewhere (av/image).
-Plus the delegated-oracle seam (Hero R1): metered oracles authorize before they
+Plus the delegated-oracle seam: metered oracles authorize before they
 spend, and a PASS records its oracle provenance.
 """
 
@@ -61,7 +61,7 @@ def test_code_happy_path_passes(tmp_path):
 
 
 def test_code_empty_entrypoint_falls_back(tmp_path):
-    """Nemo #4: a path-present but empty entrypoint is not 'an app here'."""
+    """A path-present but empty entrypoint is not 'an app here'."""
     rec = _code_record({"main.py": "   \n  \n"}, entrypoint="main.py", root=tmp_path)
     ok, reason, oracle = av.validate_code_assembly(rec, _task(), tmp_path)
     assert not ok and "empty" in reason and oracle == ""
@@ -110,7 +110,7 @@ def test_code_nonpython_unit_falls_back(tmp_path):
 
 
 def test_code_saas_imports_are_not_a_failure(tmp_path):
-    """Nemo #5: an app USING the user's keys/SDKs imports external packages NOT in
+    """An app USING the user's keys/SDKs imports external packages NOT in
     the set. That is the app using the tool, never a wiring hole."""
     rec = _code_record(
         {
@@ -167,7 +167,7 @@ def test_code_absolute_local_namespace_present_passes(tmp_path):
 
 
 def test_code_from_dot_import_absent_member_falls_back(tmp_path):
-    """Nemo code #1: `from . import missing` (no-module relative) where the member
+    """`from . import missing` (no-module relative) where the member
     is absent must NOT cheap-PASS."""
     rec = _code_record(
         {
@@ -195,7 +195,7 @@ def test_code_from_dot_import_present_submodule_passes(tmp_path):
 
 
 def test_code_from_localpkg_import_absent_member_falls_back(tmp_path):
-    """Nemo code #2: `from app import missing` where app is a local package but the
+    """`from app import missing` where app is a local package but the
     member is absent must NOT cheap-PASS (the imported name was unchecked before)."""
     rec = _code_record(
         {
@@ -223,7 +223,7 @@ def test_code_from_localpkg_import_init_attribute_passes(tmp_path):
 
 
 def test_code_import_only_entrypoint_falls_back(tmp_path):
-    """Nemo code #3: an import-only entrypoint is dependency wiring, not 'an app
+    """An import-only entrypoint is dependency wiring, not 'an app
     here' → must NOT cheap-PASS."""
     rec = _code_record(
         {"main.py": "import stripe\nimport openai\n"},
@@ -266,7 +266,7 @@ def test_bundle_happy_path_passes(tmp_path):
 
 
 def test_bundle_wrong_members_falls_back(tmp_path):
-    """Nemo #1: same count, non-empty, but bogus member names → must NOT pass."""
+    """Same count, non-empty, but bogus member names → must NOT pass."""
     rec = _bundle_record(
         {"a.png": b"AAA", "b.csv": b"BBB"},
         zip_members={"x.bin": b"AAA", "y.bin": b"BBB"},
@@ -277,7 +277,7 @@ def test_bundle_wrong_members_falls_back(tmp_path):
 
 
 def test_bundle_member_bytes_differ_falls_back(tmp_path):
-    """Nemo #1: right names, wrong bytes → caught (CRC pre-screen here)."""
+    """Right names, wrong bytes → caught (CRC pre-screen here)."""
     rec = _bundle_record(
         {"a.png": b"AAA", "b.csv": b"BBB"},
         zip_members={"a.png": b"AAA", "b.csv": b"TAMPERED"},
@@ -302,7 +302,7 @@ def _crc_collision() -> "tuple[bytes, bytes]":
 
 
 def test_bundle_byte_check_is_load_bearing(tmp_path):
-    """Hero m1: the PASS must rest on BYTE equality, not the 32-bit CRC. With a real
+    """The PASS must rest on BYTE equality, not the 32-bit CRC. With a real
     CRC-32 COLLISION the pre-screen passes (equal CRCs) yet the bytes differ — only
     the byte comparison can catch it, proving it is the spec and CRC only a pre-screen."""
     s1, s2 = _crc_collision()
@@ -349,7 +349,7 @@ def test_bundle_missing_output_falls_back(tmp_path):
     assert not ok and "missing on disk" in reason
 
 
-# ── av / image always fall back this cut (Nemo #2/#3) ─────────────────────────
+# ── av / image always fall back this cut ──────────────────────────────────────
 
 
 def test_video_always_falls_back(tmp_path):
@@ -374,7 +374,7 @@ def test_image_always_falls_back(tmp_path):
     assert not ok and oracle == ""
 
 
-# ── R1a: the delegated-oracle authorize × fallback matrix (Hero's hunt) ───────
+# ── the delegated-oracle authorize × fallback matrix ──────────────────────────
 
 
 class _Auth:
@@ -405,7 +405,7 @@ def test_run_oracle_metered_allowed_runs():
 
 
 def test_run_oracle_metered_denied_falls_back_to_local():
-    """Hero f1: deny → fall back to free-local, but the deny context RIDES in reason
+    """Deny → fall back to free-local, but the deny context RIDES in reason
     even on the fallback PASS (a misconfigured authorizer must not look clean)."""
     ok, reason, oracle = run_oracle(
         _pass_oracle(), authorize=lambda: _Auth(False, "no budget"),
@@ -425,11 +425,11 @@ def test_run_oracle_metered_denied_no_fallback_is_full_review():
 def test_run_oracle_metered_no_authorizer_falls_back():
     ok, reason, oracle = run_oracle(_pass_oracle(), fallback=_local_pass())
     assert ok and oracle == "stdlib-zipfile-bytes"
-    assert "no authorizer" in reason  # Hero f1: the witness is carried on the PASS
+    assert "no authorizer" in reason  # the witness is carried on the PASS
 
 
 def test_run_oracle_authorizer_crash_falls_back_total(caplog):
-    """Hero f1: an authorizer CRASH falls back AND is logged AND the crash rides in
+    """An authorizer CRASH falls back AND is logged AND the crash rides in
     reason — a down comptroller is never silently business-as-usual."""
     def _boom():
         raise RuntimeError("comptroller down")
@@ -450,7 +450,7 @@ def test_run_oracle_authorizer_crash_no_fallback_is_full_review():
 
 
 def test_run_oracle_is_total_when_check_raises():
-    """Nemo #6: a crashing oracle degrades to (False, reason, "") — never throws."""
+    """A crashing oracle degrades to (False, reason, "") — never throws."""
     bad = Oracle(name="x", cost_class=FREE_LOCAL,
                  run=lambda: (_ for _ in ()).throw(ValueError("kaboom")))
     ok, reason, oracle = run_oracle(bad)
@@ -458,7 +458,7 @@ def test_run_oracle_is_total_when_check_raises():
 
 
 def test_validate_media_metered_denied_carries_note_through_validator(tmp_path):
-    """Hero f1 end-to-end at the validator: a denied metered oracle falls back to the
+    """Deny-fallback end-to-end at the validator: a denied metered oracle falls back to the
     real free-local bundle oracle, which PASSES, and the deny note rides in reason so
     verify_assembly threads it into the verify mark."""
     rec = _bundle_record({"a.png": b"AAA", "b.csv": b"BBB"}, root=tmp_path)
@@ -473,7 +473,7 @@ def test_validate_media_metered_denied_carries_note_through_validator(tmp_path):
 
 
 def test_norm_normalizer_is_single_canonical_helper():
-    """Hero m2: the assembler and the validator MUST share one normalizer — no
+    """The assembler and the validator MUST share one normalizer — no
     byte-identical twin to drift apart (would silently skew bundle member names)."""
     from modulatio import assembly, review_ledger
 

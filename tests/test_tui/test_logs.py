@@ -104,7 +104,7 @@ async def test_send_opens_review_modal(tui_logs):
 async def test_send_modal_headless_copies_link_and_stays_exitable(tui_logs, monkeypatch):
     """Headless / no browser: Report on GitHub copies the issue link, spells out
     the email + exit in the status, and the modal stays dismissable (the old
-    Nemo-M2 'stranded worker' failure mode is gone — no worker, no network)."""
+    'stranded worker' failure mode is gone — no worker, no network)."""
     from modulatio import bug_report, clipboard
     monkeypatch.setattr(
         bug_report, "open_issue",

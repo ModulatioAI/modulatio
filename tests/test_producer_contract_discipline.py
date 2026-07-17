@@ -24,7 +24,7 @@ def test_producer_contract_carries_on_contract_discipline():
 
 
 def test_drafter_execute_constant_carries_the_discipline():
-    """Jenny finding 4: the seed file is the source of truth, but the producer is
+    """The seed file is the source of truth, but the producer is
     formatted from the in-code constant — lock the discipline in the CONSTANT too, so
     a drift that strips it there can't pass while the seed keeps the phrases."""
     from modulatio import orchestration

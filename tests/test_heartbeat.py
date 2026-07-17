@@ -527,7 +527,7 @@ def test_claim_is_cross_process_exclusive(tmp_path):
 
 
 # ═══ fold: test_heartbeat_r2_audit.py ═══
-# Round-2 audit regressions for heartbeat (Cowboy Opus full-debug r2).
+# Round-2 audit regressions for heartbeat.
 #
 # Two MEDIUM defects fixed in src/modulatio/heartbeat.py:
 #

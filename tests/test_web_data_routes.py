@@ -289,7 +289,7 @@ def test_artifact_preview_refuses_symlink_out_of_artifact_roots(client):
 
 
 def test_artifact_preview_refuses_symlinked_artifact_root(client, tmp_path):
-    """WB-R2: the artifact ROOT itself must not be a trusted symlink. If
+    """The artifact ROOT itself must not be a trusted symlink. If
     `artifacts/` is replaced by a symlink to an outside dir, its resolved
     target must NOT become an authorized root."""
     proj = vault.project_dir("web")

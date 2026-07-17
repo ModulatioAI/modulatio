@@ -231,7 +231,7 @@ def _set_budget(project_vault: Path, *, paid: int | None = None, premium: int | 
 
 def test_metered_unknown_cost_class_denied(project_vault):
     """Unlike agent escalation (degrades open), a metered tool with an
-    unknown/missing cost_class fails CLOSED (Nemo #7)."""
+    unknown/missing cost_class fails CLOSED."""
     for cc in (None, "free-local", "bogus"):
         auth = comptroller.authorize_metered_tool(
             PROJECT_CODE, cc, "render", "T-1", "key1", "agent-1")
@@ -240,7 +240,7 @@ def test_metered_unknown_cost_class_denied(project_vault):
 
 def test_metered_missing_budget_denied(project_vault):
     """A metered tier with NO declared budget is NOT unlimited — fail closed,
-    explicit opt-in required (Nemo #7)."""
+    explicit opt-in required."""
     _set_budget(project_vault)  # no caps declared
     auth = comptroller.authorize_metered_tool(
         PROJECT_CODE, "paid-cloud", "render", "T-1", "key1", "agent-1")
@@ -294,7 +294,7 @@ def test_metered_daily_cap_denies(project_vault):
 
 
 def test_metered_idempotency_is_per_task_not_global(project_vault):
-    """Nemo B4 #1: a DIFFERENT task with the same idempotency key is a SEPARATE
+    """A DIFFERENT task with the same idempotency key is a SEPARATE
     chargeable spend — it must not ride the first task's authorization free past
     the daily cap. Only a same-task replay of the identical key is free."""
     _set_budget(project_vault, paid=1)

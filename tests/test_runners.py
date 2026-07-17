@@ -318,7 +318,7 @@ def _pooled_preset(env_var, pool):
 
 def _setup_pool(tmp_path, monkeypatch, *, pool, keys, preset_key="pooled"):
     """Mock a pooled preset + env keys + litellm.completion, returning the
-    captured-api_key list. Exercises the REAL runner-call seam (Nemo, hull)."""
+    captured-api_key list. Exercises the REAL runner-call seam."""
     import litellm
 
     from modulatio import provider_keys, runners
@@ -339,7 +339,7 @@ def _setup_pool(tmp_path, monkeypatch, *, pool, keys, preset_key="pooled"):
 
 
 def test_pooled_runner_rotates_per_call(tmp_path, monkeypatch):
-    """THE real seam Nemo flagged: ONE constructed runner, called repeatedly,
+    """THE real seam: ONE constructed runner, called repeatedly,
     rotates the actual completion api_key across the pool — not just the
     resolver in isolation."""
     import litellm
@@ -374,7 +374,7 @@ def test_non_pooled_runner_uses_a_single_key(tmp_path, monkeypatch):
 
 
 def test_pooled_chat_runner_rotates_per_call(tmp_path, monkeypatch):
-    """The tool-loop path rotates per call too (Nemo's required chat-seam test)."""
+    """The tool-loop path rotates per call too (the chat-seam counterpart)."""
     import litellm
 
     from modulatio.runners import litellm_chat_runner
@@ -391,7 +391,7 @@ def test_pooled_chat_runner_rotates_per_call(tmp_path, monkeypatch):
 
 def test_dangling_preset_reference_warns(monkeypatch, caplog):
     """An agent pointing at a REMOVED preset (a bare slug not in the registry)
-    gets a clear warning, not a cryptic LiteLLM failure (Nemo, hull)."""
+    gets a clear warning, not a cryptic LiteLLM failure."""
     import logging
 
     from modulatio.runners import _warn_if_dangling_preset
@@ -476,7 +476,7 @@ def test_pool_429_failover_retries_with_the_next_key(tmp_path, monkeypatch):
 
 
 def test_pooled_model_refuses_to_borrow_a_pinned_base_key(tmp_path, monkeypatch):
-    """The metering keel (Nemo, hull): if every key in a provider's pool is
+    """The metering keel: if every key in a provider's pool is
     pinned — including the BASE key — a pooled model must NOT dispatch with the
     pinned base key. It raises a clear needs-setup error instead of borrowing
     the key that was pinned for isolated metering."""
@@ -899,8 +899,8 @@ def test_litellm_runner_bounds_the_codex_stream_read_with_timeout(monkeypatch):
 
 
 def test_codex_CHAT_runner_bounds_the_stream_with_timeout(monkeypatch):
-    """cadre MED (Wild Bill): the Codex CHAT-loop path (tool-using producer /
-    converse) must bound its stream-consume loop too — Op B's single-shot fix did
+    """The Codex CHAT-loop path (tool-using producer /
+    converse) must bound its stream-consume loop too — the single-shot fix did
     NOT cover ``_build_codex_chat_runner``, so a trickling converse/tool-loop
     stream could still wedge. The chat runner must thread its watchdog timeout into
     ``chat_response_from_codex_stream`` (the loop-level deadline), beside the
@@ -1087,7 +1087,7 @@ def test_build_chat_runners_warns_on_unquietable_producer_seat(
 
 
 def test_thinking_toggle_matches_token_boundaries_not_substrings():
-    """WB cadre MED: 'notqwen-model' must not read as Qwen — the family must
+    """'notqwen-model' must not read as Qwen — the family must
     start the id or follow a separator. A genuine derivative ('my-qwen-
     distill') still matches."""
     from modulatio.runners import _thinking_toggle_for
@@ -1103,7 +1103,7 @@ def test_thinking_toggle_matches_token_boundaries_not_substrings():
 def test_build_chat_runners_unquietable_warning_fires_once_per_seat(
     monkeypatch, caplog, tmp_path,
 ):
-    """WB cadre LOW: repeated runner builds in a long-lived process must not
+    """Repeated runner builds in a long-lived process must not
     re-warn the same seat — once per (project, agent, model)."""
     import logging
 

@@ -411,7 +411,7 @@ def test_document_framing_cannot_exceed_total_cap(tmp_path, monkeypatch):
     assert r.content == "unit"
 
 
-# ── Nemo hull review fixes (2026-06-04) ───────────────────────────────────
+# ── Assembly input-validation / tool-resolution hardening ─────────────────
 
 
 def test_document_separator_over_cap_returns_empty(tmp_path, monkeypatch):
@@ -446,7 +446,7 @@ def test_csv_row_arity_mismatch_is_error(tmp_path):
 
 
 def test_safe_unit_path_rejects_control_chars(tmp_path):
-    """Nemo B4 #5: a unit name with a newline/NUL is rejected (it could inject a
+    """A unit name with a newline/NUL is rejected (it could inject a
     `file '...'` directive into ffmpeg's line-oriented concat list)."""
     assert assembly._safe_unit_path("a\nb.mp4", tmp_path) is None
     assert assembly._safe_unit_path("a\rb.mp4", tmp_path) is None
@@ -534,14 +534,14 @@ def test_resolve_tool_found_in_search_dir_when_off_path(monkeypatch):
 
 
 def test_resolve_tool_rejects_relative_override(monkeypatch, tmp_path):
-    """Nemo hull #6: a RELATIVE override is rejected (would re-introduce cwd
+    """A RELATIVE override is rejected (would re-introduce cwd
     dependence) — a set-but-unusable override is a HARD STOP, not a fall-through."""
     monkeypatch.setenv("MODULATIO_MY_TOOL_PATH", "./mytool")  # relative
     assert assembly.resolve_tool("my-tool") is None
 
 
 def test_resolve_tool_curated_dirs_before_path(monkeypatch, tmp_path):
-    """Nemo hull #7: curated absolute dirs are checked BEFORE PATH, so a
+    """Curated absolute dirs are checked BEFORE PATH, so a
     contaminated PATH cannot shadow a real system binary. A fake 'sh' planted on a
     PATH dir must NOT win over /bin/sh."""
     evil = tmp_path / "evil"
@@ -698,7 +698,7 @@ def test_continuity_leading_number_form():
 
 
 def test_continuity_mixed_labels_is_noop():
-    """Nemo follow-up: a heterogeneous label set is not one sequence — leave it untouched
+    """A heterogeneous label set is not one sequence — leave it untouched
     rather than renumber Story/Chapter/Section into a fake run."""
     hs = ["Story 1: A", "Chapter 7: B", "Section 3: C"]
     out, changed = assembly.continuity_headings(hs, "document")
@@ -967,7 +967,7 @@ def test_deep_first_heading_beyond_scan_range_is_kept(tmp_path):
 
 
 def test_business_prose_mentioning_markers_is_not_stripped(tmp_path):
-    """Wild Bill MEDIUM (code review 2026-07-02): substring matching deleted a
+    """Substring matching deleted a
     legitimate executive summary that used "Operation:" and "Definition of
     Done:" as business terms mid-sentence. The predicate must require
     runbook-SHAPED marker lines (line-leading, optionally bolded), not mere
@@ -990,8 +990,7 @@ def test_business_prose_mentioning_markers_is_not_stripped(tmp_path):
 def test_line_leading_runbook_block_is_still_stripped(tmp_path):
     """A PLAIN (unbolded, no chatter) line-leading Operation/DoD pair must
     still strip. The bolded-plus-chatter live shape is pinned by
-    test_strips_runbook_preamble_before_first_heading above (Wild Bill
-    close-out polish note: docstring now matches what the body covers)."""
+    test_strips_runbook_preamble_before_first_heading above."""
     plain = (
         "Operation: Produce Research Note\n"
         "Definition of Done: A concise note.\n\n"
@@ -1171,7 +1170,7 @@ def test_csv_dedupe_key_is_unambiguous_serialization():
 
 
 # ═══ fold: test_assembly_r2_audit.py ═══
-# Regression tests for the Cowboy/Opus round-2 full-debug findings scoped to
+# Regression tests for full-debug findings scoped to
 # ``src/modulatio/assembly.py``:
 #
 #   * MEDIUM/race — csv.field_size_limit save/restore races across concurrent wave

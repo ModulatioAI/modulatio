@@ -1080,7 +1080,7 @@ async def test_team_stream_drops_wave_marker_on_concurrency_rise(project_with_ro
 
 
 async def test_wave_marker_fires_once_even_as_wave_grows(project_with_roster):
-    """Nemo B1 #3: the marker fires once on the rise THROUGH ≥2 — NOT again when a
+    """The marker fires once on the rise THROUGH ≥2 — NOT again when a
     live wave grows 2 → 3 producers."""
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.widgets.stream_view import StreamView
@@ -1153,7 +1153,7 @@ async def test_f8_clears_team_tv_but_not_leader_chat(project_with_roster):
 
 async def test_tickets_lamp_clears_on_opening_tickets_tab(project_with_roster):
     """Opening the TICKETS tab clears the tickets attention blink (you've gone
-    to read them) — symmetry with the leader lamp (Nemo cadre seam)."""
+    to read them) — symmetry with the leader lamp."""
     from textual.widgets import TabbedContent
 
     from modulatio.tui.app import ModulatioApp
@@ -1173,7 +1173,7 @@ async def test_tickets_lamp_clears_on_opening_tickets_tab(project_with_roster):
         assert "tickets" not in row._attention
 
 
-# ─── Transactional launch + trailing /end (Wild Bill cadre BLOCK, 2026-06-24) ─
+# ─── Transactional launch + trailing /end ────────────────────────────────────
 
 
 async def test_rejected_launch_keeps_capture_and_reports_in_chat(project_with_roster):
@@ -1629,7 +1629,7 @@ async def test_qc_joins_the_floor_while_reviewing(project_with_roster):
 async def test_late_team_events_cannot_reanimate_the_idle_rail(
     project_with_roster,
 ):
-    """Wild Bill BLOCK #1 (gauges arc): a straggler team event arriving AFTER
+    """A straggler team event arriving AFTER
     kickoff_ended must not repopulate the floor verbs, move the counters, or
     flip the rail back to running."""
     from textual.widgets import Static
@@ -1665,7 +1665,7 @@ async def test_late_team_events_cannot_reanimate_the_idle_rail(
 
 
 def test_tally_audit_recovers_from_truncation(tmp_path):
-    """Wild Bill BLOCK #2b: a shrunk (rotated/rewritten) audit file must not
+    """A shrunk (rotated/rewritten) audit file must not
     wedge the offset — the new stream's rows still count."""
     import json
 
@@ -1692,7 +1692,7 @@ def test_tally_audit_recovers_from_truncation(tmp_path):
 
 
 def test_tally_audit_bounds_the_per_tick_read(tmp_path, monkeypatch):
-    """Wild Bill BLOCK #2a: the 1s tick must never slurp an unbounded
+    """The 1s tick must never slurp an unbounded
     remainder — reads are capped, and a cap-sized line with no newline is
     skipped instead of rereading forever."""
     import json

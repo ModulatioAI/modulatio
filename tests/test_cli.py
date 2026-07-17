@@ -4,7 +4,7 @@ The CLI scaffolds a project + seeds a net-new roster from the --*-model flags,
 then sources its runtime runners from the ROSTER (build_role_runners) — the single
 source of every seat's model, same as TUI/daemon/ACP. The --leader-model flag is a
 net-new SEED; on an existing project the roster is authoritative (no second source
-that could split the Leader across lanes — cadre HIGH).
+that could split the Leader across lanes).
 """
 
 from __future__ import annotations
@@ -284,7 +284,7 @@ def test_project_list_marks_current_default(tmp_path, monkeypatch):
 
 
 def test_kickoff_existing_project_team_lane_is_roster_sourced(tmp_path, monkeypatch):
-    """cadre HIGH (Wild Bill): CLI kickoff on an EXISTING project sources the
+    """CLI kickoff on an EXISTING project sources the
     team/decompose Leader runner from the ROSTER (build_role_runners), NOT the
     --leader-model flag — so the Leader can't run one model on the team lane and
     another on the chat/verify lane. A --leader-model that disagrees with the

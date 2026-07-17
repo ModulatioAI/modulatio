@@ -149,7 +149,7 @@ def test_garbage_response_fails_open_to_no_split(make_orch):
 
 
 def test_planner_path_collision_with_chunk_path_fails_closed(make_orch):
-    """Jenny LOW #2: a planner-emitted output_path that collides with an
+    """A planner-emitted output_path that collides with an
     engine-derived chunk path must fail closed at plan time, before task
     creation — never a silent clobber, never a blocked wave later."""
     orch = make_orch(lambda p: _split_reply("A", "B"))
@@ -201,7 +201,7 @@ def test_cap_follows_the_tasks_own_budget_role(make_orch):
 
 
 def test_chunk_count_is_logged_prominently(make_orch, caplog):
-    """Wild Bill F2 condition: the engine never gates on chunk count, but the
+    """The engine never gates on chunk count, but the
     count must be prominent enough to diagnose a degenerate split-stage model
     at a glance."""
     orch = make_orch(lambda p: _split_reply("A", "B", "C", "D"))
@@ -212,7 +212,7 @@ def test_chunk_count_is_logged_prominently(make_orch, caplog):
 
 
 def test_sugared_duplicate_path_cannot_bypass_the_invariant(make_orch):
-    """Wild Bill BLOCK (code review 2026-07-02): the invariant compared RAW
+    """Regression: the invariant compared RAW
     strings, but _validate_output_path later strips one leading "artifacts/"
     — so "artifacts/drafts/<chunk>.md" slipped past the comparison and
     canonicalized into a collision at task creation. Paths must be normalized
@@ -245,7 +245,7 @@ def test_dot_slash_sugar_cannot_bypass_the_invariant(make_orch, sugar):
         orch._split_oversized_gathers(data)
 
 
-# ── end-to-end wiring through _plan_tasks (Nemo MEDIUM, code review) ─────────
+# ── end-to-end wiring through _plan_tasks ────────────────────────────────────
 # Unit tests prove the part, not the wiring: nothing above drives
 # _plan_tasks → _bind_wide_artifacts → _split_oversized_gathers → artifacts
 # expansion → _validate_output_path → dep multiplication. These do, so a

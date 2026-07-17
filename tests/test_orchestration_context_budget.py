@@ -478,8 +478,8 @@ def test_run_chat_loop_confines_producer_seat_not_leader(project_with_run, monke
     monkeypatch.setattr(_runners_mod, "run_llm_with_tools", fake_run_llm_with_tools)
     orch = _make_orchestrator(project_with_run)
     orch.chat_runner = lambda *a, **k: None
-    # Per-agent wiring (the leader no longer falls back to the shared default —
-    # cadre HIGH): both seats resolve their own chat runner.
+    # Per-agent wiring (the leader no longer falls back to the shared
+    # default): both seats resolve their own chat runner.
     orch.chat_runners = {"writer": orch.chat_runner, "leader": orch.chat_runner}
     orch.chat_runner_models = {"writer": "m", "leader": "m"}
 
@@ -530,7 +530,7 @@ def test_run_chat_loop_overflow_blocks_task_with_recoverable_error(
     """F11 + F12 end-to-end: a context-budget overflow inside the
     actual ``_run_chat_loop`` path (not just direct check_and_compress
     calls) must surface as a BLOCKED task with a CRITICAL ticket.
-    Wild Bill's Round 2 ask: prove the gate fires through the
+    Proves the gate fires through the
     real production path, not just that ContextVars are bound.
 
     Stub the chat runner to never tool-call but build a prompt big
@@ -798,7 +798,7 @@ def test_decompose_child_spent_budget_runs_zero_producer_attempts(
 def test_decompose_children_share_parent_remaining_not_multiply(
     project_with_run, monkeypatch, tmp_path
 ):
-    """M1 (Nemo hull): a PARTIAL-remaining split must SHARE the parent's remaining
+    """M1: a PARTIAL-remaining split must SHARE the parent's remaining
     budget, not hand each child a fresh copy. Spinning up a child on a subtask is
     ONE try against the task-bound budget, so a parent with 1 try left split into
     2 children runs exactly ONE producer attempt total (the 2nd child → QC-as-fixer)
@@ -1014,7 +1014,7 @@ def test_manifest_from_deps_includes_fallback_path_units(project_with_run):
 
 
 def test_apply_assembly_manifest_joins_fallback_path_units(project_with_run):
-    """Wild Bill BLOCK #1 (assembler arc 2026-07-03): the manifest builder
+    """The manifest builder
     resolved fallback units but the _apply_assembly_manifest allowlist still
     filtered them before the join — the content defect survived half-fixed.
     Every authoritative dep-output consumer shares ONE resolver."""

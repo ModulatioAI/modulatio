@@ -58,7 +58,7 @@ def test_export_creates_file_with_all_sections(tmp_path):
 def test_export_default_strips_secrets(tmp_path):
     """Default behavior must strip secrets — share-safe by default.
 
-    Regression for audit Wave 2 finding F3 (Wild Bill review):
+    Regression for audit Wave 2 finding F3:
     docs claimed strip-by-default but the implementation defaulted to
     include. A user following docs could have shared a backup
     containing their .env + Telegram bot token. This test pins the

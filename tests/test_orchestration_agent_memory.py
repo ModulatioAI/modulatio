@@ -116,7 +116,7 @@ def test_isolated_worker_defers_the_write(orch, monkeypatch):
 
 
 def test_abandoned_task_records_the_episode(orch, monkeypatch):
-    """Jenny MED (arc cadre): ABANDONED is the fourth terminal status (a
+    """ABANDONED is the fourth terminal status (a
     Leader-iterate drop) — the producer still worked the task and remembers it."""
     t = _task()
     _run_with_stubbed_inner(orch, t, monkeypatch, end_status=TaskStatus.ABANDONED)
@@ -125,7 +125,7 @@ def test_abandoned_task_records_the_episode(orch, monkeypatch):
 
 
 def test_memory_write_failure_never_raises_or_changes_outcome(orch, monkeypatch):
-    """Wild Bill BLOCK #1 (arc cadre): the episodic side-channel is
+    """The episodic side-channel is
     best-effort — a failing memory disk must not crash the wrapper after the
     task already completed."""
     t = _task()

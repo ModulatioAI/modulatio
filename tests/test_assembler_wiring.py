@@ -1,7 +1,7 @@
 """Tests for the engine-bound assembler→units dependency wiring (Part A / A2).
 
 An assembler task's authoritative input set must come from the task graph, not the
-producer's manifest (Nemo). The engine wires an assembler task's depends_on to its
+producer's manifest. The engine wires an assembler task's depends_on to its
 sibling unit tasks in the goal so assembly QC has a trustworthy expected sequence.
 """
 
@@ -135,7 +135,7 @@ def test_select_assembler_skill_ignores_non_assembler():
 
 def test_select_canonicalizes_mixed_assembler_skills():
     """A code task whose planner emitted BOTH document- and code-assembly must
-    end with code-assembly FIRST (else strategy resolves to document). Nemo #4."""
+    end with code-assembly FIRST (else strategy resolves to document)."""
     from modulatio.orchestration import _assembly_strategy_for_task
     asm = _task("A1", skills=["document-assembly", "code-assembly"])
     asm.artifact_kind = "code"

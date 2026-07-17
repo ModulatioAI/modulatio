@@ -116,7 +116,7 @@ def test_absent_remediation_on_disappointed_defaults_to_safe_shape():
 
 @pytest.mark.parametrize("bad", ["", 0, False, {"x": 1}, [1, 2]])
 def test_present_but_malformed_target_task_ids_fails_closed(bad):
-    """Nemo finding: a PRESENT-but-malformed target_task_ids ("" / 0 / false / non-list
+    """A PRESENT-but-malformed target_task_ids ("" / 0 / false / non-list
     / list-of-non-strings) is an INVALID declaration — fail closed, never a silent
     rebind to the safe shape."""
     data = {
@@ -132,7 +132,7 @@ def test_present_but_malformed_target_task_ids_fails_closed(bad):
 
 
 def test_string_false_window_request_does_not_open_window():
-    """Nemo finding: bool("false") is True — a malformed string must NOT open the
+    """bool("false") is True — a malformed string must NOT open the
     operator window. Only a real JSON true requests it."""
     for wr in ("false", "true", 1, 0, "yes"):
         data = {
@@ -253,7 +253,7 @@ def test_window_proceed_is_honored(orch):
 
 
 def test_window_callback_error_is_not_reported_as_proceed(orch):
-    """M1 (Hero): a callback that RAISES proceeds (fail-safe) but must be reported as
+    """A callback that RAISES proceeds (fail-safe) but must be reported as
     callback_error — never as an operator 'proceed' that never happened (audit honesty)."""
     def boom(notice):
         raise RuntimeError("callback blew up")
@@ -265,7 +265,7 @@ def test_window_callback_error_is_not_reported_as_proceed(orch):
 
 
 def test_window_malformed_return_is_callback_error(orch):
-    """M1 (Hero): a non-WindowDecision return is callback_error, not a spurious proceed."""
+    """A non-WindowDecision return is callback_error, not a spurious proceed."""
     orch.operator_present = True
     orch.fix_window_callback = lambda n: "yes please"
     reason, decision = orch._await_fix_window(_notice())

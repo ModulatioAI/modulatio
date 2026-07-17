@@ -317,9 +317,9 @@ def artifact_preview(project: str, path: str = Query(...)) -> dict:
     proj = vault.project_dir(code).resolve()
     target = (proj / path).resolve()
     # The authorization boundary is the ARTIFACT ROOTS, never the project
-    # root (WB-1): a project-root file like permissions.json can pass the
+    # root: a project-root file like permissions.json can pass the
     # extension filter but is not an artifact. A root is trusted only if it
-    # is NOT a symlink AND resolves to stay under the project root (WB-R2):
+    # is NOT a symlink AND resolves to stay under the project root:
     # a symlinked `artifacts/` → outside dir must not become an authorized
     # root. Resolving the target too blocks a symlink INSIDE a root pointing
     # back out to a non-artifact.

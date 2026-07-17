@@ -367,12 +367,12 @@ def test_qc_token_budget_is_generously_above_producer():
     assert cb.EXPERIMENTAL_DEFAULTS["qc"] >= 2 * cb.EXPERIMENTAL_DEFAULTS["producer"]
 
 
-# ── Jenny F1: api_call targeting a free_tier service is not metered ────────
+# ── api_call targeting a free_tier service is not metered ──────────────────
 
 def test_api_call_to_free_service_skips_the_meter(project_with_run):
     """api_call is ONE metered tool over many services; its cost_class is
     fixed paid-cloud when any configured service is paid. A call TARGETING a
-    free_tier service must not be gated by the paid-cloud budget (Jenny F1).
+    free_tier service must not be gated by the paid-cloud budget.
     No budget is set here, so a metered call would be denied — the free
     target must authorize anyway."""
     services.add_service(Service(
@@ -398,12 +398,12 @@ def test_api_call_to_free_service_skips_the_meter(project_with_run):
     assert "free" in reason.lower()
 
 
-# ── Wild Bill F2 check: does the REAL qc chat-loop path get the qc cap? ─────
+# ── does the REAL qc chat-loop path get the qc cap? ─────────────────────────
 
 def test_qc_chat_loop_path_resolves_qc_budget_role(
     project_with_run, tmp_path, monkeypatch,
 ):
-    """Wild Bill F2 claims the QC _run_chat_loop call (role='qc', no explicit
+    """The QC _run_chat_loop call (role='qc', no explicit
     budget_role) leaves budget_role=None, so QC gets the producer cap not the
     5x. Drive the REAL path and spy on _metered_lane_cap: role='qc' must
     resolve to budget_role='qc' BEFORE the authorizer is built (the

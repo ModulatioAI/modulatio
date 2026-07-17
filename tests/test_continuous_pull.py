@@ -1,5 +1,5 @@
 """Continuous-pull dispatch (Phase 2) — drives the real `_run_task_waves`
-loop. 4-lens cadre-signed design: docs/design/2026-06-27-continuous-pull-dispatch.md.
+loop. Design: docs/design/2026-06-27-continuous-pull-dispatch.md.
 
 Tasks here are NO_CONSTRAINT (empty required_skills) so they run the legacy path
 without needing a roster — except the stall-guard test, which forces a never-

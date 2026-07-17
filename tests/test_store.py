@@ -119,7 +119,7 @@ def test_delete_ticket_removes_file(project: Path):
 
 def test_delete_ticket_rejects_path_traversal(project: Path, tmp_path: Path):
     """A crafted ticket_id with parent refs must NOT let delete_ticket unlink a
-    file outside tickets/ (Wild Bill BLOCK: '../../target' deleted vault-root
+    file outside tickets/ (a '../../target' id could delete vault-root
     siblings). The unsafe id is refused (returns False) and the outside file
     survives."""
     from uuid import uuid4
@@ -261,7 +261,7 @@ def test_task_roundtrip_and_filter(project: Path):
 
 
 def test_corrupt_task_file_does_not_brick_listing(project: Path):
-    """F1 (minimax): a single corrupt entity file must not take down the read
+    """A single corrupt entity file must not take down the read
     path for every *other* valid entity. Corrupt one task's YAML front-matter
     out of three; list_tasks must still return the two valid ones, get_task on
     the corrupt id degrades to None, and the bad file is quarantined."""
@@ -315,7 +315,7 @@ def test_corrupt_transitions_json_quarantined(project: Path):
     assert path.with_suffix(".broken.md").exists()
 
 
-# ── Cluster A: store-read resilience (Opus H5/H6 + MiniMax BOM/CRLF) ──────────
+# ── Cluster A: store-read resilience (decode errors + BOM/CRLF) ───────────────
 
 def _seed_tasks(*ids: str):
     from uuid import uuid4
@@ -328,7 +328,7 @@ def _seed_tasks(*ids: str):
 
 
 def test_binary_entity_file_does_not_brick_listing(project: Path):
-    """Opus H5: a binary / non-UTF-8 entity file raises UnicodeDecodeError from
+    """A binary / non-UTF-8 entity file raises UnicodeDecodeError from
     read_text. Because read_text is now INSIDE the parse try, it flows to
     quarantine instead of escaping and bricking the whole listing."""
     _seed_tasks("TST-T-A", "TST-T-C")
@@ -344,7 +344,7 @@ def test_binary_entity_file_does_not_brick_listing(project: Path):
 
 @pytest.mark.parametrize("frontmatter", ["- a\n- b", "just a scalar string", "42"])
 def test_non_dict_frontmatter_quarantined_not_bricked(project: Path, frontmatter: str):
-    """Opus H6: valid YAML but non-dict frontmatter (list/scalar) would raise
+    """Valid YAML but non-dict frontmatter (list/scalar) would raise
     TypeError on the {**meta} spread. _split_frontmatter now coerces it to a
     legible ValueError, and TypeError is in _PARSE_ERRORS as a belt — either
     way the file quarantines instead of bricking the listing."""
@@ -359,7 +359,7 @@ def test_non_dict_frontmatter_quarantined_not_bricked(project: Path, frontmatter
 
 
 def test_bom_prefixed_entity_reads_back_not_quarantined(project: Path):
-    """MiniMax HIGH: a UTF-8 BOM (Excel/Notepad/PowerShell) must NOT wrongly
+    """A UTF-8 BOM (Excel/Notepad/PowerShell) must NOT wrongly
     quarantine a well-formed entity — the BOM is stripped before frontmatter
     parsing."""
     _seed_tasks("TST-T-BOM")
@@ -372,7 +372,7 @@ def test_bom_prefixed_entity_reads_back_not_quarantined(project: Path):
 
 
 def test_crlf_entity_reads_back_not_quarantined(project: Path):
-    """MiniMax (same root as BOM): CRLF line endings must not break the
+    """Same root as BOM: CRLF line endings must not break the
     ^---\\n-anchored frontmatter regex and wrongly quarantine the entity."""
     _seed_tasks("TST-T-CRLF")
     p = store._task_path(PROJECT_CODE, "TST-T-CRLF")
@@ -386,7 +386,7 @@ def test_crlf_entity_reads_back_not_quarantined(project: Path):
 def test_unreadable_entity_degrades_to_missing_without_quarantine(
     project: Path, monkeypatch
 ):
-    """Opus H5 (OSError branch): a transient/permission read failure is NOT
+    """OSError branch: a transient/permission read failure is NOT
     corruption — degrade to 'missing' WITHOUT renaming a file we couldn't even
     read."""
     _seed_tasks("TST-T-OK", "TST-T-LOCKED")

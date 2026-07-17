@@ -99,7 +99,7 @@ def test_recurrence_creates_jt_versioned_committed_consumed(env):
 
 
 def test_consume_constrained_to_real_recurring_keys(env):
-    # Nemo gap #4: a paraphrased/typo'd evidence slug must NOT consume — only a
+    # A paraphrased/typo'd evidence slug must NOT consume — only a
     # real recurring group key does (else a bad slug silently buries a shape, or
     # a missed key re-fires forever).
     _seed_runs(env, "Write a daily philosophy article", 3)

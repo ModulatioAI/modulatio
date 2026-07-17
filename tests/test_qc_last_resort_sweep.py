@@ -302,11 +302,11 @@ def test_zero_completed_redo_sweeps_instead_of_settling(project: Project):
     )
 
 
-# ── Cadre round 1 (Wild Bill BLOCK ×2 + Jenny MED) ──────────────────────────
+# ── sweep escape-path + marker-constant hardening ───────────────────────────
 
 
 def test_sweep_declines_out_of_root_output_path(project: Project, tmp_path):
-    """WB BLOCK #1: a hostile/stale absolute output_path must NOT let the
+    """A hostile/stale absolute output_path must NOT let the
     QC sweep author outside the artifacts root — the sweep declines and the
     task stays down."""
     escape = tmp_path / "wb-qc-escape.md"
@@ -324,7 +324,7 @@ def test_sweep_declines_out_of_root_output_path(project: Project, tmp_path):
 
 
 def test_sweep_declines_traversal_output_path(project: Project, tmp_path):
-    """WB BLOCK #1 (relative flavor): ../ traversal out of the artifacts root
+    """Relative flavor of the escape above: ../ traversal out of the artifacts root
     is refused the same way."""
     orch = _orch(project)
     goal = _goal(project.id)
@@ -338,7 +338,7 @@ def test_sweep_declines_traversal_output_path(project: Project, tmp_path):
 
 
 def test_environmental_block_anywhere_in_history_stays_down(project: Project):
-    """WB BLOCK #2: an environmental block earlier in the transition history
+    """An environmental block earlier in the transition history
     must not be laundered by a later transition — the sweep scans the whole
     history, not just transitions[-1]."""
     orch = _orch(project)
@@ -359,7 +359,7 @@ def test_environmental_block_anywhere_in_history_stays_down(project: Project):
 
 
 def test_block_writers_and_sweep_share_the_marker_constants():
-    """Jenny MED: the discriminator binds on shared CONSTANTS, not free-form
+    """The discriminator binds on shared CONSTANTS, not free-form
     prose — the writers and the checker reference the same symbols, so a
     rationale rewording can't silently break the exclude set."""
     from modulatio import orchestration as om

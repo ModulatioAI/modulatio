@@ -9,9 +9,9 @@ non-daemon. When pytest-asyncio closes a per-test event loop, it calls
 ``loop.shutdown_default_executor()``, which on CPython 3.12 joins those workers
 with ``THREAD_JOIN_TIMEOUT`` (300s). If a parse is still in flight at loop close
 — more likely on a loaded box, after a heavy slice — that join idles the WHOLE
-focused slice for ~5 minutes at teardown, with no failed assertion. Wild Bill
-hit exactly this and flagged it (2026-06-14): a test-harness hang, not a product
-defect, but one that obscures clean verification.
+focused slice for ~5 minutes at teardown, with no failed assertion. This is a
+test-harness hang, not a product defect, but one that obscures clean
+verification.
 
 This autouse fixture *detaches* the loop's default executor in fixture teardown —
 which runs INSIDE the loop, before pytest-asyncio closes it — so the subsequent

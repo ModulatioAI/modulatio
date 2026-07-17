@@ -106,8 +106,7 @@ async def test_clear_attention_disarms_when_none_left():
 
 async def test_partial_squad_update_keeps_the_other_value_from_state():
     """A mods-only update must not clobber qc (and vice-versa) — the widget
-    renders the squad lamp from held fields, not by parsing its own render
-    (Jenny cadre finding, 2026-06-24)."""
+    renders the squad lamp from held fields, not by parsing its own render."""
     app = _Host()
     async with app.run_test() as pilot:
         await pilot.pause()

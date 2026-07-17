@@ -29,7 +29,7 @@ def test_clay_single_shot_runner_returns_text(monkeypatch):
     # KICKOFF seat (producer/QC/plan/reflect): the sub-agent/workflow tools are
     # stripped so Clay can't spawn a background crew and ship a deferral note.
     assert captured["disallowed_tools"] == runners.claude_cli._DISALLOWED_TOOLS
-    # Fail-closed confinement (Wild Bill R2 HIGH): a POSITIVE allowlist of
+    # Fail-closed confinement: a POSITIVE allowlist of
     # non-process built-ins + safe-mode (no MCP/hooks/plugins) so a configured
     # MCP command-tool or hook can't become a process-exec surface.
     assert captured["allowed_tools"] == runners.claude_cli._ALLOWED_CONFINED_TOOLS

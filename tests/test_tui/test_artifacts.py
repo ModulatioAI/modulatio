@@ -970,7 +970,7 @@ async def test_finished_products_stay_starred_across_all_runs(tui_vault_with_art
 
 def test_is_artifact_file_rejects_symlink(tmp_path):
     """The artifacts listing must skip symlinks so a planted link can't surface
-    an out-of-tree target for preview/stale/export/delete (Wild Bill MEDIUM)."""
+    an out-of-tree target for preview/stale/export/delete."""
     from modulatio.tui.screens.artifacts import _is_artifact_file
     real = tmp_path / "real.md"
     real.write_text("# real\n")

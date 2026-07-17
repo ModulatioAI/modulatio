@@ -11,8 +11,7 @@ in flight, the posted message is still delivered — and a bare
 ``if not self.is_mounted: return`` (same pattern as
 ``model_picker._on_loaded``).
 
-Ledger: 2026-06-14 Cowboy-Opus-0.9.0-preship —
-agent_pane_panel.py:315 (MEDIUM/race).
+Covers agent_pane_panel.py:315 (MEDIUM/race).
 """
 
 from __future__ import annotations
@@ -90,8 +89,7 @@ async def test_chat_response_while_mounted_still_renders():
 # ``x[i][/...]``, regex, BBCode, markup-discussing prose) and user input
 # routinely contain such sequences, so the dynamic parts must be escaped.
 #
-# Ledger: 2026-06-13 Cowboy-Opus-fulldebug-r2 —
-# agent_pane_panel.py:320 (MEDIUM/error-path).
+# Covers agent_pane_panel.py:320 (MEDIUM/error-path).
 
 
 # Bracket sequence that crashes rich's Text.from_markup if left unescaped.

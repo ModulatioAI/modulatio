@@ -159,7 +159,7 @@ def test_api_call_redacts_urlencoded_query_key_echo(monkeypatch):
 
 
 def test_api_call_redacts_percent20_space_key_echo(monkeypatch):
-    """Wild Bill BLOCK: a query-auth key WITH SPACES rides the request URL as
+    """A query-auth key WITH SPACES rides the request URL as
     `+` (quote_plus) — but a server can echo the same URL with spaces as
     `%20` (quote), which is reversible and was surviving the belt. All echo
     forms (raw / `+` / `%20`) must be scrubbed."""
@@ -176,13 +176,13 @@ def test_api_call_redacts_percent20_space_key_echo(monkeypatch):
     out = service_tools.api_call(service="q20", path="/echo")
     assert "sk has space" not in out          # raw
     assert "sk+has+space" not in out           # quote_plus / +
-    assert "sk%20has%20space" not in out       # quote / %20 (Wild Bill's leak)
+    assert "sk%20has%20space" not in out       # quote / %20 (the reversible echo)
 
 
 def test_redact_key_matrix():
     """_redact_key scrubs every echo encoding of a key — raw, form-encoded,
-    percent-encoded, AND case-variant percent hex (Wild Bill closeout BLOCK:
-    percent hex is case-insensitive per RFC 3986, so a server can echo a
+    percent-encoded, AND case-variant percent hex (percent hex is
+    case-insensitive per RFC 3986, so a server can echo a
     lower/mixed-case form that is still reversible)."""
     key = "a b/c=d"
     forms = (

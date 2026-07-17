@@ -285,8 +285,7 @@ def test_no_module_level_constants(project):
     """the prior _CACHE_ROOT and _EMBED_MODEL
     module-level constants are gone. This test pins the contract so
     a future regression that re-introduces them is caught — module-
-    level state would un-route from config and re-create the drift
-    Wild Bill flagged."""
+    level state would un-route from config and re-create the drift."""
     assert not hasattr(qc_history, "_CACHE_ROOT"), (
         "qc_history._CACHE_ROOT must NOT exist; cache root is "
         "config-derived via the _cache_root() helper."
@@ -297,10 +296,10 @@ def test_no_module_level_constants(project):
     )
 
 
-# ── Concurrency — LanceDB rebuild/read race (Opus R2 H4) ──────────────────────
+# ── Concurrency — LanceDB rebuild/read race ───────────────────────────────────
 
 def test_similar_verdicts_concurrent_is_thread_safe(project):
-    """Opus R2 H4: QC runs per-task on concurrent wave workers; each calls
+    """QC runs per-task on concurrent wave workers; each calls
     similar_verdicts -> _ensure_verdict_vectors which does a destructive
     drop_table+create_table rebuild then reads. Without the per-(project,domain)
     lock, two workers of the same domain race the rebuild (create_table raises

@@ -326,7 +326,7 @@ def test_seat_context_routes_tls_extra_grants_to_read_only(project: Project, mon
     """``_seat_context`` routes the thread-local ``seat_extra_grants`` hint as a
     READ-ONLY grant (``read_only_roots``), NOT merged into the rw grants — so a
     Clay seat binds the run dir ``--ro-bind`` and a leader-reviewer can READ the
-    harness but not MUTATE it (cadre BLOCK: Wild Bill + Lovecraft). The rw grants
+    harness but not MUTATE it. The rw grants
     stay the operator-widen gate's roots."""
     import contextlib
 
@@ -454,7 +454,7 @@ def test_split_leader_report_body_missing_or_inline_mention_returns_empty():
 
 
 def test_split_leader_report_body_prose_line_starting_with_heading_text():
-    """Cadre (Jenny/Lovecraft/Nemo): a PROSE line that STARTS WITH the heading
+    """A PROSE line that STARTS WITH the heading
     text but has no #/* decoration must NOT match — only a real heading line does.
     Otherwise the parse grabs the wrong tail (the prose line's, including the real
     heading) instead of the real report body."""

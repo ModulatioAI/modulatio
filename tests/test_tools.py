@@ -526,7 +526,7 @@ def test_run_shell_passive_rejects_help_flag_on_user_script(tmp_path):
 
 
 def test_run_shell_passive_rejects_dash_c_with_side_effect(tmp_path):
-    """audit Wave 2 (F1, Wild Bill) repro: a malicious ``-c``
+    """Repro: a malicious ``-c``
     body that creates a file via stdlib imports must not pass the
     passive gate. The prior allowlist would have admitted it because
     the body parsed as ``import builtins``-shaped (and the gate then
@@ -709,7 +709,7 @@ def test_widened_exec_refused_without_functional_sandbox(tmp_path, monkeypatch):
 
 
 def test_widened_exec_via_argv_path_not_bypassable(tmp_path, monkeypatch):
-    """exec-widen HIGH-3, code-review r1 BLOCK (Wild Bill): widening can enter via
+    """Exec widening can enter via
     a path-bearing ARGV token (`python3 /granted/script.py`) with a WORKSPACE cwd.
     The cwd-only check missed it, so the global bypass ran it UNSANDBOXED with the
     parent env (provider-key leak). A widened-argv run must REFUSE when no sandbox,
@@ -2068,10 +2068,10 @@ def test_resolve_under_roots_overlong_path_returns_none(tmp_path):
     assert tools.resolve_under_roots(overlong, [root]) is None
 
 
-# ── write_artifact merge callback (Nemo R2 HIGH) ──────────────────────────────
+# ── write_artifact merge callback ─────────────────────────────────────────────
 
 def test_make_write_artifact_invokes_on_write_callback(tmp_path):
-    """Nemo R2 HIGH: make_write_artifact must invoke the on_write callback with
+    """make_write_artifact must invoke the on_write callback with
     the absolute target path after a successful write, so the concurrent-wave
     orchestrator can record a tool-written file for the merge."""
     art = _make_artifacts(tmp_path)

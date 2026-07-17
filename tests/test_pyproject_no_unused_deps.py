@@ -1,4 +1,4 @@
-"""audit Wave 2 (F6, Wild Bill review) — regression gate
+"""F6 regression gate
 preventing reintroduction of the unused dependencies that bloated
 v2.0's install surface and the stale CrewAI product framing in the
 package description.
@@ -52,7 +52,7 @@ def _read_description() -> str:
     ids=["crewai", "fastapi", "uvicorn", "sqlmodel"],
 )
 def test_unused_dep_not_reintroduced(forbidden: str) -> None:
-    """Each of the four unused deps Wild Bill flagged in F6 must NOT
+    """Each of the four unused deps flagged in F6 must NOT
     reappear in `dependencies`. If you genuinely need one, scope it
     behind a `[project.optional-dependencies]` extra (e.g. an `[api]`
     extra for FastAPI) so the default install doesn't pull it."""

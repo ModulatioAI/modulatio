@@ -340,14 +340,14 @@ def test_fire_auth_alert_redacts_key_before_surfacing(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# SEC-01 (Nemo, HIGH) — tool-call authorization bypass: dispatch must check
+# SEC-01 (HIGH) — tool-call authorization bypass: dispatch must check
 # the skill's tool_loadout, not just registry membership.
 # --------------------------------------------------------------------------
 
 def test_run_llm_with_tools_denies_tool_outside_loadout(tmp_path):
     """A model that returns a tool call NOT in the skill's declared
     tool_loadout must be refused — even when that tool exists in the
-    registry. Mirrors Nemo's exploit: a web-only skill must not reach
+    registry. Mirrors the exploit shape: a web-only skill must not reach
     run_shell."""
     from modulatio import tools
     from modulatio.runners import ChatResponse, ToolCall, run_llm_with_tools
@@ -390,7 +390,7 @@ def test_run_llm_with_tools_denies_tool_outside_loadout(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# SEC-04 (Nemo, LOW) — clamp caller-supplied timeouts
+# SEC-04 (LOW) — clamp caller-supplied timeouts
 # --------------------------------------------------------------------------
 
 def test_clamp_timeout_bounds_and_nonfinite():
@@ -419,7 +419,7 @@ def test_run_shell_sanitizes_nonfinite_timeout(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# SEC-02 (Nemo, MEDIUM) — ACP attachments confined to an allowed root
+# SEC-02 (MEDIUM) — ACP attachments confined to an allowed root
 # --------------------------------------------------------------------------
 
 def test_acp_attachment_path_rejects_outside_root(tmp_path, monkeypatch):
@@ -456,7 +456,7 @@ def test_acp_parse_prompt_drops_unauthorized_attachment(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# SEC-03 (Nemo, MEDIUM) — persistence redaction gaps
+# SEC-03 (MEDIUM) — persistence redaction gaps
 # --------------------------------------------------------------------------
 
 def test_checkpoint_redacts_assistant_prose(tmp_path):
@@ -517,11 +517,11 @@ def test_leader_conversation_is_0600_and_redacted(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# SEC-03 round 2 (Nemo BLOCK) — AWS credential shapes must be redacted
+# SEC-03 follow-up — AWS credential shapes must be redacted
 # --------------------------------------------------------------------------
 
 def test_redact_secrets_covers_aws_credentials():
-    """Nemo's SEC-03 BLOCK: AWS access-key IDs and secret-access-key values
+    """SEC-03 follow-up: AWS access-key IDs and secret-access-key values
     pasted/echoed into prose were persisting verbatim."""
     from modulatio.oauth_refresh import _redact_secrets
 
@@ -535,7 +535,7 @@ def test_redact_secrets_covers_aws_credentials():
     assert "<redacted>" in out
     # a bare temporary (ASIA) key id is also caught
     assert "ASIAY34FZKBOKMUTVV7A" not in _redact_secrets("token ASIAY34FZKBOKMUTVV7A here")
-    # Nemo SEC-03 r2: a labeled value with non-alphanumeric / abbreviated chars
+    # SEC-03: a labeled value with non-alphanumeric / abbreviated chars
     # must not leave the AKIA prefix behind, nor a quoted value its content.
     assert "AKIA" not in _redact_secrets("aws_access_key_id=AKIAIO...MPLE")
     assert "AKIA" not in _redact_secrets('aws_access_key_id="AKIAIOSFODNN7EXAMPLE"')

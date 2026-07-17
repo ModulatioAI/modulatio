@@ -1223,8 +1223,7 @@ def test_start_execution_writes_per_call_telemetry_log(project, isolated):
 
 
 # ── B1 integration: state-doc routing through start_execution ──
-# Nemo Round-2 implementation-sweep close-out — Nemo explicitly asked
-# for integration tests THROUGH start_execution, not only direct
+# Integration tests THROUGH start_execution, not only direct
 # emit_compaction unit tests.
 
 
@@ -1432,7 +1431,7 @@ def test_b1_prior_current_state_preserved_across_malformed_turn(
 
 
 # ── c1: compression_enabled=False prompt + dispatch branch ────
-# Nemo Round-2 implementation guard — the flag has to thread through to
+# Implementation guard — the flag has to thread through to
 # both the Leader-reflect prompt contract and the write-back path so the
 # A/B harness compression-off arm actually exercises behavior.
 
@@ -1523,8 +1522,7 @@ def test_compression_disabled_emits_disabled_by_config_audit_row(
     parsed** Leader-reflect turn with skip_reason=disabled_by_config.
     Visible without reverse-engineering the harness config.
     Parse-failed turns return on the pause path upstream and do NOT
-    add a row — covered by the malformed-state-doc tests above
-    (Nemo wording-nit close-out, 2026-05-19)."""
+    add a row — covered by the malformed-state-doc tests above."""
     plan = _approved_plan(project_with_compression_disabled, sub_objective_count=2)
     md_body = "# state\n"
     reflect = _scripted_reflect_with_state_docs([

@@ -26,7 +26,7 @@ def json_safe(value: object) -> object:
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, dict):
-        # Scrub KEYS too, not just values (WB-2): a secret can ride in key
+        # Scrub KEYS too, not just values: a secret can ride in key
         # position (a raw tool-arg dict, a model-authored payload).
         return {scrub_secrets(str(k)): json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

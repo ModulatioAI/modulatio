@@ -191,7 +191,7 @@ def test_orchestrator_rejects_split_brain_leader_model(project: Project):
     agent is on model B must fail LOUD at construction. The converse side is read
     from the roster (model_for_tier), NOT chat_runner_models — so this catches the
     split even when the Leader agent is renamed away from the literal 'leader'
-    (cadre HIGH: the id-keyed check silently passed)."""
+    (the id-keyed check silently passed)."""
     roster.save(
         roster.Agent(id="captain", name="Captain", tier="leader",
                      model="anthropic/claude-opus-4-8"),
@@ -229,7 +229,7 @@ def test_skip_leader_model_guard_allows_explicit_override(project: Project):
 
 
 def test_resolve_chat_runner_finds_renamed_leader_agent(project: Project):
-    """cadre HIGH (live bug): converse/verify resolve the leader chat runner by the
+    """Live bug: converse/verify resolve the leader chat runner by the
     role 'leader', but build_chat_runners keys by agent.id. A Leader agent renamed
     to 'captain' must still be reached via 'leader' — not silently fall back to the
     shared producer/QC default."""
@@ -252,7 +252,7 @@ def test_resolve_chat_runner_finds_renamed_leader_agent(project: Project):
 
 
 def test_resolve_chat_runner_leader_never_uses_shared_producer_qc_default(project: Project):
-    """cadre HIGH (Wild Bill R3): when the Leader-tier agent has no per-agent chat
+    """When the Leader-tier agent has no per-agent chat
     runner (its model can't build one, so build_chat_runners SKIPS it), the leader
     role must NOT fall back to the shared chat_runner / default model — that shared
     default is producer/QC-sourced (the CLI builds it from --qc-model/
@@ -308,7 +308,7 @@ def test_leader_decompose_seed_prompt_asks_for_job_name():
 
 
 def test_decompose_dict_missing_goals_raises(project: Project):
-    """Nemo MED: a decompose object that OMITS 'goals' must not silently run an
+    """A decompose object that OMITS 'goals' must not silently run an
     empty plan — it's malformed and must raise (distinct from an explicit []
     which is the Leader deliberately producing no goals)."""
     def _stub(prompt: str) -> str:
@@ -2590,7 +2590,7 @@ def test_operation_card_reaches_the_producer_but_not_qc_review(project: Project)
 
 
 def test_wide_bind_does_not_merge_specs_with_different_operations(project: Project):
-    """Wild Bill HIGH: the wide-artifact merge key must include operation. Two
+    """The wide-artifact merge key must include operation. Two
     independent same-kind specs differing ONLY by operation must NOT fold into one
     artifacts-spec — else a construct child inherits the lead's debug bar/card (the
     exact 'wrong bar' scar the axis closes)."""
@@ -7252,7 +7252,7 @@ def test_concurrent_waves_enabled_defaults_on_with_kill_switch(project: Project,
 
 
 def test_concurrent_waves_blocks_artifact_path_conflict(project: Project, monkeypatch):
-    """Nemo impl-sweep Blocker 1: two tasks in a concurrent wave targeting
+    """Two tasks in a concurrent wave targeting
     the same output_path are a plan conflict — both BLOCKED + a CRITICAL
     plan-conflict ticket, NOT a nondeterministic last-writer-wins race."""
     from modulatio.types import TicketPriority
@@ -7292,7 +7292,7 @@ def test_concurrent_waves_blocks_artifact_path_conflict(project: Project, monkey
     ), f"no path-conflict ticket; tickets: {[(tk.title, tk.priority) for tk in tickets]}"
 
 
-# ── Core rebuild B3 (Nemo): worker-side store-write deferral primitives ──
+# ── Core rebuild B3: worker-side store-write deferral primitives ──
 
 
 def test_store_write_deferrable_buffers_when_isolated(project: Project):
@@ -7337,7 +7337,7 @@ def test_save_task_deferrable_skips_in_isolated_worker(project: Project, monkeyp
 def test_qc_review_defers_team_memory_proposal_when_isolated(
     project: Project, tmp_path, monkeypatch
 ):
-    """Nemo close-out re-read: the proposed_team_memory branch in _qc_review
+    """The proposed_team_memory branch in _qc_review
     is a durable worker-side write (team-memory proposal file). It must defer
     to the main-thread merge like proposed_standard does — not fire from the
     worker."""
@@ -7560,7 +7560,7 @@ def test_max_iters_exhaustion_recovers_via_qc_build_not_blocked(project, monkeyp
 
 
 def test_producer_execute_increments_lifetime_attempts_exactly_once(project):
-    """#18 seam guard (Nemo H1): the REAL _producer_execute bumps the task's lifetime
+    """#18 seam guard: the REAL _producer_execute bumps the task's lifetime
     counter exactly once per call — the increment the redo-loop budget depends on. The
     budget test below stubs the producer (and bumps the counter in the stub), so it
     proves the loop arithmetic but not the seam; this drives the real method so a
@@ -7995,8 +7995,8 @@ def test_qc_fix_forward_completes_on_qc_patch(project, monkeypatch):
     assert draft in summary.drafts
     assert "PATCHED ARTIFACT BODY" in draft.read_text()  # QC did patch in place
     # #81: the rescue WITNESSES the recovery through the real call path, carrying the
-    # threaded defect_type (a 2-tuple last_qc + a separate param — Hero code BLOCKER 2
-    # + the escalation-tuple regression). A direct unit test never exercised this.
+    # threaded defect_type (a 2-tuple last_qc + a separate param — the
+    # escalation-tuple regression). A direct unit test never exercised this.
     from modulatio import recoveries
     recs = recoveries.load_recoveries(project.code)
     assert len(recs) == 1 and recs[0].kind == "qc_authored"
@@ -8004,7 +8004,7 @@ def test_qc_fix_forward_completes_on_qc_patch(project, monkeypatch):
 
 
 def test_breaker_trips_in_diff_mode(project, monkeypatch):
-    """Nemo impl-sweep B1: diff-mode producer dispatches must be bound by the
+    """Diff-mode producer dispatches must be bound by the
     breaker too (Slice 1 routes code/multi-file fixes here). A repetitive
     no-commit storm in diff mode → DispatchAbort, not a silent bypass."""
     from modulatio.dispatch_breaker import DispatchAbort
@@ -8025,7 +8025,7 @@ def test_breaker_trips_in_diff_mode(project, monkeypatch):
 
 
 def test_breaker_diff_sidecars_no_false_no_commit(project, monkeypatch):
-    """Nemo impl-sweep B1 caution: a valid diff that writes substantial
+    """A valid diff that writes substantial
     SIDECAR files but only a small primary marker must NOT be flagged
     no-commit — the committed aggregate counts all written blocks."""
     from modulatio.orchestration import Orchestrator
@@ -8053,7 +8053,7 @@ def test_breaker_diff_sidecars_no_false_no_commit(project, monkeypatch):
 
 
 def test_breaker_trips_in_llm_with_tools(project, monkeypatch):
-    """Nemo impl-sweep B2: the tool-loop producer path must be bound by the
+    """The tool-loop producer path must be bound by the
     breaker too. A storming final tool-loop body → DispatchAbort."""
     from types import SimpleNamespace
     from modulatio.dispatch_breaker import DispatchAbort
@@ -8380,7 +8380,7 @@ def test_goal_emits_artifact_detects_artifact_evidence():
 
 
 def test_decompose_keeps_verify_verb_goal_that_produces_an_artifact(project: Project):
-    """Nemo hull fold (2026-05-30): a verb-ambiguous goal ('Validate the
+    """A verb-ambiguous goal ('Validate the
     dataset schema') that actually PRODUCES a deliverable (artifact evidence)
     is KEPT — only a verify-led goal that emits NO deliverable is dropped.
     Dropping real producing work is the worse error."""
@@ -8668,7 +8668,7 @@ def test_effective_assembly_family_priority():
     assert fam("image", [], None) == "media"
     assert fam("video", [], None) == "media"
     # (a) standards WINS over a CONFLICTING required_skills — _select_assembler_skill
-    # canonicalizes image→media-assembly, so evidence must follow (Nemo code review).
+    # canonicalizes image→media-assembly, so evidence must follow.
     assert fam("image", ["document-assembly"], None) == "media"
     assert fam("text", ["media-assembly"], None) == "media"  # text: standards silent → backstop
     # (b) backstop: artifact_kind 'text' declares no assembler_skill, so the
@@ -8759,7 +8759,7 @@ def test_plan_tasks_document_evidence_normalizes_to_md(project: Project):
 
 
 def test_plan_tasks_conflicting_skill_vs_kind_evidence_follows_route(project: Project):
-    """#73 / Nemo code review: when the planner's required_skills CONFLICT with
+    """#73: when the planner's required_skills CONFLICT with
     artifact_kind's standards family, evidence normalization must follow the SAME
     route `_select_assembler_skill` canonicalizes to — no split-brain. Here
     artifact_kind=image (standards → media-assembly) overrides a planner
@@ -8874,7 +8874,7 @@ def test_engine_renders_grounded_deliverables_partial(tmp_path, monkeypatch):
 
 
 def test_policy_withhold_survives_delivery_pass(tmp_path, monkeypatch):
-    """#80 (Nemo BLOCKER): a pre-existing POLICY withhold — the verify-time HARD-violation
+    """#80: a pre-existing POLICY withhold — the verify-time HARD-violation
     withhold — must SURVIVE _deliver_finished_products. The violating deliverable is a
     COMPLETED, otherwise-shippable task; the old code reassigned withheld_deliverables and
     shipped it. With the fix it is excluded from `grounded` (not rendered) and stays
@@ -9252,7 +9252,7 @@ def test_leader_auto_redo_serial_under_kill_switch(tmp_path, monkeypatch):
 
 
 def test_run_task_waves_records_blocked_on_worker_crash(project: Project, monkeypatch):
-    """Hero MINOR: an UNEXPECTED worker exception inside a wave must not abort the
+    """An UNEXPECTED worker exception inside a wave must not abort the
     whole wave and orphan siblings — the crashed task surfaces as BLOCKED and its
     independent sibling still completes."""
     monkeypatch.setenv("MODULATIO_CONCURRENT_WAVES", "1")
@@ -9670,7 +9670,7 @@ def test_decompose_prompt_has_goal_layer_parallel_deliverables_rule():
         assert "{team_capacity}" in body, f"{label} missing the producer-count slot"
 
 
-# ── Fix C hardening: abort actually stops concurrent work (Nemo BLOCK) ───────
+# ── Fix C hardening: abort actually stops concurrent work ───────
 
 def test_execute_task_isolated_early_returns_on_abort(project: Project):
     """Fix C hardening: a wave worker that starts AFTER the operator hit F8 (a
@@ -9757,7 +9757,7 @@ def test_leader_auto_redo_bails_on_abort(tmp_path, monkeypatch):
 
 
 def test_concurrent_wave_abort_stops_queued_tasks(project: Project, monkeypatch):
-    """Fix C hardening (Nemo's requested e2e): with the concurrent executor ON
+    """Fix C hardening (e2e): with the concurrent executor ON
     and a wave wider than the pool ceiling, the tasks queued behind the pool must
     NOT run once the operator aborts mid-wave — they early-return instead of
     burning a producer call."""
@@ -9783,7 +9783,7 @@ def test_concurrent_wave_abort_stops_queued_tasks(project: Project, monkeypatch)
 
 
 def test_leader_auto_redo_skips_verify_when_aborted_mid_redo(tmp_path, monkeypatch):
-    """Fix C residual (Nemo close-out): F8 firing DURING auto-redo (after the
+    """Fix C residual: F8 firing DURING auto-redo (after the
     top-of-method check, while a task runs) must skip the final Leader verify —
     the kill-switch contract is zero model calls after stop."""
     from modulatio.orchestration import Orchestrator, RunSummary
@@ -10426,7 +10426,7 @@ def test_window_proceed_drives_the_fix(project):
 
 
 def test_window_block_still_withholds_measured_hard_violation(tmp_path, monkeypatch):
-    """#80 H1 (Hero code review): the operator blocking the FIX does NOT amend the BRIEF.
+    """#80 H1: the operator blocking the FIX does NOT amend the BRIEF.
     With a measured HARD violation driving the window, a BLOCK must still WITHHOLD the
     deliverable — the engine can't ship a product it measured as violating an operator-HARD
     param just because the operator vetoed the fix."""
@@ -10494,7 +10494,7 @@ def test_empty_deliverable_spec_surfaces_nothing(tmp_path, monkeypatch):
 
 
 def test_deliverable_spec_skips_floor_on_unit_mismatch(tmp_path, monkeypatch):
-    """#101 B.2 seam 1 (Hero): when the spec's size_unit denotes a DIFFERENT measure than
+    """#101 B.2 seam 1: when the spec's size_unit denotes a DIFFERENT measure than
     the digest's part unit, the engine SKIPS the floor check — no cross-unit arithmetic.
     A 500-ROW floor must never fire against a digest counted in WORDS. Structure checks
     (unit-independent) still run."""
@@ -10596,7 +10596,7 @@ def test_stamp_size_metric_targets_units_not_assembler(tmp_path, monkeypatch):
 
 
 def test_stamp_excludes_same_kind_auxiliary(tmp_path, monkeypatch):
-    """#101 C.1 (Nemo BLOCK #2): a same-kind auxiliary (front-matter/preface) that is NOT
+    """#101 C.1: a same-kind auxiliary (front-matter/preface) that is NOT
     one of the assembler's dependency units must NOT inherit the per-unit floor — even
     though it shares artifact_kind. Only the assembler's actual parts get stamped."""
     from modulatio import job_templates as _jt
@@ -10691,7 +10691,7 @@ def test_apply_assembly_manifest_missing_unit_flags_blocker(project, tmp_path):
 
 
 def test_apply_assembly_manifest_unresolved_deps_drop_units_unread(project, tmp_path):
-    """Nemo #8 close-out: a task that DECLARES dependencies but whose authoritative
+    """A task that DECLARES dependencies but whose authoritative
     output allowlist resolves empty (stale/unresolved bindings) must NOT read any
     in-root manifest unit — it fails closed (units dropped unread) and flags a
     blocker, instead of copying a non-dependency file into the draft pre-QC."""
@@ -10747,7 +10747,7 @@ def test_apply_assembly_manifest_media_records_binary_output(project, tmp_path):
 
 
 def test_qc_review_media_binary_does_not_crash_and_verifies_provenance(project, tmp_path):
-    """Nemo B4 #2: a binary media deliverable reaching QC must NOT be read_text()'d
+    """A binary media deliverable reaching QC must NOT be read_text()'d
     (a zip raises UnicodeDecodeError). It gets a binary-aware provenance verdict:
     PASS when the engine-composited file is intact (checksum matches the record),
     with content flagged as not machine-verifiable."""
@@ -10933,7 +10933,7 @@ def test_qc_review_rejects_fabricated_binary(project, tmp_path):
 
 
 def test_cross_goal_wiring_is_product_agnostic_and_sealed(project, tmp_path):
-    """Nemo BLOCKER, sealed (close-out re-review). Cross-goal resolution targets the
+    """Cross-goal resolution targets the
     wide-wave UNIT SIGNATURE — a goal with >=2 deliverables of the SAME artifact_kind
     — for ANY product type, never 'stories'. It fails CLOSED on ambiguity so a
     support/research deliverable can never become an authoritative unit."""
@@ -10967,8 +10967,8 @@ def test_cross_goal_wiring_is_product_agnostic_and_sealed(project, tmp_path):
                    "G-002", "T-009")
     assert asm.depends_on == ["T-001", "T-002"]
 
-    # (b) a SUPPORT singleton landing right before the assembly (the order Nemo
-    #     named) is excluded — singletons are not fan-out goals.
+    # (b) a SUPPORT singleton landing right before the assembly is excluded —
+    #     singletons are not fan-out goals.
     asm = scenario("20260606T000002Z-aaaaaa", ["G-001", "G-002", "G-003"],
                    [("T-001", "G-001", "research"),       # research singleton
                     ("T-002", "G-002", "text"), ("T-003", "G-002", "text"),  # units
@@ -11213,10 +11213,10 @@ def test_regression_blocked_only_in_generate_mode(project, tmp_path):
     assert orch._regression_blocked(Task(producer_mode="edit", **base), p, "stub") is False
 
 
-# ── Cluster D: wave worker-state loss (Opus R2 H2/H3 + Nemo write_artifact) ────
+# ── Cluster D: wave worker-state loss (budget tracker + staged write_artifact) ────
 
 def test_concurrent_wave_workers_inherit_budget_tracker(project: Project, monkeypatch):
-    """Opus R2 H3: wave workers must inherit the main-thread BudgetTracker
+    """Wave workers must inherit the main-thread BudgetTracker
     ContextVar (via per-future copy_context). A producer running in a wave worker
     must see the SAME bound tracker — else its spend is unmetered and
     max_tokens/max_cost_usd caps under-count (cost bypass)."""
@@ -11286,7 +11286,7 @@ def test_role_call_emits_failure_terminal_on_raise(tmp_path, monkeypatch):
 
 
 def test_staging_write_artifact_is_recorded_for_merge(project: Project):
-    """Nemo R2 HIGH: a producer's write_artifact in a wave worker writes into the
+    """A producer's write_artifact in a wave worker writes into the
     per-task staging tree; that write must be RECORDED so _merge_wave_artifacts
     copies it to the shared tree (else it's deleted with staging and lost)."""
     orch = Orchestrator(project, {"drafter": _drafter_stub, "qc": _qc_stub})
@@ -11308,7 +11308,7 @@ def test_staging_write_artifact_is_recorded_for_merge(project: Project):
 
 
 def test_concurrent_merge_copies_recorded_twin_drops_unrecorded(project: Project):
-    """Opus R2 H2: the binary deliverable's readable text-twin must survive the
+    """The binary deliverable's readable text-twin must survive the
     concurrent-wave merge. The merge only copies RECORDED artifact_writes — so the
     twin must be recorded (the fix). This pins the contract: a recorded staged
     twin lands in shared; an UNrecorded one is dropped + torn down with staging
@@ -12756,7 +12756,7 @@ def test_converse_text_turn_offline_when_no_chat_runner(tmp_path, monkeypatch):
 
 
 # ═══ fold: test_orchestration_r2_audit.py ═══
-# Regression tests for the Opus R2 full-debug MEDIUM/LOW audit fixes in
+# Regression tests for the full-debug MEDIUM/LOW audit fixes in
 # ``orchestration.py``.
 #
 # Each test fails before its fix and passes after:

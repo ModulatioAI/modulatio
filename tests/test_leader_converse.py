@@ -129,7 +129,7 @@ def test_converse_grants_harness_to_clay_seat(project: Project, monkeypatch):
     assert str(vault.project_dir(PROJECT_CODE)) in grants, (
         "converse must grant the PROJECT dir so Clay's tools reach the runs"
     )
-    # Wild Bill (vision-night BLOCK): never the VAULT ROOT — Clay's native
+    # Never the VAULT ROOT — Clay's native
     # tools include a shell with no dotfile floor, and the vault root holds
     # the `.env` secret store. The project dir covers every run without it.
     assert str(vault.VAULT_ROOT) not in grants
@@ -275,7 +275,7 @@ def test_create_job_template_captures_cardinality(project: Project):
 
 
 def test_create_job_template_cardinality_validation(project: Project):
-    """Nemo hull #12/#13: cardinality is REQUIRED (no silent default-to-one), is
+    """Cardinality is REQUIRED (no silent default-to-one), is
     normalized CASE-insensitively, and 'per-item' must name its 'per' param —
     otherwise the job has no enforceable output count (the bug class in disguise)."""
     from modulatio import job_templates
@@ -465,11 +465,11 @@ def test_converse_prompt_states_the_harness_addresses(
 def test_run_shell_roots_exclude_the_vault_secret_store(
     project: Project, tmp_path: Path, monkeypatch
 ):
-    """Wild Bill (vision-night BLOCK): the dotfile floor checks path ARGS and
+    """The dotfile floor checks path ARGS and
     cwd COMPONENTS, but arbitrary code (python3 -c) reads `.env` BY NAME from
     inside a bound shell root — so the VAULT ROOT (the secret store's home)
     must never be a run_shell root. File tools keep the vault (their
-    in-process floor holds, his verdict confirms); shell keeps the workspace
+    in-process floor holds); shell keeps the workspace
     (primary) + shared resources."""
     from modulatio import config
     from modulatio import tools as tools_mod

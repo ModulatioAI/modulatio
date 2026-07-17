@@ -134,11 +134,11 @@ def test_collapse_ignores_non_artifact_item_goal(orch):
     assert any(g["description"] == "Review story Alpha for tone" for g in out)
 
 
-# ── Nemo hull review (2026-06-05): proof-of-partition, not substring presence ──
+# ── proof-of-partition, not substring presence ────────────────────────────────
 
 
 def test_collapse_excludes_assembly_naming_all_values(orch):
-    """Nemo B1 #1: an assembly/synthesis goal that names ALL item values (and emits
+    """An assembly/synthesis goal that names ALL item values (and emits
     an artifact) must NOT be folded into the item set — it references MULTIPLE
     values, so it's not a per-item goal. The N stories still collapse; assembly stays."""
     _bind(orch, values=["Alpha", "Bravo", "Charlie"])
@@ -160,7 +160,7 @@ def test_collapse_excludes_assembly_naming_all_values(orch):
 
 
 def test_collapse_noop_for_short_values(orch):
-    """Nemo B1 #2: short values over-match even with a word boundary ("A"/"B") →
+    """Short values over-match even with a word boundary ("A"/"B") →
     no safe per-item signal, fall back to the prose contract (no engine collapse)."""
     _bind(orch, values=["A", "B"])
     data = [

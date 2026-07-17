@@ -133,7 +133,7 @@ def test_reason_code_literals_closed() -> None:
 
 
 def test_deferred_source_literals_closed() -> None:
-    """Four-value provenance enum per Nemo Q1."""
+    """Four-value provenance enum."""
     assert set(DEFERRED_SOURCE_LITERALS) == {
         "producer_claim",
         "qc_verdict",
@@ -612,7 +612,7 @@ def test_echo_correction_overwrites_and_emits_audit(
 def test_echo_correction_carries_sha_and_excerpt_not_raw(
     run_dir: Path, audit_path: Path,
 ) -> None:
-    """Audit row carries hashes + short excerpts only (Nemo M5);
+    """Audit row carries hashes + short excerpts only;
     never the raw divergent text body."""
     long_drift = "x" * 500  # well beyond ECHO_EXCERPT_CHARS=80
     bad_state = _well_formed_state(original_user_goal=long_drift)
@@ -741,7 +741,7 @@ def test_emit_compaction_skipped_rejects_unknown_skip_reason(
 # ── audit-write best-effort posture ───────────────────────────────────
 
 
-# ── L1: parent-dir fsync after replace (Nemo Round-2 close-out) ──────
+# ── parent-dir fsync after replace ───────────────────────────────────
 
 
 def test_atomic_write_fsyncs_parent_dir_after_replace(
@@ -797,7 +797,7 @@ def test_atomic_write_swallows_parent_fsync_failure(
     assert target.read_text() == "payload"
 
 
-# ── M1: persist parsed_state for real diffs (Nemo Round-2) ───────────
+# ── persist parsed_state for real diffs ──────────────────────────────
 
 
 def test_parsed_state_json_persisted_alongside_markdown(
@@ -901,7 +901,7 @@ def test_parsed_state_json_missing_falls_back_gracefully(
     assert outcome.record.compaction_version == 2
 
 
-# ── M3: item-level schema validation (Nemo Round-2 close-out) ────────
+# ── item-level schema validation ─────────────────────────────────────
 
 
 def test_validate_rejects_overlong_reason_note() -> None:
@@ -973,7 +973,7 @@ def test_validate_accepts_deferred_item_with_optional_link_fields() -> None:
 
 
 def test_validate_rejects_non_goal_missing_because() -> None:
-    """Nemo Q2: every non_goal needs a 'because' rationale."""
+    """Every non_goal needs a 'because' rationale."""
     state = _well_formed_state(
         non_goals=[{"text": "redesign Leader"}],
     )
@@ -1034,7 +1034,7 @@ def test_emit_compaction_malformed_item_routes_to_skip(
     assert not state_version_path(run_dir, 1).exists()
 
 
-# ── M2: echo audit fires on no_material_change (Nemo Round-2) ────────
+# ── echo audit fires on no_material_change ───────────────────────────
 
 
 def test_echo_correction_audit_fires_even_on_no_material_change(
@@ -1044,7 +1044,7 @@ def test_echo_correction_audit_fires_even_on_no_material_change(
     that produces an identical canonical body to the prior version,
     the compression_echo_corrected row must STILL fire — the drift is
     a forensic event independent of whether the engine wrote a new
-    version. Closes Nemo Round-2 M2."""
+    version."""
     # Turn 1: lay down a baseline at v001.
     baseline = _well_formed_state()
     emit_compaction(
@@ -1108,7 +1108,7 @@ def test_echo_audit_on_no_material_change_shares_call_scope_id(
     assert all(r["call_scope_id"] == "scope-shared" for r in turn2)
 
 
-# ── B1 + M5: typed parse-reason routing (Nemo Round-2 sweep) ─────────
+# ── typed parse-reason routing ───────────────────────────────────────
 
 
 def test_emit_compaction_no_fence_skips_missing_state_doc(

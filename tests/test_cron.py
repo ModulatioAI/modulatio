@@ -192,7 +192,7 @@ def test_cron_fails_closed_when_project_deleted(monkeypatch):
 
 
 def test_cron_malformed_project_code_fails_closed_without_aborting_sweep(monkeypatch):
-    """Wild Bill BLOCK + Nemo HIGH: a hand-corrupted malformed project_code makes
+    """A hand-corrupted malformed project_code makes
     vault.project_dir() raise ValueError — that must NOT crash the whole
     dispatch_due sweep. It must fail closed (disable) like a missing project, and
     the sweep must continue to later valid due jobs."""
@@ -213,7 +213,7 @@ def test_cron_malformed_project_code_fails_closed_without_aborting_sweep(monkeyp
 
 
 def test_system_project_code_reserved_from_user_creation():
-    """Nemo MED: orphan-cron tickets live in the 'system' project, so a USER
+    """Orphan-cron tickets live in the 'system' project, so a USER
     must not be able to create a colliding project — but the internal cron path
     can (allow_reserved). Also the wizard rejects it with a friendly error."""
     from modulatio import vault
@@ -445,11 +445,11 @@ def test_until_disables_when_next_run_passes_end_date():
     assert after["enabled"] is False and after["runs"] == 1
 
 
-# === Wild Bill beta-bundle findings: cron hardening (2026-07-09) ===
+# === cron hardening: malformed/hand-edited job metadata fails closed ===
 
 
 def test_add_normalizes_naive_start_at_to_utc():
-    """WB CRITICAL (layer 1): a browser-picked naive start_at (no offset) is
+    """Layer 1: a browser-picked naive start_at (no offset) is
     stored UTC-aware so the daemon's aware-vs-aware comparison can't raise."""
     vault.init_project("cronx", "Cron X", "o")
     job = cron.add(name="browser", schedule="daily 09:00", project_code="CRONX",
@@ -460,7 +460,7 @@ def test_add_normalizes_naive_start_at_to_utc():
 
 
 def test_hand_edited_naive_next_run_does_not_wedge_sweep():
-    """WB CRITICAL (layer 2): a naive next_run that reaches disk anyway (a
+    """Layer 2: a naive next_run that reaches disk anyway (a
     hand-edited/legacy config) must fail safe in check_due, not raise and starve
     every later valid job. Repro of the offset-naive-vs-aware TypeError."""
     vault.init_project("cronx", "Cron X", "o")
@@ -474,7 +474,7 @@ def test_hand_edited_naive_next_run_does_not_wedge_sweep():
 
 
 def test_poisoned_count_disables_fail_closed_and_sweep_continues():
-    """WB HIGH: a hand-edited count:'garbage' must disable the job fail-closed —
+    """A hand-edited count:'garbage' must disable the job fail-closed —
     not fire, raise mid-advance, abort the sweep, and re-fire every tick — and
     must not starve later valid jobs."""
     vault.init_project("cronx", "Cron X", "o")
@@ -494,7 +494,7 @@ def test_poisoned_count_disables_fail_closed_and_sweep_continues():
 
 
 def test_poisoned_until_disables_rather_than_running_forever():
-    """WB MEDIUM: a malformed until must fail closed (disable), not be silently
+    """A malformed until must fail closed (disable), not be silently
     ignored so the job runs indefinitely."""
     vault.init_project("cronx", "Cron X", "o")
     job = cron.add(name="j", schedule="1d", project_code="CRONX",
@@ -507,7 +507,7 @@ def test_poisoned_until_disables_rather_than_running_forever():
 
 
 def test_falsy_stop_metadata_is_malformed_not_absent():
-    """WB close-out MEDIUM: None is the SOLE absent sentinel — a hand-edited
+    """None is the SOLE absent sentinel — a hand-edited
     ``until: ""`` or ``runs: ""`` is malformed and must disable fail-closed
     before the heartbeat fires, not be truthiness-skipped as 'absent'."""
     vault.init_project("cronx", "Cron X", "o")
@@ -524,7 +524,7 @@ def test_falsy_stop_metadata_is_malformed_not_absent():
 
 
 def test_add_rejects_fractional_and_bool_count():
-    """WB close-out LOW + R2 note: the count contract means a Python int —
+    """The count contract means a Python int —
     fractional, bool, AND integral floats (1.0) are rejected, not truncated."""
     vault.init_project("cronx", "Cron X", "o")
     for bad in (1.5, True, 1.0):
@@ -534,7 +534,7 @@ def test_add_rejects_fractional_and_bool_count():
 
 
 def test_exhausted_stored_runs_never_buys_an_extra_fire():
-    """WB R3 MEDIUM: a count is an upper LIMIT — an enabled job hand-edited to
+    """A count is an upper LIMIT — an enabled job hand-edited to
     ``count: 1, runs: 1`` (already at the cap) must disable pre-dispatch, not
     fire once more while the advance tail catches up."""
     vault.init_project("cronx", "Cron X", "o")
@@ -550,7 +550,7 @@ def test_exhausted_stored_runs_never_buys_an_extra_fire():
 
 
 def test_add_rejects_non_int_numerics():
-    """WB R3 contract note: the count contract is exactly a Python int — an
+    """The count contract is exactly a Python int — an
     exotic integral numeric (Decimal) is rejected too, closing the class."""
     from decimal import Decimal
 
@@ -562,7 +562,7 @@ def test_add_rejects_non_int_numerics():
 
 
 def test_negative_stored_runs_disables_fail_closed():
-    """WB R2 MEDIUM: a hand-edited ``runs: -1`` on a ``count: 1`` job would
+    """A hand-edited ``runs: -1`` on a ``count: 1`` job would
     under-count fires and buy an extra run past the cap — malformed, so it
     must disable fail-closed before the heartbeat fires."""
     vault.init_project("cronx", "Cron X", "o")
@@ -577,7 +577,7 @@ def test_negative_stored_runs_disables_fail_closed():
 
 
 def test_add_rejects_nonpositive_count_and_bad_stop_metadata():
-    """WB MEDIUM: count must be a positive int (0/negative is an error, not a
+    """count must be a positive int (0/negative is an error, not a
     silent unlimited schedule); start_at/until must parse — validated while the
     operator is present."""
     vault.init_project("cronx", "Cron X", "o")

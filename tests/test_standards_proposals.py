@@ -305,7 +305,7 @@ def test_approve_appends_utf8_to_standards_file(project_vault):
 # the review surface from crashing on a corrupt byte, but that left a corrupt
 # proposal listable + approvable as mojibake (U+FFFD grafted into standards).
 #
-# The corrected contract (Nemo, 0.9.0 cadre review):
+# The corrected contract:
 # - ``_parse_file`` decodes STRICTLY → raises UnicodeDecodeError on a bad byte.
 # - ``list_proposals`` SKIPS a corrupt file (the surface still doesn't crash, and
 #   the bad file is excluded rather than surfaced as approvable mojibake).

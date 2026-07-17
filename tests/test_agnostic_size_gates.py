@@ -72,7 +72,7 @@ def test_export_copy_is_a_raw_passthrough(tmp_path: Path):
     assert dest.read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
 
 
-# ── output-agnostic: the draft fallback path is family-aware (cadre F2-2) ─────
+# ── output-agnostic: the draft fallback path is family-aware ──────────────────
 
 def test_draft_fallback_name_is_family_aware():
     """A task with NO output_path must not always land at a document `.md` path:

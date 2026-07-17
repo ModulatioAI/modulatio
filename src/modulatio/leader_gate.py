@@ -331,7 +331,7 @@ def build_permission_callback(gate: LeaderPermissionGate, *, root, prompt_fn):
     (`runners.py:915`). Extracts every gated resource from the tool call, runs
     each through ``gate.decide`` (which prompts + records the scope), and DENIES
     the whole call if any request is denied — fail-closed. The runner sees a
-    bool; the once/session/always scope is honored inside the gate (Jenny-A)."""
+    bool; the once/session/always scope is honored inside the gate."""
 
     def permission_callback(name: str, args: dict) -> bool:
         # EXTRACTION parses wholly MODEL-CONTROLLED values (paths, shell

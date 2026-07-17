@@ -432,7 +432,7 @@ def test_render_then_load_round_trip(project_run: tuple[str, str]) -> None:
     assert "use markdown" in rendered
 
 
-# ── typed parse_state_doc_block (Nemo M5 close-out) ───────────
+# ── typed parse_state_doc_block ───────────────────────────────
 
 
 def test_parse_state_doc_block_no_fence_returns_no_fence_reason() -> None:

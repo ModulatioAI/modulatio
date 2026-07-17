@@ -495,7 +495,7 @@ def _slot_json(s) -> dict:
 
 
 def _allowed_key_bases() -> set:
-    """The ONLY env vars the WebOS key manager may touch (WB-1): the key
+    """The ONLY env vars the WebOS key manager may touch: the key
     handles of CONFIGURED models + services. The route exposes the provider-key
     pool primitive, so without this a crafted request could write ANY env var
     into the vault .env — e.g. the MODULATIO_RUN_SHELL_UNSAFE sandbox switch.
@@ -544,7 +544,7 @@ def keys_remove(env_var: str) -> dict:
     from modulatio import provider_keys
 
     # A slot's env var is its base (#1) or ``<base>_<digits>`` (#2..) — the
-    # target must belong to an ALLOWED base, never an arbitrary name (WB-1).
+    # target must belong to an ALLOWED base, never an arbitrary name.
     if not env_var.isidentifier():
         raise HTTPException(status_code=404, detail="invalid key handle")
     ok = any(env_var == b or re.fullmatch(rf"{re.escape(b)}_\d+", env_var)

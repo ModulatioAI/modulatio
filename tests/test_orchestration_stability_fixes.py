@@ -424,7 +424,7 @@ def test_kickoff_intake_survives_corrupt_prior_state(project: Project, monkeypat
     assert any("could not read prior state" in e for e in summary.errors)
 
 
-# ── Opus R2 H1: zero-completed redo/resume lanes must settle, not strand ──────
+# ── Zero-completed redo/resume lanes must settle, not strand ─────────────────
 
 def test_settle_zero_completed_drives_goal_terminal_and_is_idempotent(project: Project):
     """The shared settle helper drives a non-terminal goal to COMPLETED with a
@@ -449,7 +449,7 @@ def test_settle_zero_completed_drives_goal_terminal_and_is_idempotent(project: P
 
 
 def test_reexecute_goal_zero_completed_settles_goal(project: Project):
-    """Opus R2 H1: a decline-driven _reexecute_goal whose reopened task re-fails
+    """A decline-driven _reexecute_goal whose reopened task re-fails
     (zero COMPLETED, no other completed task) must settle the goal terminal with
     a reservation — NOT leave it permanently IN_PROGRESS."""
     from modulatio.orchestration import RunSummary
@@ -477,7 +477,7 @@ def test_reexecute_goal_zero_completed_settles_goal(project: Project):
 
 
 def test_auto_resume_zero_completed_settles_goal(project: Project):
-    """Opus R2 H1 sibling: budget auto-resume whose tasks all re-fail on the
+    """Sibling case: budget auto-resume whose tasks all re-fail on the
     fresh budget must settle the goal terminal — not strand it IN_PROGRESS with
     an orphaned RESOLVED ticket."""
     from datetime import datetime, timedelta, timezone

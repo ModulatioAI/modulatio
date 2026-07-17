@@ -361,7 +361,7 @@ def test_supersedes_tombs_predecessor(run_dir: Path, audit_path: Path) -> None:
     assert contents == ["corrected"]
 
 
-# ── M1 (Lovecraft round 1): same-turn supersede race ───────────────────
+# ── M1: same-turn supersede race ───────────────────────────────────────
 
 
 def test_same_turn_supersede_best_effort(run_dir: Path, audit_path: Path) -> None:
@@ -1116,7 +1116,7 @@ def test_render_candidates_shows_target_scope(run_dir: Path, audit_path: Path) -
     assert cand is not None
     out = inboxes.render_candidates_for_prompt([cand])
     assert cand.candidate_id in out
-    # B1 (Lovecraft round 1): render uses the contract literal names
+    # B1: render uses the contract literal names
     # so the prompt-side rendering matches the JSON shape Leader emits.
     assert "target_scope=agent" in out
     assert "target_agent_id=leader" in out

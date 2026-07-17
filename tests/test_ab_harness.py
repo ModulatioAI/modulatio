@@ -117,7 +117,7 @@ def _audit_lines(*rows: dict) -> str:
 
 
 def test_interpretation_note_carries_required_phrasing() -> None:
-    """Lovecraft M2 — the disclaimer wording is the bottle's exact
+    """The disclaimer wording is the bottle's exact
     contract; future drift would silently weaken the report."""
     assert "directional signal rule only" in INTERPRETATION_NOTE
     assert "No formal statistical test" in INTERPRETATION_NOTE
@@ -208,8 +208,8 @@ def _mk_qc_task(task_id: str, *verifier_results: str) -> Any:
 
 def test_extract_first_pass_qc_accept_rate(tmp_path) -> None:
     """First QC verdict per task → accept rate is fraction of tasks
-    whose first verdict was passing. Nemo Medium 1 (2026-05-19):
-    QC source pivoted from audit rows to ``Task.transitions``."""
+    whose first verdict was passing. QC source pivoted from audit
+    rows to ``Task.transitions``."""
     audit = tmp_path / "audit.jsonl"
     audit.write_text("")
     tasks = [
@@ -295,7 +295,7 @@ def test_extract_qc_metrics_against_real_engine_state(tmp_path, monkeypatch) -> 
     for the same surface ``run_experiment`` uses, and confirms the
     snapshot sees the verdicts. Without this, the c15 pivot could
     silently extract from a surface the engine never writes to —
-    exactly the bug Nemo Medium 1 caught."""
+    exactly the bug the transitions pivot fixed."""
     from modulatio import store, types
     from uuid import uuid4
     from datetime import datetime, timezone
@@ -378,7 +378,7 @@ def test_extract_divergence_note_count(tmp_path) -> None:
 
 
 def test_extract_compaction_skip_counts_splits_disabled_from_problem(tmp_path) -> None:
-    """Nemo Round-2 metric-split: disabled_by_config is in the full
+    """Metric-split: disabled_by_config is in the full
     count but NOT in the problem count."""
     audit = tmp_path / "audit.jsonl"
     audit.write_text(_audit_lines(
@@ -406,7 +406,7 @@ def test_extract_compaction_skip_counts_splits_disabled_from_problem(tmp_path) -
 
 
 def test_extract_propose_accept_ratio_null_on_empty_denominator(tmp_path) -> None:
-    """Lovecraft L2 null-on-empty guard: no propose_emit rows →
+    """Null-on-empty guard: no propose_emit rows →
     accept_ratio is None, not 0.0."""
     audit = tmp_path / "audit.jsonl"
     audit.write_text("")
@@ -570,7 +570,7 @@ def test_deltas_directional_signal_fires_on_clear_difference() -> None:
 
 
 def test_deltas_directional_signal_fires_on_zero_stdev_with_clear_delta() -> None:
-    """Nemo close-out (2026-05-19): the documented rule
+    """The documented rule
     ``abs(delta_mean) > 2 * combined_stdev`` must fire even when
     ``combined_stdev == 0``. Two internally-consistent arms with
     different means are the cleanest possible directional signal;
@@ -619,7 +619,7 @@ def test_deltas_directional_signal_false_on_zero_stdev_zero_delta() -> None:
 
 
 def test_deltas_sample_sizes_propagate() -> None:
-    """Per-metric N (Nemo Medium 2 close-out, 2026-05-19): a metric
+    """Per-metric N: a metric
     where every snapshot carries a numeric observation reports
     ``(n_a, n_b) == (arm_a.n_successful, arm_b.n_successful)``."""
     a = aggregate_arm(arm="a", snapshots=[_mk_snap()] * 2,
@@ -632,7 +632,7 @@ def test_deltas_sample_sizes_propagate() -> None:
 
 
 def test_deltas_sample_sizes_are_per_metric_not_arm_level() -> None:
-    """Nemo Medium 2 (2026-05-19): a metric that was None on some
+    """A metric that was None on some
     replicates must report its actual non-None observation count,
     NOT the arm-level ``n_successful``. Before the fix, every metric
     reported the same arm-level total even when its real N was
@@ -665,7 +665,7 @@ def test_deltas_sample_sizes_are_per_metric_not_arm_level() -> None:
 
 
 def test_deltas_sample_sizes_final_branch_uses_per_metric_count() -> None:
-    """Nemo close-out re-read (2026-05-19): the FINAL successful-numeric
+    """The FINAL successful-numeric
     branch of compute_deltas (non-None means + non-None stdevs on both
     arms) must report per-metric observation counts, not arm-level
     ``n_successful``. The earlier c16 test mostly exercised the
@@ -674,7 +674,7 @@ def test_deltas_sample_sizes_final_branch_uses_per_metric_count() -> None:
     inside an arm that had 3 successful replicates overall still
     reported (3, 3).
 
-    Built directly from ArmAggregate (Nemo's minimal repro) so the
+    Built directly from ArmAggregate (minimal repro) so the
     test pins the construction site, not the aggregation upstream:
     both arms n_successful=3, but metric 'm' only had 2 observations
     each → sample_sizes must be (2, 2)."""
@@ -774,7 +774,7 @@ def _mk_report(arm_a_snaps, arm_b_snaps) -> ExperimentReport:
 
 
 def test_render_includes_interpretation_note_wording() -> None:
-    """Lovecraft M2 — required disclaimer wording in the output."""
+    """Required disclaimer wording in the output."""
     report = _mk_report([_mk_snap()] * 3, [_mk_snap(success=0.5)] * 3)
     md = render_report_markdown(report)
     assert "directional signal rule only" in md
@@ -867,7 +867,7 @@ def test_run_experiment_missing_factory_raises(tmp_path) -> None:
 def test_validate_config_rejects_non_bool_compression_arms(
     bad_a, bad_b, tmp_path
 ) -> None:
-    """Nemo Blocker 2 (2026-05-19): a loosely typed config (string
+    """A loosely typed config (string
     ``"False"``, int ``0``, etc.) used to be silently coerced to
     True by ``bool(...)``. _validate_config now demands actual bools
     for the compression dimension."""
@@ -1001,7 +1001,7 @@ def test_emitter_file_modes(tmp_path) -> None:
 
 
 def test_write_artifact_0600_helper_applies_mode(tmp_path) -> None:
-    """Nemo Low close-out (2026-05-19): non-audit experiment artifacts
+    """Non-audit experiment artifacts
     (config.json / manifest.json / metrics.json / aggregate.json /
     report.json / report.md) inherit the same ``0o600`` posture the
     audit log had. The helper creates the parent at ``0o700`` and

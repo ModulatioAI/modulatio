@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Test helper: run thread targets with their exceptions CAPTURED.
 
-The cadre (all four reviewers) flagged that several concurrency regression tests
-spawn raw ``threading.Thread`` targets that don't capture their own exceptions.
+Several concurrency regression tests spawn raw ``threading.Thread`` targets
+that don't capture their own exceptions.
 Under a rare interleaving a target raises, the assertion path still passes, and
 pytest's ``threadexception`` hook fires a non-deterministic
 ``PytestUnhandledThreadExceptionWarning`` — a ghost on the sonar instead of a

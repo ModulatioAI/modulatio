@@ -274,7 +274,7 @@ def test_unfilled_required_empty_schema_is_back_compat():
 
 
 def test_enum_violations_flags_out_of_contract_values():
-    """#97 R1 (Hero): a supplied value outside a declared non-empty enum is a
+    """#97: a supplied value outside a declared non-empty enum is a
     present-but-out-of-contract misfit. List/per-driver fields: any non-member item flags.
     A field with no enum is unconstrained; a not-supplied field is the presence check's job."""
     t = jt.JobTemplate(

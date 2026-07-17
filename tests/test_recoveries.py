@@ -13,7 +13,7 @@ from dataclasses import fields
 from modulatio.recoveries import RecoveryRecord, change_shape, load_recoveries
 
 
-# ── change_shape — the artifact-kind-aware diff fingerprint (Hero R3) ──────────
+# ── change_shape — the artifact-kind-aware diff fingerprint ────────────────────
 
 
 def test_change_shape_code_is_deterministic():
@@ -32,7 +32,7 @@ def test_change_shape_unknown_kind_returns_none():
 
 
 def test_change_shape_false_merge_guard():
-    """Hero R3 regression: three GENUINELY different code fixes must NOT share a
+    """Regression: three GENUINELY different code fixes must NOT share a
     fingerprint (else the false-split bias inverts to dangerous false-merge)."""
     # 1. added guard — control-flow added, nothing removed
     guard_b = "def f(x):\n    return x + 1\n"
@@ -73,7 +73,7 @@ def test_change_shape_document_kind():
     assert a is not None and a.startswith("doc:")
 
 
-# ── record_recovery — witness with write-time truncation (Nemo #6) ─────────────
+# ── record_recovery — witness with write-time truncation ───────────────────────
 
 
 def test_record_recovery_writes_and_returns(tmp_path, monkeypatch):
@@ -126,7 +126,7 @@ def test_record_recovery_unknown_kind_gets_unique_sentinel(tmp_path, monkeypatch
     assert "unclassified:" in r1.signature and "unclassified:" in r2.signature
 
 
-# ── ledger: unconsumed_recoveries + the SEPARATE consumed file (Nemo #2) ───────
+# ── ledger: unconsumed_recoveries + the SEPARATE consumed file ─────────────────
 
 
 def _rec(monkeypatch, tmp_path, project, **kw):
@@ -149,7 +149,7 @@ def test_unconsumed_excludes_consumed_and_caps(tmp_path, monkeypatch):
 
 
 def test_consumed_ledger_is_separate_from_lessons(tmp_path, monkeypatch):
-    """Nemo #2: recovery ids land in the recoveries consumed ledger, NEVER in the
+    """Recovery ids land in the recoveries consumed ledger, NEVER in the
     lessons fail ledger."""
     monkeypatch.setattr(recoveries, "project_dir", lambda pc: tmp_path / pc)
     recoveries.mark_consumed("P", ["rec-1"])
@@ -199,7 +199,7 @@ def test_cluster_floor_and_false_merge(tmp_path, monkeypatch):
 
 
 def test_signature_rationale_key_uses_truncated_rationale(tmp_path, monkeypatch):
-    """Nemo code #2: the signature's rationale-key must derive from the TRUNCATED
+    """The signature's rationale-key must derive from the TRUNCATED
     rationale — a meaningful token sitting past the cap must NOT leak into the key."""
     monkeypatch.setattr(recoveries, "project_dir", lambda pc: tmp_path)
     cap = recoveries.MAX_RECOVERY_EXCERPT_CHARS

@@ -85,7 +85,7 @@ def test_clear_plan_spares_unowned_vault(repair_env, monkeypatch):
 
 
 def test_clear_plan_routes_through_validated_plan(repair_env, monkeypatch):
-    """Jenny F3: clear_plan must return a plan validated by the SAME assert_safe
+    """clear_plan must return a plan validated by the SAME assert_safe
     gate build_plan uses — so it delegates to uninstall.validated_plan, giving
     its hand-built Targets the same plan-time guarantee (not only the delete-time
     re-check in remove_target)."""

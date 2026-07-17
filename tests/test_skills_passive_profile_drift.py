@@ -6,8 +6,8 @@ audit Wave 2 (F1) tightened the ``run_shell`` passive profile:
 ``python3 -m <module> --help / --version`` all execute user-
 controlled code and were dropped from the passive allowlist.
 
-F16 fixed the tool description and ``coding.md``. Wild Bill Round 3
-(F20) caught that ``code-review.md`` still bulleted those exact
+F16 fixed the tool description and ``coding.md``, but
+``code-review.md`` still bulleted those exact
 shapes under "Runtime grounding (do this first)" with no
 ``profile="full"`` qualifier — QC would follow the docs literally
 and hit allowlist refusals.

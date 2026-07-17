@@ -199,7 +199,7 @@ def test_authorizer_unknown_cost_class_fails_closed(vault_with_budget):
 
 
 def test_authorizer_denies_mismatched_tool_name(vault_with_budget):
-    """Nemo B4 #3: an authorizer bound to tool 'render' must not authorize a
+    """An authorizer bound to tool 'render' must not authorize a
     different tool name (else a second metered tool gets billed as this one)."""
     _root, artifacts = vault_with_budget
     unit = _pinned_unit(artifacts, "a.png", "IMG")
@@ -212,7 +212,7 @@ def test_authorizer_denies_mismatched_tool_name(vault_with_budget):
 
 
 def test_authorizer_rejects_aliased_nested_and_url_value_params(vault_with_budget):
-    """Nemo B4 #4: network params are rejected by token (input_url/base_url),
+    """Network params are rejected by token (input_url/base_url),
     recursively (nested dict), and by URL-like VALUE under any key name."""
     _root, artifacts = vault_with_budget
     unit = _pinned_unit(artifacts, "a.png", "IMG")

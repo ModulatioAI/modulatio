@@ -94,7 +94,7 @@ def test_expiry_dumps_all_thread_stacks_to_the_crash_log(zero_grace, crash_dir):
 
 
 def test_dump_carries_native_tid_and_the_native_stack_escalation():
-    """Jenny's Finding 2 close: an in-process Python dump can't show a C-level
+    """An in-process Python dump can't show a C-level
     stall's native frames — so the dump names each thread's OS-level native TID
     and points at the out-of-process tool (py-spy/gdb) that CAN read them."""
     import threading

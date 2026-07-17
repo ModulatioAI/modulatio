@@ -46,7 +46,7 @@ def test_build_claude_argv_disallows_background_workflow_and_subagent_spawners()
 
 
 def test_confined_seat_strips_shell_so_it_cannot_re_exec_claude():
-    """Wild Bill HIGH: stripping only Workflow/Task/Agent left ``Bash`` available,
+    """Stripping only Workflow/Task/Agent left ``Bash`` available,
     and a confined seat (``--permission-mode bypassPermissions``) could use Bash to
     re-exec the claude binary WITHOUT ``--disallowedTools`` — the nested process
     regains the spawners, defeating the zero-sub-agent bound. Removing the shell
@@ -60,7 +60,7 @@ def test_confined_seat_strips_shell_so_it_cannot_re_exec_claude():
 
 
 def test_confined_argv_is_fail_closed_tools_restricts_the_builtin_set():
-    """Wild Bill R2/R3 HIGH: under ``--permission-mode bypassPermissions``,
+    """Under ``--permission-mode bypassPermissions``,
     ``--allowedTools`` (a PERMISSION allow-list) does NOT make omitted built-ins
     unavailable — the option that restricts the available built-in SET is
     ``--tools``. So the confined argv must pass the non-process set through

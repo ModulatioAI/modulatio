@@ -251,7 +251,7 @@ def test_delivery_lands_in_the_picked_output_folder(orch, tmp_path):
 
 
 def test_picked_output_base_refuses_dangerous_root(orch, tmp_path):
-    """Wild Bill MED: a hand-edited output pick inside the vault (or any
+    """A hand-edited output pick inside the vault (or any
     refused tree) must NOT be delivered into — the pick runs the SAME floor as
     seat grants, falling back to the default location with a summary note."""
     from modulatio.orchestration import RunSummary

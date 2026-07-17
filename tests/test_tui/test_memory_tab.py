@@ -250,7 +250,7 @@ async def test_editing_a_team_entry_creates_a_proposal_not_a_mutation():
 @pytest.mark.asyncio
 async def test_memory_has_controls_row_and_search_filters(monkeypatch):
     """MEMORY carries the shared ControlsRow (counts + search) like every other
-    list screen (Lovecraft cadre finding), and search filters the unified list."""
+    list screen, and search filters the unified list."""
     from textual.widgets import DataTable, Static, TabbedContent
 
     from modulatio.tui.widgets.controls_row import ControlsRow
@@ -366,7 +366,7 @@ async def test_approve_on_non_pending_row_notifies():
 # routinely contains such brackets (code, regex, artifact excerpts), so the
 # Memory tab must wrap cells in Rich ``Text`` to render them verbatim.
 #
-# Ledger: 2026-06-13 Cowboy-Opus-fulldebug-r2 — memory.py:230 (MEDIUM/error-path).
+# Covers memory.py:230 (MEDIUM/error-path).
 
 
 

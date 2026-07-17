@@ -2,11 +2,11 @@
 
 The gate turns a ``SecurityRequest`` into a ``ScopedDecision`` — it returns a
 SCOPE (not a bare bool), so the engine can honor once / session / always
-distinctly (Jenny-A). The default ``leader_workspace`` is silently allowed;
+distinctly. The default ``leader_workspace`` is silently allowed;
 anything else prompts (prompt injected — no UI here), and the decision is
 recorded at its scope: ``always`` persists (via leader_permissions),
 ``session`` is in-memory, ``once`` is one call, ``deny`` refuses. Grants are
-action-scoped (read/edit ≠ exec — Wild Bill HIGH-2). ``revoke_all`` (the ``/rp``
+action-scoped (read/edit ≠ exec). ``revoke_all`` (the ``/rp``
 escape hatch) clears session + persisted.
 """
 
@@ -100,7 +100,7 @@ def test_action_scope_enforced_across_classes(env):
 
 
 def test_decide_refuses_dangerous_root_even_if_prompt_returns_always(env):
-    """Engine-bound cheat-guard (Wild Bill BLOCK-1): a root overlapping a swarm
+    """Engine-bound cheat-guard: a root overlapping a swarm
     deliverable tree CANNOT be granted, even if the prompt returns ALWAYS — the
     prompt is never reached and nothing persists."""
     tmp, ws, proj = env
@@ -138,7 +138,7 @@ def test_exec_outside_workspace_is_grantable_session(env):
 
 
 def test_exec_widen_refused_over_deliverable_tree(env):
-    """Nemo #5: the cheat-guard covers exec too — an exec root overlapping a
+    """The cheat-guard covers exec too — an exec root overlapping a
     deliverable tree is REFUSED even on ALWAYS (prompt never reached)."""
     tmp, ws, proj = env
     deliv = proj / "runs" / "r1"
@@ -165,7 +165,7 @@ def test_exec_request_excludes_always_scope(env):
 
 
 def test_extractor_gates_bare_dotfile(tmp_path):
-    """Nemo #3: `cat .env` (a bare dotfile, no slash) must surface a read request
+    """`cat .env` (a bare dotfile, no slash) must surface a read request
     — it must not ride the exec grant ungated."""
     (tmp_path / ".env").write_text("SECRET=1\n")
     reqs = lg.extract_tool_requests("run_shell", {"cmd": "cat .env", "cwd": ""}, root=tmp_path)
@@ -198,7 +198,7 @@ def test_revoke_all_clears_session_and_persisted(env):
     assert len(seen) == 1  # re-prompts after /rp
 
 
-# ── resource extractor (Nemo-BLOCK4/6 — the bypass surface) ──────────────────
+# ── resource extractor (the bypass surface) ──────────────────────────────────
 
 def test_file_tools_extract_path_requests(tmp_path):
     root = tmp_path
@@ -213,7 +213,7 @@ def test_file_tools_extract_path_requests(tmp_path):
 
 
 def test_run_shell_catches_absolute_path_token_in_cmd(tmp_path):
-    # Nemo's bypass: `cat /etc/passwd` must surface a path request for the file,
+    # Bypass case: `cat /etc/passwd` must surface a path request for the file,
     # AND run_shell itself is an exec request — not just args["path"].
     reqs = lg.extract_tool_requests(
         "run_shell", {"cmd": "cat /etc/passwd", "cwd": "", "profile": "full"}, root=tmp_path
@@ -231,13 +231,13 @@ def test_ungated_tools_extract_nothing(tmp_path):
         assert lg.extract_tool_requests(name, {"query": "x"}, root=tmp_path) == []
 
 
-# ── the converse permission_callback (Wild Bill MED-4 regression) ────────────
+# ── the converse permission_callback (regression) ────────────────────────────
 
 def test_callback_denies_run_shell_reading_outside_file(env):
     tmp, ws, proj = env
     gate = lg.LeaderPermissionGate(CODE, workspace=ws)
     cb = lg.build_permission_callback(gate, root=ws, prompt_fn=_allow(lp.SCOPE_DENY))
-    # Nemo's bypass through the callback: cat /etc/passwd → denied
+    # Bypass through the callback: cat /etc/passwd → denied
     assert cb("run_shell", {"cmd": "cat /etc/passwd", "cwd": "", "profile": "full"}) is False
     # benign in-workspace read → allowed, no prompt
     assert cb("read_file", {"path": "ok.py"}) is True
@@ -267,7 +267,7 @@ def test_callback_allows_after_always_grant(env):
     assert seen == []  # same granted tree → no re-prompt
 
 
-# ── broad-ancestor / delivery-folder refusal (Wild Bill note) ────────────────
+# ── broad-ancestor / delivery-folder refusal ─────────────────────────────────
 
 def test_dangerous_widen_root_flags_broad_dirs():
     from pathlib import Path as _P

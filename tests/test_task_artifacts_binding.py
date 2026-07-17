@@ -114,7 +114,7 @@ def test_two_homogeneous_groups_each_bind(orch):
     assert sizes == [3, 4]
 
 
-# ── Nemo P1.5 review: bind only when ALL expansion-inherited fields match ──
+# ── bind only when ALL expansion-inherited fields match ────────────────────
 
 
 def _ev(desc):
@@ -123,7 +123,7 @@ def _ev(desc):
 
 def test_heterogeneous_evidence_not_merged(orch):
     """Two same-kind/same-skill specs with DIFFERENT evidence_required must NOT
-    merge — a sibling would inherit the wrong evidence contract (Nemo #1)."""
+    merge — a sibling would inherit the wrong evidence contract."""
     a = _story("a.md")
     a["evidence_required"] = _ev("2000 words")
     b = _story("b.md")
@@ -159,7 +159,7 @@ def test_homogeneous_evidence_still_merges(orch):
 
 
 def test_dep_remap_multi_group_shifted_nonmerged_and_weird_deps(orch):
-    """Nemo's hand-probe, pinned: two merged groups + a shifted non-merged
+    """Pinned hand-probe case: two merged groups + a shifted non-merged
     singleton + bool/string/out-of-range/duplicate deps in one case."""
     data = [
         _story("s0.md", skills=("long-form",)),    # group A (lead 0)

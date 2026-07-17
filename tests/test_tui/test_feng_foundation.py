@@ -79,7 +79,7 @@ async def test_copy_paste_actions_present():
 
 
 async def test_f2_keybinding_cycles_theme():
-    # Lock the operator-facing key hook (the action test isn't enough — Wild Bill).
+    # Lock the operator-facing key hook (the action test isn't enough).
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -128,7 +128,7 @@ async def test_f4_keybinding_flips_stream_without_error():
 
 
 async def test_header_surfaces_active_variant():
-    # The operator can see which variant is live (Lovecraft coherence note).
+    # The operator can see which variant is live.
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
         await pilot.pause()

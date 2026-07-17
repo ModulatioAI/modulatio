@@ -124,7 +124,7 @@ def test_uninstall_sh_safe_rm_refuses_a_repo_dir(tmp_path):
     assert "refus" in (r.stdout + r.stderr).lower()
 
 
-# ── source-guard must resist $0 spoofing + eval (Wild Bill HIGH-1) ───────────
+# ── source-guard must resist $0 spoofing + eval ──────────────────────────────
 
 
 def _fake_home_env(tmp_path: Path) -> dict:
@@ -178,7 +178,7 @@ def test_uninstall_sh_DOES_run_when_executed_directly(tmp_path):
     assert not cache.exists()  # cache removed
 
 
-# ── safe_rm must not follow a symlink to unrelated work (Wild Bill HIGH-3) ───
+# ── safe_rm must not follow a symlink to unrelated work ──────────────────────
 
 
 def test_uninstall_sh_safe_rm_does_not_follow_symlink(tmp_path):
@@ -261,7 +261,7 @@ def test_uninstall_sh_fastembed_env_basename_only(tmp_path, rel, kept):
     assert d.exists() == kept
 
 
-# ── the autouse isolation fixture must actually run (Wild Bill HIGH-5) ───────
+# ── the autouse isolation fixture must actually run ──────────────────────────
 
 
 def test_autouse_fixture_redirects_xdg_under_tmp():

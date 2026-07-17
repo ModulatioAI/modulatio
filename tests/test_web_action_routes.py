@@ -332,7 +332,7 @@ def test_jt_schedule_unknown_template_400(client):
 
 
 def test_jt_schedule_rejects_zero_count(client):
-    """WB MEDIUM: a crafted count:0 must be rejected at the route boundary (422),
+    """A crafted count:0 must be rejected at the route boundary (422),
     not silently persisted as an unlimited schedule."""
     _seed_jt()
     resp = client.post("/api/web/jts/weekly-report/schedule", json={
@@ -341,7 +341,7 @@ def test_jt_schedule_rejects_zero_count(client):
 
 
 def test_jt_schedule_rejects_bad_start_at_and_until(client):
-    """WB CRITICAL/MEDIUM: garbage start_at / until are rejected at the route
+    """Garbage start_at / until are rejected at the route
     boundary rather than persisted to wedge or run-forever."""
     _seed_jt()
     bad_start = client.post("/api/web/jts/weekly-report/schedule", json={
@@ -399,7 +399,7 @@ def test_artifact_export_to_registered_folder(client, tmp_path):
         "path": "artifacts/report.md", "format": "markdown", "folder": "share"})
     assert resp.status_code == 200
     assert (dest / "report.md").exists()
-    # WB-3: the absolute host path (folder/share name) never crosses the
+    # The absolute host path (folder/share name) never crosses the
     # boundary — only the folder name it was asked for + the filename.
     assert resp.json() == {"folder": "share", "filename": "report.md"}
     assert str(dest) not in resp.text
@@ -425,11 +425,11 @@ def test_job_reveal_returns_path(client, finished_run, monkeypatch):
     assert finished_run in resp.json()["path"]
 
 
-# ── Wild Bill remediation: cross-project cron + live-run delete ────────
+# ── cross-project cron + live-run delete guards ────────────────
 
 
 def test_cron_verbs_refuse_cross_project(client):
-    """WB-2: a cron job id is global, but a verb must only touch a job that
+    """A cron job id is global, but a verb must only touch a job that
     belongs to the URL's project — else /api/beta can mutate alpha's schedule."""
     from modulatio import cron, vault
 
@@ -444,7 +444,7 @@ def test_cron_verbs_refuse_cross_project(client):
 
 
 def test_run_delete_refused_while_a_job_is_in_flight(client, monkeypatch):
-    """WB-1: mirror the TUI — never delete a run folder while the engine is
+    """Mirror the TUI — never delete a run folder while the engine is
     writing it. A live kickoff blocks deletion with 409."""
     from modulatio.web.actors import get_actor
 

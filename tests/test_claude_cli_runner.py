@@ -22,7 +22,7 @@ def test_run_claude_refuses_without_sandbox(tmp_path):
 
 
 def test_run_claude_never_binds_home_dir(tmp_path, monkeypatch):
-    """Wild Bill BLOCK: a claude binary at $HOME/claude must NOT cause the whole
+    """A claude binary at $HOME/claude must NOT cause the whole
     home directory to be RO-bound back into the sandbox (after --tmpfs /home)."""
     from pathlib import Path
     from modulatio import sandbox, claude_cli
@@ -47,7 +47,7 @@ def test_run_claude_never_binds_home_dir(tmp_path, monkeypatch):
 
 
 def test_run_claude_routes_read_only_dirs_to_ro_bind_not_rw(tmp_path, monkeypatch):
-    """Cadre (Wild Bill BLOCK + Lovecraft): a B5 visibility grant passed as
+    """A B5 visibility grant passed as
     ``read_only_dirs`` must be mounted READ-ONLY (sandbox ``extra_binds`` →
     ``--ro-bind``), NOT read-write (``extra_rw_roots`` → ``--bind``). A rw grant
     lets a Clay leader MUTATE the very deliverables it was only meant to inspect.

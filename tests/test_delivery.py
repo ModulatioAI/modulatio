@@ -124,7 +124,7 @@ def test_deliver_product_names_and_places(monkeypatch, tmp_path, _mock_export):
 
 
 def test_sanitize_filename_strips_bidi_controls():
-    """Wild Bill LOW: _sanitize_filename must strip Unicode bidi/RTL-override
+    """_sanitize_filename must strip Unicode bidi/RTL-override
     controls (as _job_slug already does), so an LLM-derived job-name fallback
     can't produce a display-deceptive filename stem."""
     out = delivery._sanitize_filename("report‮evil‏")
@@ -307,7 +307,7 @@ class _FakeTask:
 
 
 def test_code_bundle_signals_on_family_not_just_suffix(monkeypatch, tmp_path):
-    """Wild Bill LOW: a code bundle is detected by FAMILY too, not only suffix.
+    """A code bundle is detected by FAMILY too, not only suffix.
 
     A code-family fallback lands at `*.txt` (`_is_code_source` is false), so a
     README.md companion beside it must still ship VERBATIM as part of the
@@ -337,7 +337,7 @@ def test_code_bundle_signals_on_family_not_just_suffix(monkeypatch, tmp_path):
 
 
 def test_code_fallback_path_consistency_and_verbatim(monkeypatch, tmp_path):
-    """Wild Bill HIGH+MED: a CODE task with NO output_path is written to the
+    """A CODE task with NO output_path is written to the
     family-aware fallback (drafts/<id>.txt). Delivery must (1) resolve the SAME
     path so it is not silently lost, and (2) ship it VERBATIM — code is NOT
     pandoc-rendered, keyed on the FAMILY not the .txt suffix (which is globally
@@ -659,7 +659,7 @@ def test_job_dir_base_kwarg_overrides_project_delivery_dir(monkeypatch, tmp_path
 
 
 def test_job_slug_strips_unicode_bidi_controls():
-    # Nemo hull advisory A3: BIDI override / isolates / NEL survive the ASCII
+    # BIDI override / isolates / NEL survive the ASCII
     # regex but scramble an `ls` listing -- strip them (slug is Leader JSON in B2).
     assert delivery._job_slug("a\u202ebc") == "abc"          # RLO override
     assert delivery._job_slug("Brief\u2066x\u2069") == "Briefx"  # isolates

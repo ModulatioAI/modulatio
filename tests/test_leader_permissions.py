@@ -68,7 +68,7 @@ def test_is_allowed_workspace_and_approved_roots(tmp_path):
 
 
 def test_symlink_root_grant_pins_to_realpath(tmp_path, monkeypatch):
-    """Wild Bill HIGH#1: a durable grant pins to the resolved REALPATH at grant
+    """A durable grant pins to the resolved REALPATH at grant
     time, so retargeting the symlink later can't silently widen the grant."""
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
     vault.init_project(CODE, "x", "y")
@@ -89,7 +89,7 @@ def test_symlink_root_grant_pins_to_realpath(tmp_path, monkeypatch):
 
 
 def test_load_drops_relative_and_nonstring_entries(project):
-    """Wild Bill #7: fail-closed strictness — only absolute string roots load."""
+    """Fail-closed strictness — only absolute string roots load."""
     import json
 
     pf = vault.project_dir(CODE) / "leader_permissions.json"
@@ -100,7 +100,7 @@ def test_load_drops_relative_and_nonstring_entries(project):
     assert lp.load_allowed_roots(CODE) == ["/ok/abs"]
 
 
-# ── keyed, action-scoped grants (Jenny-B / Nemo-BLOCK2 / Wild Bill HIGH-2) ───
+# ── keyed, action-scoped grants ──────────────────────────────────────────────
 
 def test_add_grant_is_keyed_by_request_class_and_action_scoped(project):
     lp.add_grant(CODE, request_class="path", resource="/home/proj",
@@ -126,7 +126,7 @@ def test_is_action_allowed_respects_the_grant_action_set(tmp_path):
     # granted root: only the granted actions
     assert lp.is_action_allowed(str(proj / "x.py"), "read", workspace=ws, grants=grants)
     assert lp.is_action_allowed(str(proj / "x.py"), "edit", workspace=ws, grants=grants)
-    # exec NOT in the grant's action set → refused (Wild Bill HIGH-2: read/edit ≠ exec)
+    # exec NOT in the grant's action set → refused (read/edit ≠ exec)
     assert not lp.is_action_allowed(str(proj / "x.py"), "exec", workspace=ws, grants=grants)
     # outside everything → refused
     assert not lp.is_action_allowed("/etc/passwd", "read", workspace=ws, grants=grants)
@@ -134,7 +134,7 @@ def test_is_action_allowed_respects_the_grant_action_set(tmp_path):
 
 def test_v1_allowed_roots_migrates_to_path_grants(project):
     """Forward-compat: a v1 bare allowed_roots list reads as path grants with
-    full action set (Nemo-BLOCK9)."""
+    full action set."""
     import json
 
     pf = vault.project_dir(CODE) / "leader_permissions.json"

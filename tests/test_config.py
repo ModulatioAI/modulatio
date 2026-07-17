@@ -486,7 +486,7 @@ def test_absent_env_overrides_is_a_noop():
 
 
 def test_env_overrides_refuse_non_allowlisted_keys(monkeypatch):
-    """Wild Bill BLOCK #2 (arc cadre): the backend enforces the SAME curated
+    """The backend enforces the SAME curated
     allowlist as the SETTINGS tab — a hand-edited defaults.json cannot
     persistently kill the sandbox or hijack the loader."""
     for k in ("MODULATIO_RUN_SHELL_UNSAFE", "MODULATIO_SANDBOX_PROFILE",
