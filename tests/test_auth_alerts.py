@@ -81,9 +81,9 @@ def test_suggested_fix_anthropic_mentions_claude_login():
     assert "claude login" in fix
 
 
-def test_suggested_fix_openai_mentions_codex_login():
+def test_suggested_fix_openai_mentions_login_openai():
     fix = auth_alerts.suggested_fix("oauth_openai")
-    assert "codex login" in fix
+    assert "login-openai" in fix
 
 
 def test_suggested_fix_api_key_mentions_env_var():
