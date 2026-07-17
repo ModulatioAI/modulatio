@@ -6,6 +6,56 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.9.6] — 2026-07-17
+
+A **feature** release: OAuth sign-in happens **inside the app**. The add-model
+pickers no longer dead-end at "go run a terminal command" — both the TUI and
+the WebOS run the whole sign-in themselves, for both OAuth providers. Plus a
+codebase-wide comment pass: every comment now carries strictly code-functional
+context.
+
+### Added
+
+- **In-app OAuth sign-in — both surfaces, both providers.** Choosing an OAuth
+  auth method in the add-model picker (TUI or WebOS) now runs the sign-in in
+  place:
+  - **xAI (SuperGrok / X Premium+):** the app binds the loopback callback,
+    opens the provider's consent page, and captures the token — PKCE (S256)
+    end to end.
+  - **OpenAI (ChatGPT subscription):** device-code flow — the picker shows the
+    code + verification URL and polls for the grant; no callback port needed.
+  - Sign-in state is shared: `GET /api/config/oauth-login` reports it, the TUI
+    and WebOS both poll the same seam, and a completed sign-in lands in
+    Modulatio's own credentials file with auto-refresh.
+- **Cancellable sign-in.** A pending sign-in can be abandoned from every
+  surface: `DELETE /api/config/oauth-login` (WebOS wires it to a confirm →
+  take-over flow when a second operator hits a 409), and Ctrl-C on the CLI
+  path cancels cleanly — the fixed loopback port is released within a beat, so
+  a retry never hits "address in use".
+
+### Changed
+
+- **Device-code polling is throttle-proof.** The OpenAI poll survives 429s
+  (honors `Retry-After`, capped), keeps polling on RFC 8628
+  `authorization_pending`, backs off on `slow_down`, and turns
+  `expired_token` / `access_denied` into clean, stable errors — provider
+  response bodies never reach the status line.
+- **Scrubbed failure surfaces.** Unexpected sign-in failures report only the
+  exception class on the status seam; details go to the logger.
+- **Provider hints lead with the picker.** The xAI catalog hint now points at
+  the in-picker sign-in first, with the CLI command as the parenthetical.
+- **Comments carry code-functional context only.** A codebase-wide pass over
+  `src/` and `tests/` (~100 files): every comment and docstring now describes
+  mechanism and purpose only. No behavior change; test scenarios and technical
+  rationale preserved throughout.
+
+### Notes
+
+- The xAI in-app flow is live-validated end to end. The OpenAI device-code
+  flow ships unit-validated against the RFC 8628 shapes (pending / slow-down /
+  throttle / expiry); its first live pass is scheduled for the next release
+  cycle.
+
 ## [0.9.9.5] — 2026-07-13
 
 A **feature** release: Modulatio can now consume **MCP servers**, the
