@@ -84,7 +84,7 @@ modulatio setup
 The OAuth refresher tried to renew a token and the provider returned an error.
 
 - Check `auth list` for status: `modulatio auth list`
-- Re-auth manually: `modulatio auth clear oauth_anthropic` then run any command that uses Anthropic (it'll trigger re-auth flow)
+- Re-auth manually: `modulatio auth clear <provider>` (e.g. `oauth_openai` / `oauth_xai`) then run any command that uses it (it'll trigger the re-auth flow). For Anthropic, sign in with `claude login` (Clay) or set an Anthropic API key.
 - For Pro/Max OAuth: confirm your subscription is still active (sometimes a billing lapse silently invalidates tokens)
 
 ### "Model not found" / "Unknown model"

@@ -67,9 +67,16 @@ PYBIN="$OPT/python/bin/python3"
 test -x "$PYBIN"
 
 # --- modulatio + deps into the bundle ----------------------------------------
-# manylinux wheels only — the bundle must carry no host-compiled artifacts.
+# Dependencies come from a hash-pinned lock, not a fresh lower-bound solve, so
+# the shipped artifact's transitive graph is frozen and every wheel is verified
+# against a known digest (--require-hashes). manylinux wheels only — the bundle
+# carries no host-compiled artifacts. The project wheel installs WITHOUT
+# re-resolving (--no-deps): the lock is the single source of truth for deps.
+LOCK="$REPO_ROOT/packaging/requirements-web.lock"
 "$PYBIN" -m pip install --quiet --no-cache-dir --only-binary=:all: \
-  "${WHEEL}[web]"
+  --require-hashes -r "$LOCK"
+"$PYBIN" -m pip install --quiet --no-cache-dir --only-binary=:all: \
+  --no-deps "$WHEEL"
 
 # Rewrite entry-point shebangs to the INSTALLED interpreter path (pip wrote
 # the staging path, which does not exist on a target machine).

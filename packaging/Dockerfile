@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 #
 # The Modulatio container — the same self-contained .deb the packaging
-# pipeline ships, installed into a minimal Debian base, plus Claude Code
-# (for Clay seats) and an opt-in sshd whose sessions ARE the TUI.
+# pipeline ships, installed into a minimal Debian base, with an sshd whose
+# sessions ARE the TUI and runtime auto-detection of a mounted Claude for Clay.
 #
 # Build (from the repo root, with the .deb already in dist/):
 #   docker build -f packaging/Dockerfile --build-arg DEB=dist/modulatio_<ver>_amd64.deb -t modulatio .
@@ -16,10 +16,9 @@ FROM debian:stable-slim
 
 ARG DEB=dist/modulatio_amd64.deb
 
-# ca-certificates: outbound TLS (cloud providers). curl: the Claude Code
-# installer + healthchecks. openssh-server: the opt-in TUI-over-SSH door
-# (not started unless the compose ssh profile runs it). git: Clay and the
-# solo-Leader coding lane expect it.
+# ca-certificates: outbound TLS (cloud providers). curl: healthchecks.
+# openssh-server: the TUI-over-SSH door. git: Clay and the solo-Leader coding
+# lane expect it.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git openssh-server \
@@ -32,22 +31,13 @@ RUN apt-get update \
  && rm /tmp/modulatio.deb \
  && rm -rf /var/lib/apt/lists/*
 
-# Claude Code (native build, self-contained) so Clay seats work in-container.
-# Installed into a NON-volume image path (/opt/claude) and symlinked onto PATH,
-# so the binary survives the state-volume mount over /home/modulatio and image
-# upgrades. Only login state (~/.claude) rides the volume. Sign in once with
-# `docker exec -it <name> claude`, or supply CLAUDE_CODE_OAUTH_TOKEN from a
-# `claude setup-token` run done on any machine with a browser.
-# The installer drops the binary at ~/.local/share/claude/versions/<ver> with
-# ~/.local/bin/claude an absolute symlink to it. Move the app tree to /opt
-# (non-volume, world-readable so the modulatio user can exec it) and symlink
-# the versioned binary onto PATH; the ~/.local leftover is discarded.
-RUN curl -fsSL https://claude.ai/install.sh | bash \
- && mv /root/.local/share/claude /opt/claude \
- && ln -sf "$(ls -d /opt/claude/versions/* | head -1)" /usr/local/bin/claude \
- && chmod -R a+rX /opt/claude \
- && rm -rf /root/.local \
- && /usr/local/bin/claude --version
+# Clay (Claude Code) is NOT baked into the image — the image never downloads or
+# runs a vendor installer at build time. Instead the container auto-detects an
+# EXISTING Claude at runtime: mount your host's Claude install (the shipped
+# compose does this by default) or a sidecar's, and the entrypoint points
+# MODULATIO_CLAUDE_BIN at the newest version it finds under /opt/claude. No
+# Claude present → Clay is simply unavailable; everything else runs. This keeps
+# Clay bring-your-own — your Claude, your version, your model — never pinned.
 RUN useradd --create-home --uid 1000 --shell /bin/bash modulatio
 
 # TUI-over-SSH: key-only, single user, and the session IS the TUI —

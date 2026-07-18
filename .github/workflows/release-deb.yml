@@ -30,10 +30,11 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          case "$RELEASE_TAG" in
-            v[0-9]*.[0-9]*.[0-9]*|v[0-9]*.[0-9]*.[0-9]*.[0-9]*) : ;;
-            *) echo "refusing non-version tag: $RELEASE_TAG" >&2; exit 1 ;;
-          esac
+          # Anchored digits-and-dots grammar — shell globs aren't quantifiers,
+          # so `v1.0.0$(cmd)` must be rejected, not merely "starts with v1.0.0".
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){2,3}$ ]]; then
+            echo "refusing non-version tag: $RELEASE_TAG" >&2; exit 1
+          fi
           echo "TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
           echo "VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
 
@@ -42,10 +43,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      # Build toolchain (pip + build frontend + hatchling backend) comes from a
+      # hash-pinned lock, so the release build never resolves mutable latest
+      # tooling. --no-isolation makes `build` use the frozen backend we just
+      # installed rather than PEP 517-resolving hatchling afresh.
       - name: Build wheel
         run: |
-          python -m pip install --upgrade pip build
-          python -m build --wheel
+          python -m pip install --require-hashes -r packaging/requirements-build.lock
+          python -m build --wheel --no-isolation
 
       - name: Build .deb
         run: bash packaging/build_deb.sh
@@ -56,7 +61,9 @@ jobs:
         run: |
           DEB="$(ls dist/modulatio_*_amd64.deb)"
           cp "$DEB" dist/modulatio_latest_amd64.deb
-          sha256sum "$DEB" dist/modulatio_latest_amd64.deb > dist/SHA256SUMS.deb
+          # Manifest carries bare filenames (no dist/ prefix) so install.sh can
+          # match by exact filename equality rather than a substring.
+          ( cd dist && sha256sum "$(basename "$DEB")" modulatio_latest_amd64.deb > SHA256SUMS.deb )
           gh release upload "$TAG" \
             "$DEB" dist/modulatio_latest_amd64.deb dist/SHA256SUMS.deb --clobber
 

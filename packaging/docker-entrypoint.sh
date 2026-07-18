@@ -13,6 +13,16 @@
 #   *      anything else execs verbatim (modulatio …, bash, …)
 set -eu
 
+# Clay auto-detect (zero-config). The image ships no Claude; if a host or
+# sidecar Claude is mounted at /opt/claude (the shipped compose does this by
+# default), point MODULATIO_CLAUDE_BIN at the NEWEST version present so
+# find_claude_binary resolves it. Nothing mounted → left unset → Clay is simply
+# unavailable and everything else runs. Never pins a version.
+if [ -z "${MODULATIO_CLAUDE_BIN:-}" ]; then
+  _claude="$(ls -d /opt/claude/versions/* 2>/dev/null | sort -V | tail -1 || true)"
+  [ -n "$_claude" ] && [ -x "$_claude" ] && export MODULATIO_CLAUDE_BIN="$_claude"
+fi
+
 case "${1:-api}" in
   api)  shift || true; exec modulatio-api "$@" ;;
   tui)  shift || true; exec modulatio-tui "$@" ;;

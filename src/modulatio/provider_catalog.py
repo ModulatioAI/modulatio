@@ -227,7 +227,7 @@ ANTHROPIC = Provider(
     ),
     signup_url="https://console.anthropic.com/settings/keys",
     free_detect="none",  # no free tier
-    notes="Claude models (text). OAuth or API key. No free tier.",
+    notes="Claude models (text). API key, or Clay via the Claude Code subscription. No free tier.",
 )
 
 OPENAI = Provider(

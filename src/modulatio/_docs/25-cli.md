@@ -214,7 +214,7 @@ Shows all configured auth profiles, their status (`active`, `expired`, `expiring
 ### `auth clear <PROVIDER_ID>`
 
 ```
-modulatio auth clear oauth_anthropic
+modulatio auth clear oauth_openai
 ```
 
 Clear the cached tokens for one provider. Forces re-auth on next use.

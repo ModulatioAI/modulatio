@@ -101,20 +101,28 @@ provider URLs at `http://host.docker.internal:<port>` instead of localhost.
 
 ## Clay — Claude Code subscription seats
 
-The image bundles the `claude` binary, so Clay seats work in the container
-after a **one-time sign-in** (state persists in the volume). Two ways:
+The image ships **no** Claude binary — it never downloads a vendor installer at
+build time. Instead the container **auto-detects an existing Claude at runtime**,
+using *your* Claude, *your* version, *your* model — never one pinned by us.
 
-- **Interactive** (host networking lets the login's loopback callback work):
+**Zero-config, host-installed Claude.** If Claude Code is installed on your host
+(`claude` on your machine), the default compose mounts already expose it:
 
-  ```bash
-  docker exec -it modulatio claude
-  ```
+```yaml
+- ${HOME}/.local/share/claude:/opt/claude:ro   # your Claude install (read-only)
+- ${HOME}/.claude:/home/modulatio/.claude       # your login state
+```
 
-- **Headless**: run `claude setup-token` on any machine with a browser, then
-  put the token in the compose file's `CLAUDE_CODE_OAUTH_TOKEN` environment
-  entry and `docker compose up -d` again.
+The entrypoint points `MODULATIO_CLAUDE_BIN` at the newest version it finds, and
+Clay works — nothing else to do. Verify with `docker exec -it modulatio claude
+--version`.
 
-Prefer not to sign in? Anthropic models also run through plain API keys
+**No Claude on the host?** Those mounts are empty and harmless — Clay is simply
+unavailable and everything else runs. Install Claude on your host (or point the
+mounts at a **sidecar** container's `.../share/claude` and state) whenever you
+want Clay; it's detected automatically on the next `docker compose up`.
+
+Prefer not to use Clay at all? Anthropic models also run through plain API keys
 (Anthropic direct, or OpenRouter) — configure them like any other provider.
 
 ## In-app OAuth sign-ins (xAI, OpenAI subscription)

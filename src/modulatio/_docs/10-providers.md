@@ -57,20 +57,19 @@ The setup wizard's step 3 calls the same surface — adding entries through the 
 
 ## Auth types
 
-Six auth types, picked per entry:
+Five auth types, picked per entry:
 
 - **`api_key`** — standard bearer key. Stored in `<vault>/.env` under a key you name (e.g. `XAI_API_KEY`); the model entry references it by name.
-- **`oauth_anthropic`** — Anthropic OAuth tokens. Refreshes automatically via `modulatio.oauth_refresh`. Pulls Pro/Max tier if your account has it.
 - **`oauth_openai`** — OpenAI OAuth via Modulatio's own device-code sign-in: run `modulatio auth login-openai` (or use the in-picker "Sign in now" step) — no separate tooling required. The **"OpenAI Codex (subscription)"** provider uses this to reach **GPT-5.5** through the ChatGPT/Codex backend's Responses API (where a subscription token is valid), instead of the metered `api.openai.com`.
 - **`oauth_xai`** — xAI (Grok) OAuth via Modulatio's own sign-in: run `modulatio auth login-xai` (or use the in-picker "Sign in now" step) with a **SuperGrok / X Premium+** subscription. Tokens live in Modulatio's own credentials file and auto-refresh — xAI rotates the refresh token on every refresh, so Modulatio persists each rotation. A 403 on refresh means the subscription tier isn't authorized for API access; use the `api_key` path instead.
 - **`claude_cli`** — the **Clay** avatar seat: Modulatio invokes the Claude Code CLI (`claude -p`) as a subprocess and reaches Claude through the official harness using your logged-in subscription — it never reads or stores the token. The TOS-safe path for subscription-tier access; Clay is treated like any other seat (confined to its folder, additive to the existing Anthropic API-key path).
 - **`none`** — unauthenticated (only used for local services like Ollama / LM Studio that don't require auth on localhost).
 
-OAuth providers (`oauth_anthropic`, `oauth_openai`) trigger background-refresh alerts to your configured channels (Telegram, log) when tokens are nearing expiry.
+OAuth providers (`oauth_openai`, `oauth_xai`) trigger background-refresh alerts to your configured channels (Telegram, log) when tokens are nearing expiry.
 
 > **OAuth attribution — and the subscription seats that sidestep it**
 >
-> Passing Pro/Max OAuth tokens *directly* to a metered API (`oauth_anthropic`, or `oauth_openai` against `api.openai.com`) skips the first-party CLI's attribution headers, and whether that's on-spec for automated workloads is unsettled vendor-TOS territory — for cron jobs and long-running plans, plain `api_key` is clearly on-spec. As of v0.9.5 the **TOS-safe subscription paths ship**: **Clay** (`claude_cli`) routes through the official `claude -p` binary, and the **OpenAI Codex** provider reaches GPT-5.5 through the ChatGPT backend's own Responses API — both spend the subscription through the vendor's own harness rather than against the metered API.
+> Passing subscription OAuth tokens *directly* to a metered API (`oauth_openai` against `api.openai.com`) skips the first-party CLI's attribution headers, and whether that's on-spec for automated workloads is unsettled vendor-TOS territory — for cron jobs and long-running plans, plain `api_key` is clearly on-spec. As of v0.9.5 the **TOS-safe subscription paths ship**: **Clay** (`claude_cli`) routes through the official `claude -p` binary, and the **OpenAI Codex** provider reaches GPT-5.5 through the ChatGPT backend's own Responses API — both spend the subscription through the vendor's own harness rather than against the metered API.
 
 ## Per-provider details
 
