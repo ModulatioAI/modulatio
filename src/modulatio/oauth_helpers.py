@@ -7,8 +7,7 @@ by Modulatio's own sign-in flows (``oauth_login``) and are the ONLY files the
 runtime reads or refreshes — another tool's credential file is never consumed
 (its refresh tokens aren't ours to rotate, and a foreign write can stomp that
 tool's own rotation). The one external integration is Claude Code for Clay,
-which shells ``claude -p`` and never touches a credentials file here; the
-Anthropic reader below serves the ``oauth_anthropic`` strategy.
+which shells ``claude -p`` and never touches a credentials file here.
 
 Refresh logic lives in ``oauth_refresh.py``. Detection helpers here power the
 wizard's "quick-add OAuth (detected)" rows and runtime auth error handling.
@@ -19,13 +18,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from pathlib import Path
 from typing import Any
 
 from modulatio import config
 
-# Override these in tests; the Anthropic default matches the official CLI.
-ANTHROPIC_CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
+# Override these in tests.
 # Modulatio's OWN OpenAI OAuth store, minted by `modulatio auth login-openai`
 # (the device-code flow in oauth_login) and re-written on refresh. Same
 # ``{"tokens": {...}}`` shape the read/refresh pipeline has always consumed.
@@ -35,68 +32,6 @@ MODULATIO_OPENAI_OAUTH_FILE = config.CONFIG_DIR / ".openai_oauth.json"
 # (oauth_login.login_xai) and re-written on every refresh-token rotation
 # (oauth_refresh.refresh_xai_token). 0600, atomic writes.
 MODULATIO_XAI_OAUTH_FILE = config.CONFIG_DIR / ".xai_oauth.json"
-
-
-# === Anthropic ===
-#
-# File shape (from claude login):
-#   {"claudeAiOauth": {
-#       "accessToken": "sk-ant-oat01-...",
-#       "refreshToken": "sk-ant-ort01-...",
-#       "expiresAt": <unix-epoch-ms>,
-#       "scopes": [...],
-#       "subscriptionType": "max",
-#       "rateLimitTier": "..."
-#   }}
-
-def has_anthropic_credentials() -> bool:
-    """True if the Claude CLI credentials file exists and is readable."""
-    return ANTHROPIC_CREDENTIALS_FILE.exists() and os.access(ANTHROPIC_CREDENTIALS_FILE, os.R_OK)
-
-
-def read_anthropic_credentials() -> dict[str, Any] | None:
-    """Parse the credentials file. Returns the inner ``claudeAiOauth`` dict,
-    or None on missing/malformed/wrong-shape input."""
-    if not has_anthropic_credentials():
-        return None
-    try:
-        data = json.loads(ANTHROPIC_CREDENTIALS_FILE.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    inner = data.get("claudeAiOauth") if isinstance(data, dict) else None
-    if not isinstance(inner, dict):
-        return None
-    return inner
-
-
-def read_anthropic_token() -> str | None:
-    """Return the current Anthropic OAuth access token, or None if absent."""
-    creds = read_anthropic_credentials()
-    if not creds:
-        return None
-    token = creds.get("accessToken")
-    return token if isinstance(token, str) and token else None
-
-
-def anthropic_token_expires_at() -> int | None:
-    """Return the access token's Unix-epoch-ms expiry, or None if absent."""
-    creds = read_anthropic_credentials()
-    if not creds:
-        return None
-    expires = creds.get("expiresAt")
-    return int(expires) if isinstance(expires, (int, float)) else None
-
-
-def write_anthropic_credentials(updated: dict[str, Any]) -> None:
-    """Atomic write back to the credentials file. Used by oauth_refresh.
-
-    Preserves the outer ``claudeAiOauth`` envelope and writes with mode
-    0600 throughout (no world-readable window — see config.write_secret_file).
-    """
-    payload = {"claudeAiOauth": updated}
-    config.write_secret_file(
-        ANTHROPIC_CREDENTIALS_FILE, json.dumps(payload, indent=2)
-    )
 
 
 # === OpenAI ===
@@ -225,15 +160,9 @@ def find_claude_binary() -> str | None:
 
 
 __all__ = [
-    "ANTHROPIC_CREDENTIALS_FILE",
     "MODULATIO_OPENAI_OAUTH_FILE",
     "MODULATIO_XAI_OAUTH_FILE",
     "find_claude_binary",
-    "has_anthropic_credentials",
-    "read_anthropic_credentials",
-    "read_anthropic_token",
-    "anthropic_token_expires_at",
-    "write_anthropic_credentials",
     "has_openai_credentials",
     "read_openai_credentials",
     "read_openai_token",

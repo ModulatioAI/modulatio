@@ -733,7 +733,7 @@ def models_add(
     api_format: str = typer.Option("openai", help="API format: openai | anthropic"),
     auth_type: str = typer.Option(
         "api_key",
-        help="Auth type: none | api_key | oauth_anthropic | oauth_openai",
+        help="Auth type: none | api_key | oauth_openai | oauth_xai | claude_cli",
     ),
     env_var: str = typer.Option(
         None, help="Env var name (only for auth_type=api_key)"
@@ -1004,7 +1004,6 @@ def _clay_doctor_check() -> None:
 
 
 def _run_doctor_checks() -> None:
-    import time
     from modulatio import auth_alerts, oauth_helpers
 
     typer.echo("=== Modulatio doctor ===\n")
@@ -1121,16 +1120,6 @@ def _run_doctor_checks() -> None:
 
     # Token expiry
     typer.echo("\nOAuth tokens:")
-    if oauth_helpers.has_anthropic_credentials():
-        exp = oauth_helpers.anthropic_token_expires_at()
-        if exp:
-            now_ms = int(time.time() * 1000)
-            mins = max(0, (exp - now_ms) // 60_000)
-            typer.echo(f"  Anthropic: expires in {mins // 60}h {mins % 60}m")
-        else:
-            typer.echo("  Anthropic: credentials present but no expiresAt field")
-    else:
-        typer.echo("  Anthropic: no credentials file (~/.claude/.credentials.json)")
     if oauth_helpers.has_openai_credentials():
         typer.echo("  OpenAI Codex: credentials present")
     else:

@@ -201,14 +201,6 @@ def preserved_targets() -> list[Target]:
         Target("Deliverables", delivery.delivery_root(), "preserve"),
         Target("Export backups", Path(preferences.get_backup_dir()), "preserve"),
     ]
-    from modulatio import oauth_helpers
-
-    for label, attr in (
-        ("Claude CLI credentials", "ANTHROPIC_CREDENTIALS_FILE"),
-    ):
-        p = getattr(oauth_helpers, attr, None)
-        if p is not None:
-            out.append(Target(f"{label} (other tool — read-only)", Path(p), "preserve"))
     return out
 
 

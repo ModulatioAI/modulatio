@@ -68,18 +68,13 @@ def test_clear_alert_returns_false_when_absent():
 
 def test_clear_all_removes_every_alert():
     auth_alerts.raise_alert("p1", error_message="x", auth_type="api_key")
-    auth_alerts.raise_alert("p2", error_message="y", auth_type="oauth_anthropic")
+    auth_alerts.raise_alert("p2", error_message="y", auth_type="oauth_openai")
     n = auth_alerts.clear_all()
     assert n == 2
     assert auth_alerts.load_alerts() == {}
 
 
 # === Suggested fixes ===
-
-def test_suggested_fix_anthropic_mentions_claude_login():
-    fix = auth_alerts.suggested_fix("oauth_anthropic")
-    assert "claude login" in fix
-
 
 def test_suggested_fix_openai_mentions_login_openai():
     fix = auth_alerts.suggested_fix("oauth_openai")
@@ -103,12 +98,12 @@ def test_render_banner_returns_none_when_no_alerts():
 
 
 def test_render_banner_includes_provider_id_and_fix():
-    auth_alerts.raise_alert("p1", error_message="bad token", auth_type="oauth_anthropic")
+    auth_alerts.raise_alert("p1", error_message="bad token", auth_type="oauth_openai")
     banner = auth_alerts.render_cli_banner()
     assert banner is not None
     assert "p1" in banner
     assert "AUTH ALERT" in banner
-    assert "claude login" in banner
+    assert "login-openai" in banner
 
 
 def test_render_banner_pluralizes_for_multiple_alerts():

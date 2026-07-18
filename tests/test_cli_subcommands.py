@@ -232,7 +232,7 @@ def test_doctor_oauth_caveat_shown_when_oauth_model_configured():
         "models", "add", "anth",
         "--label", "A", "--base-url", "https://api.anthropic.com",
         "--api-format", "anthropic",
-        "--auth-type", "oauth_anthropic", "--model", "claude-sonnet-4-6",
+        "--auth-type", "oauth_openai", "--model", "claude-sonnet-4-6",
     ])
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0

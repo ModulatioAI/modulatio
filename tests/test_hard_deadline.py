@@ -209,7 +209,7 @@ def test_clay_runners_never_wear_the_deadline(monkeypatch, zero_grace):
     monkeypatch.setattr(
         "modulatio.model_presets.load_presets",
         lambda: {"clayseat": {"model": "claude-sonnet-4-6", "endpoint": "claude_cli",
-                              "auth_type": "oauth_anthropic"}},
+                              "auth_type": "claude_cli"}},
     )
     single = litellm_runner("clayseat")
     assert not hasattr(single, "_hard_deadline_s")

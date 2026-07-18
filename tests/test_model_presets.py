@@ -20,7 +20,6 @@ def isolate_config(tmp_path, monkeypatch):
     cfg = tmp_path / "config"
     monkeypatch.setattr(config, "CONFIG_DIR", cfg)
     monkeypatch.setattr(model_presets, "PRESETS_FILE", cfg / "model_presets.json")
-    monkeypatch.setattr(oauth_helpers, "ANTHROPIC_CREDENTIALS_FILE", tmp_path / "no-anthropic.json")
     monkeypatch.setattr(oauth_helpers, "MODULATIO_OPENAI_OAUTH_FILE", tmp_path / "no-openai-oauth.json")
     config.reload()
 
@@ -270,18 +269,6 @@ def test_is_available_accepts_staged_env(monkeypatch):
     monkeypatch.delenv("MY_KEY", raising=False)
     assert model_presets.is_available("p", staged_env={"MY_KEY": "sk-abc"}) is True
     assert model_presets.is_available("p", staged_env={}) is False
-
-
-def test_is_available_oauth_anthropic_checks_credential_file(tmp_path, monkeypatch):
-    creds = tmp_path / "anthropic.json"
-    monkeypatch.setattr(oauth_helpers, "ANTHROPIC_CREDENTIALS_FILE", creds)
-    model_presets.add_preset(
-        "anth", label="Anthropic OAuth", base_url="https://api.anthropic.com",
-        api_format="anthropic", auth_type="oauth_anthropic", model="claude-sonnet-4-6",
-    )
-    assert model_presets.is_available("anth") is False
-    creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "x"}}))
-    assert model_presets.is_available("anth") is True
 
 
 def test_update_preset_rejects_raw_secret_in_auth_config(tmp_path, monkeypatch):

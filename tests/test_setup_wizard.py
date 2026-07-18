@@ -1228,7 +1228,7 @@ def test_derive_providers_includes_oauth_only_preset(monkeypatch):
         lambda: {
             "claude-oauth": {
                 "base_url": "https://api.anthropic.com",
-                "auth_type": "oauth_anthropic",
+                "auth_type": "oauth_openai",
             },
         },
     )

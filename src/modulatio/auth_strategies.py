@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Auth strategies — provider-agnostic credential resolution.
 
-Until B-1, ``runners.py`` had explicit ``if auth_type == "oauth_anthropic"
-…`` branches, ``auth_alerts.py`` had a hardcoded ``_FIX_HINTS`` dict,
+Before the strategy pattern, ``runners.py`` had explicit per-auth-type
+branches, ``auth_alerts.py`` had a hardcoded ``_FIX_HINTS`` dict,
 ``oauth_refresh.py`` dispatched on auth_type strings, and
 ``model_presets.is_available`` had its own per-type checks. Adding a new
 auth provider meant touching all four files plus their tests.
@@ -174,51 +174,6 @@ class ApiKeyStrategy:
         return "Check that the provider's API key env var is set and valid."
 
 
-class OAuthAnthropicStrategy:
-    """OAuth via the Claude CLI's credentials file
-    (``~/.claude/.credentials.json``). Refresh delegates to
-    ``oauth_refresh.try_refresh_anthropic``.
-
-    Note: today's runtime passes the OAuth token directly to
-    ``api.anthropic.com`` without CLI-attribution headers. The strategy
-    pattern doesn't fix that; it just collects the existing behavior
-    behind a uniform interface.
-    """
-
-    name = "oauth_anthropic"
-
-    def __init__(self, config: dict | None = None) -> None:
-        del config
-
-    def load_token(self) -> str | None:
-        from modulatio import oauth_helpers
-        return oauth_helpers.read_anthropic_token()
-
-    def refresh_if_possible(self) -> str | None:
-        from modulatio import oauth_refresh
-        try:
-            return oauth_refresh.refresh_anthropic_token()
-        except oauth_refresh.RefreshError:
-            return None
-
-    def attribution_kwargs(self) -> dict[str, Any]:
-        return {}
-
-    def is_available(self, extra_env: dict[str, str] | None = None) -> bool:
-        del extra_env  # OAuth doesn't use staged env
-        from modulatio import oauth_helpers
-        return oauth_helpers.has_anthropic_credentials()
-
-    def fix_hint(self) -> str:
-        return (
-            "Run `claude login` to re-authenticate. If 401s persist, "
-            "this may be Anthropic restricting third-party use of "
-            "Pro/Max OAuth tokens — switch this provider to api_key "
-            "with an Anthropic API key. See `modulatio doctor` for "
-            "guidance."
-        )
-
-
 class OAuthOpenAIStrategy:
     """OAuth via Modulatio's OWN OpenAI sign-in (``modulatio auth login-openai``
     → the device-code flow in ``oauth_login``), tokens in Modulatio's own store.
@@ -355,7 +310,6 @@ class ClaudeCliStrategy:
 _STRATEGY_FACTORIES: dict[str, Callable[[dict | None], AuthStrategy]] = {
     "none": NoneStrategy,
     "api_key": ApiKeyStrategy,
-    "oauth_anthropic": OAuthAnthropicStrategy,
     "oauth_openai": OAuthOpenAIStrategy,
     "oauth_xai": OAuthXaiStrategy,
     "claude_cli": ClaudeCliStrategy,
@@ -409,7 +363,6 @@ __all__ = [
     "AuthStrategy",
     "ClaudeCliStrategy",
     "NoneStrategy",
-    "OAuthAnthropicStrategy",
     "OAuthOpenAIStrategy",
     "build_strategy",
     "register_strategy",

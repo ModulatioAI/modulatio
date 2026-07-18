@@ -23,7 +23,6 @@ def isolate_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_DIR", cfg)
     monkeypatch.setattr(config, "AUTH_ALERTS_FILE", cfg / "auth_alerts.json")
     monkeypatch.setattr(model_presets, "PRESETS_FILE", cfg / "model_presets.json")
-    monkeypatch.setattr(oauth_helpers, "ANTHROPIC_CREDENTIALS_FILE", tmp_path / "anthropic.json")
     monkeypatch.setattr(oauth_helpers, "MODULATIO_OPENAI_OAUTH_FILE", tmp_path / "openai.json")
 
 
@@ -67,19 +66,6 @@ def test_resolve_preset_with_local_endpoint_gets_placeholder_api_key():
     assert model == "openai/llama3"
     assert kwargs["api_base"] == "http://127.0.0.1:11434/v1"
     assert kwargs["api_key"] == "modulatio-local"
-
-
-def test_resolve_preset_with_oauth_anthropic_reads_token():
-    oauth_helpers.ANTHROPIC_CREDENTIALS_FILE.write_text(json.dumps({
-        "claudeAiOauth": {"accessToken": "sk-ant-test", "refreshToken": "r"}
-    }))
-    model_presets.add_preset(
-        "opus", label="Opus", base_url="https://api.anthropic.com",
-        api_format="anthropic", auth_type="oauth_anthropic", model="claude-opus-4-7",
-    )
-    model, kwargs = runners._resolve_model_call_args("opus")
-    assert model == "anthropic/claude-opus-4-7"
-    assert kwargs["api_key"] == "sk-ant-test"
 
 
 def test_resolve_preset_missing_model_field_raises():

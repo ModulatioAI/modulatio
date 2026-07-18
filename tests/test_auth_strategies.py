@@ -19,10 +19,10 @@ from modulatio import auth_strategies
 # ── Registry ──────────────────────────────────────────────────────────────
 
 
-def test_registered_auth_types_includes_canonical_four():
-    """Default registry has the four pre-existing types."""
+def test_registered_auth_types_includes_canonical():
+    """Default registry has the pre-existing types."""
     types = auth_strategies.registered_auth_types()
-    for t in ("none", "api_key", "oauth_anthropic", "oauth_openai"):
+    for t in ("none", "api_key", "oauth_openai", "oauth_xai", "claude_cli"):
         assert t in types, f"missing canonical type {t!r}"
 
 
@@ -32,9 +32,6 @@ def test_build_strategy_returns_strategy_with_matching_name():
 
     s = auth_strategies.build_strategy("none")
     assert s.name == "none"
-
-    s = auth_strategies.build_strategy("oauth_anthropic")
-    assert s.name == "oauth_anthropic"
 
     s = auth_strategies.build_strategy("oauth_openai")
     assert s.name == "oauth_openai"
@@ -126,14 +123,10 @@ def test_other_strategies_ignore_extra_env(monkeypatch):
     """Strategies that don't read env vars must accept ``extra_env``
     but ignore it (protocol uniformity)."""
     from modulatio import oauth_helpers
-    monkeypatch.setattr(oauth_helpers, "has_anthropic_credentials", lambda: True)
     monkeypatch.setattr(oauth_helpers, "has_openai_credentials", lambda: True)
 
     none_s = auth_strategies.NoneStrategy()
     assert none_s.is_available({"FOO": "bar"}) is True
-
-    anthropic_s = auth_strategies.OAuthAnthropicStrategy()
-    assert anthropic_s.is_available({"FOO": "bar"}) is True
 
     openai_s = auth_strategies.OAuthOpenAIStrategy()
     assert openai_s.is_available({"FOO": "bar"}) is True
@@ -158,58 +151,6 @@ def test_api_key_strategy_fix_hint_names_env_var():
 def test_api_key_strategy_attribution_is_empty():
     s = auth_strategies.ApiKeyStrategy({"env_var": "MY_TEST_KEY"})
     assert s.attribution_kwargs() == {}
-
-
-# ── OAuthAnthropicStrategy ───────────────────────────────────────────────
-
-
-def test_oauth_anthropic_strategy_load_delegates_to_helpers(monkeypatch):
-    from modulatio import oauth_helpers
-    monkeypatch.setattr(
-        oauth_helpers, "read_anthropic_token",
-        lambda: "oauth-token-from-helpers"
-    )
-    s = auth_strategies.OAuthAnthropicStrategy()
-    assert s.load_token() == "oauth-token-from-helpers"
-
-
-def test_oauth_anthropic_strategy_is_available_delegates_to_helpers(monkeypatch):
-    from modulatio import oauth_helpers
-    monkeypatch.setattr(oauth_helpers, "has_anthropic_credentials", lambda: True)
-    s = auth_strategies.OAuthAnthropicStrategy()
-    assert s.is_available() is True
-
-    monkeypatch.setattr(oauth_helpers, "has_anthropic_credentials", lambda: False)
-    assert s.is_available() is False
-
-
-def test_oauth_anthropic_strategy_refresh_returns_new_token(monkeypatch):
-    from modulatio import oauth_refresh
-    monkeypatch.setattr(
-        oauth_refresh, "refresh_anthropic_token",
-        lambda: "freshly-refreshed-token"
-    )
-    s = auth_strategies.OAuthAnthropicStrategy()
-    assert s.refresh_if_possible() == "freshly-refreshed-token"
-
-
-def test_oauth_anthropic_strategy_refresh_returns_none_on_error(monkeypatch):
-    """RefreshError is the contract for "couldn't refresh". The
-    strategy turns it into None so callers don't need to import the
-    exception class."""
-    from modulatio import oauth_refresh
-
-    def _boom():
-        raise oauth_refresh.RefreshError("simulated failure")
-
-    monkeypatch.setattr(oauth_refresh, "refresh_anthropic_token", _boom)
-    s = auth_strategies.OAuthAnthropicStrategy()
-    assert s.refresh_if_possible() is None
-
-
-def test_oauth_anthropic_strategy_fix_hint_mentions_claude_login():
-    s = auth_strategies.OAuthAnthropicStrategy()
-    assert "claude login" in s.fix_hint()
 
 
 # ── OAuthOpenAIStrategy ──────────────────────────────────────────────────

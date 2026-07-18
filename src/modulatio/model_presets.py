@@ -21,7 +21,7 @@ Schema per entry:
         "label":       "<human-readable label>",
         "base_url":    "<provider endpoint>",
         "api_format":  "openai" | "anthropic",
-        "auth_type":   "none" | "api_key" | "oauth_anthropic" | "oauth_openai",
+        "auth_type":   "none" | "api_key" | "oauth_openai" | "oauth_xai" | "claude_cli",
         "auth_config": {
             # api_key: {"env_var": "PROVIDER_API_KEY"}
             # oauth_*: {} — credential file path baked into oauth_helpers

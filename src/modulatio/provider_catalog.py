@@ -39,7 +39,7 @@ class AuthOption(BaseModel):
     (e.g. OpenAI/Anthropic carry *both* their OAuth method and a plain key)."""
 
     auth_type: Literal[
-        "api_key", "oauth_anthropic", "oauth_openai", "oauth_xai", "claude_cli", "none"
+        "api_key", "oauth_openai", "oauth_xai", "claude_cli", "none"
     ]
     label: str  # "API key", "Sign in with Claude (OAuth)", "No auth (local)"
     env_var: Optional[str] = None  # for api_key: the env var the key lands in
