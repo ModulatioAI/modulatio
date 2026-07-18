@@ -419,10 +419,14 @@ def provider_models(provider_id: str, auth_type: str = Query("")) -> dict:
     except Exception:  # noqa: BLE001 — a down endpoint degrades to free-text entry
         models = []
     # Role-relevant text models, same as the TUI picker's default listing.
+    # ``source`` tells the form what it's showing: a provider-published list
+    # ("live") vs the shipped snapshot for vendors with no listing endpoint
+    # ("curated") — a snapshot must never present itself as a live fetch.
     return {"models": [
         {"id": m.id, "free": m.is_free}
         for m in pc.of_modality(models, "text")
-    ]}
+    ], "source": ("curated" if provider.models_source.kind == "picklist"
+                  else "live")}
 
 
 @router.post("/config/models/add")

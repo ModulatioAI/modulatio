@@ -438,13 +438,21 @@ function mountModels(body) {
           }
         }
         let models = [];
+        let listSource = "live";
         try {
           const q = authType ? `?auth_type=${encodeURIComponent(authType)}` : "";
-          models = (await api(
-            `/config/providers/${encodeURIComponent(p.provider_id)}/models${q}`)).models;
+          const resp = await api(
+            `/config/providers/${encodeURIComponent(p.provider_id)}/models${q}`);
+          models = resp.models;
+          listSource = resp.source || "live";
         } catch { /* degrade to free-text */ }
+        // Name what the list IS: a provider-published fetch, or the shipped
+        // snapshot for vendors with no listing endpoint — never dressed as live.
+        const sourceLabel = listSource === "curated"
+          ? "curated list — the provider publishes no model listing"
+          : "live from the provider";
         const fields = models.length
-          ? [{ name: "model", label: `Model (${models.length} available)`,
+          ? [{ name: "model", label: `Model (${models.length} available · ${sourceLabel})`,
                options: models.map((m) =>
                  ({ value: m.id, label: m.free ? `${m.id} — free` : m.id })) },
              { name: "custom", label: "…or type a model id (overrides the pick)" }]
