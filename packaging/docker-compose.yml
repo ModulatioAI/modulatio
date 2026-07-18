@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
+#
+# Modulatio in a container — the WebOS by default, with optional TUI-over-SSH.
+#
+#   docker compose -f packaging/docker-compose.yml up -d
+#   docker exec -it modulatio modulatio setup      # first run: the wizard
+#   docker exec -it modulatio modulatio-tui        # the TUI, any time
+#
+# Host networking (default, Linux): local model servers on the host's
+# localhost (Ollama :11434, LM Studio :1234) and the OAuth loopback flows
+# work unchanged, and the WebOS serves on the host's :8787 directly.
+# On Docker Desktop (macOS/Windows) host networking is unavailable: switch
+# the service to the commented bridge block and point local-model provider
+# URLs at host.docker.internal instead of localhost.
+#
+# Clay (Claude Code seats): the image bundles the claude binary; sign in
+# once with `docker exec -it modulatio claude` (host networking lets the
+# login's loopback callback work), or run `claude setup-token` on any
+# machine with a browser and set CLAUDE_CODE_OAUTH_TOKEN below. Login state
+# persists in the modulatio-home volume.
+#
+# TUI over SSH (optional):  docker compose --profile ssh up -d
+# then drop an authorized key in the volume and connect — the session IS
+# the TUI:
+#   docker exec modulatio sh -c 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys' < ~/.ssh/id_ed25519.pub
+#   ssh -p 2222 modulatio@<host>
+
+services:
+  modulatio:
+    image: modulatio
+    build:
+      context: ..
+      dockerfile: packaging/Dockerfile
+    container_name: modulatio
+    network_mode: host
+    volumes:
+      - modulatio-home:/home/modulatio
+    environment:
+      # Uncomment to authenticate Clay headlessly (from `claude setup-token`):
+      # CLAUDE_CODE_OAUTH_TOKEN: "…"
+      TERM: xterm-256color
+    restart: unless-stopped
+    # --- Docker Desktop / bridge alternative ---
+    # network_mode: bridge
+    # ports: ["8787:8787"]
+    # extra_hosts: ["host.docker.internal:host-gateway"]
+
+  modulatio-ssh:
+    image: modulatio
+    profiles: ["ssh"]
+    container_name: modulatio-ssh
+    command: ssh
+    user: root
+    network_mode: host
+    volumes:
+      - modulatio-home:/home/modulatio
+    restart: unless-stopped
+
+volumes:
+  modulatio-home:
