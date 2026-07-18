@@ -315,31 +315,60 @@ async function signInOauth(authType, statusNote) {
       return false;
     }
   }
-  if (start.kind === "device") {
-    window.open(start.url, "_blank", "noopener");
-    notify(`Enter code ${start.user_code} on the page that just opened.`);
-  } else {
-    window.open(start.url, "_blank", "noopener");
-    notify("Complete the sign-in in the tab that just opened…");
-  }
-  const deadline = Date.now() + 6 * 60 * 1000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2000));
-    let st;
-    try { st = await api("/config/oauth-login"); } catch { continue; }
-    if (st.state === "done") { notify("Signed in ✓"); return true; }
-    if (st.state === "failed") {
-      notify(st.error || "sign-in failed", { error: true });
-      return false;
+  // The device code must OUTLIVE the tab-switch: the consent page opens in a
+  // new tab (stealing focus), so a transient toast expires unseen behind it.
+  // A persistent dialog holds the code + link until the flow resolves, with
+  // its own Cancel that releases the server-side slot.
+  let cancelled = false;
+  let dlgStatus = null;
+  const dlg = el("dialog", { class: "approval card" },
+    start.kind === "device"
+      ? el("div", {},
+          el("p", { class: "approval-detail" }, "Enter this code on the verification page:"),
+          el("p", { style: "font-size:1.6em;letter-spacing:0.15em;text-align:center;font-family:monospace" },
+            start.user_code),
+          el("p", { class: "approval-detail" },
+            el("a", { href: start.url, target: "_blank", rel: "noopener" }, start.url)),
+          (dlgStatus = el("p", { class: "approval-detail" }, "waiting for the sign-in…")))
+      : el("div", {},
+          el("p", { class: "approval-detail" }, "Complete the sign-in in the tab that just opened:"),
+          el("p", { class: "approval-detail" },
+            el("a", { href: start.url, target: "_blank", rel: "noopener" }, start.url)),
+          (dlgStatus = el("p", { class: "approval-detail" }, "waiting for the sign-in…"))),
+    el("div", { class: "row", style: "justify-content:flex-end" },
+      el("button", { class: "btn", onclick: () => { cancelled = true; } }, "Cancel sign-in")));
+  document.body.append(dlg);
+  dlg.showModal();
+  window.open(start.url, "_blank", "noopener");
+  try {
+    const deadline = Date.now() + 6 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (cancelled) {
+        try { await api("/config/oauth-login", { method: "DELETE" }); } catch { /* best-effort */ }
+        notify("Sign-in cancelled.");
+        return false;
+      }
+      let st;
+      try { st = await api("/config/oauth-login"); } catch { continue; }
+      if (st.state === "done") { notify("Signed in ✓"); return true; }
+      if (st.state === "failed") {
+        notify(st.error || "sign-in failed", { error: true });
+        return false;
+      }
+      if (statusNote) statusNote(start.kind === "device"
+        ? `waiting — enter code ${start.user_code}` : "waiting for the sign-in…");
+      dlgStatus.textContent = "waiting for the sign-in…";
     }
-    if (statusNote) statusNote(start.kind === "device"
-      ? `waiting — enter code ${start.user_code}` : "waiting for the sign-in…");
+    // The surface gave up — release the server-side slot too, or the abandoned
+    // flow owns sign-in (and the xAI callback port) until ITS timeout.
+    try { await api("/config/oauth-login", { method: "DELETE" }); } catch { /* best-effort */ }
+    notify("Sign-in timed out.", { error: true });
+    return false;
+  } finally {
+    dlg.close();
+    dlg.remove();
   }
-  // The surface gave up — release the server-side slot too, or the abandoned
-  // flow owns sign-in (and the xAI callback port) until ITS timeout.
-  try { await api("/config/oauth-login", { method: "DELETE" }); } catch { /* best-effort */ }
-  notify("Sign-in timed out.", { error: true });
-  return false;
 }
 
 function mountModels(body) {
