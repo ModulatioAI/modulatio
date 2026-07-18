@@ -252,64 +252,32 @@ def test_oauth_xai_strategy_is_registered():
     assert "oauth_xai" in auth_strategies.registered_auth_types()
 
 
-def test_xai_oauth_reads_grok_cli_creds(tmp_path, monkeypatch):
+def test_xai_oauth_ignores_foreign_credential_files(tmp_path, monkeypatch):
+    """Token isolation: another tool's credential file is never a Modulatio
+    credential — only Modulatio's own store (minted by `modulatio auth
+    login-xai`) counts."""
     from modulatio import oauth_helpers
-    cred = tmp_path / "auth.json"
-    cred.write_text('{"access_token": "xai-tok", "refresh_token": "xai-ref"}')
-    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
+    monkeypatch.setattr(
+        oauth_helpers, "MODULATIO_XAI_OAUTH_FILE", tmp_path / "own.json")
+    assert not oauth_helpers.has_xai_credentials()
+    assert oauth_helpers.read_xai_token() is None
+    oauth_helpers.write_xai_credentials(
+        {"access_token": "own-tok", "refresh_token": "own-ref"})
     assert oauth_helpers.has_xai_credentials()
-    assert oauth_helpers.read_xai_token() == "xai-tok"
-    # The CLI file is an ACCESS-token bootstrap only: xAI rotates refresh
-    # tokens per grant, so consuming the CLI's would break its session.
-    # Refresh tokens come from Modulatio's own store alone.
-    assert oauth_helpers.read_xai_refresh_token() is None
+    assert oauth_helpers.read_xai_token() == "own-tok"
+    assert oauth_helpers.read_xai_refresh_token() == "own-ref"
 
 
-def test_xai_oauth_reads_tokens_nested_under_a_wrapper(tmp_path, monkeypatch):
-    # defensive: format unconfirmed, so accept nested layout too
-    from modulatio import oauth_helpers
-    cred = tmp_path / "auth.json"
-    cred.write_text('{"tokens": {"access_token": "nested-tok"}}')
-    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
-    assert oauth_helpers.read_xai_token() == "nested-tok"
-
-
-def test_xai_oauth_reads_real_grok_cli_format(tmp_path, monkeypatch):
-    """The real Grok CLI auth.json nests creds under a dynamic
-    ``https://auth.x.ai::<uuid>`` namespace key, with the access token in a
-    field named ``key`` (not ``access_token``). Live-validated against an
-    actual login — the spec-guessed layouts above missed this shape."""
-    import json
-
-    from modulatio import oauth_helpers
-    cred = tmp_path / "auth.json"
-    cred.write_text(json.dumps({
-        "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
-            "key": "grok-access-tok",
-            "refresh_token": "grok-refresh-tok",
-            "expires_at": "2026-12-31T00:00:00Z",
-            "oidc_issuer": "https://auth.x.ai",
-        }
-    }))
-    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
-    assert oauth_helpers.read_xai_token() == "grok-access-tok"
-    # never the CLI's refresh token (rotation-safe contract — own store only)
-    assert oauth_helpers.read_xai_refresh_token() is None
-
-
-def test_xai_oauth_auth_status_reflects_grok_login(tmp_path, monkeypatch):
+def test_xai_oauth_auth_status_reflects_own_login(tmp_path, monkeypatch):
     from modulatio import oauth_helpers
     oauth = pc.get_provider("xai").auth_options[1]
-    # not logged in → not ready, with a Grok-CLI setup hint
     monkeypatch.setattr(
-        oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", tmp_path / "absent.json"
-    )
+        oauth_helpers, "MODULATIO_XAI_OAUTH_FILE", tmp_path / "own.json")
+    # not signed in → not ready, hint names Modulatio's OWN sign-in command
     ok, hint = pc.auth_status(oauth)
-    assert not ok and "login-xai" in hint    # Modulatio's OWN sign-in command
-    # logged in → ready
-    cred = tmp_path / "auth.json"
-    cred.write_text('{"access_token": "t"}')
-    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", cred)
+    assert not ok and "login-xai" in hint
+    # signed in → ready
+    oauth_helpers.write_xai_credentials({"access_token": "t"})
     ok, hint = pc.auth_status(oauth)
     assert ok and hint == ""
 

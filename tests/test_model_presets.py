@@ -21,7 +21,7 @@ def isolate_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_DIR", cfg)
     monkeypatch.setattr(model_presets, "PRESETS_FILE", cfg / "model_presets.json")
     monkeypatch.setattr(oauth_helpers, "ANTHROPIC_CREDENTIALS_FILE", tmp_path / "no-anthropic.json")
-    monkeypatch.setattr(oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "no-codex.json")
+    monkeypatch.setattr(oauth_helpers, "MODULATIO_OPENAI_OAUTH_FILE", tmp_path / "no-openai-oauth.json")
     config.reload()
 
 

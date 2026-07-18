@@ -220,7 +220,8 @@ class OAuthAnthropicStrategy:
 
 
 class OAuthOpenAIStrategy:
-    """OAuth via the Codex CLI's auth file (``~/.codex/auth.json``).
+    """OAuth via Modulatio's OWN OpenAI sign-in (``modulatio auth login-openai``
+    → the device-code flow in ``oauth_login``), tokens in Modulatio's own store.
     Refresh delegates to ``oauth_refresh.refresh_openai_token``.
     """
 
@@ -265,7 +266,7 @@ class OAuthOpenAIStrategy:
     def fix_hint(self) -> str:
         return (
             "Run `modulatio auth login-openai` to sign in (no separate "
-            "tooling needed; an existing external login also works). If "
+            "tooling needed). If "
             "401s persist, "
             "this may be OpenAI restricting third-party use of "
             "ChatGPT/Codex OAuth tokens — switch this provider to "

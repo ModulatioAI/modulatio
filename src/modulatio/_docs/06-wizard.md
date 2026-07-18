@@ -59,7 +59,7 @@ The wizard launches the TUI on your first project. But before the Leader can do 
 
 This is the part the wizard used to do; it now lives in the TUI's **Config tab**, the **only** place to set these up:
 
-- **Models** — add model entries (`label`, provider URL, auth method, model ID). Quick-add rows auto-detect Clay (Claude Code on PATH), OpenAI Codex (`~/.codex/auth.json`), and local services (Ollama / LM Studio / llama.cpp on standard ports). You need at least one model.
+- **Models** — add model entries (`label`, provider URL, auth method, model ID). Quick-add rows auto-detect Clay (Claude Code on PATH), OpenAI (a completed `modulatio auth login-openai` sign-in), and local services (Ollama / LM Studio / llama.cpp on standard ports). You need at least one model.
 - **Agents** — build your team: the **Leader** (your conversational partner — drives the GSD loop, decomposes objectives), a **QC** (reviews every artifact before it ships), and **one or more producers** (skill-holders that do the work). Each agent points at one of your configured models; the same model can back several agents.
 
 The roster is the single source of every seat's model — set a seat's model once and both the conversational Leader and the orchestration Leader use it (no split). Edits are live: rename an agent, swap its model, add a producer, all without re-running setup.

@@ -280,7 +280,7 @@ OPENAI_CODEX = Provider(
             auth_type="oauth_openai",
             label="Sign in with ChatGPT (OAuth)",
             # Modulatio runs the device sign-in itself — no separate tooling
-            # required (a pre-existing external login is still honored).
+            # required (Modulatio's own stored sign-in is what counts).
             oauth_hint=(
                 "Sign in from this picker, or run `modulatio auth "
                 "login-openai` — a page opens and you enter a short code."

@@ -1315,7 +1315,7 @@ def isolate_config(tmp_path, monkeypatch):
         oauth_helpers, "ANTHROPIC_CREDENTIALS_FILE", tmp_path / "anthropic.json"
     )
     monkeypatch.setattr(
-        oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "openai.json"
+        oauth_helpers, "MODULATIO_OPENAI_OAUTH_FILE", tmp_path / "openai.json"
     )
 
 

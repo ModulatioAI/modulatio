@@ -392,7 +392,7 @@ def test_begin_openai_login_device_flow_persists_codex_shape(
     import base64 as b64
     import json as js
     monkeypatch.setattr(
-        oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "auth.json")
+        oauth_helpers, "MODULATIO_OPENAI_OAUTH_FILE", tmp_path / "auth.json")
 
     # an id_token whose claims carry the account id
     claims = {"https://api.openai.com/auth": {"chatgpt_account_id": "acct-42"}}
@@ -458,7 +458,7 @@ def _direct_device():
 
 def test_openai_poll_survives_429_and_rfc_pending(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "auth.json")
+        oauth_helpers, "MODULATIO_OPENAI_OAUTH_FILE", tmp_path / "auth.json")
     seq = [
         _FakeResponse(429, payload={}, headers={"Retry-After": "0"}),
         _FakeResponse(400, payload={"error": "authorization_pending"}),
@@ -473,7 +473,7 @@ def test_openai_poll_survives_429_and_rfc_pending(monkeypatch, tmp_path):
 
 def test_openai_poll_slow_down_bumps_interval(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "auth.json")
+        oauth_helpers, "MODULATIO_OPENAI_OAUTH_FILE", tmp_path / "auth.json")
     device = _direct_device()
     seq = [
         _FakeResponse(400, payload={"error": "slow_down"}),

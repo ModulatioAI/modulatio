@@ -290,7 +290,7 @@ def refresh_openai_token(*, timeout: float = 30.0) -> str:
     if not isinstance(refresh_token, str) or not refresh_token:
         raise RefreshError("OpenAI credentials lack a refresh token — re-run `modulatio auth login-openai`")
 
-    lock_path = str(oauth_helpers.OPENAI_CODEX_CREDENTIALS_FILE) + ".lock"
+    lock_path = str(oauth_helpers.MODULATIO_OPENAI_OAUTH_FILE) + ".lock"
     with _single_flight("openai", lock_path):
         # Re-read under the lock. Codex's auth.json has no expiry field, so we
         # detect a just-completed concurrent refresh by the refresh token having

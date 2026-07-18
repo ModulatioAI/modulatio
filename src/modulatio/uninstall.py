@@ -205,8 +205,6 @@ def preserved_targets() -> list[Target]:
 
     for label, attr in (
         ("Claude CLI credentials", "ANTHROPIC_CREDENTIALS_FILE"),
-        ("Codex CLI credentials", "OPENAI_CODEX_CREDENTIALS_FILE"),
-        ("Grok CLI credentials", "XAI_GROK_CREDENTIALS_FILE"),
     ):
         p = getattr(oauth_helpers, attr, None)
         if p is not None:

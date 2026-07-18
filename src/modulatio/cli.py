@@ -1134,7 +1134,7 @@ def _run_doctor_checks() -> None:
     if oauth_helpers.has_openai_credentials():
         typer.echo("  OpenAI Codex: credentials present")
     else:
-        typer.echo("  OpenAI Codex: no credentials file (~/.codex/auth.json)")
+        typer.echo("  OpenAI Codex: not signed in (run `modulatio auth login-openai`)")
     _clay_doctor_check()
 
     # Surface the OAuth attribution caveat when any OAuth-backed model is configured.

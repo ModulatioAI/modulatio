@@ -19,7 +19,7 @@ from modulatio import oauth_helpers, oauth_refresh
 @pytest.fixture(autouse=True)
 def isolate_credential_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(oauth_helpers, "ANTHROPIC_CREDENTIALS_FILE", tmp_path / "anthropic.json")
-    monkeypatch.setattr(oauth_helpers, "OPENAI_CODEX_CREDENTIALS_FILE", tmp_path / "openai.json")
+    monkeypatch.setattr(oauth_helpers, "MODULATIO_OPENAI_OAUTH_FILE", tmp_path / "openai.json")
 
 
 class _FakeResponse:
@@ -127,7 +127,7 @@ def test_refresh_anthropic_raises_on_http_error(monkeypatch):
 # === OpenAI Codex ===
 
 def test_refresh_openai_writes_new_token(monkeypatch):
-    oauth_helpers.OPENAI_CODEX_CREDENTIALS_FILE.write_text(json.dumps({
+    oauth_helpers.MODULATIO_OPENAI_OAUTH_FILE.write_text(json.dumps({
         "tokens": {"access_token": "old", "refresh_token": "old-r"}
     }))
     _stub_post(monkeypatch, _FakeResponse(200, {
@@ -249,7 +249,7 @@ def test_concurrent_openai_refresh_does_not_clobber_rotated_token(monkeypatch):
     keys off the refresh token having rotated."""
     import threading
 
-    oauth_helpers.OPENAI_CODEX_CREDENTIALS_FILE.write_text(json.dumps({
+    oauth_helpers.MODULATIO_OPENAI_OAUTH_FILE.write_text(json.dumps({
         "tokens": {"access_token": "old", "refresh_token": "R0"}
     }))
 
@@ -312,14 +312,6 @@ def test_concurrent_openai_refresh_does_not_clobber_rotated_token(monkeypatch):
 # (the class upgraded to the r2 superset: default status, non-dict payload).
 
 
-
-
-@pytest.fixture(autouse=True)
-def isolate_xai_creds(tmp_path, monkeypatch):
-    # Writable lock-file dir so _single_flight's cross-process flock can acquire.
-    monkeypatch.setattr(
-        oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", tmp_path / "grok" / "auth.json"
-    )
 
 
 @pytest.fixture(autouse=True)
@@ -659,12 +651,9 @@ def test_xai_refresh_persists_rotated_pair(monkeypatch):
     assert own["refresh_token"] == "rot-persist-2"      # the rotation stuck
 
 
-def test_xai_refresh_requires_own_store_not_grok_cli(monkeypatch, tmp_path):
-    """A Grok CLI file alone is NOT refreshable — consuming its refresh token
-    would invalidate the CLI's session. The error names the login command."""
-    grok = tmp_path / "grok.json"
-    grok.write_text('{"access_token": "cli-a", "refresh_token": "cli-r"}')
-    monkeypatch.setattr(oauth_helpers, "XAI_GROK_CREDENTIALS_FILE", grok)
+def test_xai_refresh_requires_own_store():
+    """No Modulatio-owned store → not refreshable; the error names the
+    login command."""
     with pytest.raises(oauth_refresh.RefreshError) as e:
         oauth_refresh.refresh_xai_token()
     assert "login-xai" in str(e.value)

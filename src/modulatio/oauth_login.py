@@ -507,7 +507,7 @@ def _openai_request_user_code(timeout: float = 15.0) -> dict:
 def _openai_poll_and_persist(device: dict) -> None:
     """Steps 2-4: poll until the operator finishes the verification page,
     exchange the returned code (the auth server supplies the PKCE verifier in
-    the device flow), persist to the Codex-shape store the existing
+    the device flow), persist to Modulatio's own OAuth store the existing
     read/refresh pipeline consumes."""
     import time as _time
     start = _time.monotonic()
@@ -667,7 +667,7 @@ def login_openai(*, echo=print) -> None:
             status = login_status()
             if status["state"] == "done":
                 echo(f"Signed in. Tokens stored (write-only) in "
-                     f"{oauth_helpers.OPENAI_CODEX_CREDENTIALS_FILE}")
+                     f"{oauth_helpers.MODULATIO_OPENAI_OAUTH_FILE}")
                 return
             if status["state"] == "failed":
                 raise LoginError(status["error"] or "sign-in failed")
