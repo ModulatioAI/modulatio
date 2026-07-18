@@ -366,7 +366,12 @@ function mountModels(body) {
             options: providers.map((x) => x.id) }]);
         if (!p) return false;
         const prov = providers.find((x) => x.id === p.provider_id);
+        // Credential-first, ALWAYS: the model list below is only live when the
+        // fetch runs authenticated, so the auth method is resolved (and its
+        // credential collected) before any list is shown — a single-method
+        // provider skips the radio, never the credential.
         let authType = "";
+        let chosen = null;
         if (prov && prov.auth.length > 1) {
           const a = await formDialog(`Authenticate · ${p.provider_id}`, [
             { name: "auth_type", label: "Method",
@@ -377,12 +382,29 @@ function mountModels(body) {
               })) }]);
           if (!a) return false;
           authType = a.auth_type;
-          const chosen = prov.auth.find((o) => o.auth_type === authType);
-          if (chosen && chosen.ready === false) {
-            // Not signed in — run Modulatio's own sign-in right here (the
-            // dead-end "go find a terminal" toast is retired).
-            const ok = await signInOauth(authType);
-            if (!ok) return false;
+          chosen = prov.auth.find((o) => o.auth_type === authType);
+        } else if (prov && prov.auth.length === 1) {
+          chosen = prov.auth[0];
+          authType = chosen.auth_type;
+        }
+        if (chosen && chosen.ready === false) {
+          // Not signed in — run Modulatio's own sign-in right here (the
+          // dead-end "go find a terminal" toast is retired).
+          const ok = await signInOauth(authType);
+          if (!ok) return false;
+        }
+        if (chosen && chosen.env_var && !chosen.auth_type.startsWith("oauth")) {
+          // An api_key method with no key yet: collect it now, for the same
+          // reason — a keyless list fetch degrades to the static catalog.
+          const slots = ((await api(
+            `/config/keys?base=${encodeURIComponent(chosen.env_var)}`)).slots || []);
+          if (!slots.some((s) => s.is_set)) {
+            const kf = await formDialog(`API key · ${p.provider_id}`, [
+              { name: "value", type: "password",
+                label: `Key (stored under ${chosen.env_var}, never shown again)` }]);
+            if (!kf) return false;
+            await api("/config/keys",
+              { method: "POST", body: { base: chosen.env_var, value: kf.value } });
           }
         }
         let models = [];
