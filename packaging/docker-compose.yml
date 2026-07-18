@@ -20,18 +20,17 @@
 # machine with a browser and set CLAUDE_CODE_OAUTH_TOKEN below. Login state
 # persists in the modulatio-home volume.
 #
-# TUI over SSH (optional):  docker compose --profile ssh up -d
-# then drop an authorized key in the volume and connect — the session IS
+# TUI over SSH (on by default; inert until you authorize a key):
+# drop your public key in the shared volume and connect — the session IS
 # the TUI:
 #   docker exec modulatio sh -c 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys' < ~/.ssh/id_ed25519.pub
 #   ssh -p 2222 modulatio@<host>
 
 services:
   modulatio:
-    image: modulatio
-    build:
-      context: ..
-      dockerfile: packaging/Dockerfile
+    # Published on release. To build locally instead (repo + .deb in dist/):
+    #   docker build -f packaging/Dockerfile --build-arg DEB=dist/<deb> -t ghcr.io/modulatioai/modulatio:latest .
+    image: ghcr.io/modulatioai/modulatio:latest
     container_name: modulatio
     network_mode: host
     volumes:
@@ -47,8 +46,7 @@ services:
     # extra_hosts: ["host.docker.internal:host-gateway"]
 
   modulatio-ssh:
-    image: modulatio
-    profiles: ["ssh"]
+    image: ghcr.io/modulatioai/modulatio:latest
     container_name: modulatio-ssh
     command: ssh
     user: root

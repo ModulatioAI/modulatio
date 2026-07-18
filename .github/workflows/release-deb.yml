@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   deb:
@@ -42,3 +43,18 @@ jobs:
           sha256sum "$DEB" dist/modulatio_latest_amd64.deb > dist/SHA256SUMS.deb
           gh release upload "${{ github.event.release.tag_name }}" \
             "$DEB" dist/modulatio_latest_amd64.deb dist/SHA256SUMS.deb --clobber
+
+      # The container image is the same .deb installed into a minimal base
+      # (see packaging/Dockerfile) — too large for a release asset, so it
+      # publishes to GHCR, versioned + latest.
+      - name: Publish container image
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          DEB="$(ls dist/modulatio_*_amd64.deb)"
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -f packaging/Dockerfile --build-arg DEB="$DEB" \
+            -t "ghcr.io/modulatioai/modulatio:${VERSION}" \
+            -t "ghcr.io/modulatioai/modulatio:latest" .
+          docker push "ghcr.io/modulatioai/modulatio:${VERSION}"
+          docker push "ghcr.io/modulatioai/modulatio:latest"
