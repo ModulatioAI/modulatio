@@ -18,6 +18,7 @@ from modulatio import oauth_helpers, oauth_refresh
 @pytest.fixture(autouse=True)
 def isolate_credential_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(oauth_helpers, "MODULATIO_OPENAI_OAUTH_FILE", tmp_path / "openai.json")
+    monkeypatch.setattr(oauth_helpers, "MODULATIO_XAI_OAUTH_FILE", tmp_path / "xai.json")
 
 
 class _FakeResponse:
@@ -454,3 +455,47 @@ def test_xai_refresh_403_is_entitlement_gate_not_relogin(monkeypatch):
     msg = str(e.value).lower()
     assert "tier" in msg and "api key" in msg
     assert oauth_helpers.read_own_xai_credentials()["refresh_token"] == "rot-tier-1"
+
+
+# === refresh error bodies never echo the opaque grant (security) ===
+
+def test_openai_refresh_error_never_echoes_body(monkeypatch):
+    """A 400 body carrying the exact submitted refresh grant must not reach
+    the RefreshError — only status + an allowlisted OAuth error code."""
+    oauth_helpers.MODULATIO_OPENAI_OAUTH_FILE.write_text(json.dumps({
+        "tokens": {"access_token": "old", "refresh_token": "opaqueGrantMaterial0123456789"}
+    }))
+    _stub_post(monkeypatch, _FakeResponse(
+        400, {"error": "invalid_grant",
+              "detail": "token opaqueGrantMaterial0123456789 revoked"}))
+    with pytest.raises(oauth_refresh.RefreshError) as e:
+        oauth_refresh.refresh_openai_token()
+    msg = str(e.value)
+    assert "opaqueGrantMaterial0123456789" not in msg
+    assert "(invalid_grant)" in msg  # allowlisted code surfaced, body text not
+
+
+def test_openai_refresh_error_drops_unknown_error_code(monkeypatch):
+    """A non-allowlisted error string is not echoed either."""
+    oauth_helpers.MODULATIO_OPENAI_OAUTH_FILE.write_text(json.dumps({
+        "tokens": {"access_token": "old", "refresh_token": "r"}
+    }))
+    _stub_post(monkeypatch, _FakeResponse(
+        400, {"error": "secretLeakInErrorField_abc123"}))
+    with pytest.raises(oauth_refresh.RefreshError) as e:
+        oauth_refresh.refresh_openai_token()
+    assert "secretLeakInErrorField_abc123" not in str(e.value)
+
+
+def test_xai_refresh_error_never_echoes_body(monkeypatch):
+    """xAI equivalent: a non-200 refresh body with the grant is not echoed."""
+    oauth_helpers.write_xai_credentials(
+        {"access_token": "old", "refresh_token": "xaiOpaqueGrant987654321"})
+    monkeypatch.setattr(
+        oauth_refresh.httpx, "get",
+        lambda url, **kw: _FakeResponse(payload={"token_endpoint": "https://t/x"}))
+    _stub_post(monkeypatch, _FakeResponse(
+        400, {"error": "invalid_grant", "raw": "xaiOpaqueGrant987654321 bad"}))
+    with pytest.raises(oauth_refresh.RefreshError) as e:
+        oauth_refresh.refresh_xai_token()
+    assert "xaiOpaqueGrant987654321" not in str(e.value)

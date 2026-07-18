@@ -140,6 +140,32 @@ def _redact_secrets(text: str) -> str:
         text = pat.sub("<redacted>", text)
     return text
 
+
+# The submitted refresh grant is opaque and need not match a token pattern, so
+# rendering a provider error body (even redacted) can echo the exact long-lived
+# grant back into an exception string. Instead of the body, surface only a
+# standard OAuth error code from a fixed allowlist (RFC 6749 §5.2 + device
+# flow); anything else collapses to no detail. Never render raw response text.
+_OAUTH_ERROR_ALLOWLIST = frozenset({
+    "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+    "unsupported_grant_type", "invalid_scope", "access_denied", "expired_token",
+    "authorization_pending", "slow_down", "server_error",
+    "temporarily_unavailable",
+})
+
+
+def _safe_oauth_error(response) -> str:
+    """A parenthetical ``(error_code)`` from the response's OAuth ``error``
+    field when it is a known standard code, else empty. Never the raw body."""
+    try:
+        body = response.json()
+    except (ValueError, AttributeError):
+        return ""
+    code = body.get("error") if isinstance(body, dict) else None
+    if isinstance(code, str) and code in _OAUTH_ERROR_ALLOWLIST:
+        return f" ({code})"
+    return ""
+
 # Token expiry buffer — refresh if expiring within this many seconds. Avoids
 # the race where we read a "valid" token, dispatch, and the upstream rejects
 # it as expired by the time the call lands.
@@ -224,8 +250,8 @@ def _do_refresh_openai(
 
     if response.status_code != 200:
         raise RefreshError(
-            f"OpenAI Codex refresh rejected (HTTP {response.status_code}): "
-            f"{_redact_secrets(response.text[:200])}"
+            f"OpenAI Codex refresh rejected (HTTP {response.status_code})"
+            f"{_safe_oauth_error(response)} — re-run `modulatio auth login-openai`"
         )
 
     try:
@@ -383,8 +409,8 @@ def _do_refresh_xai(refresh_token: str, *, timeout: float) -> str:
         )
     if response.status_code != 200:
         raise RefreshError(
-            f"xAI refresh rejected (HTTP {response.status_code}): "
-            f"{_redact_secrets(response.text[:200])}"
+            f"xAI refresh rejected (HTTP {response.status_code})"
+            f"{_safe_oauth_error(response)} — re-run `modulatio auth login-xai`"
         )
     try:
         payload = response.json()
