@@ -90,7 +90,30 @@ def run(argv: list[str] | None = None) -> None:
     # default=None so an explicit --port is distinguishable from the fallback
     # chain (--port > MODULATIO_WEB_PORT knob > shipped default).
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument(
+        "--install-service", action="store_true",
+        help="install + enable a user-level systemd unit so the WebOS "
+             "survives reboots (Linux; no sudo), then exit",
+    )
+    parser.add_argument(
+        "--uninstall-service", action="store_true",
+        help="disable and remove the WebOS user-level systemd unit, then exit",
+    )
     args = parser.parse_args(argv)
+
+    if args.install_service or args.uninstall_service:
+        from modulatio.web import install as web_install
+
+        if args.install_service:
+            # Only a non-default host is baked into the unit; the port rides
+            # through as given so the service serves where the operator asked.
+            host = args.host if args.host != "127.0.0.1" else None
+            ok, msg = web_install.install_service(host=host, port=args.port)
+        else:
+            ok, msg = web_install.uninstall_service()
+        print(msg)
+        raise SystemExit(0 if ok else 1)
+
     port = args.port if args.port is not None else _resolve_port()
 
     token: str | None = None
