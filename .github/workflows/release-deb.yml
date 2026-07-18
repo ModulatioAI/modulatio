@@ -1,0 +1,44 @@
+name: release-deb
+
+# Build the self-contained Debian package for a published release and attach
+# it to that release: the versioned artifact plus a stable-named alias so
+# .../releases/latest/download/modulatio_latest_amd64.deb never goes stale
+# (the website's download button and install.sh point at the alias).
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Build .deb
+        run: bash packaging/build_deb.sh
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DEB="$(ls dist/modulatio_*_amd64.deb)"
+          cp "$DEB" dist/modulatio_latest_amd64.deb
+          sha256sum "$DEB" dist/modulatio_latest_amd64.deb > dist/SHA256SUMS.deb
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "$DEB" dist/modulatio_latest_amd64.deb dist/SHA256SUMS.deb --clobber
