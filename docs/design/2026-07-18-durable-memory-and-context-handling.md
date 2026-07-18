@@ -81,8 +81,10 @@ Leader — trusted, one call, no tax.
 One store→recall→consolidate spine: episodic (raw, decaying) → semantic
 (durable, curated) with embedding-backed recall over both, plus the Leader's
 conversational lane as a first-class client of the durable layer so what it
-learns survives `/new`. Compression survival is addressed in Part B (the
-durable store is where evicted content goes, retrievable verbatim).
+learns survives `/new`. Compression survival depends on the durable store as
+the eviction target — but the *trigger* that lifts a mid-conversation fact to
+the store before compression destroys it is not yet specified; see Open
+questions (O1), which gates implementation.
 
 ---
 
@@ -221,6 +223,33 @@ shift safer, but the shift is the point, so it earns validation.
    drift-gates moved deliberately.
 5. Push→pull pointer feeding where payloads are large and task-relevance is
    partial.
+
+## Open questions — resolve before implementation
+
+These are real gaps in the *design*, not the principles. They are post-1.0
+work and do not change the 1.0 scope, but **each must be resolved and folded
+back into this doc before any implementation begins.**
+
+- **O1 — Extract-before-compress (the compression-survival keystone).** The
+  dreamer runs at boundaries (converse-end, run-end), but compression fires
+  *mid-conversation*, before a boundary. A fact taught at turn 30 can be
+  crushed at turn 40 and never reach the boundary dream at turn 80 — destroyed
+  before extraction. The mechanism must become **extract-then-compress**: a
+  cheap pass skims what compression is about to destroy and lifts the durable
+  bits to the store *first*. This trigger is currently unspecified; it is the
+  actual keystone of "recall survives compression" and must be designed before
+  implementation.
+- **O2 — Recall threshold calibration for memory retrieval.** Re-surfacing
+  durable facts into the salient tail puts them in the highest-attention zone,
+  where noise is most costly. The existing similarity threshold is
+  routing-calibrated and too aggressive for body/memory retrieval, so memory
+  recall needs its own calibrated threshold and a precision story (miss vs.
+  pollute). Unspecified today.
+- **O3 — Unify the interface, not the module.** The three fragments are
+  independent today with separate concerns and failure modes. "One spine" must
+  mean a shared recall/consolidate *interface* over three bounded pieces, not a
+  merged monolith. The boundary between shared-interface and preserved-module
+  must be drawn before implementation so unification does not create coupling.
 
 ## Explicitly rejected
 
