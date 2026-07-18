@@ -292,7 +292,8 @@ async function signInOauth(authType, statusNote) {
     const msg = String(e.message || e);
     if (msg.includes("already in progress")) {
       const takeover = await confirmDialog(
-        "A sign-in is already in progress. Cancel it and start over?");
+        "A sign-in is already in progress.",
+        { okLabel: "Cancel it & start over", cancelLabel: "Keep waiting" });
       if (!takeover) return false;
       try {
         await api("/config/oauth-login", { method: "DELETE" });

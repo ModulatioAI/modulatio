@@ -168,16 +168,18 @@ export function heading(text) {
 // Dialogs + toast ─────────────────────────────────────────────────────
 
 // A themed confirm — resolves true on OK, false on Cancel/Esc (fail-safe:
-// a dismissed destructive prompt never acts).
-export function confirmDialog(message) {
+// a dismissed destructive prompt never acts). Optional labels name the
+// buttons for what they DO — "Cancel" beside a question about cancelling
+// something reads as ambiguous.
+export function confirmDialog(message, { okLabel = "OK", cancelLabel = "Cancel" } = {}) {
   return new Promise((resolve) => {
     let decided = false;
     const done = (ok) => { decided = true; dlg.close(); resolve(ok); };
     const dlg = el("dialog", { class: "approval card" },
       el("p", { class: "approval-detail" }, message),
       el("div", { class: "row", style: "justify-content:flex-end;gap:10px" },
-        el("button", { class: "btn", onclick: () => done(false) }, "Cancel"),
-        el("button", { class: "btn btn--danger", onclick: () => done(true) }, "OK")));
+        el("button", { class: "btn", onclick: () => done(false) }, cancelLabel),
+        el("button", { class: "btn btn--danger", onclick: () => done(true) }, okLabel)));
     dlg.addEventListener("close", () => {
       if (!decided) resolve(false);
       dlg.remove();
