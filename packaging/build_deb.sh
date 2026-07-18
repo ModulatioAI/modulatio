@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 #
-# Build the Modulatio .deb — self-contained, generic Debian/Ubuntu.
+# Build the Modulatio .deb — self-contained, generic Debian/Ubuntu (amd64).
 #
 # The package carries its own CPython (a pinned python-build-standalone
 # release) plus Modulatio and its dependencies installed into it, under
@@ -121,7 +121,7 @@ Description: Orchestrate teams of LLM agents on real projects
  of LLM agents against project objectives — producers generate, QC reviews
  and patches, the Leader plans and verifies. This package is fully
  self-contained: it bundles its own Python interpreter and dependencies
- under /opt/modulatio and requires only glibc from the host.
+ under /opt/modulatio and requires only glibc from the host. Architecture: amd64.
 CONTROL
 
 cat > "$ROOT/usr/share/doc/modulatio/README.Debian" <<'DOC'

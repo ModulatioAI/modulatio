@@ -33,27 +33,42 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Claude Code (native build, self-contained) so Clay seats work in-container.
-# Installed for the runtime user below; login state persists in the mounted
-# /home/modulatio/.claude volume (or supply CLAUDE_CODE_OAUTH_TOKEN from a
-# `claude setup-token` run done on any machine with a browser).
-RUN useradd --create-home --uid 1000 --shell /bin/bash modulatio
-USER modulatio
+# Installed into a NON-volume image path (/opt/claude) and symlinked onto PATH,
+# so the binary survives the state-volume mount over /home/modulatio and image
+# upgrades. Only login state (~/.claude) rides the volume. Sign in once with
+# `docker exec -it <name> claude`, or supply CLAUDE_CODE_OAUTH_TOKEN from a
+# `claude setup-token` run done on any machine with a browser.
+# The installer drops the binary at ~/.local/share/claude/versions/<ver> with
+# ~/.local/bin/claude an absolute symlink to it. Move the app tree to /opt
+# (non-volume, world-readable so the modulatio user can exec it) and symlink
+# the versioned binary onto PATH; the ~/.local leftover is discarded.
 RUN curl -fsSL https://claude.ai/install.sh | bash \
- && /home/modulatio/.local/bin/claude --version
-ENV PATH="/home/modulatio/.local/bin:${PATH}"
-USER root
+ && mv /root/.local/share/claude /opt/claude \
+ && ln -sf "$(ls -d /opt/claude/versions/* | head -1)" /usr/local/bin/claude \
+ && chmod -R a+rX /opt/claude \
+ && rm -rf /root/.local \
+ && /usr/local/bin/claude --version
+RUN useradd --create-home --uid 1000 --shell /bin/bash modulatio
 
-# TUI-over-SSH (opt-in): key-only, single user, and the session IS the TUI —
+# TUI-over-SSH: key-only, single user, and the session IS the TUI —
 # ForceCommand drops the client straight into modulatio-tui; closing the TUI
-# closes the session. Enabled only when the compose `ssh` profile runs this
-# image with the `ssh` command; authorized_keys arrives via the state volume.
+# closes the session. Run with the `ssh` command (the compose ssh service does);
+# authorized_keys arrives via the state volume — no key, no login.
+# Loopback-bound by default: the daemon listens only on 127.0.0.1, so the door
+# is reachable from the docker host (the realistic path) but not exposed on the
+# network. DisableForwarding closes port/agent/X11/tunnel channels — otherwise
+# `ssh -N -L/-R/-D` would tunnel past ForceCommand (and, under host networking,
+# reach host-loopback services). ForceCommand uses the absolute shim path
+# (PATH begins with the user-writable ~/.local/bin).
 RUN mkdir -p /run/sshd && printf '%s\n' \
       'Port 2222' \
+      'ListenAddress 127.0.0.1' \
       'AllowUsers modulatio' \
       'PasswordAuthentication no' \
       'KbdInteractiveAuthentication no' \
       'PermitRootLogin no' \
-      'ForceCommand env TERM=xterm-256color modulatio-tui' \
+      'DisableForwarding yes' \
+      'ForceCommand env TERM=xterm-256color /usr/bin/modulatio-tui' \
       > /etc/ssh/sshd_config.d/modulatio-tui.conf
 
 COPY packaging/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

@@ -26,7 +26,7 @@ Two services come up:
 
 | Service | What it is |
 |---|---|
-| `modulatio` | the WebOS server (`modulatio-api --host 0.0.0.0`) |
+| `modulatio` | the WebOS server (`modulatio-api`, loopback-bound by default) |
 | `modulatio-ssh` | the TUI-over-SSH door on port 2222 (inert until you authorize a key — see below) |
 
 Both share one named volume (`modulatio-home`) holding all state: your
@@ -38,11 +38,22 @@ that does.
 
 ## The WebOS (browser)
 
-Served on port **8787** (the host's own port — the default compose file uses
-host networking). Loopback access needs nothing. Reaching it from another
-machine engages the server's LAN protections automatically: a bearer token
-(printed to the container log on first non-loopback bind — `docker logs
-modulatio`) and a Host allowlist.
+Served on port **8787**, **bound to loopback by default** (the compose file
+uses host networking, so that's the host's own `127.0.0.1:8787`). From the
+docker host, open `http://localhost:8787/` — nothing else needed.
+
+To reach it from **another machine**, bind all interfaces explicitly — set the
+service command to `["api", "--host", "0.0.0.0"]`. Two things to know before you
+do: the transport is **plain HTTP**, so the bearer token and your project
+traffic cross the network unencrypted — put a **TLS reverse proxy in front**
+for any real remote use. And the server's Host allowlist admits the bound name
+(e.g. `0.0.0.0`), which does not match an ordinary browser `Host:` header — so
+remote browsers reach it by IP/host only when you add that host to the
+allowlist. Loopback + an SSH tunnel, or a TLS proxy, is the recommended remote
+path.
+
+The bearer token for non-loopback access is printed to the container log on
+first bind (`docker logs modulatio`).
 
 Change the port by editing the service command: `command: ["api", "--port", "9000"]`.
 
