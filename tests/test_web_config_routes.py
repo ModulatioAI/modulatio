@@ -304,6 +304,16 @@ def test_providers_catalog(client):
     assert ps and all("id" in p and "base_url" in p and "api_format" in p for p in ps)
 
 
+def test_providers_catalog_carries_models_source_kind(client):
+    """Every provider entry names its models_source kind — the form gates the
+    typed-model-id path to kind == "custom" (everything listable is
+    picker-only), so the kind must cross the boundary."""
+    ps = client.get("/api/config/providers").json()["providers"]
+    assert all(p.get("kind") in {"api", "picklist", "local_probe", "custom"}
+               for p in ps)
+    assert any(p["kind"] == "custom" for p in ps)   # the typed-id path exists
+
+
 def test_provider_models_live_list(client, monkeypatch):
     """The add-model picker gets the provider's LIVE list — the same engine
     fetch the TUI runs — filtered to text models, free-flagged."""
@@ -342,9 +352,11 @@ def test_provider_models_key_used_but_never_returned(client, monkeypatch):
     assert "sk-LIST-NEVER-LEAK" not in r.text        # ...and the key stayed in
 
 
-def test_provider_models_fetch_failure_degrades_empty(client, monkeypatch):
-    """A down endpoint / missing key degrades to [] (the form falls back to a
-    typed model id) — never a 500."""
+def test_provider_models_fetch_failure_is_502_not_empty_200(client, monkeypatch):
+    """A down endpoint / bad credential is a FAILURE the form can show — a 502
+    with a plain detail. It must never come back as an empty 200: that shape
+    is indistinguishable from "provider has no models" and is what used to
+    silently degrade the add-model picker to free-text entry."""
     from modulatio import provider_catalog as pc
 
     def _boom(provider, *, api_key=None, **kw):
@@ -352,8 +364,9 @@ def test_provider_models_fetch_failure_degrades_empty(client, monkeypatch):
 
     monkeypatch.setattr(pc, "fetch_models", _boom)
     r = client.get("/api/config/providers/openrouter/models")
-    assert r.status_code == 200
-    assert r.json()["models"] == []
+    assert r.status_code == 502
+    assert "model listing failed" in r.json()["detail"]
+    assert "endpoint down" not in r.text   # raw exception text stays server-side
 
 
 def test_provider_models_unknown_provider_422(client):
@@ -615,3 +628,84 @@ def test_oauth_login_cancel_route(client, monkeypatch):
 
     monkeypatch.setattr(oauth_login, "cancel_login", lambda: False)
     assert client.delete("/api/config/oauth-login").json() == {"cancelled": False}
+
+
+# ── custom-provider listing + registration overrides ─────────────────────────
+
+
+def test_custom_listing_probes_the_operator_endpoint(client, monkeypatch):
+    """For the custom provider, base_url/env_var query params reach the
+    listing (the operator-supplied endpoint + key slot) — the probed models
+    come back as a real picker list."""
+    from modulatio import provider_catalog as pc
+
+    seen = {}
+
+    def _spy(provider, *, env_var=None, auth_type=None, base_url=None, **kw):
+        seen.update(env_var=env_var, base_url=base_url)
+        return [pc.CatalogModel(id="my-33b", name="my-33b", provider_id="custom")]
+
+    monkeypatch.setattr(pc, "fetch_models_authed", _spy)
+    r = client.get("/api/config/providers/custom/models"
+                   "?auth_type=api_key&base_url=https://host/v1&env_var=MY_KEY")
+    assert r.status_code == 200
+    assert [m["id"] for m in r.json()["models"]] == ["my-33b"]
+    assert seen == {"env_var": "MY_KEY", "base_url": "https://host/v1"}
+
+
+def test_catalog_provider_ignores_listing_overrides(client, monkeypatch):
+    """base_url/env_var overrides are custom-only: a catalog provider always
+    lists against its own definition — the web boundary must not re-point a
+    known provider's listing at a caller-chosen endpoint or key slot."""
+    from modulatio import provider_catalog as pc
+
+    seen = {}
+
+    def _spy(provider, *, env_var=None, auth_type=None, base_url=None, **kw):
+        seen.update(env_var=env_var, base_url=base_url)
+        return []
+
+    monkeypatch.setattr(pc, "fetch_models_authed", _spy)
+    client.get("/api/config/providers/openrouter/models"
+               "?base_url=https://evil/v1&env_var=OPENROUTER_API_KEY")
+    assert seen["base_url"] is None
+    assert seen["env_var"] == "OPENROUTER_API_KEY"  # the provider's OWN slot
+    # (identical to its catalog definition, not the caller's choice)
+    assert seen["env_var"] == pc.get_provider("openrouter").auth_options[0].env_var
+
+
+def test_model_add_custom_carries_endpoint_and_key_slot(client):
+    """Registering a custom model persists the operator's base_url and named
+    env var — a browser-added custom model must be as complete as a TUI one
+    (an empty base_url is a dead preset)."""
+    from modulatio import model_presets
+
+    r = client.post("/api/config/models/add", json={
+        "provider_id": "custom", "model": "my-33b", "auth_type": "api_key",
+        "base_url": "https://host/v1", "env_var": "MY_CUSTOM_KEY"})
+    assert r.status_code == 200
+    key = r.json()["key"]
+    try:
+        preset = model_presets.load_presets()[key]
+        assert preset["base_url"] == "https://host/v1"
+        assert preset["auth_config"]["env_var"] == "MY_CUSTOM_KEY"
+    finally:
+        model_presets.remove_preset(key)
+
+
+def test_model_add_catalog_provider_ignores_endpoint_override(client):
+    """A catalog provider's endpoint is a catalog fact — the body's base_url
+    must not re-point it."""
+    from modulatio import model_presets
+    from modulatio import provider_catalog as pc
+
+    r = client.post("/api/config/models/add", json={
+        "provider_id": "openrouter", "model": "x/y",
+        "base_url": "https://evil/v1"})
+    assert r.status_code == 200
+    key = r.json()["key"]
+    try:
+        preset = model_presets.load_presets()[key]
+        assert preset["base_url"] == pc.get_provider("openrouter").base_url
+    finally:
+        model_presets.remove_preset(key)

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.error
 import urllib.request
 from typing import Literal, Optional
 
@@ -658,10 +659,15 @@ def _load_picklist(picklist_key: str) -> list[str]:
 
 
 def _fetch_source(
-    provider: Provider, src: ModelsSource, api_key: Optional[str], timeout: float
+    provider: Provider,
+    src: ModelsSource,
+    api_key: Optional[str],
+    timeout: float,
+    base_url: Optional[str] = None,
 ) -> list[CatalogModel]:
+    base = (base_url or provider.base_url).rstrip("/")
     if src.kind == "api":
-        url = provider.base_url.rstrip("/") + (src.endpoint or "/models")
+        url = base + (src.endpoint or "/models")
         headers: dict[str, str] = {}
         if src.auth_required and api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -672,13 +678,24 @@ def _fetch_source(
         payload = {"data": [{"id": i} for i in ids]}
         return parse_models(provider, payload, modality=src.modality)
     if src.kind == "local_probe":
-        url = src.probe_url or (provider.base_url.rstrip("/") + "/models")
+        url = src.probe_url or (base + "/models")
         try:
             payload = _http_get_json(url, {}, min(timeout, 5.0))
         except Exception:
             return []  # local server not running / unreachable — empty, no error
         return parse_models(provider, payload, modality=src.modality)
-    return []  # custom: no listing — the operator enters the model id
+    if src.kind == "custom" and base:
+        # Best-effort probe: most custom endpoints are OpenAI-compatible, so
+        # once the operator has supplied a base_url the picker can usually be
+        # filled live. Unreachable/incompatible just means empty — the typed
+        # model id remains the sanctioned custom path, so no error surfaces.
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        try:
+            payload = _http_get_json(base + "/models", headers, min(timeout, 5.0))
+        except Exception:
+            return []
+        return parse_models(provider, payload, modality=src.modality)
+    return []  # custom with no endpoint yet — the operator enters the model id
 
 
 def auth_status(
@@ -704,18 +721,25 @@ def auth_status(
 
 
 def fetch_models(
-    provider: Provider, *, api_key: Optional[str] = None, timeout: float = 30.0
+    provider: Provider,
+    *,
+    api_key: Optional[str] = None,
+    timeout: float = 30.0,
+    base_url: Optional[str] = None,
 ) -> list[CatalogModel]:
     """Fetch a provider's model list across all its sources — free-flagged,
     modality-tagged, pinned.
 
-    Sources are ``api`` (live ``/models``, public or key-gated) or ``picklist``
-    (a curated seed list, for OAuth providers that can't be live-listed).
+    Sources are ``api`` (live ``/models``, public or key-gated), ``picklist``
+    (a curated seed list, for OAuth providers that can't be live-listed), or
+    ``custom`` (best-effort OpenAI-shape probe of the operator-supplied
+    ``base_url``; empty on failure — the typed id remains the custom path).
     Listing needs the key only when an ``api`` source's ``auth_required`` is set
-    (OpenRouter/Ollama are public; xAI needs the key; Anthropic uses a picklist)."""
+    (OpenRouter/Ollama are public; xAI needs the key; Anthropic uses a picklist).
+    ``base_url`` overrides the provider's own (the custom endpoint)."""
     all_models: list[CatalogModel] = []
     for src in [provider.models_source, *provider.extra_sources]:
-        all_models.extend(_fetch_source(provider, src, api_key, timeout))
+        all_models.extend(_fetch_source(provider, src, api_key, timeout, base_url))
     return apply_pinned(provider, all_models)
 
 
@@ -737,6 +761,35 @@ def listing_key(
         except Exception:
             return None
     return None
+
+
+def fetch_models_authed(
+    provider: Provider,
+    *,
+    env_var: Optional[str] = None,
+    auth_type: Optional[str] = None,
+    timeout: float = 30.0,
+    base_url: Optional[str] = None,
+) -> list[CatalogModel]:
+    """``fetch_models`` with the listing credential resolved AND self-healing:
+    the same refresh-once-on-401 contract the model-call retry path uses. An
+    OAuth access token ages out between sign-in and listing; without this, a
+    listing with the stored-but-expired token 401/403s and the picker shows
+    nothing even though the operator IS signed in. Refresh is attempted only
+    after the provider rejects the stored token — never preemptively (an xAI
+    refresh ROTATES the grant, so gratuitous refreshes are not free).
+    The one listing entry point shared by the TUI picker and the WebOS route."""
+    key = listing_key(env_var=env_var, auth_type=auth_type)
+    try:
+        return fetch_models(provider, api_key=key, timeout=timeout, base_url=base_url)
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (401, 403) or not (auth_type or "").startswith("oauth_"):
+            raise
+        from modulatio import oauth_refresh
+        fresh = oauth_refresh.try_refresh(auth_type)
+        if not fresh:
+            raise
+        return fetch_models(provider, api_key=fresh, timeout=timeout, base_url=base_url)
 
 
 # ── picker helpers: free / curated-default / search ──────────────────────────

@@ -317,6 +317,11 @@ class ModelAdd(BaseModel):
     # Blank = the provider's api-key option, else its first — the pre-choice
     # behavior, kept for back-compat.
     auth_type: str = ""
+    # Custom-provider facts the catalog can't supply: the endpoint and the
+    # operator-named key slot (the TUI's AuthStep collects the same two).
+    # Ignored for catalog providers.
+    base_url: str = ""
+    env_var: str = ""
 
 
 @router.get("/config/providers")
@@ -343,6 +348,9 @@ def providers_catalog() -> dict:
         out.append({
             "id": p.id, "name": p.name, "base_url": p.base_url,
             "api_format": p.api_format, "signup_url": p.signup_url,
+            # kind lets the form gate typed model ids to "custom" providers —
+            # everything listable gets a picker, never a text box.
+            "kind": p.models_source.kind,
             "auth": auth,
         })
     return {"providers": out}
@@ -390,14 +398,19 @@ def oauth_login_cancel() -> dict:
 
 
 @router.get("/config/providers/{provider_id}/models")
-def provider_models(provider_id: str, auth_type: str = Query("")) -> dict:
+def provider_models(
+    provider_id: str,
+    auth_type: str = Query(""),
+    base_url: str = Query(""),
+    env_var: str = Query(""),
+) -> dict:
     """The provider's LIVE model list for the add-model picker — the same
     engine fetch the TUI picker runs (``fetch_models``), with the listing key
     resolved server-side from the CHOSEN auth option (the TUI passes its
     AuthStep selection to the picker the same way); blank = the provider's
     api-key option, else its first. The key itself never crosses the web
-    boundary; an unreachable list degrades to ``[]`` (the form falls back to
-    a typed model id)."""
+    boundary; an unreachable list is a 502 — a failure must never look like
+    a provider with no models."""
     from modulatio import provider_catalog as pc
 
     provider = pc.get_provider(provider_id)
@@ -413,11 +426,28 @@ def provider_models(provider_id: str, auth_type: str = Query("")) -> dict:
     else:
         auth = next((a for a in provider.auth_options if a.auth_type == "api_key"),
                     provider.auth_options[0])
-    key = pc.listing_key(env_var=auth.env_var, auth_type=auth.auth_type)
+    # base_url / env_var overrides exist for the "custom" provider only — its
+    # endpoint and key-slot name are operator-supplied rather than catalog
+    # facts (the TUI's AuthStep collects the same two). Other providers list
+    # against their own catalog definition, always.
+    is_custom = provider.models_source.kind == "custom"
     try:
-        models = pc.fetch_models(provider, api_key=key)
-    except Exception:  # noqa: BLE001 — a down endpoint degrades to free-text entry
-        models = []
+        # Credential resolved inside, with the refresh-once-on-401 healing the
+        # model-call path uses — a signed-in operator's aged access token must
+        # not present as "no models".
+        models = pc.fetch_models_authed(
+            provider,
+            env_var=(env_var or auth.env_var) if is_custom else auth.env_var,
+            auth_type=auth.auth_type,
+            base_url=(base_url or None) if is_custom else None)
+    except Exception as exc:  # noqa: BLE001 — surface the failure, never an empty 200
+        # A down endpoint or bad credential must present as a FAILURE, not as
+        # a provider with no models — the silent empty list is what used to
+        # degrade the add-model form to free-text entry.
+        raise HTTPException(
+            status_code=502,
+            detail=(f"model listing failed for {provider_id} — "
+                    "check the credential/endpoint and retry")) from exc
     # Role-relevant text models, same as the TUI picker's default listing.
     # ``source`` tells the form what it's showing: a provider-published list
     # ("live") vs the shipped snapshot for vendors with no listing endpoint
@@ -453,8 +483,17 @@ def model_add(body: ModelAdd) -> dict:
     else:
         auth = next((a for a in provider.auth_options if a.auth_type == "api_key"),
                     provider.auth_options[0])
+    # Custom-provider facts (the TUI register step's exact moves): the
+    # operator-named key slot rides the auth option; the endpoint overrides
+    # the catalog's empty base_url. Catalog providers ignore both.
+    is_custom = provider.models_source.kind == "custom"
+    if is_custom and body.env_var.strip():
+        auth = pc.AuthOption(auth_type=auth.auth_type, label=auth.label,
+                             env_var=body.env_var.strip())
     model = pc.CatalogModel(id=body.model, name=body.model, provider_id=provider.id)
     kwargs = pc.preset_kwargs(provider, model, auth)
+    if is_custom and body.base_url.strip():
+        kwargs["base_url"] = body.base_url.strip()
     key = kwargs.pop("key")
     try:
         model_presets.add_preset(key, **kwargs)

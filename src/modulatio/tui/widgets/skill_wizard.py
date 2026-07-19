@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Skill wizard (inline panel) — slice #25.
 
-Same inline-panel pattern as slice #24's AgentWizard. Thin wrapper
-around ``skills.create_skill`` with a scope toggle (shared vs
-project-local) that maps to the ``project_code`` kwarg.
+Thin wrapper around ``skills.create_skill`` with a scope toggle (shared
+vs project-local) that maps to the ``project_code`` kwarg.
 
 MVP scope: name, description, prompt_template, capability_tags,
 required_capabilities, model_tier, cost_class, scope. Advanced fields

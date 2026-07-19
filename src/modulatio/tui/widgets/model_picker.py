@@ -6,7 +6,8 @@ The payoff: pick a model and the register step has everything (base_url,
 api_format, auth, model id) — the operator never typed any of it except the
 key. For cloud providers it fetches the live list on a worker thread; for
 locals it probes the running server (empty + a hint if it's down); for custom
-the operator types the id directly.
+it probes the operator's endpoint the same way (most are OpenAI-compatible),
+with the typed id as the ever-present fallback.
 
 The list is the curated default (pinned → flagship families by recency) with a
 search box that reaches the whole catalog, and **free models flagged** with the
@@ -67,6 +68,11 @@ class ModelPicker(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(f"Pick a model · {self.provider.name}", classes="mp-title")
         if self.is_custom:
+            # Typed id is the sanctioned custom path — but with a base_url in
+            # hand the endpoint is probed too (most are OpenAI-compatible), so
+            # a reachable server fills a pick-list above the input.
+            yield OptionList(id="mp-list")
+            yield Static("probing the endpoint…", id="mp-status")
             yield Input(placeholder="model id, e.g. my-model-v1", id="mp-custom-id")
             yield Button("Use this model", id="mp-custom-go", variant="primary")
         else:
@@ -79,21 +85,19 @@ class ModelPicker(Vertical):
     def on_mount(self) -> None:
         if self.is_custom:
             self.query_one("#mp-custom-id", Input).focus()
-        else:
-            self._load()
+        self._load()
 
     # ── fetch (worker thread) ───────────────────────────────────────────
 
-    def _listing_key(self) -> str | None:
-        """The bearer used to list models — the engine's shared resolver, fed
-        the SELECTED auth option (its env var, or an OAuth strategy's token)."""
-        return pc.listing_key(env_var=self._env_var, auth_type=self._auth_type)
-
     @work(thread=True, exclusive=True)
     def _load(self) -> None:
-        key = self._listing_key()
+        # Credential resolved by the shared listing entry point, which also
+        # heals an aged OAuth access token (refresh-once-on-401) — a signed-in
+        # operator must never see an empty picker over token expiry.
         try:
-            models = pc.fetch_models(self.provider, api_key=key)
+            models = pc.fetch_models_authed(
+                self.provider, env_var=self._env_var, auth_type=self._auth_type,
+                base_url=self._base_url)
         except Exception:
             models = []
         self.app.call_from_thread(self._on_loaded, models)
@@ -109,9 +113,12 @@ class ModelPicker(Vertical):
         others = len(models) - len(self._models)
         status = self.query_one("#mp-status", Static)
         if not self._models:
+            kind = self.provider.models_source.kind
             status.update(
                 "no models found — is the local server running?"
-                if self.provider.models_source.kind == "local_probe"
+                if kind == "local_probe"
+                else "endpoint listed no models — type the id below"
+                if kind == "custom"
                 else "no models returned (check the key/endpoint)"
             )
         else:

@@ -114,9 +114,10 @@ async def test_custom_types_the_model_id():
 
 
 def test_listing_key_falls_back_to_oauth_token(monkeypatch):
-    """xAI OAuth has no API-key env var, so the picker must reach the live
-    /models list via the selected auth strategy's token (the Grok CLI
-    bearer) — otherwise the picklist comes back empty."""
+    """xAI OAuth has no API-key env var, so the listing resolver (the engine
+    seam the picker's fetch rides) must reach the live /models list via the
+    selected auth strategy's token — otherwise the picklist comes back
+    empty."""
     from modulatio import auth_strategies
 
     monkeypatch.delenv("XAI_API_KEY", raising=False)
@@ -126,16 +127,14 @@ def test_listing_key_falls_back_to_oauth_token(monkeypatch):
             return "grok-oauth-tok"
 
     monkeypatch.setattr(auth_strategies, "build_strategy", lambda *a, **k: _Strat())
-    mp = ModelPicker(pc.XAI, env_var=None, auth_type="oauth_xai")
-    assert mp._listing_key() == "grok-oauth-tok"
+    assert pc.listing_key(env_var=None, auth_type="oauth_xai") == "grok-oauth-tok"
 
 
 def test_listing_key_prefers_env_api_key(monkeypatch):
     """An API-key provider still reads its env var — OAuth fallback only
     kicks in when no key is present."""
     monkeypatch.setenv("XAI_API_KEY", "xai-realkey")
-    mp = ModelPicker(pc.XAI, env_var="XAI_API_KEY", auth_type="api_key")
-    assert mp._listing_key() == "xai-realkey"
+    assert pc.listing_key(env_var="XAI_API_KEY", auth_type="api_key") == "xai-realkey"
 
 
 # ═══ fold: test_tui_widgets_model_picker_resweep_r3.py ═══
@@ -230,3 +229,43 @@ def test_unmounted_optionlist_actually_raises_without_dedup():
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+async def test_custom_with_base_url_probes_and_lists(monkeypatch):
+    """A custom provider with an operator-supplied base_url is PROBED — a
+    reachable OpenAI-compatible endpoint fills the pick-list, with the typed
+    id still available beneath it."""
+    seen = {}
+
+    def _fetch(p, **k):
+        seen.update(k)
+        return [pc.CatalogModel(id="my-local-33b", name="m",
+                                provider_id="custom", modality="text")]
+
+    monkeypatch.setattr(pc, "fetch_models", _fetch)
+    app = _Host(pc.CUSTOM, base_url="https://host/v1")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ol = await _wait_options(pilot, app)
+        assert ol.get_option_at_index(0).id == "my-local-33b"
+        assert seen.get("base_url") == "https://host/v1"   # probed THE endpoint
+        # the sanctioned typed path stays present alongside the probe result
+        assert app.query_one("#mp-custom-id", Input)
+
+
+async def test_custom_unreachable_endpoint_still_types_the_id(monkeypatch):
+    """The probe failing (unreachable/incompatible endpoint) must not block
+    custom's typed-id path — status says so, the input still submits."""
+    monkeypatch.setattr(pc, "fetch_models", lambda p, **k: [])
+    app = _Host(pc.CUSTOM, base_url="https://host/v1")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        mp = app.query_one("#mp", ModelPicker)
+        for _ in range(20):
+            await pilot.pause(0.05)
+        assert mp._models == []  # probe came back empty, no crash
+        app.query_one("#mp-custom-id", Input).value = "my-model-v1"
+        await pilot.pause()
+        await pilot.click("#mp-custom-go")
+        await pilot.pause()
+        assert app.chosen == [("custom", "my-model-v1")]

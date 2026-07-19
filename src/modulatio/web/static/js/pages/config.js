@@ -389,7 +389,9 @@ function mountModels(body) {
         // when the provider offers more than one (the AuthStep radio — an
         // OAuth option shows its live signed-in status), then pick from the
         // LIVE model list (fetched with the chosen method's credential,
-        // server-side). An unlistable provider falls back to a typed id.
+        // server-side). A typed model id exists ONLY for "custom" providers
+        // (no listable catalog); everything else gets the picker, and a
+        // failed listing is an error — never a silent text box.
         const providers = (await api("/config/providers")).providers;
         const p = await formDialog("Add a model", [
           { name: "provider_id", label: "Provider",
@@ -437,32 +439,89 @@ function mountModels(body) {
               { method: "POST", body: { base: chosen.env_var, value: kf.value } });
           }
         }
-        let models = [];
-        let listSource = "live";
-        try {
-          const q = authType ? `?auth_type=${encodeURIComponent(authType)}` : "";
-          const resp = await api(
-            `/config/providers/${encodeURIComponent(p.provider_id)}/models${q}`);
-          models = resp.models;
-          listSource = resp.source || "live";
-        } catch { /* degrade to free-text */ }
+        // CUSTOM provider: the catalog can't supply the endpoint or key slot —
+        // collect both (the TUI AuthStep's exact fields) BEFORE the listing,
+        // so even a custom endpoint gets a live probed picker when reachable.
+        const isCustom = prov && prov.kind === "custom";
+        let customBase = "";
+        let customEnvVar = "";
+        if (isCustom) {
+          const cf = await formDialog(`Custom endpoint · ${p.provider_id}`, [
+            { name: "base_url", label: "Base URL (e.g. https://host/v1)" },
+            ...(authType === "api_key"
+              ? [{ name: "env_var",
+                   label: "Key slot name (e.g. CUSTOM_API_KEY)" }]
+              : []),
+          ]);
+          if (!cf) return false;
+          customBase = (cf.base_url || "").trim();
+          if (!customBase) {
+            notify("A base URL is required for a custom endpoint.", { error: true });
+            return false;
+          }
+          customEnvVar = (cf.env_var || "").trim();
+          if (customEnvVar) {
+            const slots = ((await api(
+              `/config/keys?base=${encodeURIComponent(customEnvVar)}`)).slots || []);
+            if (!slots.some((s) => s.is_set)) {
+              const kf = await formDialog(`API key · ${p.provider_id}`, [
+                { name: "value", type: "password",
+                  label: `Key (stored under ${customEnvVar}, never shown again)` }]);
+              if (!kf) return false;
+              await api("/config/keys",
+                { method: "POST", body: { base: customEnvVar, value: kf.value } });
+            }
+          }
+        }
+        // A listing failure THROWS (backend 502) and rides the action
+        // runner's error toast — no silent degrade to a typed id. (A custom
+        // endpoint probe never throws: unreachable just lists empty, because
+        // the typed id is custom's sanctioned path.)
+        const qp = new URLSearchParams();
+        if (authType) qp.set("auth_type", authType);
+        if (customBase) qp.set("base_url", customBase);
+        if (customEnvVar) qp.set("env_var", customEnvVar);
+        const qs = qp.toString() ? `?${qp}` : "";
+        const resp = await api(
+          `/config/providers/${encodeURIComponent(p.provider_id)}/models${qs}`);
+        const models = resp.models;
         // Name what the list IS: a provider-published fetch, or the shipped
         // snapshot for vendors with no listing endpoint — never dressed as live.
-        const sourceLabel = listSource === "curated"
+        const sourceLabel = (resp.source || "live") === "curated"
           ? "curated list — the provider publishes no model listing"
           : "live from the provider";
-        const fields = models.length
-          ? [{ name: "model", label: `Model (${models.length} available · ${sourceLabel})`,
-               options: models.map((m) =>
-                 ({ value: m.id, label: m.free ? `${m.id} — free` : m.id })) },
-             { name: "custom", label: "…or type a model id (overrides the pick)" }]
-          : [{ name: "model", label: "Model id (e.g. meta/llama-3, gpt-4o)" }];
+        let fields;
+        if (models.length) {
+          fields = [
+            { name: "model", label: `Model (${models.length} available · ${sourceLabel})`,
+              options: models.map((m) =>
+                ({ value: m.id, label: m.free ? `${m.id} — free` : m.id })) },
+            // Custom only: the typed id stays available even with a live
+            // probe (the endpoint may serve models it doesn't list).
+            ...(isCustom
+              ? [{ name: "custom", label: "…or type a model id (overrides the pick)" }]
+              : []),
+          ];
+        } else if (isCustom) {
+          // The sanctioned typed-id path: the endpoint didn't list (or listed
+          // nothing) — the operator names the model.
+          fields = [{ name: "model", label: "Model id (e.g. meta/llama-3, gpt-4o)" }];
+        } else {
+          // Same wording split as the TUI picker's empty states.
+          notify(prov && prov.kind === "local_probe"
+            ? `${p.provider_id} returned no models — is the local server running?`
+            : `${p.provider_id} returned no models for this auth method — `
+              + "check the credential or pick the signed-in method.",
+            { error: true });
+          return false;
+        }
         const f = await formDialog(`Add a model · ${p.provider_id}`, fields);
         if (!f) return false;
-        const model = (f.custom || "").trim() || f.model;
+        const model = (isCustom && (f.custom || "").trim()) || f.model;
         await api("/config/models/add",
           { method: "POST",
-            body: { provider_id: p.provider_id, model, auth_type: authType } });
+            body: { provider_id: p.provider_id, model, auth_type: authType,
+                    base_url: customBase, env_var: customEnvVar } });
         notify(`Added model '${model}'.`);
       } },
       { label: "Set key", run: async (m) => {

@@ -916,3 +916,114 @@ def test_preset_kwargs_pool_with_env_var_still_pools():
     kwargs = pc.preset_kwargs(p, model, keyed, pool=True)
     assert kwargs["auth_config"]["pool"] is True
     assert kwargs["auth_config"]["env_var"] == keyed.env_var
+
+
+# ── fetch_models_authed: the self-healing listing entry point ─────────────────
+
+
+def _http_401(url="https://api.x.ai/v1/models", code=401):
+    import io
+    import urllib.error
+    return urllib.error.HTTPError(url, code, "denied", hdrs=None, fp=io.BytesIO(b""))
+
+
+def test_fetch_models_authed_heals_expired_oauth_token(monkeypatch):
+    """An aged OAuth access token 401/403s the listing; the entry point must
+    refresh ONCE (the model-call retry contract) and re-fetch — a signed-in
+    operator never sees an empty picker over token expiry."""
+    from modulatio import oauth_refresh
+
+    calls = []
+
+    def _fetch(provider, *, api_key=None, **kw):
+        calls.append(api_key)
+        if api_key != "fresh-tok":
+            raise _http_401(code=403)
+        return [pc.CatalogModel(id="grok-4", name="grok-4", provider_id="xai")]
+
+    monkeypatch.setattr(pc, "fetch_models", _fetch)
+    monkeypatch.setattr(pc, "listing_key",
+                        lambda *, env_var=None, auth_type=None: "stale-tok")
+    monkeypatch.setattr(oauth_refresh, "try_refresh", lambda auth_type: "fresh-tok")
+    models = pc.fetch_models_authed(pc.XAI, auth_type="oauth_xai")
+    assert [m.id for m in models] == ["grok-4"]
+    assert calls == ["stale-tok", "fresh-tok"]   # exactly one retry
+
+
+def test_fetch_models_authed_failed_refresh_reraises(monkeypatch):
+    """When the refresh can't recover (revoked grant), the original HTTP error
+    surfaces — the route turns it into a loud 502, never an empty list."""
+    import urllib.error
+
+    from modulatio import oauth_refresh
+
+    def _fetch(provider, *, api_key=None, **kw):
+        raise _http_401()
+
+    monkeypatch.setattr(pc, "fetch_models", _fetch)
+    monkeypatch.setattr(pc, "listing_key",
+                        lambda *, env_var=None, auth_type=None: "stale-tok")
+    monkeypatch.setattr(oauth_refresh, "try_refresh", lambda auth_type: None)
+    with pytest.raises(urllib.error.HTTPError):
+        pc.fetch_models_authed(pc.XAI, auth_type="oauth_xai")
+
+
+def test_fetch_models_authed_api_key_auth_never_refreshes(monkeypatch):
+    """A rejected API key is not refreshable — no OAuth refresh attempt, the
+    error propagates untouched."""
+    import urllib.error
+
+    from modulatio import oauth_refresh
+
+    def _fetch(provider, *, api_key=None, **kw):
+        raise _http_401()
+
+    def _no(auth_type):
+        raise AssertionError("refresh must not run for api_key auth")
+
+    monkeypatch.setattr(pc, "fetch_models", _fetch)
+    monkeypatch.setattr(pc, "listing_key",
+                        lambda *, env_var=None, auth_type=None: "sk-bad")
+    monkeypatch.setattr(oauth_refresh, "try_refresh", _no)
+    with pytest.raises(urllib.error.HTTPError):
+        pc.fetch_models_authed(pc.XAI, env_var="XAI_API_KEY", auth_type="api_key")
+
+
+# ── custom-provider endpoint probe ────────────────────────────────────────────
+
+
+def test_custom_provider_probes_operator_base_url(monkeypatch):
+    """Once the operator supplies a base_url, the custom provider is probed
+    OpenAI-style ({base}/models, Bearer when a key is present) so the picker
+    fills live instead of demanding a typed id."""
+    seen = {}
+
+    def _fake_get(url, headers, timeout):
+        seen["url"], seen["headers"] = url, headers
+        return {"data": [{"id": "my-local-33b"}]}
+
+    monkeypatch.setattr(pc, "_http_get_json", _fake_get)
+    models = pc.fetch_models(pc.CUSTOM, api_key="sk-c", base_url="https://host/v1/")
+    assert [m.id for m in models] == ["my-local-33b"]
+    assert seen["url"] == "https://host/v1/models"
+    assert seen["headers"] == {"Authorization": "Bearer sk-c"}
+
+
+def test_custom_probe_failure_is_silent_empty(monkeypatch):
+    """An unreachable/incompatible custom endpoint lists EMPTY, never raises —
+    the typed model id is custom's sanctioned path, so a failed probe must not
+    block the flow (unlike catalog providers, where failure is loud)."""
+    def _boom(url, headers, timeout):
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(pc, "_http_get_json", _boom)
+    assert pc.fetch_models(pc.CUSTOM, base_url="https://host/v1") == []
+
+
+def test_custom_without_base_url_lists_empty(monkeypatch):
+    """No endpoint yet → nothing to probe, no network attempt."""
+    def _no(url, headers, timeout):
+        raise AssertionError("must not attempt a fetch without a base_url")
+
+    monkeypatch.setattr(pc, "_http_get_json", _no)
+    assert pc.fetch_models(pc.CUSTOM) == []
