@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Literal, Optional
@@ -736,7 +738,12 @@ def fetch_models(
     ``base_url``; empty on failure — the typed id remains the custom path).
     Listing needs the key only when an ``api`` source's ``auth_required`` is set
     (OpenRouter/Ollama are public; xAI needs the key; Anthropic uses a picklist).
-    ``base_url`` overrides the provider's own (the custom endpoint)."""
+    ``base_url`` overrides the provider's own — a **custom-provider-only**
+    affordance (its endpoint is operator-supplied). Enforced here, not just at
+    callers, so a catalog provider can never be re-pointed at another endpoint
+    by any path."""
+    if base_url and provider.models_source.kind != "custom":
+        base_url = None
     all_models: list[CatalogModel] = []
     for src in [provider.models_source, *provider.extra_sources]:
         all_models.extend(_fetch_source(provider, src, api_key, timeout, base_url))
@@ -763,6 +770,46 @@ def listing_key(
     return None
 
 
+#: In-process single-flight for listing-triggered OAuth heals: a burst of
+#: concurrent stale listings in ONE interpreter (e.g. two picker fetches) rotates
+#: the grant once, the followers reusing the leader's cached token. Cross-process
+#: collapse (a separate TUI and WebOS both listing stale) is handled one layer
+#: down, by the token-file lock + store re-read in oauth_refresh (the rejected
+#: token rides down via ``failed_access``) — this lock can't see another process.
+_LISTING_HEAL_LOCK = threading.Lock()
+_LISTING_HEAL_TTL_SEC = 30.0
+#: auth_type -> (failed_token, replacement_token, monotonic). The cache carries
+#: LINEAGE, not just a token: the replacement is reused only when the caller
+#: presents the SAME failed token it was minted for. Otherwise (a later caller
+#: was rejected with the replacement itself, or a different token) the cache is
+#: bypassed and try_refresh's store re-read decides — so the heal can never hand
+#: back the exact token that was just rejected.
+_listing_heal: dict[str, tuple[str, str, float]] = {}
+
+
+def _heal_listing_token(auth_type: str, failed_access: Optional[str]) -> Optional[str]:
+    """Refresh the OAuth token ONCE for a burst of concurrent stale listings.
+    In-process: a lock + short-TTL LINEAGE cache collapse a same-process burst —
+    a follower rejected with the same token reuses the leader's replacement.
+    Cross-process: ``failed_access`` (the rejected token) rides into
+    ``try_refresh``, where the token-file lock plus a store re-read make a
+    separate TUI/WebOS process reuse the rotation instead of rotating again.
+    Returns the fresh token, or None if refresh can't recover (revoked grant /
+    api-key auth)."""
+    from modulatio import oauth_refresh
+
+    now = time.monotonic()
+    with _LISTING_HEAL_LOCK:
+        cached = _listing_heal.get(auth_type)
+        if (cached and now - cached[2] < _LISTING_HEAL_TTL_SEC
+                and failed_access is not None and cached[0] == failed_access):
+            return cached[1]                    # same token failed → known replacement
+        fresh = oauth_refresh.try_refresh(auth_type, failed_access)
+        if fresh:
+            _listing_heal[auth_type] = (failed_access or "", fresh, now)
+        return fresh
+
+
 def fetch_models_authed(
     provider: Provider,
     *,
@@ -777,7 +824,8 @@ def fetch_models_authed(
     listing with the stored-but-expired token 401/403s and the picker shows
     nothing even though the operator IS signed in. Refresh is attempted only
     after the provider rejects the stored token — never preemptively (an xAI
-    refresh ROTATES the grant, so gratuitous refreshes are not free).
+    refresh ROTATES the grant, so gratuitous refreshes are not free) — and a
+    burst of concurrent stale listings heals ONCE via ``_heal_listing_token``.
     The one listing entry point shared by the TUI picker and the WebOS route."""
     key = listing_key(env_var=env_var, auth_type=auth_type)
     try:
@@ -785,8 +833,7 @@ def fetch_models_authed(
     except urllib.error.HTTPError as exc:
         if exc.code not in (401, 403) or not (auth_type or "").startswith("oauth_"):
             raise
-        from modulatio import oauth_refresh
-        fresh = oauth_refresh.try_refresh(auth_type)
+        fresh = _heal_listing_token(auth_type, key)
         if not fresh:
             raise
         return fetch_models(provider, api_key=fresh, timeout=timeout, base_url=base_url)

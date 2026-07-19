@@ -439,18 +439,25 @@ function mountModels(body) {
               { method: "POST", body: { base: chosen.env_var, value: kf.value } });
           }
         }
-        // CUSTOM provider: the catalog can't supply the endpoint or key slot —
-        // collect both (the TUI AuthStep's exact fields) BEFORE the listing,
-        // so even a custom endpoint gets a live probed picker when reachable.
+        // CUSTOM provider: the catalog can't supply the endpoint or key slot,
+        // so collect them (the TUI AuthStep's exact fields) and probe the
+        // endpoint. The probe is a CSRF-protected POST carrying the key VALUE
+        // (never an env-var name a GET could resolve to an arbitrary secret);
+        // the key is written into the vault only when the model registers.
         const isCustom = prov && prov.kind === "custom";
         let customBase = "";
-        let customEnvVar = "";
+        let customKey = "";
+        let models;
+        let sourceLabel;
         if (isCustom) {
+          // Endpoint + (for api_key) the key VALUE. No key-slot NAME: the
+          // server stores the key under an opaque engine-minted handle, so a
+          // caller can't route a key write to a process-control env var.
           const cf = await formDialog(`Custom endpoint · ${p.provider_id}`, [
             { name: "base_url", label: "Base URL (e.g. https://host/v1)" },
             ...(authType === "api_key"
-              ? [{ name: "env_var",
-                   label: "Key slot name (e.g. CUSTOM_API_KEY)" }]
+              ? [{ name: "key", type: "password",
+                   label: "API key (stored write-only when you add the model)" }]
               : []),
           ]);
           if (!cf) return false;
@@ -459,37 +466,25 @@ function mountModels(body) {
             notify("A base URL is required for a custom endpoint.", { error: true });
             return false;
           }
-          customEnvVar = (cf.env_var || "").trim();
-          if (customEnvVar) {
-            const slots = ((await api(
-              `/config/keys?base=${encodeURIComponent(customEnvVar)}`)).slots || []);
-            if (!slots.some((s) => s.is_set)) {
-              const kf = await formDialog(`API key · ${p.provider_id}`, [
-                { name: "value", type: "password",
-                  label: `Key (stored under ${customEnvVar}, never shown again)` }]);
-              if (!kf) return false;
-              await api("/config/keys",
-                { method: "POST", body: { base: customEnvVar, value: kf.value } });
-            }
-          }
+          customKey = cf.key || "";
+          const resp = await api("/config/providers/custom/probe",
+            { method: "POST", body: { base_url: customBase, key: customKey } });
+          models = resp.models;
+          sourceLabel = "live from the provider";
+        } else {
+          // Catalog/local/picklist: list against the provider's OWN definition
+          // (no caller overrides). A listing failure THROWS (backend 502) and
+          // rides the action runner's error toast — no silent degrade to text.
+          const q = authType ? `?auth_type=${encodeURIComponent(authType)}` : "";
+          const resp = await api(
+            `/config/providers/${encodeURIComponent(p.provider_id)}/models${q}`);
+          models = resp.models;
+          // Name what the list IS: a provider-published fetch, or the shipped
+          // snapshot for vendors with no listing endpoint — never "live".
+          sourceLabel = (resp.source || "live") === "curated"
+            ? "curated list — the provider publishes no model listing"
+            : "live from the provider";
         }
-        // A listing failure THROWS (backend 502) and rides the action
-        // runner's error toast — no silent degrade to a typed id. (A custom
-        // endpoint probe never throws: unreachable just lists empty, because
-        // the typed id is custom's sanctioned path.)
-        const qp = new URLSearchParams();
-        if (authType) qp.set("auth_type", authType);
-        if (customBase) qp.set("base_url", customBase);
-        if (customEnvVar) qp.set("env_var", customEnvVar);
-        const qs = qp.toString() ? `?${qp}` : "";
-        const resp = await api(
-          `/config/providers/${encodeURIComponent(p.provider_id)}/models${qs}`);
-        const models = resp.models;
-        // Name what the list IS: a provider-published fetch, or the shipped
-        // snapshot for vendors with no listing endpoint — never dressed as live.
-        const sourceLabel = (resp.source || "live") === "curated"
-          ? "curated list — the provider publishes no model listing"
-          : "live from the provider";
         let fields;
         if (models.length) {
           fields = [
@@ -521,7 +516,7 @@ function mountModels(body) {
         await api("/config/models/add",
           { method: "POST",
             body: { provider_id: p.provider_id, model, auth_type: authType,
-                    base_url: customBase, env_var: customEnvVar } });
+                    base_url: customBase, key: customKey } });
         notify(`Added model '${model}'.`);
       } },
       { label: "Set key", run: async (m) => {

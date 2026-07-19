@@ -189,11 +189,16 @@ class RefreshError(Exception):
 
 # === OpenAI Codex ===
 
-def refresh_openai_token(*, timeout: float = 30.0) -> str:
+def refresh_openai_token(*, timeout: float = 30.0, failed_access: str | None = None) -> str:
     """Exchange the stored Codex refresh token for a fresh access token.
 
     Codex's auth.json schema differs from Anthropic's: tokens live under
     ``tokens.{access_token, refresh_token, id_token, account_id}``.
+
+    ``failed_access`` (the token the caller was rejected with) makes the
+    exchange exactly-once across processes: under the file lock, a stored access
+    token that no longer matches means another caller already rotated — return
+    it without a second exchange.
     """
     creds = oauth_helpers.read_openai_credentials()
     if not creds:
@@ -216,6 +221,15 @@ def refresh_openai_token(*, timeout: float = 30.0) -> str:
         if isinstance(fresh_tokens, dict):
             fresh_refresh = fresh_tokens.get("refresh_token")
             fresh_access = fresh_tokens.get("access_token")
+            # Cross-process late-follower: the stored access token already moved
+            # off the one we were rejected with → another caller rotated; reuse.
+            if (
+                failed_access
+                and isinstance(fresh_access, str)
+                and fresh_access
+                and fresh_access != failed_access
+            ):
+                return fresh_access
             if (
                 isinstance(fresh_access, str)
                 and fresh_access
@@ -283,23 +297,31 @@ def _iso_now() -> str:
 
 # === Dispatch helper used by the runner ===
 
-def try_refresh(auth_type: str) -> str | None:
-    """Single-call helper used by ``runners.litellm_runner`` on 401.
+def try_refresh(auth_type: str, failed_access: str | None = None) -> str | None:
+    """Single-call helper used by ``runners.litellm_runner`` and the model-list
+    listing path on 401/403.
+
+    ``failed_access`` is the access token the caller was rejected with. Passed
+    through to the refresh, it makes the exchange exactly-once ACROSS processes:
+    under the cross-process token-file lock, if the stored access token no
+    longer matches the rejected one, another caller (in this process or a
+    separate TUI/WebOS process) already rotated the grant, so its token is
+    returned WITHOUT a second rotation.
 
     Returns the new access token on success, None on failure (caller falls
     through to the auth-alerts path).
     """
     try:
         if auth_type == "oauth_openai":
-            return refresh_openai_token()
+            return refresh_openai_token(failed_access=failed_access)
         if auth_type == "oauth_xai":
-            return refresh_xai_token()
+            return refresh_xai_token(failed_access=failed_access)
     except RefreshError:
         return None
     return None
 
 
-def refresh_xai_token(*, timeout: float = 30.0) -> str:
+def refresh_xai_token(*, timeout: float = 30.0, failed_access: str | None = None) -> str:
     """Exchange Modulatio's stored xAI refresh token for fresh tokens and
     PERSIST the rotation.
 
@@ -327,6 +349,16 @@ def refresh_xai_token(*, timeout: float = 30.0) -> str:
     # same-instant bursts without touching disk.
     lock_path = str(oauth_helpers.MODULATIO_XAI_OAUTH_FILE) + ".lock"
     with _single_flight("xai", lock_path):
+        # Exactly-once ACROSS processes: if the stored access token no longer
+        # matches the one the caller was rejected with, a separate process (a
+        # TUI/WebOS listing racing this one) already rotated the grant under the
+        # file lock — return its token rather than rotating again. The in-process
+        # cache below can't see another interpreter; this store re-read can.
+        if failed_access:
+            own = oauth_helpers.read_own_xai_credentials()
+            current_access = own.get("access_token") if own else None
+            if current_access and current_access != failed_access:
+                return current_access
         # Re-check under the lock: if the leader of this burst just minted an
         # access token from the SAME refresh token we hold, return it rather
         # than POSTing the now-consumed grant (which the provider would reject).

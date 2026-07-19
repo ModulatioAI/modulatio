@@ -317,11 +317,12 @@ class ModelAdd(BaseModel):
     # Blank = the provider's api-key option, else its first — the pre-choice
     # behavior, kept for back-compat.
     auth_type: str = ""
-    # Custom-provider facts the catalog can't supply: the endpoint and the
-    # operator-named key slot (the TUI's AuthStep collects the same two).
-    # Ignored for catalog providers.
+    # Custom-provider facts the catalog can't supply: the endpoint and the key
+    # VALUE. Ignored for catalog providers. The key is stored under an OPAQUE
+    # engine-minted handle after the preset registers — the caller never names
+    # the env var (a caller-named slot could be a process-control var).
     base_url: str = ""
-    env_var: str = ""
+    key: str = ""
 
 
 @router.get("/config/providers")
@@ -398,19 +399,20 @@ def oauth_login_cancel() -> dict:
 
 
 @router.get("/config/providers/{provider_id}/models")
-def provider_models(
-    provider_id: str,
-    auth_type: str = Query(""),
-    base_url: str = Query(""),
-    env_var: str = Query(""),
-) -> dict:
+def provider_models(provider_id: str, auth_type: str = Query("")) -> dict:
     """The provider's LIVE model list for the add-model picker — the same
     engine fetch the TUI picker runs (``fetch_models``), with the listing key
     resolved server-side from the CHOSEN auth option (the TUI passes its
     AuthStep selection to the picker the same way); blank = the provider's
     api-key option, else its first. The key itself never crosses the web
     boundary; an unreachable list is a 502 — a failure must never look like
-    a provider with no models."""
+    a provider with no models.
+
+    Lists against the provider's OWN catalog definition only — it takes no
+    caller endpoint/key-name overrides. A custom provider (operator-supplied
+    endpoint + key) is probed through the CSRF-protected ``/custom/probe`` POST
+    instead, so a credential-bearing request can never be triggered by a
+    safe-method GET."""
     from modulatio import provider_catalog as pc
 
     provider = pc.get_provider(provider_id)
@@ -426,20 +428,12 @@ def provider_models(
     else:
         auth = next((a for a in provider.auth_options if a.auth_type == "api_key"),
                     provider.auth_options[0])
-    # base_url / env_var overrides exist for the "custom" provider only — its
-    # endpoint and key-slot name are operator-supplied rather than catalog
-    # facts (the TUI's AuthStep collects the same two). Other providers list
-    # against their own catalog definition, always.
-    is_custom = provider.models_source.kind == "custom"
     try:
         # Credential resolved inside, with the refresh-once-on-401 healing the
         # model-call path uses — a signed-in operator's aged access token must
         # not present as "no models".
         models = pc.fetch_models_authed(
-            provider,
-            env_var=(env_var or auth.env_var) if is_custom else auth.env_var,
-            auth_type=auth.auth_type,
-            base_url=(base_url or None) if is_custom else None)
+            provider, env_var=auth.env_var, auth_type=auth.auth_type)
     except Exception as exc:  # noqa: BLE001 — surface the failure, never an empty 200
         # A down endpoint or bad credential must present as a FAILURE, not as
         # a provider with no models — the silent empty list is what used to
@@ -457,6 +451,47 @@ def provider_models(
         for m in pc.of_modality(models, "text")
     ], "source": ("curated" if provider.models_source.kind == "picklist"
                   else "live")}
+
+
+def _valid_http_url(url: str) -> bool:
+    """A bounded http(s) endpoint URL: scheme + host only, no query/fragment
+    (which could smuggle the request off the apparent ``/models`` path)."""
+    from urllib.parse import urlparse
+
+    try:
+        u = urlparse(url)
+    except ValueError:
+        return False
+    return u.scheme in ("http", "https") and bool(u.netloc) and not u.query and not u.fragment
+
+
+class CustomProbe(BaseModel):
+    base_url: str
+    key: str = ""   # write-only value, used as the bearer; never an env-var name
+
+
+@router.post("/config/providers/custom/probe")
+def custom_probe(body: CustomProbe) -> dict:
+    """Live-probe an operator-supplied custom endpoint for its model list.
+
+    A POST (not a GET) so the WebOS CSRF header is mandatory: the request
+    carries a caller-chosen destination and, optionally, a key VALUE, so it
+    must not be triggerable cross-origin. The key is used directly as the
+    bearer and is NEVER resolved from the process environment (the old GET that
+    read ``os.environ[env_var]`` was a secret-exfiltration primitive). base_url
+    is bounded to a plain http(s) URL. A probe failure is empty, not an error —
+    the typed model id is the sanctioned path for a custom endpoint."""
+    from modulatio import provider_catalog as pc
+
+    base = body.base_url.strip()
+    if not _valid_http_url(base):
+        raise HTTPException(status_code=422, detail="base_url must be a plain http(s) URL")
+    try:
+        models = pc.fetch_models(pc.CUSTOM, api_key=(body.key or None), base_url=base)
+    except Exception:  # noqa: BLE001 — unreachable/incompatible → empty; typed id remains
+        models = []
+    return {"models": [{"id": m.id, "free": m.is_free}
+                       for m in pc.of_modality(models, "text")], "source": "live"}
 
 
 @router.post("/config/models/add")
@@ -483,22 +518,40 @@ def model_add(body: ModelAdd) -> dict:
     else:
         auth = next((a for a in provider.auth_options if a.auth_type == "api_key"),
                     provider.auth_options[0])
-    # Custom-provider facts (the TUI register step's exact moves): the
-    # operator-named key slot rides the auth option; the endpoint overrides
-    # the catalog's empty base_url. Catalog providers ignore both.
+    # Custom-provider facts the catalog can't supply: the operator's endpoint
+    # (overrides the catalog's empty base_url) and, for api_key, a key slot. The
+    # key slot is an OPAQUE, engine-minted handle (mirrors services.new_key_handle),
+    # NEVER the caller's chosen name — otherwise a request could route a key
+    # write to a process-control env var (BASH_ENV, PYTHONPATH, LD_PRELOAD, a
+    # proxy/cert var …) and self-authorize an arbitrary-env write. Catalog
+    # providers ignore all of this — their endpoint and key slot are catalog facts.
     is_custom = provider.models_source.kind == "custom"
-    if is_custom and body.env_var.strip():
-        auth = pc.AuthOption(auth_type=auth.auth_type, label=auth.label,
-                             env_var=body.env_var.strip())
+    key_handle = ""
+    if is_custom:
+        if not _valid_http_url(body.base_url.strip()):
+            raise HTTPException(
+                status_code=422,
+                detail="a custom model needs a plain http(s) base_url")
+        if auth.auth_type == "api_key":
+            key_handle = _new_custom_key_handle()
+            auth = pc.AuthOption(auth_type="api_key", label=auth.label,
+                                 env_var=key_handle)
     model = pc.CatalogModel(id=body.model, name=body.model, provider_id=provider.id)
     kwargs = pc.preset_kwargs(provider, model, auth)
-    if is_custom and body.base_url.strip():
+    if is_custom:
         kwargs["base_url"] = body.base_url.strip()
     key = kwargs.pop("key")
     try:
         model_presets.add_preset(key, **kwargs)
     except ValueError as exc:  # collision / invalid
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # The preset now exists, so its opaque handle is a configured key base — write
+    # the supplied value into it (write-only; the value never returns). The
+    # handle is engine-generated, so this can only ever touch that inert slot.
+    if key_handle and body.key.strip():
+        from modulatio import provider_keys
+        _require_key_base(key_handle)
+        provider_keys.add_key(key_handle, body.key.strip(), None)
     return {"key": key}
 
 
@@ -537,16 +590,38 @@ def _slot_json(s) -> dict:
     }
 
 
+def _new_custom_key_handle() -> str:
+    """An opaque env-var handle for a CUSTOM model's key — ``CUSTOMKEY_<hex>``,
+    carrying no operator-chosen name (mirrors ``services.new_key_handle``). The
+    vault must never store a key under a caller-named env var: a name like
+    ``BASH_ENV`` / ``LD_PRELOAD`` would be a process-control write, not a key.
+    Collision-checked against every allowed key base."""
+    import secrets
+
+    taken = _allowed_key_bases()
+    while True:
+        handle = f"CUSTOMKEY_{secrets.token_hex(3).upper()}"
+        if handle not in taken:
+            return handle
+
+
 def _allowed_key_bases() -> set:
-    """The ONLY env vars the WebOS key manager may touch: the key
-    handles of CONFIGURED models + services. The route exposes the provider-key
-    pool primitive, so without this a crafted request could write ANY env var
-    into the vault .env — e.g. the MODULATIO_RUN_SHELL_UNSAFE sandbox switch.
-    Keys are only ever set for a model/service that already exists, so the
-    configured set is exactly the legitimate target set."""
-    from modulatio import model_presets, services
+    """The ONLY env vars the WebOS key manager may touch: the key handles of
+    catalog providers plus CONFIGURED models + services. The route exposes the
+    provider-key pool primitive, so without this a crafted request could write
+    ANY env var into the vault .env — e.g. the MODULATIO_RUN_SHELL_UNSAFE
+    sandbox switch. A catalog provider's api-key slot is a known, bounded name,
+    so its first key can be set BEFORE its first model exists (the
+    credential-first add flow). A custom model's operator-named slot is NOT in
+    this set until the preset registers — the add route writes that key after
+    registration."""
+    from modulatio import model_presets, provider_catalog, services
 
     bases: set = set()
+    for prov in provider_catalog.list_providers():
+        for a in prov.auth_options:
+            if a.auth_type == "api_key" and a.env_var:
+                bases.add(a.env_var)
     for rec in model_presets.load_presets().values():
         ev = (rec.get("auth_config") or {}).get("env_var")
         if ev:

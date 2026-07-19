@@ -944,7 +944,7 @@ def test_fetch_models_authed_heals_expired_oauth_token(monkeypatch):
     monkeypatch.setattr(pc, "fetch_models", _fetch)
     monkeypatch.setattr(pc, "listing_key",
                         lambda *, env_var=None, auth_type=None: "stale-tok")
-    monkeypatch.setattr(oauth_refresh, "try_refresh", lambda auth_type: "fresh-tok")
+    monkeypatch.setattr(oauth_refresh, "try_refresh", lambda auth_type, failed=None: "fresh-tok")
     models = pc.fetch_models_authed(pc.XAI, auth_type="oauth_xai")
     assert [m.id for m in models] == ["grok-4"]
     assert calls == ["stale-tok", "fresh-tok"]   # exactly one retry
@@ -963,7 +963,7 @@ def test_fetch_models_authed_failed_refresh_reraises(monkeypatch):
     monkeypatch.setattr(pc, "fetch_models", _fetch)
     monkeypatch.setattr(pc, "listing_key",
                         lambda *, env_var=None, auth_type=None: "stale-tok")
-    monkeypatch.setattr(oauth_refresh, "try_refresh", lambda auth_type: None)
+    monkeypatch.setattr(oauth_refresh, "try_refresh", lambda auth_type, failed=None: None)
     with pytest.raises(urllib.error.HTTPError):
         pc.fetch_models_authed(pc.XAI, auth_type="oauth_xai")
 
@@ -978,7 +978,7 @@ def test_fetch_models_authed_api_key_auth_never_refreshes(monkeypatch):
     def _fetch(provider, *, api_key=None, **kw):
         raise _http_401()
 
-    def _no(auth_type):
+    def _no(auth_type, failed=None):
         raise AssertionError("refresh must not run for api_key auth")
 
     monkeypatch.setattr(pc, "fetch_models", _fetch)
@@ -1027,3 +1027,185 @@ def test_custom_without_base_url_lists_empty(monkeypatch):
 
     monkeypatch.setattr(pc, "_http_get_json", _no)
     assert pc.fetch_models(pc.CUSTOM) == []
+
+
+# ── central custom-only base_url gate + concurrent-heal single-flight ─────────
+
+
+def test_fetch_models_ignores_base_url_for_catalog_providers(monkeypatch):
+    """Defense-in-depth: base_url is a custom-provider affordance. fetch_models
+    itself drops it for any other kind, so a catalog provider can never be
+    re-pointed at another endpoint by ANY caller path (not just the web route)."""
+    seen = {}
+
+    def _spy(url, headers, timeout):
+        seen["url"] = url
+        return {"data": []}
+
+    monkeypatch.setattr(pc, "_http_get_json", _spy)
+    pc.fetch_models(pc.OPENROUTER, base_url="https://evil/v1")
+    assert seen["url"].startswith(pc.OPENROUTER.base_url)   # its OWN endpoint, not evil
+
+
+def test_concurrent_stale_listings_heal_exactly_once(monkeypatch):
+    """Two listings racing on the same stale OAuth token must rotate the grant
+    ONCE — a per-caller refresh would burn xAI's rotating grant. The listing
+    single-flight collapses the burst; only one try_refresh runs."""
+    import threading
+
+    from modulatio import oauth_refresh
+
+    monkeypatch.setattr(pc, "_listing_heal", {})   # clean cache for the test
+    monkeypatch.setattr(pc, "listing_key",
+                        lambda **kw: "stale-access")
+    at_barrier = threading.Barrier(2)
+
+    def _fetch(provider, *, api_key=None, **kw):
+        if api_key == "stale-access":
+            at_barrier.wait(timeout=5)             # both arrive stale together
+            raise pc.urllib.error.HTTPError(
+                "https://api.x.ai/v1/models", 403, "expired", None, None)
+        return [pc.CatalogModel(id="grok", name="grok", provider_id="xai")]
+
+    refreshes: list[str] = []
+    lock = threading.Lock()
+
+    def _rotate(auth_type, failed=None):
+        with lock:
+            tok = f"fresh-{len(refreshes) + 1}"
+            refreshes.append(tok)
+            return tok
+
+    monkeypatch.setattr(pc, "fetch_models", _fetch)
+    monkeypatch.setattr(oauth_refresh, "try_refresh", _rotate)
+
+    results: list = []
+
+    def _run():
+        results.append(pc.fetch_models_authed(pc.XAI, auth_type="oauth_xai"))
+
+    threads = [threading.Thread(target=_run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert refreshes == ["fresh-1"]                # exactly one rotation
+    assert all(r and r[0].id == "grok" for r in results)   # both listings succeeded
+
+
+def test_cross_process_late_follower_reuses_rotation(tmp_path, monkeypatch):
+    """Two separate processes (a TUI and a WebOS) both list with the same stale
+    OAuth token. The late follower must reuse the leader's rotation via the
+    token-file lock + store re-read, NOT rotate the grant a second time. Unlike
+    a stubbed-try_refresh shape (which bypasses that lock), this drives the REAL
+    refresh_xai_token; only the network exchange (_do_refresh_xai) is stubbed."""
+    import multiprocessing
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("fork-based pin is POSIX-only")
+    from modulatio import oauth_helpers, oauth_refresh
+
+    store = tmp_path / "xai.json"
+    monkeypatch.setattr(oauth_helpers, "MODULATIO_XAI_OAUTH_FILE", store)
+    oauth_helpers.write_xai_credentials({"access_token": "stale", "refresh_token": "r0"})
+    monkeypatch.setattr(pc, "_listing_heal", {})
+    monkeypatch.setattr(pc, "listing_key",
+                        lambda **kw: (oauth_helpers.read_own_xai_credentials() or {}).get(
+                            "access_token"))
+
+    ctx = multiprocessing.get_context("fork")
+    both_stale = ctx.Barrier(2)
+    leader_done = ctx.Event()
+    exchanges = ctx.Value("i", 0)
+    xlock = ctx.Lock()
+
+    def _do_refresh(refresh_token, *, timeout):
+        with xlock:
+            exchanges.value += 1
+            n = exchanges.value
+        oauth_helpers.write_xai_credentials(
+            {"access_token": f"fresh-{n}", "refresh_token": f"r{n}"})
+        leader_done.set()
+        return f"fresh-{n}"
+
+    monkeypatch.setattr(oauth_refresh, "_do_refresh_xai", _do_refresh)
+
+    def _fetch(provider, *, api_key=None, **kw):
+        if api_key == "stale":
+            both_stale.wait(timeout=5)
+            if multiprocessing.current_process().name == "late":
+                leader_done.wait(timeout=5)      # follower handles its 403 after the rotation
+            raise pc.urllib.error.HTTPError(
+                "https://api.x.ai/v1/models", 403, "", None, None)
+        return []
+
+    monkeypatch.setattr(pc, "fetch_models", _fetch)
+
+    def _run():
+        pc.fetch_models_authed(pc.XAI, auth_type="oauth_xai")
+
+    procs = [ctx.Process(target=_run, name="leader"),
+             ctx.Process(target=_run, name="late")]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(timeout=15)
+    for proc in procs:
+        assert proc.exitcode == 0
+    assert exchanges.value == 1                   # the grant rotated exactly once
+
+
+def test_heal_cache_never_reuses_the_token_just_rejected(monkeypatch):
+    """The heal cache must not hand back the exact token that just failed. A
+    cached replacement is keyed to the token it replaced; when THAT replacement
+    is later itself rejected, the cache is bypassed and try_refresh runs (whose
+    store re-read decides), rather than retrying the dead token as-is."""
+    rejected = "fresh-but-rejected"
+    # Cache lineage: an earlier "stale-0" was healed to `rejected`.
+    monkeypatch.setattr(pc, "_listing_heal",
+                        {"oauth_xai": ("stale-0", rejected, pc.time.monotonic())})
+    monkeypatch.setattr(pc, "listing_key", lambda **kw: rejected)
+
+    calls = []
+
+    def _fetch(provider, *, api_key=None, **kw):
+        calls.append(api_key)
+        if api_key == rejected:
+            raise pc.urllib.error.HTTPError("https://x", 403, "", None, None)
+        return []
+
+    monkeypatch.setattr(pc, "fetch_models", _fetch)
+    from modulatio import oauth_refresh
+
+    refreshes = []
+    monkeypatch.setattr(oauth_refresh, "try_refresh",
+                        lambda auth_type, failed=None: refreshes.append(failed) or "new-token")
+
+    pc.fetch_models_authed(pc.XAI, auth_type="oauth_xai")
+    assert refreshes == [rejected]              # bypassed the cache, refreshed
+    assert calls == [rejected, "new-token"]     # retried with the NEW token, not the dead one
+
+
+def test_heal_cache_reuses_replacement_for_the_same_failed_token(monkeypatch):
+    """The intended reuse: a follower rejected with the SAME token the cached
+    replacement was minted for reuses that replacement without a second refresh."""
+    monkeypatch.setattr(pc, "_listing_heal",
+                        {"oauth_xai": ("stale", "the-replacement", pc.time.monotonic())})
+    monkeypatch.setattr(pc, "listing_key", lambda **kw: "stale")
+
+    def _fetch(provider, *, api_key=None, **kw):
+        if api_key == "stale":
+            raise pc.urllib.error.HTTPError("https://x", 403, "", None, None)
+        return []
+
+    monkeypatch.setattr(pc, "fetch_models", _fetch)
+    from modulatio import oauth_refresh
+
+    refreshes = []
+    monkeypatch.setattr(oauth_refresh, "try_refresh",
+                        lambda auth_type, failed=None: refreshes.append(failed) or "unexpected")
+
+    pc.fetch_models_authed(pc.XAI, auth_type="oauth_xai")
+    assert refreshes == []                       # reused the cached replacement, no refresh

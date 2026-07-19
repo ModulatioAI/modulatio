@@ -94,15 +94,17 @@ class ModelPicker(Vertical):
         # Credential resolved by the shared listing entry point, which also
         # heals an aged OAuth access token (refresh-once-on-401) — a signed-in
         # operator must never see an empty picker over token expiry.
+        error = ""
         try:
             models = pc.fetch_models_authed(
                 self.provider, env_var=self._env_var, auth_type=self._auth_type,
                 base_url=self._base_url)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
             models = []
-        self.app.call_from_thread(self._on_loaded, models)
+            error = type(exc).__name__  # class only — never the message (secrets)
+        self.app.call_from_thread(self._on_loaded, models, error)
 
-    def _on_loaded(self, models: list[pc.CatalogModel]) -> None:
+    def _on_loaded(self, models: list[pc.CatalogModel], error: str = "") -> None:
         # The fetch runs on a worker thread; the operator may have navigated
         # away (picker unmounted) before it completes. Touching query_one on a
         # detached widget raises NoMatches on the main thread — bail quietly.
@@ -115,7 +117,13 @@ class ModelPicker(Vertical):
         if not self._models:
             kind = self.provider.models_source.kind
             status.update(
-                "no models found — is the local server running?"
+                # A genuine fetch error is surfaced loudly (its class, never the
+                # message) rather than passed off as "no models" — the TUI twin
+                # of the WebOS 502. Custom/local keep their own empty guidance
+                # (an unreachable custom endpoint is expected — type the id).
+                f"listing failed ({error}) — check the key/endpoint"
+                if error and kind not in ("local_probe", "custom")
+                else "no models found — is the local server running?"
                 if kind == "local_probe"
                 else "endpoint listed no models — type the id below"
                 if kind == "custom"

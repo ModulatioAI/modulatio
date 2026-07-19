@@ -499,3 +499,44 @@ def test_xai_refresh_error_never_echoes_body(monkeypatch):
     with pytest.raises(oauth_refresh.RefreshError) as e:
         oauth_refresh.refresh_xai_token()
     assert "xaiOpaqueGrant987654321" not in str(e.value)
+
+
+# === failed_access re-read: exactly-once across concurrent/cross-process heals ===
+
+
+def test_refresh_xai_reuses_rotated_token_without_second_exchange(monkeypatch):
+    """The late-follower case (a separate TUI/WebOS process already rotated):
+    under the file lock, if the stored access token no longer matches the one
+    the caller was rejected with, return the stored token WITHOUT a second grant
+    exchange. This is what makes the burst exactly-once across processes."""
+    oauth_helpers.write_xai_credentials(
+        {"access_token": "already-rotated", "refresh_token": "r1"})
+    exchanged = []
+    monkeypatch.setattr(oauth_refresh, "_do_refresh_xai",
+                        lambda rt, *, timeout: exchanged.append(rt) or "should-not-mint")
+    got = oauth_refresh.refresh_xai_token(failed_access="the-stale-token-we-were-rejected-with")
+    assert got == "already-rotated"
+    assert exchanged == []                      # no second rotation of the grant
+
+
+def test_refresh_xai_still_rotates_when_token_unchanged(monkeypatch):
+    """The leader case: the stored access token is still the one we failed with,
+    so this caller performs the single exchange."""
+    oauth_helpers.write_xai_credentials(
+        {"access_token": "stale", "refresh_token": "r1"})
+    monkeypatch.setattr(oauth_refresh, "_do_refresh_xai",
+                        lambda rt, *, timeout: "freshly-minted")
+    got = oauth_refresh.refresh_xai_token(failed_access="stale")
+    assert got == "freshly-minted"
+
+
+def test_refresh_openai_reuses_rotated_token_without_second_exchange(monkeypatch):
+    """OpenAI equivalent — the stored access moved off the rejected one → reuse."""
+    oauth_helpers.write_openai_credentials(
+        {"tokens": {"access_token": "already-rotated", "refresh_token": "r1"}})
+    exchanged = []
+    monkeypatch.setattr(oauth_refresh, "_do_refresh_openai",
+                        lambda *a, **k: exchanged.append(1) or "should-not-mint")
+    got = oauth_refresh.refresh_openai_token(failed_access="stale")
+    assert got == "already-rotated"
+    assert exchanged == []

@@ -466,6 +466,19 @@ def test_key_add_refuses_arbitrary_env_var(client, monkeypatch):
     assert "MODULATIO_RUN_SHELL_UNSAFE" not in os.environ
 
 
+def test_key_add_allows_catalog_provider_slot_before_first_model(client):
+    """The credential-first add flow sets a provider's key BEFORE its first
+    model exists. A catalog provider's api-key slot is a known, bounded handle,
+    so it's allowed — this is the exact case the gif hit (adding the first xAI
+    model with an API key 404'd on 'not a configured key handle')."""
+    from modulatio import provider_catalog as pc
+
+    xai_slot = next(a.env_var for a in pc.XAI.auth_options if a.auth_type == "api_key")
+    assert client.get("/api/config/keys", params={"base": xai_slot}).status_code == 200
+    r = client.post("/api/config/keys", json={"base": xai_slot, "value": "sk-first"})
+    assert r.status_code == 200
+
+
 def test_key_list_refuses_arbitrary_env_var(client):
     r = client.get("/api/config/keys", params={"base": "HOME"})
     assert r.status_code == 404
@@ -633,30 +646,12 @@ def test_oauth_login_cancel_route(client, monkeypatch):
 # ── custom-provider listing + registration overrides ─────────────────────────
 
 
-def test_custom_listing_probes_the_operator_endpoint(client, monkeypatch):
-    """For the custom provider, base_url/env_var query params reach the
-    listing (the operator-supplied endpoint + key slot) — the probed models
-    come back as a real picker list."""
-    from modulatio import provider_catalog as pc
-
-    seen = {}
-
-    def _spy(provider, *, env_var=None, auth_type=None, base_url=None, **kw):
-        seen.update(env_var=env_var, base_url=base_url)
-        return [pc.CatalogModel(id="my-33b", name="my-33b", provider_id="custom")]
-
-    monkeypatch.setattr(pc, "fetch_models_authed", _spy)
-    r = client.get("/api/config/providers/custom/models"
-                   "?auth_type=api_key&base_url=https://host/v1&env_var=MY_KEY")
-    assert r.status_code == 200
-    assert [m["id"] for m in r.json()["models"]] == ["my-33b"]
-    assert seen == {"env_var": "MY_KEY", "base_url": "https://host/v1"}
-
-
-def test_catalog_provider_ignores_listing_overrides(client, monkeypatch):
-    """base_url/env_var overrides are custom-only: a catalog provider always
-    lists against its own definition — the web boundary must not re-point a
-    known provider's listing at a caller-chosen endpoint or key slot."""
+def test_get_listing_takes_no_caller_endpoint_or_keyname(client, monkeypatch):
+    """The GET listing route lists a provider against its OWN catalog
+    definition only. It accepts no base_url/env_var — so it can neither be
+    re-pointed at a caller endpoint nor coerced into resolving a caller-named
+    process-env secret (the old exfil primitive). Stray query params are inert.
+    """
     from modulatio import provider_catalog as pc
 
     seen = {}
@@ -667,30 +662,126 @@ def test_catalog_provider_ignores_listing_overrides(client, monkeypatch):
 
     monkeypatch.setattr(pc, "fetch_models_authed", _spy)
     client.get("/api/config/providers/openrouter/models"
-               "?base_url=https://evil/v1&env_var=OPENROUTER_API_KEY")
-    assert seen["base_url"] is None
-    assert seen["env_var"] == "OPENROUTER_API_KEY"  # the provider's OWN slot
-    # (identical to its catalog definition, not the caller's choice)
+               "?base_url=https://evil/v1&env_var=SOME_SECRET")
+    assert seen["base_url"] is None                       # never a caller endpoint
     assert seen["env_var"] == pc.get_provider("openrouter").auth_options[0].env_var
 
 
-def test_model_add_custom_carries_endpoint_and_key_slot(client):
-    """Registering a custom model persists the operator's base_url and named
-    env var — a browser-added custom model must be as complete as a TUI one
-    (an empty base_url is a dead preset)."""
-    from modulatio import model_presets
+def test_custom_probe_uses_key_value_never_process_env(client, monkeypatch):
+    """SECURITY (Wild Bill HIGH): the custom probe is a CSRF-protected POST
+    whose bearer is the supplied key VALUE — it must never resolve a
+    caller-named process-env secret. A secret in os.environ cannot leak: there
+    is no env-var name input, and the outbound header carries only the value."""
+    from modulatio import provider_catalog as pc
+
+    monkeypatch.setenv("UNRELATED_PROCESS_SECRET", "must-never-leave-this-box")
+    captured = {}
+
+    def _capture(url, headers, timeout):
+        captured.update(url=url, headers=headers)
+        return {"data": [{"id": "probed-model"}]}
+
+    monkeypatch.setattr(pc, "_http_get_json", _capture)
+    r = client.post("/api/config/providers/custom/probe",
+                    json={"base_url": "https://host/v1", "key": "sk-supplied"})
+    assert r.status_code == 200
+    assert [m["id"] for m in r.json()["models"]] == ["probed-model"]
+    assert captured["url"] == "https://host/v1/models"
+    assert captured["headers"] == {"Authorization": "Bearer sk-supplied"}
+    assert "must-never-leave-this-box" not in str(captured)   # env secret stayed home
+
+
+def test_custom_probe_is_post_only_csrf_protected():
+    """The probe is a state-changing POST, so the CSRF header is mandatory
+    (a cross-origin page can't set it) and a GET to the path is not routed —
+    no safe-method probe of a caller-chosen URL. Uses a header-LESS client so
+    the 403 boundary is actually exercised (not the fixture's always-on header).
+    """
+    from fastapi.testclient import TestClient
+
+    from modulatio import vault
+    from modulatio.web.app import create_app
+
+    vault.init_project("web", "Web", "o")
+    bare = TestClient(create_app(stub=True), base_url="http://localhost")  # no header
+    r = bare.post("/api/config/providers/custom/probe",
+                  json={"base_url": "https://host/v1", "key": "x"})
+    assert r.status_code == 403                          # CSRF header required
+    assert bare.get("/api/config/providers/custom/probe").status_code in (404, 405)
+
+
+def test_custom_probe_rejects_nonhttp_base_url(client):
+    for bad in ("file:///etc/passwd", "ftp://host/v1", "https://host/v1?x=/models", ""):
+        r = client.post("/api/config/providers/custom/probe", json={"base_url": bad})
+        assert r.status_code == 422, bad
+
+
+def test_custom_probe_keyless_and_failure_is_empty(client, monkeypatch):
+    """Keyless probe sends no Authorization; an unreachable endpoint lists empty
+    (the typed id is custom's sanctioned path), never an error."""
+    from modulatio import provider_catalog as pc
+
+    seen = {}
+
+    def _keyless(url, headers, timeout):
+        seen.update(headers=headers)
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(pc, "_http_get_json", _keyless)
+    r = client.post("/api/config/providers/custom/probe",
+                    json={"base_url": "https://host/v1"})
+    assert r.status_code == 200 and r.json()["models"] == []
+    assert seen["headers"] == {}                              # no bearer when keyless
+
+
+def test_model_add_custom_stores_key_under_opaque_handle(client):
+    """A browser-added custom model persists its endpoint and stores the key
+    under an OPAQUE engine-minted handle (never a caller-named env var), with
+    the value written AFTER registration and never echoed back."""
+    from modulatio import model_presets, provider_keys
 
     r = client.post("/api/config/models/add", json={
         "provider_id": "custom", "model": "my-33b", "auth_type": "api_key",
-        "base_url": "https://host/v1", "env_var": "MY_CUSTOM_KEY"})
+        "base_url": "https://host/v1", "key": "sk-custom-secret"})
     assert r.status_code == 200
     key = r.json()["key"]
     try:
         preset = model_presets.load_presets()[key]
         assert preset["base_url"] == "https://host/v1"
-        assert preset["auth_config"]["env_var"] == "MY_CUSTOM_KEY"
+        handle = preset["auth_config"]["env_var"]
+        assert handle.startswith("CUSTOMKEY_")          # opaque, not caller-named
+        assert any(s["is_set"] for s in provider_keys.list_keys(handle))
+        assert "sk-custom-secret" not in r.text
     finally:
         model_presets.remove_preset(key)
+
+
+def test_custom_add_cannot_self_authorize_process_control_env(client, monkeypatch):
+    """SECURITY (Wild Bill HIGH): a custom add must not write a caller-named
+    process-control env var. Even if the body names BASH_ENV as the slot, the
+    key is stored under an opaque handle — BASH_ENV is never set in the live
+    process (it would be executed by future non-interactive bash)."""
+    import os
+
+    monkeypatch.delenv("BASH_ENV", raising=False)
+    r = client.post("/api/config/models/add", json={
+        "provider_id": "custom", "model": "m", "auth_type": "api_key",
+        "base_url": "https://operator.invalid/v1",
+        "env_var": "BASH_ENV",                            # ignored — no caller slot names
+        "key": "/tmp/attacker-controlled-shell-init"})
+    assert r.status_code == 200
+    assert "BASH_ENV" not in os.environ
+    from modulatio import model_presets
+    model_presets.remove_preset(r.json()["key"])
+
+
+def test_model_add_custom_requires_valid_endpoint(client):
+    """No endpoint (or a non-http one) is refused — no dead preset via a
+    handcrafted request."""
+    base = {"provider_id": "custom", "model": "m", "auth_type": "api_key"}
+    assert client.post("/api/config/models/add", json=base).status_code == 422
+    assert client.post("/api/config/models/add",
+                       json={**base, "base_url": "ftp://h/v1"}).status_code == 422
 
 
 def test_model_add_catalog_provider_ignores_endpoint_override(client):
