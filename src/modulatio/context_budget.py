@@ -1189,17 +1189,21 @@ def dispatch_context(
         # clamped e.g. a 24k researcher budget down to the fallback, blocking
         # the run. A genuinely smaller KNOWN window still clamps (correct).
         model_max = get_known_max_input_tokens(model)
-        if (budget_role == "leader-chat"
+        if (budget_role in ("leader-chat", "leader-reflect")
                 and resolution.budget_source == "default"
                 and not _role_knob_set(budget_role)
                 and model_max):
-            # The conversational Leader rides the MODEL's full window: no
-            # explicit cap anywhere (knob / project / agent / user), so the
-            # model's inherent limit governs. The compress/refuse bands
-            # apply to that window like any cap. Unknown-window models
-            # (local servers litellm can't know) keep the role default —
-            # the operator's knob can raise those. Every other role
-            # (leader-decompose included) keeps role-bounded discipline.
+            # The Leader rides the MODEL's full window for the two lanes that
+            # must see the whole picture: leader-CHAT (conversation) and
+            # leader-REFLECT (whole-deliverable verification after a multi-task
+            # goal completes — a 15-chapter novel doesn't fit a 40K role cap and
+            # would only churn compression). No explicit cap anywhere (knob /
+            # project / agent / user), so the model's inherent limit governs.
+            # The compress/refuse bands apply to that window like any cap.
+            # Unknown-window models (local servers litellm can't know) keep the
+            # role default — the operator's knob can raise those. Every other
+            # role (leader-decompose / leader-iterate included) keeps
+            # role-bounded discipline.
             effective = model_max
             resolution = dataclasses.replace(
                 resolution,

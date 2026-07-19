@@ -1277,11 +1277,40 @@ def test_leader_chat_project_override_still_wins(monkeypatch) -> None:
         assert cb.current_config().max_input_tokens == 30_000
 
 
+def test_leader_reflect_default_rides_the_model_window(monkeypatch) -> None:
+    """Whole-deliverable verification (leader-reflect) rides the model window
+    like leader-chat — a large finished deliverable (e.g. a novel) must not
+    churn compression against the 40K role cap. No explicit cap → the model's
+    inherent window governs, stamped budget_source='model_window'."""
+    monkeypatch.delenv("MODULATIO_CTX_BUDGET_LEADER_REFLECT", raising=False)
+    _window(monkeypatch, 500_000)
+    with cb.dispatch_context(
+        budget_role="leader-reflect", runner_role="leader",
+        model="big-window-model", project_code="P", run_id=None,
+    ) as resolution:
+        assert resolution.budget_source == "model_window"
+        assert cb.current_config().max_input_tokens == 500_000
+
+
+def test_leader_reflect_knob_still_caps(monkeypatch) -> None:
+    """An explicit leader-reflect knob keeps role-bounded discipline (the
+    window is the DEFAULT, not a mandate) — the operator can still cap it."""
+    monkeypatch.setenv("MODULATIO_CTX_BUDGET_LEADER_REFLECT", "50000")
+    _window(monkeypatch, 500_000)
+    with cb.dispatch_context(
+        budget_role="leader-reflect", runner_role="leader",
+        model="big-window-model", project_code="P", run_id=None,
+    ) as resolution:
+        assert resolution.budget_source == "default"
+        assert cb.current_config().max_input_tokens == 50_000
+
+
 def test_other_roles_keep_role_bounded_discipline(monkeypatch) -> None:
-    """leader-decompose (and every non-chat role) is UNCHANGED: the role
-    budget governs even on a huge-window model."""
+    """Only leader-chat + leader-reflect ride the window; every other role
+    (leader-decompose, leader-iterate, producer, qc) keeps the role budget
+    even on a huge-window model."""
     _window(monkeypatch, 1_000_000)
-    for role in ("leader-decompose", "producer", "qc"):
+    for role in ("leader-decompose", "leader-iterate", "producer", "qc"):
         with cb.dispatch_context(
             budget_role=role, runner_role="leader",
             model="big-window-model", project_code="P", run_id=None,

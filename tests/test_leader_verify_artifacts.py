@@ -730,3 +730,46 @@ def test_leader_verify_tool_loop_prompt_grounds_reviewer_in_the_files(
         "the tool-loop verify prompt must tell the reviewer to read the real files "
         "with its own tools before judging"
     )
+
+
+def test_leader_verify_churn_settles_completed_goal_without_crashing(
+    project: Project, tmp_path: Path
+):
+    """A CompressionChurnExceeded during the Leader's goal verify must NOT fail
+    the run — the deliverable is already produced and committed. The goal is
+    settled terminal with a PQR reservation and the churn is recorded, exactly
+    like the parse-failure path (a finished novel must never report as failed)."""
+    from modulatio import context_budget
+
+    artifacts_root = tmp_path / PROJECT_CODE.lower() / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    (artifacts_root / "book.md").write_text("# A very large finished deliverable\n")
+
+    goal = Goal(
+        id="LVA-G-001", project_id=project.id, description="Write the book",
+        success_criteria="book exists", status=GoalStatus.IN_PROGRESS,
+    )
+    store.save_goal(project.code, goal)
+    task = Task(
+        id="LVA-T-001", project_id=project.id, goal_id=goal.id,
+        description="Write it", output_path="book.md", status=TaskStatus.COMPLETED,
+    )
+    store.save_task(project.code, task)
+
+    def _churn_leader(prompt: str) -> str:
+        raise context_budget.CompressionChurnExceeded(compressions=4, limit=3)
+
+    runners = {"leader": _churn_leader, "planner": lambda p: "```json\n[]\n```",
+               "drafter": lambda p: "", "qc": lambda p: "", "researcher": lambda p: ""}
+    orch = Orchestrator(project, runners)
+    summary = RunSummary(project=project)
+
+    # Must not raise — the churn is caught and the goal settled gracefully.
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert any("reflect" in e.lower() and goal.id in e for e in summary.errors), (
+        "the churn should be recorded as an error note, not crash the run"
+    )
+    assert goal.status != GoalStatus.IN_PROGRESS, (
+        "the goal must be driven terminal, not stranded IN_PROGRESS"
+    )

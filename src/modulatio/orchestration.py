@@ -11082,10 +11082,10 @@ class Orchestrator:
                         skill_name=leader_tool_skill.name,
                         needs_network=leader_tool_skill.needs_network,
                         pass_env=leader_tool_skill.pass_env,
-                        # leader-reflect, NOT leader-chat: the model-window
-                        # exception is CONVERSATION-only. A tool-using goal
-                        # verify keeps the role-bounded discipline, in parity
-                        # with its multimodal + single-shot verify siblings.
+                        # leader-reflect: whole-deliverable verification rides
+                        # the model window (like leader-chat) so a large finished
+                        # deliverable doesn't churn compression, in parity with
+                        # its multimodal + single-shot verify siblings.
                         budget_role="leader-reflect",
                         goal_id=goal.id,
                     )
@@ -11121,6 +11121,30 @@ class Orchestrator:
                     _verify_tmp.cleanup()
             if data is None:
                 raise ValueError("verdict response unparseable after retry")
+        except _ctx_budget_module.CompressionChurnExceeded as exc:
+            # The deliverable is ALREADY built and committed by the time the
+            # Leader verifies it; a context-churn here (a very large deliverable
+            # the reflect window still can't hold) must NOT turn a finished job
+            # into a failed run. Settle the goal terminal with a PQR reservation
+            # noting the automated verdict couldn't run — same graceful path as a
+            # parse failure, never a crash.
+            summary.errors.append(
+                f"{goal.id}: leader verify skipped — deliverable too large for the "
+                f"reflect window ({exc})"
+            )
+            self._settle_zero_completed(
+                goal, summary,
+                concern=(
+                    "The deliverable was produced, but the Leader's automated "
+                    "quality verdict was skipped because the assembled result "
+                    "exceeded the reflect context window (compression churn). "
+                    "The work is complete; review it directly."
+                ),
+                rationale="leader verify settled: reflect context churn on a "
+                          "completed deliverable",
+            )
+            self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
+            return
         except (ValueError, KeyError) as exc:
             # Parse failure is rare but not impossible. Don't crash the
             # run — surface the error and move on. Previously this returned
