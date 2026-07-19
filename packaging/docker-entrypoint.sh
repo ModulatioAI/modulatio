@@ -20,7 +20,10 @@ set -eu
 # unavailable and everything else runs. Never pins a version.
 if [ -z "${MODULATIO_CLAUDE_BIN:-}" ]; then
   _claude="$(ls -d /opt/claude/versions/* 2>/dev/null | sort -V | tail -1 || true)"
-  [ -n "$_claude" ] && [ -x "$_claude" ] && export MODULATIO_CLAUDE_BIN="$_claude"
+  # -f as well as -x: a searchable directory also passes -x, so require a
+  # regular file (the version entry is the binary itself).
+  [ -n "$_claude" ] && [ -f "$_claude" ] && [ -x "$_claude" ] \
+    && export MODULATIO_CLAUDE_BIN="$_claude"
 fi
 
 case "${1:-api}" in

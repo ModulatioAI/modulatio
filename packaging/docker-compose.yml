@@ -40,6 +40,9 @@ services:
       - modulatio-home:/home/modulatio
       # Clay auto-detect (zero-config): the host's Claude install (read-only)
       # and its login state. Empty/absent on hosts without Claude — harmless.
+      # The login-state mount is WRITABLE: the container's Claude reads and can
+      # modify your host Claude state (token refresh writes back). For
+      # separation, drop the line below and sign in inside the container.
       - ${HOME}/.local/share/claude:/opt/claude:ro
       - ${HOME}/.claude:/home/modulatio/.claude
     environment:

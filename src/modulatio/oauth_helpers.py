@@ -154,7 +154,7 @@ def find_claude_binary() -> str | None:
     """Locate the Claude Code CLI. MODULATIO_CLAUDE_BIN overrides; else PATH.
     Returns None if not installed (doctor + the runner surface a clear error)."""
     override = os.environ.get("MODULATIO_CLAUDE_BIN")
-    if override and os.path.exists(override):
+    if override and os.path.isfile(override) and os.access(override, os.X_OK):
         return override
     return shutil.which("claude")
 

@@ -78,6 +78,14 @@ LOCK="$REPO_ROOT/packaging/requirements-web.lock"
 "$PYBIN" -m pip install --quiet --no-cache-dir --only-binary=:all: \
   --no-deps "$WHEEL"
 
+# Fail closed on lock/wheel drift. --require-hashes verifies only the packages
+# the lock names, and --no-deps skips the wheel's Requires-Dist check — so a
+# stale lock (a new project dependency, a tightened bound) could otherwise
+# install green with an incomplete graph. pip check validates that the bundled
+# environment actually satisfies every installed package's metadata; a miss
+# aborts the build before packaging.
+"$PYBIN" -m pip check
+
 # Rewrite entry-point shebangs to the INSTALLED interpreter path (pip wrote
 # the staging path, which does not exist on a target machine).
 for f in "$OPT/python/bin/"*; do

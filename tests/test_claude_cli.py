@@ -195,6 +195,20 @@ def test_find_claude_binary_env_override(monkeypatch, tmp_path):
     assert oauth_helpers.find_claude_binary() == str(fake)
 
 
+def test_find_claude_binary_override_must_be_executable_file(monkeypatch, tmp_path):
+    """A directory (searchable, so os.access X_OK is true) or a non-executable
+    file is not a valid override — fall through to PATH rather than returning it."""
+    monkeypatch.setattr(oauth_helpers.shutil, "which", lambda n: None)
+    a_dir = tmp_path / "claude-dir"
+    a_dir.mkdir()
+    monkeypatch.setenv("MODULATIO_CLAUDE_BIN", str(a_dir))
+    assert oauth_helpers.find_claude_binary() is None
+    non_exec = tmp_path / "claude.txt"
+    non_exec.write_text("not a binary\n")
+    monkeypatch.setenv("MODULATIO_CLAUDE_BIN", str(non_exec))
+    assert oauth_helpers.find_claude_binary() is None
+
+
 def test_find_claude_binary_path(monkeypatch):
     monkeypatch.delenv("MODULATIO_CLAUDE_BIN", raising=False)
     monkeypatch.setattr(oauth_helpers.shutil, "which", lambda n: "/x/claude" if n == "claude" else None)

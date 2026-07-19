@@ -114,13 +114,28 @@ using *your* Claude, *your* version, *your* model — never one pinned by us.
 ```
 
 The entrypoint points `MODULATIO_CLAUDE_BIN` at the newest version it finds, and
-Clay works — nothing else to do. Verify with `docker exec -it modulatio claude
---version`.
+Clay works — nothing else to do. That variable belongs to the entrypoint's own
+process tree, and `claude` is not placed on `PATH`, so verify the detection
+itself rather than running `claude` from a fresh `docker exec`:
+
+```bash
+docker exec modulatio sh -c 'echo "$MODULATIO_CLAUDE_BIN"; command -v claude || true'
+```
+
+A non-empty `MODULATIO_CLAUDE_BIN` means Clay resolved a Claude.
 
 **No Claude on the host?** Those mounts are empty and harmless — Clay is simply
 unavailable and everything else runs. Install Claude on your host (or point the
 mounts at a **sidecar** container's `.../share/claude` and state) whenever you
 want Clay; it's detected automatically on the next `docker compose up`.
+
+**A note on the login-state mount.** The default compose mounts your host
+`~/.claude` **writable** into the container, so the container's Claude process
+can read *and modify* your host's Claude login state (token refreshes write
+back). That's the price of zero-config. If you want the container kept away from
+your host's Claude state, drop the `~/.claude` mount and use container-owned
+state (sign in inside the container) or the `CLAUDE_CODE_OAUTH_TOKEN` option
+instead.
 
 Prefer not to use Clay at all? Anthropic models also run through plain API keys
 (Anthropic direct, or OpenRouter) — configure them like any other provider.
