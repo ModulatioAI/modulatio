@@ -14254,6 +14254,14 @@ class Orchestrator:
             bound_jt_params=bound_jt_params, ask_operator=ask_operator,
             summary=summary,
         )
+        # An explicit bind ("Run job template: <name>") carries the JOB in the
+        # template body — the objective the caller passed is only a placeholder
+        # naming the template. Decompose the template's actual instructions, so a
+        # saved-template run behaves exactly like pasting that text as the
+        # objective (which is what already works). Without this the Leader plans
+        # against the placeholder and the producers never see the real job.
+        if self._bound_jt is not None and self._bound_jt.interview_body.strip():
+            objective = self._bound_jt.interview_body
         # #97 R2 — skip-the-slot: when an explicit/cron bind was REFUSED by the
         # fit-gate and the caller's policy is "skip" (the cron default), do NOT
         # run a greenfield substitute. A refused cron bind is a persistent config

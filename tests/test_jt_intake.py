@@ -480,3 +480,32 @@ def test_greenfield_enforcement_is_noop(env):
     s.tasks = [_DTask("a.md")]
     o._validate_output_contract(s)
     assert not s.recommendations
+
+
+def test_run_job_template_decomposes_the_template_body_not_the_placeholder(env):
+    """A saved-template run ("Run job template: <name>") must decompose the
+    template's BODY (the actual job), not the placeholder objective naming it.
+    Previously the bind set _bound_jt but the Leader planned against the
+    placeholder, so producers never saw the real job (a live novel run produced
+    a folder-compliance stub, zero chapters)."""
+    body = "Write a 15-chapter novel. Chapter 1: ... Chapter 15: ..."
+    jt.create_job_template(
+        name="the-book", description="Write a book",
+        interview_body=body,
+        output_spec=jt.OutputSpec(cardinality="one"),
+        param_schema=(), project_code=None,
+    )
+    o, pr = _orch(env)
+
+    seen = {}
+
+    def _capture(objective, **kw):
+        seen["objective"] = objective
+        return []                                        # empty plan → run ends fast
+
+    o._leader_decompose = _capture  # type: ignore[assignment]
+    o.kickoff("Run job template: the-book", bound_jt_name="the-book",
+              bound_jt_params={})
+
+    assert seen.get("objective", "").strip() == body     # the JOB, not the placeholder
+    assert "Run job template" not in seen["objective"]
