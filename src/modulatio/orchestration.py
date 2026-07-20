@@ -10862,49 +10862,64 @@ class Orchestrator:
         """#43: engine-run test-suite evidence for CODE goals. Runs pytest
         from the deliverable's repo root and returns ``(green, report)``;
         ``None`` when the goal has no code deliverable, no discoverable suite
-        root, or the runtime env has no pytest (gate unavailable ≠ red).
+        root, or the gate cannot run here (unavailable ≠ red).
 
         RED — including "no tests collected": a code deliverable without a
         runnable suite has no green evidence to show — joins
         ``goal_spec_issues``, so the verdict CLAMP binds it as a measured
         HARD violation the model cannot wave through. Deterministic and
         engine-side: the code verdict is evidence-based, not inference-based.
+
+        Executes THROUGH the ``run_shell`` tool (full profile), never a raw
+        engine subprocess: the produced repo's test code is MODEL-AUTHORED
+        code, and it runs under the same bwrap sandbox, argv allowlist,
+        rlimits, process-group reaping and fail-closed REQUIRE_SANDBOX
+        policy as every other model-authored execution.
         """
         if not any(t.artifact_kind in _CODE_ARTIFACT_KINDS for t in tasks):
             return None
         repo_root = self._pytest_repo_root()
         if repo_root is None:
             return None
-        import subprocess
-        import sys
-
-        argv = [sys.executable, "-m", "pytest", "-q", "--color=no",
-                "-p", "no:cacheprovider"]
+        artifacts_root = self._shared_artifacts_root()
+        run_shell = tools.build_registry(
+            artifacts_root=artifacts_root,
+            tool_calls_dir=artifacts_root / "tool_calls",
+            project_code=self.project.code,
+        ).get("run_shell")
+        if run_shell is None:
+            return None
         try:
-            proc = subprocess.run(
-                argv, cwd=repo_root, capture_output=True, text=True,
+            result = run_shell.call(
+                cmd="pytest -q --color=no -p no:cacheprovider",
+                profile="full",
+                cwd=str(repo_root),
                 timeout=_PYTEST_GATE_TIMEOUT_S,
             )
-        except subprocess.TimeoutExpired:
-            return False, (
-                f"engine-run pytest TIMED OUT after "
-                f"{int(_PYTEST_GATE_TIMEOUT_S)}s (cwd: {repo_root})"
-            )
-        except OSError as exc:
+        except (RuntimeError, ValueError, OSError) as exc:
+            # Sandbox required-but-unavailable, profile refusal, cwd escape —
+            # the gate is UNAVAILABLE, not red; never crash the verdict.
             _logger.warning("pytest gate could not run: %s", exc)
             return None
-        out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
-        if "No module named pytest" in out:
+        head = result.split("\n", 1)[0]
+        try:
+            exit_code = int(head.removeprefix("exit_code:").strip())
+        except ValueError:
             _logger.warning(
-                "pytest gate unavailable (no pytest in the engine env) — "
-                "code goal verified without test-suite evidence"
+                "pytest gate: unparseable run_shell result head %r", head)
+            return None
+        if exit_code == -1 and "[TIMEOUT" not in result and "[INFO]" in result:
+            # pytest isn't installed on this host — unavailable, not red.
+            _logger.warning(
+                "pytest gate unavailable (pytest not installed) — code goal "
+                "verified without test-suite evidence"
             )
             return None
         report = (
-            f"engine-run pytest (cwd: {repo_root}) — exit {proc.returncode}\n\n"
-            + out[-2000:]
+            f"engine-run pytest via run_shell (cwd: {repo_root}) — "
+            f"{head}\n\n" + result[-2000:]
         )
-        return proc.returncode == 0, report
+        return exit_code == 0, report
 
     def _leader_verify_goal(
         self,
