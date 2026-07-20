@@ -10990,54 +10990,52 @@ class Orchestrator:
         if run_shell is None:
             return None, "run_shell tool unavailable (no artifacts root bound)"
 
-        def _collect_ids(root: "Path", rel: str, noconftest: bool):
-            """file::func ids pytest collects for ``rel`` under ``root`` (params
-            FULL nodeids, parameter suffix INCLUDED (cadre R4 MED): a hook that
-            removes only the failing ``[0]`` while keeping ``[1]`` must show up
-            as a hidden item, so params are NOT collapsed. ``noconftest`` builds
-            the HOOK-FREE engine manifest. Returns ``None`` when collection
-            errors (can't certify)."""
+        def _run_pytest(root: "Path", rel: str, noconftest: bool):
+            """Run the engine-selected test files under ``root``. Returns
+            ``(exit_code, result_text)``, or ``(None, reason)`` when the gate
+            is UNAVAILABLE (tool refusal / pytest not installed / unparseable).
+            """
             flag = "--noconftest " if noconftest else ""
             try:
-                out = run_shell.call(
-                    cmd=(f"pytest --collect-only -q {flag}-o addopts= "
+                result = run_shell.call(
+                    cmd=(f"pytest -q --color=no {flag}-o addopts= "
                          f"-p no:cacheprovider {rel}"),
                     profile="full", cwd=str(root),
                     timeout=_PYTEST_GATE_TIMEOUT_S,
                 )
-            except (RuntimeError, ValueError, OSError):
-                return None
-            first = out.split("\n", 1)[0]
+            except (RuntimeError, ValueError, OSError) as exc:
+                _logger.warning("pytest gate could not run: %s", exc)
+                return None, f"gate could not run in {root}: {exc}"
+            head = result.split("\n", 1)[0]
             try:
-                code = int(first.removeprefix("exit_code:").strip())
+                code = int(head.removeprefix("exit_code:").strip())
             except ValueError:
-                return None
-            if code not in (0, 5):  # 5 = no tests collected (an empty set)
-                return None
-            ids = set()
-            for line in out.splitlines():
-                # A collected line is a full nodeid `path.py::item`. Match on
-                # the `.py::` structure with NO filename character allowlist
-                # (cadre R5 MED): pytest and the engine's own test_*.py glob
-                # both admit `+`, spaces, and Unicode in paths, and the whole
-                # path::item suffix (params included) must be preserved so a
-                # special-character test file can't be silently dropped from
-                # the manifest. Collection-error output is exit!=0/5 above, so
-                # these lines are nodeids, not tracebacks.
-                m = re.match(r"\s*(\S.*\.py::.+?)\s*$", line)
-                if m:
-                    ids.add(m.group(1))
-            return ids
+                return None, f"unparseable shell result in {root}"
+            if code == -1 and "[TIMEOUT" not in result and "[INFO]" in result:
+                return None, "pytest is not installed on this host"
+            return code, result
+
+        # A real assertion/test FAILURE ("N failed") vs a setup/collection
+        # ERROR ("N error"): a failure surfacing HOOK-FREE is authoritative RED
+        # (no producer conftest could be hiding it); an error-only non-zero
+        # means the suite could not RUN without its own conftest (missing
+        # fixtures), which routes to the advisory path.
+        def _has_real_failure(text: str) -> bool:
+            return bool(re.search(r"\b\d+ failed", text))
+
+        def _snip(text: str) -> str:
+            return f"{text.split(chr(10), 1)[0]}\n\n{text[-2000:]}"
 
         reports: "list[str]" = []
         all_green = True
+        advisory = False
         any_tests = False
         for repo_root in roots:
             # Engine-selected explicit test files + neutralized addopts
-            # (cadre R2 MED-1): the suite cannot hide its own red tests via
-            # testpaths / --ignore / norecursedirs / python_files. A root
-            # with a marker but NO engine-discoverable test file contributes
-            # no green evidence (handled by the any_tests check below).
+            # (cadre R2 MED-1): the suite cannot steer collection via
+            # testpaths / --ignore / norecursedirs / python_files. A root with
+            # a marker but NO engine-discoverable test file contributes no
+            # green evidence (handled by the any_tests check below).
             test_files = self._discover_test_files(repo_root)
             if not test_files:
                 reports.append(
@@ -11048,84 +11046,54 @@ class Orchestrator:
             any_tests = True
             rel = " ".join(
                 _shlex.quote(str(p.relative_to(repo_root))) for p in test_files)
-            # Anti-hook bind (cadre R3 MED-1): a producer conftest.py can
-            # remove the failing test in pytest_collection_modifyitems even
-            # with explicit files + neutralized addopts. Compare the HOOK-FREE
-            # engine manifest (--noconftest) with what pytest actually
-            # collects; any engine-expected test the hooks HID is tamper. If
-            # the hook-free manifest can't be built (the suite imports from
-            # conftest at collection time), we cannot certify green → the
-            # gate is UNAVAILABLE for this root, never silently green.
-            expected_ids = _collect_ids(repo_root, rel, noconftest=True)
-            if expected_ids is None:
-                return None, (
-                    f"cannot build a hook-free collection manifest under "
-                    f"{repo_root} (the suite depends on conftest for "
-                    f"collection) — test evidence is not certifiable"
-                )
-            visible_ids = _collect_ids(repo_root, rel, noconftest=False) or set()
-            # Group by base function so a legit conftest that ADDS params
-            # (pytest_generate_tests: hook-free manifest sees the bare
-            # `test_x`, hooked sees `test_x[a]`/`test_x[b]`) is not a false
-            # RED, while a hook that REMOVES a specific param a hook-free
-            # manifest listed (`test_x[0]`) IS caught (cadre R4 MED).
-            def _base(n: str) -> str:
-                return re.sub(r"\[.*\]$", "", n)
-            vis_by_base = collections.defaultdict(set)
-            for n in visible_ids:
-                vis_by_base[_base(n)].add(n)
-            exp_by_base = collections.defaultdict(set)
-            for n in expected_ids:
-                exp_by_base[_base(n)].add(n)
-            hidden: "list[str]" = []
-            for base, exp in exp_by_base.items():
-                vis = vis_by_base.get(base, set())
-                if not vis:
-                    hidden.append(base)  # whole function gone
-                    continue
-                # Function present. Every PARAMETRIZED item the hook-free
-                # manifest listed must survive; a bare-only expected base
-                # (params come from a conftest hook) gets no per-param check.
-                hidden.extend(sorted(n for n in exp if n != base and n not in vis))
-            if hidden:
+            # HOOK-FREE binding pass (cadre R6, "evidence not attestation"):
+            # run with --noconftest so NO producer collection hook executes.
+            # This is the sound replacement for parsing a producer-controlled
+            # stdout manifest (which a conftest hook can forge): with hooks
+            # stripped, a test the producer tried to hide/deselect/xfail RUNS
+            # and its failure surfaces — the engine cannot be tricked by code
+            # it did not run.
+            code, res = _run_pytest(repo_root, rel, noconftest=True)
+            if code is None:
+                return None, res  # UNAVAILABLE (tool refusal / no pytest)
+            if code == 0:
+                reports.append(
+                    f"engine-run pytest (hook-free, cwd: {repo_root}) — "
+                    + _snip(res))
+                continue  # authoritative GREEN for this root
+            if _has_real_failure(res):
+                # A real test failed with hooks stripped — authoritative RED,
+                # even if a conftest would have hidden it.
                 return False, (
-                    "collection hooks (conftest.py) hid engine-expected "
-                    f"tests under {repo_root}: {', '.join(sorted(hidden))} — "
-                    "a suite that deselects its own tests has no green evidence"
-                )
-            try:
-                result = run_shell.call(
-                    cmd=("pytest -q --color=no -p no:cacheprovider "
-                         f"-o addopts= {rel}"),
-                    profile="full",
-                    cwd=str(repo_root),
-                    timeout=_PYTEST_GATE_TIMEOUT_S,
-                )
-            except (RuntimeError, ValueError, OSError) as exc:
-                _logger.warning("pytest gate could not run: %s", exc)
-                return None, f"gate could not run in {repo_root}: {exc}"
-            head = result.split("\n", 1)[0]
-            try:
-                exit_code = int(head.removeprefix("exit_code:").strip())
-            except ValueError:
-                _logger.warning(
-                    "pytest gate: unparseable run_shell result head %r", head)
-                return None, f"unparseable shell result in {repo_root}"
-            if exit_code == -1 and "[TIMEOUT" not in result and "[INFO]" in result:
-                _logger.warning(
-                    "pytest gate unavailable (pytest not installed) — code "
-                    "goal verified without test-suite evidence"
-                )
-                return None, "pytest is not installed on this host"
-            all_green = all_green and exit_code == 0
+                    f"engine-run pytest (hook-free, cwd: {repo_root}) is RED "
+                    "— a test the engine discovered fails when producer "
+                    f"collection hooks are stripped:\n\n{_snip(res)}")
+            # Non-zero but NO real failure = the suite could not RUN without
+            # its own conftest (missing fixtures / conftest-time imports). Fall
+            # back to a conftest-enabled run — but its result is ADVISORY: the
+            # engine cannot verify it hook-free, so a green here is evidence,
+            # not a tamper-proof attestation.
+            code_cf, res_cf = _run_pytest(repo_root, rel, noconftest=False)
+            if code_cf is None:
+                return None, res_cf
+            advisory = True
+            all_green = all_green and code_cf == 0
             reports.append(
-                f"engine-run pytest via run_shell (cwd: {repo_root}) — "
-                f"{head}\n\n" + result[-2000:]
-            )
+                f"engine-run pytest (ADVISORY — the suite requires its own "
+                f"conftest.py to run, so the engine could not verify it "
+                f"hook-free; cwd: {repo_root}) — " + _snip(res_cf))
         if not any_tests:
             # Suite roots existed but not one engine-discoverable test file —
             # no green evidence to show, same as no suite at all (RED).
             return False, "\n\n".join(reports)
+        if advisory:
+            reports.append(
+                "[ADVISORY] One or more suites required their own conftest.py "
+                "to run, so the engine could not verify them with producer "
+                "collection hooks stripped. This test evidence is ADVISORY — "
+                "the tests ran and are reported, but the engine cannot certify "
+                "that producer code did not influence the result. Treat it as "
+                "evidence, not a tamper-proof attestation.")
         return all_green, "\n\n".join(reports)
 
     #: Files that CONTROL pytest collection/selection — a change to any of

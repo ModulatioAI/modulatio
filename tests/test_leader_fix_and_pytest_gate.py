@@ -711,9 +711,9 @@ def test_transcript_preplanted_symlink_not_chmodded(project_with_run, tmp_path):
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
 def test_conftest_hook_cannot_greenwash_gate(project_with_run, monkeypatch):
-    """WB R3 MED-1: a producer conftest.py that deselects the failing test in
-    pytest_collection_modifyitems can't green the gate — the hook-free
-    engine manifest catches the hidden test → RED."""
+    """WB R3 MED-1 (Choice A): a producer conftest.py that deselects the
+    failing test can't green the gate — the hook-free binding pass strips the
+    hook, so the hidden test RUNS and fails → RED."""
     _enforceable_sandbox(monkeypatch)
     orch = _orch(project_with_run)
     root = orch._shared_artifacts_root()
@@ -731,7 +731,7 @@ def test_conftest_hook_cannot_greenwash_gate(project_with_run, monkeypatch):
 
     state, report = orch._goal_pytest_gate([_code_task()])
     assert state is False
-    assert "test_real" in report and "hid engine-expected" in report
+    assert "test_real" in report and "hook-free" in report
 
 
 def test_seat_tool_sink_preplanted_symlink_not_chmodded(
@@ -759,9 +759,8 @@ def test_seat_tool_sink_preplanted_symlink_not_chmodded(
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
 def test_conftest_hook_cannot_drop_a_single_param(project_with_run, monkeypatch):
-    """WB R4 MED: a hook that removes only the FAILING parameter (keeping a
-    passing sibling) must be caught — full nodeids are compared, params not
-    collapsed."""
+    """WB R4 MED (Choice A): a hook that removes only the FAILING parameter is
+    stripped in the hook-free pass, so test_value[0] runs and fails → RED."""
     _enforceable_sandbox(monkeypatch)
     orch = _orch(project_with_run)
     root = orch._shared_artifacts_root()
@@ -780,16 +779,48 @@ def test_conftest_hook_cannot_drop_a_single_param(project_with_run, monkeypatch)
 
     state, report = orch._goal_pytest_gate([_code_task()])
     assert state is False
-    assert "test_value[0]" in report and "hid engine-expected" in report
+    assert "test_value" in report and "hook-free" in report
 
 
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
-def test_conftest_generated_params_are_not_false_red(project_with_run, monkeypatch):
-    """WB R4 MED boundary: a LEGIT conftest that ADDS parametrization
-    (pytest_generate_tests) must NOT read as tamper — the hook-free manifest
-    sees the bare function, the run sees the generated params, and that
-    addition is allowed."""
+def test_conftest_hook_that_forges_and_xfails_cannot_greenwash(
+        project_with_run, monkeypatch):
+    """WB R6 (Choice A): a conftest hook that both FORGES the collector stdout
+    AND xfails/hides the failing test can't green the gate — the hook-free
+    binding pass runs NO producer hook, so neither the forgery nor the xfail
+    fires and the real failure surfaces → RED."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_real.py").write_text(
+        "def test_real():\n    assert False\n", encoding="utf-8")
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n', encoding="utf-8")
+    (root / "conftest.py").write_text(
+        "import pytest\n"
+        "def pytest_collection_modifyitems(config, items):\n"
+        "    r = config.pluginmanager.getplugin('terminalreporter')\n"
+        "    r.write_line('tests/test_real.py::test_real')\n"
+        "    for i in items:\n"
+        "        if 'test_real' in i.nodeid:\n"
+        "            i.add_marker(pytest.mark.xfail(strict=False))\n",
+        encoding="utf-8")
+
+    state, report = orch._goal_pytest_gate([_code_task()])
+    assert state is False and "hook-free" in report
+
+
+@pytest.mark.skipif(not sandbox.is_sandbox_available(),
+                    reason="bwrap required: the gate never runs unsandboxed")
+def test_conftest_required_suite_is_advisory_green(project_with_run, monkeypatch):
+    """Choice A: a LEGIT suite that needs its conftest to run (here
+    pytest_generate_tests supplies the params) can't run hook-free, so it
+    falls to the conftest-enabled run and passes — GREEN, but flagged
+    ADVISORY (evidence, not a hook-verified attestation)."""
     _enforceable_sandbox(monkeypatch)
     orch = _orch(project_with_run)
     root = orch._shared_artifacts_root()
@@ -804,7 +835,30 @@ def test_conftest_generated_params_are_not_false_red(project_with_run, monkeypat
         "        metafunc.parametrize('value', [1, 2])\n", encoding="utf-8")
 
     state, report = orch._goal_pytest_gate([_code_task()])
-    assert state is True   # generated params both pass; not flagged as hidden
+    assert state is True         # ran green with conftest
+    assert "ADVISORY" in report  # disclosed, not silently authoritative
+
+
+@pytest.mark.skipif(not sandbox.is_sandbox_available(),
+                    reason="bwrap required: the gate never runs unsandboxed")
+def test_conftest_required_suite_that_fails_is_red(project_with_run, monkeypatch):
+    """Choice A: a conftest-dependent suite whose test actually FAILS under
+    the conftest-enabled run is RED (advisory covers green, not failures)."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_gen.py").write_text(
+        "def test_gen(value):\n    assert value == 99\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n', encoding="utf-8")
+    (root / "conftest.py").write_text(
+        "def pytest_generate_tests(metafunc):\n"
+        "    if 'value' in metafunc.fixturenames:\n"
+        "        metafunc.parametrize('value', [1, 2])\n", encoding="utf-8")
+
+    state, _ = orch._goal_pytest_gate([_code_task()])
+    assert state is False
 
 
 # --------------------------------------------- cadre R5 (R6 round) closure
@@ -813,10 +867,9 @@ def test_conftest_generated_params_are_not_false_red(project_with_run, monkeypat
                     reason="bwrap required: the gate never runs unsandboxed")
 def test_conftest_hook_cannot_hide_special_char_test_path(
         project_with_run, monkeypatch):
-    """WB R5 MED: a test file with a valid special char in its name
-    (test_red+case.py) must appear in the hook-free manifest — the parser
-    can't drop it through a filename character allowlist, so a hook hiding
-    it is still caught."""
+    """WB R5 MED (Choice A): a failing test in a special-char file
+    (test_red+case.py) that a hook tries to hide still runs and fails under
+    the hook-free binding pass → RED (the file is passed explicitly, quoted)."""
     _enforceable_sandbox(monkeypatch)
     orch = _orch(project_with_run)
     root = orch._shared_artifacts_root()
@@ -834,4 +887,4 @@ def test_conftest_hook_cannot_hide_special_char_test_path(
 
     state, report = orch._goal_pytest_gate([_code_task()])
     assert state is False
-    assert "test_red+case.py" in report and "hid engine-expected" in report
+    assert "test_red+case.py" in report and "hook-free" in report
