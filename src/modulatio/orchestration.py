@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import shlex as _shlex
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -5553,16 +5554,13 @@ class Orchestrator:
             tool_loadout = tuple(t for t in tool_loadout if t in _registry_now)
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         # Audit transcript carries verbatim tool args + results (run_shell
-        # commands, http_get URLs, full responses). On a multi-user host
-        # the default-umask 0644 leaves these world-readable. Tighten to
-        # 0600: touch creates with that mode if missing; chmod tightens
-        # any legacy file from prior runs. Per-task file, so the cost is
-        # one syscall on first write per task.
-        transcript_path.touch(mode=0o600, exist_ok=True)
-        try:
-            transcript_path.chmod(0o600)
-        except OSError:  # pragma: no cover — defensive, race-tolerant
-            pass
+        # commands, http_get URLs, full responses) — 0600, per-task. NO
+        # preliminary pathname touch/chmod (cadre R2 H2): both follow a
+        # symlink already planted at the predictable path, which let a model
+        # with artifacts write-access make the trusted parent chmod an
+        # OUTSIDE target to 0600. Creation + owner-only mode are established
+        # atomically by _append_owned_jsonl (O_NOFOLLOW|O_CREAT, 0600, fstat
+        # check) on the first record instead.
 
         def on_tool_call(name: str, args: dict, result: str) -> None:
             self._emit_activity(
@@ -5772,7 +5770,6 @@ class Orchestrator:
 
         path = self._conversation_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        existed = path.exists()
         record = {
             "role": role,
             "content": _redact_secrets(content),
@@ -5780,14 +5777,9 @@ class Orchestrator:
         }
         if interrupted:
             record["interrupted"] = True
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
-        if existed:  # tighten a legacy file created before this guard
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
+        # Owned no-follow append (cadre R2 H2): no O_CREAT-then-chmod window
+        # and no symlink-follow at the predictable path.
+        _append_owned_jsonl(path, record)
 
     def _constitution_block(self) -> str:
         """The Leader's constitution (values), injected ONLY into the
@@ -8602,16 +8594,17 @@ class Orchestrator:
             if transcript_path is None:
                 return
             try:
-                with transcript_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps({
-                        "task_id": task_id,
-                        "role": role,
-                        "agent_id": agent_id,
-                        "tool": name,
-                        "args": args,
-                        "result": result,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }) + "\n")
+                # H2: no-follow owned append — a model can't redirect this
+                # trusted-parent write via a symlink swap at the path.
+                _append_owned_jsonl(transcript_path, {
+                    "task_id": task_id,
+                    "role": role,
+                    "agent_id": agent_id,
+                    "tool": name,
+                    "args": args,
+                    "result": result,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
             except Exception:  # noqa: BLE001 — sidecar failure never aborts the seat
                 pass
         return _sink
@@ -8670,14 +8663,21 @@ class Orchestrator:
         when rendering its verdict (the "eyes everywhere" north-star).
 
         EXEC stays at home (cadre R1 H2): ``run_shell``'s PRIMARY (writable /
-        cwd-eligible) root is the shared ARTIFACTS tree — the deliverable
-        lane — never the whole run dir. The sandbox ro-binds the filesystem,
-        so the Leader still READS logs and reports by absolute path from a
-        shell; engine-owned run state (goals, tasks, decisions, reports) is
-        not a writable root and not an eligible cwd for a full-profile
-        command. Write-class tools (write_artifact / edit_file) keep the
-        caller's artifacts-bound versions; every other caller-registered tool
-        (http_get, custom) is preserved untouched."""
+        cwd-eligible) root is the shared ARTIFACTS tree — never the whole run
+        dir — so a full-profile command cannot overwrite engine-owned run
+        state. And it is SANDBOX-GATED (cadre R2 H1): this shell starts
+        model-authored code automatically, so when the sandbox is not
+        enforceable (no bwrap / explicit bypass / profile=off) ``run_shell``
+        is OMITTED entirely rather than soft-falling to an unsandboxed child
+        — the Leader keeps its artifacts-bound file tools and its run-dir
+        reads. The chat loop's missing-tool filter drops it from the loadout.
+
+        WRITE-class tools (``edit_file`` / ``write_artifact``) are rebuilt
+        STRICTLY against the shared artifacts tree (cadre R2 MED-3) — the
+        caller's registry binds registered read-write FOLDERS as ``edit_file``
+        extra roots, and NEITHER lane may edit an operator project folder
+        outside the deliverable. Registered-folder visibility stays READ-only."""
+        from modulatio import sandbox as _sandbox
         root = self._scope_root()
         art_root = self._shared_artifacts_root()
         folder_rw, folder_read = self._folder_roots()
@@ -8690,7 +8690,11 @@ class Orchestrator:
             project_code=self.project.code,
             extra_read_roots=(*folder_rw, *folder_read),
         )
-        exec_bound = tools.build_registry(
+        # The exec/write registry is bound to ARTIFACTS with NO rw-folder
+        # extra roots (extra_roots defaults to ()), so run_shell/edit_file/
+        # write_artifact rebuilt from it cannot reach a registered operator
+        # folder.
+        art_bound = tools.build_registry(
             artifacts_root=art_root,
             tool_calls_dir=art_root / "tool_calls",
             project_code=self.project.code,
@@ -8700,8 +8704,20 @@ class Orchestrator:
         for name in ("read_file", "read_tool_result"):
             if name in read_bound:
                 merged[name] = read_bound[name]
-        if "run_shell" in exec_bound:
-            merged["run_shell"] = exec_bound["run_shell"]
+        for name in ("edit_file", "write_artifact"):
+            if name in art_bound:
+                merged[name] = art_bound[name]
+        sandbox_enforceable = (
+            _sandbox.is_sandbox_available()
+            and not _sandbox.is_bypass_requested()
+            and _sandbox.current_profile() != "off"
+        )
+        if sandbox_enforceable and "run_shell" in art_bound:
+            merged["run_shell"] = art_bound["run_shell"]
+        else:
+            # Not enforceable → omit the automatic shell rather than run
+            # model-authored code unsandboxed.
+            merged.pop("run_shell", None)
         return merged
 
     def _merge_wave_artifacts(
@@ -10972,12 +10988,27 @@ class Orchestrator:
             return None, "run_shell tool unavailable (no artifacts root bound)"
         reports: "list[str]" = []
         all_green = True
+        any_tests = False
         for repo_root in roots:
+            # Engine-selected explicit test files + neutralized addopts
+            # (cadre R2 MED-1): the suite cannot hide its own red tests via
+            # testpaths / --ignore / norecursedirs / python_files. A root
+            # with a marker but NO engine-discoverable test file contributes
+            # no green evidence (handled by the any_tests check below).
+            test_files = self._discover_test_files(repo_root)
+            if not test_files:
+                reports.append(
+                    f"no engine-discoverable test files (test_*.py / "
+                    f"*_test.py) under {repo_root}"
+                )
+                continue
+            any_tests = True
+            rel = " ".join(
+                _shlex.quote(str(p.relative_to(repo_root))) for p in test_files)
             try:
-                # The explicit "." target makes pytest collect the WHOLE
-                # root, overriding any producer-authored testpaths decoy.
                 result = run_shell.call(
-                    cmd="pytest -q --color=no -p no:cacheprovider .",
+                    cmd=("pytest -q --color=no -p no:cacheprovider "
+                         f"-o addopts= {rel}"),
                     profile="full",
                     cwd=str(repo_root),
                     timeout=_PYTEST_GATE_TIMEOUT_S,
@@ -11003,47 +11034,92 @@ class Orchestrator:
                 f"engine-run pytest via run_shell (cwd: {repo_root}) — "
                 f"{head}\n\n" + result[-2000:]
             )
+        if not any_tests:
+            # Suite roots existed but not one engine-discoverable test file —
+            # no green evidence to show, same as no suite at all (RED).
+            return False, "\n\n".join(reports)
         return all_green, "\n\n".join(reports)
 
-    def _suite_fingerprint(self, tasks: "list[Task]") -> "dict[str, str]":
-        """sha256 of every test-relevant file (test modules, conftest.py,
-        pytest config files) under the goal's suite roots. The greenwash
-        bind's evidence base (cadre R1): snapshotted before a LEADER fix
-        dispatches, compared when a later gate comes back green."""
-        out: "dict[str, str]" = {}
-        config_names = ("conftest.py", "pytest.ini", "tox.ini",
-                        "setup.cfg", "pyproject.toml")
+    #: Files that CONTROL pytest collection/selection — a change to any of
+    #: these can hide a red test. conftest.py is included by exact name.
+    _SUITE_CONFIG_NAMES = (
+        "conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml",
+    )
+
+    def _discover_test_files(self, root: "Path") -> "list[Path]":
+        """Test modules under ``root`` the ENGINE selects (cadre R2 MED-1) —
+        by fixed pattern (``test_*.py`` / ``*_test.py``), NOT by the
+        producer-authored ``python_files`` / ``testpaths`` / ``norecursedirs``
+        the suite could weaponize to hide its own red tests."""
+        out: "list[Path]" = []
+        for p in root.rglob("*.py"):
+            rel_parts = p.relative_to(root).parts
+            if ("__pycache__" in rel_parts
+                    or any(part.startswith(".") for part in rel_parts)):
+                continue
+            if p.name.startswith("test_") or p.name.endswith("_test.py"):
+                out.append(p)
+        return sorted(out)
+
+    def _suite_fingerprint(self, tasks: "list[Task]") -> "dict[str, tuple[str, str]]":
+        """``path → (kind, sha256)`` for every collection-relevant file under
+        the goal's suite roots — ``kind`` is ``"config"`` (a collection-
+        control file: conftest.py or a pytest config) or ``"test"`` (a test
+        module). The greenwash bind's evidence base (cadre R1/R2 MED-2):
+        snapshotted before a LEADER fix dispatches; at re-verify, ANY change
+        to a config file (add / remove / modify) and any modify/remove of a
+        snapshotted test module is tamper — only ADDED test modules are free."""
+        out: "dict[str, tuple[str, str]]" = {}
         for root in self._pytest_repo_roots(tasks):
-            for p in root.rglob("*.py"):
-                rel_parts = p.relative_to(root).parts
-                if ("__pycache__" in rel_parts
-                        or any(part.startswith(".") for part in rel_parts)):
+            for p in self._discover_test_files(root):
+                out[str(p)] = ("test", hashlib.sha256(p.read_bytes()).hexdigest())
+            # conftest.py can live anywhere in the tree; config files at root.
+            for p in root.rglob("conftest.py"):
+                if "__pycache__" not in p.parts:
+                    out[str(p)] = (
+                        "config", hashlib.sha256(p.read_bytes()).hexdigest())
+            for name in self._SUITE_CONFIG_NAMES:
+                if name == "conftest.py":
                     continue
-                if (p.name == "conftest.py"
-                        or p.name.startswith("test_")
-                        or p.name.endswith("_test.py")
-                        or "tests" in rel_parts[:-1]):
-                    out[str(p)] = hashlib.sha256(p.read_bytes()).hexdigest()
-            for name in config_names:
                 f = root / name
                 if f.is_file():
-                    out[str(f)] = hashlib.sha256(f.read_bytes()).hexdigest()
+                    out[str(f)] = (
+                        "config", hashlib.sha256(f.read_bytes()).hexdigest())
         return out
 
     def _suite_tamper_issues(
         self, goal: "Goal", tasks: "list[Task]",
     ) -> "list[str]":
-        """Files from the goal's pre-fix suite snapshot that a leader fix
-        modified or deleted (additions are fine — the Leader may
-        legitimately ADD tests). Non-empty = green over an altered suite,
-        which is not acceptable evidence. Empty when no snapshot exists
-        (no leader fix ran, or a floor redo cleared it)."""
+        """How a leader fix altered the suite's collection surface since the
+        pre-fix snapshot. A collection-control file added, removed, or
+        modified is tamper (a Leader could add a ``pytest.ini`` /
+        ``conftest.py`` that deselects the failing tests — cadre R2 MED-2); a
+        snapshotted TEST module modified or removed is tamper; only ADDED
+        test modules are free. Empty = untouched, or no snapshot (no leader
+        fix ran / a floor redo cleared it)."""
         snapshot = self._goal_suite_snapshots.get(goal.id)
         if not snapshot:
             return []
         current = self._suite_fingerprint(tasks)
-        return [path for path, digest in snapshot.items()
-                if current.get(path) != digest]
+        issues: "list[str]" = []
+        snap_cfg = {p for p, (k, _) in snapshot.items() if k == "config"}
+        cur_cfg = {p for p, (k, _) in current.items() if k == "config"}
+        for path in sorted(snap_cfg | cur_cfg):
+            snap_v, cur_v = snapshot.get(path), current.get(path)
+            name = Path(path).name
+            if snap_v is None:
+                issues.append(f"added collection-control file {name}")
+            elif cur_v is None:
+                issues.append(f"removed collection-control file {name}")
+            elif snap_v[1] != cur_v[1]:
+                issues.append(f"modified collection-control file {name}")
+        for path, (kind, digest) in snapshot.items():
+            if kind != "test":
+                continue
+            cur_v = current.get(path)
+            if cur_v is None or cur_v[1] != digest:
+                issues.append(f"modified/removed test module {Path(path).name}")
+        return issues
 
     def _leader_verify_goal(
         self,

@@ -24,7 +24,7 @@ import pytest
 from modulatio import runners as mod_runners
 from modulatio import sandbox, store, tools, vault
 from modulatio.orchestration import Orchestrator
-from modulatio.types import GoalStatus, Project, Task
+from modulatio.types import Goal, GoalStatus, Project, Task
 
 from tests.test_orchestration import (
     _drafter_stub,
@@ -202,7 +202,7 @@ def _wire_fix_lane(monkeypatch, fix_calls: list):
         Orchestrator, "_leader_verify_tool_loadout_skill", lambda self: None)
     monkeypatch.setattr(
         Orchestrator, "_leader_verify_tool_registry",
-        lambda self: {name: _stub_tool(name) for name in (
+        lambda self, **kw: {name: _stub_tool(name) for name in (
             "run_shell", "read_file", "read_tool_result",
             "edit_file", "write_artifact")},
     )
@@ -359,7 +359,7 @@ def test_fix_lane_shell_budget_caps_calls_and_timeout(project, monkeypatch):
     monkeypatch.setattr(
         Orchestrator, "_resolve_chat_runner", lambda self, agent_id: object())
     monkeypatch.setattr(
-        Orchestrator, "_leader_verify_tool_registry", lambda self: registry)
+        Orchestrator, "_leader_verify_tool_registry", lambda self, **kw: registry)
 
     results: list = []
 
@@ -454,9 +454,11 @@ def test_gate_unavailable_never_runs_collection_code(project_with_run, monkeypat
     assert not marker.exists()                          # collection never ran
 
 
-def test_verify_registry_run_shell_cannot_write_run_state(project_with_run):
+def test_verify_registry_run_shell_cannot_write_run_state(
+        project_with_run, monkeypatch):
     """WB H2: the leader registry's run_shell is artifacts-bound — a
     full-profile write aimed at engine-owned run state is refused."""
+    _enforceable_sandbox(monkeypatch)  # else run_shell is omitted (H1)
     orch = _orch(project_with_run)
     run_root = orch._scope_root()
     sentinel = run_root / "run-state-sentinel.txt"
@@ -564,3 +566,141 @@ def test_repo_roots_derive_from_declared_output_paths(project_with_run):
                 output_path="src/app/core.py")
     roots = orch._pytest_repo_roots([task])
     assert roots == [(root / "src").resolve()]
+
+
+# --------------------------------------------- cadre R2 (R3 round) closures
+
+def test_leader_registry_omits_run_shell_when_sandbox_unenforceable(
+        project_with_run, monkeypatch):
+    """WB R2 HIGH-1: the automatic leader verify/fix run_shell must share the
+    gate's strict posture — when the sandbox is not enforceable it is OMITTED
+    (the Leader keeps its file tools), never soft-fell to an unsandboxed
+    child."""
+    orch = _orch(project_with_run)
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    assert "run_shell" not in orch._leader_verify_tool_registry()
+    assert "run_shell" not in orch._leader_verify_tool_registry()
+    # read tools stay — the reviewer can still read the harness.
+    assert "read_file" in orch._leader_verify_tool_registry()
+
+    _enforceable_sandbox(monkeypatch)
+    assert "run_shell" in orch._leader_verify_tool_registry()
+
+
+def test_fix_registry_edit_file_cannot_reach_registered_folder(
+        project_with_run, monkeypatch):
+    """WB R2 MED-3: the fix lane's edit_file/write_artifact are rebuilt
+    against shared artifacts — a registered rw FOLDER (edit_file extra root
+    in the base registry) is NOT writable from the fix lane."""
+    from modulatio import tools
+    _enforceable_sandbox(monkeypatch)
+    outside = Path(project_with_run.wiki_path).parent / "operator_folder"
+    outside.mkdir(parents=True)
+    (outside / "project.txt").write_text("owned", encoding="utf-8")
+    orch = _orch(project_with_run)
+    # Base registry binds the registered folder as an edit_file extra root.
+    orch.tool_registry = tools.build_registry(
+        artifacts_root=orch._shared_artifacts_root(),
+        project_code=project_with_run.code,
+        extra_roots=(str(outside),),
+    )
+    fix_reg = orch._leader_verify_tool_registry()
+    with pytest.raises((ValueError, PermissionError, OSError)):
+        fix_reg["edit_file"].call(
+            path=str(outside / "project.txt"), old="owned", new="pwned")
+    assert (outside / "project.txt").read_text(encoding="utf-8") == "owned"
+
+
+@pytest.mark.skipif(not sandbox.is_sandbox_available(),
+                    reason="bwrap required: the gate never runs unsandboxed")
+def test_gate_neutralizes_hostile_addopts(project_with_run, monkeypatch):
+    """WB R2 MED-1: a producer addopts=--ignore can't hide a red test — the
+    engine passes explicit globbed files with addopts neutralized."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    (root / "real_tests").mkdir(parents=True)
+    (root / "real_tests" / "test_real.py").write_text(
+        "def test_real():\n    assert False\n", encoding="utf-8")
+    (root / "test_pass.py").write_text(
+        "def test_pass():\n    assert True\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\n'
+        'addopts = ["--ignore=real_tests"]\n'
+        'norecursedirs = ["real_tests"]\n', encoding="utf-8")
+
+    state, report = orch._goal_pytest_gate([_code_task()])
+    assert state is False and "test_real" in report
+
+
+def test_added_config_file_is_tamper(project_with_run):
+    """WB R2 MED-2: a Leader fix that ADDS a collection-control file
+    (pytest.ini / conftest.py deselecting the red tests) is tamper — the
+    greenwash snapshot flags additive config, not just modified snapshot
+    entries."""
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_real.py").write_text(
+        "def test_real():\n    assert False\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n', encoding="utf-8")
+    goal = Goal(id="LFX-G-001", project_id=uuid4(), description="d",
+                success_criteria="c")
+    task = Task(id="LFX-T-1", project_id=uuid4(), goal_id="LFX-G-001",
+                description="c", artifact_kind="application",
+                output_path="tests/test_real.py")
+    # Snapshot the pre-fix suite, then the "fix" adds a deselecting pytest.ini.
+    orch._goal_suite_snapshots[goal.id] = orch._suite_fingerprint([task])
+    (root / "pytest.ini").write_text(
+        "[pytest]\naddopts = --ignore=tests/test_real.py\n", encoding="utf-8")
+    issues = orch._suite_tamper_issues(goal, [task])
+    assert any("pytest.ini" in i for i in issues)
+
+
+def test_added_test_module_is_not_tamper(project_with_run):
+    """WB R2 MED-2 boundary: ADDING a test module is legitimate (the Leader
+    may write new tests) — only config files and changed/removed snapshotted
+    tests are tamper."""
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_real.py").write_text(
+        "def test_real():\n    assert True\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n', encoding="utf-8")
+    goal = Goal(id="LFX-G-001", project_id=uuid4(), description="d",
+                success_criteria="c")
+    task = Task(id="LFX-T-1", project_id=uuid4(), goal_id="LFX-G-001",
+                description="c", artifact_kind="application",
+                output_path="tests/test_real.py")
+    orch._goal_suite_snapshots[goal.id] = orch._suite_fingerprint([task])
+    (root / "tests" / "test_more.py").write_text(
+        "def test_more():\n    assert True\n", encoding="utf-8")
+    assert orch._suite_tamper_issues(goal, [task]) == []
+
+
+def test_transcript_preplanted_symlink_not_chmodded(project_with_run, tmp_path):
+    """WB R2 HIGH-2: a symlink planted at the transcript path BEFORE the chat
+    loop must not make the trusted parent chmod the outside target — no
+    pathname touch/chmod runs before the no-follow append."""
+    transcript = Path(project_with_run.wiki_path).parent / "pre.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x\n", encoding="utf-8")
+    os.chmod(outside, 0o644)
+    transcript.symlink_to(outside)
+
+    calls = {"n": 0}
+
+    def noop():
+        calls["n"] += 1
+        return "ok"
+
+    orch = _chat_orch(project_with_run,
+                      tools.Tool(name="noop", description="n", call=noop))
+    orch._run_chat_loop(
+        prompt="p", tool_loadout=("noop",), role="leader", agent_id="leader",
+        task_id="G", transcript_path=transcript, skill_name="leader-fix")
+    assert outside.stat().st_mode & 0o777 == 0o644   # not chmodded to 0600
+    assert outside.read_text(encoding="utf-8") == "x\n"  # not written through

@@ -224,7 +224,12 @@ def test_leader_verify_registry_run_shell_bound_to_artifacts_read_widened(
     cannot overwrite engine-owned run state (goals, tasks, reports). READ
     tools (``read_file``) ARE widened to the run dir so the reviewer still
     reads logs/reports/tickets for its verdict."""
-    from modulatio import tools
+    from modulatio import sandbox, tools
+
+    # run_shell is only present when the sandbox is enforceable (R2 H1).
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
 
     shell_roots: list[Path] = []
     read_roots: list[Path] = []
@@ -265,7 +270,11 @@ def test_leader_verify_chat_loop_widens_registry_and_grants_run_dir(
     like any model, writes still gated. Both thread-local hints restored after."""
     from types import SimpleNamespace
 
-    from modulatio import tools
+    from modulatio import sandbox, tools
+
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
 
     artifacts_root = tmp_path / PROJECT_CODE.lower() / "artifacts"
     artifacts_root.mkdir(parents=True, exist_ok=True)
