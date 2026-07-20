@@ -805,3 +805,33 @@ def test_conftest_generated_params_are_not_false_red(project_with_run, monkeypat
 
     state, report = orch._goal_pytest_gate([_code_task()])
     assert state is True   # generated params both pass; not flagged as hidden
+
+
+# --------------------------------------------- cadre R5 (R6 round) closure
+
+@pytest.mark.skipif(not sandbox.is_sandbox_available(),
+                    reason="bwrap required: the gate never runs unsandboxed")
+def test_conftest_hook_cannot_hide_special_char_test_path(
+        project_with_run, monkeypatch):
+    """WB R5 MED: a test file with a valid special char in its name
+    (test_red+case.py) must appear in the hook-free manifest — the parser
+    can't drop it through a filename character allowlist, so a hook hiding
+    it is still caught."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_red+case.py").write_text(
+        "def test_real():\n    assert False\n", encoding="utf-8")
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n', encoding="utf-8")
+    (root / "conftest.py").write_text(
+        "def pytest_collection_modifyitems(items):\n"
+        "    items[:] = [i for i in items if 'test_ok' in i.nodeid]\n",
+        encoding="utf-8")
+
+    state, report = orch._goal_pytest_gate([_code_task()])
+    assert state is False
+    assert "test_red+case.py" in report and "hid engine-expected" in report

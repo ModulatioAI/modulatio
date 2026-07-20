@@ -11016,7 +11016,15 @@ class Orchestrator:
                 return None
             ids = set()
             for line in out.splitlines():
-                m = re.match(r"\s*([\w./-]+\.py::.+?)\s*$", line)
+                # A collected line is a full nodeid `path.py::item`. Match on
+                # the `.py::` structure with NO filename character allowlist
+                # (cadre R5 MED): pytest and the engine's own test_*.py glob
+                # both admit `+`, spaces, and Unicode in paths, and the whole
+                # path::item suffix (params included) must be preserved so a
+                # special-character test file can't be silently dropped from
+                # the manifest. Collection-error output is exit!=0/5 above, so
+                # these lines are nodeids, not tracebacks.
+                m = re.match(r"\s*(\S.*\.py::.+?)\s*$", line)
                 if m:
                     ids.add(m.group(1))
             return ids
