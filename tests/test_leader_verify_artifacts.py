@@ -215,31 +215,44 @@ def test_leader_verify_falls_back_to_drafts_convention(project: Project, tmp_pat
     assert "DRAFTS-FALLBACK-MARKER-789" in prompt
 
 
-def test_leader_verify_registry_run_shell_widened_to_run_dir(
+def test_leader_verify_registry_run_shell_bound_to_artifacts_read_widened(
     project: Project, tmp_path: Path, monkeypatch
 ):
-    """B5: the Leader-verify registry's ``run_shell`` is rooted at the whole RUN
-    dir (``_scope_root()``), not just ``artifacts/`` — so the trusted Leader-
-    reviewer can ``ls``/``cat`` the entire harness (logs, reports, tickets) for
-    its verdict, while producers stay confined to staging. READ widens; the
-    verify loadout (``run_shell``, passive) keeps WRITE in its lane."""
+    """Cadre R1 H2: the Leader-verify registry splits READ from EXEC.
+    ``run_shell``'s primary (writable / cwd-eligible) root stays the shared
+    ARTIFACTS tree — never the whole run dir — so a full-profile command
+    cannot overwrite engine-owned run state (goals, tasks, reports). READ
+    tools (``read_file``) ARE widened to the run dir so the reviewer still
+    reads logs/reports/tickets for its verdict."""
     from modulatio import tools
 
-    seen_roots: list[Path] = []
-    real = tools.make_run_shell
+    shell_roots: list[Path] = []
+    read_roots: list[Path] = []
+    real_shell = tools.make_run_shell
+    real_read = tools.make_read_file
     monkeypatch.setattr(
         tools, "make_run_shell",
-        lambda root, *a, **k: (seen_roots.append(Path(root)), real(root, *a, **k))[1],
+        lambda root, *a, **k: (shell_roots.append(Path(root)),
+                               real_shell(root, *a, **k))[1],
+    )
+    monkeypatch.setattr(
+        tools, "make_read_file",
+        lambda root, *a, **k: (read_roots.append(Path(root)),
+                               real_read(root, *a, **k))[1],
     )
 
     orch, _ = _capturing_orch(project)
     registry = orch._leader_verify_tool_registry()
 
     assert "run_shell" in registry
-    assert seen_roots[-1] == orch._scope_root()
-    assert seen_roots[-1] != orch._artifacts_root(), (
-        "verify run_shell must be widened beyond artifacts/ to the run dir"
+    # The run_shell installed in the merged registry is the EXEC-bound one:
+    # rooted at shared artifacts, NOT the run dir.
+    assert shell_roots[-1] == orch._shared_artifacts_root()
+    assert shell_roots[-1] != orch._scope_root(), (
+        "verify run_shell must NOT be rooted at the whole run dir (H2)"
     )
+    # read_file IS widened to the run dir so the reviewer reads the harness.
+    assert orch._scope_root() in read_roots
 
 
 def test_leader_verify_chat_loop_widens_registry_and_grants_run_dir(

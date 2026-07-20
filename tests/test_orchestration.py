@@ -6391,9 +6391,9 @@ def test_leader_verify_falls_back_to_simple_path_when_no_tool_skill(
 def test_leader_verify_writes_transcript_sidecar(
     project: Project, tmp_path, monkeypatch
 ):
-    """Leader's tool calls write to ``artifacts/tool_calls/leader_<
-    goal_id>.jsonl`` — distinct namespace from drafter and QC
-    transcripts so audit trails don't collide on the same task."""
+    """Leader's tool calls write to ``<run>/tool_calls/leader_<goal_id>.jsonl``
+    — the RUN dir, NOT the model-writable ``artifacts/`` tree (cadre R1 H3),
+    and a distinct namespace from drafter/QC transcripts."""
     from modulatio import skills as skills_mod
     from modulatio import tools as tools_mod
     from modulatio.runners import ChatResponse, ToolCall, stub_chat_runner
@@ -6440,14 +6440,12 @@ def test_leader_verify_writes_transcript_sidecar(
     )
     summary = orch.kickoff("anything")
 
-    from modulatio.vault import project_dir
     # The goal id is generated as <code>-G-001 etc. Find which one
     # got verified through the chat path (only one goal in this run).
     assert summary.goals
     goal_id = summary.goals[0].id
     transcript = (
-        project_dir(PROJECT_CODE) / "artifacts" / "tool_calls"
-        / f"leader_{goal_id.lower()}.jsonl"
+        orch._scope_root() / "tool_calls" / f"leader_{goal_id.lower()}.jsonl"
     )
     assert transcript.exists(), (
         f"expected Leader transcript at {transcript}; "

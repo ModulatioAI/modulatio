@@ -217,6 +217,13 @@ _LEADER_FIX_LOADOUT = (
     "run_shell", "read_file", "read_tool_result", "edit_file", "write_artifact",
 )
 
+#: Leader fix-in-place lane budgets (cadre R1): per-call shell ceiling, a
+#: cumulative shell-call cap, and a whole-session deadline so a
+#: prompt-injected tool loop can't stretch one fix cycle into hours.
+_LEADER_FIX_SHELL_TIMEOUT_S = 120.0
+_LEADER_FIX_SHELL_CALLS = 8
+_LEADER_FIX_DEADLINE_S = 900.0
+
 #: Block-reason markers shared by the BLOCK writers and the QC-sweep
 #: discriminator (a discriminator must bind on a constant
 #: both sides reference, never on free-form rationale prose that can drift).
@@ -2239,6 +2246,19 @@ class Orchestrator:
         #: identical output the Leader still rejects → futile, bow out. Keyed by
         #: goal id; lives for the run.
         self._goal_redo_fingerprints: dict[str, str] = {}
+        #: goal_id → {suite file → sha256} snapshotted when the LEADER fix
+        #: lane dispatches. A later GREEN gate over a non-additively changed
+        #: suite is a measured HARD issue (the greenwash bind); a floor redo
+        #: clears the snapshot — producers may legitimately rewrite tests.
+        self._goal_suite_snapshots: dict[str, dict[str, str]] = {}
+        #: goal_id → True when the LAST redo was a LEADER fix-in-place (vs a
+        #: floor producer re-dispatch). The deadlock guard (a producer↔QC
+        #: stalemate) applies only to floor rounds; after a leader fix the
+        #: persisted qc_authored_fix flags are stale, so the Leader keeps its
+        #: fix budget (Jenny R1 LOW). Tracks the ACTUAL lane, not the knob —
+        #: a no-chat-runner run falls back to floor with the knob still
+        #: "leader".
+        self._goal_redo_was_leader: dict[str, bool] = {}
         #: Goals that already got their ONE-shot goal-end QC last-resort
         #: sweep this run (the producer-of-last-resort doctrine: QC produces
         #: the missing pieces before a goal may ship "disappointed over a
@@ -5555,15 +5575,17 @@ class Orchestrator:
                 detail={"tool": name},
             )
             try:
-                with transcript_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps({
-                        "task_id": task_id,
-                        "role": role,
-                        "tool": name,
-                        "args": args,
-                        "result": result,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }) + "\n")
+                # H3: no-follow owned append — a model that unlinks/symlinks
+                # the transcript mid-loop can't redirect this trusted-parent
+                # write outside its lane or loosen the 0600 mode.
+                _append_owned_jsonl(transcript_path, {
+                    "task_id": task_id,
+                    "role": role,
+                    "tool": name,
+                    "args": args,
+                    "result": result,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
             except Exception:
                 # Sidecar failure must not abort a producing run.
                 pass
@@ -8641,36 +8663,45 @@ class Orchestrator:
         return merged
 
     def _leader_verify_tool_registry(self) -> "dict[str, tools.Tool]":
-        """The Leader's GOAL-VERIFY registry: path-bound builtins rebound to the
-        whole RUN directory (``_scope_root()``) instead of only its ``artifacts/``
-        subtree, so the trusted Leader-reviewer can ``ls``/``cat`` the entire
-        harness for this run — logs, reports, tickets, run state — not just the
-        deliverables, when rendering its verdict (the "eyes everywhere" north-
-        star). READ widens to the run dir; the verify loadout is read-only
-        (``run_shell`` inspection, passive profile), so nothing here lets the
-        Leader WRITE outside its lane — this is the trusted-reviewer exception to
-        the producer confinement, which stays on staging (``_staging_tool_registry``).
-        Only the READ-class path tools are widened; the write-class builtins and
-        any caller-registered tools (http_get, web_search, custom) are kept."""
+        """The Leader's GOAL-VERIFY / FIX registry. READ-class path builtins
+        (``read_file`` / ``read_tool_result``) are rebound to the whole RUN
+        directory (``_scope_root()``) so the trusted Leader-reviewer can read
+        the entire harness for this run — logs, reports, tickets, run state —
+        when rendering its verdict (the "eyes everywhere" north-star).
+
+        EXEC stays at home (cadre R1 H2): ``run_shell``'s PRIMARY (writable /
+        cwd-eligible) root is the shared ARTIFACTS tree — the deliverable
+        lane — never the whole run dir. The sandbox ro-binds the filesystem,
+        so the Leader still READS logs and reports by absolute path from a
+        shell; engine-owned run state (goals, tasks, decisions, reports) is
+        not a writable root and not an eligible cwd for a full-profile
+        command. Write-class tools (write_artifact / edit_file) keep the
+        caller's artifacts-bound versions; every other caller-registered tool
+        (http_get, custom) is preserved untouched."""
         root = self._scope_root()
+        art_root = self._shared_artifacts_root()
         folder_rw, folder_read = self._folder_roots()
-        rebound = tools.build_registry(
+        # Registered FOLDERS are read-visible to the verifying Leader like
+        # any seat (requirement: Leader/QC access == producers) — READ
+        # class only here.
+        read_bound = tools.build_registry(
             artifacts_root=root,
             tool_calls_dir=root / "artifacts" / "tool_calls",
             project_code=self.project.code,
-            # Registered FOLDERS are read-visible to the verifying Leader like
-            # any seat (requirement: Leader/QC access == producers) — READ
-            # class only here; this registry never writes.
             extra_read_roots=(*folder_rw, *folder_read),
         )
-        # Widen ONLY the read-class path builtins to the run dir. The write-class
-        # tools (write_artifact / edit_file) keep the caller's artifacts-bound
-        # versions — READ widens, WRITE stays in its lane — and every other tool
-        # the caller registered (http_get, custom tools) is preserved untouched.
+        exec_bound = tools.build_registry(
+            artifacts_root=art_root,
+            tool_calls_dir=art_root / "tool_calls",
+            project_code=self.project.code,
+            extra_read_roots=(*folder_rw, *folder_read),
+        )
         merged = dict(self.tool_registry)
-        for name in ("run_shell", "read_file", "read_tool_result"):
-            if name in rebound:
-                merged[name] = rebound[name]
+        for name in ("read_file", "read_tool_result"):
+            if name in read_bound:
+                merged[name] = read_bound[name]
+        if "run_shell" in exec_bound:
+            merged["run_shell"] = exec_bound["run_shell"]
         return merged
 
     def _merge_wave_artifacts(
@@ -10836,51 +10867,101 @@ class Orchestrator:
         return datetime.combine(tomorrow, time.min, tzinfo=timezone.utc)
 
     # ── Leader goal verification (slice #7d + auto-redo #7e) ────────────
-    def _pytest_repo_root(self) -> "Path | None":
-        """Shallowest directory under the shared artifacts root that looks
-        like a pytest-able repo (a packaging/pytest marker file, or a
-        ``tests/`` dir). ``None`` = no discoverable suite root, the gate
-        does not engage."""
+    def _pytest_repo_roots(self, tasks: "list[Task]") -> "list[Path]":
+        """Suite roots for the goal's CODE deliverables — ENGINE-selected
+        (cadre R1 M1): derived from the code tasks' declared ``output_path``s
+        (nearest marker dir at or above each), so a producer cannot point the
+        gate at a decoy tree it doesn't deliver into. The whole-tree
+        shallowest-marker scan survives only as the fallback when no code
+        task declares a path. ``[]`` = no discoverable suite root."""
         root = self._shared_artifacts_root()
         if not root.is_dir():
-            return None
+            return []
         markers = ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini")
-        candidates: "list[Path]" = []
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [
-                d for d in dirnames
-                if not d.startswith(".")
-                and d not in ("__pycache__", "tool_calls", "drafts")
-            ]
-            if any(m in filenames for m in markers) or "tests" in dirnames:
-                candidates.append(Path(dirpath))
-        if not candidates:
-            return None
-        return min(candidates, key=lambda p: len(p.parts))
 
-    def _goal_pytest_gate(self, tasks: "list[Task]") -> "tuple[bool, str] | None":
-        """#43: engine-run test-suite evidence for CODE goals. Runs pytest
-        from the deliverable's repo root and returns ``(green, report)``;
-        ``None`` when the goal has no code deliverable, no discoverable suite
-        root, or the gate cannot run here (unavailable ≠ red).
+        def _is_suite_root(d: Path) -> bool:
+            return (any((d / m).is_file() for m in markers)
+                    or (d / "tests").is_dir())
 
-        RED — including "no tests collected": a code deliverable without a
-        runnable suite has no green evidence to show — joins
-        ``goal_spec_issues``, so the verdict CLAMP binds it as a measured
-        HARD violation the model cannot wave through. Deterministic and
-        engine-side: the code verdict is evidence-based, not inference-based.
+        roots: "list[Path]" = []
+        declared = False
+        for t in tasks:
+            if t.artifact_kind not in _CODE_ARTIFACT_KINDS or not t.output_path:
+                continue
+            declared = True
+            d = (root / t.output_path).resolve().parent
+            try:
+                d.relative_to(root.resolve())
+            except ValueError:
+                continue  # a path escaping artifacts is not gate-eligible
+            while True:
+                if _is_suite_root(d):
+                    if d not in roots:
+                        roots.append(d)
+                    break
+                if d == root or d == d.parent:
+                    break
+                d = d.parent
+        if not roots and not declared:
+            candidates: "list[Path]" = []
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [
+                    d for d in dirnames
+                    if not d.startswith(".")
+                    and d not in ("__pycache__", "tool_calls", "drafts")
+                ]
+                if any(m in filenames for m in markers) or "tests" in dirnames:
+                    candidates.append(Path(dirpath))
+            if candidates:
+                roots.append(min(candidates, key=lambda p: len(p.parts)))
+        return roots
 
-        Executes THROUGH the ``run_shell`` tool (full profile), never a raw
-        engine subprocess: the produced repo's test code is MODEL-AUTHORED
-        code, and it runs under the same bwrap sandbox, argv allowlist,
-        rlimits, process-group reaping and fail-closed REQUIRE_SANDBOX
-        policy as every other model-authored execution.
+    def _goal_pytest_gate(
+        self, tasks: "list[Task]",
+    ) -> "tuple[bool | None, str] | None":
+        """#43: engine-run test-suite evidence for CODE goals. Four states:
+
+        - ``None`` — not applicable (no code deliverable in the goal).
+        - ``(None, reason)`` — gate UNAVAILABLE (sandbox not enforceable,
+          pytest missing, tool refusal). Surfaced in the verify evidence so
+          a code goal never SILENTLY ships without test evidence; no clamp.
+        - ``(False, report)`` — RED, including "no suite root discovered"
+          and "no tests collected": a code deliverable without a runnable
+          green suite has no evidence to show. Joins ``goal_spec_issues`` →
+          the verdict CLAMP binds it as a measured HARD violation.
+        - ``(True, report)`` — GREEN; rides into the verify prompt.
+
+        Executes THROUGH the ``run_shell`` tool with EXPLICIT engine-selected
+        targets (defeats producer-authored ``testpaths`` decoys), one run per
+        derived suite root, all must be green.
+
+        SANDBOX-MANDATORY (cadre R1 H1): unlike an operator-driven
+        ``run_shell``, this gate starts model-authored code AUTOMATICALLY —
+        it must not inherit the general soft-fall to unsandboxed execution.
+        No functional bwrap, an explicit bypass, or profile=off →
+        UNAVAILABLE; pytest is never started.
         """
         if not any(t.artifact_kind in _CODE_ARTIFACT_KINDS for t in tasks):
             return None
-        repo_root = self._pytest_repo_root()
-        if repo_root is None:
-            return None
+        from modulatio import sandbox as _sandbox
+        if (not _sandbox.is_sandbox_available()
+                or _sandbox.is_bypass_requested()
+                or _sandbox.current_profile() == "off"):
+            reason = (
+                "sandbox not enforceable on this host (bwrap missing, "
+                "bypassed, or profile=off) — model-authored tests are never "
+                "run unsandboxed, so no test evidence was gathered"
+            )
+            _logger.warning("pytest gate unavailable: %s", reason)
+            return None, reason
+        roots = self._pytest_repo_roots(tasks)
+        if not roots:
+            return False, (
+                "no runnable test suite discovered under the deliverable "
+                "(no pyproject.toml / pytest.ini / setup.cfg / tox.ini / "
+                "tests/ at or above the declared code paths) — a code goal "
+                "with no suite has no green evidence to show"
+            )
         artifacts_root = self._shared_artifacts_root()
         run_shell = tools.build_registry(
             artifacts_root=artifacts_root,
@@ -10888,38 +10969,81 @@ class Orchestrator:
             project_code=self.project.code,
         ).get("run_shell")
         if run_shell is None:
-            return None
-        try:
-            result = run_shell.call(
-                cmd="pytest -q --color=no -p no:cacheprovider",
-                profile="full",
-                cwd=str(repo_root),
-                timeout=_PYTEST_GATE_TIMEOUT_S,
+            return None, "run_shell tool unavailable (no artifacts root bound)"
+        reports: "list[str]" = []
+        all_green = True
+        for repo_root in roots:
+            try:
+                # The explicit "." target makes pytest collect the WHOLE
+                # root, overriding any producer-authored testpaths decoy.
+                result = run_shell.call(
+                    cmd="pytest -q --color=no -p no:cacheprovider .",
+                    profile="full",
+                    cwd=str(repo_root),
+                    timeout=_PYTEST_GATE_TIMEOUT_S,
+                )
+            except (RuntimeError, ValueError, OSError) as exc:
+                _logger.warning("pytest gate could not run: %s", exc)
+                return None, f"gate could not run in {repo_root}: {exc}"
+            head = result.split("\n", 1)[0]
+            try:
+                exit_code = int(head.removeprefix("exit_code:").strip())
+            except ValueError:
+                _logger.warning(
+                    "pytest gate: unparseable run_shell result head %r", head)
+                return None, f"unparseable shell result in {repo_root}"
+            if exit_code == -1 and "[TIMEOUT" not in result and "[INFO]" in result:
+                _logger.warning(
+                    "pytest gate unavailable (pytest not installed) — code "
+                    "goal verified without test-suite evidence"
+                )
+                return None, "pytest is not installed on this host"
+            all_green = all_green and exit_code == 0
+            reports.append(
+                f"engine-run pytest via run_shell (cwd: {repo_root}) — "
+                f"{head}\n\n" + result[-2000:]
             )
-        except (RuntimeError, ValueError, OSError) as exc:
-            # Sandbox required-but-unavailable, profile refusal, cwd escape —
-            # the gate is UNAVAILABLE, not red; never crash the verdict.
-            _logger.warning("pytest gate could not run: %s", exc)
-            return None
-        head = result.split("\n", 1)[0]
-        try:
-            exit_code = int(head.removeprefix("exit_code:").strip())
-        except ValueError:
-            _logger.warning(
-                "pytest gate: unparseable run_shell result head %r", head)
-            return None
-        if exit_code == -1 and "[TIMEOUT" not in result and "[INFO]" in result:
-            # pytest isn't installed on this host — unavailable, not red.
-            _logger.warning(
-                "pytest gate unavailable (pytest not installed) — code goal "
-                "verified without test-suite evidence"
-            )
-            return None
-        report = (
-            f"engine-run pytest via run_shell (cwd: {repo_root}) — "
-            f"{head}\n\n" + result[-2000:]
-        )
-        return exit_code == 0, report
+        return all_green, "\n\n".join(reports)
+
+    def _suite_fingerprint(self, tasks: "list[Task]") -> "dict[str, str]":
+        """sha256 of every test-relevant file (test modules, conftest.py,
+        pytest config files) under the goal's suite roots. The greenwash
+        bind's evidence base (cadre R1): snapshotted before a LEADER fix
+        dispatches, compared when a later gate comes back green."""
+        out: "dict[str, str]" = {}
+        config_names = ("conftest.py", "pytest.ini", "tox.ini",
+                        "setup.cfg", "pyproject.toml")
+        for root in self._pytest_repo_roots(tasks):
+            for p in root.rglob("*.py"):
+                rel_parts = p.relative_to(root).parts
+                if ("__pycache__" in rel_parts
+                        or any(part.startswith(".") for part in rel_parts)):
+                    continue
+                if (p.name == "conftest.py"
+                        or p.name.startswith("test_")
+                        or p.name.endswith("_test.py")
+                        or "tests" in rel_parts[:-1]):
+                    out[str(p)] = hashlib.sha256(p.read_bytes()).hexdigest()
+            for name in config_names:
+                f = root / name
+                if f.is_file():
+                    out[str(f)] = hashlib.sha256(f.read_bytes()).hexdigest()
+        return out
+
+    def _suite_tamper_issues(
+        self, goal: "Goal", tasks: "list[Task]",
+    ) -> "list[str]":
+        """Files from the goal's pre-fix suite snapshot that a leader fix
+        modified or deleted (additions are fine — the Leader may
+        legitimately ADD tests). Non-empty = green over an altered suite,
+        which is not acceptable evidence. Empty when no snapshot exists
+        (no leader fix ran, or a floor redo cleared it)."""
+        snapshot = self._goal_suite_snapshots.get(goal.id)
+        if not snapshot:
+            return []
+        current = self._suite_fingerprint(tasks)
+        return [path for path, digest in snapshot.items()
+                if current.get(path) != digest]
 
     def _leader_verify_goal(
         self,
@@ -11095,19 +11219,46 @@ class Orchestrator:
         # the verify prompt as evidence; RED joins goal_spec_issues so the
         # verdict clamp binds it as a measured HARD violation — a code goal
         # cannot be waved through without a recorded green pytest run.
+        # UNAVAILABLE is surfaced (never silent) but does not clamp. The
+        # report text is model-authored test OUTPUT — untrusted; its fences
+        # are defused before it rides into any prompt.
         pytest_gate = self._goal_pytest_gate(tasks)
         if pytest_gate is not None:
             gate_green, gate_report = pytest_gate
-            artifact_blocks.append(
-                "### Test-suite evidence (engine-run pytest, deterministic)\n\n"
-                f"```\n{gate_report}\n```"
-            )
-            if not gate_green:
-                goal_spec_issues.append(
-                    "test-suite: engine-run pytest is RED — the goal's code "
-                    "deliverable has no green test evidence (see the "
-                    "test-suite evidence block)"
+            safe_report = gate_report.replace("```", "'''")
+            if gate_green is None:
+                artifact_blocks.append(
+                    "### Test-suite evidence — GATE UNAVAILABLE (engine)\n\n"
+                    f"```\n{safe_report}\n```\n\n"
+                    "No test evidence was gathered for this CODE goal. Do "
+                    "not claim test health you cannot see; record the gap "
+                    "as a recommendation for the human."
                 )
+            else:
+                artifact_blocks.append(
+                    "### Test-suite evidence (engine-run pytest, "
+                    f"deterministic)\n\n```\n{safe_report}\n```"
+                )
+                if not gate_green:
+                    goal_spec_issues.append(
+                        "test-suite: engine-run pytest is RED — the goal's "
+                        "code deliverable has no green test evidence (see "
+                        "the test-suite evidence block)"
+                    )
+                else:
+                    # Greenwash bind (cadre R1): green over a suite the
+                    # LEADER fix modified non-additively is not evidence.
+                    tampered = self._suite_tamper_issues(goal, tasks)
+                    if tampered:
+                        shown = ", ".join(
+                            Path(p).name for p in tampered[:5])
+                        goal_spec_issues.append(
+                            "test-suite: suite files were modified or "
+                            "deleted during the leader fix "
+                            f"({shown}{'…' if len(tampered) > 5 else ''}) — "
+                            "a green run over an altered suite is not "
+                            "acceptable evidence"
+                        )
 
         prior_approvals_block = _format_prior_approvals(
             store.list_tickets(self.project.code, run_id=self.project.run_id)
@@ -11176,9 +11327,11 @@ class Orchestrator:
                 # without this it judges from the inline digest and hedges. The
                 # verify analog of the converse deliverables block (harder half of B5).
                 leader_prompt = _LEADER_VERIFY_GROUNDING + body
-                artifacts_root = self._shared_artifacts_root()
+                # H3: the audit transcript lives under the RUN dir, not the
+                # model-writable artifacts tree — with the exec root rebound
+                # to artifacts (H2), no leader tool can reach it.
                 transcript_path = (
-                    artifacts_root / "tool_calls"
+                    self._scope_root() / "tool_calls"
                     / f"leader_{goal.id.lower()}.jsonl"
                 )
                 # Widen the verify loop to the whole RUN dir so the Leader-reviewer
@@ -11383,7 +11536,19 @@ class Orchestrator:
             qc_authored_round = any(
                 getattr(t, "qc_authored_fix", False) for t in tasks
             )
-            deadlocked = qc_authored_round and goal.retry_count >= 1
+            # The producer↔QC stalemate guard is FLOOR-lane semantics: when
+            # the LAST redo was a Leader fix-in-place, the producers were not
+            # re-dispatched, so the qc_authored_fix flags persist stale from
+            # an earlier pass and would spuriously kill the Leader's next fix
+            # cycle regardless of progress (Jenny R1 LOW). Keyed on the lane
+            # that actually ran — NOT the knob — so a no-chat-runner run that
+            # fell back to floor still gets the guard. The leader lane's own
+            # breaker is the stalled deliverable fingerprint below (disk-
+            # based, actor-agnostic).
+            deadlocked = (
+                qc_authored_round and goal.retry_count >= 1
+                and not self._goal_redo_was_leader.get(goal.id, False)
+            )
             # The redo now REVISES in place — it builds on the
             # existing draft with the Leader's critique as the instruction, never
             # destroys-and-regenerates (see _leader_auto_redo). So a present
@@ -11966,6 +12131,13 @@ class Orchestrator:
             self._record_abort(summary)
             return
         goal.retry_count += 1
+        # A floor redo hands the work back to PRODUCERS, who may legitimately
+        # rewrite tests — the leader-fix greenwash snapshot no longer
+        # describes a protected suite. Clear it so producer rewrites aren't
+        # misread as leader tampering. Record that this round was a floor
+        # redo (not a leader fix) so the deadlock guard applies.
+        self._goal_suite_snapshots.pop(goal.id, None)
+        self._goal_redo_was_leader[goal.id] = False
         # Stamp the budget window's date as the budget is consumed. The in-run
         # loop no longer refreshes on a date roll (the absolute-cap invariant),
         # but the date is still recorded so the CROSS-RUN resume
@@ -12133,6 +12305,16 @@ class Orchestrator:
         """
         if self._resolve_chat_runner("leader") is None:
             return False
+        # M3 (cadre R1): a Clay-backed Leader drives NATIVE tools, not this
+        # function registry — its writable workspace is the Leader workspace
+        # and the run (artifacts included) is a read-only seat grant, so it
+        # has no deliverable write path. Fall back to the floor WITHOUT
+        # consuming a retry slot rather than burning a cycle it can't use.
+        from modulatio import model_presets as _presets
+        _model_key = self._resolve_chat_runner_model("leader")
+        _preset = _presets.get_preset(_model_key) if _model_key else None
+        if _preset is not None and _preset.get("endpoint") == "claude_cli":
+            return False
         registry = self._leader_verify_tool_registry()
         loadout = tuple(t for t in _LEADER_FIX_LOADOUT if t in registry)
         if not any(t in ("edit_file", "write_artifact") for t in loadout):
@@ -12142,6 +12324,13 @@ class Orchestrator:
         if self.abort_event.is_set():
             self._record_abort(summary)
             return True
+        # This round is a LEADER fix — the deadlock guard's stale
+        # qc_authored_fix flags must not kill the next fix cycle.
+        self._goal_redo_was_leader[goal.id] = True
+        # Greenwash bind (cadre R1): snapshot the suite BEFORE the Leader's
+        # hands touch the tree — a later green gate over a non-additively
+        # changed suite is a measured HARD issue at re-verify.
+        self._goal_suite_snapshots[goal.id] = self._suite_fingerprint(tasks)
         goal.retry_count += 1
         goal.retry_count_date = date.today()
         attempt = goal.retry_count
@@ -12171,17 +12360,55 @@ class Orchestrator:
             success_criteria=goal.success_criteria,
             rationale=leader_rationale,
             gate_block=(
+                # Model-authored test output is UNTRUSTED — defuse fences
+                # before it rides into the fix prompt (cadre R1 H2).
                 "TEST-SUITE EVIDENCE (engine-run pytest)\n"
-                f"```\n{gate_report}\n```"
+                f"```\n{gate_report.replace('```', chr(39) * 3)}\n```"
                 if gate_report
                 else "(no engine test-suite evidence for this goal)"
             ),
             artifacts_root=artifacts_root,
             deliverables="\n".join(deliverable_lines) or "(none on disk)",
         )
+        # H3: audit transcript under the RUN dir — outside the model-writable
+        # artifacts tree the fix lane's exec/write tools are rooted at.
         transcript_path = (
-            artifacts_root / "tool_calls" / f"leader_fix_{goal.id.lower()}.jsonl"
+            self._scope_root() / "tool_calls"
+            / f"leader_fix_{goal.id.lower()}.jsonl"
         )
+        # M2 (cadre R1): lane budgets. Clamp each shell run, cap the count,
+        # and hold the whole session to a deadline — a prompt-injected tool
+        # loop cannot stretch one fix cycle into hours. Exhaustion returns a
+        # refusal body (the model finishes with its summary); the re-verify
+        # still renders the binding judgment.
+        inner_shell = registry.get("run_shell")
+        if inner_shell is not None:
+            from dataclasses import replace as _dc_replace
+            from time import monotonic as _monotonic
+            _lane_deadline = _monotonic() + _LEADER_FIX_DEADLINE_S
+            _shell_calls = {"n": 0}
+
+            def _budgeted_shell(
+                cmd: str, profile: str = "passive", cwd: str = "",
+                timeout: float = 30.0,
+            ) -> str:
+                _shell_calls["n"] += 1
+                left = _lane_deadline - _monotonic()
+                if _shell_calls["n"] > _LEADER_FIX_SHELL_CALLS or left <= 0:
+                    return (
+                        "exit_code: -1\nstdout:\n\nstderr:\n[leader-fix lane "
+                        "budget exhausted — no more shell runs this cycle; "
+                        "finish with your summary]"
+                    )
+                capped = max(1.0, min(
+                    float(timeout or 30.0), _LEADER_FIX_SHELL_TIMEOUT_S, left))
+                return inner_shell.call(
+                    cmd=cmd, profile=profile, cwd=cwd, timeout=capped)
+
+            registry = {
+                **registry,
+                "run_shell": _dc_replace(inner_shell, call=_budgeted_shell),
+            }
         # Same two-seat scope widening as the verify loop: a litellm leader
         # drives the read-widened registry (WRITE stays artifacts-bound); a
         # Clay leader gets the run dir as a read-only seat grant.
@@ -16389,6 +16616,41 @@ DOMAIN STANDARDS (for kind={artifact_kind}):
 
 Emit the complete artifact now.
 """
+
+
+def _append_owned_jsonl(path: Path, payload: dict) -> None:
+    """Audit-append one JSON line, refusing symlink swaps (cadre R1 H3):
+    ``O_NOFOLLOW`` open + owner-only create mode + an fstat identity check,
+    so a model that unlinks or symlink-replaces the transcript mid-loop can
+    neither redirect the trusted parent's append outside its lane nor loosen
+    the 0600 mode. A symlink planted at the path is removed and the append
+    retried once on a clean owned file; any other anomaly raises OSError."""
+    import stat as _stat
+
+    def _open_and_write() -> None:
+        fd = os.open(
+            str(path),
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            st = os.fstat(fd)
+            if not _stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                raise OSError(f"audit transcript {path} is not an owned regular file")
+            if st.st_mode & 0o077:
+                os.fchmod(fd, 0o600)
+            os.write(fd, (json.dumps(payload) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+
+    try:
+        _open_and_write()
+    except OSError:
+        if path.is_symlink():
+            path.unlink()
+            _open_and_write()
+        else:
+            raise
 
 
 def _qc_fixer_enabled() -> bool:

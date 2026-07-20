@@ -86,7 +86,9 @@ KNOBS: "tuple[Knob, ...]" = tuple(
         Knob("MODULATIO_GOAL_REDO_ACTOR", "Disappointed-goal fixer", "leader",
              "Who fixes a 'disappointed' goal: leader = the Leader patches "
              "the deliverable in place (default); floor = re-dispatch the "
-             "producing tasks to the swarm.",
+             "producing tasks to the swarm. Note: floor with task retries 0 "
+             "hands the redo to QC-as-fixer (the producers' lifetime budget "
+             "is already spent) — pair floor with task retries ≥ 1.",
              lambda raw: raw in ("leader", "floor")),
         Knob("MODULATIO_QC_FIXER", "QC-as-fixer", "1",
              "1 = QC patches what a producer can't fix (shipping default); "
