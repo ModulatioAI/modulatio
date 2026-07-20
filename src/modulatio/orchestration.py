@@ -10994,8 +10994,16 @@ class Orchestrator:
             """Run the engine-selected test files under ``root``. Returns
             ``(exit_code, result_text)``, or ``(None, reason)`` when the gate
             is UNAVAILABLE (tool refusal / pytest not installed / unparseable).
+
+            The HOOK-FREE binding pass suppresses captured output + traceback
+            and stops at the first failure (cadre R7 MED): ``run_shell`` keeps
+            only the first 8 KB of stdout, and pytest's ``N failed`` summary is
+            at the END — a noisy failing test could otherwise push it past the
+            cap, hiding a real failure from the classifier below. With capture
+            and traceback off, the summary stays in-window.
             """
-            flag = "--noconftest " if noconftest else ""
+            flag = "--noconftest --tb=no --show-capture=no --maxfail=1 " \
+                if noconftest else ""
             try:
                 result = run_shell.call(
                     cmd=(f"pytest -q --color=no {flag}-o addopts= "
@@ -11068,11 +11076,21 @@ class Orchestrator:
                     f"engine-run pytest (hook-free, cwd: {repo_root}) is RED "
                     "— a test the engine discovered fails when producer "
                     f"collection hooks are stripped:\n\n{_snip(res)}")
-            # Non-zero but NO real failure = the suite could not RUN without
-            # its own conftest (missing fixtures / conftest-time imports). Fall
-            # back to a conftest-enabled run — but its result is ADVISORY: the
-            # engine cannot verify it hook-free, so a green here is evidence,
-            # not a tamper-proof attestation.
+            if "... [truncated," in res:
+                # Non-zero, no positively-identified failure, but the output
+                # was capped (cadre R7 MED): we CANNOT tell an assertion
+                # failure whose summary was truncated from a genuine
+                # conftest-dependency. Fail closed — never infer
+                # conftest-dependent (→ advisory green) from missing tail text.
+                return None, (
+                    f"hook-free pytest output under {repo_root} was truncated; "
+                    "the failure kind cannot be certified safely"
+                )
+            # Non-zero, UNTRUNCATED, NO real failure = the suite could not RUN
+            # without its own conftest (missing fixtures / conftest-time
+            # imports). Fall back to a conftest-enabled run — but its result is
+            # ADVISORY: the engine cannot verify it hook-free, so a green here
+            # is evidence, not a tamper-proof attestation.
             code_cf, res_cf = _run_pytest(repo_root, rel, noconftest=False)
             if code_cf is None:
                 return None, res_cf
