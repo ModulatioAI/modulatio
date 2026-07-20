@@ -50,7 +50,7 @@ def test_settings_list_knobs_with_value_and_source(client):
     by_key = {k["key"]: k for k in knobs}
     assert "MODULATIO_TASK_MAX_RETRIES" in by_key
     row = by_key["MODULATIO_TASK_MAX_RETRIES"]
-    assert row["label"] and row["default"] == "3" and row["hint"]
+    assert row["label"] and row["default"] == "0" and row["hint"]
     assert row["source"] in ("default", "settings", "shell/.env")
 
 

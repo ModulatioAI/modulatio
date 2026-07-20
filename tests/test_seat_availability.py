@@ -51,6 +51,10 @@ def _crash_400() -> BadRequestError:
 
 
 def _task(pid, tid="SAV-T-001", **kw) -> Task:
+    # Explicit retry budget: these tests observe the BETWEEN-ATTEMPT backoff,
+    # which needs redo attempts to exist (the shipped default is 0 = one QC
+    # verdict, then QC-as-fixer).
+    kw.setdefault("max_retries", 3)
     return Task(
         id=tid, project_id=pid, goal_id="SAV-G-001",
         description="produce the piece", assigned_agent_id="james",

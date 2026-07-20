@@ -298,7 +298,7 @@ class Task(BaseModel):
     transitions: list[StateTransition] = Field(default_factory=list)
     retry_count: int = 0
     max_retries: int = Field(
-        default_factory=lambda: _env_int("MODULATIO_TASK_MAX_RETRIES", 3))
+        default_factory=lambda: _env_int("MODULATIO_TASK_MAX_RETRIES", 0))
     #: #18 keystone: LIFETIME producer-attempt counter — monotonic, incremented on
     #: every ``_producer_execute`` regardless of which model holds the task or which
     #: path re-entered the redo loop (goal-redo, declined-ticket re-dispatch,

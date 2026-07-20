@@ -204,6 +204,19 @@ _AVAILABILITY_RETRY_BACKOFF_S = (2.0, 8.0, 20.0)
 #: ranked "best-available" — and every task it attracts burns its budget.
 _SEAT_COOLDOWN_S = 180.0
 
+#: Hard wall-clock ceiling on the engine-run pytest evidence gate (#43) so a
+#: hanging produced test suite can never hang the Leader's verify.
+_PYTEST_GATE_TIMEOUT_S = 300.0
+
+#: artifact_kinds whose goals carry the engine-run test-suite evidence gate.
+_CODE_ARTIFACT_KINDS = ("application", "code")
+
+#: The Leader's fix-in-place loadout — the default remediation for a
+#: 'disappointed' goal: read the deliverable, patch it surgically, re-check.
+_LEADER_FIX_LOADOUT = (
+    "run_shell", "read_file", "read_tool_result", "edit_file", "write_artifact",
+)
+
 #: Block-reason markers shared by the BLOCK writers and the QC-sweep
 #: discriminator (a discriminator must bind on a constant
 #: both sides reference, never on free-form rationale prose that can drift).
@@ -10823,6 +10836,76 @@ class Orchestrator:
         return datetime.combine(tomorrow, time.min, tzinfo=timezone.utc)
 
     # ── Leader goal verification (slice #7d + auto-redo #7e) ────────────
+    def _pytest_repo_root(self) -> "Path | None":
+        """Shallowest directory under the shared artifacts root that looks
+        like a pytest-able repo (a packaging/pytest marker file, or a
+        ``tests/`` dir). ``None`` = no discoverable suite root, the gate
+        does not engage."""
+        root = self._shared_artifacts_root()
+        if not root.is_dir():
+            return None
+        markers = ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini")
+        candidates: "list[Path]" = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [
+                d for d in dirnames
+                if not d.startswith(".")
+                and d not in ("__pycache__", "tool_calls", "drafts")
+            ]
+            if any(m in filenames for m in markers) or "tests" in dirnames:
+                candidates.append(Path(dirpath))
+        if not candidates:
+            return None
+        return min(candidates, key=lambda p: len(p.parts))
+
+    def _goal_pytest_gate(self, tasks: "list[Task]") -> "tuple[bool, str] | None":
+        """#43: engine-run test-suite evidence for CODE goals. Runs pytest
+        from the deliverable's repo root and returns ``(green, report)``;
+        ``None`` when the goal has no code deliverable, no discoverable suite
+        root, or the runtime env has no pytest (gate unavailable ≠ red).
+
+        RED — including "no tests collected": a code deliverable without a
+        runnable suite has no green evidence to show — joins
+        ``goal_spec_issues``, so the verdict CLAMP binds it as a measured
+        HARD violation the model cannot wave through. Deterministic and
+        engine-side: the code verdict is evidence-based, not inference-based.
+        """
+        if not any(t.artifact_kind in _CODE_ARTIFACT_KINDS for t in tasks):
+            return None
+        repo_root = self._pytest_repo_root()
+        if repo_root is None:
+            return None
+        import subprocess
+        import sys
+
+        argv = [sys.executable, "-m", "pytest", "-q", "--color=no",
+                "-p", "no:cacheprovider"]
+        try:
+            proc = subprocess.run(
+                argv, cwd=repo_root, capture_output=True, text=True,
+                timeout=_PYTEST_GATE_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            return False, (
+                f"engine-run pytest TIMED OUT after "
+                f"{int(_PYTEST_GATE_TIMEOUT_S)}s (cwd: {repo_root})"
+            )
+        except OSError as exc:
+            _logger.warning("pytest gate could not run: %s", exc)
+            return None
+        out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        if "No module named pytest" in out:
+            _logger.warning(
+                "pytest gate unavailable (no pytest in the engine env) — "
+                "code goal verified without test-suite evidence"
+            )
+            return None
+        report = (
+            f"engine-run pytest (cwd: {repo_root}) — exit {proc.returncode}\n\n"
+            + out[-2000:]
+        )
+        return proc.returncode == 0, report
+
     def _leader_verify_goal(
         self,
         goal: Goal,
@@ -10836,9 +10919,12 @@ class Orchestrator:
         - ``satisfied`` → goal COMPLETED, MINOR sign-off ticket.
         - ``on_the_fence`` → goal stays IN_PROGRESS, CRITICAL review ticket.
         - ``disappointed`` → route through the retry-budget check:
-            * budget available this window → auto-redo (reset tasks,
-              re-execute, recursively re-verify). No ticket fires on
-              this path; Leader's rationale feeds corrective notes.
+            * budget available this window → the Leader FIXES the
+              deliverable in place itself (default; recursively
+              re-verifies), or — MODULATIO_GOAL_REDO_ACTOR=floor, or no
+              chat runner — auto-redo (reset tasks, re-execute,
+              recursively re-verify). No ticket fires on this path;
+              Leader's rationale feeds the fix / corrective notes.
             * budget exhausted → ship-with-reservations and COMPLETE the
               goal (the final ``else`` below). The run is never blocked on
               the Leader's reservations; the human reads them in the
@@ -10989,6 +11075,24 @@ class Orchestrator:
                         f"```\n{snippet}\n```"
                         + self._operation_bar_directive(t)
                     )
+
+        # #43: engine-run test-suite evidence for CODE goals. GREEN rides into
+        # the verify prompt as evidence; RED joins goal_spec_issues so the
+        # verdict clamp binds it as a measured HARD violation — a code goal
+        # cannot be waved through without a recorded green pytest run.
+        pytest_gate = self._goal_pytest_gate(tasks)
+        if pytest_gate is not None:
+            gate_green, gate_report = pytest_gate
+            artifact_blocks.append(
+                "### Test-suite evidence (engine-run pytest, deterministic)\n\n"
+                f"```\n{gate_report}\n```"
+            )
+            if not gate_green:
+                goal_spec_issues.append(
+                    "test-suite: engine-run pytest is RED — the goal's code "
+                    "deliverable has no green test evidence (see the "
+                    "test-suite evidence block)"
+                )
 
         prior_approvals_block = _format_prior_approvals(
             store.list_tickets(self.project.code, run_id=self.project.run_id)
@@ -11347,19 +11451,30 @@ class Orchestrator:
                         deadline_s=self._fix_window_s,
                     ))
                 if decision is not WindowDecision.BLOCK:
-                    # Remember what we're handing the producers, so a no-progress
+                    # Remember what we're handing the fixer, so a no-progress
                     # redo is caught next round (only meaningful with deliverables).
                     if has_deliverables:
                         self._goal_redo_fingerprints[goal.id] = fingerprint
                     self._emit_activity(
                         role="leader", phase="leader_self_fix", agent_id="leader",
                         detail={"goal_id": goal.id, "window": reason,
-                                "concern": rationale[:200]},
+                                "concern": rationale[:200],
+                                "actor": _goal_redo_actor()},
                     )
                     self._emit_activity(role="leader", phase="leader_verify_ended", agent_id="leader")
-                    self._leader_auto_redo(
+                    # Default remediation: the LEADER patches the deliverable in
+                    # place with its own hands — no floor push. The producer
+                    # re-dispatch (_leader_auto_redo) remains as the explicit
+                    # MODULATIO_GOAL_REDO_ACTOR=floor choice, and as the
+                    # fallback when the fix lane can't run (no chat runner /
+                    # no write tools) — the goal must still converge.
+                    if _goal_redo_actor() == "floor" or not self._leader_fix_in_place(
                         goal, tasks, rationale, report_path, summary,
-                    )
+                        gate_report=(pytest_gate[1] if pytest_gate else ""),
+                    ):
+                        self._leader_auto_redo(
+                            goal, tasks, rationale, report_path, summary,
+                        )
                     return
                 # BLOCK → operator owns the concern. No redo, no retry_count increment;
                 # falls through to the common completion (the elif chain is skipped
@@ -11975,6 +12090,124 @@ class Orchestrator:
                     f"{report_path.name}"
                 ),
             )
+
+    def _leader_fix_in_place(
+        self,
+        goal: Goal,
+        tasks: list[Task],
+        leader_rationale: str,
+        report_path: Path,
+        summary: RunSummary,
+        gate_report: str = "",
+    ) -> bool:
+        """Default 'disappointed' remediation: the LEADER patches the
+        deliverable itself — reads the files, applies surgical edits with its
+        own hands, re-checks — then re-enters ``_leader_verify_goal``. No
+        floor push: the producers are never re-dispatched on this lane
+        (``MODULATIO_GOAL_REDO_ACTOR=floor`` restores the old behavior).
+
+        Same convergence contract as the floor redo: each cycle consumes one
+        ``Goal.max_retries`` slot (an ABSOLUTE counter within the run), the
+        stalled-fingerprint breaker catches a fix that changed nothing, and
+        exhaustion settles through the honest ship-with-reservations path.
+
+        Returns False WITHOUT consuming a retry slot when the lane cannot run
+        (no leader chat runner, or no write-class tools in the registry) so
+        the caller falls back to the floor redo — the goal must still
+        converge on a runner-less Orchestrator.
+        """
+        if self._resolve_chat_runner("leader") is None:
+            return False
+        registry = self._leader_verify_tool_registry()
+        loadout = tuple(t for t in _LEADER_FIX_LOADOUT if t in registry)
+        if not any(t in ("edit_file", "write_artifact") for t in loadout):
+            return False
+        # The operator stopped the run — kill-switch contract: no more model
+        # calls. True (not floor-fallback): the run is stopping either way.
+        if self.abort_event.is_set():
+            self._record_abort(summary)
+            return True
+        goal.retry_count += 1
+        goal.retry_count_date = date.today()
+        attempt = goal.retry_count
+        goal.transitions.append(
+            StateTransition(
+                from_state=goal.status.value,
+                to_state=goal.status.value,
+                actor="leader",
+                rationale=(
+                    f"leader fix-in-place attempt {attempt}/{goal.max_retries}: "
+                    f"{leader_rationale} | report {report_path.name}"
+                ),
+            )
+        )
+        # Persist the consumed budget NOW (observability), like the floor redo.
+        store.save_goal(self.project.code, goal, run_id=self.project.run_id)
+
+        artifacts_root = self._shared_artifacts_root()
+        deliverable_lines = []
+        for t in tasks:
+            p = self._task_artifact_path(t)
+            if p is not None:
+                deliverable_lines.append(f"- {t.id}: {p}")
+        prompt = _LEADER_FIX_PROMPT.format(
+            goal_id=goal.id,
+            goal_description=goal.description,
+            success_criteria=goal.success_criteria,
+            rationale=leader_rationale,
+            gate_block=(
+                "TEST-SUITE EVIDENCE (engine-run pytest)\n"
+                f"```\n{gate_report}\n```"
+                if gate_report
+                else "(no engine test-suite evidence for this goal)"
+            ),
+            artifacts_root=artifacts_root,
+            deliverables="\n".join(deliverable_lines) or "(none on disk)",
+        )
+        transcript_path = (
+            artifacts_root / "tool_calls" / f"leader_fix_{goal.id.lower()}.jsonl"
+        )
+        # Same two-seat scope widening as the verify loop: a litellm leader
+        # drives the read-widened registry (WRITE stays artifacts-bound); a
+        # Clay leader gets the run dir as a read-only seat grant.
+        self._tls.tool_registry_override = registry
+        self._tls.seat_extra_grants = (str(self._scope_root()),)
+        try:
+            self._run_chat_loop(
+                prompt=prompt,
+                tool_loadout=loadout,
+                role="leader",
+                agent_id="leader",
+                task_id=goal.id,
+                transcript_path=transcript_path,
+                skill_name="leader-fix",
+                budget_role="leader-reflect",
+                goal_id=goal.id,
+            )
+        except Exception as exc:
+            # Best-effort fix: the re-verify below renders the binding judgment
+            # on whatever state the deliverable is in, and the retry budget
+            # bounds the loop — a crashed fix attempt must not strand the goal.
+            _logger.warning(
+                "leader fix-in-place loop failed (%s); re-verifying as-is",
+                type(exc).__name__,
+            )
+            summary.errors.append(
+                f"{goal.id}: leader fix-in-place attempt {attempt} raised "
+                f"{type(exc).__name__}; re-verified as-is"
+            )
+        finally:
+            self._tls.tool_registry_override = None
+            self._tls.seat_extra_grants = None
+        if self.abort_event.is_set():
+            self._record_abort(summary)
+            return True
+        # Re-verify: the engine pytest gate re-runs from disk, so a code
+        # goal's next verdict is judged on the FIXED bytes. If still
+        # disappointed and budget remains, this recurses; otherwise it lands
+        # on satisfied / on_the_fence / the honest settle.
+        self._leader_verify_goal(goal, tasks, summary)
+        return True
 
     def _task_artifact_path(self, task: "Task") -> "Path | None":
         """The on-disk path of a task's produced artifact, via the two-tier
@@ -15025,8 +15258,9 @@ reservation goes to the human in the Product Quality Report, never a
 "disappointed" verdict.
 
 COMPLETE WORK IS REVISED, NOT DESTROYED. A "disappointed" verdict sends the
-team to REVISE the deliverable IN PLACE — they build on the existing draft
-with your rationale as the instruction, never regenerating from scratch. So a
+deliverable to an IN-PLACE revision (by you or the team) that builds on the
+existing draft with your rationale as the instruction, never regenerating
+from scratch. So a
 FIXABLE GAP in substantial output — a required section absent, a brief
 requirement unmet — IS a valid "disappointed": the team can close it cheaply
 by revising, and your rationale must name the concrete fix. Reserve restraint
@@ -15041,8 +15275,8 @@ Render one of three verdicts:
   STILL DONE — ship it; your reservations go to the human as
   recommendations (below), they do NOT block the goal.
 - "disappointed": the WRONG or incomplete thing was made — a genuine
-  fitness gap the team CAN fix (off-topic, a required section absent).
-  The team redoes the producing work. Use ONLY for fixable wrong-
+  fitness gap that CAN be fixed (off-topic, a required section absent).
+  The work is revised in place. Use ONLY for fixable wrong-
   deliverable, NEVER for quality nitpicks or anything you can't verify.
 
 RESERVATIONS → the human, never the loop. Anything you don't fully trust
@@ -15094,6 +15328,40 @@ size) MUST come from that artifact's "MEASURED SIZE (engine)" line — never
 estimated from the content snippet, which may be truncated. If the measured
 size falls short of a size the goal demanded, say so plainly; do not round a
 deliverable up to the goal's number.
+"""
+
+
+_LEADER_FIX_PROMPT = """\
+LEADER FIX-IN-PLACE
+
+You are the Leader. You just verified goal {goal_id} and found fixable gaps.
+Instead of sending the work back to the team, close the gaps YOURSELF, in
+place, with your tools. Keep every change surgical: fix what your rationale
+names, build on the existing work, do not rewrite healthy files.
+
+GOAL
+  id: {goal_id}
+  description: {goal_description}
+  success criteria: {success_criteria}
+
+YOUR VERIFY RATIONALE (the gaps to close):
+{rationale}
+
+{gate_block}
+
+DELIVERABLES ON DISK (under {artifacts_root}):
+{deliverables}
+
+HOW TO WORK
+- Read the real files first (read_file / run_shell ls+cat), then patch them
+  with edit_file (surgical) or write_artifact (whole-file rewrite only when
+  a file is genuinely beyond patching).
+- run_shell with profile='full' lets you run pytest / python / ruff from the
+  deliverable's root to confirm a fix before you finish — for a code goal,
+  do not finish while the suite is red if you can help it.
+- When the named gaps are closed, reply with a short plain-text summary of
+  what you changed. The engine re-verifies the goal after you finish — your
+  edits are judged there, so the summary is a note, not a verdict.
 """
 
 
@@ -16116,6 +16384,17 @@ def _qc_fixer_enabled() -> bool:
     import os
 
     return os.environ.get("MODULATIO_QC_FIXER", "1").strip() != "0"
+
+
+def _goal_redo_actor() -> str:
+    """Who fixes a 'disappointed' goal. ``leader`` (default) = the Leader
+    patches the deliverable in place with its own hands; ``floor`` = the
+    pre-1.0 behavior (reset the goal's tasks, re-dispatch the producers).
+    Set via ``MODULATIO_GOAL_REDO_ACTOR=floor`` to opt out."""
+    import os
+
+    raw = os.environ.get("MODULATIO_GOAL_REDO_ACTOR", "").strip().lower()
+    return "floor" if raw == "floor" else "leader"
 
 
 # #151 wave-boundary reflection: the Leader revises the plan for upcoming

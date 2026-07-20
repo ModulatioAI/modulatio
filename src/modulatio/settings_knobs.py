@@ -69,18 +69,25 @@ _BUDGET_ROLES = tuple(
 
 KNOBS: "tuple[Knob, ...]" = tuple(
     [
-        Knob("MODULATIO_TASK_MAX_RETRIES", "Task retries before QC fixes", "3",
-             "Producer attempts a task gets before QC-as-fixer authors the fix "
-             "itself. Applies to tasks planned after save. Range 0–10.",
+        Knob("MODULATIO_TASK_MAX_RETRIES", "Task retries before QC fixes", "0",
+             "Producer redo attempts after a QC reject before QC-as-fixer "
+             "authors the fix itself (0 = one verdict, then QC fixes). "
+             "Applies to tasks planned after save. Range 0–10.",
              _int_range(0, 10)),
         Knob("MODULATIO_GOAL_MAX_RETRIES", "Leader verify attempts", "4",
-             "Auto-redo attempts the Leader gets on a 'disappointed' verdict "
-             "before shipping with reservations. Range 0–10.",
+             "Fix cycles (leader fix-in-place or floor redo) the Leader gets "
+             "on a 'disappointed' verdict before shipping with reservations. "
+             "Range 0–10.",
              _int_range(0, 10)),
         Knob("MODULATIO_TASK_CONTEXT_CAP_PCT", "Task context cap (fraction)", "0.20",
              "Fraction of a role's window a task may project before the engine "
              "fans it into size-bounded chunks. Range (0, 1].",
              _float_range(0.0, 1.0, lo_open=True)),
+        Knob("MODULATIO_GOAL_REDO_ACTOR", "Disappointed-goal fixer", "leader",
+             "Who fixes a 'disappointed' goal: leader = the Leader patches "
+             "the deliverable in place (default); floor = re-dispatch the "
+             "producing tasks to the swarm.",
+             lambda raw: raw in ("leader", "floor")),
         Knob("MODULATIO_QC_FIXER", "QC-as-fixer", "1",
              "1 = QC patches what a producer can't fix (shipping default); "
              "0 = rejected tasks stay rejected.", _toggle),

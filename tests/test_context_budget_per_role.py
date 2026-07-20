@@ -1124,7 +1124,7 @@ def test_task_and_goal_retry_defaults_follow_env(monkeypatch):
     monkeypatch.delenv("MODULATIO_GOAL_MAX_RETRIES", raising=False)
     t = Task(id="X-T-1", project_id=uuid.uuid4(), goal_id="g", description="d")
     g = Goal(id="X-G-1", project_id=uuid.uuid4(), description="d", success_criteria="s")
-    assert t.max_retries == 3 and g.max_retries == 4  # byte-identical defaults
+    assert t.max_retries == 0 and g.max_retries == 4  # byte-identical defaults
     monkeypatch.setenv("MODULATIO_TASK_MAX_RETRIES", "1")
     monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "2")
     t2 = Task(id="X-T-2", project_id=uuid.uuid4(), goal_id="g", description="d")
@@ -1132,7 +1132,7 @@ def test_task_and_goal_retry_defaults_follow_env(monkeypatch):
     assert t2.max_retries == 1 and g2.max_retries == 2
     # stored JSON round-trips keep their explicit value (no default rewrite)
     t3 = Task(**{**t.model_dump(), "id": "X-T-3"})
-    assert t3.max_retries == 3
+    assert t3.max_retries == 0
     monkeypatch.setenv("MODULATIO_TASK_MAX_RETRIES", "-4")  # bad → default
     t4 = Task(id="X-T-4", project_id=uuid.uuid4(), goal_id="g", description="d")
-    assert t4.max_retries == 3
+    assert t4.max_retries == 0

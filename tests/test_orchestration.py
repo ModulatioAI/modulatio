@@ -64,6 +64,14 @@ def project(tmp_path: Path, monkeypatch) -> Project:
     )
 
 
+@pytest.fixture
+def three_retries(monkeypatch) -> None:
+    """Pin the pre-default retry budget for tests whose SCENARIO is the
+    producer redo loop itself (the shipped default is 0 = one QC verdict,
+    then QC-as-fixer)."""
+    monkeypatch.setenv("MODULATIO_TASK_MAX_RETRIES", "3")
+
+
 def _seed_producers(code: str = PROJECT_CODE, n: int = 3) -> None:
     """Seed a producer roster so NO_CONSTRAINT tasks route through schedule_wave
     (capability + load-balance) like a real run. The producers' ``stub`` model
@@ -1032,7 +1040,7 @@ def test_drafter_prompt_includes_standards_when_present(project: Project, tmp_pa
 
 # ─── Slice #5a producer modes (GENERATE vs EDIT) ────────────────────────────
 
-def test_qc_mechanical_defect_switches_next_retry_to_edit_mode(project: Project):
+def test_qc_mechanical_defect_switches_next_retry_to_edit_mode(project: Project, three_retries):
     """When QC rejects with defect_type="mechanical", the next retry flips
     the task to EDIT mode — the producer receives the existing draft and
     applies surgical patches, rather than regenerating from scratch."""
@@ -1084,7 +1092,7 @@ def test_qc_mechanical_defect_switches_next_retry_to_edit_mode(project: Project)
     assert "EXISTING DRAFT" not in drafter_prompts[0]
 
 
-def test_qc_substantive_defect_revises_in_place(project: Project):
+def test_qc_substantive_defect_revises_in_place(project: Project, three_retries):
     """§3b: a substantive defect (argument miss, wrong register) no longer
     regenerates from scratch — it REVISES the existing draft with the critique as
     the instruction (never throw the work away). Mode switches to 'revise' and
@@ -1162,7 +1170,7 @@ def test_qc_missing_defect_type_revises_in_place(project: Project, monkeypatch):
     assert all(t.producer_mode == "revise" for t in tasks)
 
 
-def test_edit_mode_prompt_carries_existing_draft_and_corrective_notes(project: Project):
+def test_edit_mode_prompt_carries_existing_draft_and_corrective_notes(project: Project, three_retries):
     """The edit-mode prompt must hand the producer the full prior draft
     (so the edits apply against real content) AND the specific corrective
     notes from QC (so the producer knows what to surgically change)."""
@@ -1795,7 +1803,7 @@ def test_ticket_default_refresh_at_is_none():
     assert t.refresh_at is None
 
 
-def test_leader_disappointed_within_budget_auto_redoes_until_satisfied(project: Project):
+def test_leader_disappointed_within_budget_auto_redoes_until_satisfied(project: Project, three_retries):
     """When Leader returns 'disappointed' and retry budget is
     available, orchestrator auto-redoes the goal (resets tasks to
     PENDING, injects Leader's prior rationale as corrective notes,
@@ -1838,7 +1846,7 @@ def test_leader_disappointed_within_budget_auto_redoes_until_satisfied(project: 
     assert blockers == []
 
 
-def test_leader_disappointed_exhaust_budget_ships_with_recommendation_no_ticket(project: Project):
+def test_leader_disappointed_exhaust_budget_ships_with_recommendation_no_ticket(project: Project, three_retries):
     """Seven disappointed verdicts exhaust the daily redo budget
     (Alfred-loop budget = 7). Post-2026-05-30: the run is NEVER blocked on
     the Leader's judgement and NEVER punts a ticket to the human — on
@@ -2829,7 +2837,7 @@ def test_orchestrator_runs_tasks_in_dependency_order(project: Project):
     assert execution_order[-1] == "TST-T-001"
 
 
-def test_orchestrator_blocks_task_when_dependency_fails(project: Project, monkeypatch):
+def test_orchestrator_blocks_task_when_dependency_fails(project: Project, monkeypatch, three_retries):
     """If a predecessor lands in terminal-fail state (BLOCKED or
     QC_REJECTED), the successor is marked BLOCKED with an explanatory
     rationale. Successor doesn't execute — no producer call on a task
@@ -3082,7 +3090,7 @@ def test_leader_verify_on_the_fence_ships_and_records_recommendations(project: P
                for r in summary.recommendations)
 
 
-def test_leader_verify_disappointed_auto_redo_then_ships(project: Project):
+def test_leader_verify_disappointed_auto_redo_then_ships(project: Project, three_retries):
     """Disappointed = a fixable wrong/incomplete deliverable → Leader
     auto-redo until the daily budget is exhausted. Post-2026-05-30: on
     exhaustion the goal SHIPS (COMPLETED) with a recommendation — it does
@@ -4483,7 +4491,7 @@ def test_orchestrator_blocks_failing_task_but_completes_others(project: Project)
 
 # ─── Slice #3 redo loop ─────────────────────────────────────────────────────
 
-def test_redo_loop_retries_once_on_qc_rejection_then_passes(project: Project):
+def test_redo_loop_retries_once_on_qc_rejection_then_passes(project: Project, three_retries):
     """QC rejects attempt 1; retry with corrective notes → task completes.
 
     Ships quality-architecture.md §8: tasks that didn't ship must be retried,
@@ -4530,7 +4538,7 @@ def test_redo_loop_retries_once_on_qc_rejection_then_passes(project: Project):
     assert goals[0].status == GoalStatus.COMPLETED
 
 
-def test_corrective_notes_injected_into_drafter_prompt_on_retry(project: Project):
+def test_corrective_notes_injected_into_drafter_prompt_on_retry(project: Project, three_retries):
     """On retry, the drafter must receive QC's corrective notes in its prompt
     so it has something actionable to work from. The first attempt should
     NOT carry any corrective-notes preamble."""
@@ -4576,7 +4584,7 @@ def test_corrective_notes_injected_into_drafter_prompt_on_retry(project: Project
     assert "rewrite in second-person contrarian voice" in drafter_prompts[1]
 
 
-def test_redo_loop_exhausts_max_retries_when_qc_always_rejects(project: Project, monkeypatch):
+def test_redo_loop_exhausts_max_retries_when_qc_always_rejects(project: Project, monkeypatch, three_retries):
     """QC never passes → task lands QC_REJECTED terminal.
 
     max_retries = 3 → 1 initial attempt + 3 retries = 4 producer/QC calls (the
@@ -4636,7 +4644,7 @@ def test_redo_loop_exhausts_max_retries_when_qc_always_rejects(project: Project,
     assert t.id in summary.errors[0]
 
 
-def test_redo_loop_recovers_from_transient_drafter_exception(project: Project):
+def test_redo_loop_recovers_from_transient_drafter_exception(project: Project, three_retries):
     """An exception from the drafter is a failure-to-deliver per
     quality-architecture.md §8 and must go through the redo loop, not drop
     the task on the floor."""
@@ -4673,7 +4681,7 @@ def test_redo_loop_recovers_from_transient_drafter_exception(project: Project):
     assert drafter_calls["n"] == 2
 
 
-def test_redo_loop_exhausts_max_retries_on_persistent_drafter_failure(project: Project, monkeypatch):
+def test_redo_loop_exhausts_max_retries_on_persistent_drafter_failure(project: Project, monkeypatch, three_retries):
     """Drafter raises on every attempt → task lands BLOCKED terminal after
     max_retries. Last exception message surfaces in summary.errors."""
     monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the no-backstop terminal
@@ -9321,7 +9329,7 @@ def test_leader_redo_loop_breaker_stops_unchanged_deliverable(tmp_path, monkeypa
     ), "the loop-breaker should record a stall reservation"
 
 
-def test_leader_redo_revise_exhausts_budget_and_terminates(tmp_path, monkeypatch):
+def test_leader_redo_revise_exhausts_budget_and_terminates(tmp_path, monkeypatch, three_retries):
     """§3b termination invariant for the NEW path: when revise keeps CHANGING the
     artifact every pass (so the loop-breaker can't fire), the goal must still
     terminate — bounded by the absolute retry budget — and ship with the
