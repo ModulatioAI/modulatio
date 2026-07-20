@@ -8578,9 +8578,12 @@ class Orchestrator:
         slug = re.sub(r"[^A-Za-z0-9._-]", "_", f"{task_id or role}_{agent_id or role}")
         transcript_path: "Path | None" = self._scope_root() / "tool_calls" / f"seat_{slug}.jsonl"
         try:
+            # Only ensure the parent dir. NO pathname touch/chmod (cadre R3
+            # MED-2): both follow a pre-planted symlink at the predictable
+            # path, which let a local/shared-fs preplant make the trusted
+            # parent chmod an outside target. Creation + owner-only 0600 are
+            # established atomically by _append_owned_jsonl on the first record.
             transcript_path.parent.mkdir(parents=True, exist_ok=True)
-            transcript_path.touch(mode=0o600, exist_ok=True)
-            transcript_path.chmod(0o600)  # tighten a legacy/umask-loosened file
         except OSError:  # best-effort — a transcript failure must not abort the seat
             transcript_path = None
 
@@ -10986,6 +10989,35 @@ class Orchestrator:
         ).get("run_shell")
         if run_shell is None:
             return None, "run_shell tool unavailable (no artifacts root bound)"
+
+        def _collect_ids(root: "Path", rel: str, noconftest: bool):
+            """file::func ids pytest collects for ``rel`` under ``root`` (params
+            stripped). ``noconftest`` builds the HOOK-FREE engine manifest.
+            Returns ``None`` when collection errors (can't certify)."""
+            flag = "--noconftest " if noconftest else ""
+            try:
+                out = run_shell.call(
+                    cmd=(f"pytest --collect-only -q {flag}-o addopts= "
+                         f"-p no:cacheprovider {rel}"),
+                    profile="full", cwd=str(root),
+                    timeout=_PYTEST_GATE_TIMEOUT_S,
+                )
+            except (RuntimeError, ValueError, OSError):
+                return None
+            first = out.split("\n", 1)[0]
+            try:
+                code = int(first.removeprefix("exit_code:").strip())
+            except ValueError:
+                return None
+            if code not in (0, 5):  # 5 = no tests collected (an empty set)
+                return None
+            ids = set()
+            for line in out.splitlines():
+                m = re.match(r"\s*([\w./-]+\.py::[\w:.-]+)", line)
+                if m:
+                    ids.add(re.sub(r"\[.*\]$", "", m.group(1)))
+            return ids
+
         reports: "list[str]" = []
         all_green = True
         any_tests = False
@@ -11005,6 +11037,29 @@ class Orchestrator:
             any_tests = True
             rel = " ".join(
                 _shlex.quote(str(p.relative_to(repo_root))) for p in test_files)
+            # Anti-hook bind (cadre R3 MED-1): a producer conftest.py can
+            # remove the failing test in pytest_collection_modifyitems even
+            # with explicit files + neutralized addopts. Compare the HOOK-FREE
+            # engine manifest (--noconftest) with what pytest actually
+            # collects; any engine-expected test the hooks HID is tamper. If
+            # the hook-free manifest can't be built (the suite imports from
+            # conftest at collection time), we cannot certify green → the
+            # gate is UNAVAILABLE for this root, never silently green.
+            expected_ids = _collect_ids(repo_root, rel, noconftest=True)
+            if expected_ids is None:
+                return None, (
+                    f"cannot build a hook-free collection manifest under "
+                    f"{repo_root} (the suite depends on conftest for "
+                    f"collection) — test evidence is not certifiable"
+                )
+            visible_ids = _collect_ids(repo_root, rel, noconftest=False) or set()
+            hidden = expected_ids - visible_ids
+            if hidden:
+                return False, (
+                    "collection hooks (conftest.py) hid engine-expected "
+                    f"tests under {repo_root}: {', '.join(sorted(hidden))} — "
+                    "a suite that deselects its own tests has no green evidence"
+                )
             try:
                 result = run_shell.call(
                     cmd=("pytest -q --color=no -p no:cacheprovider "

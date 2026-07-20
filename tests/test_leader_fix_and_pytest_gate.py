@@ -704,3 +704,51 @@ def test_transcript_preplanted_symlink_not_chmodded(project_with_run, tmp_path):
         task_id="G", transcript_path=transcript, skill_name="leader-fix")
     assert outside.stat().st_mode & 0o777 == 0o644   # not chmodded to 0600
     assert outside.read_text(encoding="utf-8") == "x\n"  # not written through
+
+
+# --------------------------------------------- cadre R3 (R4 round) closures
+
+@pytest.mark.skipif(not sandbox.is_sandbox_available(),
+                    reason="bwrap required: the gate never runs unsandboxed")
+def test_conftest_hook_cannot_greenwash_gate(project_with_run, monkeypatch):
+    """WB R3 MED-1: a producer conftest.py that deselects the failing test in
+    pytest_collection_modifyitems can't green the gate — the hook-free
+    engine manifest catches the hidden test → RED."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_real.py").write_text(
+        "def test_real():\n    assert False\n", encoding="utf-8")
+    (root / "tests" / "test_decoy.py").write_text(
+        "def test_decoy():\n    assert True\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n', encoding="utf-8")
+    (root / "conftest.py").write_text(
+        "def pytest_collection_modifyitems(items):\n"
+        "    items[:] = [i for i in items if 'decoy' in i.nodeid]\n",
+        encoding="utf-8")
+
+    state, report = orch._goal_pytest_gate([_code_task()])
+    assert state is False
+    assert "test_real" in report and "hid engine-expected" in report
+
+
+def test_seat_tool_sink_preplanted_symlink_not_chmodded(
+        project_with_run, tmp_path):
+    """WB R3 MED-2: the seat sink no longer touch/chmods a pre-planted
+    symlink at the transcript path before the no-follow append."""
+    orch = _orch(project_with_run)
+    tc_dir = orch._scope_root() / "tool_calls"
+    tc_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x\n", encoding="utf-8")
+    os.chmod(outside, 0o644)
+    # The sink's slug for (role=leader, task_id=GOAL, agent_id=leader).
+    (tc_dir / "seat_GOAL_leader.jsonl").symlink_to(outside)
+
+    sink = orch._seat_tool_sink("leader", task_id="GOAL", agent_id="leader")
+    sink("some_tool", {"a": 1}, "result")
+
+    assert outside.stat().st_mode & 0o777 == 0o644   # not chmodded to 0600
+    assert outside.read_text(encoding="utf-8") == "x\n"  # not written through
