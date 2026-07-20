@@ -10992,8 +10992,11 @@ class Orchestrator:
 
         def _collect_ids(root: "Path", rel: str, noconftest: bool):
             """file::func ids pytest collects for ``rel`` under ``root`` (params
-            stripped). ``noconftest`` builds the HOOK-FREE engine manifest.
-            Returns ``None`` when collection errors (can't certify)."""
+            FULL nodeids, parameter suffix INCLUDED (cadre R4 MED): a hook that
+            removes only the failing ``[0]`` while keeping ``[1]`` must show up
+            as a hidden item, so params are NOT collapsed. ``noconftest`` builds
+            the HOOK-FREE engine manifest. Returns ``None`` when collection
+            errors (can't certify)."""
             flag = "--noconftest " if noconftest else ""
             try:
                 out = run_shell.call(
@@ -11013,9 +11016,9 @@ class Orchestrator:
                 return None
             ids = set()
             for line in out.splitlines():
-                m = re.match(r"\s*([\w./-]+\.py::[\w:.-]+)", line)
+                m = re.match(r"\s*([\w./-]+\.py::.+?)\s*$", line)
                 if m:
-                    ids.add(re.sub(r"\[.*\]$", "", m.group(1)))
+                    ids.add(m.group(1))
             return ids
 
         reports: "list[str]" = []
@@ -11053,7 +11056,29 @@ class Orchestrator:
                     f"collection) — test evidence is not certifiable"
                 )
             visible_ids = _collect_ids(repo_root, rel, noconftest=False) or set()
-            hidden = expected_ids - visible_ids
+            # Group by base function so a legit conftest that ADDS params
+            # (pytest_generate_tests: hook-free manifest sees the bare
+            # `test_x`, hooked sees `test_x[a]`/`test_x[b]`) is not a false
+            # RED, while a hook that REMOVES a specific param a hook-free
+            # manifest listed (`test_x[0]`) IS caught (cadre R4 MED).
+            def _base(n: str) -> str:
+                return re.sub(r"\[.*\]$", "", n)
+            vis_by_base = collections.defaultdict(set)
+            for n in visible_ids:
+                vis_by_base[_base(n)].add(n)
+            exp_by_base = collections.defaultdict(set)
+            for n in expected_ids:
+                exp_by_base[_base(n)].add(n)
+            hidden: "list[str]" = []
+            for base, exp in exp_by_base.items():
+                vis = vis_by_base.get(base, set())
+                if not vis:
+                    hidden.append(base)  # whole function gone
+                    continue
+                # Function present. Every PARAMETRIZED item the hook-free
+                # manifest listed must survive; a bare-only expected base
+                # (params come from a conftest hook) gets no per-param check.
+                hidden.extend(sorted(n for n in exp if n != base and n not in vis))
             if hidden:
                 return False, (
                     "collection hooks (conftest.py) hid engine-expected "

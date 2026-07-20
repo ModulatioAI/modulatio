@@ -752,3 +752,56 @@ def test_seat_tool_sink_preplanted_symlink_not_chmodded(
 
     assert outside.stat().st_mode & 0o777 == 0o644   # not chmodded to 0600
     assert outside.read_text(encoding="utf-8") == "x\n"  # not written through
+
+
+# --------------------------------------------- cadre R4 (R5 round) closures
+
+@pytest.mark.skipif(not sandbox.is_sandbox_available(),
+                    reason="bwrap required: the gate never runs unsandboxed")
+def test_conftest_hook_cannot_drop_a_single_param(project_with_run, monkeypatch):
+    """WB R4 MED: a hook that removes only the FAILING parameter (keeping a
+    passing sibling) must be caught — full nodeids are compared, params not
+    collapsed."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_value.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('value', [0, 1])\n"
+        "def test_value(value):\n"
+        "    assert value\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n', encoding="utf-8")
+    (root / "conftest.py").write_text(
+        "def pytest_collection_modifyitems(items):\n"
+        "    items[:] = [i for i in items if '[1]' in i.nodeid]\n",
+        encoding="utf-8")
+
+    state, report = orch._goal_pytest_gate([_code_task()])
+    assert state is False
+    assert "test_value[0]" in report and "hid engine-expected" in report
+
+
+@pytest.mark.skipif(not sandbox.is_sandbox_available(),
+                    reason="bwrap required: the gate never runs unsandboxed")
+def test_conftest_generated_params_are_not_false_red(project_with_run, monkeypatch):
+    """WB R4 MED boundary: a LEGIT conftest that ADDS parametrization
+    (pytest_generate_tests) must NOT read as tamper — the hook-free manifest
+    sees the bare function, the run sees the generated params, and that
+    addition is allowed."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_gen.py").write_text(
+        "def test_gen(value):\n    assert value\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n', encoding="utf-8")
+    (root / "conftest.py").write_text(
+        "def pytest_generate_tests(metafunc):\n"
+        "    if 'value' in metafunc.fixturenames:\n"
+        "        metafunc.parametrize('value', [1, 2])\n", encoding="utf-8")
+
+    state, report = orch._goal_pytest_gate([_code_task()])
+    assert state is True   # generated params both pass; not flagged as hidden
