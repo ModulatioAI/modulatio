@@ -1562,6 +1562,16 @@ def make_read_file(artifacts_root: Path, extra_roots=()) -> "Callable[..., str]"
             raise ValueError(f"read_file: {path!r} does not exist")
         data = target.read_bytes()
         text = data[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
+        # A binary file (PDF, image, archive) decode-replaces into a sea of
+        # U+FFFD — a megabyte of it blows the model's context window. Refuse
+        # with one honest line instead; the head sample keeps huge text files
+        # (few or no replacements) flowing through the normal truncation.
+        head = text[:4096]
+        if head and head.count("�") / len(head) > 0.15:
+            raise ValueError(
+                f"read_file: {path!r} is a binary file "
+                f"(~{len(data) // 1024} KB) — read_file handles text only"
+            )
         if len(data) > _READ_FILE_MAX_BYTES:
             text += f"\n[...truncated at {_READ_FILE_MAX_BYTES} bytes]"
         return text

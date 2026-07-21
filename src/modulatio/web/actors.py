@@ -102,6 +102,12 @@ class ApprovalBroker:
         finally:
             with self._lock:
                 self._pending.pop(rid, None)
+            # However it ended (grant, deny, timeout), the ask is dead: tell
+            # the bus so the request never replays as a ghost modal on a
+            # reconnect, and any open tab drops the now-unanswerable dialog.
+            get_bus(self._code).publish({
+                "type": "approval_resolved", "data": {"id": rid},
+            })
 
     def resolve(self, rid: str, scope: str) -> bool:
         """Record a browser's chosen scope. True when the id was pending and

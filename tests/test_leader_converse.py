@@ -518,3 +518,27 @@ def test_converse_leader_gate_carries_standing_harness_roots(project: Project):
     assert gate.is_granted(req) is True
     d = gate.decide(req, prompt_fn=lambda r: pytest.fail("must not prompt"))
     assert d.granted_via == "standing"
+
+
+def test_converse_answers_in_lane_when_the_turn_crashes(
+    project: Project, monkeypatch
+):
+    """The no-block invariant: a model/tool failure mid-turn becomes an honest
+    in-lane reply (persisted like any turn), never an exception the surface
+    turns into a 500 (web) or a dead TUI worker."""
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": lambda **k: ChatResponse(content="ok", tool_calls=())},
+        chat_runner_models={"leader": "mock-model"},
+    )
+
+    def _boom(**kwargs):
+        raise RuntimeError("input exceeds the context window of this model")
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _boom)
+    reply = orch.converse("read that huge file for me")
+    assert "turn failed before I could reply" in reply
+    assert "context window" in reply
+    thread = orch._load_conversation()
+    assert thread[-1]["role"] == "leader"
+    assert "turn failed" in thread[-1]["content"]

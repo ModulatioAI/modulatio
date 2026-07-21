@@ -6795,14 +6795,18 @@ class Orchestrator:
                         self._tls.tool_registry_override = None
                         self._tls.seat_extra_grants = None
             except Exception as exc:
-                self._append_conversation(
-                    "leader",
-                    f"(the turn failed before I could reply: {exc})",
-                )
+                # The converse lane must never be BLOCKED by anything except a
+                # gated permission ask (the no-block invariant): a model/tool
+                # failure becomes an honest in-lane reply, not an exception the
+                # surface turns into a 500 (web) or a dead worker (TUI). Loud
+                # trace so the failure never degrades silently.
+                _logger.exception("converse turn failed; answering in-lane")
+                failure = f"(the turn failed before I could reply: {exc})"
+                self._append_conversation("leader", failure)
                 self._emit_activity(
                     role="leader", phase="leader_answered", agent_id="leader",
                 )
-                raise
+                return failure
 
             # An operator ESC returns the interrupt sentinel BY IDENTITY — record
             # the turn as a first-class interrupt so a future reader

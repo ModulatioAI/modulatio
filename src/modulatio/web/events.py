@@ -87,6 +87,19 @@ class EventBus:
                 self._replay.append(frame)
             elif ftype == "telemetry":
                 self._last_telemetry = frame
+            elif ftype == "approval_resolved":
+                # A modal is a one-shot interaction, not view state: once an
+                # ask resolves (grant/deny/timeout), drop it from the replay so
+                # a reconnect never re-pops a dead dialog. A still-PENDING ask
+                # keeps replaying — a late-opening tab must still see it. The
+                # resolved frame itself is live-only (nothing to repaint).
+                rid = frame.get("data", {}).get("id")
+                self._replay = deque(
+                    (f for f in self._replay
+                     if not (f.get("type") == "approval_request"
+                             and f.get("data", {}).get("id") == rid)),
+                    maxlen=_REPLAY_DEPTH,
+                )
             else:
                 self._replay.append(frame)
             targets = list(self._subscribers)

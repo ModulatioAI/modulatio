@@ -205,3 +205,24 @@ async def test_sse_stream_emits_hello_then_published_frames():
 def test_sse_rejects_invalid_project_code(client):
     resp = client.get("/api/BAD..CODE/events")
     assert resp.status_code in (404, 422)
+
+
+def test_resolved_approval_never_replays_a_pending_one_does():
+    """A modal is a one-shot interaction, not view state: a PENDING ask still
+    replays to a late-opening tab, but once resolved (grant/deny/timeout) a
+    reconnect must never re-pop the dead dialog (the ghost-modal bug)."""
+    from modulatio.web.events import EventBus
+
+    bus = EventBus()
+    bus.publish({"type": "event", "data": {"n": 0}})
+    bus.publish({"type": "approval_request", "data": {"id": "a1"}})
+    q1 = bus.subscribe()  # pending → the ask replays
+    assert q1.get(timeout=2)["type"] == "event"
+    assert q1.get(timeout=2) == {"type": "approval_request", "data": {"id": "a1"}}
+    bus.publish({"type": "approval_resolved", "data": {"id": "a1"}})
+    # live subscribers see the resolution (closes an open dialog)…
+    assert q1.get(timeout=2) == {"type": "approval_resolved", "data": {"id": "a1"}}
+    # …but a reconnect sees neither the dead ask nor the resolution.
+    q2 = bus.subscribe()
+    assert q2.get(timeout=2)["type"] == "event"
+    assert q2.empty()

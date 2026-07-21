@@ -2713,3 +2713,15 @@ def test_credential_dotfiles_unreadable_under_standing_config_root(tmp_path):
     for name in (".web_token", ".xai_oauth.json"):
         with pytest.raises(ValueError, match="dotfile"):
             reg["read_file"].call(path=str(cfg / name))
+
+
+def test_read_file_refuses_binary_reads_accented_text(tmp_path):
+    """A binary file (PDF, image) decode-replaces into a sea of U+FFFD that
+    blows the model's context window — refused with one honest line. Real
+    text with non-ASCII flows through untouched."""
+    (tmp_path / "b.pdf").write_bytes(bytes(range(256)) * 64)
+    (tmp_path / "t.txt").write_text("héllo wörld\n" * 10, encoding="utf-8")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError, match="binary"):
+        registry["read_file"].call(path="b.pdf")
+    assert "héllo" in registry["read_file"].call(path="t.txt")

@@ -232,3 +232,36 @@ def test_get_actor_is_per_project_singleton():
     vault.init_project("web", "Web", "o", exist_ok=True)
     a = get_actor("web", stub=True)
     assert get_actor("web", stub=True) is a
+
+
+def test_approval_resolution_publishes_resolved_frame():
+    """However the ask ends, the broker announces it so the bus prunes the
+    replay (no ghost modal) and open tabs drop the dead dialog."""
+    from modulatio.web.actors import ApprovalBroker
+
+    bus_q = get_bus("web").subscribe()
+    broker = ApprovalBroker("web", timeout_s=10)
+    results: list = []
+    t = threading.Thread(
+        target=lambda: results.append(broker.prompt(_security_request()))
+    )
+    t.start()
+    rid = bus_q.get(timeout=5)["data"]["id"]
+    assert broker.resolve(rid, "session") is True
+    t.join(timeout=5)
+    assert bus_q.get(timeout=5) == {"type": "approval_resolved", "data": {"id": rid}}
+    get_bus("web").unsubscribe(bus_q)
+
+
+def test_approval_timeout_publishes_resolved_frame():
+    from modulatio.web.actors import ApprovalBroker
+
+    bus_q = get_bus("web").subscribe()
+    broker = ApprovalBroker("web", timeout_s=0.05)
+    assert broker.prompt(_security_request()).scope == "deny"
+    req = bus_q.get(timeout=5)
+    assert req["type"] == "approval_request"
+    assert bus_q.get(timeout=5) == {
+        "type": "approval_resolved", "data": {"id": req["data"]["id"]},
+    }
+    get_bus("web").unsubscribe(bus_q)

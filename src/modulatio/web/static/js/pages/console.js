@@ -532,6 +532,10 @@ export function mountConsole(page, ctx) {
     } else if (frame.type === "approval_request") {
       modal.dataset.rid = frame.data.id;
       showApproval(frame.data);
+    } else if (frame.type === "approval_resolved") {
+      // The ask was answered elsewhere (another tab, or it timed out) —
+      // a dialog left open would be unanswerable.
+      if (modal.open && modal.dataset.rid === frame.data.id) modal.close();
     }
   }, {
     onStatus: (s) => {
