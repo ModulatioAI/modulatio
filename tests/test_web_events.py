@@ -249,3 +249,34 @@ def test_pending_approval_survives_run_started_and_clear_screen():
     q3 = bus.subscribe()
     assert q3.empty()
     bus.unsubscribe(q3)
+
+
+def test_pending_approvals_survive_a_saturated_replay():
+    """WB R2-F3 pins: pending asks outrank telemetry and run history — a
+    replay at full depth must crowd out stale run frames, never a live ask;
+    resolving one of two asks replays only the unresolved id."""
+    from modulatio.web.events import _SUBSCRIBER_DEPTH, EventBus
+
+    bus = EventBus()
+    for i in range(_SUBSCRIBER_DEPTH):
+        bus.publish({"type": "event", "data": {"n": i}})
+    bus.publish({"type": "telemetry", "data": {"t": 1}})
+    bus.publish({"type": "approval_request", "data": {"id": "a1"}})
+    bus.publish({"type": "approval_request", "data": {"id": "a2"}})
+    q = bus.subscribe()
+    frames = []
+    while not q.empty():
+        frames.append(q.get_nowait())
+    bus.unsubscribe(q)
+    ids = [f["data"]["id"] for f in frames if f["type"] == "approval_request"]
+    assert ids == ["a1", "a2"]
+    assert any(f["type"] == "telemetry" for f in frames)
+    assert len(frames) <= _SUBSCRIBER_DEPTH
+    bus.publish({"type": "approval_resolved", "data": {"id": "a1"}})
+    q2 = bus.subscribe()
+    frames2 = []
+    while not q2.empty():
+        frames2.append(q2.get_nowait())
+    bus.unsubscribe(q2)
+    ids2 = [f["data"]["id"] for f in frames2 if f["type"] == "approval_request"]
+    assert ids2 == ["a2"]

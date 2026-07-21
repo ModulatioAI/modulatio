@@ -52,25 +52,36 @@ class EventBus:
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=_SUBSCRIBER_DEPTH)
         with self._lock:
-            # Replay the current run first, then register for live frames —
-            # both under the lock so no live frame slips in between. Hand over
-            # the NEWEST frames that fit (leaving one slot for the latest
-            # telemetry), so a long run's tail — the current producer burst and
-            # run_done — survives instead of being dropped for stale head frames.
-            # The deque is already capped at _SUBSCRIBER_DEPTH.
-            for frame in list(self._replay)[-(_SUBSCRIBER_DEPTH - 1):]:
+            # Replay the current run, then register for live frames — all
+            # under the lock so no live frame slips in between. RESERVE queue
+            # capacity for the operator-interaction state FIRST: pending asks
+            # outrank telemetry, which outranks run history — a saturated
+            # replay must crowd out stale run frames, never a live ask the
+            # reconnecting tab still has to answer. Run history hands over the
+            # NEWEST suffix that fits the remainder (the producer burst and
+            # run_done survive, stale head frames drop).
+            pending = list(self._pending_approvals.values())[-_SUBSCRIBER_DEPTH:]
+            telemetry = (
+                self._last_telemetry
+                if self._last_telemetry is not None
+                and len(pending) < _SUBSCRIBER_DEPTH
+                else None
+            )
+            reserved = len(pending) + (1 if telemetry is not None else 0)
+            run_slots = max(0, _SUBSCRIBER_DEPTH - reserved)
+            for frame in (list(self._replay)[-run_slots:] if run_slots else ()):
                 try:
                     q.put_nowait(frame)
                 except queue.Full:
                     break
-            if self._last_telemetry is not None:
+            if telemetry is not None:
                 try:
-                    q.put_nowait(self._last_telemetry)
+                    q.put_nowait(telemetry)
                 except queue.Full:
                     pass
-            for pending in self._pending_approvals.values():
+            for frame in pending:
                 try:
-                    q.put_nowait(pending)
+                    q.put_nowait(frame)
                 except queue.Full:
                     break
             self._subscribers.append(q)

@@ -2757,7 +2757,7 @@ def test_read_file_pdf_without_pdftotext_refuses(tmp_path, monkeypatch):
     """A host without poppler refuses with the actionable one-liner — never
     a crash, never mojibake."""
     (tmp_path / "novel.pdf").write_bytes(_tiny_pdf())
-    monkeypatch.setattr(tools.shutil, "which", lambda _: None)
+    monkeypatch.setattr(tools.shutil, "which", lambda _n, path=None: None)
     registry = tools.build_registry(artifacts_root=tmp_path)
     with pytest.raises(ValueError, match="poppler"):
         registry["read_file"].call(path="novel.pdf")
@@ -2776,7 +2776,7 @@ def test_pdf_helper_absolute_binary_staged_path_stripped_env(tmp_path, monkeypat
     the engine-owned staged copy (never the operator pathname — kills the
     sniff-then-reopen swap), and gets a minimal env with no engine secrets."""
     stub = _stub_pdftotext(tmp_path, 'echo "ARGV0=$0"; echo "ARG1=$1"; env')
-    monkeypatch.setattr(tools.shutil, "which", lambda _: str(stub))
+    monkeypatch.setattr(tools.shutil, "which", lambda _n, path=None: str(stub))
     monkeypatch.setenv("PROVIDER_SECRET_XYZ", "leak-me")
     src = tmp_path / "doc.pdf"
     src.write_bytes(b"%PDF-1.4 tiny")
@@ -2791,7 +2791,7 @@ def test_pdf_helper_output_flood_is_capped(tmp_path, monkeypatch):
     """WB F1 pin: a stdout flood drains to the hard ceiling, the group is
     killed, and the capped head returns truncated — never unbounded capture."""
     stub = _stub_pdftotext(tmp_path, "exec yes floodfloodfloodflood")
-    monkeypatch.setattr(tools.shutil, "which", lambda _: str(stub))
+    monkeypatch.setattr(tools.shutil, "which", lambda _n, path=None: str(stub))
     (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4 tiny")
     registry = tools.build_registry(artifacts_root=tmp_path)
     out = registry["read_file"].call(path="doc.pdf")
@@ -2805,7 +2805,7 @@ def test_pdf_helper_timeout_kills_the_group(tmp_path, monkeypatch):
     import time
 
     stub = _stub_pdftotext(tmp_path, "sleep 300 &\nsleep 300")
-    monkeypatch.setattr(tools.shutil, "which", lambda _: str(stub))
+    monkeypatch.setattr(tools.shutil, "which", lambda _n, path=None: str(stub))
     monkeypatch.setattr(tools, "_PDF_TIMEOUT_S", 0.4)
     (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4 tiny")
     registry = tools.build_registry(artifacts_root=tmp_path)
@@ -2816,9 +2816,27 @@ def test_pdf_helper_timeout_kills_the_group(tmp_path, monkeypatch):
 
 
 def test_pdf_over_input_ceiling_refuses(tmp_path, monkeypatch):
-    monkeypatch.setattr(tools.shutil, "which", lambda _: "/bin/true")
+    monkeypatch.setattr(tools.shutil, "which", lambda _n, path=None: "/bin/true")
     monkeypatch.setattr(tools, "_PDF_INPUT_MAX_BYTES", 16)
     (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4" + b"x" * 64)
     registry = tools.build_registry(artifacts_root=tmp_path)
     with pytest.raises(ValueError, match="ceiling"):
         registry["read_file"].call(path="doc.pdf")
+
+
+@pytest.mark.skipif(tools.shutil.which("pdftotext", path="/usr/bin:/bin") is None,
+                    reason="poppler-utils not installed")
+def test_pdf_helper_ignores_engine_path_and_cwd(tmp_path, monkeypatch):
+    """WB R2-F1 pin: a fake ./pdftotext riding the engine's PATH/cwd never
+    runs — the helper resolves only from its fixed system path, absolute."""
+    fake = tmp_path / "pdftotext"
+    sentinel = tmp_path / "pwned"
+    fake.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", f".:{tmp_path}")
+    (tmp_path / "doc.pdf").write_bytes(_tiny_pdf())
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    out = registry["read_file"].call(path="doc.pdf")
+    assert "the owl flies at midnight" in out  # the SYSTEM helper ran
+    assert not sentinel.exists()

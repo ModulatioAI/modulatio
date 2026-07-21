@@ -1571,12 +1571,22 @@ def _pdf_text(data: bytes, path: str) -> str:
 
     Hosts without poppler, ceilings, timeouts, failures, and text-less scans
     refuse with one actionable line — the read_file refusal class."""
-    binary = shutil.which("pdftotext")
-    if binary is None:
+    # Resolve ONLY from the helper's fixed system path — never the engine's
+    # inherited PATH (a `.`/relative entry there would let a cwd-controlled
+    # fake ride a mere PDF read) — and exec the canonical absolute result.
+    candidate = shutil.which("pdftotext", path=_PDF_HELPER_ENV["PATH"])
+    if candidate is None:
         raise ValueError(
             f"read_file: {path!r} is a PDF and this host has no pdftotext "
             f"(install poppler-utils), so its text can't be extracted"
         )
+    binary_path = Path(candidate).resolve(strict=True)
+    if not binary_path.is_file() or not os.access(binary_path, os.X_OK):
+        raise ValueError(
+            f"read_file: {path!r} is a PDF but the host pdftotext at "
+            f"{str(binary_path)!r} is not an executable file"
+        )
+    binary = str(binary_path)
     if len(data) > _PDF_INPUT_MAX_BYTES:
         raise ValueError(
             f"read_file: {path!r} is a {len(data) // 1024**2} MB PDF — over "
