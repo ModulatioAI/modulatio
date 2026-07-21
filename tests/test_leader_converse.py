@@ -542,3 +542,50 @@ def test_converse_answers_in_lane_when_the_turn_crashes(
     thread = orch._load_conversation()
     assert thread[-1]["role"] == "leader"
     assert "turn failed" in thread[-1]["content"]
+
+
+def test_mid_turn_grant_reaches_the_very_call_that_prompted(
+    project: Project, tmp_path: Path
+):
+    """The stale-split defect, end-to-end: the Leader read_files a path
+    outside every root, the operator grants Session at the modal — and the
+    SAME tool call must succeed (the registry's fence reads the gate live,
+    not a tuple frozen at turn start)."""
+    from modulatio import runners as mod_runners
+
+    outside = tmp_path.parent / f"outside-{project.code}"
+    outside.mkdir(exist_ok=True)
+    secret = outside / "notes.txt"
+    secret.write_text("the owl flies at midnight\n", encoding="utf-8")
+
+    calls: list = []
+
+    def mock_leader(*, messages, tools, tool_choice=None):
+        calls.append(list(messages))
+        if len(calls) == 1:
+            return ChatResponse(content="", tool_calls=(
+                mod_runners.ToolCall(
+                    id="c1", name="read_file", args={"path": str(secret)}),
+            ))
+        return ChatResponse(content="done reading", tool_calls=())
+
+    prompts: list = []
+
+    def grant_session(request):
+        from modulatio import leader_gate as lg
+        prompts.append(request)
+        return lg.ScopedDecision(scope="session")
+
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": mock_leader},
+        chat_runner_models={"leader": "mock-model"},
+    )
+    reply = orch.converse("read my notes", prompt_fn=grant_session)
+    assert reply == "done reading"
+    assert len(prompts) == 1, "the out-of-root read must prompt exactly once"
+    # The tool result the model saw carries the file content — the granted
+    # call succeeded first try, no refusal round-trip.
+    fed_back = str(calls[1])
+    assert "the owl flies at midnight" in fed_back
+    assert "outside the confined/granted roots" not in fed_back

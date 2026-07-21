@@ -60,6 +60,28 @@ class ScopedDecision:
     granted_via: str = "modal"
 
 
+class LiveGrantRoots:
+    """A CALL-TIME view of the gate's granted roots for one request class,
+    prepended with static roots. The tool factories iterate their
+    ``extra_roots`` on every call, so handing them THIS view (instead of a
+    tuple materialized at registry-build time) means a mid-turn operator
+    grant is honored by the very call that prompted the ask — the gate and
+    the tools' confinement fence can never go stale-split."""
+
+    def __init__(self, gate: "LeaderPermissionGate", request_class: str,
+                 static=()):
+        self._gate = gate
+        self._request_class = request_class
+        self._static = tuple(str(s) for s in static)
+
+    def __iter__(self):
+        yield from self._static
+        yield from self._gate.granted_roots(self._request_class)
+
+    def __len__(self):
+        return len(self._static) + len(self._gate.granted_roots(self._request_class))
+
+
 class LeaderPermissionGate:
     """Per-project gate. Persisted ``always`` grants live in leader_permissions;
     ``session`` grants are held here in memory. The ``workspace`` (the Leader's
@@ -84,6 +106,12 @@ class LeaderPermissionGate:
         # standing root.
         self._standing_roots = tuple(Path(s).resolve() for s in standing_roots)
         self._session: dict[str, list[dict]] = {}  # {request_class: [grant, ...]}
+        # A ONCE grant is recorded nowhere durable — but the tools' confinement
+        # fence (LiveGrantRoots) must still honor it for the single approved
+        # call. This slot holds it exactly that long: begin_tool_call() clears
+        # it before every tool call's gating, and is_granted/_grants never read
+        # it, so the NEXT ask for the same resource re-prompts (once = once).
+        self._once: dict[str, list[str]] = {}
 
     # ── lookups ──────────────────────────────────────────────────────────────
     def _grants(self, request_class: str) -> list[dict]:
@@ -155,10 +183,17 @@ class LeaderPermissionGate:
         return None
 
     def granted_roots(self, request_class: str = lp.REQUEST_CLASS_PATH) -> list[str]:
-        """The granted resources for a class (persisted + session) — the
-        ``extra_roots`` the Leader's tool registry confines to, beyond the
-        workspace."""
-        return [g["resource"] for g in self._grants(request_class)]
+        """The granted resources for a class (persisted + session + the
+        current tool call's ONCE grants) — the ``extra_roots`` the Leader's
+        tool registry confines to, beyond the workspace."""
+        return ([g["resource"] for g in self._grants(request_class)]
+                + list(self._once.get(request_class, ())))
+
+    def begin_tool_call(self) -> None:
+        """Called by the permission callback before each tool call's gating:
+        the previous call's ONCE grants expire here, so a once-scope covers
+        exactly the call it was granted for."""
+        self._once.clear()
 
     @staticmethod
     def _grant_root(request: SecurityRequest) -> str:
@@ -227,7 +262,10 @@ class LeaderPermissionGate:
             self._session.setdefault(request.request_class, []).append(
                 {"resource": root, "actions": list(actions), "scope": SCOPE_SESSION}
             )
-        # SCOPE_ONCE: allow this single call; record nothing.
+        elif decision.scope == SCOPE_ONCE:
+            # Recorded nowhere durable — but the confinement fence must honor
+            # the single approved call (begin_tool_call expires it).
+            self._once.setdefault(request.request_class, []).append(root)
         return decision
 
     def revoke_all(self) -> None:
@@ -236,6 +274,7 @@ class LeaderPermissionGate:
         rebuilds any cached registry.)"""
         lp.revoke_all(self.code)
         self._session.clear()
+        self._once.clear()
 
 
 # ── resource extractor ────────────────────────────────────────────────────
@@ -334,6 +373,9 @@ def build_permission_callback(gate: LeaderPermissionGate, *, root, prompt_fn):
     bool; the once/session/always scope is honored inside the gate."""
 
     def permission_callback(name: str, args: dict) -> bool:
+        # A new tool call starts a fresh once-slate: the previous call's ONCE
+        # grants expire before any of this call's requests are gated.
+        gate.begin_tool_call()
         # EXTRACTION parses wholly MODEL-CONTROLLED values (paths, shell
         # strings — or non-strings where strings belong): ANY failure there
         # is malformed model input and fails CLOSED as a deny (embedded NUL →
@@ -395,6 +437,7 @@ __all__ = [
     "SCOPE_ONCE",
     "SCOPE_SESSION",
     "LeaderPermissionGate",
+    "LiveGrantRoots",
     "ScopedDecision",
     "SecurityRequest",
     "build_permission_callback",

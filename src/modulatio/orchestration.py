@@ -8625,6 +8625,7 @@ class Orchestrator:
         the boundary. Operator-granted roots (via the gate) are added as
         ``extra_roots`` so a deliberately-widened folder becomes reachable.
         Mirrors ``_staging_tool_registry``'s rebind; non-path tools preserved."""
+        from modulatio import leader_gate as _lg
         workspace = self._leader_workspace()
         gate = self.leader_gate()
         folder_rw, folder_read = self._folder_roots()
@@ -8650,12 +8651,15 @@ class Orchestrator:
             # resources (no secret store lives there by contract); the
             # config dir stays file-tools-only too (shell roots double as
             # writable bwrap binds).
-            extra_roots=(
-                *gate.granted_roots(), *folder_rw,
-                vault_root, shared_root, config_dir,
-            ),
-            run_shell_extra_roots=(
-                *gate.granted_roots("exec"), *folder_rw, shared_root),
+            # LIVE views, not tuples materialized here: the factories iterate
+            # extra_roots per call, so a mid-turn operator grant (including a
+            # ONCE) is honored by the very call that prompted the ask — the
+            # gate and the fence can't go stale-split (the "granted but still
+            # refused" defect).
+            extra_roots=_lg.LiveGrantRoots(gate, "path", static=(
+                *folder_rw, vault_root, shared_root, config_dir)),
+            run_shell_extra_roots=_lg.LiveGrantRoots(gate, "exec", static=(
+                *folder_rw, shared_root)),
             extra_read_roots=folder_read,
         )
         merged = dict(self.tool_registry)

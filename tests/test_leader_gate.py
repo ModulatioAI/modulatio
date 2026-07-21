@@ -430,3 +430,34 @@ def test_scope_contract_violation_surfaces_through_the_callback(env, tmp_path):
         prompt_fn=lambda r: lg.ScopedDecision(scope=lg.SCOPE_ALWAYS))
     with pytest.raises(ValueError, match="available_scopes"):
         cb("run_shell", {"cmd": "ls", "cwd": str(outside)})
+
+
+def test_live_roots_honor_a_mid_call_session_grant(env):
+    """The stale-split defect: the tool registry's extra_roots froze at build
+    time, so the very call that prompted the ask executed against a fence
+    that had never heard of the grant. LiveGrantRoots reads the gate at
+    iteration time — the grant lands before the tool runs."""
+    tmp, ws, proj = env
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    live = lg.LiveGrantRoots(gate, "path", static=(ws,))
+    assert list(live) == [str(ws)]
+    gate.decide(_req("read", proj / "x.txt"), prompt_fn=_allow(lp.SCOPE_SESSION))
+    assert str(proj) in list(live)  # same object, no rebuild
+    assert len(live) == 2
+
+
+def test_once_grant_covers_exactly_one_tool_call(env):
+    """A ONCE grant reaches the fence for the single approved call — and
+    expires at the next call's begin_tool_call, where the same resource
+    re-prompts (once = once, never a quiet session)."""
+    tmp, ws, proj = env
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    live = lg.LiveGrantRoots(gate, "path")
+    d = gate.decide(_req("read", proj / "x.txt"), prompt_fn=_allow(lp.SCOPE_ONCE))
+    assert d.scope == lp.SCOPE_ONCE
+    assert str(proj) in list(live)  # fence honors the approved call
+    gate.begin_tool_call()  # the NEXT tool call starts
+    assert str(proj) not in list(live)
+    seen: list = []
+    gate.decide(_req("read", proj / "x.txt"), prompt_fn=_record(seen))
+    assert len(seen) == 1  # re-prompted — the once never became a session

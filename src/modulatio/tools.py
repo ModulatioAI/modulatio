@@ -1546,18 +1546,23 @@ def _resolve_file_under_root(path: str, root: Path, extra_roots=()) -> Path:
     return target
 
 
-def make_read_file(artifacts_root: Path, extra_roots=()) -> "Callable[..., str]":
+def make_read_file(
+    artifacts_root: Path, extra_roots=(), extra_read_roots=(),
+) -> "Callable[..., str]":
     """Return a ``read_file`` callable bound to ``artifacts_root`` (+ any granted
-    ``extra_roots`` reachable via absolute path). Returns the file's UTF-8 text,
-    truncated to 1 MiB. Raises ``ValueError`` for a safety violation or missing
-    file::
+    ``extra_roots`` / read-only ``extra_read_roots`` reachable via absolute
+    path). The two root sets merge PER CALL — a caller may pass a live view
+    (the Leader gate's LiveGrantRoots) and a build-time splat would freeze it.
+    Returns the file's UTF-8 text, truncated to 1 MiB. Raises ``ValueError``
+    for a safety violation or missing file::
 
         read_file(path: str) -> str
     """
     root = Path(artifacts_root)
 
     def read_file(path: str) -> str:
-        target = _resolve_file_under_root(path, root, extra_roots)
+        target = _resolve_file_under_root(
+            path, root, (*extra_roots, *extra_read_roots))
         if not target.is_file():
             raise ValueError(f"read_file: {path!r} does not exist")
         data = target.read_bytes()
@@ -2095,7 +2100,7 @@ def build_registry(
                 "``..`` traversal, and dotfiles are refused. Read a file "
                 "before you edit it."
             ),
-            call=make_read_file(artifacts_root, (*extra_roots, *extra_read_roots)),
+            call=make_read_file(artifacts_root, extra_roots, extra_read_roots),
             params_schema={
                 "type": "object",
                 "properties": {
