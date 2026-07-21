@@ -256,10 +256,6 @@ footer#hints .key { font-family: var(--font-mono); font-weight: 600; color: var(
 
 /* ── the Console ─────────────────────────────────────────────────── */
 
-/* The console is the one page with no right-hand detail pane, so centre
-   its capped width instead of leaving an empty gutter on the right. */
-.console { max-width: 1200px; margin-inline: auto; }
-
 #lamps { font-size: 13px; }
 .lamp.attention .glyph { font-weight: 800; color: var(--ink); }
 
@@ -268,6 +264,9 @@ footer#hints .key { font-family: var(--font-mono); font-weight: 600; color: var(
   overflow-y: auto;
   padding: 16px 18px;
   font-size: 13.5px;
+  /* The feeds shed the card frame — lines run to the true edge and the
+     Leader's own highlight (plus the panel bg on Vellum) marks the region. */
+  border: none;
 }
 
 .stream-line { padding: 2px 0; }
@@ -325,6 +324,15 @@ footer#hints .key { font-family: var(--font-mono); font-weight: 600; color: var(
 
 .rail { font-size: 13px; }
 .rail div { padding: 2px 0; }
+/* The floor's live filter — checkbox mutes a seat, its name solos it. */
+.rail .floor-mute {
+  vertical-align: middle;
+  margin-right: 6px;
+  accent-color: var(--ink);
+}
+.rail .floor-name { cursor: pointer; }
+.rail .floor-name.solo { font-weight: 800; text-decoration: underline; }
+.rail .floor-showall { cursor: pointer; }
 
 .statusline { font-size: 13px; padding: 0 4px; }
 

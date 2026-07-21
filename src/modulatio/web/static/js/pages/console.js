@@ -97,7 +97,9 @@ export function mountConsole(page, ctx) {
     lane: "leader",
     mode: "default", // the converse Leader's autonomy mode (/yolo //goal …)
     running: false,
-    producers: new Map(), // agent_id → {name, glyph, verb}
+    producers: new Map(), // agent_id → {name, glyph, verb, task}
+    muted: new Set(), // per-run seat filter (Team TV) — dies with the run
+    solo: null, // agent_id shown alone in the Team TV; overrides muted
     tokens: 0,
     elapsed: 0,
     tickets: 0,
@@ -274,8 +276,17 @@ export function mountConsole(page, ctx) {
       el("span", { class: "glyph" }, glyph), ` ${name} ${verb}${task}`);
     if (isLeaderRole(ev.role)) appendLine(tvLeader, line);
     else if (isTeamRole(ev.role)) {
+      // Seat-tagged so the floor filter can sort the live stream; Leader and
+      // run-level lines stay untagged — they always show.
+      line.dataset.agent = ev.agent_id;
+      line.hidden = seatHidden(ev.agent_id);
       appendLine(tvTeam, line);
-      state.producers.set(ev.agent_id, { name, glyph, verb });
+      state.producers.set(ev.agent_id, {
+        name, glyph, verb,
+        // An event without a task id (rare between tasks) keeps the seat's
+        // last-known task rather than blinking the floor entry empty.
+        task: ev.task_id ?? state.producers.get(ev.agent_id)?.task,
+      });
       renderRail();
     } else {
       // run-level (orchestrator/comptroller): both lanes deserve the beat
@@ -287,9 +298,30 @@ export function mountConsole(page, ctx) {
     if (ev.phase === "ticket_opened") { state.tickets += 1; renderLamps(); }
   }
 
+  // ── the floor's seat filter — a live lens, per-run only ──────────
+
+  function seatHidden(id) {
+    return state.solo ? id !== state.solo : state.muted.has(id);
+  }
+
+  // Re-sort the whole streamed backlog, not just future lines — the filter
+  // is a real-time viewing tool, so a toggle lands instantly.
+  function applySeatFilter() {
+    for (const node of tvTeam.querySelectorAll("[data-agent]")) {
+      node.hidden = seatHidden(node.dataset.agent);
+    }
+  }
+
   function setRunning(running) {
     state.running = running;
-    if (!running) state.producers.clear();
+    if (!running) {
+      state.producers.clear();
+      // The seat filter lives and dies with the run — a fresh kickoff
+      // starts with everyone on screen.
+      state.muted.clear();
+      state.solo = null;
+      applySeatFilter();
+    }
     btnStop.toggleAttribute("disabled", !running);
     statusLine.textContent = running ? "◌ working…" : "standby";
     statusLine.classList.toggle("idle-region", !running);
@@ -318,8 +350,39 @@ export function mountConsole(page, ctx) {
     if (state.producers.size === 0) {
       rows.push(el("div", { class: "soft" }, "(idle)"));
     } else {
-      for (const p of state.producers.values()) {
-        rows.push(el("div", {}, `◆◆ ${p.name}  ${p.glyph} ${p.verb}`));
+      for (const [id, p] of state.producers) {
+        const mute = el("input", {
+          type: "checkbox", class: "floor-mute",
+          title: "Mute this seat in the Team TV",
+          onchange: () => {
+            if (mute.checked) state.muted.add(id); else state.muted.delete(id);
+            applySeatFilter();
+            renderRail();
+          },
+        });
+        mute.checked = state.muted.has(id);
+        const name = el("span", {
+          class: state.solo === id ? "floor-name solo" : "floor-name",
+          title: "Solo this seat in the Team TV (click again to clear)",
+          onclick: () => {
+            state.solo = state.solo === id ? null : id;
+            applySeatFilter();
+            renderRail();
+          },
+        }, p.name);
+        rows.push(el("div", { class: seatHidden(id) ? "soft" : "" },
+          mute, name, `${p.task ? ` · ${p.task}` : ""}  ${p.glyph} ${p.verb}`));
+      }
+      if (state.muted.size || state.solo) {
+        rows.push(el("div", {
+          class: "soft floor-showall",
+          onclick: () => {
+            state.muted.clear();
+            state.solo = null;
+            applySeatFilter();
+            renderRail();
+          },
+        }, "⟲ show all"));
       }
     }
     rail.replaceChildren(...rows);
