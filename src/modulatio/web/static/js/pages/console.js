@@ -276,9 +276,52 @@ export function mountConsole(page, ctx) {
     appendLine(tvLeader, el("div", { class: "stream-line op mono" }, `▸ ${text}`));
   }
 
+  // ── the Leader's markdown, rendered the safe way ─────────────────
+  // The Leader writes markdown (the TUI renders it; the web showed the raw
+  // source). Parse ONLY the shapes he actually emits — fences, headings,
+  // list lines, `code`, **bold**, *em* — and build real nodes with el():
+  // never innerHTML for engine content (the dom.js contract). Anything
+  // unrecognized degrades to the literal text.
+
+  function mdInline(s) {
+    const out = [];
+    const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)/g;
+    let last = 0;
+    for (let m = re.exec(s); m; m = re.exec(s)) {
+      if (m.index > last) out.push(s.slice(last, m.index));
+      if (m[1]) out.push(el("code", {}, m[1].slice(1, -1)));
+      else if (m[2]) out.push(el("strong", {}, m[2].slice(2, -2)));
+      else out.push(el("em", {}, m[3].slice(1, -1)));
+      last = re.lastIndex;
+    }
+    if (last < s.length) out.push(s.slice(last));
+    return out;
+  }
+
+  function mdInto(block, text) {
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i += 1) {
+      const ln = lines[i];
+      if (ln.startsWith("```")) {
+        const buf = [];
+        i += 1;
+        while (i < lines.length && !lines[i].startsWith("```")) buf.push(lines[i++]);
+        block.append(el("pre", { class: "md-code mono" }, buf.join("\n")));
+        continue;
+      }
+      const h = ln.match(/^#{1,4}\s+(.*)$/);
+      const li = /^\s*(?:[-*•]|\d+[.)])\s/.test(ln);
+      if (!ln.trim()) block.append(el("div", { class: "md-gap" }));
+      else if (h) block.append(el("div", { class: "md-h" }, ...mdInline(h[1])));
+      else block.append(el("div", { class: li ? "md-li" : "" }, ...mdInline(ln)));
+    }
+  }
+
   function leaderSpeech(text) {
-    state.lastLeader = text;
-    appendLine(tvLeader, el("div", { class: "leader-speech" }, text));
+    state.lastLeader = text; // Ctrl+C copies the RAW source, unchanged
+    const block = el("div", { class: "leader-speech" });
+    mdInto(block, text);
+    appendLine(tvLeader, block);
   }
 
   function eventLine(ev) {

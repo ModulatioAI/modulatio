@@ -302,6 +302,24 @@ footer#hints .key { font-family: var(--font-mono); font-weight: 600; color: var(
   background: var(--ink);
   color: var(--field);
 }
+/* The Leader's rendered markdown — accents ride currentColor so they hold
+   on Atelier's ink block and Vellum's field block alike. */
+.leader-speech .md-gap { height: 0.6em; }
+.leader-speech .md-h { font-weight: 800; margin: 4px 0 2px; }
+.leader-speech .md-li { padding-left: 1.4em; text-indent: -1.4em; }
+.leader-speech code {
+  font-family: var(--font-mono);
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.leader-speech .md-code {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  overflow-x: auto;
+}
 
 /* Three even wings: telemetry rail · centred feed · goal board + QC desk. */
 .teamwrap {
