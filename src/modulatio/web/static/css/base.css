@@ -309,6 +309,9 @@ footer#hints .key { font-family: var(--font-mono); font-weight: 600; color: var(
   gap: 22px;
   align-items: stretch;
 }
+/* The Team TV centres its lines; the Leader lane stays left-justified,
+   stretching the full width and wrapping at the far edge. */
+.teamwrap .tv { text-align: center; }
 .teamwrap[hidden], .tv[hidden] { display: none; }
 
 /* Team view drops the composer, so the TV fills the page to the bottom
