@@ -106,6 +106,10 @@ export function mountConsole(page, ctx) {
     liveRun: null,
     telemetry: null, // last frame — the gauges land, they don't reset
     lastLeader: "",  // the Leader's latest reply — Ctrl+C's no-selection copy
+    // The right wing's tallies — like the gauges, they land and stay until
+    // the next kickoff (or the replay repaint) resets them.
+    board: { goals: new Map(), tasks: new Map() }, // id → {verified} / {status}
+    qc: { verdicts: 0, fixes: 0, fails: 0, patched: [] },
   };
 
   // — lamps —
@@ -123,7 +127,12 @@ export function mountConsole(page, ctx) {
   const tvLeader = el("div", { class: "card tv", role: "log", "aria-label": "Leader lane" });
   const tvTeam = el("div", { class: "card tv", role: "log", "aria-label": "Team lane" });
   const rail = el("aside", { class: "card rail mono" });
-  const teamWrap = el("div", { class: "teamwrap", hidden: "" }, rail, tvTeam);
+  // The right wing — goal board over QC desk — balances the telemetry rail
+  // so the two frame the centred team feed.
+  const boardBox = el("aside", { class: "card rail mono", "aria-label": "Goal board" });
+  const qcBox = el("aside", { class: "card rail mono", "aria-label": "QC desk" });
+  const infoCol = el("div", { class: "infocol" }, boardBox, qcBox);
+  const teamWrap = el("div", { class: "teamwrap", hidden: "" }, rail, tvTeam, infoCol);
 
   const statusLine = el("div", { class: "soft mono statusline" }, "standby");
 
@@ -223,7 +232,11 @@ export function mountConsole(page, ctx) {
     tvTeam.replaceChildren();
     state.producers.clear();
     state.telemetry = null;
+    state.board.goals.clear();
+    state.board.tasks.clear();
+    state.qc = { verdicts: 0, fixes: 0, fails: 0, patched: [] };
     renderRail();
+    renderInfo();
   }
 
   // Operator "clear screen" — wipe both activity logs AND every repaint
@@ -269,6 +282,7 @@ export function mountConsole(page, ctx) {
   }
 
   function eventLine(ev) {
+    trackRun(ev);
     const [glyph, verb] = glyphVerb(ev);
     const name = humanize(ev.agent_id || ev.role);
     const task = ev.task_id ? `  ·  ${ev.task_id}` : "";
@@ -329,22 +343,70 @@ export function mountConsole(page, ctx) {
     renderRail();
   }
 
-  function renderRail() {
+  // Every streamed event feeds the right wing's ledgers — goals and tasks
+  // told apart by their id family (…-G-… / …-T-…). A fresh kickoff resets
+  // the count; the replay repaint rebuilds it, so reconnects can't double.
+  function trackRun(ev) {
+    if (ev.phase === "kickoff_started") {
+      state.board.goals.clear();
+      state.board.tasks.clear();
+      state.qc = { verdicts: 0, fixes: 0, fails: 0, patched: [] };
+    }
+    const id = ev.task_id || "";
+    if (id.includes("-G-")) {
+      const g = state.board.goals.get(id) ?? { verified: false };
+      if (ev.phase === "leader_verify_ended") g.verified = true;
+      state.board.goals.set(id, g);
+    } else if (id.includes("-T-")) {
+      const t = state.board.tasks.get(id) ?? { status: "working" };
+      if (ev.phase === "task_completed" || ev.phase === "task_settled") t.status = "done";
+      state.board.tasks.set(id, t);
+    }
+    if (ev.phase === "qc_verdict") state.qc.verdicts += 1;
+    else if (ev.phase === "qc_authored_fix") {
+      state.qc.fixes += 1;
+      if (id) state.qc.patched = [id, ...state.qc.patched.filter((x) => x !== id)].slice(0, 4);
+    } else if (ev.phase === "qc_fix_failed") state.qc.fails += 1;
+    renderInfo();
+  }
+
+  function renderInfo() {
     const t = state.telemetry;
     const seg = (pct) => "▰".repeat(Math.round(pct / 10)).padEnd(10, "▱");
+    const goals = [...state.board.goals.values()];
+    const tasks = [...state.board.tasks.values()];
+    const done = tasks.filter((x) => x.status === "done").length;
+    boardBox.replaceChildren(
+      el("h2", {}, "Goal board"),
+      t ? el("div", {}, `tasks ${seg(t.pct)} ${t.pct}%`)
+        : el("div", { class: "soft" }, "tasks ▱▱▱▱▱▱▱▱▱▱ —"),
+      el("div", {}, `goals ✓ ${goals.filter((g) => g.verified).length} verified · ${goals.length} seen`),
+      el("div", {}, `tasks ✓ ${done} done · ▸ ${tasks.length - done} working · ${tasks.length} seen`),
+    );
+    const q = state.qc;
+    qcBox.replaceChildren(
+      el("h2", {}, "QC desk"),
+      el("div", {}, `✓ ${q.verdicts} verdicts`),
+      el("div", {}, `✚ ${q.fixes} fixes authored`),
+      el("div", {}, `✗ ${q.fails} fix failures · ${t ? t.qc_rejected : 0} rejected`),
+      q.patched.length
+        ? el("div", { class: "soft" },
+          `patched: ${q.patched.map((x) => (x.match(/[GT]-\d+$/) || [x])[0]).join(" · ")}`)
+        : "",
+    );
+  }
+
+  function renderRail() {
+    const t = state.telemetry;
     const rows = [
       el("h2", {}, "Run telemetry"),
       el("div", {}, `⏱ ${fmtElapsed(state.elapsed)}`),
     ];
     if (t) {
       rows.push(
-        el("div", {}, `tasks ${seg(t.pct)} ${t.pct}%`),
-        el("div", {}, `qc    ✗ ${t.qc_rejected} rejected`),
         el("div", {}, `tok   ↑ ${fmtTokens(t.tokens_in || 0)} in · ↓ ${fmtTokens(t.tokens_out || 0)} out`),
         el("div", {}, `ctx   ${fmtTokens(t.tokens)} tok · ${t.compressions} compress`),
       );
-    } else {
-      rows.push(el("div", { class: "soft" }, "tasks ▱▱▱▱▱▱▱▱▱▱ —"));
     }
     rows.push(el("div", { class: "soft", style: "margin-top:8px" }, "── on the floor ──"));
     if (state.producers.size === 0) {
@@ -453,6 +515,7 @@ export function mountConsole(page, ctx) {
       state.elapsed = frame.data.elapsed_s;
       renderLamps();
       renderRail();
+      renderInfo(); // the board's pct bar and the desk's rejected count live here
     } else if (frame.type === "run_started") {
       state.liveRun = frame.data.run_id;
       setRunning(true);
@@ -575,6 +638,7 @@ export function mountConsole(page, ctx) {
     } catch { /* pill stays default */ }
     renderLamps();
     renderRail();
+    renderInfo();
     flip("leader");
   })();
 
