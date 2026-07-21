@@ -2725,3 +2725,39 @@ def test_read_file_refuses_binary_reads_accented_text(tmp_path):
     with pytest.raises(ValueError, match="binary"):
         registry["read_file"].call(path="b.pdf")
     assert "héllo" in registry["read_file"].call(path="t.txt")
+
+
+_TINY_PDF_STREAM = b"BT /F1 18 Tf 20 100 Td (the owl flies at midnight) Tj ET"
+
+
+def _tiny_pdf() -> bytes:
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n"
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n"
+        b"4 0 obj << /Length " + str(len(_TINY_PDF_STREAM)).encode()
+        + b" >> stream\n" + _TINY_PDF_STREAM + b"\nendstream endobj\n"
+        b"5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n"
+        b"trailer << /Root 1 0 R >>\n"
+    )
+
+
+@pytest.mark.skipif(tools.shutil.which("pdftotext") is None,
+                    reason="poppler-utils not installed")
+def test_read_file_extracts_pdf_text(tmp_path):
+    """Reader parity: reading a PDF returns its text layer, not a refusal."""
+    (tmp_path / "novel.pdf").write_bytes(_tiny_pdf())
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    assert "the owl flies at midnight" in registry["read_file"].call(path="novel.pdf")
+
+
+def test_read_file_pdf_without_pdftotext_refuses(tmp_path, monkeypatch):
+    """A host without poppler refuses with the actionable one-liner — never
+    a crash, never mojibake."""
+    (tmp_path / "novel.pdf").write_bytes(_tiny_pdf())
+    monkeypatch.setattr(tools.shutil, "which", lambda _: None)
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError, match="poppler"):
+        registry["read_file"].call(path="novel.pdf")

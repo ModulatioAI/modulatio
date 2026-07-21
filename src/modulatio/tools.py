@@ -46,6 +46,7 @@ import ipaddress
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -1546,6 +1547,36 @@ def _resolve_file_under_root(path: str, root: Path, extra_roots=()) -> Path:
     return target
 
 
+def _pdf_text(target: Path, path: str) -> str:
+    """A PDF read returns its TEXT LAYER (the reader-parity contract: reading
+    a PDF should just work), extracted with the host's ``pdftotext`` (poppler)
+    — a system binary run read-only on an already-confinement-cleared file, no
+    Python dependency. Hosts without it, timeouts, and text-less scans refuse
+    with one actionable line, same class as the binary refusal."""
+    if shutil.which("pdftotext") is None:
+        raise ValueError(
+            f"read_file: {path!r} is a PDF and this host has no pdftotext "
+            f"(install poppler-utils), so its text can't be extracted"
+        )
+    try:
+        out = subprocess.run(
+            ["pdftotext", str(target), "-"], capture_output=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"read_file: pdftotext timed out on {path!r}") from None
+    if out.returncode != 0:
+        err = out.stderr.decode("utf-8", "replace").strip()[:200]
+        raise ValueError(f"read_file: pdftotext failed on {path!r}: {err}")
+    text = out.stdout[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
+    if not text.strip():
+        raise ValueError(
+            f"read_file: {path!r} has no extractable text layer (a scan?)"
+        )
+    if len(out.stdout) > _READ_FILE_MAX_BYTES:
+        text += f"\n[...truncated at {_READ_FILE_MAX_BYTES} bytes]"
+    return text
+
+
 def make_read_file(
     artifacts_root: Path, extra_roots=(), extra_read_roots=(),
 ) -> "Callable[..., str]":
@@ -1566,8 +1597,10 @@ def make_read_file(
         if not target.is_file():
             raise ValueError(f"read_file: {path!r} does not exist")
         data = target.read_bytes()
+        if data[:5] == b"%PDF-":
+            return _pdf_text(target, path)
         text = data[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
-        # A binary file (PDF, image, archive) decode-replaces into a sea of
+        # A binary file (image, archive) decode-replaces into a sea of
         # U+FFFD — a megabyte of it blows the model's context window. Refuse
         # with one honest line instead; the head sample keeps huge text files
         # (few or no replacements) flowing through the normal truncation.
