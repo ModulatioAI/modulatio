@@ -589,3 +589,39 @@ def test_mid_turn_grant_reaches_the_very_call_that_prompted(
     fed_back = str(calls[1])
     assert "the owl flies at midnight" in fed_back
     assert "outside the confined/granted roots" not in fed_back
+
+
+def test_no_block_belt_survives_broken_persist_and_activity(
+    project: Project, monkeypatch
+):
+    """WB F2 pin: the belt's own side effects (failure-turn persist, activity
+    emit) are best-effort — a disk fault in either must not resurrect the 500
+    the belt exists to prevent."""
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": lambda **k: ChatResponse(content="ok", tool_calls=())},
+        chat_runner_models={"leader": "mock-model"},
+    )
+
+    def _boom(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _boom)
+    real_append = orch._append_conversation
+
+    def flaky_append(role, content, **kw):
+        if "turn failed" in content:
+            raise OSError("disk full")
+        return real_append(role, content, **kw)
+
+    real_emit = orch._emit_activity
+
+    def flaky_emit(**kw):
+        if kw.get("phase") == "leader_answered":
+            raise OSError("activity sink down")
+        return real_emit(**kw)
+
+    monkeypatch.setattr(orch, "_append_conversation", flaky_append)
+    monkeypatch.setattr(orch, "_emit_activity", flaky_emit)
+    reply = orch.converse("read something")
+    assert "turn failed before I could reply: boom" in reply

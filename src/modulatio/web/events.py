@@ -42,6 +42,12 @@ class EventBus:
         self._subscribers: list[queue.Queue] = []
         self._replay: deque[dict] = deque(maxlen=_REPLAY_DEPTH)
         self._last_telemetry: dict | None = None
+        # Pending approval asks are OPERATOR-INTERACTION state, not run
+        # history: they live outside the replay deque so a run_started reset
+        # (or the operator's clear-screen) can never erase a live ask a
+        # reconnecting tab still needs to answer. Keyed by request id;
+        # resolution removes them.
+        self._pending_approvals: dict[str, dict] = {}
 
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=_SUBSCRIBER_DEPTH)
@@ -62,6 +68,11 @@ class EventBus:
                     q.put_nowait(self._last_telemetry)
                 except queue.Full:
                     pass
+            for pending in self._pending_approvals.values():
+                try:
+                    q.put_nowait(pending)
+                except queue.Full:
+                    break
             self._subscribers.append(q)
         return q
 
@@ -87,19 +98,18 @@ class EventBus:
                 self._replay.append(frame)
             elif ftype == "telemetry":
                 self._last_telemetry = frame
-            elif ftype == "approval_resolved":
-                # A modal is a one-shot interaction, not view state: once an
-                # ask resolves (grant/deny/timeout), drop it from the replay so
-                # a reconnect never re-pops a dead dialog. A still-PENDING ask
-                # keeps replaying — a late-opening tab must still see it. The
-                # resolved frame itself is live-only (nothing to repaint).
+            elif ftype == "approval_request":
+                # A modal is a one-shot operator interaction, not run history:
+                # a PENDING ask replays to any (re)connecting tab from its own
+                # store, and survives run_started / clear-screen.
                 rid = frame.get("data", {}).get("id")
-                self._replay = deque(
-                    (f for f in self._replay
-                     if not (f.get("type") == "approval_request"
-                             and f.get("data", {}).get("id") == rid)),
-                    maxlen=_REPLAY_DEPTH,
-                )
+                if rid is not None:
+                    self._pending_approvals[rid] = frame
+            elif ftype == "approval_resolved":
+                # Grant/deny/timeout: the ask is dead — a reconnect never
+                # re-pops it. The resolved frame itself is live-only (open
+                # tabs use it to close a stale dialog; nothing to repaint).
+                self._pending_approvals.pop(frame.get("data", {}).get("id"), None)
             else:
                 self._replay.append(frame)
             targets = list(self._subscribers)

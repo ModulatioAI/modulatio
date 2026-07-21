@@ -6799,13 +6799,22 @@ class Orchestrator:
                 # gated permission ask (the no-block invariant): a model/tool
                 # failure becomes an honest in-lane reply, not an exception the
                 # surface turns into a 500 (web) or a dead worker (TUI). Loud
-                # trace so the failure never degrades silently.
+                # trace so the failure never degrades silently. Persistence and
+                # activity emission are each independent best-effort — a disk
+                # fault in either must not resurrect the very crash this belt
+                # exists to contain (nor suppress the other side effect).
                 _logger.exception("converse turn failed; answering in-lane")
                 failure = f"(the turn failed before I could reply: {exc})"
-                self._append_conversation("leader", failure)
-                self._emit_activity(
-                    role="leader", phase="leader_answered", agent_id="leader",
-                )
+                try:
+                    self._append_conversation("leader", failure)
+                except Exception:  # noqa: BLE001 — belt must hold
+                    _logger.exception("failure-turn persist failed")
+                try:
+                    self._emit_activity(
+                        role="leader", phase="leader_answered", agent_id="leader",
+                    )
+                except Exception:  # noqa: BLE001 — belt must hold
+                    _logger.exception("failure-turn activity emit failed")
                 return failure
 
             # An operator ESC returns the interrupt sentinel BY IDENTITY — record

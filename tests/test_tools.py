@@ -2761,3 +2761,64 @@ def test_read_file_pdf_without_pdftotext_refuses(tmp_path, monkeypatch):
     registry = tools.build_registry(artifacts_root=tmp_path)
     with pytest.raises(ValueError, match="poppler"):
         registry["read_file"].call(path="novel.pdf")
+
+
+def _stub_pdftotext(tmp_path, script: str):
+    stub = tmp_path / "stub-bin" / "pdftotext"
+    stub.parent.mkdir(exist_ok=True)
+    stub.write_text("#!/bin/sh\n" + script + "\n", encoding="utf-8")
+    stub.chmod(0o755)
+    return stub
+
+
+def test_pdf_helper_absolute_binary_staged_path_stripped_env(tmp_path, monkeypatch):
+    """WB F1 pins: the helper execs the RESOLVED absolute binary, reads only
+    the engine-owned staged copy (never the operator pathname — kills the
+    sniff-then-reopen swap), and gets a minimal env with no engine secrets."""
+    stub = _stub_pdftotext(tmp_path, 'echo "ARGV0=$0"; echo "ARG1=$1"; env')
+    monkeypatch.setattr(tools.shutil, "which", lambda _: str(stub))
+    monkeypatch.setenv("PROVIDER_SECRET_XYZ", "leak-me")
+    src = tmp_path / "doc.pdf"
+    src.write_bytes(b"%PDF-1.4 tiny")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    out = registry["read_file"].call(path="doc.pdf")
+    assert f"ARGV0={stub}" in out
+    assert str(src) not in out and "modulatio-pdf-" in out
+    assert "PROVIDER_SECRET_XYZ" not in out
+
+
+def test_pdf_helper_output_flood_is_capped(tmp_path, monkeypatch):
+    """WB F1 pin: a stdout flood drains to the hard ceiling, the group is
+    killed, and the capped head returns truncated — never unbounded capture."""
+    stub = _stub_pdftotext(tmp_path, "exec yes floodfloodfloodflood")
+    monkeypatch.setattr(tools.shutil, "which", lambda _: str(stub))
+    (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4 tiny")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    out = registry["read_file"].call(path="doc.pdf")
+    assert out.endswith(f"[...truncated at {tools._READ_FILE_MAX_BYTES} bytes]")
+    assert len(out) <= tools._READ_FILE_MAX_BYTES + 100
+
+
+def test_pdf_helper_timeout_kills_the_group(tmp_path, monkeypatch):
+    """WB F1 pin: wall-clock timeout SIGKILLs the whole process group
+    (grandchildren included) and refuses promptly."""
+    import time
+
+    stub = _stub_pdftotext(tmp_path, "sleep 300 &\nsleep 300")
+    monkeypatch.setattr(tools.shutil, "which", lambda _: str(stub))
+    monkeypatch.setattr(tools, "_PDF_TIMEOUT_S", 0.4)
+    (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4 tiny")
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    t0 = time.monotonic()
+    with pytest.raises(ValueError, match="timed out"):
+        registry["read_file"].call(path="doc.pdf")
+    assert time.monotonic() - t0 < 10
+
+
+def test_pdf_over_input_ceiling_refuses(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools.shutil, "which", lambda _: "/bin/true")
+    monkeypatch.setattr(tools, "_PDF_INPUT_MAX_BYTES", 16)
+    (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4" + b"x" * 64)
+    registry = tools.build_registry(artifacts_root=tmp_path)
+    with pytest.raises(ValueError, match="ceiling"):
+        registry["read_file"].call(path="doc.pdf")

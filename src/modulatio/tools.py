@@ -1547,32 +1547,110 @@ def _resolve_file_under_root(path: str, root: Path, extra_roots=()) -> Path:
     return target
 
 
-def _pdf_text(target: Path, path: str) -> str:
-    """A PDF read returns its TEXT LAYER (the reader-parity contract: reading
-    a PDF should just work), extracted with the host's ``pdftotext`` (poppler)
-    — a system binary run read-only on an already-confinement-cleared file, no
-    Python dependency. Hosts without it, timeouts, and text-less scans refuse
-    with one actionable line, same class as the binary refusal."""
-    if shutil.which("pdftotext") is None:
+_PDF_TIMEOUT_S = 60
+_PDF_INPUT_MAX_BYTES = 50 * 1024 * 1024  # extraction ceiling (a copy is staged)
+_PDF_STDERR_CAP = 65536
+#: The extraction helper's ENTIRE environment — never the engine's own env
+#: (provider credentials live there).
+_PDF_HELPER_ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+
+
+def _pdf_text(data: bytes, path: str) -> str:
+    """A PDF read returns its TEXT LAYER (the reader-parity contract),
+    extracted by the host's ``pdftotext`` (poppler) run as a CONTAINED helper:
+
+    - the binary resolves ONCE to an absolute path — never the mutable name;
+    - the parser reads a 0600 engine-owned staged copy of the bytes the
+      confinement check already cleared — the operator-controlled pathname is
+      never reopened, so a symlink/file swap after the sniff cannot retarget
+      the read;
+    - minimal allowlisted env, stdin closed, own process group, the parent-
+      applied run_shell rlimits;
+    - stdout/stderr drain incrementally under hard ceilings; timeout or
+      overflow kills the whole group (never an unbounded capture).
+
+    Hosts without poppler, ceilings, timeouts, failures, and text-less scans
+    refuse with one actionable line — the read_file refusal class."""
+    binary = shutil.which("pdftotext")
+    if binary is None:
         raise ValueError(
             f"read_file: {path!r} is a PDF and this host has no pdftotext "
             f"(install poppler-utils), so its text can't be extracted"
         )
-    try:
-        out = subprocess.run(
-            ["pdftotext", str(target), "-"], capture_output=True, timeout=60,
+    if len(data) > _PDF_INPUT_MAX_BYTES:
+        raise ValueError(
+            f"read_file: {path!r} is a {len(data) // 1024**2} MB PDF — over "
+            f"the {_PDF_INPUT_MAX_BYTES // 1024**2} MB extraction ceiling"
         )
-    except subprocess.TimeoutExpired:
-        raise ValueError(f"read_file: pdftotext timed out on {path!r}") from None
-    if out.returncode != 0:
-        err = out.stderr.decode("utf-8", "replace").strip()[:200]
-        raise ValueError(f"read_file: pdftotext failed on {path!r}: {err}")
-    text = out.stdout[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
+    import signal as _signal
+    import tempfile
+    import threading
+
+    with tempfile.TemporaryDirectory(prefix="modulatio-pdf-") as td:
+        staged = Path(td, "staged.pdf")
+        staged.touch(mode=0o600)
+        staged.write_bytes(data)
+        proc = subprocess.Popen(
+            [binary, str(staged), "-"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=_PDF_HELPER_ENV,
+            start_new_session=True,
+        )
+        _apply_rlimits_to_pid(proc.pid)
+        timed_out = threading.Event()
+
+        def _kill_group() -> None:
+            timed_out.set()
+            try:
+                os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+
+        def _drain(stream, limit: int) -> "tuple[bytes, bool]":
+            buf = bytearray()
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    return bytes(buf), False
+                buf += chunk
+                if len(buf) > limit:
+                    return bytes(buf), True
+
+        timer = threading.Timer(_PDF_TIMEOUT_S, _kill_group)
+        timer.start()
+        try:
+            out, out_over = _drain(proc.stdout, _READ_FILE_MAX_BYTES)
+            if out_over:
+                _kill_group()  # stop the producer; keep the capped head
+            err, _ = _drain(proc.stderr, _PDF_STDERR_CAP)
+            try:
+                proc.wait(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                _kill_group()
+                try:
+                    proc.wait(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            timer.cancel()
+            for pipe in (proc.stdout, proc.stderr):
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+    if timed_out.is_set() and not out_over:
+        raise ValueError(f"read_file: pdftotext timed out on {path!r}")
+    if proc.returncode != 0 and not out_over:
+        e = err.decode("utf-8", "replace").strip()[:200]
+        raise ValueError(f"read_file: pdftotext failed on {path!r}: {e}")
+    text = out[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
     if not text.strip():
         raise ValueError(
             f"read_file: {path!r} has no extractable text layer (a scan?)"
         )
-    if len(out.stdout) > _READ_FILE_MAX_BYTES:
+    if out_over:
         text += f"\n[...truncated at {_READ_FILE_MAX_BYTES} bytes]"
     return text
 
@@ -1598,7 +1676,7 @@ def make_read_file(
             raise ValueError(f"read_file: {path!r} does not exist")
         data = target.read_bytes()
         if data[:5] == b"%PDF-":
-            return _pdf_text(target, path)
+            return _pdf_text(data, path)
         text = data[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
         # A binary file (image, archive) decode-replaces into a sea of
         # U+FFFD — a megabyte of it blows the model's context window. Refuse

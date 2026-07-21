@@ -226,3 +226,26 @@ def test_resolved_approval_never_replays_a_pending_one_does():
     q2 = bus.subscribe()
     assert q2.get(timeout=2)["type"] == "event"
     assert q2.empty()
+
+
+def test_pending_approval_survives_run_started_and_clear_screen():
+    """WB F3 pin: a pending ask is operator-interaction state, not run
+    history — run_started resets and the operator's clear-screen must not
+    erase a live ask a reconnecting tab still needs to answer."""
+    from modulatio.web.events import EventBus
+
+    bus = EventBus()
+    bus.publish({"type": "approval_request", "data": {"id": "a1"}})
+    bus.publish({"type": "run_started", "data": {"run_id": "r1"}})
+    q = bus.subscribe()
+    frames = [q.get(timeout=2), q.get(timeout=2)]
+    assert {"type": "approval_request", "data": {"id": "a1"}} in frames
+    bus.unsubscribe(q)
+    bus.clear_replay()
+    q2 = bus.subscribe()
+    assert q2.get(timeout=2)["type"] == "approval_request"
+    bus.unsubscribe(q2)
+    bus.publish({"type": "approval_resolved", "data": {"id": "a1"}})
+    q3 = bus.subscribe()
+    assert q3.empty()
+    bus.unsubscribe(q3)
