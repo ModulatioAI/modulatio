@@ -326,7 +326,9 @@ def test_converse_with_image_none_content_does_not_crash(
 # ── #8: converse leaves a paired log when the turn raises ─────────────────────
 def test_converse_pairs_log_on_failure(project: Project, monkeypatch):
     """If the model call raises, converse must still append a leader turn (so
-    the durable log never ends on an unanswered operator turn) and re-raise."""
+    the durable log never ends on an unanswered operator turn) and answer
+    IN-LANE — the no-block invariant: the failure returns as the reply,
+    never an exception a surface turns into a 500 or a dead worker."""
     from modulatio.runners import ChatResponse
 
     orch = Orchestrator(
@@ -340,8 +342,8 @@ def test_converse_pairs_log_on_failure(project: Project, monkeypatch):
 
     monkeypatch.setattr(orch, "_run_chat_loop", boom)
 
-    with pytest.raises(RuntimeError):
-        orch.converse("please do the thing")
+    reply = orch.converse("please do the thing")
+    assert "failed" in reply.lower()
 
     thread = orch._load_conversation()
     # operator turn paired with a synthetic leader-error turn.
