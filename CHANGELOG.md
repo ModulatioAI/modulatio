@@ -6,6 +6,58 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0b1] — 2026-07-20
+
+The first release of the **1.0 line** — a public beta. The theme: the Leader
+earns real hands and an honest console. The solo coding harness hardens
+through eight security-review rounds, the conversational lane becomes
+unblockable by anything except a permission ask, operator grants land the
+moment they're given, and the WebOS console grows into a live mission
+board.
+
+### Added
+
+- **Leader coding harness.** The Leader fixes `disappointed` goals in
+  place (edit over regenerate); code goals are gated by an engine-run
+  pytest evidence pass routed through the sandboxed shell — model-authored
+  tests never run unsandboxed, a noisy or truncated failure stays RED, and
+  the verdict binds to the collected test set, not a forgeable manifest.
+  QC defaults to one verdict then fix.
+- **Console (WebOS).** Full-width borderless feeds; the Team lane centres
+  its stream between a telemetry rail and a new right wing — a live Goal
+  board (goal/task tallies, progress) over a QC desk (verdicts, fixes,
+  rejections, recently patched). "On the floor" shows each seat's current
+  task, with a per-seat solo/mute filter that applies to the whole
+  streamed backlog in real time and resets with the run. The Leader's
+  replies render their markdown (safe DOM construction, no raw HTML
+  path).
+- **Reading beyond text.** `read_file` recognizes PDFs and returns the
+  text layer via the host's `pdftotext`, run as a contained helper:
+  fixed-path binary resolution, an engine-owned staged copy (the source
+  pathname is never reopened), stripped environment, resource limits,
+  bounded output, group-killed timeouts. Binary files refuse with one
+  actionable line instead of a context-flooding byte soup.
+
+### Changed
+
+- **The converse lane cannot be blocked** by anything except a gated
+  permission ask: any mid-turn failure — model error, context overflow,
+  tool crash, even a failing conversation write — returns as an honest
+  in-lane reply instead of a surface error.
+- **Operator grants are live.** A permission grant reaches the very tool
+  call that prompted the ask; `Once` covers exactly that call and
+  re-prompts next time; `Session`/`Always` apply immediately.
+- Model pickers always pull live listings; leader-reflect rides the model
+  window and can no longer fail a completed run; a bound job template
+  runs against its body, not the placeholder objective.
+
+### Fixed
+
+- A resolved permission dialog no longer re-appears on tab return; a
+  still-pending ask now survives run starts, clear-screen, and saturated
+  replay buffers, and reaches every reconnecting tab.
+- Release dependency drift fails closed; BYO-Claude detection hardened.
+
 ## [0.9.9.6] — 2026-07-17
 
 A **feature** release: OAuth sign-in happens **inside the app**. The add-model
