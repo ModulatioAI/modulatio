@@ -360,6 +360,12 @@ class Task(BaseModel):
     #: the immutable descriptor authority (canonical path, lineage) match —
     #: same id under a different authority is a typed engine conflict.
     minted_by: str | None = None
+    #: Stable identifier of the DURABLE attempt claim (minted children
+    #: only). Persisted together with the spent counter BEFORE any producer
+    #: byte — presence means the minted attempt is consumed: recovery never
+    #: re-runs the producer for a claimed nonterminal child (at-most-once;
+    #: a claim-then-crash conservatively costs the attempt).
+    attempt_claim_id: str | None = None
     # QC-as-fixer Slice 3: True when QC AUTHORED a fix for this task's
     # artifact after the producer exhausted its attempts (or stormed).
     # LOAD-BEARING flag, not cosmetic: a qc-authored artifact has NO

@@ -836,3 +836,218 @@ def test_restart_replay_counts_one_unique_mint_id(
     assert len(unique) == 1, (
         "replay may re-deliver, but there is ONE logical mint fact per id"
     )
+
+
+# ── Durable attempt claim + three-state recovery ────────────────────────────
+
+def test_claim_persisted_durably_before_producer_byte(
+    project_with_run, monkeypatch, tmp_path
+):
+    """At the moment the producer's model call
+    fires for a minted child, the child FILE already carries the stable
+    attempt id and the spent lifetime — the claim is durable before any
+    producer byte."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    observed = {}
+
+    def _model_call(self, agent_id, role, prompt, **kw):
+        if role == self.default_producer_role and "producer" not in observed:
+            child_id = f"{reloaded.id}-D1"
+            stored = {
+                t.id: t for t in store.list_tasks(
+                    PROJECT_CODE, run_id=project_with_run.run_id)
+            }
+            child = stored.get(child_id)
+            observed["producer"] = {
+                "claimed": child is not None
+                and child.attempt_claim_id is not None,
+                "lifetime": None if child is None else child.lifetime_attempts,
+            }
+        return "stub draft"
+
+    monkeypatch.setattr(Orchestrator, "_run_agent_call", _model_call)
+    monkeypatch.setattr(
+        Orchestrator, "_run", lambda self, role, prompt, **kw: "stub")
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    orch._run_task_with_redo(reloaded, RunSummary(project=project_with_run))
+    assert observed.get("producer", {}).get("claimed") is True, (
+        f"the durable claim must precede the producer byte: {observed}"
+    )
+    assert observed["producer"]["lifetime"] == max(reloaded.max_retries, 0) + 1
+
+
+def test_claim_is_the_single_increment(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Claim + producer seam must not BOTH bump the
+    counter — after a minted child's one attempt, lifetime is exactly
+    retry_budget + 1."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    monkeypatch.setattr(
+        Orchestrator, "_run_agent_call",
+        lambda self, agent_id, role, prompt, **kw: "stub draft")
+    monkeypatch.setattr(
+        Orchestrator, "_run", lambda self, role, prompt, **kw: "stub")
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    orch._run_task_with_redo(reloaded, RunSummary(project=project_with_run))
+    stored = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }
+    for cid in (f"{reloaded.id}-D1", f"{reloaded.id}-D2"):
+        child = stored[cid]
+        assert child.attempt_claim_id is not None
+        assert child.lifetime_attempts == max(child.max_retries, 0) + 1, (
+            f"{cid}: claim must BE the increment — got "
+            f"{child.lifetime_attempts}"
+        )
+
+
+def test_ordinary_task_never_claims_and_counts_per_attempt(
+    project_with_run, monkeypatch, tmp_path
+):
+    """A non-minted task keeps its exact prior
+    behavior — in-memory increment per attempt, no claim id, no extra
+    persist."""
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    calls = {"n": 0}
+
+    def _model_call(self, agent_id, role, prompt, **kw):
+        if role == self.default_producer_role:
+            calls["n"] += 1
+        return "stub draft"
+
+    monkeypatch.setattr(Orchestrator, "_run_agent_call", _model_call)
+    monkeypatch.setattr(
+        Orchestrator, "_run", lambda self, role, prompt, **kw: "stub")
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    task = _make_task(id="MNT-T-ORD", max_retries=1)
+    orch._run_task_with_redo(task, RunSummary(project=project_with_run))
+    assert task.attempt_claim_id is None
+    assert calls["n"] >= 1
+    assert task.lifetime_attempts == calls["n"], (
+        "ordinary counting must stay one in-memory increment per attempt"
+    )
+
+
+def _plant_child(project, parent, idx, **overrides):
+    from modulatio import store
+    from modulatio.types import Task
+    d = dict(parent.decompose_mint.child_descriptors[idx])
+    d.update(overrides)
+    child = Task.model_validate(d)
+    store.save_task(PROJECT_CODE, child, run_id=project.run_id)
+    return child
+
+
+def test_claimed_interrupted_child_without_draft_takes_stuck_lane(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Claimed + nonterminal + no durable draft →
+    recovery makes ZERO producer calls for that child and settles it through
+    the typed interrupted lane — the attempt is consumed, never refunded."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import TaskStatus
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    clamp = max(reloaded.max_retries, 0)
+    interrupted = _plant_child(
+        project_with_run, reloaded, 0,
+        attempt_claim_id="claim-1", lifetime_attempts=clamp + 1)
+    producer_calls = []
+
+    def _spy(self, task, corrective_notes=""):
+        producer_calls.append(task.id)
+        task.lifetime_attempts += 1
+        path = orch._resolve_draft_path(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("draft")
+        return path, "sum", 10
+
+    monkeypatch.setattr(Orchestrator, "_producer_execute", _spy)
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    orch._run_task_with_redo(reloaded, RunSummary(project=project_with_run))
+    assert interrupted.id not in producer_calls, (
+        "a claimed attempt must never re-run the producer"
+    )
+    stored = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }
+    settled = stored[interrupted.id]
+    assert settled.status is TaskStatus.BLOCKED
+    assert any(
+        "interrupted" in tr.rationale for tr in settled.transitions
+    ), "the stuck lane must name the interrupted claimed attempt"
+
+
+def test_claimed_interrupted_child_with_draft_never_reruns_producer(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Claimed + nonterminal + durable draft
+    on disk → recovery may only QC the draft; zero producer calls."""
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    clamp = max(reloaded.max_retries, 0)
+    interrupted = _plant_child(
+        project_with_run, reloaded, 0,
+        attempt_claim_id="claim-1", lifetime_attempts=clamp + 1)
+    draft = orch._shared_artifacts_root() / "drafts" / "one.md"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("half-finished draft from the interrupted attempt")
+    producer_calls = []
+
+    def _spy(self, task, corrective_notes=""):
+        producer_calls.append(task.id)
+        task.lifetime_attempts += 1
+        path = orch._resolve_draft_path(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("draft")
+        return path, "sum", 10
+
+    monkeypatch.setattr(Orchestrator, "_producer_execute", _spy)
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    orch._run_task_with_redo(reloaded, RunSummary(project=project_with_run))
+    assert interrupted.id not in producer_calls, (
+        "an interrupted claimed attempt settles by QC-on-draft or stuck — "
+        "never by re-running the producer"
+    )
+
+
+def test_recovered_unclaimed_child_is_claimed_on_its_single_run(
+    project_with_run, monkeypatch, tmp_path
+):
+    """A materialized-but-unclaimed child claims and runs
+    exactly once on recovery."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    monkeypatch.setattr(
+        Orchestrator, "_run_agent_call",
+        lambda self, agent_id, role, prompt, **kw: "stub draft")
+    monkeypatch.setattr(
+        Orchestrator, "_run", lambda self, role, prompt, **kw: "stub")
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    orch._run_task_with_redo(reloaded, RunSummary(project=project_with_run))
+    stored = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }
+    child = stored[f"{reloaded.id}-D1"]
+    assert child.attempt_claim_id is not None
+    assert child.lifetime_attempts == max(child.max_retries, 0) + 1

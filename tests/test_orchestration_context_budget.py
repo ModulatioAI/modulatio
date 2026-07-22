@@ -27,7 +27,8 @@ from uuid import uuid4
 import pytest
 
 from modulatio import context_budget, store, vault
-from modulatio.orchestration import Orchestrator, RunSummary, _DecomposeRefusal
+from modulatio import orchestration as orch_mod
+from modulatio.orchestration import Orchestrator, RunSummary
 from modulatio.types import Project, Task, TaskStatus, TicketPriority
 
 
@@ -811,7 +812,7 @@ def test_attempt_decompose_recursion_cap(project_with_run, monkeypatch, tmp_path
     parent = _make_task()
     parent.decompose_depth = orch._MAX_DECOMPOSE_DEPTH
     outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
-    assert isinstance(outcome, _DecomposeRefusal)
+    assert isinstance(outcome, orch_mod._DecomposeRefusal)
 
 
 def test_attempt_decompose_junk_is_refused(project_with_run, monkeypatch, tmp_path):
@@ -819,7 +820,7 @@ def test_attempt_decompose_junk_is_refused(project_with_run, monkeypatch, tmp_pa
     orch = _make_orchestrator(project_with_run)
     _planner_returns(monkeypatch, "I cannot split this further.")
     outcome = orch._attempt_decompose(_make_task(), _ctx_err(tmp_path))
-    assert isinstance(outcome, _DecomposeRefusal)
+    assert isinstance(outcome, orch_mod._DecomposeRefusal)
 
 
 def test_attempt_decompose_single_child_is_not_a_split(project_with_run, monkeypatch, tmp_path):
@@ -827,7 +828,7 @@ def test_attempt_decompose_single_child_is_not_a_split(project_with_run, monkeyp
     orch = _make_orchestrator(project_with_run)
     _planner_returns(monkeypatch, '[{"description":"only one"}]')
     outcome = orch._attempt_decompose(_make_task(), _ctx_err(tmp_path))
-    assert isinstance(outcome, _DecomposeRefusal)
+    assert isinstance(outcome, orch_mod._DecomposeRefusal)
 
 
 def test_decompose_and_run_parent_completes_via_children(project_with_run, monkeypatch, tmp_path):
@@ -867,7 +868,7 @@ def test_decompose_and_run_falls_through_when_cannot_split(project_with_run, mon
     _planner_returns(monkeypatch, "no split possible")
     summary = RunSummary(project=project_with_run)
     handled, refusal = orch._try_decompose_and_run(_make_task(), _ctx_err(tmp_path), summary)
-    assert handled is False and isinstance(refusal, _DecomposeRefusal)
+    assert handled is False and isinstance(refusal, orch_mod._DecomposeRefusal)
 
 
 def test_churn_that_survives_retries_routes_to_decompose(project_with_run, monkeypatch):
@@ -958,7 +959,7 @@ def test_attempt_decompose_refuses_assembler_tasks(project_with_run, monkeypatch
     parent = _make_task()
     parent.required_skills = ["document-assembly"]
     outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
-    assert isinstance(outcome, _DecomposeRefusal)
+    assert isinstance(outcome, orch_mod._DecomposeRefusal)
     assert calls == []  # not consulted, not swallowed-by-exception
 
 

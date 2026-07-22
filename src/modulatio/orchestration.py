@@ -4560,10 +4560,13 @@ class Orchestrator:
         self._increment_turn_persisted()
         # #18 keystone: this is the SINGLE producer-run seam (every caller — the redo
         # loop, escalation, and every re-entry path — flows through here), so the
-        # task's LIFETIME attempt counter increments here exactly once per attempt.
+        # task's LIFETIME attempt counter spends here exactly once per attempt.
         # It never resets, which ties the producer budget to the task: a model can't
         # earn a fresh budget by re-entering the loop and so can't skirt QC-as-fixer.
-        task.lifetime_attempts += 1
+        # _claim_and_count is the ONE claim-and-count owner — minted children
+        # get a DURABLE claim persisted before any producer byte; ordinary tasks
+        # keep the exact in-memory increment.
+        self._claim_and_count(task)
         # (c12): sweep abandoned candidates on every producer
         # turn so the 3-turn rule holds when Leader-iterate is off.
         self._sweep_abandoned_candidates()
@@ -10880,6 +10883,15 @@ class Orchestrator:
                     if child.status is not TaskStatus.COMPLETED:
                         all_ok = False
                     continue
+                if child.attempt_claim_id is not None:
+                    # Claimed but nonterminal: the minted attempt is
+                    # consumed — NEVER the producer again. Settle through
+                    # the interrupted lane (QC-on-draft when one exists,
+                    # else typed stuck).
+                    self._settle_interrupted_claim(child, summary)
+                    if child.status is not TaskStatus.COMPLETED:
+                        all_ok = False
+                    continue
                 self._run_task_with_redo(child, summary)
                 self._persist_child_task(child)
                 if child.status is not TaskStatus.COMPLETED:
@@ -10911,6 +10923,47 @@ class Orchestrator:
             summary.errors.append(
                 f"{t.id}: decomposed but a child task did not complete"
             )
+
+    def _settle_interrupted_claim(
+        self, child: "Task", summary: RunSummary,
+    ) -> None:
+        """A claimed-but-interrupted minted child: the attempt is spent and
+        cannot be refunded or repeated (at-most-once — the safe direction
+        on this store). When the interrupted attempt left a durable draft,
+        QC may check/patch it forward; otherwise the child takes the typed
+        interrupted/stuck lane. Either way: zero producer calls."""
+        draft = self._resolve_draft_path(child)
+        if draft.exists():
+            try:
+                if self._attempt_qc_fix_forward(
+                    child, draft, None, summary,
+                    defect_type="interrupted",
+                ):
+                    self._persist_child_task(child)
+                    return
+            except Exception:  # noqa: BLE001 — settlement must not crash recovery
+                _logger.warning(
+                    "QC-on-draft settlement failed for interrupted child %s "
+                    "— falling to the stuck lane", child.id, exc_info=True)
+        child.transitions.append(StateTransition(
+            from_state=child.status.value,
+            to_state=TaskStatus.BLOCKED.value,
+            actor="orchestrator",
+            rationale=(
+                f"interrupted claimed attempt {child.attempt_claim_id} — "
+                f"the minted producer attempt was consumed by the claim and "
+                f"is not repeated; no durable draft to QC"
+                if not draft.exists() else
+                f"interrupted claimed attempt {child.attempt_claim_id} — "
+                f"attempt consumed, QC settlement did not complete the draft"
+            ),
+        ))
+        child.status = TaskStatus.BLOCKED
+        summary.errors.append(
+            f"{child.id}: interrupted claimed attempt settled without a "
+            f"completed artifact"
+        )
+        self._persist_child_task(child)
 
     def _materialize_mint_children(self, t: "Task") -> "list[Task]":
         """Idempotently project the committed record's descriptors into
@@ -11001,6 +11054,30 @@ class Orchestrator:
             return _DecomposeRefusal(
                 "parent mint commit failed — split refused, nothing minted")
         return None
+
+    def _claim_and_count(self, task: "Task") -> None:
+        """THE one claim-and-count owner at the producer seam.
+
+        Ordinary task → the exact plain in-memory increment (no claim, no
+        extra write). Minted child, unclaimed → an atomic child persist
+        records the stable ``attempt_claim_id`` and the spent counter
+        (``retry_budget + 1``) BEFORE any producer byte runs; the claim IS
+        the increment, so a crash mid-producer replays as claimed-and-spent,
+        never as budget-available. Minted child, already claimed → no second
+        increment (recovery routing should have prevented the call; refusing
+        to double-count keeps the budget honest either way)."""
+        if task.minted_by is None:
+            task.lifetime_attempts += 1
+            return
+        if task.attempt_claim_id is not None:
+            _logger.warning(
+                "producer seam reached a CLAIMED minted child %s "
+                "(claim %s) — not double-counting", task.id,
+                task.attempt_claim_id)
+            return
+        task.attempt_claim_id = str(uuid4())
+        task.lifetime_attempts = max(task.max_retries, 0) + 1
+        self._persist_child_task(task)
 
     def _emit_decompose_mint(self, t: "Task") -> None:
         """The mint disclosure fact — audit evidence, not a spend control:
