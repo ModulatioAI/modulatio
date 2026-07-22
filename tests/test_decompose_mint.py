@@ -2001,3 +2001,190 @@ def test_merge_conflict_reconciles_live_object_and_surfaces_error(
     assert any("MNT-T-MC" in e for e in summary.errors), (
         "a merge conflict must surface as a summary error, not log-only"
     )
+
+
+# ── Conflict payloads + guaranteed reconciliation ───────────────────────────
+
+def test_genuine_foreign_parent_on_disk_converges_live_to_disk(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The barrier save returns, then a GENUINELY
+    different mint record is persisted before verification — typed conflict,
+    zero children/producer, and the LIVE parent converges to the disk
+    authority (carried in the exception payload, no second read)."""
+    from modulatio import store
+    from modulatio.orchestration import MintBarrierConflict, RunSummary
+    from modulatio.types import DecomposeMintRecord
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    producer_calls = []
+    monkeypatch.setattr(
+        Orchestrator, "_producer_execute",
+        lambda self, task, corrective_notes="": producer_calls.append(task.id))
+    orig_save = store_mod.save_task
+
+    def _race_writer(code, task, body="", run_id=None):
+        out = orig_save(code, task, body=body, run_id=run_id)
+        if task.id == parent.id and task.decompose_mint is not None:
+            foreign = task.model_copy(deep=True)
+            foreign.decompose_mint = DecomposeMintRecord(
+                mint_id="GENUINE-FOREIGN")
+            orig_save(code, foreign, run_id=run_id)  # really on disk
+        return out
+
+    monkeypatch.setattr(store_mod, "save_task", _race_writer)
+    with pytest.raises(MintBarrierConflict) as exc_info:
+        orch._try_decompose_and_run(
+            parent, _ctx_err(tmp_path), RunSummary(project=project_with_run))
+    monkeypatch.setattr(store_mod, "save_task", orig_save)
+    assert producer_calls == []
+    assert exc_info.value.observed is not None, (
+        "the conflict must carry the observed durable task"
+    )
+    assert parent.decompose_mint.mint_id == "GENUINE-FOREIGN", (
+        "the live parent must converge to the disk authority"
+    )
+    on_disk = store.get_task(
+        PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
+    assert on_disk.decompose_mint.mint_id == "GENUINE-FOREIGN"
+
+
+def test_genuine_foreign_claim_on_disk_converges_live_to_disk(
+    project_with_run, monkeypatch, tmp_path
+):
+    """A claimed child whose durable claim is GENUINELY
+    different — typed conflict; the live child converges to the disk
+    claim."""
+    from modulatio import store
+    from modulatio.orchestration import MintBarrierConflict
+    orch = _make_orchestrator(project_with_run)
+    child = _make_task(id="MNT-T-001-D1", minted_by="mint-1")
+    child.lifetime_attempts = max(child.max_retries, 0)
+    store.save_task(PROJECT_CODE, child, run_id=project_with_run.run_id)
+    orig_save = store_mod.save_task
+
+    def _race_writer(code, task, body="", run_id=None):
+        out = orig_save(code, task, body=body, run_id=run_id)
+        if task.id == child.id and task.attempt_claim_id is not None:
+            foreign = task.model_copy(deep=True)
+            foreign.attempt_claim_id = "GENUINE-FOREIGN-CLAIM"
+            orig_save(code, foreign, run_id=run_id)
+        return out
+
+    monkeypatch.setattr(store_mod, "save_task", _race_writer)
+    with pytest.raises(MintBarrierConflict):
+        orch._claim_and_count(child)
+    monkeypatch.setattr(store_mod, "save_task", orig_save)
+    assert child.attempt_claim_id == "GENUINE-FOREIGN-CLAIM", (
+        "the live child must converge to the durable claim authority"
+    )
+
+
+def test_merge_conflict_reconciles_from_payload_without_second_read(
+    project_with_run, monkeypatch
+):
+    """The store conflict carries the canonical task; the
+    merge reconciles from that payload even when every subsequent get_task
+    returns None — disk, result, task map, and summary all converge."""
+    from modulatio import store
+    from modulatio.orchestration import (
+        RunSummary, TaskExecutionResult, _merge_task_result,
+    )
+    run_id = project_with_run.run_id
+    orch = _make_orchestrator(project_with_run)
+    durable = _make_task(id="MNT-T-PL", minted_by="mint-1")
+    durable.attempt_claim_id = "claim-1"
+    store.save_task(PROJECT_CODE, durable, run_id=run_id)
+    imposter = _make_task(id="MNT-T-PL", minted_by="mint-1")
+    imposter.attempt_claim_id = "claim-EVIL"
+    orig_get = store_mod.get_task
+    state = {"armed": False}
+
+    def _blind_after_conflict(code, task_id, run_id=None):
+        if state["armed"] and task_id == "MNT-T-PL":
+            return None  # every read after the conflict fails
+        return orig_get(code, task_id, run_id=run_id)
+
+    monkeypatch.setattr(store_mod, "get_task", _blind_after_conflict)
+    orig_monotonic = store_mod.save_task_monotonic
+
+    def _armed_monotonic(code, candidate, run_id=None):
+        try:
+            return orig_monotonic(code, candidate, run_id=run_id)
+        finally:
+            state["armed"] = True
+
+    monkeypatch.setattr(store_mod, "save_task_monotonic", _armed_monotonic)
+    summary = RunSummary(project=project_with_run)
+    task_map = {imposter.id: imposter}
+    res = TaskExecutionResult(task=imposter)
+    _merge_task_result(
+        res, summary,
+        save_task=lambda t: orch._merge_save(t, summary),
+        merged_ids=set(),
+    )
+    monkeypatch.setattr(store_mod, "get_task", orig_get)
+    assert res.task.attempt_claim_id == "claim-1", (
+        "reconciliation must come from the exception payload, not a second "
+        "fallible read"
+    )
+    assert task_map["MNT-T-PL"].attempt_claim_id == "claim-1"
+    assert any("MNT-T-PL" in e for e in summary.errors)
+
+
+def test_raising_conflict_subscriber_cannot_break_reconciliation(
+    project_with_run, monkeypatch
+):
+    """A raising activity subscriber on
+    mint_merge_conflict — reconciliation and the summary error remain
+    intact; the merge does not fail."""
+    from modulatio import store
+    from modulatio.orchestration import (
+        RunSummary, TaskExecutionResult, _merge_task_result,
+    )
+    run_id = project_with_run.run_id
+    orch = _make_orchestrator(project_with_run)
+
+    def _bad_subscriber(event):
+        if event.phase == "mint_merge_conflict":
+            raise RuntimeError("subscriber crashed")
+
+    orch.activity_callback = _bad_subscriber
+    durable = _make_task(id="MNT-T-PS", minted_by="mint-1")
+    durable.attempt_claim_id = "claim-1"
+    store.save_task(PROJECT_CODE, durable, run_id=run_id)
+    imposter = _make_task(id="MNT-T-PS", minted_by="mint-1")
+    imposter.attempt_claim_id = "claim-EVIL"
+    summary = RunSummary(project=project_with_run)
+    res = TaskExecutionResult(task=imposter)
+    _merge_task_result(
+        res, summary,
+        save_task=lambda t: orch._merge_save(t, summary),
+        merged_ids=set(),
+    )
+    assert res.task.attempt_claim_id == "claim-1"
+    assert any("MNT-T-PS" in e for e in summary.errors)
+
+
+def test_conflict_without_canonical_payload_fails_closed(
+    project_with_run, monkeypatch
+):
+    """A conflict arriving with NO canonical payload must
+    fail closed (raise, stopping the pump) — never return normally claiming
+    the view was reconciled."""
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import DecomposeMintConflict
+    orch = _make_orchestrator(project_with_run)
+    bare = _make_task(id="MNT-T-PF")
+    monkeypatch.setattr(
+        store_mod, "save_task_monotonic",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            DecomposeMintConflict("payloadless conflict")))
+    summary = RunSummary(project=project_with_run)
+    with pytest.raises(DecomposeMintConflict):
+        orch._merge_save(bare, summary)
+    assert any(
+        "MNT-T-PF" in e and "reconciled" not in e for e in summary.errors
+    ), "the summary must not claim reconciliation that never happened"

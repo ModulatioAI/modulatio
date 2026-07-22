@@ -186,7 +186,16 @@ class DecomposeMintConflict(RuntimeError):
     """A mint-record child id already exists under a DIFFERENT authority
     (foreign ``mint_id``, foreign ``attempt_claim_id``, or mismatched
     immutable descriptor). Neither recovery nor the wave merge may preserve
-    or overwrite such a record; the conflict surfaces typed, with no write."""
+    or overwrite such a record; the conflict surfaces typed, with no write.
+
+    ``canonical`` carries a deep copy of the durable authority the raiser
+    already had in hand, so reconciliation never depends on a second
+    fallible read. A conflict WITHOUT a payload is unreconcilable — the
+    consumer fails closed rather than claiming the view was reconciled."""
+
+    def __init__(self, message: str, *, canonical=None):
+        super().__init__(message)
+        self.canonical = canonical
 
 
 class DecomposeMintRecord(BaseModel):

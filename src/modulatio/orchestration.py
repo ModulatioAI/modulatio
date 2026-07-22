@@ -1444,8 +1444,16 @@ class MintBarrierConflict(RuntimeError):
     """A mint durability barrier's verification read returned a DIFFERENT
     authority than the record just saved (foreign mint id / claim). The
     save itself returned — the commit happened — so this is never rolled
-    back or reported as "nothing minted": the caller stops before children
-    and reconciles from disk, keeping the in-memory committed state."""
+    back or reported as "nothing minted". The BARRIER is the one
+    reconciliation owner: before raising, it synchronizes the live task in
+    place to the observed durable authority, and the exception carries deep
+    copies of both sides so no consumer ever needs a second fallible read.
+    Work stops before children; reservations stay conservatively held."""
+
+    def __init__(self, message: str, *, observed=None, attempted=None):
+        super().__init__(message)
+        self.observed = observed
+        self.attempted = attempted
 
 
 def _sync_task_in_place(live: "Task", canonical: "Task") -> None:
@@ -11154,10 +11162,18 @@ class Orchestrator:
                 != parent.decompose_mint.mint_id
                 or reloaded.lifetime_attempts != parent.lifetime_attempts
             ):
+                attempted_id = parent.decompose_mint.mint_id
+                attempted = parent.model_copy(deep=True)
+                # The barrier owns reconciliation: the live parent
+                # converges to the observed durable authority in place,
+                # with the payload in hand — no second read.
+                _sync_task_in_place(parent, reloaded)
                 raise MintBarrierConflict(
                     f"mint parent barrier for {parent.id}: committed "
-                    f"{parent.decompose_mint.mint_id} but the store shows "
-                    f"a different authority")
+                    f"{attempted_id} but the store shows a different "
+                    f"authority",
+                    observed=reloaded.model_copy(deep=True),
+                    attempted=attempted)
 
     def _persist_mint_child_barrier(self, child: "Task") -> None:
         """Durability barrier for a minted child record (materialization and
@@ -11181,9 +11197,13 @@ class Orchestrator:
                 or reloaded.attempt_claim_id != child.attempt_claim_id
                 or reloaded.lifetime_attempts != child.lifetime_attempts
             ):
+                attempted = child.model_copy(deep=True)
+                _sync_task_in_place(child, reloaded)
                 raise MintBarrierConflict(
                     f"mint child barrier for {child.id}: the store shows a "
-                    f"different authority than the record just saved")
+                    f"different authority than the record just saved",
+                    observed=reloaded.model_copy(deep=True),
+                    attempted=attempted)
 
     def _claim_and_count(self, task: "Task") -> None:
         """THE one claim-and-count owner at the producer seam.
@@ -11306,22 +11326,34 @@ class Orchestrator:
         try:
             canonical = store.save_task_monotonic(
                 self.project.code, task, run_id=self.project.run_id)
-        except DecomposeMintConflict:
+        except DecomposeMintConflict as conflict:
             _logger.error(
                 "wave merge refused a conflicting mint/claim snapshot "
                 "for %s — durable record kept", task.id, exc_info=True)
-            durable = store.get_task(
-                self.project.code, task.id, run_id=self.project.run_id)
-            if durable is not None:
-                _sync_task_in_place(task, durable)
+            if conflict.canonical is None:
+                # No authority in hand and none promised — fail CLOSED:
+                # never return normally claiming a reconciliation that
+                # didn't happen (the raise stops the pump).
+                summary.errors.append(
+                    f"{task.id}: conflicting mint/claim snapshot with no "
+                    f"canonical payload — failing closed")
+                raise
+            # Reconcile from the payload the store already had in hand —
+            # a second read is fallible and unnecessary (the B7 lesson).
+            _sync_task_in_place(task, conflict.canonical)
             summary.errors.append(
                 f"{task.id}: wave merge carried a conflicting mint/claim "
                 f"snapshot — the durable record was kept and the live view "
                 f"reconciled to it")
-            self._emit_activity(
-                role="planner", phase="mint_merge_conflict", task_id=task.id,
-                agent_id="planner",
-            )
+            try:
+                self._emit_activity(
+                    role="planner", phase="mint_merge_conflict",
+                    task_id=task.id, agent_id="planner",
+                )
+            except Exception:  # noqa: BLE001 — best-effort after reconciliation
+                _logger.warning(
+                    "mint_merge_conflict live delivery failed for %s — "
+                    "reconciliation already complete", task.id, exc_info=True)
             return
         if canonical is not task:
             _sync_task_in_place(task, canonical)

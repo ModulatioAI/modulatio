@@ -833,14 +833,16 @@ def save_task_monotonic(
             raise DecomposeMintConflict(
                 f"task {candidate.id}: merge carries mint "
                 f"{candidate.decompose_mint.mint_id} but the store holds "
-                f"{current.decompose_mint.mint_id}")
+                f"{current.decompose_mint.mint_id}",
+                canonical=current.model_copy(deep=True))
         candidate.decompose_mint = current.decompose_mint
     if current.attempt_claim_id is not None:
         if candidate.attempt_claim_id not in (None, current.attempt_claim_id):
             raise DecomposeMintConflict(
                 f"task {candidate.id}: merge carries claim "
                 f"{candidate.attempt_claim_id} but the store holds "
-                f"{current.attempt_claim_id}")
+                f"{current.attempt_claim_id}",
+                canonical=current.model_copy(deep=True))
         candidate.attempt_claim_id = current.attempt_claim_id
     candidate.lifetime_attempts = max(
         candidate.lifetime_attempts, current.lifetime_attempts)
