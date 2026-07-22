@@ -120,6 +120,17 @@ The most common drafter failure mode is writing too much. A few specific anti-pa
 - **Comments that restate the code.** `# increment counter` over `counter += 1` is noise. Comments explain WHY (a non-obvious constraint, a workaround, a hidden invariant), never WHAT.
 - **Half-finished work.** If you can't complete a path in this artifact, leave it out and surface the gap in your output. Don't ship `# TODO: actually implement` and call it done.
 
+## Code notes — about the code, nothing else
+
+Comments, docstrings, commit messages, test names, and example identifiers describe the code itself: mechanism + purpose. Nothing else belongs in them:
+
+- **No names** — people, agents, teams, reviewers.
+- **No stories** — anecdotes, incident history, project codenames. State the mechanism a lesson taught ("forking from a multithreaded process deadlocks"), never the story that taught it.
+- **No decision info** — review findings, spec section numbers, meeting or discussion outcomes. The "why" in a note is the technical reason the code needs to exist, not the process that produced it.
+- **Neutral fixtures** — test data and example identifiers use placeholder names (`proj-T-001`, `apppkg`), never real project codes or run artifacts.
+
+The test: a stranger reading only this file must understand every note completely, with zero context about how the code came to be.
+
 ## Output shape
 
 The artifact body is your code. Specifically:
