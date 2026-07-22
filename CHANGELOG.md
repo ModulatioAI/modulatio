@@ -6,6 +6,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Decompose-child budget floor (#40).** A decompose split is now a
+  MINT: the parent's remaining producer budget is consumed by the split
+  in one atomic parent write (a durable mint record carrying full child
+  descriptors — the parent file is the write-ahead log), and every child
+  is constructed with exactly one producer attempt regardless of ceiling
+  (including 0 and negative misconfiguration). A crashed mint finishes
+  from the record alone: children materialize idempotently, a minted
+  container can never re-enter the producer loop, and a child's attempt
+  is claimed durably before any producer byte — so process death can
+  never re-run a spent attempt (at-most-once). Splits refuse whole — over
+  the width cap of 8, on any hostile/duplicate/ancestor-colliding
+  artifact path, or past depth 3 — with a typed, audited reason; refusals
+  write nothing.
+- Worst-case spend is bounded and disclosed honestly: one mint per node,
+  at most `8 + 64 + 512 = 584` child attempts **per eligible root**
+  (`584 × R` for R roots). Deliberately driving overflow buys real,
+  bounded producer calls (denial-of-wallet), never unbounded ones; the
+  `decompose_mint` audit fact (stable id, deduplicated) is evidence, not
+  a spend control.
+- Operator note: a child whose attempt was claimed and then interrupted
+  settles through QC-on-draft or a typed stuck lane **with zero producer
+  calls** — that is the at-most-once floor working, not the floor
+  failing.
+
 ## [1.0.0b1] — 2026-07-20
 
 The first release of the **1.0 line** — a public beta. The theme: the Leader
