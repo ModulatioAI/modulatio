@@ -9009,7 +9009,7 @@ class Orchestrator:
         operator killed it → no auto-resume). Best-effort — a teardown error never
         breaks the run's return."""
         code, rid = self.project.code, self.project.run_id
-        reason = "operator stopped the run  — pipeline cleared"
+        reason = "operator stopped the run (F8) — pipeline cleared"
         try:
             for t in store.list_tasks(code, run_id=rid):
                 if t.status not in (TaskStatus.COMPLETED, TaskStatus.ABANDONED):
