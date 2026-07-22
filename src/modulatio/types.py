@@ -219,6 +219,12 @@ class DecomposeMintRecord(BaseModel):
     #: The parent's remaining producer attempts BEFORE the mint consumed
     #: them — the disclosure fact's arithmetic input.
     parent_remaining_was: int = 0
+    #: Durable disclosure outbox state: ``pending`` from the WAL commit
+    #: until the idempotent audit row lands, then ``emitted``. Startup
+    #: recovery scans pending disclosures — including on terminal parents —
+    #: so a transient audit failure can never become a permanently missing
+    #: fact (an in-memory set is not an outbox).
+    disclosure: str = "pending"
 
 
 class Task(BaseModel):

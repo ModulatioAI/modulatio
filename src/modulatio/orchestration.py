@@ -1440,6 +1440,23 @@ def _token_floor(task: "Task") -> int | None:
 
 
 
+class MintBarrierConflict(RuntimeError):
+    """A mint durability barrier's verification read returned a DIFFERENT
+    authority than the record just saved (foreign mint id / claim). The
+    save itself returned — the commit happened — so this is never rolled
+    back or reported as "nothing minted": the caller stops before children
+    and reconciles from disk, keeping the in-memory committed state."""
+
+
+def _sync_task_in_place(live: "Task", canonical: "Task") -> None:
+    """Copy every field of ``canonical`` onto ``live`` IN PLACE, so every
+    existing reference to the live object (``result.task``, the scheduler's
+    task map, the run summary) sees the durable authority — replacing the
+    object would leave stale aliases behind."""
+    for name in type(live).model_fields:
+        setattr(live, name, getattr(canonical, name))
+
+
 class MintedAttemptAlreadyClaimed(RuntimeError):
     """Typed control flow raised at the ONE producer seam when a CLAIMED
     minted child reaches it: the minted attempt is already consumed, so no
@@ -9163,17 +9180,7 @@ class Orchestrator:
         in_flight: dict[str, tuple] = {}
 
         def _save(task: Task) -> None:
-            # Monotonic vs the decompose-mint barriers: a worker snapshot must not
-            # regress a barrier-persisted WAL/claim/terminal record. A typed
-            # conflict keeps the durable record intact — log loudly, don't
-            # take down the wave merge.
-            try:
-                store.save_task_monotonic(
-                    self.project.code, task, run_id=self.project.run_id)
-            except DecomposeMintConflict:
-                _logger.error(
-                    "wave merge refused a conflicting mint/claim snapshot "
-                    "for %s — durable record kept", task.id, exc_info=True)
+            self._merge_save(task, summary)
 
         def _cascade_dep_failures() -> None:
             for t in tasks:
@@ -11101,7 +11108,15 @@ class Orchestrator:
         t.lifetime_attempts = retry_budget + 1  # spent BY the split
         try:
             self._persist_mint_parent_barrier(t)
+        except MintBarrierConflict:
+            # The save RETURNED — the commit happened. A conflicting
+            # verification read must never roll back or claim "nothing
+            # minted": keep the in-memory committed record and ownership,
+            # stop before children, reconcile from disk.
+            raise
         except Exception:
+            # Known PRE-commit failure: save_task raised before its atomic
+            # replace — rollback and refusal are safe and correct.
             _logger.warning(
                 "decompose mint commit failed for %s — refusing the split",
                 t.id, exc_info=True)
@@ -11114,41 +11129,61 @@ class Orchestrator:
 
     def _persist_mint_parent_barrier(self, parent: "Task") -> None:
         """Durability barrier for the parent WAL commit: a synchronized
-        atomic store write that runs EVEN under worker deferral, then
-        reload-verifies the committed identity before returning. Raises on
-        any failure — never best-effort, never a deferred lambda."""
+        atomic store write that runs EVEN under worker deferral. The
+        ``save_task`` RETURN is the commit point (it returns only after the
+        atomic ``os.replace``) — a raise from it is a known pre-commit
+        failure the caller may roll back. The reload after it is a
+        DIAGNOSTIC: an unavailable read (transient ``None``) leaves the
+        commit standing; a read showing a DIFFERENT authority raises typed
+        :class:`MintBarrierConflict` — never rolled back, never reported
+        as "nothing minted"."""
         with self._mint_barrier_lock:
             store.save_task(self.project.code, parent,
                             run_id=self.project.run_id)
             reloaded = store.get_task(
                 self.project.code, parent.id, run_id=self.project.run_id)
+            if reloaded is None:
+                _logger.warning(
+                    "mint parent barrier verify read unavailable for %s — "
+                    "the returned save is the commit point; commit stands",
+                    parent.id)
+                return
             if (
-                reloaded is None
-                or reloaded.decompose_mint is None
+                reloaded.decompose_mint is None
                 or reloaded.decompose_mint.mint_id
                 != parent.decompose_mint.mint_id
                 or reloaded.lifetime_attempts != parent.lifetime_attempts
             ):
-                raise OSError(
-                    f"mint parent barrier verify failed for {parent.id}")
+                raise MintBarrierConflict(
+                    f"mint parent barrier for {parent.id}: committed "
+                    f"{parent.decompose_mint.mint_id} but the store shows "
+                    f"a different authority")
 
     def _persist_mint_child_barrier(self, child: "Task") -> None:
         """Durability barrier for a minted child record (materialization and
-        attempt claim). Same contract as the parent barrier: synchronized,
-        atomic, deferral-proof, reload-verified, raising."""
+        attempt claim). Same contract as the parent barrier: the returned
+        save is the commit point (a returned claim save is CONSUMED even if
+        its verification read is temporarily unavailable); a foreign
+        authority on the diagnostic read is a typed conflict."""
         with self._mint_barrier_lock:
             store.save_task(self.project.code, child,
                             run_id=self.project.run_id)
             reloaded = store.get_task(
                 self.project.code, child.id, run_id=self.project.run_id)
+            if reloaded is None:
+                _logger.warning(
+                    "mint child barrier verify read unavailable for %s — "
+                    "the returned save is the commit point; claim stands",
+                    child.id)
+                return
             if (
-                reloaded is None
-                or reloaded.minted_by != child.minted_by
+                reloaded.minted_by != child.minted_by
                 or reloaded.attempt_claim_id != child.attempt_claim_id
                 or reloaded.lifetime_attempts != child.lifetime_attempts
             ):
-                raise OSError(
-                    f"mint child barrier verify failed for {child.id}")
+                raise MintBarrierConflict(
+                    f"mint child barrier for {child.id}: the store shows a "
+                    f"different authority than the record just saved")
 
     def _claim_and_count(self, task: "Task") -> None:
         """THE one claim-and-count owner at the producer seam.
@@ -11183,7 +11218,11 @@ class Orchestrator:
         by id; a restarted process may re-deliver, and consumers count
         unique ids."""
         rec = t.decompose_mint
-        if rec is None or rec.mint_id in self._emitted_mint_ids:
+        if (
+            rec is None
+            or rec.disclosure == "emitted"
+            or rec.mint_id in self._emitted_mint_ids
+        ):
             return
         detail = {
             "mint_id": rec.mint_id,
@@ -11230,10 +11269,21 @@ class Orchestrator:
                     )
         except Exception:  # noqa: BLE001 — disclosure must not abort the mint
             _logger.warning(
-                "decompose_mint audit append failed for %s (mint %s) — id "
-                "stays retryable", t.id, rec.mint_id, exc_info=True)
+                "decompose_mint audit append failed for %s (mint %s) — the "
+                "record's durable pending marker keeps it recoverable",
+                t.id, rec.mint_id, exc_info=True)
             return
         self._emitted_mint_ids.add(rec.mint_id)
+        # Durable outbox advance the row landed — mark the record
+        # emitted. Best-effort: a lost advance replays idempotently (the
+        # append scan finds the existing row and re-advances).
+        rec.disclosure = "emitted"
+        try:
+            self._persist_mint_parent_barrier(t)
+        except Exception:  # noqa: BLE001 — recovery re-advances idempotently
+            _logger.warning(
+                "decompose_mint emitted-advance save failed for %s — "
+                "startup recovery will re-advance", t.id, exc_info=True)
         try:
             self._emit_activity(
                 role="planner", phase="decompose_mint", task_id=t.id,
@@ -11243,6 +11293,58 @@ class Orchestrator:
             _logger.warning(
                 "decompose_mint live activity delivery failed for %s — "
                 "durable fact already landed", t.id, exc_info=True)
+
+    def _merge_save(self, task: Task, summary: RunSummary) -> None:
+        """The wave merge's save: monotonic vs the decompose-mint barriers, AND
+        canonical for the LIVE control plane — when the store keeps a
+        durable record over a stale worker snapshot, the durable state is
+        synchronized IN PLACE into the worker object so every live
+        reference (result, task map, summary, dependency scheduling) sees
+        what disk sees. A conflicting snapshot keeps the durable record,
+        reconciles the live object to it, and surfaces a summary error +
+        activity fact — never log-only stale control state."""
+        try:
+            canonical = store.save_task_monotonic(
+                self.project.code, task, run_id=self.project.run_id)
+        except DecomposeMintConflict:
+            _logger.error(
+                "wave merge refused a conflicting mint/claim snapshot "
+                "for %s — durable record kept", task.id, exc_info=True)
+            durable = store.get_task(
+                self.project.code, task.id, run_id=self.project.run_id)
+            if durable is not None:
+                _sync_task_in_place(task, durable)
+            summary.errors.append(
+                f"{task.id}: wave merge carried a conflicting mint/claim "
+                f"snapshot — the durable record was kept and the live view "
+                f"reconciled to it")
+            self._emit_activity(
+                role="planner", phase="mint_merge_conflict", task_id=task.id,
+                agent_id="planner",
+            )
+            return
+        if canonical is not task:
+            _sync_task_in_place(task, canonical)
+
+    def _recover_pending_mint_disclosures(self) -> None:
+        """Startup outbox scan every task whose committed mint record
+        still says ``pending`` — including TERMINAL parents, which no redo
+        path will ever re-enter — gets its disclosure re-attempted. The
+        append is idempotent by mint id, so replay after a crash between
+        append and advance lands exactly one row. Best-effort: a scan
+        failure must never break kickoff."""
+        try:
+            tasks = store.list_tasks(
+                self.project.code, run_id=self.project.run_id)
+        except Exception:  # noqa: BLE001 — recovery is best-effort
+            _logger.warning(
+                "pending mint-disclosure scan failed — will retry next "
+                "startup", exc_info=True)
+            return
+        for t in tasks:
+            rec = t.decompose_mint
+            if rec is not None and rec.disclosure != "emitted":
+                self._emit_decompose_mint(t)
 
     def _emit_decompose_refused(
         self, t: "Task", refusal: "_DecomposeRefusal",
@@ -15226,6 +15328,9 @@ class Orchestrator:
         # orchestrator is reused across turns, so a stop from a prior run must not
         # carry over and kill this one before it begins.
         self.abort_event.clear()
+        # Disclosure outbox: recover mint disclosures whose audit row never landed
+        # (durable pending markers survive even on terminal parents).
+        self._recover_pending_mint_disclosures()
         # §4 liveness: flag the run as in-flight so a concurrent team_status
         # (background kickoff + converse on another thread) never says "done"
         # mid-run. try/finally so the flag always clears, even on error.

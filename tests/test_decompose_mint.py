@@ -1737,3 +1737,267 @@ def test_two_workers_contesting_one_key_exactly_one_mints(
     assert len(minted) == 1, (
         f"exactly one worker may own the contested key; got {minted}"
     )
+
+
+# ── Commit-point truth, disclosure outbox, canonical live merge ─────────────
+
+def test_verify_read_unavailable_after_save_is_not_a_refusal(
+    project_with_run, monkeypatch, tmp_path
+):
+    """save_task RETURNED (atomic replace done) but the
+    verification read comes back None — the commit STANDS. No refusal, no
+    rollback; memory and disk agree on mint id + spent counter. Sequential
+    and worker-TLS flavors."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    for worker in (False, True):
+        orch = _make_orchestrator(project_with_run)
+        parent = _make_task(id=f"MNT-T-CP-{int(worker)}")
+        store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+        _planner_returns(
+            monkeypatch,
+            f'[{{"description":"a","output_path":"drafts/b7-{int(worker)}-a.md"}},'
+            f'{{"description":"b","output_path":"drafts/b7-{int(worker)}-b.md"}}]')
+        monkeypatch.setattr(Orchestrator, "_run_task_with_redo",
+            lambda self, t, summary, **kw: setattr(
+                t, "status", __import__(
+                    "modulatio.types", fromlist=["TaskStatus"],
+                ).TaskStatus.COMPLETED))
+        orig_get = store_mod.get_task
+        blind = {"n": 0}
+
+        def _blind_once(code, task_id, run_id=None):
+            if task_id == parent.id and blind["n"] == 0:
+                blind["n"] += 1
+                return None  # transient read failure AFTER the save returned
+            return orig_get(code, task_id, run_id=run_id)
+
+        monkeypatch.setattr(store_mod, "get_task", _blind_once)
+        if worker:
+            _enter_worker_tls(orch)
+        try:
+            handled, refusal = orch._try_decompose_and_run(
+                parent, _ctx_err(tmp_path), RunSummary(project=project_with_run))
+        finally:
+            if worker:
+                orch._tls.deferred_writes = None
+                orch._tls.child_tasks = None
+        monkeypatch.setattr(store_mod, "get_task", orig_get)
+        assert handled is True and refusal is None, (
+            f"worker={worker}: a returned save is the commit point — a blind "
+            f"verify read must not become a refusal"
+        )
+        assert parent.decompose_mint is not None
+        on_disk = store.get_task(
+            PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
+        assert on_disk.decompose_mint.mint_id == parent.decompose_mint.mint_id
+        assert on_disk.lifetime_attempts == parent.lifetime_attempts
+
+
+def test_verify_read_foreign_authority_is_typed_barrier_conflict(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Verification reads back a DIFFERENT mint authority —
+    typed MintBarrierConflict: no children, no producer, no rollback, and no
+    'nothing minted' refusal (the in-memory committed record is retained)."""
+    from modulatio import store
+    from modulatio.orchestration import MintBarrierConflict, RunSummary
+    from modulatio.types import DecomposeMintRecord
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    producer_calls = []
+    monkeypatch.setattr(
+        Orchestrator, "_producer_execute",
+        lambda self, task, corrective_notes="": producer_calls.append(task.id))
+    orig_get = store_mod.get_task
+
+    def _foreign(code, task_id, run_id=None):
+        if task_id == parent.id:
+            impost = orig_get(code, task_id, run_id=run_id)
+            if impost is not None and impost.decompose_mint is not None:
+                impost.decompose_mint = DecomposeMintRecord(
+                    mint_id="FOREIGN-MINT")
+            return impost
+        return orig_get(code, task_id, run_id=run_id)
+
+    monkeypatch.setattr(store_mod, "get_task", _foreign)
+    with pytest.raises(MintBarrierConflict):
+        orch._try_decompose_and_run(
+            parent, _ctx_err(tmp_path), RunSummary(project=project_with_run))
+    monkeypatch.setattr(store_mod, "get_task", orig_get)
+    assert producer_calls == []
+    assert parent.decompose_mint is not None, (
+        "conflict must retain the in-memory committed record, not roll back"
+    )
+
+
+def test_claim_verify_read_unavailable_claim_is_consumed(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The claim save returned, its verify read fails —
+    the claim is CONSUMED. Fresh recovery sees it and makes zero producer
+    calls."""
+    from modulatio import store
+    orch = _make_orchestrator(project_with_run)
+    child = _make_task(id="MNT-T-001-D1", minted_by="mint-1")
+    child.lifetime_attempts = max(child.max_retries, 0)
+    store.save_task(PROJECT_CODE, child, run_id=project_with_run.run_id)
+    orig_get = store_mod.get_task
+    monkeypatch.setattr(
+        store_mod, "get_task",
+        lambda code, task_id, run_id=None: None
+        if task_id == child.id else orig_get(code, task_id, run_id=run_id))
+    orch._claim_and_count(child)  # must NOT raise — the claim stands
+    monkeypatch.setattr(store_mod, "get_task", orig_get)
+    assert child.attempt_claim_id is not None
+    on_disk = store.get_task(
+        PROJECT_CODE, child.id, run_id=project_with_run.run_id)
+    assert on_disk.attempt_claim_id == child.attempt_claim_id
+
+
+def test_failed_disclosure_recovers_via_real_startup(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Audit append fails, the run ends with the parent
+    COMPLETED — a fresh orchestrator entering through the REAL kickoff entry
+    recovers the pending disclosure: exactly one stable-id row, record
+    advanced to emitted."""
+    import json as _json
+    from modulatio import compression, store
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    orig_append = compression._append_audit_row_0600
+    monkeypatch.setattr(
+        compression, "_append_audit_row_0600",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("audit sink down")))
+    handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
+    assert handled is True
+    on_disk = store.get_task(
+        PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
+    assert on_disk.decompose_mint.disclosure == "pending", (
+        "a failed append must leave a DURABLE pending marker, not just a "
+        "volatile unmarked set"
+    )
+    monkeypatch.setattr(compression, "_append_audit_row_0600", orig_append)
+    fresh = _make_orchestrator(project_with_run)
+    monkeypatch.setattr(
+        Orchestrator, "_kickoff_inner",
+        lambda self, *a, **kw: __import__(
+            "modulatio.orchestration", fromlist=["RunSummary"],
+        ).RunSummary(project=project_with_run))
+    fresh.kickoff("noop")  # the REAL startup entry — no private resume call
+    audit = fresh._scope_root() / "audit.jsonl"
+    rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+    mints = [r for r in rows if r.get("event") == "decompose_mint"]
+    assert [r["mint_id"] for r in mints] == [on_disk.decompose_mint.mint_id]
+    recovered = store.get_task(
+        PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
+    assert recovered.decompose_mint.disclosure == "emitted"
+
+
+def test_crash_between_append_and_advance_yields_one_row(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The row landed but the emitted advance did not —
+    startup recovery appends NO second row and advances the record."""
+    import json as _json
+    from modulatio import store
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
+    assert handled is True
+    on_disk = store.get_task(
+        PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
+    on_disk.decompose_mint.disclosure = "pending"  # simulate the lost advance
+    store.save_task(PROJECT_CODE, on_disk, run_id=project_with_run.run_id)
+    fresh = _make_orchestrator(project_with_run)
+    monkeypatch.setattr(
+        Orchestrator, "_kickoff_inner",
+        lambda self, *a, **kw: __import__(
+            "modulatio.orchestration", fromlist=["RunSummary"],
+        ).RunSummary(project=project_with_run))
+    fresh.kickoff("noop")
+    audit = fresh._scope_root() / "audit.jsonl"
+    rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+    mints = [r for r in rows if r.get("event") == "decompose_mint"]
+    assert len(mints) == 1, "idempotent recovery: one row, not two"
+    recovered = store.get_task(
+        PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
+    assert recovered.decompose_mint.disclosure == "emitted"
+
+
+def test_merge_syncs_canonical_terminal_state_into_live_objects(
+    project_with_run, monkeypatch
+):
+    """A stale nonterminal snapshot merged through the
+    REAL _merge_task_result path — disk, result.task, task_map, and
+    summary.tasks all expose the durable terminal record afterward."""
+    from modulatio import store
+    from modulatio.orchestration import (
+        RunSummary, TaskExecutionResult, _merge_task_result,
+    )
+    from modulatio.types import TaskStatus
+    run_id = project_with_run.run_id
+    orch = _make_orchestrator(project_with_run)
+    durable = _make_task(id="MNT-T-MG", minted_by="mint-1")
+    durable.attempt_claim_id = "claim-1"
+    durable.lifetime_attempts = 4
+    durable.status = TaskStatus.COMPLETED
+    store.save_task(PROJECT_CODE, durable, run_id=run_id)
+    stale = _make_task(id="MNT-T-MG", minted_by="mint-1")
+    stale.status = TaskStatus.PENDING
+    stale.lifetime_attempts = 0
+    summary = RunSummary(project=project_with_run)
+    task_map = {stale.id: stale}
+    res = TaskExecutionResult(task=stale)
+    _merge_task_result(
+        res, summary,
+        save_task=lambda t: orch._merge_save(t, summary),
+        merged_ids=set(),
+    )
+    on_disk = store.get_task(PROJECT_CODE, "MNT-T-MG", run_id=run_id)
+    assert on_disk.status is TaskStatus.COMPLETED
+    assert res.task.status is TaskStatus.COMPLETED, (
+        "the live result object must be synchronized to the durable record"
+    )
+    assert task_map["MNT-T-MG"].status is TaskStatus.COMPLETED
+    assert summary.tasks and summary.tasks[0].status is TaskStatus.COMPLETED
+    assert res.task.attempt_claim_id == "claim-1"
+
+
+def test_merge_conflict_reconciles_live_object_and_surfaces_error(
+    project_with_run, monkeypatch
+):
+    """A conflicting snapshot — durable record kept, the
+    live object reconciled TO it, and a summary error surfaced (not
+    log-only)."""
+    from modulatio import store
+    from modulatio.orchestration import (
+        RunSummary, TaskExecutionResult, _merge_task_result,
+    )
+    run_id = project_with_run.run_id
+    orch = _make_orchestrator(project_with_run)
+    durable = _make_task(id="MNT-T-MC", minted_by="mint-1")
+    durable.attempt_claim_id = "claim-1"
+    store.save_task(PROJECT_CODE, durable, run_id=run_id)
+    imposter = _make_task(id="MNT-T-MC", minted_by="mint-1")
+    imposter.attempt_claim_id = "claim-EVIL"
+    summary = RunSummary(project=project_with_run)
+    res = TaskExecutionResult(task=imposter)
+    _merge_task_result(
+        res, summary,
+        save_task=lambda t: orch._merge_save(t, summary),
+        merged_ids=set(),
+    )
+    on_disk = store.get_task(PROJECT_CODE, "MNT-T-MC", run_id=run_id)
+    assert on_disk.attempt_claim_id == "claim-1"
+    assert res.task.attempt_claim_id == "claim-1", (
+        "the live object must reconcile to the durable authority"
+    )
+    assert any("MNT-T-MC" in e for e in summary.errors), (
+        "a merge conflict must surface as a summary error, not log-only"
+    )
