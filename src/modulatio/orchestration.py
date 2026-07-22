@@ -10605,16 +10605,14 @@ class Orchestrator:
                            "escalating as stuck", t.id, exc_info=True)
             return None
         specs = _parse_redecompose_specs(resp)
-        # Keystone #18 (task-bound, no reset): the split SHARES the parent's
-        # REMAINING budget — the children do NOT each get a fresh copy of it.
-        # Spinning up a child on a subtask counts as ONE try against the
-        # task-bound budget, so only the first ``parent_remaining`` children are
-        # granted a producer attempt; any beyond that fall straight to the forced
-        # QC-as-fixer floor. Total producer attempts across a split therefore never
-        # exceed what the parent had left — a split cannot multiply the budget by
-        # the child count.
+        # Mint floor: a split is a MINT — the parent's remaining budget is
+        # consumed BY the split, and every child is constructed with exactly
+        # ONE producer attempt (clamped ceiling; a raw negative must not mint
+        # extras). The run's spend is bounded by one-mint-per-node × width ×
+        # depth, not by handing children a share of the parent's counter — a
+        # starved child (zero attempts) forces QC to author the keystone
+        # artifact, which is the pathology this floor fixes.
         retry_budget = max(t.max_retries, 0)
-        parent_remaining = max(0, (retry_budget + 1) - t.lifetime_attempts)
         children: "list[Task]" = []
         for spec in specs:
             desc = str(spec.get("description") or "").strip()
@@ -10622,12 +10620,7 @@ class Orchestrator:
                 continue
             raw_path = spec.get("output_path")
             idx = len(children)  # 0-based position among the VALID children
-            # One try per child, drawn from the shared remaining: within budget →
-            # a single producer attempt (lifetime one below the ceiling → remaining
-            # 1); beyond it → zero remaining (lifetime AT the ceiling → QC-as-fixer).
-            child_lifetime = (
-                retry_budget if idx < parent_remaining else retry_budget + 1
-            )
+            child_lifetime = retry_budget
             children.append(Task(
                 id=f"{t.id}-D{idx + 1}",
                 project_id=t.project_id,
@@ -10645,9 +10638,9 @@ class Orchestrator:
                 #   • max_retries  — the (operator-settable) CEILING; inheriting
                 #     it stops a split resurrecting the model default when the
                 #     knob is set lower.
-                #   • lifetime_attempts — STAGGERED (not copied) so the children
-                #     share the parent's remaining budget: each qualifying child
-                #     gets one try, the rest go straight to QC-as-fixer.
+                #   • lifetime_attempts — the clamped floor: every child gets
+                #     exactly one producer attempt; the split's bound is
+                #     one-mint-per-node, not a share of the parent's counter.
                 #   • retry_count — so a child's "after N retries" report is true.
                 max_retries=t.max_retries,
                 lifetime_attempts=child_lifetime,

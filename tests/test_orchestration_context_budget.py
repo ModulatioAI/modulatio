@@ -712,61 +712,35 @@ def test_attempt_decompose_children_inherit_assigned_agent(
     assert all(c.assigned_agent_id == "jan" for c in children)
 
 
-def test_attempt_decompose_children_inherit_lifetime_budget(
-    project_with_run, monkeypatch, tmp_path
-):
-    """The attempt budget is bound to the TASK's lifetime (keystone #18). A
-    churn-exhausted parent (spent its full budget) must yield children with ZERO
-    remaining — every child lands at the ceiling+1 (→ QC-as-fixer), so splitting a
-    spent task hands NO child a fresh budget. (The children SHARE the parent's
-    remaining rather than each copying it — see the partial-remaining test.)"""
-    orch = _make_orchestrator(project_with_run)
-    _planner_returns(monkeypatch,
-        '[{"description":"a","output_path":"x.md"},'
-        '{"description":"b","output_path":"y.md"}]')
-    parent = _make_task()               # max_retries=3
-    parent.lifetime_attempts = 4        # spent: remaining = (3+1) - 4 = 0
-    children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
-    assert children is not None
-    # Spent parent → every child at ceiling+1 → zero remaining.
-    assert all(c.lifetime_attempts == parent.max_retries + 1 for c in children)
-    assert all(
-        max(0, (c.max_retries + 1) - c.lifetime_attempts) == 0 for c in children
-    )
-
-
 def test_attempt_decompose_children_inherit_retry_ceiling(
     project_with_run, monkeypatch, tmp_path
 ):
-    """``max_retries`` is the operator-set CEILING (future settings knob). A
-    child must inherit the parent's ceiling — else a knob set BELOW the model
-    default lets a split resurrect the higher default and mint extra tries.
-    Parent retries=2, fully spent → child has zero remaining (→ QC-as-fixer)."""
+    """``max_retries`` is the operator-set CEILING (a settings knob). A child
+    must inherit the parent's ceiling — else a knob set BELOW the model
+    default lets a split resurrect the higher default. Under the #40 mint
+    floor the child's counter derives from the CLAMPED ceiling (one remaining
+    attempt); the floor arithmetic itself is pinned in
+    test_decompose_mint.py."""
     orch = _make_orchestrator(project_with_run)
     _planner_returns(monkeypatch,
         '[{"description":"a","output_path":"x.md"},'
         '{"description":"b","output_path":"y.md"}]')
     parent = _make_task()
     parent.max_retries = 2          # operator knob set below the default of 4
-    parent.lifetime_attempts = 3    # spent its full (2 + 1) budget
     children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
     assert children is not None
     assert all(c.max_retries == 2 for c in children)
-    # the invariant: zero tries left, no resurrected ceiling
-    assert all(
-        max(0, (c.max_retries + 1) - c.lifetime_attempts) == 0 for c in children
-    )
 
 
 @pytest.mark.parametrize("cap", [2, 3, 4, 9])
-def test_decompose_child_spent_budget_runs_zero_producer_attempts(
+def test_decompose_children_run_one_attempt_each(
     project_with_run, monkeypatch, tmp_path, cap
 ):
-    """End-to-end through the real run path, for ANY operator-set ceiling
-    (retries-per-task is a settings knob: 2-of-3, 3-of-4, 9-of-10, …): a parent
-    that has spent its full lifetime budget splits, and the children — inheriting
-    BOTH the ceiling and the spent count — run ZERO new producer attempts (forced
-    straight to the QC-as-fixer floor). No setting value lets a split mint a try."""
+    """End-to-end through the real run path, for ANY operator-set ceiling: a
+    budget-spent parent splits and every child runs exactly ONE producer
+    attempt (the #40 mint floor). The split's spend bound is one-mint-per-node
+    — not a share of the parent's counter, which starved children into
+    QC-authored keystones."""
     monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the budget mechanics
     orch = _make_orchestrator(project_with_run)
     _planner_returns(monkeypatch,
@@ -789,20 +763,19 @@ def test_decompose_child_spent_budget_runs_zero_producer_attempts(
     summary = RunSummary(project=project_with_run)
     handled = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
     assert handled is True
-    assert calls["n"] == 0, (
-        f"cap={cap}: a spent parent's split children must run ZERO producer "
-        f"attempts, but {calls['n']} ran — the split minted fresh tries"
+    assert calls["n"] == 2, (
+        f"cap={cap}: a split into 2 children must run exactly one producer "
+        f"attempt per child, but {calls['n']} ran"
     )
 
 
-def test_decompose_children_share_parent_remaining_not_multiply(
+def test_decompose_children_one_attempt_each_partial_remaining(
     project_with_run, monkeypatch, tmp_path
 ):
-    """M1: a PARTIAL-remaining split must SHARE the parent's remaining
-    budget, not hand each child a fresh copy. Spinning up a child on a subtask is
-    ONE try against the task-bound budget, so a parent with 1 try left split into
-    2 children runs exactly ONE producer attempt total (the 2nd child → QC-as-fixer)
-    — never 2. A split can't multiply the budget by the child count."""
+    """A partial-remaining parent's split still grants every child its one
+    attempt (the #40 mint floor): parent with 1 try left, 2 children → 2
+    producer attempts, one per child. The multiply guard is one-mint-per-node
+    (spend-at-mint + durable marker), not child starvation."""
     monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the budget mechanics
     orch = _make_orchestrator(project_with_run)
     _planner_returns(monkeypatch,
@@ -825,10 +798,9 @@ def test_decompose_children_share_parent_remaining_not_multiply(
     summary = RunSummary(project=project_with_run)
     handled = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
     assert handled is True
-    assert calls["n"] == 1, (
-        f"a parent with 1 try left, split into 2 children, must run exactly ONE "
-        f"producer attempt (shared budget) — but {calls['n']} ran; the split "
-        f"multiplied the budget by the child count"
+    assert calls["n"] == 2, (
+        f"a split into 2 children must run one producer attempt per child, "
+        f"but {calls['n']} ran"
     )
 
 
