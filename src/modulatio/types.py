@@ -182,6 +182,13 @@ class Goal(BaseModel):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class DecomposeMintConflict(RuntimeError):
+    """A mint-record child id already exists under a DIFFERENT authority
+    (foreign ``mint_id``, foreign ``attempt_claim_id``, or mismatched
+    immutable descriptor). Neither recovery nor the wave merge may preserve
+    or overwrite such a record; the conflict surfaces typed, with no write."""
+
+
 class DecomposeMintRecord(BaseModel):
     """The committed decompose-mint transaction, attached to the PARENT task.
 

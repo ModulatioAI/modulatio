@@ -47,6 +47,7 @@ from modulatio.types import (
     ActivityEvent,
     ArtifactEvidence,
     AssertionEvidence,
+    DecomposeMintConflict,
     DecomposeMintRecord,
     EvidenceRequirement,
     Goal,
@@ -1439,11 +1440,12 @@ def _token_floor(task: "Task") -> int | None:
 
 
 
-class DecomposeMintConflict(RuntimeError):
-    """A mint-record child id already exists under a DIFFERENT authority
-    (foreign ``mint_id`` or mismatched immutable descriptor — canonical
-    path/lineage). Recovery must never preserve or overwrite such a child;
-    the conflict surfaces typed, with no write."""
+class MintedAttemptAlreadyClaimed(RuntimeError):
+    """Typed control flow raised at the ONE producer seam when a CLAIMED
+    minted child reaches it: the minted attempt is already consumed, so no
+    producer/tool/artifact work (nor a turn) may run. The redo owner routes
+    the child to the interrupted settlement lane — the seam enforces the
+    invariant instead of assuming upstream routing forever."""
 
 
 @dataclass(frozen=True)
@@ -2446,6 +2448,13 @@ class Orchestrator:
         #: starts empty) — that's allowed; consumers count UNIQUE mint ids,
         #: so crash replay can't inflate the claimed mint count.
         self._emitted_mint_ids: "set[str]" = set()
+        #: Serializes the mint DURABILITY BARRIERS (parent WAL commit,
+        #: missing-child materialization, attempt claim) — the three
+        #: authorization records whose durability controls whether expensive
+        #: work may begin. Deliberately bypasses worker deferral: these are a
+        #: narrow transaction boundary, not a retreat from the deterministic
+        #: wave merge (ordinary task state still merges on the main thread).
+        self._mint_barrier_lock = threading.RLock()
         #: Serializes converse() turns on one project so two concurrent operator
         #: sessions (e.g. TUI + ACP) don't interleave the durable conversation log
         #: or read a half-written thread. Held for the whole turn — converse is an
@@ -4554,10 +4563,6 @@ class Orchestrator:
         Returns (path, sha256, token_count).
         """
         #: every producer-attempt dispatch is one turn for the
-        # sparse-inbox channel. Redo attempts re-enter this method, so
-        # they naturally bump the counter. Persist-before-increment
-        # guarantees monotonicity across crash-resume.
-        self._increment_turn_persisted()
         # #18 keystone: this is the SINGLE producer-run seam (every caller — the redo
         # loop, escalation, and every re-entry path — flows through here), so the
         # task's LIFETIME attempt counter spends here exactly once per attempt.
@@ -4565,8 +4570,13 @@ class Orchestrator:
         # earn a fresh budget by re-entering the loop and so can't skirt QC-as-fixer.
         # _claim_and_count is the ONE claim-and-count owner — minted children
         # get a DURABLE claim persisted before any producer byte; ordinary tasks
-        # keep the exact in-memory increment.
+        # keep the exact in-memory increment. It runs BEFORE the turn increment so
+        # a typed claimed-child refusal doesn't consume a turn by touching the seam.
         self._claim_and_count(task)
+        # Redo attempts re-enter this method, so they naturally bump the
+        # counter. Persist-before-increment guarantees monotonicity across
+        # crash-resume (sparse-inbox channel).
+        self._increment_turn_persisted()
         # (c12): sweep abandoned candidates on every producer
         # turn so the 3-turn rule holds when Leader-iterate is off.
         self._sweep_abandoned_candidates()
@@ -9153,7 +9163,17 @@ class Orchestrator:
         in_flight: dict[str, tuple] = {}
 
         def _save(task: Task) -> None:
-            store.save_task(self.project.code, task, run_id=self.project.run_id)
+            # Monotonic vs the decompose-mint barriers: a worker snapshot must not
+            # regress a barrier-persisted WAL/claim/terminal record. A typed
+            # conflict keeps the durable record intact — log loudly, don't
+            # take down the wave merge.
+            try:
+                store.save_task_monotonic(
+                    self.project.code, task, run_id=self.project.run_id)
+            except DecomposeMintConflict:
+                _logger.error(
+                    "wave merge refused a conflicting mint/claim snapshot "
+                    "for %s — durable record kept", task.id, exc_info=True)
 
         def _cascade_dep_failures() -> None:
             for t in tasks:
@@ -9697,6 +9717,13 @@ class Orchestrator:
                     task_id=t.id,
                     agent_id=t.assigned_agent_id,
                 )
+
+            except MintedAttemptAlreadyClaimed:
+                # The seam refused a CLAIMED minted child (at-most-once
+                # enforced at the seam itself). The attempt is consumed —
+                # settle through the interrupted lane, never re-run.
+                self._settle_interrupted_claim(t, summary)
+                return
 
             except _ctx_budget_module.RecoverableContextError as ctx_exc:
                 # Context-budget exhaustion is NOT producer-retriable (same
@@ -10964,15 +10991,50 @@ class Orchestrator:
         )
         self._persist_child_task(child)
 
+    @staticmethod
+    def _mint_child_authority(task: "Task") -> tuple:
+        """THE canonical immutable-authority projection of a minted child —
+        every birth-time field that controls identity, work, binding,
+        routing-independent budget, ancestry, tooling, and artifact
+        authority. Shared by commit blueprints and recovery comparison: any
+        difference is a typed conflict. Deliberately EXCLUDES state the
+        engine legitimately changes after birth (status, transitions,
+        counters, claim, evidence provided, QC fields, timestamps, assigned
+        agent / QC agent / continuity routing, producer_mode) — comparing a
+        mutable current field to its birth value would reject honest
+        completed children. Collections are canonicalized so serialization
+        order can't create false conflicts."""
+        from modulatio.families import task_output_rel_path
+        return (
+            task.id,
+            str(task.project_id),
+            task.goal_id,
+            task.description,
+            task.artifact_kind,
+            task.operation,
+            tuple(task.research_topics),
+            tuple(sorted(task.required_skills)),
+            tuple(sorted(task.required_capabilities)),
+            tuple(task.depends_on),
+            task_output_rel_path(task),
+            task.deliverable,
+            json.dumps(task.tool_args, sort_keys=True, default=str),
+            tuple(str(e) for e in task.evidence_required),
+            task.max_retries,
+            task.decompose_depth,
+            tuple(task.artifact_lineage),
+            task.minted_by,
+        )
+
     def _materialize_mint_children(self, t: "Task") -> "list[Task]":
         """Idempotently project the committed record's descriptors into
         child Task files. Missing child → create it. Existing child under
-        the SAME authority (``minted_by`` mint id + immutable descriptor:
-        canonical path, lineage) → preserve its current state untouched.
-        Existing id under a DIFFERENT authority → typed engine conflict,
-        no write. ``prepared`` alone is sufficient; the advance to
-        ``children_materialized`` is a best-effort convenience."""
-        from modulatio.families import task_output_rel_path
+        the SAME authority (``minted_by`` mint id + the full immutable
+        descriptor projection, :meth:`_mint_child_authority`) → preserve
+        its current state untouched. Existing id under a DIFFERENT
+        authority → typed engine conflict, no write. ``prepared`` alone is
+        sufficient; the advance to ``children_materialized`` is a
+        best-effort convenience."""
         rec = t.decompose_mint
         children: "list[Task]" = []
         for d in rec.child_descriptors:
@@ -10980,14 +11042,13 @@ class Orchestrator:
             existing = store.get_task(
                 self.project.code, blueprint.id, run_id=self.project.run_id)
             if existing is None:
-                self._persist_child_task(blueprint)
+                self._persist_mint_child_barrier(blueprint)
                 children.append(blueprint)
                 continue
             if (
                 existing.minted_by != rec.mint_id
-                or task_output_rel_path(existing)
-                != task_output_rel_path(blueprint)
-                or existing.artifact_lineage != blueprint.artifact_lineage
+                or self._mint_child_authority(existing)
+                != self._mint_child_authority(blueprint)
             ):
                 raise DecomposeMintConflict(
                     f"child {blueprint.id} of mint {rec.mint_id} exists "
@@ -11039,7 +11100,7 @@ class Orchestrator:
         t.decompose_mint = record
         t.lifetime_attempts = retry_budget + 1  # spent BY the split
         try:
-            self._save_task_deferrable(t)
+            self._persist_mint_parent_barrier(t)
         except Exception:
             _logger.warning(
                 "decompose mint commit failed for %s — refusing the split",
@@ -11051,6 +11112,44 @@ class Orchestrator:
                 "parent mint commit failed — split refused, nothing minted")
         return None
 
+    def _persist_mint_parent_barrier(self, parent: "Task") -> None:
+        """Durability barrier for the parent WAL commit: a synchronized
+        atomic store write that runs EVEN under worker deferral, then
+        reload-verifies the committed identity before returning. Raises on
+        any failure — never best-effort, never a deferred lambda."""
+        with self._mint_barrier_lock:
+            store.save_task(self.project.code, parent,
+                            run_id=self.project.run_id)
+            reloaded = store.get_task(
+                self.project.code, parent.id, run_id=self.project.run_id)
+            if (
+                reloaded is None
+                or reloaded.decompose_mint is None
+                or reloaded.decompose_mint.mint_id
+                != parent.decompose_mint.mint_id
+                or reloaded.lifetime_attempts != parent.lifetime_attempts
+            ):
+                raise OSError(
+                    f"mint parent barrier verify failed for {parent.id}")
+
+    def _persist_mint_child_barrier(self, child: "Task") -> None:
+        """Durability barrier for a minted child record (materialization and
+        attempt claim). Same contract as the parent barrier: synchronized,
+        atomic, deferral-proof, reload-verified, raising."""
+        with self._mint_barrier_lock:
+            store.save_task(self.project.code, child,
+                            run_id=self.project.run_id)
+            reloaded = store.get_task(
+                self.project.code, child.id, run_id=self.project.run_id)
+            if (
+                reloaded is None
+                or reloaded.minted_by != child.minted_by
+                or reloaded.attempt_claim_id != child.attempt_claim_id
+                or reloaded.lifetime_attempts != child.lifetime_attempts
+            ):
+                raise OSError(
+                    f"mint child barrier verify failed for {child.id}")
+
     def _claim_and_count(self, task: "Task") -> None:
         """THE one claim-and-count owner at the producer seam.
 
@@ -11059,21 +11158,22 @@ class Orchestrator:
         records the stable ``attempt_claim_id`` and the spent counter
         (``retry_budget + 1``) BEFORE any producer byte runs; the claim IS
         the increment, so a crash mid-producer replays as claimed-and-spent,
-        never as budget-available. Minted child, already claimed → no second
-        increment (recovery routing should have prevented the call; refusing
-        to double-count keeps the budget honest either way)."""
+        never as budget-available. Minted child, already claimed → typed
+        :class:`MintedAttemptAlreadyClaimed` (the seam fails closed; the
+        redo owner routes the child to the interrupted lane)."""
         if task.minted_by is None:
             task.lifetime_attempts += 1
             return
         if task.attempt_claim_id is not None:
-            _logger.warning(
-                "producer seam reached a CLAIMED minted child %s "
-                "(claim %s) — not double-counting", task.id,
-                task.attempt_claim_id)
-            return
+            # Fail CLOSED: the seam enforces at-most-once itself — a claimed
+            # child that reaches it (redispatch, tampered counter, future
+            # re-entry) is refused typed, before any producer work.
+            raise MintedAttemptAlreadyClaimed(
+                f"minted child {task.id} already claimed attempt "
+                f"{task.attempt_claim_id}")
         task.attempt_claim_id = str(uuid4())
         task.lifetime_attempts = max(task.max_retries, 0) + 1
-        self._persist_child_task(task)
+        self._persist_mint_child_barrier(task)
 
     def _emit_decompose_mint(self, t: "Task") -> None:
         """The mint disclosure fact — audit evidence, not a spend control:
@@ -11085,7 +11185,6 @@ class Orchestrator:
         rec = t.decompose_mint
         if rec is None or rec.mint_id in self._emitted_mint_ids:
             return
-        self._emitted_mint_ids.add(rec.mint_id)
         detail = {
             "mint_id": rec.mint_id,
             "children": len(rec.child_descriptors),
@@ -11093,21 +11192,57 @@ class Orchestrator:
             "depth": rec.depth,
             "parent_remaining_was": rec.parent_remaining_was,
         }
-        self._emit_activity(
-            role="planner", phase="decompose_mint", task_id=t.id,
-            agent_id="planner", detail=detail,
-        )
-        from modulatio.compression import _append_audit_row_0600
-        _append_audit_row_0600(
-            self._scope_root() / "audit.jsonl",
-            {
-                "event": "decompose_mint",
-                "task_id": t.id,
-                **detail,
-                "ts": datetime.now(timezone.utc).isoformat(),
-            },
-            self._store_lock,
-        )
+        # Delivery order: durable audit append FIRST — and
+        # idempotent by stable id, so restart replay appends no duplicate —
+        # then mark delivered, then best-effort live activity. A failed
+        # append leaves the id unmarked so recovery retries; a failed live
+        # subscriber loses nothing durable.
+        from modulatio import compression as _compression
+        audit_path = self._scope_root() / "audit.jsonl"
+        try:
+            with self._store_lock:
+                already = False
+                if audit_path.exists():
+                    for line in audit_path.read_text(
+                        encoding="utf-8",
+                    ).splitlines():
+                        try:
+                            r = json.loads(line)
+                        except ValueError:
+                            continue
+                        if (
+                            r.get("event") == "decompose_mint"
+                            and r.get("mint_id") == rec.mint_id
+                        ):
+                            already = True
+                            break
+                if not already:
+                    _compression._append_audit_row_0600(
+                        audit_path,
+                        {
+                            "event": "decompose_mint",
+                            "task_id": t.id,
+                            **detail,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        },
+                        None,  # self._store_lock already held
+                        strict=True,
+                    )
+        except Exception:  # noqa: BLE001 — disclosure must not abort the mint
+            _logger.warning(
+                "decompose_mint audit append failed for %s (mint %s) — id "
+                "stays retryable", t.id, rec.mint_id, exc_info=True)
+            return
+        self._emitted_mint_ids.add(rec.mint_id)
+        try:
+            self._emit_activity(
+                role="planner", phase="decompose_mint", task_id=t.id,
+                agent_id="planner", detail=detail,
+            )
+        except Exception:  # noqa: BLE001 — live delivery is best-effort
+            _logger.warning(
+                "decompose_mint live activity delivery failed for %s — "
+                "durable fact already landed", t.id, exc_info=True)
 
     def _emit_decompose_refused(
         self, t: "Task", refusal: "_DecomposeRefusal",

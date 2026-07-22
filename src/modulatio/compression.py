@@ -879,11 +879,14 @@ def _unified_diff(prev_state: dict | None, curr_state: dict) -> str:
 
 def _append_audit_row_0600(
     audit_path: Path, row: dict, write_lock: Any = None,
+    *, strict: bool = False,
 ) -> None:
-    """Append one JSONL line to ``audit.jsonl``. Best-effort: write
-    failures log WARN and return (mirrors inbox audit
+    """Append one JSONL line to ``audit.jsonl``. Best-effort by default:
+    write failures log WARN and return (mirrors inbox audit
     semantics — the LLM call that triggered the event must not be
-    broken by an audit-write hiccup).
+    broken by an audit-write hiccup). ``strict=True`` re-raises instead —
+    for callers whose delivery bookkeeping must not mark an append that
+    never landed (the decompose-mint disclosure fact).
 
     Created at 0o600 if missing (matches the context_budget /
     inbox row-writers).
@@ -915,6 +918,8 @@ def _append_audit_row_0600(
             with audit_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, default=str, ensure_ascii=True) + "\n")
     except Exception as exc:  # noqa: BLE001 — best-effort audit
+        if strict:
+            raise
         _logger.warning(
             "compression audit append failed at %s: %s", audit_path, exc,
         )

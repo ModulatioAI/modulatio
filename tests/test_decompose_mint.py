@@ -16,6 +16,7 @@ from uuid import uuid4
 import pytest
 
 from modulatio import context_budget, vault
+from modulatio import store as store_mod
 from modulatio.orchestration import Orchestrator
 from modulatio.types import Project, Task
 
@@ -523,7 +524,7 @@ def test_crash_before_first_child_leaves_complete_committed_record(
     def _die(self, child):
         raise RuntimeError("process death injected before child save")
 
-    monkeypatch.setattr(Orchestrator, "_persist_child_task", _die)
+    monkeypatch.setattr(Orchestrator, "_persist_mint_child_barrier", _die)
     summary = RunSummary(project=project_with_run)
     with pytest.raises(RuntimeError):
         orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
@@ -571,8 +572,8 @@ def test_parent_commit_failure_releases_reservations_and_refuses(
     def _fail_save(self, task):
         raise OSError("disk full injected at parent commit")
 
-    orig_save = Orchestrator._save_task_deferrable
-    monkeypatch.setattr(Orchestrator, "_save_task_deferrable", _fail_save)
+    orig_save = Orchestrator._persist_mint_parent_barrier
+    monkeypatch.setattr(Orchestrator, "_persist_mint_parent_barrier", _fail_save)
     summary = RunSummary(project=project_with_run)
     handled, refusal = orch._try_decompose_and_run(
         parent, _ctx_err(tmp_path), summary)
@@ -580,7 +581,7 @@ def test_parent_commit_failure_releases_reservations_and_refuses(
     assert parent.decompose_mint is None
     assert parent.lifetime_attempts == 0  # in-memory spend reverted
     assert orch._decompose_reservations == {}
-    monkeypatch.setattr(Orchestrator, "_save_task_deferrable", orig_save)
+    monkeypatch.setattr(Orchestrator, "_persist_mint_parent_barrier", orig_save)
     _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
     retry = orch._attempt_decompose(
         _make_task(id="MNT-T-NEXT"), _ctx_err(tmp_path))
@@ -603,12 +604,12 @@ def _committed_parent_no_children(orch, monkeypatch, project, tmp_path):
     def _die(self, child):
         raise RuntimeError("crash injected before child save")
 
-    orig_persist = Orchestrator._persist_child_task
-    monkeypatch.setattr(Orchestrator, "_persist_child_task", _die)
+    orig_persist = Orchestrator._persist_mint_child_barrier
+    monkeypatch.setattr(Orchestrator, "_persist_mint_child_barrier", _die)
     with pytest.raises(RuntimeError):
         orch._try_decompose_and_run(
             parent, _ctx_err(tmp_path), RunSummary(project=project))
-    monkeypatch.setattr(Orchestrator, "_persist_child_task", orig_persist)
+    monkeypatch.setattr(Orchestrator, "_persist_mint_child_barrier", orig_persist)
     stored = {
         t.id: t for t in store.list_tasks(PROJECT_CODE, run_id=project.run_id)
     }
@@ -1140,3 +1141,599 @@ def test_declared_artifact_keys_tracks_saves_updates_and_deletes(
     os.remove(store._task_path(PROJECT_CODE, a.id, run_id=run_id))
     keys = store.declared_artifact_keys(PROJECT_CODE, run_id=run_id)
     assert "drafts/k1-moved.md" not in keys
+
+
+# ── Durability barriers, sealed seam, monotonic merge ───────────────────────
+
+def _enter_worker_tls(orch):
+    """Flip the orchestrator into the isolated-worker deferral posture the
+    concurrent wave uses — deferred store writes + buffered children."""
+    orch._tls.deferred_writes = []
+    orch._tls.child_tasks = []
+
+
+def test_wal_commit_is_durable_under_worker_deferral(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The parent mint commit is a DURABILITY BARRIER — even
+    inside an isolated worker (deferral active), the record + spend are on
+    disk before the commit returns."""
+    from modulatio import store
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(children, list)
+    _enter_worker_tls(orch)
+    try:
+        failure = orch._commit_decompose_mint(parent, children)
+        assert failure is None
+        on_disk = store.get_task(
+            PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
+        assert on_disk.decompose_mint is not None, (
+            "worker deferral must not void the WAL barrier"
+        )
+        assert on_disk.lifetime_attempts == max(parent.max_retries, 0) + 1
+    finally:
+        orch._tls.deferred_writes = None
+        orch._tls.child_tasks = None
+
+
+def test_claim_is_durable_under_worker_deferral(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The attempt claim is a barrier too — durable before the
+    producer byte even inside a worker."""
+    from modulatio import store
+    orch = _make_orchestrator(project_with_run)
+    child = _make_task(id="MNT-T-001-D1", minted_by="mint-1")
+    child.lifetime_attempts = max(child.max_retries, 0)
+    store.save_task(PROJECT_CODE, child, run_id=project_with_run.run_id)
+    _enter_worker_tls(orch)
+    try:
+        orch._claim_and_count(child)
+        on_disk = store.get_task(
+            PROJECT_CODE, child.id, run_id=project_with_run.run_id)
+        assert on_disk.attempt_claim_id == child.attempt_claim_id
+        assert on_disk.attempt_claim_id is not None
+        assert on_disk.lifetime_attempts == max(child.max_retries, 0) + 1
+    finally:
+        orch._tls.deferred_writes = None
+        orch._tls.child_tasks = None
+
+
+def test_commit_failure_under_worker_tls_fails_closed(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The barrier save raising under worker TLS →
+    refusal, zero mint event, zero children, spend reverted, reservations
+    released."""
+    import json as _json
+    from modulatio.orchestration import RunSummary, _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    monkeypatch.setattr(
+        store_mod, "save_task",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")))
+    _enter_worker_tls(orch)
+    try:
+        handled, refusal = orch._try_decompose_and_run(
+            parent, _ctx_err(tmp_path), RunSummary(project=project_with_run))
+    finally:
+        orch._tls.deferred_writes = None
+        orch._tls.child_tasks = None
+    assert handled is False and isinstance(refusal, _DecomposeRefusal)
+    assert parent.decompose_mint is None
+    assert parent.lifetime_attempts == 0
+    assert orch._decompose_reservations == {}
+    audit = orch._scope_root() / "audit.jsonl"
+    if audit.exists():
+        rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+        assert not [r for r in rows if r.get("event") == "decompose_mint"]
+
+
+def test_seam_raises_typed_on_claimed_minted_child(
+    project_with_run, monkeypatch
+):
+    """The ONE producer seam fails CLOSED — a claimed minted
+    child reaching it raises typed control flow before any producer/tool/
+    artifact work or turn consumption."""
+    from modulatio.orchestration import MintedAttemptAlreadyClaimed
+    orch = _make_orchestrator(project_with_run)
+    child = _make_task(id="MNT-T-001-D1", minted_by="mint-1")
+    child.attempt_claim_id = "claim-1"
+    child.lifetime_attempts = 0  # adversarial: stale/tampered counter
+    turns = []
+    monkeypatch.setattr(
+        Orchestrator, "_increment_turn_persisted",
+        lambda self: turns.append(1))
+    with pytest.raises(MintedAttemptAlreadyClaimed):
+        orch._producer_execute(child)
+    assert turns == [], (
+        "a rejected claimed entry must not consume a turn"
+    )
+
+
+def test_redo_owner_routes_claimed_seam_refusal_to_interrupted_lane(
+    project_with_run, monkeypatch
+):
+    """The redo owner catches the typed refusal and settles the
+    child through the interrupted lane — zero producer work."""
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import TaskStatus
+    orch = _make_orchestrator(project_with_run)
+    child = _make_task(id="MNT-T-001-D1", minted_by="mint-1")
+    child.attempt_claim_id = "claim-1"
+    child.lifetime_attempts = 0  # adversarial re-entry: admitted by arithmetic
+    orch._run_task_with_redo(child, RunSummary(project=project_with_run))
+    assert child.status is TaskStatus.BLOCKED
+    assert any("interrupted" in tr.rationale for tr in child.transitions)
+
+
+def test_merge_cannot_regress_barrier_state(project_with_run):
+    """A stale worker snapshot merged after the barrier
+    cannot remove the mint record, decrease the counter, clear the claim, or
+    regress a terminal child."""
+    from modulatio import store
+    from modulatio.types import DecomposeMintRecord, TaskStatus
+    run_id = project_with_run.run_id
+    current = _make_task(id="MNT-T-MONO", minted_by="mint-1")
+    current.attempt_claim_id = "claim-1"
+    current.lifetime_attempts = 4
+    current.status = TaskStatus.COMPLETED
+    current.decompose_mint = DecomposeMintRecord(mint_id="m-1")
+    store.save_task(PROJECT_CODE, current, run_id=run_id)
+    stale = _make_task(id="MNT-T-MONO", minted_by="mint-1")
+    stale.lifetime_attempts = 0  # pre-claim snapshot
+    store.save_task_monotonic(PROJECT_CODE, stale, run_id=run_id)
+    on_disk = store.get_task(PROJECT_CODE, "MNT-T-MONO", run_id=run_id)
+    assert on_disk.decompose_mint is not None
+    assert on_disk.attempt_claim_id == "claim-1"
+    assert on_disk.lifetime_attempts == 4
+    assert on_disk.status is TaskStatus.COMPLETED
+
+
+def test_merge_conflicting_claim_id_is_typed_conflict(project_with_run):
+    """A snapshot carrying a DIFFERENT claim id is a typed
+    conflict, never last-writer-wins."""
+    from modulatio import store
+    from modulatio.orchestration import DecomposeMintConflict
+    run_id = project_with_run.run_id
+    current = _make_task(id="MNT-T-MONO2", minted_by="mint-1")
+    current.attempt_claim_id = "claim-1"
+    store.save_task(PROJECT_CODE, current, run_id=run_id)
+    imposter = _make_task(id="MNT-T-MONO2", minted_by="mint-1")
+    imposter.attempt_claim_id = "claim-OTHER"
+    with pytest.raises(DecomposeMintConflict):
+        store.save_task_monotonic(PROJECT_CODE, imposter, run_id=run_id)
+    on_disk = store.get_task(PROJECT_CODE, "MNT-T-MONO2", run_id=run_id)
+    assert on_disk.attempt_claim_id == "claim-1"
+
+
+# ── Restart reservation authority + strict declared-key index ───────────────
+
+def test_prepared_mint_reservations_survive_restart(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Parent committed, no child files, FRESH process — a
+    different split targeting one of the prepared record's keys takes a
+    typed refusal; recovery afterwards still materializes the originals."""
+    from modulatio.orchestration import RunSummary, _DecomposeRefusal
+    from modulatio.types import TaskStatus
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    assert reloaded.decompose_mint.state == "prepared"
+    fresh = _make_orchestrator(project_with_run)  # restart: empty registry
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"drafts/one.md"},'
+        '{"description":"b","output_path":"drafts/elsewhere.md"}]')
+    rival = _make_task(id="MNT-T-RIVAL")
+    outcome = fresh._attempt_decompose(rival, _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal), (
+        "a prepared mint's reservations must be owned across restart"
+    )
+    assert "drafts/one.md" in outcome.reason
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo_inner",
+        lambda self, t, summary, *a, **kw: setattr(
+            t, "status", TaskStatus.COMPLETED))
+    fresh._resume_decompose_mint(reloaded, RunSummary(project=project_with_run))
+    assert reloaded.status is TaskStatus.COMPLETED
+
+
+def test_same_size_mtime_restored_replacement_is_observed(
+    project_with_run
+):
+    """(mtime, size) is not a content identity — an equal-size
+    replacement with its mtime restored must still be observed (inode/ctime
+    signature)."""
+    import os
+    from modulatio import store
+    run_id = project_with_run.run_id
+    a = _make_task(id="MNT-T-SWP", output_path="drafts/aaa.md")
+    store.save_task(PROJECT_CODE, a, run_id=run_id)
+    keys = store.declared_artifact_keys(PROJECT_CODE, run_id=run_id)
+    assert "drafts/aaa.md" in keys
+    path = store._task_path(PROJECT_CODE, a.id, run_id=run_id)
+    st = path.stat()
+    body = path.read_text()
+    assert "drafts/aaa.md" in body
+    replaced = body.replace("drafts/aaa.md", "drafts/bbb.md")  # equal length
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(replaced)
+    os.replace(tmp, path)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))  # restore mtime
+    keys = store.declared_artifact_keys(PROJECT_CODE, run_id=run_id)
+    assert "drafts/bbb.md" in keys and "drafts/aaa.md" not in keys, (
+        "a same-size mtime-restored replacement must invalidate the cache"
+    )
+
+
+def test_malformed_task_file_refuses_split_fail_closed(
+    project_with_run, monkeypatch, tmp_path
+):
+    """A task file that cannot be parsed is UNKNOWN authority —
+    the index raises typed and the whole split refuses; no reservations, no
+    mint, no children."""
+    from modulatio import store
+    from modulatio.orchestration import _DecomposeRefusal
+    run_id = project_with_run.run_id
+    path = store._task_path(PROJECT_CODE, "MNT-T-JUNK", run_id=run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("::: not frontmatter :::\ngarbage")
+    with pytest.raises(store.DeclaredArtifactIndexError):
+        store.declared_artifact_keys(PROJECT_CODE, run_id=run_id)
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    outcome = orch._attempt_decompose(_make_task(), _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+    assert orch._decompose_reservations == {}
+
+
+# ── Child-authority projection ──────────────────────────────────────────────
+
+@pytest.mark.parametrize("field,value", [
+    ("description", "altered payload"),
+    ("depends_on", ["MNT-T-999"]),
+    ("goal_id", "MNT-G-EVIL"),
+    ("max_retries", 99),
+    ("decompose_depth", 0),
+    ("required_skills", ["shell-execution"]),
+    ("tool_args", {"cmd": "rm -rf"}),
+])
+def test_altered_immutable_descriptor_is_typed_conflict(
+    project_with_run, monkeypatch, tmp_path, field, value
+):
+    """Same mint id, path, and lineage — but ANY altered
+    immutable construction field (work, binding, budget, ancestry, tools)
+    raises DecomposeMintConflict: no write, no producer call."""
+    from modulatio import store
+    from modulatio.types import DecomposeMintConflict, Task
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    rec = reloaded.decompose_mint
+    planted = Task.model_validate(rec.child_descriptors[0])
+    setattr(planted, field, value)
+    store.save_task(PROJECT_CODE, planted, run_id=project_with_run.run_id)
+    producer_calls = []
+    monkeypatch.setattr(
+        Orchestrator, "_producer_execute",
+        lambda self, task, corrective_notes="": producer_calls.append(task.id))
+    with pytest.raises(DecomposeMintConflict):
+        orch._materialize_mint_children(reloaded)
+    assert producer_calls == []
+    on_disk = store.get_task(
+        PROJECT_CODE, planted.id, run_id=project_with_run.run_id)
+    assert getattr(on_disk, field) == getattr(planted, field), (
+        "conflict must not overwrite the planted record"
+    )
+
+
+def test_honest_reassigned_completed_child_is_preserved(
+    project_with_run, monkeypatch, tmp_path
+):
+    """routing/execution state the
+    engine legitimately changes after birth — assigned agent, status,
+    counter, claim — must NOT be treated as authority; an honest completed
+    child that was reassigned is preserved, not conflicted."""
+    from modulatio import store
+    from modulatio.types import Task, TaskStatus
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    rec = reloaded.decompose_mint
+    honest = Task.model_validate(rec.child_descriptors[0])
+    honest.assigned_agent_id = "reassigned-seat"
+    honest.status = TaskStatus.COMPLETED
+    honest.lifetime_attempts = 99
+    honest.attempt_claim_id = "claim-x"
+    store.save_task(PROJECT_CODE, honest, run_id=project_with_run.run_id)
+    children = orch._materialize_mint_children(reloaded)
+    got = {c.id: c for c in children}[honest.id]
+    assert got.status is TaskStatus.COMPLETED
+    assert got.assigned_agent_id == "reassigned-seat"
+
+
+# ── Mint-fact delivery ordering ─────────────────────────────────────────────
+
+def test_audit_append_failure_keeps_mint_fact_recoverable(
+    project_with_run, monkeypatch, tmp_path
+):
+    """If the durable audit append fails, the id is NOT marked
+    delivered — a later resume re-emits the same stable id and the durable
+    fact lands."""
+    import json as _json
+    from modulatio import compression, store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+
+    def _broken_append(path, row, lock=None, **kw):
+        raise OSError("audit disk full")
+
+    orig = compression._append_audit_row_0600
+    monkeypatch.setattr(compression, "_append_audit_row_0600", _broken_append)
+    handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
+    assert handled is True, "a disclosure failure must not abort the mint"
+    mint_id = parent.decompose_mint.mint_id
+    assert mint_id not in orch._emitted_mint_ids, (
+        "the id must stay retryable when the durable append failed"
+    )
+    monkeypatch.setattr(compression, "_append_audit_row_0600", orig)
+    orch._resume_decompose_mint(parent, RunSummary(project=project_with_run))
+    audit = orch._scope_root() / "audit.jsonl"
+    rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+    mints = [r for r in rows if r.get("event") == "decompose_mint"]
+    assert [r["mint_id"] for r in mints] == [mint_id]
+
+
+def test_activity_callback_failure_does_not_lose_durable_fact(
+    project_with_run, monkeypatch, tmp_path
+):
+    """A raising live-activity subscriber neither aborts the
+    mint nor loses the durable audit fact (which lands BEFORE delivery)."""
+    import json as _json
+    from modulatio import store
+    orch = _make_orchestrator(project_with_run)
+
+    def _bad_subscriber(event):
+        if event.phase == "decompose_mint":
+            raise RuntimeError("subscriber crashed")
+
+    orch.activity_callback = _bad_subscriber
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
+    assert handled is True
+    audit = orch._scope_root() / "audit.jsonl"
+    rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+    mints = [r for r in rows if r.get("event") == "decompose_mint"]
+    assert len(mints) == 1
+    assert parent.decompose_mint.mint_id in orch._emitted_mint_ids
+
+
+def test_fresh_process_reemit_appends_no_duplicate_row(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The audit append is idempotent by mint_id — a fresh
+    process replaying the committed mint appends NO second row."""
+    import json as _json
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
+    assert handled is True
+    fresh = _make_orchestrator(project_with_run)
+    reloaded = store.get_task(
+        PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
+    fresh._resume_decompose_mint(reloaded, RunSummary(project=project_with_run))
+    audit = fresh._scope_root() / "audit.jsonl"
+    rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+    mints = [r for r in rows if r.get("event") == "decompose_mint"]
+    assert len(mints) == 1, "idempotent append: one row per stable id"
+
+
+# ── The isolated-worker production-path matrix ──────────────────────────────
+
+def _worker_overflow_setup(orch, monkeypatch, parent_marker):
+    """Route the REAL producer seam inside a worker: the parent's model call
+    overflows (→ inline decompose); minted children's calls return a draft."""
+    def _model_call(self, agent_id, role, prompt, **kw):
+        if parent_marker in prompt:
+            raise context_budget.RecoverableContextError(
+                model="m", estimated_tokens=999_999, max_input_tokens=1,
+                checkpoint_path=None,
+            )
+        return "stub draft"
+
+    monkeypatch.setattr(Orchestrator, "_run_agent_call", _model_call)
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+
+
+def test_worker_path_wal_durable_before_first_child_write(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Real _execute_task_isolated,
+    deferral active — at the FIRST child materialization, a fresh read of
+    the parent FILE already shows record + spend."""
+    from modulatio import store
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task(description="OVERFLOW-ME-PARENT")
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    _worker_overflow_setup(orch, monkeypatch, "OVERFLOW-ME-PARENT")
+    monkeypatch.setattr(
+        Orchestrator, "_run",
+        lambda self, role, prompt, **kw: TWO_CHILD_SPLIT)
+    observed = {}
+    orig_child_barrier = Orchestrator._persist_mint_child_barrier
+
+    def _probe(self, child):
+        if "at_first_child" not in observed:
+            on_disk = store.get_task(
+                PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
+            observed["at_first_child"] = {
+                "record": on_disk is not None
+                and on_disk.decompose_mint is not None,
+                "spent": on_disk is not None
+                and on_disk.lifetime_attempts
+                == max(parent.max_retries, 0) + 1,
+            }
+        return orig_child_barrier(self, child)
+
+    monkeypatch.setattr(Orchestrator, "_persist_mint_child_barrier", _probe)
+    result = orch._execute_task_isolated(parent)
+    assert observed.get("at_first_child") == {"record": True, "spent": True}, (
+        f"worker WAL must be durable before any child write: {observed}"
+    )
+    assert result.task.decompose_mint is not None
+
+
+def test_worker_path_claim_durable_at_child_model_call(
+    project_with_run, monkeypatch, tmp_path
+):
+    """At the minted child's model call
+    inside the worker, the child FILE already carries claim + spent."""
+    from modulatio import store
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task(description="OVERFLOW-ME-PARENT")
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    observed = {}
+
+    def _model_call(self, agent_id, role, prompt, **kw):
+        if "OVERFLOW-ME-PARENT" in prompt:
+            raise context_budget.RecoverableContextError(
+                model="m", estimated_tokens=999_999, max_input_tokens=1,
+                checkpoint_path=None,
+            )
+        if role == self.default_producer_role and "child" not in observed:
+            child_id = f"{parent.id}-D1"
+            on_disk = store.get_task(
+                PROJECT_CODE, child_id, run_id=project_with_run.run_id)
+            observed["child"] = {
+                "claimed": on_disk is not None
+                and on_disk.attempt_claim_id is not None,
+                "spent": on_disk is not None
+                and on_disk.lifetime_attempts
+                == max(on_disk.max_retries, 0) + 1,
+            }
+        return "stub draft"
+
+    monkeypatch.setattr(Orchestrator, "_run_agent_call", _model_call)
+    monkeypatch.setattr(
+        Orchestrator, "_run",
+        lambda self, role, prompt, **kw: TWO_CHILD_SPLIT)
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    orch._execute_task_isolated(parent)
+    assert observed.get("child") == {"claimed": True, "spent": True}, (
+        f"worker claim must be durable before the child's model call: "
+        f"{observed}"
+    )
+
+
+def test_worker_death_after_wal_resumes_same_mint_from_fresh_process(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Worker dies after the WAL commit,
+    before any child write — a FRESH orchestrator built from disk resumes
+    the SAME mint id, materializes the children, no replan, no parent
+    producer."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task(description="OVERFLOW-ME-PARENT")
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _worker_overflow_setup(orch, monkeypatch, "OVERFLOW-ME-PARENT")
+    monkeypatch.setattr(
+        Orchestrator, "_run",
+        lambda self, role, prompt, **kw: TWO_CHILD_SPLIT)
+
+    def _die(self, child):
+        raise RuntimeError("worker death before child save")
+
+    monkeypatch.setattr(Orchestrator, "_persist_mint_child_barrier", _die)
+    try:
+        orch._execute_task_isolated(parent)
+    except RuntimeError:
+        pass
+    on_disk = store.get_task(
+        PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
+    assert on_disk.decompose_mint is not None
+    mint_id = on_disk.decompose_mint.mint_id
+    monkeypatch.undo()
+    fresh = _make_orchestrator(project_with_run)
+    roles = []
+
+    def _record(self, role, prompt, **kw):
+        roles.append(role)
+        return "stub"
+
+    monkeypatch.setattr(Orchestrator, "_run", _record)
+    monkeypatch.setattr(
+        Orchestrator, "_run_agent_call",
+        lambda self, agent_id, role, prompt, **kw: "stub draft")
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)  # re-pin after undo
+    fresh._run_task_with_redo(on_disk, RunSummary(project=project_with_run))
+    assert "planner" not in roles
+    stored = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }
+    assert stored[parent.id].decompose_mint.mint_id == mint_id
+    assert f"{parent.id}-D1" in stored and f"{parent.id}-D2" in stored
+
+
+def test_two_workers_contesting_one_key_exactly_one_mints(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Two isolated workers race one
+    child artifact key across the barrier/release interval — exactly one
+    parent mints it."""
+    import json as _json
+    import threading
+    from modulatio import store
+    orch = _make_orchestrator(project_with_run)
+    parents = [
+        _make_task(id="MNT-T-W1", description="OVERFLOW-ME-PARENT"),
+        _make_task(id="MNT-T-W2", description="OVERFLOW-ME-PARENT"),
+    ]
+    for p in parents:
+        store.save_task(PROJECT_CODE, p, run_id=project_with_run.run_id)
+    _worker_overflow_setup(orch, monkeypatch, "OVERFLOW-ME-PARENT")
+
+    def _split(self, role, prompt, **kw):
+        tid = kw.get("task_id", "x")
+        return _json.dumps([
+            {"description": "a", "output_path": "drafts/contested.md"},
+            {"description": "b", "output_path": f"drafts/{tid}-own.md"},
+        ])
+
+    monkeypatch.setattr(Orchestrator, "_run", _split)
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def _go(p):
+        barrier.wait()
+        results[p.id] = orch._execute_task_isolated(p)
+
+    threads = [threading.Thread(target=_go, args=(p,)) for p in parents]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    minted = [
+        p.id for p in parents
+        if results[p.id].task.decompose_mint is not None
+        and "drafts/contested.md"
+        in results[p.id].task.decompose_mint.reservations
+    ]
+    assert len(minted) == 1, (
+        f"exactly one worker may own the contested key; got {minted}"
+    )

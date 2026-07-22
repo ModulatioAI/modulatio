@@ -806,50 +806,131 @@ def get_task(project_code: str, task_id: str, run_id: str | None = None) -> Task
     return _read_entity(_task_path(project_code, task_id, run_id=run_id), Task)  # type: ignore[return-value]
 
 
-#: mtime+size-keyed parse cache behind :func:`declared_artifact_keys` —
-#: per tasks-directory, so distinct projects/runs (and test vaults) never
-#: share entries. Value: path → (mtime_ns, size, task_id, canonical key).
-_artifact_key_cache: dict[Path, dict[Path, tuple[int, int, str, str]]] = {}
+def save_task_monotonic(
+    project_code: str, candidate: Task, run_id: str | None = None,
+) -> Task:
+    """Save ``candidate`` without regressing barrier-persisted mint state.
+
+    The decompose-mint barriers write parent WAL commits and child attempt claims
+    to the store DURING worker execution; the later wave merge then saves
+    the worker's task snapshot, which may predate those writes. Merging only
+    FORWARD keeps the barrier authoritative: a persisted ``decompose_mint``
+    is never removed (a different mint id is a typed conflict), the lifetime
+    counter never decreases, a claim id is never cleared (a different one is
+    a typed conflict), and a terminal record never regresses to nonterminal
+    (the stale snapshot is discarded whole)."""
+    from modulatio.types import DecomposeMintConflict
+
+    current = get_task(project_code, candidate.id, run_id=run_id)
+    if current is None:
+        return save_task(project_code, candidate, run_id=run_id)
+    if current.decompose_mint is not None:
+        if (
+            candidate.decompose_mint is not None
+            and candidate.decompose_mint.mint_id
+            != current.decompose_mint.mint_id
+        ):
+            raise DecomposeMintConflict(
+                f"task {candidate.id}: merge carries mint "
+                f"{candidate.decompose_mint.mint_id} but the store holds "
+                f"{current.decompose_mint.mint_id}")
+        candidate.decompose_mint = current.decompose_mint
+    if current.attempt_claim_id is not None:
+        if candidate.attempt_claim_id not in (None, current.attempt_claim_id):
+            raise DecomposeMintConflict(
+                f"task {candidate.id}: merge carries claim "
+                f"{candidate.attempt_claim_id} but the store holds "
+                f"{current.attempt_claim_id}")
+        candidate.attempt_claim_id = current.attempt_claim_id
+    candidate.lifetime_attempts = max(
+        candidate.lifetime_attempts, current.lifetime_attempts)
+    terminal = (
+        TaskStatus.COMPLETED, TaskStatus.QC_REJECTED,
+        TaskStatus.BLOCKED, TaskStatus.ABANDONED,
+    )
+    if current.status in terminal and candidate.status not in terminal:
+        return current  # the settled record stands; drop the stale snapshot
+    return save_task(project_code, candidate, run_id=run_id)
+
+
+class DeclaredArtifactIndexError(RuntimeError):
+    """The artifact-authority index could not account for a declared task
+    file (stat/read/parse failure, or quarantine). An unknown declared
+    target must never become permission to claim a path — the caller
+    (decompose split validation) refuses the whole split."""
+
+
+#: Parse cache behind :func:`declared_artifact_keys`, per tasks-directory so
+#: distinct projects/runs (and test vaults) never share entries. Signature is
+#: ``(st_dev, st_ino, st_ctime_ns, st_size)`` — NOT mtime+size, which a
+#: same-size replacement with a restored mtime defeats; ``os.replace`` always
+#: changes the inode and any in-place edit bumps ctime. Value:
+#: path → (signature, [(canonical key, owner task id), ...]).
+_artifact_key_cache: dict[
+    Path, dict[Path, tuple[tuple[int, int, int, int], list[tuple[str, str]]]]
+] = {}
+_artifact_key_cache_lock = threading.Lock()
 
 
 def declared_artifact_keys(
     project_code: str, run_id: str | None = None,
 ) -> dict[str, str]:
-    """Canonical artifact key → task id for every declared task.
+    """Canonical artifact key → owner task id for every declared task,
+    INCLUDING every reservation in a committed ``decompose_mint`` record —
+    a ``prepared`` parent owns its children's keys even before their files
+    exist, across restart.
 
     The decompose mint validator consults this on every split; a full
-    ``list_tasks`` parse there is O(n²) across a deep tree (each task file
-    re-parses YAML on every mint). Here each file parses once and re-parses
-    only when its mtime or size changes (``os.replace`` bumps both), so the
-    scan cost is a directory stat sweep. Saves, updates, and deletions are
-    observed immediately — the stat is per call, only the parse is cached."""
+    ``list_tasks`` parse there is O(n²) across a deep tree. Here each file
+    parses once and re-parses only when its content signature changes, so
+    the scan cost is a directory stat sweep. STRICT: any file that cannot
+    be stated, read, or parsed — or is quarantined — raises
+    :class:`DeclaredArtifactIndexError`; unknown authority is never treated
+    as an unclaimed path."""
     from modulatio.families import task_output_rel_path
 
     d = _scope_dir(project_code, run_id) / "tasks"
     if not d.exists():
         return {}
-    cache = _artifact_key_cache.setdefault(d, {})
-    seen: set[Path] = set()
-    for p in d.glob("*.md"):
-        if _is_quarantined(p):
-            continue
-        try:
-            st = p.stat()
-        except OSError:
-            continue
-        ent = cache.get(p)
-        if ent is not None and ent[0] == st.st_mtime_ns and ent[1] == st.st_size:
+    with _artifact_key_cache_lock:
+        cache = _artifact_key_cache.setdefault(d, {})
+        seen: set[Path] = set()
+        for p in d.glob("*.md"):
+            if _is_quarantined(p):
+                raise DeclaredArtifactIndexError(
+                    f"declared task file is quarantined: {p.name}")
+            try:
+                st = p.stat()
+            except OSError as exc:
+                raise DeclaredArtifactIndexError(
+                    f"cannot stat declared task file {p.name}: {exc}"
+                ) from exc
+            sig = (st.st_dev, st.st_ino, st.st_ctime_ns, st.st_size)
+            ent = cache.get(p)
+            if ent is not None and ent[0] == sig:
+                seen.add(p)
+                continue
+            t = _read_entity(p, Task)
+            if not isinstance(t, Task):
+                cache.pop(p, None)
+                raise DeclaredArtifactIndexError(
+                    f"cannot parse declared task file {p.name}")
+            pairs = [(task_output_rel_path(t), t.id)]
+            if t.decompose_mint is not None:
+                for key in t.decompose_mint.reservations:
+                    pairs.append((key, t.id))
+            cache[p] = (sig, pairs)
             seen.add(p)
-            continue
-        t = _read_entity(p, Task)
-        if not isinstance(t, Task):
-            cache.pop(p, None)
-            continue
-        cache[p] = (st.st_mtime_ns, st.st_size, t.id, task_output_rel_path(t))
-        seen.add(p)
-    for stale in [p for p in cache if p not in seen]:
-        del cache[stale]
-    return {key: tid for (_, _, tid, key) in cache.values()}
+        for stale in [p for p in cache if p not in seen]:
+            del cache[stale]
+        out: dict[str, str] = {}
+        for _, pairs in cache.values():
+            for key, tid in pairs:
+                # A materialized child's OWN declaration wins over its
+                # parent's reservation for the same key — either owner
+                # refuses a rival split; the child is the truer one.
+                out.setdefault(key, tid)
+        return out
 
 
 def list_tasks(
