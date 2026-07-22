@@ -758,3 +758,81 @@ def test_prepared_state_alone_is_sufficient_for_recovery(
             t, "status", TaskStatus.COMPLETED))
     orch._resume_decompose_mint(reloaded, RunSummary(project=project_with_run))
     assert reloaded.status is TaskStatus.COMPLETED
+
+
+# ── The decompose_mint disclosure fact ──────────────────────────────────────
+
+def test_mint_fact_carries_stable_id_and_real_arithmetic(
+    project_with_run, monkeypatch, tmp_path
+):
+    """One durable ``decompose_mint`` row per mint: stable mint_id from the
+    committed record, actual child count, cap, depth, and the pre-burn parent
+    remaining — audit evidence with real arithmetic."""
+    import json as _json
+    from modulatio import store
+    orch = _make_orchestrator(project_with_run)
+    events = []
+    orch.activity_callback = lambda e: events.append(e)
+    parent = _make_task(max_retries=9)
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
+    assert handled is True
+    audit = orch._scope_root() / "audit.jsonl"
+    rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+    mints = [r for r in rows if r.get("event") == "decompose_mint"]
+    assert len(mints) == 1
+    assert mints[0]["mint_id"] == parent.decompose_mint.mint_id
+    assert mints[0]["task_id"] == parent.id
+    assert mints[0]["children"] == 2
+    assert mints[0]["cap"] == 8
+    assert mints[0]["parent_remaining_was"] == 10
+    assert "decompose_mint" in [e.phase for e in events]
+
+
+def test_same_process_replay_emits_one_mint_row(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Re-entering the minted parent in the same process does not double the
+    mint fact — the emitter dedups by stable id."""
+    import json as _json
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
+    assert handled is True
+    orch._resume_decompose_mint(parent, RunSummary(project=project_with_run))
+    audit = orch._scope_root() / "audit.jsonl"
+    rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+    mints = [r for r in rows if r.get("event") == "decompose_mint"]
+    assert len(mints) == 1
+
+
+def test_restart_replay_counts_one_unique_mint_id(
+    project_with_run, monkeypatch, tmp_path
+):
+    """A fresh process may re-emit the committed mint (its dedup set is
+    empty); consumers count UNIQUE mint ids, so crash replay cannot inflate
+    the claimed mint count."""
+    import json as _json
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
+    assert handled is True
+    fresh = _make_orchestrator(project_with_run)  # restart: empty dedup set
+    reloaded = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }[parent.id]
+    fresh._resume_decompose_mint(reloaded, RunSummary(project=project_with_run))
+    audit = fresh._scope_root() / "audit.jsonl"
+    rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+    mints = [r for r in rows if r.get("event") == "decompose_mint"]
+    unique = {r["mint_id"] for r in mints}
+    assert len(unique) == 1, (
+        "replay may re-deliver, but there is ONE logical mint fact per id"
+    )

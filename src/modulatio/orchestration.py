@@ -2441,6 +2441,11 @@ class Orchestrator:
         #: children are declared tasks (the durable authority) or on refusal.
         self._decompose_reservations: "dict[str, str]" = {}
         self._decompose_reservation_lock = threading.Lock()
+        #: In-process dedup for ``decompose_mint`` disclosure facts. A fresh
+        #: process may re-emit a committed mint's fact on recovery (this set
+        #: starts empty) — that's allowed; consumers count UNIQUE mint ids,
+        #: so crash replay can't inflate the claimed mint count.
+        self._emitted_mint_ids: "set[str]" = set()
         #: Serializes converse() turns on one project so two concurrent operator
         #: sessions (e.g. TUI + ACP) don't interleave the durable conversation log
         #: or read a half-written thread. Held for the whole turn — converse is an
@@ -10860,6 +10865,7 @@ class Orchestrator:
         haven't reached a terminal state, then settle the parent container.
         ONE path for fresh mints and crash recovery — both replay the
         committed record."""
+        self._emit_decompose_mint(t)
         children = self._materialize_mint_children(t)
         terminal = (
             TaskStatus.COMPLETED, TaskStatus.QC_REJECTED,
@@ -10995,6 +11001,40 @@ class Orchestrator:
             return _DecomposeRefusal(
                 "parent mint commit failed — split refused, nothing minted")
         return None
+
+    def _emit_decompose_mint(self, t: "Task") -> None:
+        """The mint disclosure fact — audit evidence, not a spend control:
+        stable ``mint_id`` from the COMMITTED record, actual child count,
+        cap, depth, and the captured pre-burn remaining. Emitted from the
+        one mint-replay path (fresh mint AND recovery), deduped in-process
+        by id; a restarted process may re-deliver, and consumers count
+        unique ids."""
+        rec = t.decompose_mint
+        if rec is None or rec.mint_id in self._emitted_mint_ids:
+            return
+        self._emitted_mint_ids.add(rec.mint_id)
+        detail = {
+            "mint_id": rec.mint_id,
+            "children": len(rec.child_descriptors),
+            "cap": rec.cap,
+            "depth": rec.depth,
+            "parent_remaining_was": rec.parent_remaining_was,
+        }
+        self._emit_activity(
+            role="planner", phase="decompose_mint", task_id=t.id,
+            agent_id="planner", detail=detail,
+        )
+        from modulatio.compression import _append_audit_row_0600
+        _append_audit_row_0600(
+            self._scope_root() / "audit.jsonl",
+            {
+                "event": "decompose_mint",
+                "task_id": t.id,
+                **detail,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            },
+            self._store_lock,
+        )
 
     def _emit_decompose_refused(
         self, t: "Task", refusal: "_DecomposeRefusal",
