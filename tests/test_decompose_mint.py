@@ -459,3 +459,130 @@ def test_reservations_released_after_split_settles(
         parent, _ctx_err(tmp_path), summary)
     assert handled is True
     assert orch._decompose_reservations == {}
+
+
+# ── The mint WAL — one atomic parent commit ─────────────────────────────────
+
+def _run_split(orch, monkeypatch, project, parent, tmp_path, payload=None):
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import TaskStatus
+    _planner_returns(monkeypatch, payload or TWO_CHILD_SPLIT)
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo",
+        lambda self, t, summary, **kw: setattr(t, "status", TaskStatus.COMPLETED))
+    summary = RunSummary(project=project)
+    return orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
+
+
+def test_mint_commits_marker_spend_and_record_in_one_parent_write(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The committed parent — RELOADED from the store — carries the mint
+    record (stable mint_id, full lossless child descriptors, reservations,
+    depth, cap, captured pre-burn remaining) AND the spent counter together.
+    The commit is the mint; no durable marked-but-unspent state exists."""
+    from modulatio import store
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task(max_retries=9)  # unspent: remaining 10
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
+    assert handled is True
+    stored = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }
+    reloaded = stored[parent.id]
+    rec = reloaded.decompose_mint
+    assert rec is not None, "the durable parent must carry the mint record"
+    assert rec.mint_id
+    assert rec.parent_remaining_was == 10
+    assert reloaded.lifetime_attempts == 10  # spent at the same boundary
+    ids = [d["id"] for d in rec.child_descriptors]
+    assert ids == [f"{parent.id}-D1", f"{parent.id}-D2"]
+    # Lossless: descriptors alone must reconstruct the children.
+    d0 = rec.child_descriptors[0]
+    assert d0["description"] == "part one"
+    assert d0["output_path"] == "drafts/one.md"
+    assert d0["artifact_lineage"]
+    assert rec.reservations == ["drafts/one.md", "drafts/two.md"]
+
+
+def test_crash_before_first_child_leaves_complete_committed_record(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Die between the parent
+    commit and the first child save — the reloaded parent alone carries
+    everything recovery needs (marker, descriptors, reservations, spent
+    lifetime), and no child files exist."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+
+    def _die(self, child):
+        raise RuntimeError("process death injected before child save")
+
+    monkeypatch.setattr(Orchestrator, "_persist_child_task", _die)
+    summary = RunSummary(project=project_with_run)
+    with pytest.raises(RuntimeError):
+        orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
+    stored = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }
+    reloaded = stored[parent.id]
+    assert reloaded.decompose_mint is not None
+    assert reloaded.lifetime_attempts == max(parent.max_retries, 0) + 1
+    assert len(reloaded.decompose_mint.child_descriptors) == 2
+    assert f"{parent.id}-D1" not in stored  # no child files yet — record owns them
+
+
+def test_refusal_writes_no_mint_record(project_with_run, monkeypatch, tmp_path):
+    """Refuse path: zero durable mint state on the parent."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _planner_returns(monkeypatch, _nine_specs())
+    summary = RunSummary(project=project_with_run)
+    handled, refusal = orch._try_decompose_and_run(
+        parent, _ctx_err(tmp_path), summary)
+    assert handled is False
+    stored = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }
+    assert stored[parent.id].decompose_mint is None
+
+
+def test_parent_commit_failure_releases_reservations_and_refuses(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The atomic parent save raises → no
+    mint record, no children, and every tentative reservation released so a
+    subsequent decomposition can claim the keys."""
+    from modulatio.orchestration import RunSummary, _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    parent = _make_task(id="MNT-T-FAIL")
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+
+    def _fail_save(self, task):
+        raise OSError("disk full injected at parent commit")
+
+    monkeypatch.setattr(Orchestrator, "_save_task_deferrable", _fail_save)
+    summary = RunSummary(project=project_with_run)
+    handled, refusal = orch._try_decompose_and_run(
+        parent, _ctx_err(tmp_path), summary)
+    assert handled is False and isinstance(refusal, _DecomposeRefusal)
+    assert parent.decompose_mint is None
+    assert parent.lifetime_attempts == 0  # in-memory spend reverted
+    assert orch._decompose_reservations == {}
+    monkeypatch.undo()
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    retry = orch._attempt_decompose(
+        _make_task(id="MNT-T-NEXT"), _ctx_err(tmp_path))
+    assert isinstance(retry, list), (
+        "keys must be claimable after a failed commit released them"
+    )

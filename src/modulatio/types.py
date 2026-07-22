@@ -182,6 +182,38 @@ class Goal(BaseModel):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class DecomposeMintRecord(BaseModel):
+    """The committed decompose-mint transaction, attached to the PARENT task.
+
+    The parent file is the write-ahead log: one atomic parent persist
+    carries this record together with the spent lifetime counter — after
+    that commit the children exist as authority (full lossless descriptors)
+    and are materialized idempotently from here, so recovery never needs a
+    child file to finish the mint. Presence of the record IS the
+    never-mint-again marker: a task carrying one can never mint again, on
+    redispatch, recovery, or replay.
+    """
+
+    #: Stable identifier of the mint transaction — the dedup key for the
+    #: ``decompose_mint`` disclosure fact and the authority test when a
+    #: child id already exists.
+    mint_id: str
+    #: ``prepared`` (commit done, children owed) → ``children_materialized``
+    #: (convenience advance; recovery must work from ``prepared`` alone).
+    state: str = "prepared"
+    #: FULL lossless child Task dumps — complete construction inputs, not
+    #: ids: recovery rebuilds every child from these alone.
+    child_descriptors: list[dict] = Field(default_factory=list)
+    #: Canonical artifact keys the mint owns (a committed record holds its
+    #: keys even before every child file exists).
+    reservations: list[str] = Field(default_factory=list)
+    depth: int = 0
+    cap: int = 8
+    #: The parent's remaining producer attempts BEFORE the mint consumed
+    #: them — the disclosure fact's arithmetic input.
+    parent_remaining_was: int = 0
+
+
 class Task(BaseModel):
     id: str  # e.g. "STA-T-001"
     project_id: UUID
@@ -319,6 +351,10 @@ class Task(BaseModel):
     #: key matches any entry refuses the split — comparing only the immediate
     #: parent misses a grandchild re-targeting the grandparent's artifact.
     artifact_lineage: list[str] = Field(default_factory=list)
+    #: The committed mint transaction (parent-as-WAL). ``None`` until this
+    #: task decomposes; set + persisted in the SAME atomic write that spends
+    #: ``lifetime_attempts``. Presence = the never-mint-again marker.
+    decompose_mint: DecomposeMintRecord | None = None
     # QC-as-fixer Slice 3: True when QC AUTHORED a fix for this task's
     # artifact after the producer exhausted its attempts (or stormed).
     # LOAD-BEARING flag, not cosmetic: a qc-authored artifact has NO

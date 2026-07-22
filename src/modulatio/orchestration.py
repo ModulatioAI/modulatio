@@ -47,6 +47,7 @@ from modulatio.types import (
     ActivityEvent,
     ArtifactEvidence,
     AssertionEvidence,
+    DecomposeMintRecord,
     EvidenceRequirement,
     Goal,
     GoalStatus,
@@ -10796,6 +10797,10 @@ class Orchestrator:
             self._emit_decompose_refused(t, outcome)
             return False, outcome
         children = outcome
+        commit_failure = self._commit_decompose_mint(t, children)
+        if commit_failure is not None:
+            self._emit_decompose_refused(t, commit_failure)
+            return False, commit_failure
         self._emit_activity(
             role="planner", phase="task_decomposed", task_id=t.id,
             agent_id="planner",
@@ -10837,6 +10842,49 @@ class Orchestrator:
                 f"{t.id}: decomposed but a child task did not complete"
             )
         return True, None
+
+    def _commit_decompose_mint(
+        self, t: "Task", children: "list[Task]",
+    ) -> "_DecomposeRefusal | None":
+        """The mint transaction: ONE atomic parent persist carrying the
+        marker/record authority (stable ``mint_id``, full lossless child
+        descriptors, reservations, captured pre-burn remaining) AND the
+        spent lifetime counter together. No durable marked-but-unspent (or
+        spent-but-unmarked) state can exist — the commit is the mint.
+
+        Returns a refusal when the commit itself fails: the in-memory spend
+        reverts and the tentative reservations release, so a subsequent
+        decomposition can claim the keys (a caught save failure in a live
+        process must not leave a poisoned registry)."""
+        from modulatio.families import task_output_rel_path
+        retry_budget = max(t.max_retries, 0)
+        prev_lifetime = t.lifetime_attempts
+        record = DecomposeMintRecord(
+            mint_id=str(uuid4()),
+            state="prepared",
+            child_descriptors=[
+                c.model_dump(mode="json") for c in children
+            ],
+            reservations=[task_output_rel_path(c) for c in children],
+            depth=t.decompose_depth,
+            cap=self._MAX_DECOMPOSE_WIDTH,
+            parent_remaining_was=max(
+                0, (retry_budget + 1) - t.lifetime_attempts),
+        )
+        t.decompose_mint = record
+        t.lifetime_attempts = retry_budget + 1  # spent BY the split
+        try:
+            self._save_task_deferrable(t)
+        except Exception:
+            _logger.warning(
+                "decompose mint commit failed for %s — refusing the split",
+                t.id, exc_info=True)
+            t.decompose_mint = None
+            t.lifetime_attempts = prev_lifetime
+            self._release_split_reservations(t.id)
+            return _DecomposeRefusal(
+                "parent mint commit failed — split refused, nothing minted")
+        return None
 
     def _emit_decompose_refused(
         self, t: "Task", refusal: "_DecomposeRefusal",
