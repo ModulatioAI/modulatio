@@ -1003,25 +1003,35 @@ def _clay_doctor_check() -> None:
         )
 
 
+def _doctor_version_line() -> str:
+    """The doctor's version line. An unknown disk stamp is CAUSE-NEUTRAL:
+    ``installed_version()`` returns ``None`` for editable installs AND for
+    missing/malformed/unreadable metadata — the skew detector fails safe
+    either way, and the diagnosis must not overstate which cause applies
+    (no second metadata probe here; that would duplicate the helper's
+    policy and race its reads)."""
+    from modulatio import __version__, installed_version
+
+    disk = installed_version()
+    if disk is None:
+        skew = ("  (no reliable disk stamp — editable install or unreadable "
+                "metadata; skew detection off)")
+    elif disk != __version__:
+        skew = f"  (dist-info reads {disk} — reinstall?)"
+    else:
+        skew = ""
+    return f"Version: {__version__}{skew}"
+
+
 def _run_doctor_checks() -> None:
-    from modulatio import __version__, auth_alerts, installed_version, oauth_helpers
+    from modulatio import auth_alerts, oauth_helpers
 
     typer.echo("=== Modulatio doctor ===\n")
 
     # Version stamp: doctor is a fresh process (its own skew is always zero),
     # but the line documents what's installed — and any LONG-LIVED server
     # started before a reinstall reports its own skew on the WebOS console.
-    disk = installed_version()
-    if disk is None:
-        # Editable/unreadable metadata reports unknown, so skew detection is
-        # inert here BY DESIGN — say so, or an operator hunting "why does my
-        # dev box never warn about a stale server?" gets no clue why.
-        skew = "  (no disk stamp — editable install; skew detection off)"
-    elif disk != __version__:
-        skew = f"  (dist-info reads {disk} — reinstall?)"
-    else:
-        skew = ""
-    typer.echo(f"Version: {__version__}{skew}\n")
+    typer.echo(_doctor_version_line() + "\n")
 
     # Models
     presets = model_presets.load_presets()

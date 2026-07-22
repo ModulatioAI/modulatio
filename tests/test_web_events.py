@@ -511,3 +511,35 @@ def test_installed_version_malformed_direct_url_is_unknown(monkeypatch):
 
     _patch_distribution(monkeypatch, _FakeDist("1.0.2", direct_url="{not json"))
     assert modulatio.installed_version() is None
+
+
+# ── Doctor's unknown-disk-stamp line is cause-neutral ───────────────────────
+
+def test_doctor_unknown_disk_stamp_is_cause_neutral(monkeypatch):
+    """``installed_version() is None`` covers editable installs AND missing/
+    malformed/unreadable metadata — the Doctor line must say the stamp is
+    unavailable and skew detection is off WITHOUT categorically diagnosing
+    an editable install."""
+    import modulatio
+    from modulatio import cli
+    monkeypatch.setattr(modulatio, "installed_version", lambda: None)
+    line = cli._doctor_version_line()
+    assert "skew detection off" in line
+    assert "no reliable disk stamp" in line
+    assert "editable install;" not in line, (
+        "the diagnosis must not be categorical — unreadable metadata also "
+        "returns None"
+    )
+
+
+def test_doctor_version_line_reports_skew_and_clean(monkeypatch):
+    """The other two branches keep their meaning: mismatch names the disk
+    version; a match adds nothing."""
+    import modulatio
+    from modulatio import cli
+    monkeypatch.setattr(modulatio, "installed_version", lambda: "0.0.1-disk")
+    assert "0.0.1-disk" in cli._doctor_version_line()
+    monkeypatch.setattr(
+        modulatio, "installed_version", lambda: modulatio.__version__)
+    line = cli._doctor_version_line()
+    assert "skew" not in line and "reinstall" not in line
