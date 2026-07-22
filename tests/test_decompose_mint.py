@@ -246,3 +246,130 @@ def test_refusal_reason_reaches_stuck_ticket(
     assert tickets, "context-budget refusal must open the stuck ticket"
     joined = " ".join(t.body for t in tickets)
     assert "9" in joined and "8" in joined
+
+
+# ── Artifact-key validation + lineage ───────────────────────────────────────
+
+def test_child_targeting_parent_artifact_refuses(
+    project_with_run, monkeypatch, tmp_path
+):
+    """A child aimed at the PARENT's canonical artifact key refuses the whole
+    split — minted budget must never become fresh writes to the same artifact."""
+    from modulatio.orchestration import _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"drafts/parent.md"},'
+        '{"description":"b","output_path":"drafts/other.md"}]')
+    parent = _make_task(output_path="drafts/parent.md")
+    outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+    assert "drafts/parent.md" in outcome.reason
+
+
+def test_sibling_duplicate_paths_refuse(project_with_run, monkeypatch, tmp_path):
+    from modulatio.orchestration import _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"drafts/same.md"},'
+        '{"description":"b","output_path":"drafts/same.md"}]')
+    outcome = orch._attempt_decompose(_make_task(), _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+    assert "drafts/same.md" in outcome.reason
+
+
+def test_sibling_sugared_equivalent_paths_refuse(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Canonicalization catches sugared twins ('drafts/./one.md' vs
+    'drafts/one.md') — distinct spellings, one artifact."""
+    from modulatio.orchestration import _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"drafts/./one.md"},'
+        '{"description":"b","output_path":"drafts/one.md"}]')
+    outcome = orch._attempt_decompose(_make_task(), _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+
+
+def test_ancestor_collision_refuses_at_grandchild_depth(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Comparing only the immediate parent is insufficient: a child whose key
+    matches ANY decompose ancestor's refuses (engine-owned lineage)."""
+    from modulatio.orchestration import _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"drafts/grandparent.md"},'
+        '{"description":"b","output_path":"drafts/fresh.md"}]')
+    parent = _make_task(decompose_depth=1)
+    parent.artifact_lineage = ["drafts/grandparent.md"]
+    outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+    assert "drafts/grandparent.md" in outcome.reason
+
+
+def test_children_carry_engine_owned_lineage(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Each child's lineage is the parent's lineage plus the parent's own
+    canonical key — the durable relation the grandchild check reads."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    parent = _make_task(output_path="drafts/parent.md", decompose_depth=1)
+    parent.artifact_lineage = ["drafts/root.md"]
+    children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(children, list)
+    for c in children:
+        assert c.artifact_lineage == ["drafts/root.md", "drafts/parent.md"]
+
+
+@pytest.mark.parametrize("hostile", [
+    "/etc/passwd", "../escape.md", "drafts//x.md", "drafts/.ssh/keys.md",
+])
+def test_hostile_child_paths_refuse_whole_split(
+    project_with_run, monkeypatch, tmp_path, hostile
+):
+    """Absolute / traversal / empty-component / dotfile shapes take the
+    refusal lane — no silent drop or rename of the hostile member, zero
+    children."""
+    import json as _json
+    from modulatio.orchestration import _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, _json.dumps([
+        {"description": "a", "output_path": hostile},
+        {"description": "b", "output_path": "drafts/clean.md"},
+    ]))
+    outcome = orch._attempt_decompose(_make_task(), _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+
+
+def test_declared_task_target_collision_refuses(
+    project_with_run, monkeypatch, tmp_path
+):
+    """A child key colliding with an already-declared task's target refuses —
+    the reservation authority sees every declared task, not just the split."""
+    from modulatio import store
+    from modulatio.orchestration import _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    other = _make_task(id="MNT-T-777", output_path="drafts/taken.md")
+    store.save_task(PROJECT_CODE, other, run_id=project_with_run.run_id)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"drafts/taken.md"},'
+        '{"description":"b","output_path":"drafts/free.md"}]')
+    outcome = orch._attempt_decompose(_make_task(), _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+    assert "drafts/taken.md" in outcome.reason
+
+
+def test_fallback_path_children_get_distinct_canonical_keys(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Children with NO explicit output_path key at their engine fallback
+    (drafts/<id>.<ext>) — distinct per child id, so a plain no-path split is
+    accepted and still lineage-stamped."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a"},{"description":"b"}]')
+    parent = _make_task()
+    children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(children, list) and len(children) == 2

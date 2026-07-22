@@ -10685,7 +10685,63 @@ class Orchestrator:
             return _DecomposeRefusal(
                 f"planner returned {len(children)} usable child spec(s) — "
                 f"a split needs at least 2")
+        refusal = self._validate_split_artifacts(t, children)
+        if refusal is not None:
+            return refusal
         return children
+
+    def _validate_split_artifacts(
+        self, t: "Task", children: "list[Task]",
+    ) -> "_DecomposeRefusal | None":
+        """Whole-split artifact authority: every child key must be confined
+        (same validation the plan path uses), canonical, sibling-distinct,
+        distinct from the parent's and every decompose ancestor's key, and
+        free of already-declared task targets. ANY violation refuses the
+        ENTIRE split with the offending path named — no silent drops or
+        renames of hostile members. On success, stamps each child's
+        engine-owned ``artifact_lineage``."""
+        from modulatio.families import task_output_rel_path
+        root = self._shared_artifacts_root()
+        parent_key = task_output_rel_path(t)
+        blocked = {parent_key: "the parent's artifact"}
+        for ancestor_key in t.artifact_lineage:
+            blocked.setdefault(ancestor_key, "a decompose ancestor's artifact")
+        try:
+            for declared in store.list_tasks(
+                self.project.code, run_id=self.project.run_id,
+            ):
+                if declared.id == t.id:
+                    continue
+                blocked.setdefault(
+                    task_output_rel_path(declared),
+                    f"task {declared.id}'s declared target")
+        except Exception:
+            # A store read failure must not let an unvalidated split through.
+            _logger.warning(
+                "declared-task scan failed during decompose validation for "
+                "%s — refusing the split", t.id, exc_info=True)
+            return _DecomposeRefusal(
+                "could not enumerate declared task targets — split refused")
+        seen: "dict[str, str]" = {}
+        for child in children:
+            if child.output_path:
+                try:
+                    child.output_path = _validate_output_path(
+                        child.output_path, root)
+                except _PlanError as exc:
+                    return _DecomposeRefusal(f"child output_path: {exc}")
+            key = task_output_rel_path(child)
+            if key in seen:
+                return _DecomposeRefusal(
+                    f"sibling artifact collision on {key!r} — two children "
+                    f"target one artifact")
+            if key in blocked:
+                return _DecomposeRefusal(
+                    f"child artifact {key!r} collides with {blocked[key]}")
+            seen[key] = child.id
+        for child in children:
+            child.artifact_lineage = [*t.artifact_lineage, parent_key]
+        return None
 
     def _try_decompose_and_run(
         self, t: "Task",

@@ -314,6 +314,11 @@ class Task(BaseModel):
     #: re-splitting and escalates (genuine stuck, not confusion). 0 = an
     #: originally-planned task.
     decompose_depth: int = 0
+    #: Engine-owned canonical artifact keys of every decompose ANCESTOR
+    #: (oldest first; the minting parent appends its own key). A child whose
+    #: key matches any entry refuses the split — comparing only the immediate
+    #: parent misses a grandchild re-targeting the grandparent's artifact.
+    artifact_lineage: list[str] = Field(default_factory=list)
     # QC-as-fixer Slice 3: True when QC AUTHORED a fix for this task's
     # artifact after the producer exhausted its attempts (or stormed).
     # LOAD-BEARING flag, not cosmetic: a qc-authored artifact has NO
