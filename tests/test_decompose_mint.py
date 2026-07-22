@@ -373,3 +373,89 @@ def test_fallback_path_children_get_distinct_canonical_keys(
     parent = _make_task()
     children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
     assert isinstance(children, list) and len(children) == 2
+
+
+# ── Path reservation — one lock/registry authority ──────────────────────────
+
+def test_concurrent_decompose_same_key_exactly_one_wins(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Two concurrent decompositions targeting the same child key: the ONE
+    registry authority serializes the check, so exactly one split validates
+    and the other refuses — never two owners for one artifact."""
+    import threading
+    from modulatio.orchestration import _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"drafts/contested.md"},'
+        '{"description":"b","output_path":"drafts/uncontested-%ID%.md"}]')
+
+    real_run = Orchestrator._run
+
+    def _per_parent(self, role, prompt, **kw):
+        payload = real_run(self, role, prompt, **kw)
+        return payload.replace("%ID%", kw.get("task_id", "x"))
+
+    monkeypatch.setattr(Orchestrator, "_run", _per_parent)
+    parents = [
+        _make_task(id="MNT-T-A"),
+        _make_task(id="MNT-T-B"),
+    ]
+    results = {}
+    barrier = threading.Barrier(2)
+
+    def _go(p):
+        barrier.wait()
+        results[p.id] = orch._attempt_decompose(p, _ctx_err(tmp_path))
+
+    threads = [threading.Thread(target=_go, args=(p,)) for p in parents]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    kinds = sorted(type(v).__name__ for v in results.values())
+    assert kinds == ["_DecomposeRefusal", "list"], (
+        f"exactly one split must win the contested key; got {kinds}"
+    )
+    refused = [v for v in results.values() if isinstance(v, _DecomposeRefusal)]
+    assert "drafts/contested.md" in refused[0].reason
+
+
+def test_refused_split_reserves_nothing(
+    project_with_run, monkeypatch, tmp_path
+):
+    """A refused validation leaves the registry untouched — a later split may
+    claim the same keys."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"drafts/x.md"},'
+        '{"description":"b","output_path":"drafts/x.md"}]')  # sibling dup → refuse
+    first = orch._attempt_decompose(_make_task(id="MNT-T-A"), _ctx_err(tmp_path))
+    assert not isinstance(first, list)
+    _planner_returns(monkeypatch,
+        '[{"description":"a","output_path":"drafts/x.md"},'
+        '{"description":"b","output_path":"drafts/y.md"}]')
+    second = orch._attempt_decompose(_make_task(id="MNT-T-B"), _ctx_err(tmp_path))
+    assert isinstance(second, list), (
+        "a refused split must not leave tentative reservations behind"
+    )
+
+
+def test_reservations_released_after_split_settles(
+    project_with_run, monkeypatch, tmp_path
+):
+    """After _try_decompose_and_run settles the split (children persisted as
+    declared tasks), the in-memory tentative reservations are released — the
+    declared tasks themselves are the durable authority."""
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import TaskStatus
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo",
+        lambda self, t, summary, **kw: setattr(t, "status", TaskStatus.COMPLETED))
+    parent = _make_task()
+    summary = RunSummary(project=project_with_run)
+    handled, refusal = orch._try_decompose_and_run(
+        parent, _ctx_err(tmp_path), summary)
+    assert handled is True
+    assert orch._decompose_reservations == {}

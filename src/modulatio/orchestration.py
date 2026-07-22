@@ -2425,6 +2425,14 @@ class Orchestrator:
         #: LLM/producer/QC work — so it doesn't serialize the parallel
         #: window. Uncontended (≈free) on the sequential path.
         self._store_lock = threading.Lock()
+        #: THE one path-reservation authority for decompose splits:
+        #: canonical child artifact key → owning parent task id. Guarded by
+        #: its lock so concurrent decompositions can't both validate the same
+        #: key against the store before either persists children. Tentative —
+        #: reserved during whole-split validation, released once the split's
+        #: children are declared tasks (the durable authority) or on refusal.
+        self._decompose_reservations: "dict[str, str]" = {}
+        self._decompose_reservation_lock = threading.Lock()
         #: Serializes converse() turns on one project so two concurrent operator
         #: sessions (e.g. TUI + ACP) don't interleave the durable conversation log
         #: or read a half-written thread. Held for the whole turn — converse is an
@@ -10702,6 +10710,17 @@ class Orchestrator:
         engine-owned ``artifact_lineage``."""
         from modulatio.families import task_output_rel_path
         root = self._shared_artifacts_root()
+        with self._decompose_reservation_lock:
+            return self._validate_split_artifacts_locked(
+                t, children, root, task_output_rel_path)
+
+    def _validate_split_artifacts_locked(
+        self, t: "Task", children: "list[Task]", root: Path,
+        task_output_rel_path,
+    ) -> "_DecomposeRefusal | None":
+        """Body of :meth:`_validate_split_artifacts`, under the reservation
+        lock. Reserves the split's keys only on FULL success — a refusal
+        leaves the registry untouched."""
         parent_key = task_output_rel_path(t)
         blocked = {parent_key: "the parent's artifact"}
         for ancestor_key in t.artifact_lineage:
@@ -10738,10 +10757,27 @@ class Orchestrator:
             if key in blocked:
                 return _DecomposeRefusal(
                     f"child artifact {key!r} collides with {blocked[key]}")
+            owner = self._decompose_reservations.get(key)
+            if owner is not None and owner != t.id:
+                return _DecomposeRefusal(
+                    f"child artifact {key!r} collides with a concurrent "
+                    f"reservation held by task {owner}")
             seen[key] = child.id
+        for key in seen:
+            self._decompose_reservations[key] = t.id
         for child in children:
             child.artifact_lineage = [*t.artifact_lineage, parent_key]
         return None
+
+    def _release_split_reservations(self, parent_id: str) -> None:
+        """Drop the tentative reservations a settled split holds — its
+        children are declared tasks now, which IS the durable authority."""
+        with self._decompose_reservation_lock:
+            for key in [
+                k for k, owner in self._decompose_reservations.items()
+                if owner == parent_id
+            ]:
+                del self._decompose_reservations[key]
 
     def _try_decompose_and_run(
         self, t: "Task",
@@ -10765,12 +10801,18 @@ class Orchestrator:
             agent_id="planner",
         )
         all_ok = True
-        for child in children:
-            self._persist_child_task(child)  # §5: deferral-aware (worker-safe)
-            self._run_task_with_redo(child, summary)
-            self._persist_child_task(child)
-            if child.status is not TaskStatus.COMPLETED:
-                all_ok = False
+        try:
+            for child in children:
+                self._persist_child_task(child)  # §5: deferral-aware (worker-safe)
+                self._run_task_with_redo(child, summary)
+                self._persist_child_task(child)
+                if child.status is not TaskStatus.COMPLETED:
+                    all_ok = False
+        finally:
+            # The children are declared tasks now — the durable authority.
+            # Releasing in ``finally`` keeps a raising child from leaking
+            # the tentative reservations forever.
+            self._release_split_reservations(t.id)
         if all_ok:
             t.transitions.append(StateTransition(
                 from_state=t.status.value,
