@@ -718,7 +718,7 @@ def test_attempt_decompose_children_inherit_retry_ceiling(
 ):
     """``max_retries`` is the operator-set CEILING (a settings knob). A child
     must inherit the parent's ceiling — else a knob set BELOW the model
-    default lets a split resurrect the higher default. Under the #40 mint
+    default lets a split resurrect the higher default. Under the decompose-mint
     floor the child's counter derives from the CLAMPED ceiling (one remaining
     attempt); the floor arithmetic itself is pinned in
     test_decompose_mint.py."""
@@ -739,7 +739,7 @@ def test_decompose_children_run_one_attempt_each(
 ):
     """End-to-end through the real run path, for ANY operator-set ceiling: a
     budget-spent parent splits and every child runs exactly ONE producer
-    attempt (the #40 mint floor). The split's spend bound is one-mint-per-node
+    attempt (the decompose-mint floor). The split's spend bound is one-mint-per-node
     — not a share of the parent's counter, which starved children into
     QC-authored keystones."""
     monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the budget mechanics
@@ -774,7 +774,7 @@ def test_decompose_children_one_attempt_each_partial_remaining(
     project_with_run, monkeypatch, tmp_path
 ):
     """A partial-remaining parent's split still grants every child its one
-    attempt (the #40 mint floor): parent with 1 try left, 2 children → 2
+    attempt (the decompose-mint floor): parent with 1 try left, 2 children → 2
     producer attempts, one per child. The multiply guard is one-mint-per-node
     (spend-at-mint + durable marker), not child starvation."""
     monkeypatch.setenv("MODULATIO_QC_FIXER", "0")  # isolate the budget mechanics
