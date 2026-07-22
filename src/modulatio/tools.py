@@ -50,8 +50,10 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -1074,6 +1076,154 @@ def _format_run_shell_result(returncode: int, stdout: str, stderr: str) -> str:
     )
 
 
+#: Rolling-tail retention per child stream during the drain. The head keeps
+#: up to the output cap (so downstream truncation has full material); the
+#: tail keeps the newest bytes so a flooding child's FINAL output (the part
+#: that usually carries the error) survives with bounded memory.
+_RUN_SHELL_TAIL_CAP_BYTES = 65_536
+
+
+class _BoundedPipeCapture:
+    """Memory-bounded capture for one child pipe: a head up to ``head_cap``
+    bytes plus a rolling tail up to ``tail_cap`` bytes; the middle is dropped
+    with a byte-count marker. A flooding child costs bounded memory instead
+    of an OOM, and decoding happens once at :meth:`text` (replacement for
+    undecodable bytes), never mid-stream."""
+
+    def __init__(self, head_cap: int, tail_cap: int) -> None:
+        self._head = bytearray()
+        self._tail: deque[bytes] = deque()
+        self._tail_len = 0
+        self._head_cap = head_cap
+        self._tail_cap = tail_cap
+        self._dropped = 0
+
+    def feed(self, chunk: bytes) -> None:
+        room = self._head_cap - len(self._head)
+        if room > 0:
+            self._head.extend(chunk[:room])
+            chunk = chunk[room:]
+        if not chunk:
+            return
+        self._tail.append(chunk)
+        self._tail_len += len(chunk)
+        while self._tail_len > self._tail_cap and self._tail:
+            gone = self._tail.popleft()
+            self._tail_len -= len(gone)
+            self._dropped += len(gone)
+
+    def text(self) -> str:
+        body = bytes(self._head)
+        if self._dropped:
+            body += (
+                f"\n... [{self._dropped} bytes dropped mid-stream]\n"
+            ).encode("ascii")
+        if self._tail:
+            body += b"".join(self._tail)
+        return body.decode("utf-8", errors="replace")
+
+
+def _drain_shell_pipes(
+    proc: "subprocess.Popen", *, wall: float,
+    should_abort: "Callable[[], bool] | None" = None,
+) -> tuple[str, str, str]:
+    """Drain the child's stdout/stderr without a blocking ``communicate``:
+    nonblocking binary pipes + a select loop waking at most once per second
+    to check the absolute ``wall`` and the operator ``should_abort``. Each
+    pipe unregisters independently at EOF; when both close while the child
+    lives, bounded polling continues (abort/wall stay live). Returns
+    ``(stdout, stderr, outcome)`` with outcome ``"done" | "timeout" |
+    "abort"``. On timeout/abort the whole process group is killed, the
+    remaining pipe contents are collected under a bounded drain window, and
+    the direct child is reaped; our pipe descriptors close on every path,
+    so an escaped descendant holding a copied write end can delay EOF but
+    never wedge the loop or leak fds."""
+    import selectors
+    import signal as _signal
+
+    captures: dict[object, _BoundedPipeCapture] = {}
+    sel = selectors.DefaultSelector()
+    outcome = "done"
+
+    def _read_ready(timeout: float) -> None:
+        for key, _ in sel.select(timeout=timeout):
+            stream = key.fileobj
+            try:
+                chunk = stream.read(65536)
+            except (BlockingIOError, InterruptedError):
+                continue
+            except OSError:
+                chunk = b""
+            if chunk:
+                captures[stream].feed(chunk)
+            elif chunk is not None:  # b"" → EOF; None → spurious wakeup
+                sel.unregister(stream)
+
+    try:
+        for stream in (proc.stdout, proc.stderr):
+            if stream is None:
+                continue
+            os.set_blocking(stream.fileno(), False)
+            captures[stream] = _BoundedPipeCapture(
+                _RUN_SHELL_MAX_OUTPUT_BYTES, _RUN_SHELL_TAIL_CAP_BYTES)
+            sel.register(stream, selectors.EVENT_READ)
+        while True:
+            if should_abort is not None and should_abort():
+                outcome = "abort"
+                break
+            now = time.monotonic()
+            if now >= wall:
+                outcome = "timeout"
+                break
+            if sel.get_map():
+                _read_ready(min(1.0, wall - now))
+                if not sel.get_map() and proc.poll() is not None:
+                    break
+            else:
+                # Both pipes at EOF but the child lives: bounded poll so the
+                # wall and abort keep firing at ≤1s granularity.
+                if proc.poll() is not None:
+                    break
+                time.sleep(min(1.0, max(wall - time.monotonic(), 0.01)))
+        if outcome == "done":
+            proc.wait()  # already exited (poll() confirmed); reap now
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            # Collect what the pipes still hold, bounded — a re-parented
+            # grandchild can keep the write ends open forever.
+            drain_wall = time.monotonic() + _RUN_SHELL_DRAIN_TIMEOUT
+            while sel.get_map() and time.monotonic() < drain_wall:
+                _read_ready(0.05)
+            try:
+                proc.wait(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    # Group already SIGKILLed; best-effort reap so repeated
+                    # timeouts don't accumulate defunct PIDs.
+                    proc.poll()
+    finally:
+        sel.close()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+    out = captures.get(proc.stdout)
+    err = captures.get(proc.stderr)
+    return (
+        out.text() if out is not None else "",
+        err.text() if err is not None else "",
+        outcome,
+    )
+
+
 def _resolve_payload_binary(head: str) -> str | None:
     """Return the resolved executable path for ``head`` (the first real
     payload token), or ``None`` when it isn't installed on this host.
@@ -1110,10 +1260,20 @@ def _not_installed_body(missing: str, detail: str = "") -> str:
     )
 
 
-def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
+def make_run_shell(
+    artifacts_root: Path, extra_roots=(),
+    should_abort: "Callable[[], bool] | None" = None,
+) -> Callable[..., str]:
     """Return a ``run_shell`` callable bound to ``artifacts_root`` (plus any
     operator-granted ``extra_roots`` for exec-widen — cwd + file-args may resolve
     under a granted root, and widened-root execution is sandbox-REQUIRED).
+
+    ``should_abort`` (optional) is a CONSTRUCTION-TIME callable — never part
+    of the model-visible tool schema, never accepted from tool-call
+    arguments. When it returns True the drain loop kills the process group
+    within ~1s and the result carries a non-success exit code plus an
+    engine-owned ``[ABORTED by operator]`` marker; partial output is
+    evidence, never a successful result.
 
     Closing over the root rather than accepting it per-call keeps the
     skill-authored ``tool_args`` minimal AND makes path confinement a
@@ -1289,27 +1449,23 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
         try:
             # Own process group (start_new_session) + child rlimits so a
             # wall-clock timeout reaps the WHOLE tree (orphaned background
-            # grandchildren included), and a memory/disk bomb is bounded. We use
-            # Popen+communicate rather than subprocess.run because run() SIGKILLs
-            # only the direct child on timeout, leaving an unsandboxed
-            # background process alive.
-            import signal as _signal
-
+            # grandchildren included), and a memory/disk bomb is bounded.
+            # Binary pipes + the select drain replace a blocking
+            # communicate(): the loop wakes ≤1s to honor the wall AND the
+            # operator abort, keeps per-stream memory bounded against a
+            # flooding child, and decodes with replacement only at result
+            # formatting (a child can emit non-UTF-8/binary bytes; a strict
+            # decode would discard ALL captured output and crash the chat
+            # loop). killpg on expiry targets the session we created; under
+            # the bwrap sandbox the payload's PID namespace (--unshare-pid)
+            # tears down with the bwrap process, --die-with-parent is the
+            # belt if we are reaped first, and the drain's bounded post-kill
+            # collection covers a re-parented grandchild holding the pipes.
             proc = subprocess.Popen(
                 run_argv,
                 cwd=str(wd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                # errors="replace": a child can emit non-UTF-8/binary bytes on
-                # stdout/stderr (a probe that dumps a binary, a tool that writes
-                # latin-1 diagnostics). With text=True the default 'strict'
-                # decoder would raise UnicodeDecodeError inside communicate() —
-                # which is caught by NEITHER the TimeoutExpired nor the
-                # FileNotFoundError handler, so it would propagate and discard
-                # ALL captured output (and crash the chat loop). Substitute the
-                # undecodable bytes so the model still sees a best-effort body.
-                errors="replace",
                 shell=False,
                 env=run_env,
                 start_new_session=True,
@@ -1317,60 +1473,20 @@ def make_run_shell(artifacts_root: Path, extra_roots=()) -> Callable[..., str]:
             # Apply the resource caps from the PARENT (fork-safe), not a
             # preexec_fn (fork-from-multithreaded deadlock hazard).
             _apply_rlimits_to_pid(proc.pid)
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                # Kill the entire process group, then drain. killpg targets the
-                # session we created above (start_new_session). For an
-                # UNSANDBOXED child this is what reaps grandchildren. Under the
-                # bwrap sandbox the payload runs in its own PID namespace
-                # (--unshare-pid) whose grandchildren are NOT in our session, so
-                # killpg reaps the bwrap process itself and the kernel then tears
-                # down the whole PID namespace; --die-with-parent is the belt
-                # that also kills the sandbox if we are reaped first. The
-                # bounded drain below covers a double-forking grandchild that
-                # re-parented away and kept the pipes open.
-                try:
-                    os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    proc.kill()
-                # Bounded drain: a double-forking grandchild that re-parented
-                # away from our process group can keep the stdout/stderr pipes
-                # open after the killpg, so an unbounded communicate() would
-                # hang run_shell forever. Cap the drain; on a second timeout,
-                # kill again and give up on the leftover output.
-                try:
-                    stdout, stderr = proc.communicate(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    try:
-                        stdout, stderr = proc.communicate(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
-                    except subprocess.TimeoutExpired:
-                        # A grandchild that re-parented away still holds the
-                        # pipes open; the final communicate() never closed them,
-                        # so close our pipe ends explicitly to avoid leaking fds
-                        # across repeated timeouts (Popen.__del__ is not
-                        # guaranteed to run promptly under the chat loop's GC).
-                        for _pipe in (proc.stdout, proc.stderr):
-                            if _pipe is not None:
-                                try:
-                                    _pipe.close()
-                                except OSError:
-                                    pass
-                        # killpg already SIGKILL'd the group, so the
-                        # child is dead — but nothing here reaped it, leaving a
-                        # zombie until Popen.__del__ runs under the chat loop's
-                        # GC. Reap it now with a non-blocking poll() (the group
-                        # is gone, so this returns immediately) rather than
-                        # leaking a defunct PID per give-up under wave load.
-                        # Best-effort: a reap failure must never crash the chat
-                        # loop on this already-pathological path.
-                        try:
-                            proc.poll()
-                        except Exception:  # noqa: BLE001 - best-effort reap
-                            pass
-                        stdout, stderr = "", ""
+            stdout, stderr, outcome = _drain_shell_pipes(
+                proc,
+                wall=time.monotonic() + timeout,
+                should_abort=should_abort,
+            )
+            if outcome == "timeout":
                 stderr = (stderr or "") + f"\n[TIMEOUT after {timeout}s]"
+                return _format_run_shell_result(-1, stdout or "", stderr)
+            if outcome == "abort":
+                # Engine-owned classification, assembled from the drain
+                # outcome — tool-call arguments can neither supply nor
+                # suppress it, and an aborted run can never format as
+                # exit_code: 0.
+                stderr = (stderr or "") + "\n[ABORTED by operator]"
                 return _format_run_shell_result(-1, stdout or "", stderr)
             return _format_run_shell_result(
                 proc.returncode,
@@ -1948,6 +2064,7 @@ def build_registry(
     extra_roots=(),
     run_shell_extra_roots=(),
     extra_read_roots=(),
+    should_abort: "Callable[[], bool] | None" = None,
 ) -> dict[str, Tool]:
     """Return a fresh dict of builtin tools. Callers (CLI / tests)
     merge their own tools in and pass the result into the
@@ -2159,7 +2276,10 @@ def build_registry(
                 "Non-zero exit codes and stderr tracebacks are evidence, "
                 "not noise — read them."
             ),
-            call=make_run_shell(artifacts_root, run_shell_extra_roots),
+            call=make_run_shell(
+                artifacts_root, run_shell_extra_roots,
+                should_abort=should_abort,
+            ),
             params_schema={
                 "type": "object",
                 "properties": {

@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import os
+import time as _time
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from modulatio import orchestration as _orch_mod
 from modulatio import runners as mod_runners
 from modulatio import sandbox, store, tools, vault
 from modulatio.orchestration import Orchestrator
@@ -920,3 +922,254 @@ def test_noisy_hook_free_failure_is_red_not_advisory(project_with_run, monkeypat
     state, report = orch._goal_pytest_gate([_code_task()])
     assert state is False           # authoritative RED, never advisory green
     assert "ADVISORY" not in report
+
+
+# ── lane wall: the tool-loop's absolute deadline (model + tool dispatch) ─────
+#
+# The fix lane anchors ONE absolute monotonic deadline unconditionally and
+# threads it into the chat loop: no model invocation or individual tool
+# dispatch starts past the wall, each model call is capped to the remaining
+# wall with the hard-deadline grace counted INSIDE it (no positive floor),
+# and the shell clamp can never be raised back above the remainder by a
+# lower bound.
+
+
+def _final_response(content="done"):
+    return mod_runners.ChatResponse(content=content, tool_calls=[])
+
+
+def test_deadline_past_starts_zero_model_calls():
+    calls = {"n": 0}
+
+    def runner(**kw):
+        calls["n"] += 1
+        return _final_response()
+
+    with pytest.raises(mod_runners.LoopDeadlineExceeded):
+        mod_runners.run_llm_with_tools(
+            chat_runner=runner, prompt="p", tool_loadout=(),
+            tool_registry={}, deadline=_time.monotonic() - 1.0)
+    assert calls["n"] == 0
+
+
+def test_remaining_at_or_below_grace_starts_zero_model_calls(monkeypatch):
+    monkeypatch.setattr(mod_runners, "_HARD_DEADLINE_GRACE_S", 5.0)
+    calls = {"n": 0}
+
+    def runner(**kw):
+        calls["n"] += 1
+        return _final_response()
+
+    for delta in (3.0, 5.0):  # strictly below, and exactly at, the grace
+        with pytest.raises(mod_runners.LoopDeadlineExceeded):
+            mod_runners.run_llm_with_tools(
+                chat_runner=runner, prompt="p", tool_loadout=(),
+                tool_registry={}, deadline=_time.monotonic() + delta)
+    assert calls["n"] == 0
+
+
+def test_model_call_capped_to_remaining_wall(monkeypatch):
+    """A model call started just before the wall cannot outlive it: the
+    per-call cap is remaining − grace with NO positive floor, so the
+    wrapper's join lands at the deadline and surfaces the typed outcome."""
+    monkeypatch.setattr(mod_runners, "_HARD_DEADLINE_GRACE_S", 0.2)
+
+    def slow_runner(**kw):
+        _time.sleep(10)
+        return _final_response()
+
+    start = _time.monotonic()
+    with pytest.raises(mod_runners.LoopDeadlineExceeded):
+        mod_runners.run_llm_with_tools(
+            chat_runner=slow_runner, prompt="p", tool_loadout=(),
+            tool_registry={}, deadline=start + 0.6)
+    assert _time.monotonic() - start < 2.0
+
+
+def test_expiry_mid_response_stops_second_tool_call(monkeypatch):
+    """One assistant response carrying two tool calls: expiry during the
+    first prevents the second from starting."""
+    monkeypatch.setattr(mod_runners, "_HARD_DEADLINE_GRACE_S", 0.05)
+    executed: list[str] = []
+
+    def slow_tool(**kw):
+        _time.sleep(0.6)
+        executed.append("first")
+        return "ok"
+
+    def second_tool(**kw):
+        executed.append("second")
+        return "ok"
+
+    registry = {
+        "slow": tools.Tool(name="slow", description="d", call=slow_tool),
+        "second": tools.Tool(name="second", description="d", call=second_tool),
+    }
+    responses = iter([
+        mod_runners.ChatResponse(content="", tool_calls=[
+            mod_runners.ToolCall(id="1", name="slow", args={}),
+            mod_runners.ToolCall(id="2", name="second", args={}),
+        ]),
+        _final_response(),
+    ])
+
+    with pytest.raises(mod_runners.LoopDeadlineExceeded):
+        mod_runners.run_llm_with_tools(
+            chat_runner=lambda **kw: next(responses), prompt="p",
+            tool_loadout=("slow", "second"), tool_registry=registry,
+            deadline=_time.monotonic() + 0.3)
+    assert executed == ["first"]
+
+
+def test_deadline_none_keeps_existing_loop_shape():
+    calls = {"n": 0}
+
+    def runner(**kw):
+        calls["n"] += 1
+        return _final_response("plain")
+
+    assert mod_runners.run_llm_with_tools(
+        chat_runner=runner, prompt="p", tool_loadout=(),
+        tool_registry={}) == "plain"
+    assert calls["n"] == 1
+
+
+def test_fix_lane_anchors_deadline_without_run_shell(project, monkeypatch):
+    """The lane deadline anchors unconditionally: a loadout with no
+    run_shell still threads an absolute wall into the chat loop."""
+    registry = {name: _stub_tool(name) for name in (
+        "read_file", "read_tool_result", "edit_file", "write_artifact")}
+    monkeypatch.setattr(
+        Orchestrator, "_resolve_chat_runner", lambda self, agent_id: object())
+    monkeypatch.setattr(
+        Orchestrator, "_leader_verify_tool_registry",
+        lambda self, **kw: registry)
+    monkeypatch.setattr(_orch_mod, "_LEADER_FIX_DEADLINE_S", 123.0)
+    seen: dict = {}
+
+    def _capture_chat_loop(self, **kwargs):
+        seen.update(kwargs)
+        return "captured"
+
+    monkeypatch.setattr(Orchestrator, "_run_chat_loop", _capture_chat_loop)
+    counter = {"n": 0}
+    runners = {
+        "leader": _progressive_leader(["disappointed", "satisfied"], counter),
+        "planner": _planner_stub,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    before = _time.monotonic()
+    Orchestrator(project, runners).kickoff("anchor the wall")
+    assert seen.get("deadline") is not None
+    assert before + 100.0 < seen["deadline"] <= _time.monotonic() + 123.0
+
+
+def test_fix_lane_survives_wall_expiry(project, monkeypatch):
+    """A wall-tripped fix attempt must not strand the goal: the typed
+    deadline outcome is caught, the error is recorded, and re-verify still
+    renders the binding judgment."""
+    registry = {name: _stub_tool(name) for name in (
+        "read_file", "read_tool_result", "edit_file", "write_artifact")}
+    monkeypatch.setattr(
+        Orchestrator, "_resolve_chat_runner", lambda self, agent_id: object())
+    monkeypatch.setattr(
+        Orchestrator, "_leader_verify_tool_registry",
+        lambda self, **kw: registry)
+
+    def _expiring_chat_loop(self, **kwargs):
+        raise mod_runners.LoopDeadlineExceeded("tool-loop deadline exceeded")
+
+    monkeypatch.setattr(Orchestrator, "_run_chat_loop", _expiring_chat_loop)
+    counter = {"n": 0}
+    runners = {
+        "leader": _progressive_leader(["disappointed", "satisfied"], counter),
+        "planner": _planner_stub,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    Orchestrator(project, runners).kickoff("survive the wall")
+    assert counter["n"] >= 2  # re-verify ran after the expired fix attempt
+
+
+def test_fix_lane_shell_remainder_below_minimum_starts_no_child(
+        project, monkeypatch):
+    """Remaining lane budget at or below run_shell's own minimum clamp
+    refuses WITHOUT starting a child — a lower timeout clamp must never
+    raise a deadline-derived bound back above the remainder."""
+    shell_log: list = []
+
+    def _recording_shell(**kw):
+        shell_log.append(kw)
+        return "exit_code: 0\nstdout:\n\nstderr:\n"
+
+    registry = {name: _stub_tool(name) for name in (
+        "run_shell", "read_file", "read_tool_result",
+        "edit_file", "write_artifact")}
+    registry["run_shell"] = tools.Tool(
+        name="run_shell", description="run_shell", call=_recording_shell)
+    monkeypatch.setattr(
+        Orchestrator, "_resolve_chat_runner", lambda self, agent_id: object())
+    monkeypatch.setattr(
+        Orchestrator, "_leader_verify_tool_registry",
+        lambda self, **kw: registry)
+    monkeypatch.setattr(_orch_mod, "_LEADER_FIX_DEADLINE_S", 0.05)
+    results: list = []
+
+    def _probing_chat_loop(self, **kwargs):
+        budgeted = self._tls.tool_registry_override["run_shell"]
+        results.append(budgeted.call(
+            cmd="pytest -q", profile="full", cwd="", timeout=600.0))
+        return "probed"
+
+    monkeypatch.setattr(Orchestrator, "_run_chat_loop", _probing_chat_loop)
+    counter = {"n": 0}
+    runners = {
+        "leader": _progressive_leader(["disappointed", "satisfied"], counter),
+        "planner": _planner_stub,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    Orchestrator(project, runners).kickoff("floor cannot extend the wall")
+    assert shell_log == []
+    assert any("wall expired" in r for r in results)
+
+
+def test_fix_lane_shell_timeout_clamped_to_subsecond_remainder(
+        project, monkeypatch):
+    """A sub-second remainder above the tool minimum reaches the child
+    UNRAISED: no 1-second floor may enlarge the deadline-derived timeout."""
+    shell_log: list = []
+
+    def _recording_shell(**kw):
+        shell_log.append(kw)
+        return "exit_code: 0\nstdout:\n\nstderr:\n"
+
+    registry = {name: _stub_tool(name) for name in (
+        "run_shell", "read_file", "read_tool_result",
+        "edit_file", "write_artifact")}
+    registry["run_shell"] = tools.Tool(
+        name="run_shell", description="run_shell", call=_recording_shell)
+    monkeypatch.setattr(
+        Orchestrator, "_resolve_chat_runner", lambda self, agent_id: object())
+    monkeypatch.setattr(
+        Orchestrator, "_leader_verify_tool_registry",
+        lambda self, **kw: registry)
+    monkeypatch.setattr(_orch_mod, "_LEADER_FIX_DEADLINE_S", 0.5)
+
+    def _probing_chat_loop(self, **kwargs):
+        budgeted = self._tls.tool_registry_override["run_shell"]
+        budgeted.call(cmd="pytest -q", profile="full", cwd="", timeout=600.0)
+        return "probed"
+
+    monkeypatch.setattr(Orchestrator, "_run_chat_loop", _probing_chat_loop)
+    counter = {"n": 0}
+    runners = {
+        "leader": _progressive_leader(["disappointed", "satisfied"], counter),
+        "planner": _planner_stub,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    Orchestrator(project, runners).kickoff("clamp to the remainder")
+    assert len(shell_log) == 1
+    assert shell_log[0]["timeout"] < 1.0

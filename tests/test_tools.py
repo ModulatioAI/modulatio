@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import http.client
 import io
+import os as _os
+import time as _time
 from pathlib import Path
 import urllib.request
 from urllib.error import HTTPError
@@ -2327,51 +2329,56 @@ def test_passive_heads_keep_legitimate_forms(tmp_path):
 
 # ── Finding 3: fd leak on the triple-timeout drain path ────────────────
 
-def test_triple_timeout_drain_closes_pipes(tmp_path, monkeypatch):
-    """On the pathological path where every drain ``communicate`` times out,
-    run_shell must close the Popen pipe ends rather than leak the fds.
-
-    We simulate a Popen whose communicate always raises TimeoutExpired and
-    assert both pipe ends end up closed and a TIMEOUT result is returned.
-    """
+def test_wedged_drain_closes_pipes(tmp_path, monkeypatch):
+    """On the pathological path where the pipes never reach EOF (an escaped
+    descendant holds the write ends) and the child never becomes reapable,
+    run_shell must still return a TIMEOUT result and close its pipe ends
+    rather than leak the fds."""
+    import os
     import subprocess
 
-    closed: dict[str, bool] = {"stdout": False, "stderr": False}
-
-    class _FakePipe:
-        def __init__(self, name: str):
-            self._name = name
-
-        def close(self):
-            closed[self._name] = True
+    r_out, w_out = os.pipe()
+    r_err, w_err = os.pipe()  # writer ends deliberately stay open (no EOF)
 
     class _FakeProc:
-        def __init__(self, *a, **k):
+        def __init__(self):
             self.pid = 424242
             self.returncode = -9
-            self.stdout = _FakePipe("stdout")
-            self.stderr = _FakePipe("stderr")
+            self.stdout = os.fdopen(r_out, "rb")
+            self.stderr = os.fdopen(r_err, "rb")
 
-        def communicate(self, timeout=None):
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
             raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
 
         def kill(self):
             pass
 
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _FakeProc())
+    made: dict = {}
+
+    def _fake_popen(*a, **k):
+        made["proc"] = _FakeProc()
+        return made["proc"]
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
     # Neutralize process-group / rlimit side effects that the fake pid lacks.
     monkeypatch.setattr(tools.os, "killpg", lambda *a, **k: None)
     monkeypatch.setattr(tools.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(tools, "_apply_rlimits_to_pid", lambda pid: None)
+    monkeypatch.setattr(tools, "_RUN_SHELL_DRAIN_TIMEOUT", 0.2)
 
     root = _art(tmp_path)
     run_shell = tools.make_run_shell(root)
     # A command that passes the passive profile so we reach the Popen path.
-    result = run_shell("ls", profile="passive", cwd=str(root))
+    result = run_shell("ls", profile="passive", cwd=str(root), timeout=0.3)
 
     assert "[TIMEOUT" in result
-    assert closed["stdout"] is True
-    assert closed["stderr"] is True
+    assert made["proc"].stdout.closed
+    assert made["proc"].stderr.closed
+    os.close(w_out)
+    os.close(w_err)
 
 
 # ═══ fold: test_tools_resweep.py ═══
@@ -2394,28 +2401,29 @@ def test_triple_timeout_drain_closes_pipes(tmp_path, monkeypatch):
 # ── Finding 1: give-up drain branch reaps the SIGKILL'd child ──────────
 
 def test_give_up_branch_reaps_child(tmp_path, monkeypatch):
-    """When every drain ``communicate`` times out, run_shell must reap the
-    SIGKILL'd child (a non-blocking ``poll()``) rather than leave it as a
-    zombie for ``Popen.__del__`` to clean up under GC.
+    """When the killed child never becomes waitable (every bounded ``wait``
+    times out), run_shell must still attempt the non-blocking ``poll()``
+    reap rather than leave a zombie for ``Popen.__del__`` under GC.
 
-    We simulate a Popen whose communicate always raises TimeoutExpired —
-    driving the pathological give-up branch — and assert ``poll`` is
-    called there (the reap) while a TIMEOUT result is still returned.
+    We simulate a Popen whose pipes never reach EOF and whose ``wait``
+    always raises TimeoutExpired — driving the pathological give-up
+    branch — and assert ``poll`` is called there (the reap) while a
+    TIMEOUT result is still returned.
     """
-    polled: dict[str, int] = {"count": 0}
+    import os as _os_mod
 
-    class _FakePipe:
-        def close(self):
-            pass
+    polled: dict[str, int] = {"count": 0}
+    r_out, w_out = _os_mod.pipe()
+    r_err, w_err = _os_mod.pipe()  # writer ends stay open: no EOF
 
     class _FakeProc:
         def __init__(self, *a, **k):
             self.pid = 525252
             self.returncode = -9
-            self.stdout = _FakePipe()
-            self.stderr = _FakePipe()
+            self.stdout = _os_mod.fdopen(r_out, "rb")
+            self.stderr = _os_mod.fdopen(r_err, "rb")
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
 
         def kill(self):
@@ -2424,18 +2432,21 @@ def test_give_up_branch_reaps_child(tmp_path, monkeypatch):
         def poll(self):
             # Non-blocking reap; updates returncode in real Popen.
             polled["count"] += 1
-            return self.returncode
+            return None
 
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _FakeProc())
     # Neutralize process-group / rlimit side effects the fake pid lacks.
     monkeypatch.setattr(tools.os, "killpg", lambda *a, **k: None)
     monkeypatch.setattr(tools.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(tools, "_apply_rlimits_to_pid", lambda pid: None)
+    monkeypatch.setattr(tools, "_RUN_SHELL_DRAIN_TIMEOUT", 0.2)
 
     root = _art(tmp_path)
     run_shell = tools.make_run_shell(root)
     # A command that passes the passive profile so we reach the Popen path.
-    result = run_shell("ls", profile="passive", cwd=str(root))
+    result = run_shell("ls", profile="passive", cwd=str(root), timeout=0.3)
+    _os_mod.close(w_out)
+    _os_mod.close(w_err)
 
     assert "[TIMEOUT" in result
     # Without the fix, poll() is never called on the give-up branch.
@@ -2475,14 +2486,16 @@ class _CaptureProc:
         type(self).last_argv = list(argv)
         self.pid = 424242
         self.returncode = 0
-        self.stdout = _CapturePipe()
-        self.stderr = _CapturePipe()
-
-    def communicate(self, timeout=None):
-        return ("", "")
+        # No pipes: the drain loop sees an exited child with nothing to
+        # read and takes the clean-exit path immediately.
+        self.stdout = None
+        self.stderr = None
 
     def kill(self):
         pass
+
+    def wait(self, timeout=None):
+        return self.returncode
 
     def poll(self):
         return self.returncode
@@ -2894,3 +2907,191 @@ def test_registry_write_artifact_gets_edit_roots_not_read_roots(tmp_path):
     assert "wrote" in wa(path=str(rw / "a.md"), content="x")
     with pytest.raises(ValueError):
         wa(path=str(ro / "b.md"), content="x")             # read grant can't write
+
+
+# ── abortable reaper: two-pipe drain, operator abort, bounded capture ─────────
+#
+# run_shell's child-wait is a select loop over nonblocking binary pipes: it
+# wakes ≤1s to check the absolute wall and the construction-time
+# ``should_abort`` callable, keeps per-stream memory bounded, kills the whole
+# process group on expiry/abort, and closes its pipe ends on every path.
+
+
+@pytest.fixture
+def unsandboxed(monkeypatch):
+    """Run children directly (no bwrap): the drain/abort mechanics under test
+    are identical on both paths, and the bypass keeps CI hosts sandbox-free."""
+    monkeypatch.setattr(_sandbox, "is_bypass_requested", lambda: True)
+
+
+def test_run_shell_abort_kills_child_and_classifies(tmp_path, unsandboxed):
+    """An abort observed by the drain loop kills the group within the ~1s
+    wake, returns a NON-success exit code plus the engine-owned marker —
+    partial output is evidence, never a successful result."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art, should_abort=lambda: True)
+    start = _time.monotonic()
+    out = rs(cmd="python3 -c 'import time; time.sleep(30)'",
+             profile="full", timeout=30.0)
+    assert _time.monotonic() - start < 10.0
+    assert out.startswith("exit_code: -1")
+    assert "[ABORTED by operator]" in out
+
+
+def test_run_shell_abort_preserves_partial_output(tmp_path, unsandboxed):
+    """Output written before the abort survives in the result body as
+    evidence alongside the abort classification."""
+    art = _make_artifacts(tmp_path)
+    t0 = _time.monotonic()
+    rs = tools.make_run_shell(
+        art, should_abort=lambda: _time.monotonic() - t0 > 1.0)
+    out = rs(
+        cmd=("python3 -c \"import sys,time; print('partial-evidence'); "
+             "sys.stdout.flush(); time.sleep(30)\""),
+        profile="full", timeout=30.0)
+    assert "partial-evidence" in out
+    assert "[ABORTED by operator]" in out
+    assert out.startswith("exit_code: -1")
+
+
+def test_run_shell_timeout_classification_distinct_from_abort(
+        tmp_path, unsandboxed):
+    """Timeout and abort share the kill/reap path but keep distinct
+    classifications in the result body."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    out = rs(cmd="python3 -c 'import time; time.sleep(30)'",
+             profile="full", timeout=1.0)
+    assert "[TIMEOUT after 1.0s]" in out
+    assert "ABORTED" not in out
+    assert out.startswith("exit_code: -1")
+
+
+def test_run_shell_immediate_exit_pays_no_wake_penalty(tmp_path, unsandboxed):
+    """A child that exits at once completes its drain on EOF — no fixed
+    1-second sleep rides the happy path."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    start = _time.monotonic()
+    out = rs(cmd="python3 -c 'print(\"hi\")'", profile="full", timeout=30.0)
+    assert _time.monotonic() - start < 1.0
+    assert out.startswith("exit_code: 0")
+    assert "hi" in out
+
+
+def test_run_shell_stream_shapes(tmp_path, unsandboxed):
+    """Silent, stdout-only, and stderr-only children all drain to EOF and
+    report their real exit codes."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    assert rs(cmd="python3 -c 'pass'", profile="full",
+              timeout=10.0).startswith("exit_code: 0")
+    out_only = rs(cmd="python3 -c 'print(\"out-only\")'",
+                  profile="full", timeout=10.0)
+    assert "out-only" in out_only
+    err_only = rs(
+        cmd="python3 -c \"import sys; sys.stderr.write('err-only')\"",
+        profile="full", timeout=10.0)
+    assert "err-only" in err_only
+    assert err_only.startswith("exit_code: 0")
+
+
+def test_run_shell_two_pipe_flood_bounded_no_deadlock(tmp_path, unsandboxed):
+    """A child flooding BOTH pipes simultaneously completes (no
+    full-pipe-buffer deadlock) and the retained output stays bounded."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    out = rs(
+        cmd=("python3 -c \"import sys\n"
+             "d = 'x' * 65536\n"
+             "for _ in range(50):\n"
+             "    sys.stdout.write(d)\n"
+             "    sys.stderr.write(d)\n"
+             "print('flood-done')\""),
+        profile="full", timeout=60.0)
+    assert out.startswith("exit_code: 0")
+    assert len(out) < 100_000
+    assert "truncated" in out or "dropped" in out
+
+
+def test_run_shell_grandchild_pipe_holder_cannot_wedge(tmp_path, unsandboxed):
+    """A background descendant inheriting the pipes delays EOF but cannot
+    wedge the drain: the wall still fires, the group is killed, and output
+    written before the wedge survives."""
+    art = _make_artifacts(tmp_path)
+    (art / "bg.sh").write_text("sleep 30 &\necho started\nexit 0\n")
+    rs = tools.make_run_shell(art)
+    start = _time.monotonic()
+    out = rs(cmd="bash bg.sh", profile="full", timeout=2.0)
+    assert _time.monotonic() - start < 12.0
+    assert "started" in out
+    assert "[TIMEOUT after 2.0s]" in out
+
+
+def test_run_shell_repeated_aborts_leak_no_fds_or_zombies(
+        tmp_path, unsandboxed):
+    """Repeated abort-kill cycles neither grow the process's fd table nor
+    leave unreaped children."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art, should_abort=lambda: True)
+    baseline = len(_os.listdir("/proc/self/fd"))
+    for _ in range(5):
+        out = rs(cmd="python3 -c 'import time; time.sleep(5)'",
+                 profile="full", timeout=10.0)
+        assert "[ABORTED by operator]" in out
+    assert len(_os.listdir("/proc/self/fd")) <= baseline + 3
+    try:
+        pid, _status = _os.waitpid(-1, _os.WNOHANG)
+        assert pid == 0  # children may exist; none is an unreaped zombie
+    except ChildProcessError:
+        pass
+
+
+def test_run_shell_one_pipe_closes_while_other_stays_open(
+        tmp_path, unsandboxed):
+    """Each pipe unregisters independently at EOF: a child that closes
+    stdout while writing stderr (and the inverse) drains both correctly."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    out = rs(
+        cmd=("python3 -c \"import sys, os\n"
+             "print('before-close')\n"
+             "sys.stdout.flush()\n"
+             "os.close(1)\n"
+             "sys.stderr.write('stderr-after-stdout-close')\""),
+        profile="full", timeout=10.0)
+    assert out.startswith("exit_code: 0")
+    assert "before-close" in out
+    assert "stderr-after-stdout-close" in out
+    inverse = rs(
+        cmd=("python3 -c \"import sys, os\n"
+             "sys.stderr.write('early-err')\n"
+             "sys.stderr.flush()\n"
+             "os.close(2)\n"
+             "print('stdout-after-stderr-close')\""),
+        profile="full", timeout=10.0)
+    assert inverse.startswith("exit_code: 0")
+    assert "early-err" in inverse
+    assert "stdout-after-stderr-close" in inverse
+
+
+def test_run_shell_both_pipes_closed_child_still_alive(tmp_path, unsandboxed):
+    """After both pipes reach EOF with the child still running, bounded
+    polling continues until the real exit — the exit code is the child's,
+    not a premature EOF misread."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    start = _time.monotonic()
+    out = rs(
+        cmd=("python3 -c \"import os, time, sys\n"
+             "print('closing')\n"
+             "sys.stdout.flush()\n"
+             "os.close(1)\n"
+             "os.close(2)\n"
+             "time.sleep(2)\n"
+             "os._exit(7)\""),
+        profile="full", timeout=15.0)
+    took = _time.monotonic() - start
+    assert took >= 2.0  # waited for the real exit, not the EOF
+    assert out.startswith("exit_code: 7")
+    assert "closing" in out

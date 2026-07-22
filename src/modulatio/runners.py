@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -1426,6 +1427,14 @@ class MaxItersExhausted(RuntimeError):
     QC-as-fixer backstop (recoverable) instead of settling BLOCKED like a real bug."""
 
 
+class LoopDeadlineExceeded(RuntimeError):
+    """The tool-loop's absolute wall-clock deadline passed — no further model
+    invocation or tool dispatch may start. Typed control flow (never
+    model-visible prose): the caller settles the lane on whatever state the
+    on-disk artifact is in. Distinct from operator abort (``should_abort`` →
+    ``INTERRUPTED_REPLY``) and from per-call ``SeatCallHardTimeout``."""
+
+
 #: Returned (by identity) from the tool-loop when ``should_abort`` fires (operator
 #: pressed ESC). First-person so it reads naturally as a Leader turn in the chat,
 #: BUT it is also a public sentinel: callers compare ``reply is INTERRUPTED_REPLY``
@@ -1459,8 +1468,18 @@ def run_llm_with_tools(
     permission_broker: "object | None" = None,
     metered_authorizer: Callable[[str, dict], "tuple[bool, str]"] | None = None,
     should_abort: Callable[[], bool] | None = None,
+    deadline: float | None = None,
 ) -> str:
     """Run a function-calling loop. Returns the model's final text.
+
+    ``deadline`` (optional) is an ABSOLUTE ``time.monotonic()`` wall: once it
+    passes, no further model invocation or individual tool dispatch starts —
+    checked before every model call and before EACH tool call inside a
+    multi-call response — and the loop raises :class:`LoopDeadlineExceeded`.
+    Each model invocation is additionally capped to the remaining wall via
+    ``_hard_deadline`` with its grace counted INSIDE the wall (cap =
+    remaining − grace, no positive floor: remaining at or below the grace
+    starts zero calls), so the wrapper cannot itself cross the deadline.
 
     Loop semantics:
     1. Send the user ``prompt`` plus the loadout's tools schema.
@@ -1570,6 +1589,11 @@ def run_llm_with_tools(
         # kill — a single long in-flight tool/model call still finishes first.
         if should_abort is not None and should_abort():
             return INTERRUPTED_REPLY
+        if deadline is not None and time.monotonic() >= deadline:
+            raise LoopDeadlineExceeded(
+                f"tool-loop deadline exceeded at iteration {iteration + 1}: "
+                f"no further model or tool call may start"
+            )
         # Slice 90: pre-flight context-budget check. Compresses
         # in-band; raises RecoverableContextError when even compression
         # can't fit. No-op when no ContextBudgetConfig is bound or when
@@ -1608,7 +1632,36 @@ def run_llm_with_tools(
             messages = compressed
             if did_warn:
                 soft_warn_seen = True
-        response = chat_runner(messages=messages, tools=tools_schema)
+        if deadline is None:
+            response = chat_runner(messages=messages, tools=tools_schema)
+        else:
+            # Cap this invocation to the remaining wall, grace counted INSIDE
+            # it: cap = remaining − grace with NO positive floor — a floor
+            # after the subtraction would let the wrapper's join
+            # (cap + grace) cross the declared wall.
+            remaining = deadline - time.monotonic()
+            if remaining <= _HARD_DEADLINE_GRACE_S:
+                raise LoopDeadlineExceeded(
+                    f"tool-loop deadline: {remaining:.1f}s remaining is within "
+                    f"the {_HARD_DEADLINE_GRACE_S:.0f}s hard-deadline grace — "
+                    f"no model call started"
+                )
+            bounded_runner = _hard_deadline(
+                chat_runner,
+                timeout_s=remaining - _HARD_DEADLINE_GRACE_S,
+                describe="deadline-bounded tool-loop model call",
+            )
+            try:
+                response = bounded_runner(messages=messages, tools=tools_schema)
+            except SeatCallHardTimeout as exc:
+                if time.monotonic() >= deadline - 0.001:
+                    # OUR remaining-wall cap expired (join lands at the
+                    # deadline) — surface the typed lane outcome, not a
+                    # per-call availability failure.
+                    raise LoopDeadlineExceeded(
+                        "tool-loop deadline: model call expired at the wall"
+                    ) from exc
+                raise
         if not response.tool_calls:
             return response.content or ""
         # Append the assistant turn carrying the tool_calls — required
@@ -1652,6 +1705,15 @@ def run_llm_with_tools(
             iter_suffix = ""
 
         for call in response.tool_calls:
+            # The wall is re-checked before EACH dispatch — one assistant
+            # response can carry several tool calls, and expiry during the
+            # first must prevent the second from starting.
+            if deadline is not None and time.monotonic() >= deadline:
+                raise LoopDeadlineExceeded(
+                    f"tool-loop deadline exceeded before dispatching "
+                    f"{call.name!r} — remaining calls in this response are "
+                    f"not started"
+                )
             # Enforce the loadout authority boundary. An unlisted tool
             # resolves to the same safe deny path as an unknown one — refused,
             # never executed, fed back so the model can re-plan within its tools.

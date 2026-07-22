@@ -5584,11 +5584,18 @@ class Orchestrator:
         goal_id: str | None = None,
         permission_callback: "Callable[[str, dict], bool] | None" = None,
         permission_broker: "object | None" = None,
+        deadline: float | None = None,
     ) -> str:
         """Shared helper: run the function-calling loop with a JSONL
         transcript sidecar and per-call activity events. Returns the
         model's final text. Used by both producer (drafter) and QC
         verify paths so the wiring stays in one place.
+
+        ``deadline`` (optional, absolute ``time.monotonic()``) bounds the
+        whole loop: no model invocation or tool dispatch starts past it, and
+        each model call is capped to the remaining wall (see
+        ``runners.run_llm_with_tools``). Absolute, so it also spans seat
+        fallbacks — a restart on the next seat inherits the same wall.
 
         ``needs_network`` and ``pass_env`` derive from the active
         skill's frontmatter and bind sandbox contextvars for the
@@ -5738,6 +5745,7 @@ class Orchestrator:
                     # iteration and bails with a clean note. Same abort_event F8
                     # uses, so a kickoff's producer/QC tool-loops stop too.
                     should_abort=self.abort_event.is_set,
+                    deadline=deadline,
                 )
 
             # #8 per-seat fallback: run the WHOLE task on the primary; if it's
@@ -8550,6 +8558,10 @@ class Orchestrator:
             extra_roots=folder_rw,
             run_shell_extra_roots=folder_rw,
             extra_read_roots=folder_read,
+            # F8 reaches an in-flight shell: the drain loop wakes ≤1s and
+            # kills the process group instead of waiting out the per-call
+            # timeout.
+            should_abort=self.abort_event.is_set,
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # staging-bound builtins win over shared ones
@@ -8747,6 +8759,10 @@ class Orchestrator:
             run_shell_extra_roots=_lg.LiveGrantRoots(gate, "exec", static=(
                 *folder_rw, shared_root)),
             extra_read_roots=folder_read,
+            # F8 reaches an in-flight shell: the drain loop wakes ≤1s and
+            # kills the process group instead of waiting out the per-call
+            # timeout.
+            should_abort=self.abort_event.is_set,
         )
         merged = dict(self.tool_registry)
         merged.update(rebound)  # workspace-bound builtins win over shared ones
@@ -8796,6 +8812,10 @@ class Orchestrator:
             tool_calls_dir=art_root / "tool_calls",
             project_code=self.project.code,
             extra_read_roots=(*folder_rw, *folder_read),
+            # F8 reaches an in-flight verify/fix shell: the drain loop wakes
+            # ≤1s and kills the process group instead of waiting out the
+            # per-call timeout.
+            should_abort=self.abort_event.is_set,
         )
         merged = dict(self.tool_registry)
         for name in ("read_file", "read_tool_result"):
@@ -13290,15 +13310,20 @@ class Orchestrator:
             / f"leader_fix_{goal.id.lower()}.jsonl"
         )
         # M2 (cadre R1): lane budgets. Clamp each shell run, cap the count,
-        # and hold the whole session to a deadline — a prompt-injected tool
-        # loop cannot stretch one fix cycle into hours. Exhaustion returns a
-        # refusal body (the model finishes with its summary); the re-verify
-        # still renders the binding judgment.
+        # and hold the whole session to a wall-clock deadline the chat loop
+        # itself enforces (model + tool dispatch, not just shell) — a
+        # prompt-injected tool loop cannot stretch one fix cycle into hours.
+        # Exhaustion returns a refusal body / typed deadline outcome; the
+        # re-verify still renders the binding judgment. The deadline anchors
+        # UNCONDITIONALLY — a loadout without run_shell still has inference
+        # and file tools to bound.
+        from time import monotonic as _monotonic
+        _lane_deadline = _monotonic() + _LEADER_FIX_DEADLINE_S
         inner_shell = registry.get("run_shell")
         if inner_shell is not None:
             from dataclasses import replace as _dc_replace
-            from time import monotonic as _monotonic
-            _lane_deadline = _monotonic() + _LEADER_FIX_DEADLINE_S
+
+            from modulatio.tools import _RUN_SHELL_MIN_TIMEOUT_SECONDS
             _shell_calls = {"n": 0}
 
             def _budgeted_shell(
@@ -13306,15 +13331,25 @@ class Orchestrator:
                 timeout: float = 30.0,
             ) -> str:
                 _shell_calls["n"] += 1
-                left = _lane_deadline - _monotonic()
-                if _shell_calls["n"] > _LEADER_FIX_SHELL_CALLS or left <= 0:
+                if _shell_calls["n"] > _LEADER_FIX_SHELL_CALLS:
                     return (
                         "exit_code: -1\nstdout:\n\nstderr:\n[leader-fix lane "
                         "budget exhausted — no more shell runs this cycle; "
                         "finish with your summary]"
                     )
-                capped = max(1.0, min(
-                    float(timeout or 30.0), _LEADER_FIX_SHELL_TIMEOUT_S, left))
+                left = _lane_deadline - _monotonic()
+                # At or below the tool's own minimum clamp: refuse WITHOUT
+                # starting a child — the inner lo-clamp would otherwise RAISE
+                # a sub-minimum remainder back to the minimum, and a lower
+                # bound must never enlarge a deadline-derived upper bound.
+                if left <= _RUN_SHELL_MIN_TIMEOUT_SECONDS:
+                    return (
+                        "exit_code: -1\nstdout:\n\nstderr:\n[leader-fix lane "
+                        "wall expired — no shell time remains this cycle; "
+                        "finish with your summary]"
+                    )
+                capped = min(
+                    float(timeout or 30.0), _LEADER_FIX_SHELL_TIMEOUT_S, left)
                 return inner_shell.call(
                     cmd=cmd, profile=profile, cwd=cwd, timeout=capped)
 
@@ -13338,6 +13373,7 @@ class Orchestrator:
                 skill_name="leader-fix",
                 budget_role="leader-reflect",
                 goal_id=goal.id,
+                deadline=_lane_deadline,
             )
         except Exception as exc:
             # Best-effort fix: the re-verify below renders the binding judgment
