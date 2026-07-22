@@ -1439,6 +1439,13 @@ def _token_floor(task: "Task") -> int | None:
 
 
 
+class DecomposeMintConflict(RuntimeError):
+    """A mint-record child id already exists under a DIFFERENT authority
+    (foreign ``mint_id`` or mismatched immutable descriptor — canonical
+    path/lineage). Recovery must never preserve or overwrite such a child;
+    the conflict surfaces typed, with no write."""
+
+
 @dataclass(frozen=True)
 class _DecomposeRefusal:
     """Typed outcome of a refused decompose split. Atomic by contract:
@@ -9478,6 +9485,13 @@ class Orchestrator:
         when invoked from an auto-redo. Normal task dispatch passes
         empty string (first attempt has no prior feedback).
         """
+        if t.decompose_mint is not None:
+            # Recovery routing: a minted container's disposition is
+            # owned by its committed record — resume/materialize the
+            # children; NEVER the producer loop or QC-as-fixer, no matter
+            # which path re-entered (redispatch, recovery, goal-redo).
+            self._resume_decompose_mint(t, summary)
+            return
         corrective_notes = initial_corrective_notes
         last_qc: tuple[AssertionEvidence, str] | None = None  # (verdict, notes)
         rescue_defect_type: str | None = None  # #81: last QC defect class for the witness
@@ -10614,6 +10628,14 @@ class Orchestrator:
         usable children, over the width cap). A refusal is ATOMIC — no
         children, no mint fact, no producer calls — and falls through to the
         genuine-stuck ticket carrying its reason."""
+        if t.decompose_mint is not None:
+            # One mint per node: the committed record is the never-mint-again
+            # marker. Recovery RESUMES the committed children (routing in
+            # ``_run_task_with_redo_inner``); it never mints fresh budget.
+            return _DecomposeRefusal(
+                f"task already minted decomposition {t.decompose_mint.mint_id}"
+                f" — one mint per node; recovery resumes the committed "
+                f"children")
         if _is_assembler_task(t):
             # Decomposing a MECHANICAL JOIN
             # yields partial assemblies — children inherit the assembly skill +
@@ -10805,10 +10827,53 @@ class Orchestrator:
             role="planner", phase="task_decomposed", task_id=t.id,
             agent_id="planner",
         )
+        self._run_mint_children(
+            t, summary,
+            ok_rationale=(
+                f"too big for one call ({ctx_exc.estimated_tokens} > "
+                f"{ctx_exc.max_input_tokens} tokens) — decomposed into "
+                f"{len(children)} children, all completed"
+            ),
+        )
+        return True, None
+
+    def _resume_decompose_mint(self, t: "Task", summary: RunSummary) -> None:
+        """Recovery routing for a minted container: EVERY entry into the
+        redo path checks the mint record first and lands here — the record
+        owns the parent's disposition from commit onward, so a minted
+        container can never fall into the producer loop or QC-as-fixer via
+        redispatch. Children materialize idempotently from the committed
+        record; only nonterminal ones resume."""
+        n = len(t.decompose_mint.child_descriptors) if t.decompose_mint else 0
+        self._run_mint_children(
+            t, summary,
+            ok_rationale=(
+                f"minted container recovered — {n} children resumed from "
+                f"the committed record, all completed"
+            ),
+        )
+
+    def _run_mint_children(
+        self, t: "Task", summary: RunSummary, ok_rationale: str,
+    ) -> None:
+        """Materialize the committed mint's children and run the ones that
+        haven't reached a terminal state, then settle the parent container.
+        ONE path for fresh mints and crash recovery — both replay the
+        committed record."""
+        children = self._materialize_mint_children(t)
+        terminal = (
+            TaskStatus.COMPLETED, TaskStatus.QC_REJECTED,
+            TaskStatus.BLOCKED, TaskStatus.ABANDONED,
+        )
         all_ok = True
         try:
             for child in children:
-                self._persist_child_task(child)  # §5: deferral-aware (worker-safe)
+                if child.status in terminal:
+                    # A settled child is preserved — zero additional
+                    # producer calls on replay.
+                    if child.status is not TaskStatus.COMPLETED:
+                        all_ok = False
+                    continue
                 self._run_task_with_redo(child, summary)
                 self._persist_child_task(child)
                 if child.status is not TaskStatus.COMPLETED:
@@ -10823,11 +10888,7 @@ class Orchestrator:
                 from_state=t.status.value,
                 to_state=TaskStatus.COMPLETED.value,
                 actor="orchestrator",
-                rationale=(
-                    f"too big for one call ({ctx_exc.estimated_tokens} > "
-                    f"{ctx_exc.max_input_tokens} tokens) — decomposed into "
-                    f"{len(children)} children, all completed"
-                ),
+                rationale=ok_rationale,
             ))
             t.status = TaskStatus.COMPLETED
         else:
@@ -10835,13 +10896,59 @@ class Orchestrator:
                 from_state=t.status.value,
                 to_state=TaskStatus.BLOCKED.value,
                 actor="orchestrator",
-                rationale=f"decomposed into {len(children)} children; not all completed",
+                rationale=(
+                    f"decomposed into {len(children)} children; "
+                    f"not all completed"
+                ),
             ))
             t.status = TaskStatus.BLOCKED
             summary.errors.append(
                 f"{t.id}: decomposed but a child task did not complete"
             )
-        return True, None
+
+    def _materialize_mint_children(self, t: "Task") -> "list[Task]":
+        """Idempotently project the committed record's descriptors into
+        child Task files. Missing child → create it. Existing child under
+        the SAME authority (``minted_by`` mint id + immutable descriptor:
+        canonical path, lineage) → preserve its current state untouched.
+        Existing id under a DIFFERENT authority → typed engine conflict,
+        no write. ``prepared`` alone is sufficient; the advance to
+        ``children_materialized`` is a best-effort convenience."""
+        from modulatio.families import task_output_rel_path
+        rec = t.decompose_mint
+        stored = {
+            task.id: task for task in store.list_tasks(
+                self.project.code, run_id=self.project.run_id)
+        }
+        children: "list[Task]" = []
+        for d in rec.child_descriptors:
+            blueprint = Task.model_validate(d)
+            existing = stored.get(blueprint.id)
+            if existing is None:
+                self._persist_child_task(blueprint)
+                children.append(blueprint)
+                continue
+            if (
+                existing.minted_by != rec.mint_id
+                or task_output_rel_path(existing)
+                != task_output_rel_path(blueprint)
+                or existing.artifact_lineage != blueprint.artifact_lineage
+            ):
+                raise DecomposeMintConflict(
+                    f"child {blueprint.id} of mint {rec.mint_id} exists "
+                    f"under a different authority "
+                    f"(minted_by={existing.minted_by!r}) — refusing to "
+                    f"preserve or overwrite")
+            children.append(existing)
+        if rec.state == "prepared":
+            rec.state = "children_materialized"
+            try:
+                self._save_task_deferrable(t)
+            except Exception:  # noqa: BLE001 — the advance is convenience-only
+                _logger.warning(
+                    "children_materialized advance failed for %s — recovery "
+                    "works from prepared alone", t.id, exc_info=True)
+        return children
 
     def _commit_decompose_mint(
         self, t: "Task", children: "list[Task]",
@@ -10859,8 +10966,11 @@ class Orchestrator:
         from modulatio.families import task_output_rel_path
         retry_budget = max(t.max_retries, 0)
         prev_lifetime = t.lifetime_attempts
+        mint_id = str(uuid4())
+        for c in children:
+            c.minted_by = mint_id
         record = DecomposeMintRecord(
-            mint_id=str(uuid4()),
+            mint_id=mint_id,
             state="prepared",
             child_descriptors=[
                 c.model_dump(mode="json") for c in children

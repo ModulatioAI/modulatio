@@ -355,6 +355,11 @@ class Task(BaseModel):
     #: task decomposes; set + persisted in the SAME atomic write that spends
     #: ``lifetime_attempts``. Presence = the never-mint-again marker.
     decompose_mint: DecomposeMintRecord | None = None
+    #: The ``mint_id`` that created this task (decompose children only).
+    #: Materialization preserves an existing child ONLY when both this and
+    #: the immutable descriptor authority (canonical path, lineage) match —
+    #: same id under a different authority is a typed engine conflict.
+    minted_by: str | None = None
     # QC-as-fixer Slice 3: True when QC AUTHORED a fix for this task's
     # artifact after the producer exhausted its attempts (or stormed).
     # LOAD-BEARING flag, not cosmetic: a qc-authored artifact has NO

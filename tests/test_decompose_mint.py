@@ -571,6 +571,7 @@ def test_parent_commit_failure_releases_reservations_and_refuses(
     def _fail_save(self, task):
         raise OSError("disk full injected at parent commit")
 
+    orig_save = Orchestrator._save_task_deferrable
     monkeypatch.setattr(Orchestrator, "_save_task_deferrable", _fail_save)
     summary = RunSummary(project=project_with_run)
     handled, refusal = orch._try_decompose_and_run(
@@ -579,10 +580,181 @@ def test_parent_commit_failure_releases_reservations_and_refuses(
     assert parent.decompose_mint is None
     assert parent.lifetime_attempts == 0  # in-memory spend reverted
     assert orch._decompose_reservations == {}
-    monkeypatch.undo()
+    monkeypatch.setattr(Orchestrator, "_save_task_deferrable", orig_save)
     _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
     retry = orch._attempt_decompose(
         _make_task(id="MNT-T-NEXT"), _ctx_err(tmp_path))
     assert isinstance(retry, list), (
         "keys must be claimable after a failed commit released them"
     )
+
+
+# ── Idempotent materialization + recovery routing ───────────────────────────
+
+def _committed_parent_no_children(orch, monkeypatch, project, tmp_path):
+    """A parent with a committed mint record and ZERO child files — the
+    pre-child crash state recovery must finish from the record alone."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    parent = _make_task()
+    store.save_task(PROJECT_CODE, parent, run_id=project.run_id)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+
+    def _die(self, child):
+        raise RuntimeError("crash injected before child save")
+
+    orig_persist = Orchestrator._persist_child_task
+    monkeypatch.setattr(Orchestrator, "_persist_child_task", _die)
+    with pytest.raises(RuntimeError):
+        orch._try_decompose_and_run(
+            parent, _ctx_err(tmp_path), RunSummary(project=project))
+    monkeypatch.setattr(Orchestrator, "_persist_child_task", orig_persist)
+    stored = {
+        t.id: t for t in store.list_tasks(PROJECT_CODE, run_id=project.run_id)
+    }
+    return stored[parent.id]
+
+
+def test_recovery_materializes_children_from_record_without_replanning(
+    project_with_run, monkeypatch, tmp_path
+):
+    """re-entering the marked parent through the
+    real redo path creates every child from the committed record — planner
+    never consulted again, no second mint id, no parent producer call."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    original_mint_id = reloaded.decompose_mint.mint_id
+    roles_called = []
+
+    def _record_run(self, role, prompt, **kw):
+        roles_called.append(role)
+        return "stub"
+
+    monkeypatch.setattr(Orchestrator, "_run", _record_run)
+    producer_calls = []
+
+    def _spy(self, task, corrective_notes=""):
+        producer_calls.append(task.id)
+        task.lifetime_attempts += 1
+        path = orch._resolve_draft_path(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("draft")
+        return path, "sum", 10
+
+    monkeypatch.setattr(Orchestrator, "_producer_execute", _spy)
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    orch._run_task_with_redo(reloaded, RunSummary(project=project_with_run))
+    assert "planner" not in roles_called, "recovery must not re-plan the split"
+    stored = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }
+    assert f"{reloaded.id}-D1" in stored and f"{reloaded.id}-D2" in stored
+    assert reloaded.id not in producer_calls, (
+        "a minted container must never reach the producer loop"
+    )
+    assert stored[reloaded.id].decompose_mint.mint_id == original_mint_id
+
+
+def test_partial_materialization_preserves_existing_children(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Child D1 already exists COMPLETED —
+    recovery creates only D2, never overwrites D1's state, and D1 takes zero
+    additional producer calls."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import Task, TaskStatus
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    rec = reloaded.decompose_mint
+    d1 = Task.model_validate(rec.child_descriptors[0])
+    d1.status = TaskStatus.COMPLETED
+    store.save_task(PROJECT_CODE, d1, run_id=project_with_run.run_id)
+    producer_calls = []
+
+    def _spy(self, task, corrective_notes=""):
+        producer_calls.append(task.id)
+        task.lifetime_attempts += 1
+        path = orch._resolve_draft_path(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("draft")
+        return path, "sum", 10
+
+    monkeypatch.setattr(Orchestrator, "_producer_execute", _spy)
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    orch._run_task_with_redo(reloaded, RunSummary(project=project_with_run))
+    stored = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }
+    assert stored[d1.id].status is TaskStatus.COMPLETED
+    assert d1.id not in producer_calls, (
+        "a completed child must receive zero additional producer calls"
+    )
+    assert f"{reloaded.id}-D2" in producer_calls
+
+
+def test_planted_child_with_foreign_authority_is_typed_conflict(
+    project_with_run, monkeypatch, tmp_path
+):
+    """An existing child id under a different
+    mint authority → typed engine conflict, no overwrite."""
+    from modulatio import store
+    from modulatio.orchestration import DecomposeMintConflict
+    from modulatio.types import Task
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    rec = reloaded.decompose_mint
+    foreign = Task.model_validate(rec.child_descriptors[0])
+    foreign.minted_by = "some-other-mint"
+    foreign.description = "foreign payload"
+    store.save_task(PROJECT_CODE, foreign, run_id=project_with_run.run_id)
+    with pytest.raises(DecomposeMintConflict):
+        orch._materialize_mint_children(reloaded)
+    stored = {
+        t.id: t for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+    }
+    assert stored[foreign.id].description == "foreign payload", (
+        "conflict must not overwrite the existing child"
+    )
+
+
+def test_marked_parent_cannot_mint_again(
+    project_with_run, monkeypatch, tmp_path
+):
+    """One mint per node: _attempt_decompose on a marked parent refuses —
+    belt (marker) under the suspenders (spent arithmetic + routing)."""
+    from modulatio.orchestration import _DecomposeRefusal
+    from modulatio.types import DecomposeMintRecord
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    parent = _make_task()
+    parent.decompose_mint = DecomposeMintRecord(mint_id="m-1")
+    outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+    assert "mint" in outcome.reason
+
+
+def test_prepared_state_alone_is_sufficient_for_recovery(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The optional children_materialized advance is convenience-only —
+    recovery works from ``prepared`` + descriptors alone."""
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import TaskStatus
+    orch = _make_orchestrator(project_with_run)
+    reloaded = _committed_parent_no_children(
+        orch, monkeypatch, project_with_run, tmp_path)
+    assert reloaded.decompose_mint.state == "prepared"
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo_inner",
+        lambda self, t, summary, *a, **kw: setattr(
+            t, "status", TaskStatus.COMPLETED))
+    orch._resume_decompose_mint(reloaded, RunSummary(project=project_with_run))
+    assert reloaded.status is TaskStatus.COMPLETED
