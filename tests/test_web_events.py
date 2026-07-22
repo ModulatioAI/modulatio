@@ -187,6 +187,14 @@ async def test_sse_stream_emits_hello_then_published_frames():
 
     hello = await frames.__anext__()
     assert hello.startswith("event: hello\n")
+    # The version stamp rides the hello: engine (this process) + disk (read
+    # at call time) + the stale verdict — the reconnect after a reinstall is
+    # the one that reports the skew.
+    hd = json.loads(hello.split("\n")[1][6:])
+    from modulatio import __version__
+    assert hd["engine"] == __version__
+    assert "disk" in hd and hd["stale"] in (True, False)
+    assert hd["stale"] is (hd["disk"] is not None and hd["disk"] != __version__)
 
     get_bus("alpha").publish(
         {"type": "event", "data": {"phase": "qc_started"}}
@@ -229,7 +237,7 @@ def test_resolved_approval_never_replays_a_pending_one_does():
 
 
 def test_pending_approval_survives_run_started_and_clear_screen():
-    """WB F3 pin: a pending ask is operator-interaction state, not run
+    """A pending ask is operator-interaction state, not run
     history — run_started resets and the operator's clear-screen must not
     erase a live ask a reconnecting tab still needs to answer."""
     from modulatio.web.events import EventBus
@@ -280,3 +288,226 @@ def test_pending_approvals_survive_a_saturated_replay():
     bus.unsubscribe(q2)
     ids2 = [f["data"]["id"] for f in frames2 if f["type"] == "approval_request"]
     assert ids2 == ["a2"]
+
+
+def test_boot_stamp_emits_once_on_the_real_entry_path():
+    """The stamp must land on the path an operator actually launches. Read
+    alone, the factory-body version looked right and emitted NOTHING: the
+    entry passes create_app() as an argument to uvicorn.run(), so the factory
+    runs before Uvicorn installs logging, AND Uvicorn configures only the
+    uvicorn* loggers (root has no handler, so a modulatio.* INFO record dies
+    at lastResort). Hence: launch the real server, read the real log."""
+    import socket
+    import subprocess
+    import sys
+    import tempfile
+    import time
+    from pathlib import Path
+
+    from modulatio import __version__
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    # Output to a file, not a pipe: the server runs until we stop it, so
+    # reading a pipe mid-flight risks a deadlock.
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "boot.log"
+        with out.open("w") as fh:
+            proc = subprocess.Popen(
+                [sys.executable, "-c",
+                 "from modulatio.web import server; "
+                 "server.run(['--port', '%d'])" % port],
+                stdout=fh, stderr=subprocess.STDOUT,
+            )
+            try:
+                deadline = time.monotonic() + 45
+                while time.monotonic() < deadline:
+                    if "Application startup complete" in out.read_text():
+                        break
+                    if proc.poll() is not None:
+                        raise AssertionError(f"server exited early:\n{out.read_text()}")
+                    time.sleep(0.2)
+                else:
+                    raise AssertionError(f"server never started:\n{out.read_text()}")
+            finally:
+                proc.terminate()
+                proc.wait(timeout=30)
+        log = out.read_text()
+
+    stamps = [ln for ln in log.splitlines() if "modulatio-api" in ln]
+    assert len(stamps) == 1, f"expected exactly one boot stamp, got {stamps!r}\n{log}"
+    assert __version__ in stamps[0]
+
+
+async def test_hello_reports_stale_on_upgrade_and_downgrade(monkeypatch):
+    """The wire pin, both directions: stale is ANY non-empty
+    mismatch, so a rollback under a live server must fire exactly like an
+    upgrade. Disk versions are INJECTED (not inherited from the test host's
+    packaging state) — the route reads modulatio.installed_version at call
+    time, so the patch rides the real hello path."""
+    import modulatio
+    from modulatio.web.routes.console import event_stream
+
+    engine = modulatio.__version__
+    for disk in (engine + ".post1", "0.0.1"):  # ahead of / behind the engine
+        monkeypatch.setattr(modulatio, "installed_version", lambda d=disk: d)
+        resp = await event_stream("alpha")
+        frames = resp.body_iterator
+        hello = await frames.__anext__()
+        await frames.aclose()
+        hd = json.loads(hello.split("\n")[1][6:])
+        assert hd["stale"] is True, f"disk={disk} must read stale"
+        assert hd["disk"] == disk and hd["engine"] == engine
+
+    # Same version and unknown must NOT fire — the no-false-stale contract.
+    for disk in (engine, None):
+        monkeypatch.setattr(modulatio, "installed_version", lambda d=disk: d)
+        resp = await event_stream("alpha")
+        frames = resp.body_iterator
+        hello = await frames.__anext__()
+        await frames.aclose()
+        hd = json.loads(hello.split("\n")[1][6:])
+        assert hd["stale"] is False, f"disk={disk} must not read stale"
+
+
+def test_stale_notice_makes_no_version_ordering_claim():
+    """The server calls ANY non-empty mismatch stale, so a rollback reaches
+    this notice too — copy that says "newer" would misreport the direction.
+    Contract: name both versions, ask for a restart, assert no ordering.
+
+    Source-level pin: the repo carries no JS harness, and standing one up to
+    drive one string would cost more than it pins. If the notice grows real
+    logic, that trade flips and this becomes a DOM test."""
+    from pathlib import Path
+
+    import modulatio.web as web
+
+    js = (Path(web.__file__).parent / "static/js/pages/console.js").read_text()
+    start = js.index("if (frame.data.stale)")
+    # Comment lines are prose ABOUT the contract (they name the rejected
+    # wording on purpose) — judge the emitted copy only.
+    notice = "\n".join(
+        ln for ln in js[start:start + 900].splitlines()
+        if not ln.lstrip().startswith("//")
+    )
+
+    assert "${frame.data.disk}" in notice      # names the disk version
+    assert "${frame.data.engine}" in notice    # names the running version
+    assert "restart it" in notice              # names the remedy
+    for claim in ("newer", "older", "upgrade", "downgrade"):
+        assert claim not in notice, f"notice claims ordering: {claim!r}"
+
+
+def test_create_app_alone_does_not_emit_the_boot_stamp(caplog):
+    """Factory construction stays side-effect-free — the stamp belongs to
+    server startup, so building an app must not claim a boot happened."""
+    import logging
+
+    from modulatio.web.app import create_app
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        create_app(stub=True)
+    assert not [r for r in caplog.records if "modulatio-api" in r.getMessage()]
+
+
+def test_boot_stamp_reports_in_memory_version_not_disk(monkeypatch, caplog):
+    """The boot line pins WHICH engine this process loaded — that is
+    __version__, never the disk metadata (which a reinstall can move
+    underneath a live process; the SSE hello reports that skew instead)."""
+    import logging
+
+    import modulatio
+    from fastapi.testclient import TestClient
+
+    from modulatio.web.app import create_app
+
+    monkeypatch.setattr(modulatio, "installed_version", lambda: "9.9.9-from-disk")
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        with TestClient(create_app(stub=True)):
+            pass
+    stamps = [r.getMessage() for r in caplog.records if "modulatio-api" in r.getMessage()]
+    assert stamps == [f"modulatio-api {modulatio.__version__}"]
+
+
+class _FakeDist:
+    """A stand-in for importlib.metadata.Distribution: the two attributes
+    installed_version() touches. ``direct_url`` None → the file is absent."""
+
+    def __init__(self, version, direct_url=None):
+        self.version = version
+        self._direct_url = direct_url
+
+    def read_text(self, name):
+        return self._direct_url if name == "direct_url.json" else None
+
+
+def _patch_distribution(monkeypatch, *results):
+    """Patch metadata.distribution — the seam production actually calls —
+    to yield ``results`` in order. Returns the call log."""
+    from importlib import metadata as _md
+
+    calls = []
+    seq = list(results)
+
+    def _fake(name):
+        calls.append(name)
+        outcome = seq.pop(0) if len(seq) > 1 else seq[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(_md, "distribution", _fake)
+    return calls
+
+
+def test_installed_version_rereads_disk_every_call(monkeypatch):
+    """The skew detector's whole point: the disk is read at CALL time, not
+    cached at import. Two successive reads see two different versions."""
+    import modulatio
+
+    calls = _patch_distribution(monkeypatch, _FakeDist("1.0.0"), _FakeDist("1.0.1"))
+    assert modulatio.installed_version() == "1.0.0"
+    assert modulatio.installed_version() == "1.0.1"
+    assert len(calls) == 2
+
+
+def test_installed_version_missing_metadata_is_unknown(monkeypatch):
+    """Unreadable dist-info is UNKNOWN (None), never a false stale."""
+    import modulatio
+    from importlib import metadata as _md
+
+    _patch_distribution(monkeypatch, _md.PackageNotFoundError("modulatio"))
+    assert modulatio.installed_version() is None
+
+
+def test_installed_version_editable_is_unknown(monkeypatch):
+    """An editable install's dist-info doesn't track the code — unknown even
+    when its recorded version differs from __version__ (the dev-tree case:
+    a stale 0.9.5.1 stamp must NOT light the siren on every session)."""
+    import modulatio
+
+    _patch_distribution(
+        monkeypatch,
+        _FakeDist("0.9.5.1", direct_url='{"dir_info": {"editable": true}}'),
+    )
+    assert modulatio.installed_version() is None
+
+
+def test_installed_version_missing_direct_url_uses_wheel_version(monkeypatch):
+    """No direct_url.json = an ordinary wheel install: report its version."""
+    import modulatio
+
+    _patch_distribution(monkeypatch, _FakeDist("1.0.2", direct_url=None))
+    assert modulatio.installed_version() == "1.0.2"
+
+
+def test_installed_version_malformed_direct_url_is_unknown(monkeypatch):
+    """Malformed direct_url.json degrades to unknown rather than guessing —
+    an unparseable editable marker must not become a false stale."""
+    import modulatio
+
+    _patch_distribution(monkeypatch, _FakeDist("1.0.2", direct_url="{not json"))
+    assert modulatio.installed_version() is None

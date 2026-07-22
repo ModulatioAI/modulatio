@@ -108,6 +108,50 @@ class ACPSession:
         )
         return _permission_allows(result)
 
+    # ── SecurityRequest → session/request_permission (the gate's bridge) ─
+    def prompt_fn(self, request):
+        """The ``LeaderPermissionGate`` prompt surface : render
+        the engine-authored request over ACP, offer ONLY the request's
+        ``available_scopes``, map the chosen optionId → ``ScopedDecision``.
+        Supplied to ``converse(prompt_fn=...)`` so orchestration builds the
+        REAL gate-backed callback — an approved path lands in the gate's live
+        roots before dispatch, unlike the old raw boolean callback (which
+        approved operations the tools then refused). Cancelled / unknown / no
+        answer → deny (fail-closed)."""
+        from modulatio import leader_gate as lg
+        if self.cancelled:
+            return lg.ScopedDecision(scope=lg.SCOPE_DENY, granted_via="acp")
+        _menu = [
+            (lg.SCOPE_ONCE, "Allow once", "allow_once"),
+            (lg.SCOPE_SESSION, "Allow this session", "allow_always"),
+            (lg.SCOPE_ALWAYS, "Allow always", "allow_always"),
+            (lg.SCOPE_DENY, "Deny", "reject_once"),
+        ]
+        result = self._server.request_and_wait(
+            "session/request_permission",
+            {
+                "sessionId": self.id,
+                "toolCall": {
+                    "name": f"{request.action}: {request.resource}",
+                    "rawInput": {"detail": request.why},
+                },
+                "options": [
+                    {"optionId": scope, "name": name, "kind": kind}
+                    for scope, name, kind in _menu
+                    if scope in request.available_scopes
+                ],
+            },
+            cancel_check=lambda: self.cancelled,
+        )
+        chosen = None
+        if isinstance(result, dict):
+            outcome = result.get("outcome")
+            if isinstance(outcome, dict):
+                chosen = outcome.get("optionId")
+        if chosen in request.available_scopes:
+            return lg.ScopedDecision(scope=chosen, granted_via="acp")
+        return lg.ScopedDecision(scope=lg.SCOPE_DENY, granted_via="acp")
+
     def ask_capability(self, cap):
         """The PermissionBroker's four-option ask surface. Offers
         once/session/always/deny carrying the capability's plain-language label +

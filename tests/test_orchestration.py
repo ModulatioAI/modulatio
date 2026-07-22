@@ -13115,3 +13115,189 @@ def test_wave_capacity_starved_blocks_tasks(project: Project, monkeypatch):
     assert any("capacity" in e for e in summary.errors), (
         "the saturated roster must surface a visible error"
     )
+
+
+def test_apply_assembly_manifest_code_strategy_attaches_code_digest(project, tmp_path):
+    """Wiring pin: a CODE assembly flows strategy="code" through the digest
+    socket, so the record carries the code family's facts (lines, packaging,
+    layout, snapshot hash, probes-not-run disclosure) — not the generic byte
+    fallback it fell to before the extractor existed."""
+    from uuid import uuid4
+    from modulatio.types import Task
+
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    pkg = artifacts / "src" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "main.py").write_text("import os\n\nprint('hi')\n")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+    task = Task(id="CDG-T-001", project_id=uuid4(), goal_id="CDG-G-001",
+                description="assemble", summary_for_state_doc="",
+                output_path="README.md", required_skills=["code-assembly"])
+    body = ('```assembly\n{"units": ["pyproject.toml", "src/pkg/main.py"],'
+            ' "entrypoint": "src/pkg/main.py"}\n```\n')
+    orch._apply_assembly_manifest(task, body)
+
+    d = orch._assembly_records[task.id].digest
+    assert d is not None and d.kind == "code"
+    assert d.part_size_unit == "lines"
+    assert d.whole_size == 2 and d.whole_size_unit == "files"
+    assert d.structure["execution_probes"] == "not_run"
+    assert d.structure["packaging"]["shape"] == "pyproject"
+    assert d.structure["packaging"]["root"] == "."
+    assert d.structure["snapshot_hash"].startswith("sha256:")
+
+
+def test_deliverable_spec_issues_carries_family_hard_issues_without_a_spec(
+        project, tmp_path):
+    """Hard-issue wiring: a code digest's own deterministic hard issues
+    (root ambiguity, closure holes) join the goal_spec_issues stream EVEN
+    WITH an empty declared spec — the existing clamp then binds them
+    (clamp→disappointed is pinned by the leader-fix suite)."""
+    artifacts = tmp_path / "art"
+    artifacts.mkdir()
+    (artifacts / "pyproject.toml").write_text("[project]\nname = 'a'\n")
+    other = artifacts / "vendor" / "other"
+    other.mkdir(parents=True)
+    (other / "pyproject.toml").write_text("[project]\nname = 'b'\n")
+    orch = _assembly_orch(project, tmp_path, artifacts)
+
+    from modulatio import assembly as _assembly
+    units = ["pyproject.toml", "vendor/other/pyproject.toml"]
+    digest = _assembly.build_deliverable_digest(
+        {"units": units}, units, artifacts, strategy="code")
+
+    issues = orch._deliverable_spec_issues(digest)
+    assert any("candidate packaging roots" in i for i in issues)
+
+
+def test_converse_with_prompt_fn_wires_the_coordinator_not_two_arms(
+        project, monkeypatch):
+    """Coordinator wiring: a converse with a prompt surface builds
+    ONE authorization coordinator (both axes, at most one approval per tool
+    call) and retires the runner's second broker arm — permission_broker
+    reaches the chat loop as None, and the callback is coordinator-built
+    (composes gate + broker), not the bare gate callback."""
+    from modulatio import leader_gate as lg
+    from modulatio import runners as R
+    from modulatio.orchestration import Orchestrator
+    from modulatio.runners import ChatResponse
+
+    orch = Orchestrator(
+        project, R.default_generic_stub_runners(),
+        chat_runners={"leader": R.stub_chat_runner(
+            [ChatResponse(content="hi", tool_calls=())])},
+        chat_runner_models={"leader": "stub"},
+    )
+    seen: dict = {}
+
+    def _fake_loop(**kwargs):
+        seen.update(kwargs)
+        return "reply"
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _fake_loop)
+    orch.converse("hello", prompt_fn=lambda r: lg.ScopedDecision(scope="deny"))
+    assert seen.get("permission_broker") is None       # second arm retired
+    cb = seen.get("permission_callback")
+    assert callable(cb)
+    # The coordinator composes the CAPABILITY axis too: a network tool (no
+    # path extraction) reaches the prompt through the same callback — the
+    # deny answer above refuses it. The bare gate callback would allow it
+    # (nothing to extract) and leave network gating to the retired arm.
+    assert cb("http_get", {"url": "https://x.example/a"}) is False
+
+
+def test_remediable_issues_exclude_engine_gate_unavailable():
+    from modulatio import assembly as A
+    from modulatio.orchestration import Orchestrator
+
+    issues = [
+        "T-1: expected 3 parts, got 2",
+        f"T-2: {A.ENGINE_GATE_UNAVAILABLE_PREFIX} — execution probes could "
+        "not run: no wheelhouse",
+    ]
+    out = Orchestrator._remediable_spec_issues(issues)
+    assert out == ["T-1: expected 3 parts, got 2"]
+    assert Orchestrator._remediable_spec_issues([issues[1]]) == []
+
+
+def test_verify_runs_probes_and_unavailable_clamps_without_fixer(
+        project, tmp_path, monkeypatch):
+    """Step 8 end-to-end at the verify seam: a code deliverable's digest
+    is probe-enriched at verify time; ENGINE_UNAVAILABLE clamps a scripted
+    'satisfied' to disappointed AND the fix loop never fires (no retry
+    consumed, no self-fix event) — the withhold disposition."""
+    import json as _json
+
+    from modulatio import assembly as A
+    from modulatio import code_probes as cp
+    from modulatio.orchestration import Orchestrator, RunSummary
+    from modulatio.types import Goal, GoalStatus, Task, TaskStatus
+
+    def _leader(prompt: str) -> str:
+        return "```json\n" + _json.dumps({
+            "verdict": "satisfied", "rationale": "looks fine",
+            "report_body": "## R\n\nok\n"}) + "\n```"
+
+    orch = Orchestrator(project, {
+        "leader": _leader, "planner": lambda p: "```json\n[]\n```",
+        "drafter": lambda p: "", "qc": lambda p: ""})
+
+    artifacts = orch._shared_artifacts_root()
+    artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / "pyproject.toml").write_text("[project]\nname='x'\n")
+    from uuid import uuid4
+    goal_id = f"{project.code}-G-001"
+    task = Task(id=f"{project.code}-T-001", project_id=uuid4(),
+                goal_id=goal_id, description="assemble",
+                summary_for_state_doc="", output_path="README.md",
+                required_skills=["code-assembly"], deliverable=True)
+    task.status = TaskStatus.COMPLETED
+    orch._apply_assembly_manifest(task, '```assembly\n{"units": ["pyproject.toml"]}\n```')
+
+    monkeypatch.setattr(
+        cp, "run_execution_probes",
+        lambda u, r, *, scratch_root: {
+            "status": "engine_unavailable", "reason": "no wheelhouse",
+            "phases": [], "packaging": {}, "install_mode": "hermetic",
+            "test_extras": []})
+    A._PROBE_FACTS_MEMO.clear()
+
+    from modulatio import store
+    goal = Goal(id=goal_id, project_id=task.project_id,
+                description="g", success_criteria="works",
+                status=GoalStatus.IN_PROGRESS)
+    store.save_goal(project.code, goal)
+    store.save_task(project.code, task)
+    fixes = []
+    monkeypatch.setattr(orch, "_leader_fix_in_place",
+                        lambda *a, **k: fixes.append(1) or True)
+    monkeypatch.setattr(orch, "_leader_auto_redo",
+                        lambda *a, **k: fixes.append(1))
+    summary = RunSummary(project=project)
+    orch._leader_verify_goal(goal, [task], summary)
+
+    # enriched digest reached the record
+    probes = orch._assembly_records[task.id].digest.structure["execution_probes"]
+    assert probes["status"] == "engine_unavailable"
+    # clamped, never satisfied; no fixer ran; no retry consumed
+    assert summary.verdicts[-1]["verdict"] == "disappointed"
+    assert any("clamped" in e for e in summary.errors)
+    assert fixes == []
+    assert goal.retry_count == 0
+    # The deliverable is actually WITHHELD (engine-unavailable rides
+    # the goal_spec_issues withhold branch — the artifact does not ship clean).
+    assert task.id in summary.withheld_deliverables
+    # Closure: the withhold SURVIVES final delivery — run the real delivery
+    # pass over an otherwise-shippable artifact and assert nothing renders
+    # for the withheld id.
+    monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "deliver"))
+    art = orch._artifacts_root()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "README.md").write_text("# Product\n\nreal content, shippable.\n")
+    summary.tasks = [task]
+    orch._deliver_finished_products(summary)
+    assert task.id in summary.withheld_deliverables      # still withheld
+    assert all(d.task_id != task.id
+               for d in summary.rendered_deliverables)   # never rendered

@@ -857,3 +857,27 @@ def test_project_runs_non_utf8_objective_does_not_crash(isolated):
     assert result.exit_code == 0, result.output
     assert run_id in result.output
     assert "Traceback" not in result.output
+
+
+def test_doctor_wheelhouse_present_and_missing(capsys, tmp_path, monkeypatch):
+    """Doctor line: the wheelhouse readiness is disclosed —
+    a populated one reads ✓; an absent one prints the exact pip-download
+    remedy so a code goal never silently reports ENGINE_UNAVAILABLE."""
+    from modulatio import code_probes
+
+    # populated
+    monkeypatch.setenv("MODULATIO_WHEELHOUSE", str(tmp_path))
+    (tmp_path / "pytest-9.0.0-py3-none-any.whl").write_bytes(b"x")
+    (tmp_path / "hatchling-1.0-py3-none-any.whl").write_bytes(b"x")
+    assert code_probes.wheelhouse_path() == tmp_path
+    cli._run_doctor_checks()
+    out = capsys.readouterr().out
+    assert "Code verification (wheelhouse):" in out
+    assert "✓ wheelhouse" in out and "pytest present" in out
+
+    # absent → the remedy
+    monkeypatch.setenv("MODULATIO_WHEELHOUSE", str(tmp_path / "nope"))
+    cli._run_doctor_checks()
+    out = capsys.readouterr().out
+    assert "✗ no wheelhouse" in out
+    assert "pip download pytest hatchling setuptools wheel" in out

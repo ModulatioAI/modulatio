@@ -140,3 +140,14 @@ def test_run_converse_passes_prompt_fn():
     app._run_converse(spy, "hello", [])
     assert "prompt_fn" in spy.converse_kwargs
     assert callable(spy.converse_kwargs["prompt_fn"])
+
+
+def test_run_converse_passes_capability_ask_over_the_same_modal():
+    """Converse also gets ask= — the broker's
+    capability surface adapted over the SAME approval modal bridge, so
+    default/goal modes ask for shell/network in the TUI instead of goal
+    denying without a prompt . One approval UI, both axes."""
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    spy = _SpyOrch()
+    app._run_converse(spy, "hello", [])
+    assert callable(spy.converse_kwargs.get("ask"))

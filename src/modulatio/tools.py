@@ -452,10 +452,15 @@ def _apply_rlimits_to_pid(pid: int) -> None:
     _clamp(resource.RLIMIT_CORE, 0)
 
 
-def _prlimit_wrapper_prefix() -> list[str]:
-    """The ``prlimit`` argv prefix that applies the run_shell resource caps
-    to the *payload itself* at exec time, or ``[]`` when ``prlimit`` is
-    unavailable (non-Linux, util-linux absent).
+def _prlimit_wrapper_prefix(
+    *,
+    as_bytes: int = _RUN_SHELL_RLIMIT_AS_BYTES,
+    fsize_bytes: int = _RUN_SHELL_RLIMIT_FSIZE_BYTES,
+    cpu_s: "int | None" = None,
+) -> list[str]:
+    """The ``prlimit`` argv prefix that applies resource caps (run_shell's
+    by default) to the *payload itself* at exec time, or ``[]`` when
+    ``prlimit`` is unavailable (non-Linux, util-linux absent).
 
     The parent-side ``_apply_rlimits_to_pid`` clamps the PID
     that ``Popen`` returns. On the UNSANDBOXED path that is the payload and
@@ -485,13 +490,16 @@ def _prlimit_wrapper_prefix() -> list[str]:
     if prlimit_bin is None:  # non-Linux / util-linux not installed
         return []
     # Single value sets both soft and hard; prlimit lowers only, unprivileged.
-    return [
+    prefix = [
         prlimit_bin,
-        f"--as={_RUN_SHELL_RLIMIT_AS_BYTES}",
-        f"--fsize={_RUN_SHELL_RLIMIT_FSIZE_BYTES}",
+        f"--as={as_bytes}",
+        f"--fsize={fsize_bytes}",
         "--core=0",
-        "--",
     ]
+    if cpu_s is not None:
+        prefix.append(f"--cpu={cpu_s}")
+    prefix.append("--")
+    return prefix
 
 
 def _is_safe_relative_file_arg(arg: str) -> bool:
@@ -1404,6 +1412,7 @@ _WRITE_ARTIFACT_BLOCKED_PREFIXES = ("tool_calls/", "tool_calls\\")
 def make_write_artifact(
     artifacts_root: Path,
     on_write: "Callable[[Path], None] | None" = None,
+    extra_roots=(),
 ) -> Callable[..., str]:
     """Return a ``write_artifact`` callable bound to ``artifacts_root``.
 
@@ -1447,6 +1456,25 @@ def make_write_artifact(
                 f"write_artifact: content must be a string, got "
                 f"{type(content).__name__}"
             )
+        # An ABSOLUTE path is honored ONLY under an operator-granted extra
+        # root (the gate could approve an outside write the
+        # tool then refused — the grant landed nowhere this tool looked).
+        # Same canonical resolver as edit_file: containment + the secret
+        # floor below the granted root. Everything else about the write
+        # (size cap, verbatim UTF-8, on_write recording) is identical.
+        if os.path.isabs(path) and extra_roots:
+            encoded = content.encode("utf-8", errors="replace")
+            if len(encoded) > _WRITE_ARTIFACT_MAX_BYTES:
+                raise ValueError(
+                    f"write_artifact: content size {len(encoded)} exceeds "
+                    f"{_WRITE_ARTIFACT_MAX_BYTES}-byte cap"
+                )
+            target = _resolve_file_under_root(path, artifacts_root, extra_roots)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            if on_write is not None:
+                on_write(target)
+            return f"[OK] wrote {len(encoded)} bytes to {target}"
         # Path-arg safety mirrors run_shell's relative-only check: no
         # absolute paths, no traversal, no dotfile components, no
         # writes into tool_calls/ (audit log).
@@ -2194,7 +2222,10 @@ def build_registry(
                 "Best practice: write_artifact for probing, AND emit "
                 "the same content as your final response."
             ),
-            call=make_write_artifact(artifacts_root, on_write=on_artifact_write),
+            # extra_roots: the EDIT-class live grants — an approved outside
+            # write is honorable (read-only roots never reach this tool).
+            call=make_write_artifact(
+                artifacts_root, on_write=on_artifact_write, extra_roots=extra_roots),
             params_schema={
                 "type": "object",
                 "properties": {

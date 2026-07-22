@@ -36,12 +36,14 @@ the tool, then resets after.
 from __future__ import annotations
 
 import contextvars
+import enum
 import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 logger = logging.getLogger("modulatio.sandbox")
@@ -239,6 +241,87 @@ def is_sandbox_required() -> bool:
     return os.environ.get(_SANDBOX_REQUIRED_ENV, "").strip() == "1"
 
 
+# ── the typed enforcement state ────────────────────────────────────────
+
+
+class EnforcementState(enum.Enum):
+    """The ONE engine-owned sandbox truth . Disclosure and
+    dispatch both consume THIS — nothing keys on ``is_sandbox_available()``
+    alone. ``profile=off`` / the unsafe bypass never upgrade to FULL; an
+    explicit bypass wins over REQUIRE (that env governs only the implicit
+    missing-bwrap path — the operator accepted the risk knowingly)."""
+
+    SANDBOXED_FULL = "sandboxed_full"
+    DEGRADED_ALLOWLIST = "degraded_allowlist"
+    REFUSED = "refused"
+
+
+#: (state, computed_at_monotonic) — TTL-cached; any bwrap exec failure
+#: invalidates immediately (a wrapper failure never rides a stale FULL).
+_ENFORCEMENT_CACHE: "tuple[EnforcementState, float] | None" = None
+_ENFORCEMENT_TTL_S = 300.0
+
+
+def _probe_policy_shape() -> bool:
+    """Probe the ACTUAL policy shape the empty-root mount uses — tmpfs root,
+    runtime ro-binds, the unshare set — never ``bwrap --ro-bind / / true``
+    (a host can pass that and still refuse this shape: hardened kernels
+    gate mount/namespace combinations independently)."""
+    if not is_sandbox_installed():
+        return False
+    try:
+        result = subprocess.run(
+            ["bwrap", "--tmpfs", "/", "--ro-bind", "/usr", "/usr",
+             "--ro-bind-try", "/bin", "/bin", "--ro-bind-try", "/lib", "/lib",
+             "--ro-bind-try", "/lib64", "/lib64",
+             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+             "--unshare-pid", "--unshare-uts", "--unshare-ipc",
+             "--unshare-net", "--die-with-parent", "--new-session",
+             "--", "/usr/bin/true"],
+            capture_output=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def enforcement_state() -> EnforcementState:
+    """Compute (or serve cached) the typed enforcement state:
+
+    - ``SANDBOXED_FULL``      — policy probe ok ∧ profile ≠ off ∧ no bypass
+    - ``REFUSED``             — sandbox unusable ∧ REQUIRE_SANDBOX (implicit
+                                path only; an explicit bypass/off wins)
+    - ``DEGRADED_ALLOWLIST``  — everything else (the disclosed soft state)
+    """
+    global _ENFORCEMENT_CACHE
+    now = time.monotonic()
+    if _ENFORCEMENT_CACHE is not None and now - _ENFORCEMENT_CACHE[1] < _ENFORCEMENT_TTL_S:
+        return _ENFORCEMENT_CACHE[0]
+    explicit_unsafe = is_bypass_requested() or current_profile() == "off"
+    if not explicit_unsafe and _probe_policy_shape():
+        state = EnforcementState.SANDBOXED_FULL
+    elif is_sandbox_required() and not explicit_unsafe:
+        state = EnforcementState.REFUSED
+    else:
+        state = EnforcementState.DEGRADED_ALLOWLIST
+    _ENFORCEMENT_CACHE = (state, now)
+    return state
+
+
+def note_bwrap_exec_failure() -> None:
+    """A LIVE bwrap invocation failed: drop the cached state so the very
+    next read re-probes. The caller must never retry the payload bare —
+    it re-reads ``enforcement_state()`` and follows the typed answer."""
+    global _ENFORCEMENT_CACHE
+    _ENFORCEMENT_CACHE = None
+
+
+def reset_enforcement_state_cache() -> None:
+    """Test seam (mirrors ``reset_sandbox_probe_cache``)."""
+    global _ENFORCEMENT_CACHE
+    _ENFORCEMENT_CACHE = None
+
+
 def is_sandbox_installed() -> bool:
     """True if the ``bwrap`` binary is on PATH (regardless of whether
     it can actually create namespaces). Use this when you need to
@@ -401,6 +484,42 @@ def _build_env(pass_env: tuple[str, ...], *, profile: str = "standard") -> dict[
     return out
 
 
+#: /etc entries every exec needs (the dynamic loader + name/UID plumbing).
+_ETC_RUNTIME_ALWAYS = (
+    "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
+    "/etc/alternatives", "/etc/passwd", "/etc/group", "/etc/localtime",
+    "/etc/locale.alias",
+)
+#: /etc entries that only make sense when the child HAS a network — binding
+#: them without one would leak host resolver/CA layout for no capability.
+_ETC_RUNTIME_NETWORK = (
+    "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf",
+    "/etc/ssl", "/etc/ca-certificates", "/etc/pki",
+)
+
+
+def _etc_runtime_binds(allow_network: bool) -> list[str]:
+    """The narrow /etc allowlist for the empty-root mount: loader +
+    identity files always; resolver/CA files only with network. Everything
+    is ``--ro-bind-try`` — absence on a given distro is fine, presence of
+    anything NOT listed here is impossible (the root is tmpfs)."""
+    entries = list(_ETC_RUNTIME_ALWAYS)
+    if allow_network:
+        entries += _ETC_RUNTIME_NETWORK
+    out: list[str] = []
+    for p in entries:
+        out += ["--ro-bind-try", p, p]
+    return out
+
+
+def _sized_tmpfs(dest: str, size: "int | None") -> list[str]:
+    """A ``--tmpfs DEST`` mount, capped to ``size`` bytes when given
+    (``--size BYTES`` precedes the ``--tmpfs`` it sizes in bwrap ≥0.6)."""
+    if size is not None:
+        return ["--size", str(int(size)), "--tmpfs", dest]
+    return ["--tmpfs", dest]
+
+
 def _rw_root_binds(roots: "tuple[Path, ...]") -> list[str]:
     """``--bind`` (writable) pairs for each operator-granted exec root."""
     out: list[str] = []
@@ -419,8 +538,16 @@ def build_sandboxed_argv(
     extra_binds: tuple[Path, ...] = (),
     extra_rw_roots: tuple[Path, ...] = (),
     profile: str | None = None,
+    tmpfs_size: "int | None" = None,
+    status_fd: "int | None" = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Wrap ``exec_argv`` in a ``bwrap ... -- exec_argv`` invocation.
+
+    ``status_fd``, when given, becomes bwrap's ``--json-status-fd``: bwrap
+    reports the started child on it, so the caller can distinguish a
+    sandbox SETUP failure (no child ever started — engine) from the payload
+    exiting nonzero (product). The caller owns the fd and must pass it
+    through ``Popen(pass_fds=...)``.
 
     Returns ``(wrapped_argv, env_dict)``. Caller passes both to
     ``subprocess.run(argv, env=env_dict, ...)``. The env dict is
@@ -462,14 +589,37 @@ def build_sandboxed_argv(
 
     bwrap: list[str] = [
         "bwrap",
-        # Read-only host filesystem
-        "--ro-bind", "/", "/",
+        # EMPTY root: the child sees
+        # NOTHING of the host it isn't explicitly bound. `--ro-bind / /`
+        # exposed /etc, /opt, /mnt, /media, /srv, host /var and /run —
+        # pathname sockets, credentials readable by EXECUTED code that the
+        # file tools deliberately refuse, service discovery. Gone.
+        "--tmpfs", "/",
+        # The runtime needed to execute host tools, read-only. /bin, /lib*
+        # and /sbin are symlinks into /usr on merged-usr distros — bind-try
+        # covers both worlds.
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind-try", "/bin", "/bin",
+        "--ro-bind-try", "/sbin", "/sbin",
+        "--ro-bind-try", "/lib", "/lib",
+        "--ro-bind-try", "/lib64", "/lib64",
+        # Narrowly selected /etc runtime files (never the whole /etc): the
+        # loader's cache/conf, the alternatives symlink farm (Debian routes
+        # python3 through it), user/group lookup, timezone.
+        *_etc_runtime_binds(allow_network),
         # /proc and /dev need to be live
         "--proc", "/proc",
         "--dev", "/dev",
-        # Writable tmpfs for /tmp and /home (sandboxed homedir)
-        "--tmpfs", "/tmp",
-        "--tmpfs", "/home",
+        # Writable tmpfs for /tmp and /home (sandboxed homedir); /run and
+        # /var EXIST (tools expect them) but are EMPTY — no host pathname
+        # socket or state is visible by default . ``tmpfs_size``
+        # (bytes) caps each so a hostile hook can't flood engine memory
+        # through the in-sandbox tmpfs (per-mount, kernel-
+        # enforced) — None leaves them uncapped (run_shell's posture).
+        *_sized_tmpfs("/tmp", tmpfs_size),
+        *_sized_tmpfs("/home", tmpfs_size),
+        *_sized_tmpfs("/run", tmpfs_size),
+        *_sized_tmpfs("/var", tmpfs_size),
         # The producer's only writable host path: the project's
         # artifacts root
         "--bind", artifacts_root_str, artifacts_root_str,
@@ -478,23 +628,32 @@ def build_sandboxed_argv(
         # explicit, sandbox-gated decision; the cheat-guard already refuses a
         # root overlapping the swarm deliverable tree.
         *_rw_root_binds(extra_rw_roots),
-        # Namespace isolation
+        # Namespace isolation + child hygiene (explicit, per the R3 pins)
         "--unshare-pid",
         "--unshare-uts",
         "--unshare-ipc",
         "--unshare-cgroup-try",
+        "--cap-drop", "ALL",
         "--die-with-parent",
         "--new-session",
     ]
     if not allow_network:
         bwrap += ["--unshare-net"]
-    # #82 fix: bind the active interpreter/venv back in AFTER the --tmpfs
-    # /home that masks it, so python3/pytest actually exec. ro-bind-try is
-    # idempotent + safe when the path is already covered by --ro-bind / /.
+    # #82 fix: bind the active interpreter/venv back in AFTER the tmpfs
+    # mounts that mask it, so python3/pytest actually exec. Under the empty
+    # root these binds are LOAD-BEARING for any venv outside /usr.
     # Caller-supplied extra_binds (e.g. a project test tree) come after.
     for bind_path in (*_interpreter_binds(), *extra_binds):
         bp = str(Path(bind_path).resolve())
         bwrap += ["--ro-bind-try", bp, bp]
+    # Seal the skeleton: the root tmpfs would otherwise be writable (a child
+    # could scribble a fake /etc into the throwaway root). Remounted ro LAST
+    # so it covers the assembled tree; the explicit RW binds (artifacts,
+    # granted roots) and the tmpfs workdirs (/tmp /home /run /var) are their
+    # own mounts and stay writable.
+    bwrap += ["--remount-ro", "/"]
+    if status_fd is not None:
+        bwrap += ["--json-status-fd", str(status_fd)]
     # End of bwrap flags; everything after `--` is the child argv.
     bwrap += ["--"]
     bwrap += list(exec_argv)

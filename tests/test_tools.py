@@ -606,7 +606,7 @@ def test_run_shell_unknown_profile_rejected(tmp_path):
 
 
 def test_run_shell_cwd_confined_to_artifacts_root(tmp_path):
-    """cwd is resolved under artifacts_root. Path traversal that
+    """Cwd is resolved under artifacts_root. Path traversal that
     escapes the root is refused. Same shape as
     ``_validate_output_path`` in orchestration."""
     art = _make_artifacts(tmp_path)
@@ -1412,7 +1412,7 @@ def test_run_shell_passive_allows_bundle_version(tmp_path):
 
 
 def test_run_shell_passive_allows_rubocop_lint(tmp_path):
-    """rubocop is read-only — same passive-tier as ruff/mypy/pyflakes."""
+    """Rubocop is read-only — same passive-tier as ruff/mypy/pyflakes."""
     art = _make_artifacts(tmp_path)
     (art / "app.rb").write_text("class App\nend\n")
     rs = tools.make_run_shell(art)
@@ -1464,7 +1464,7 @@ def test_run_shell_passive_allows_go_version(tmp_path):
 
 
 def test_run_shell_passive_allows_go_vet(tmp_path):
-    """go vet is the static analyzer — read-only."""
+    """Go vet is the static analyzer — read-only."""
     art = _make_artifacts(tmp_path)
     rs = tools.make_run_shell(art)
     out = rs(cmd="go vet ./...", profile="passive", timeout=5)
@@ -2788,7 +2788,7 @@ def test_pdf_helper_absolute_binary_staged_path_stripped_env(tmp_path, monkeypat
 
 
 def test_pdf_helper_output_flood_is_capped(tmp_path, monkeypatch):
-    """WB F1 pin: a stdout flood drains to the hard ceiling, the group is
+    """A stdout flood drains to the hard ceiling, the group is
     killed, and the capped head returns truncated — never unbounded capture."""
     stub = _stub_pdftotext(tmp_path, "exec yes floodfloodfloodflood")
     monkeypatch.setattr(tools.shutil, "which", lambda _n, path=None: str(stub))
@@ -2800,7 +2800,7 @@ def test_pdf_helper_output_flood_is_capped(tmp_path, monkeypatch):
 
 
 def test_pdf_helper_timeout_kills_the_group(tmp_path, monkeypatch):
-    """WB F1 pin: wall-clock timeout SIGKILLs the whole process group
+    """wall-clock timeout SIGKILLs the whole process group
     (grandchildren included) and refuses promptly."""
     import time
 
@@ -2827,7 +2827,7 @@ def test_pdf_over_input_ceiling_refuses(tmp_path, monkeypatch):
 @pytest.mark.skipif(tools.shutil.which("pdftotext", path="/usr/bin:/bin") is None,
                     reason="poppler-utils not installed")
 def test_pdf_helper_ignores_engine_path_and_cwd(tmp_path, monkeypatch):
-    """WB R2-F1 pin: a fake ./pdftotext riding the engine's PATH/cwd never
+    """A fake ./pdftotext riding the engine's PATH/cwd never
     runs — the helper resolves only from its fixed system path, absolute."""
     fake = tmp_path / "pdftotext"
     sentinel = tmp_path / "pwned"
@@ -2840,3 +2840,57 @@ def test_pdf_helper_ignores_engine_path_and_cwd(tmp_path, monkeypatch):
     out = registry["read_file"].call(path="doc.pdf")
     assert "the owl flies at midnight" in out  # the SYSTEM helper ran
     assert not sentinel.exists()
+
+
+# ── honorable outside writes ────────────────────────────────────────
+
+
+def test_write_artifact_honors_granted_extra_roots(tmp_path):
+    """The UI could present and approve an outside write the tool then
+    refused — the grant landed nowhere write_artifact looked. An absolute
+    path under a granted root now writes; outside stays refused; the
+    secret floor holds below the granted root."""
+    root = tmp_path / "art"
+    root.mkdir()
+    granted = tmp_path / "proj"
+    granted.mkdir()
+    recorded = []
+    wa = tools.make_write_artifact(
+        root, on_write=recorded.append, extra_roots=[str(granted)])
+
+    out = wa(path=str(granted / "notes" / "plan.md"), content="body")
+    assert (granted / "notes" / "plan.md").read_text() == "body"
+    assert str(granted / "notes" / "plan.md") in out       # names the real target
+    assert recorded == [granted / "notes" / "plan.md"]     # merge recording fires
+
+    with pytest.raises(ValueError):
+        wa(path=str(tmp_path / "elsewhere" / "x.md"), content="no")   # ungranted
+    with pytest.raises(ValueError):
+        wa(path=str(granted / ".env"), content="no")       # secret floor holds
+
+
+def test_write_artifact_without_grants_keeps_absolute_refusal(tmp_path):
+    root = tmp_path / "art"
+    root.mkdir()
+    wa = tools.make_write_artifact(root)
+    with pytest.raises(ValueError):
+        wa(path=str(tmp_path / "abs.md"), content="x")
+    # the relative contract is untouched
+    assert "wrote" in wa(path="ok.md", content="x")
+
+
+def test_registry_write_artifact_gets_edit_roots_not_read_roots(tmp_path):
+    """Action separation at the registry seam: write_artifact rides the
+    EDIT-class extra_roots; a read-only grant cannot write."""
+    root = tmp_path / "art"
+    root.mkdir()
+    rw = tmp_path / "rw"
+    rw.mkdir()
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    reg = tools.build_registry(
+        artifacts_root=root, extra_roots=[str(rw)], extra_read_roots=[str(ro)])
+    wa = reg["write_artifact"].call
+    assert "wrote" in wa(path=str(rw / "a.md"), content="x")
+    with pytest.raises(ValueError):
+        wa(path=str(ro / "b.md"), content="x")             # read grant can't write

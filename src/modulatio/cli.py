@@ -1004,9 +1004,24 @@ def _clay_doctor_check() -> None:
 
 
 def _run_doctor_checks() -> None:
-    from modulatio import auth_alerts, oauth_helpers
+    from modulatio import __version__, auth_alerts, installed_version, oauth_helpers
 
     typer.echo("=== Modulatio doctor ===\n")
+
+    # Version stamp: doctor is a fresh process (its own skew is always zero),
+    # but the line documents what's installed — and any LONG-LIVED server
+    # started before a reinstall reports its own skew on the WebOS console.
+    disk = installed_version()
+    if disk is None:
+        # Editable/unreadable metadata reports unknown, so skew detection is
+        # inert here BY DESIGN — say so, or an operator hunting "why does my
+        # dev box never warn about a stale server?" gets no clue why.
+        skew = "  (no disk stamp — editable install; skew detection off)"
+    elif disk != __version__:
+        skew = f"  (dist-info reads {disk} — reinstall?)"
+    else:
+        skew = ""
+    typer.echo(f"Version: {__version__}{skew}\n")
 
     # Models
     presets = model_presets.load_presets()
@@ -1182,6 +1197,32 @@ def _run_doctor_checks() -> None:
                 "    trusted: network on + pip enabled for agents; cloud "
                 "API keys/secrets are still stripped."
             )
+
+    # Code deliverable verification: the execution digest builds + tests
+    # a code deliverable in a throwaway sandbox, provisioning its build
+    # backend and test runner from an APPROVED LOCAL wheelhouse (never the
+    # network, never the live venv). Without it, code-family probes report
+    # ENGINE_UNAVAILABLE and a code goal can't be verified as buildable.
+    from modulatio import code_probes as _cp
+    typer.echo("\nCode verification (wheelhouse):")
+    _wh = _cp.wheelhouse_path()
+    if _wh is None:
+        from modulatio import config as _cfg
+        typer.echo(
+            f"  ✗ no wheelhouse — populate {_cfg.CONFIG_DIR / 'wheelhouse'} "
+            "(or set MODULATIO_WHEELHOUSE):\n"
+            "      pip download pytest hatchling setuptools wheel -d "
+            f"{_cfg.CONFIG_DIR / 'wheelhouse'}"
+        )
+    elif not any(_wh.glob("pytest-*.whl")):
+        typer.echo(
+            f"  ⚠ wheelhouse {_wh} has no pytest wheel — the test probe "
+            "reports ENGINE_UNAVAILABLE. Add pytest:\n"
+            f"      pip download pytest -d {_wh}"
+        )
+    else:
+        n = len(list(_wh.glob("*.whl")))
+        typer.echo(f"  ✓ wheelhouse {_wh} — {n} wheel(s), pytest present.")
 
     # Clipboard backend (TUI copy/paste reaches the OS clipboard via pyperclip;
     # Linux needs xclip/wl-clipboard, which `modulatio setup` ensures).

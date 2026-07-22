@@ -461,3 +461,155 @@ def test_once_grant_covers_exactly_one_tool_call(env):
     seen: list = []
     gate.decide(_req("read", proj / "x.txt"), prompt_fn=_record(seen))
     assert len(seen) == 1  # re-prompted — the once never became a session
+
+
+# ── ONE authorization coordinator ────────────────────────────────────────
+#
+# One tool call → at most ONE approval event, even when it carries BOTH a
+# path/exec ask (gate axis) and a capability ask (broker axis). The scope
+# answer lands in BOTH stores. The runner's second independent pass dies.
+
+
+def _coordinator_env(tmp_path, prompt_fn, mode=None):
+    from modulatio import permissions as perm
+
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    broker = perm.PermissionBroker(
+        mode=mode or perm.RunMode.DEFAULT,
+        grants=perm.GrantStore(tmp_path / "grants.json"),
+        ask=None,   # the coordinator owns the ask surface now
+        sandbox_available=lambda: True,
+    )
+    coord = perm.build_authorization_coordinator(
+        gate=gate, root=ws, prompt_fn=prompt_fn, broker=broker)
+    return coord, gate, broker, ws
+
+
+def test_coordinator_merges_path_and_capability_into_one_prompt(env, tmp_path):
+    """run_shell with an outside cwd needs BOTH an exec grant and the shell
+    capability. The coordinator fires ONE prompt; the answered scope lands
+    in the gate (exec grant honored) AND the broker (capability
+    remembered) — the operator answers one question, not two."""
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_SESSION)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+
+    assert coord("run_shell", {"cmd": "ls", "cwd": str(outside)}) is True
+    assert len(prompts) == 1                       # ONE approval event
+    # the combined ask discloses the capability rider
+    assert "command" in prompts[0].why or "capability" in prompts[0].why
+    # gate axis: the exec grant landed — same call class silently allowed now
+    assert coord("run_shell", {"cmd": "pwd", "cwd": str(outside)}) is True
+    assert len(prompts) == 1                       # no re-ask: both stores hold
+    # broker axis: the capability was recorded at session scope
+    from modulatio.permissions import capability_for
+    assert broker.grants.remembered(capability_for("run_shell", {"cmd": "x"}))
+
+
+def test_coordinator_single_axis_asks_once_and_records(env, tmp_path):
+    """Path-only (read_file outside: generic cap never asks) and
+    capability-only (http_get: no path extraction) each produce exactly one
+    prompt on their own axis."""
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_SESSION)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    outside = tmp_path / "docs"
+    outside.mkdir()
+    (outside / "f.md").write_text("x")
+
+    assert coord("read_file", {"path": str(outside / "f.md")}) is True
+    assert len(prompts) == 1 and prompts[0].request_class == "path"
+
+    assert coord("http_get", {"url": "https://x.example/a"}) is True
+    assert len(prompts) == 2 and prompts[1].request_class == "capability"
+
+
+def test_coordinator_deny_records_nothing_on_either_axis(env, tmp_path):
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_DENY)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+
+    assert coord("run_shell", {"cmd": "ls", "cwd": str(outside)}) is False
+    assert len(prompts) == 1
+    from modulatio.permissions import capability_for
+    assert not broker.grants.remembered(capability_for("run_shell", {"cmd": "ls"}))
+    # a fresh identical call re-asks (nothing was granted anywhere)
+    coord("run_shell", {"cmd": "ls", "cwd": str(outside)})
+    assert len(prompts) == 2
+
+
+def test_coordinator_gate_refusal_denies_without_any_prompt(env, tmp_path):
+    """An engine-refused path (dangerous root) never prompts — and the
+    capability rider must not leak through as its own ask."""
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_SESSION)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    assert coord("run_shell", {"cmd": "ls", "cwd": "/etc"}) is False
+    assert prompts == []                            # refusal floor: silent deny
+
+
+def test_coordinator_yolo_auto_grants_capability_but_path_still_asks(env, tmp_path):
+    """/yolo auto-grants the CAPABILITY axis; the folder fence still asks —
+    'a new folder always needs /work, in every mode'."""
+    from modulatio import permissions as perm
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_SESSION)
+
+    coord, gate, broker, ws = _coordinator_env(
+        tmp_path, prompt_fn, mode=perm.RunMode.YOLO)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    assert coord("run_shell", {"cmd": "ls", "cwd": str(outside)}) is True
+    assert len(prompts) == 1 and prompts[0].request_class == "exec"
+
+
+def test_approved_outside_write_lands_and_is_honored(env, tmp_path):
+    """End to end: approve an outside write_artifact once →
+    the grant lands in LiveGrantRoots and the SAME call's tool honors it.
+    Before: the UI approved a write the tool could never perform."""
+    from modulatio import tools as T
+
+    tmp, ws, proj = env
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    coord_prompts = []
+
+    def prompt_fn(req):
+        coord_prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_SESSION)
+
+    from modulatio import permissions as perm
+    coord = perm.build_authorization_coordinator(
+        gate=gate, root=ws, prompt_fn=prompt_fn, broker=None)
+    live = lg.LiveGrantRoots(gate, "path", static=(ws,))
+    wa = T.make_write_artifact(ws, extra_roots=live)
+
+    target = str(proj / "out" / "report.md")
+    assert coord("write_artifact", {"path": target, "content": "body"}) is True
+    assert len(coord_prompts) == 1
+    assert "wrote" in wa(path=target, content="body")
+    assert (proj / "out" / "report.md").read_text() == "body"

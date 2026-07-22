@@ -38,7 +38,7 @@ import enum
 import json
 import os
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -274,6 +274,96 @@ def capability_for(tool_name: str, args: "dict | None" = None) -> Capability:
                       _scoped={"once": key, "session": key, "always": key})
 
 
+def ask_via_prompt_fn(prompt_fn):
+    """Adapt a surface's EXISTING ``prompt_fn(SecurityRequest) -> ScopedDecision``
+    bridge (the TUI approval modal / the web approval ticket) into the broker's
+    ``ask(cap) -> Decision`` surface (one approval UI per
+    surface, never a second one). The capability renders as a
+    ``capability``-class request — ``resource`` is the human utterance
+    (``cap.label``), ``why`` the detail — offering the broker's four scopes.
+    An unknown scope or a crashing bridge maps to DENY in the broker's own
+    guard (`Decision.coerce` + the except arm)."""
+
+    def ask(cap) -> Decision:
+        from modulatio import leader_gate as lg
+        decision = prompt_fn(lg.SecurityRequest(
+            action="capability", resource=getattr(cap, "label", str(cap)),
+            request_class="capability", why=getattr(cap, "detail", ""),
+        ))
+        return Decision.coerce(getattr(decision, "scope", None))
+
+    return ask
+
+
+def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
+    """ONE authorization coordinator: compose the
+    filesystem axis (``LeaderPermissionGate``) and the capability axis
+    (``PermissionBroker``) into a single ``authorize(name, args) -> bool``
+    with AT MOST ONE approval event per tool call.
+
+    Silent resolutions (standing roots, prior grants, refusal floor, yolo
+    auto-grant, remembered capabilities) never prompt. When a call needs
+    BOTH a path/exec grant and a capability, the capability rides the path
+    prompt as a disclosed line and the answered scope lands in BOTH stores —
+    the operator answers one question, not two. The runner keeps a single
+    deny arm; the broker's independent pass is retired where this runs.
+    """
+    from modulatio import leader_gate as lg
+
+    def authorize(name: str, args: dict) -> bool:
+        # A new tool call starts a fresh once-slate (same contract as
+        # build_permission_callback).
+        gate.begin_tool_call()
+        # Extraction parses wholly model-controlled values — any failure is
+        # malformed model input and fails CLOSED (scoped to extraction only).
+        try:
+            requests = lg.extract_tool_requests(name, args, root=root)
+        except Exception:  # noqa: BLE001 — model-shaped input, deny the call
+            return False
+
+        # Gate axis: silent resolution first; collect what needs a prompt.
+        pending = []
+        for req in requests:
+            silent = gate.decide_silently(req)
+            if silent is None:
+                pending.append(req)
+            elif silent.scope == lg.SCOPE_DENY:
+                return False
+
+        # Capability axis: silent resolution (auto/remembered/sandbox floor).
+        state, cap = ("allow", None)
+        if broker is not None:
+            state, cap = broker.resolve_capability(name, args)
+            if state == "deny":
+                return False
+
+        # One prompt per pending gate request; the capability rides the FIRST
+        # as a disclosed line, its answer recorded on both axes.
+        for i, req in enumerate(pending):
+            shown = req
+            if i == 0 and state == "ask":
+                shown = replace(
+                    req, why=f"{req.why} — also grants the capability: {cap.label}")
+            decision = gate.record_prompted(req, prompt_fn(shown))
+            if decision.scope == lg.SCOPE_DENY:
+                return False
+            if i == 0 and state == "ask":
+                broker.record_ask_decision(cap, Decision.coerce(decision.scope))
+                state = "allow"
+
+        # Capability-only ask (no path prompt carried it): same surface.
+        if state == "ask":
+            decision = Decision.coerce(
+                getattr(prompt_fn(lg.SecurityRequest(
+                    action="capability", resource=cap.label,
+                    request_class="capability", why=cap.detail,
+                )), "scope", None))
+            return broker.record_ask_decision(cap, decision)
+        return True
+
+    return authorize
+
+
 # ── grant key schema validation (§6.B/D) ───────────────────────────────────
 _VALID_GRANT_PREFIXES = (
     "network:url=", "network:host=", "network:domain=",
@@ -416,7 +506,33 @@ class PermissionBroker:
             return False
 
     def _authorize_inner(self, tool_name: str, args: "dict | None" = None) -> bool:
+        state, cap = self.resolve_capability(tool_name, args)
+        if state != "ask":
+            return state == "allow"
+        # Must ask. Headless (no ask) → fail-closed deny (§6.C).
+        if self.ask is None:
+            return not self.fail_closed
+        try:
+            decision = Decision.coerce(self.ask(cap))
+        except Exception:
+            decision = Decision.DENY  # an ask-bridge crash is a deterministic DENY
+        return self.record_ask_decision(cap, decision)
+
+    def resolve_capability(
+        self, tool_name: str, args: "dict | None" = None,
+    ) -> "tuple[str, Capability | None]":
+        """The promptless half of authorization (coordinator         seam): ``("allow"|"deny"|"ask", cap)``. Silent paths keep their side
+        effects (audit emits); only a real operator question returns "ask"."""
         cap = capability_for(tool_name, args or {})
+
+        # Generic ``tool:<name>`` capabilities are the TOOL LOOP itself, not a
+        # capability: the path gate (filesystem axis) is their fence. Asking
+        # for them made goal mode deny read_file-class tools outright (no UI
+        # bridge → fail-closed) and would turn default mode into nagware the
+        # moment surfaces supply an ask. Silent allow, nothing recorded — the
+        # REAL capabilities (shell/network/file-write/spend) gate below.
+        if cap.kind.startswith("tool:"):
+            return "allow", None
 
         # §6.A — the substrate is the HULL, not a preflight. A sandbox-requiring
         # capability cannot run without a live
@@ -426,24 +542,24 @@ class PermissionBroker:
         # Denying here also means nothing is recorded from an unsafe state.
         if cap.requires_sandbox and not (self._sandbox_available() or self.unsafe_posture):
             self._emit(cap, Decision.DENY)
-            return False
+            return "deny", cap
 
         # /yolo: auto-grant the ASK (the substrate is already guaranteed above).
         if self.mode.auto_grants_capabilities:
-            return self._granted(cap, Decision.ALLOW_ONCE)
+            self._granted(cap, Decision.ALLOW_ONCE)
+            return "allow", cap
 
         # Remembered / baked-in grants (scope-aware) — skip re-asking.
         preauth_hit = any(k in self.preauthorized for k in cap.covering_keys())
         if preauth_hit or self.grants.remembered(cap):
-            return self._granted(cap, Decision.ALLOW_SESSION)
+            self._granted(cap, Decision.ALLOW_SESSION)
+            return "allow", cap
 
-        # Must ask. Headless (no ask) → fail-closed deny (§6.C).
-        if self.ask is None:
-            return not self.fail_closed
-        try:
-            decision = Decision.coerce(self.ask(cap))
-        except Exception:
-            decision = Decision.DENY  # §6.C: an ask-bridge crash is a deterministic DENY
+        return "ask", cap
+
+    def record_ask_decision(self, cap: Capability, decision: Decision) -> bool:
+        """Record an operator's answered capability ask (the recording half;
+        the coordinator prompts once on its own surface and applies here)."""
         if not decision.allows:
             self._emit(cap, Decision.DENY)
             return False

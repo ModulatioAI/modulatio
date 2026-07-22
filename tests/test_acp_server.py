@@ -62,7 +62,9 @@ class _Client:
 
     def _handle_server_request(self, msg: dict) -> None:
         if msg["method"] == "session/request_permission":
-            opt = "allow" if self.permission_decision == "allow" else "reject"
+            # "once"/"deny" — the scope vocabulary BOTH ask surfaces speak
+            # (the gate's prompt_fn menu and the broker's capability ask).
+            opt = "once" if self.permission_decision == "allow" else "deny"
             self._push(rpc.make_response(
                 msg["id"], {"outcome": {"outcome": "selected", "optionId": opt}}))
         elif msg["method"] == "session/request_input":
@@ -154,15 +156,19 @@ def test_prompt_returns_full_reply(vault_root):
 
 
 def test_permission_round_trip_allows_tool(vault_root):
-    """The key test: a tool call round-trips to the client; ALLOW → the tool
-    runs and the turn completes."""
-    ran: list = []
+    """A REAL-capability tool call (network) round-trips ONE ask to the
+    client; ALLOW → the turn completes. (A benign generic tool never asks —
+    the surface-mode capability policy. Converse runs the Leader's own solo
+    registry, so the observable here is the wire: ask count + reply.)"""
     scripted = [
         ChatResponse(content=None, tool_calls=(
-            ToolCall(id="c1", name="echo", args={"x": "hi"}),)),
+            ToolCall(id="c1", name="http_get", args={"url": "https://x.example/a"}),)),
         ChatResponse(content="done", tool_calls=()),
     ]
-    client = _Client(_factory(scripted, lambda **k: ran.append(k) or "echoed"))
+    client = _Client(_factory(scripted, lambda **k: ""))
+    asks: list = []
+    inner = client._handle_server_request
+    client._handle_server_request = lambda m: (asks.append(m), inner(m))[1]
     client.permission_decision = "allow"
     client.start()
     try:
@@ -170,24 +176,25 @@ def test_permission_round_trip_allows_tool(vault_root):
         sid = client.request("session/new", {})["result"]["sessionId"]
         resp = client.request("session/prompt", {"sessionId": sid, "prompt": "go"})
         assert resp["result"]["reply"] == "done"
-        assert len(ran) == 1                     # the tool actually ran
-        # the server asked permission first
-        assert any(n["method"] == "session/update" for n in client.notifications) \
-            or True  # activity is best-effort; not asserting strict ordering
+        perm = [a for a in asks if a["method"] == "session/request_permission"]
+        assert len(perm) == 1                    # asked exactly once
     finally:
         client.close()
 
 
 def test_permission_round_trip_denies_tool(vault_root):
-    """DENY → the tool does NOT run; the model gets a DENIED result and still
-    finishes the turn."""
-    ran: list = []
+    """DENY → the broker refuses the capability, the model gets a DENIED
+    result, and the turn still finishes (the deny→no-execution contract
+    itself is pinned at the runner/permissions level)."""
     scripted = [
         ChatResponse(content=None, tool_calls=(
-            ToolCall(id="c1", name="echo", args={"x": "hi"}),)),
+            ToolCall(id="c1", name="http_get", args={"url": "https://x.example/a"}),)),
         ChatResponse(content="ok, skipped it", tool_calls=()),
     ]
-    client = _Client(_factory(scripted, lambda **k: ran.append(k) or "echoed"))
+    client = _Client(_factory(scripted, lambda **k: ""))
+    asks: list = []
+    inner = client._handle_server_request
+    client._handle_server_request = lambda m: (asks.append(m), inner(m))[1]
     client.permission_decision = "deny"
     client.start()
     try:
@@ -195,7 +202,7 @@ def test_permission_round_trip_denies_tool(vault_root):
         sid = client.request("session/new", {})["result"]["sessionId"]
         resp = client.request("session/prompt", {"sessionId": sid, "prompt": "go"})
         assert resp["result"]["reply"] == "ok, skipped it"
-        assert ran == []                         # the tool never ran
+        assert any(a["method"] == "session/request_permission" for a in asks)
     finally:
         client.close()
 
@@ -209,7 +216,8 @@ class _BlockingOrch:
         self.entered = 0
         self._lock = threading.Lock()
 
-    def converse(self, message, *, attachments=None, permission_callback=None, ask=None):
+    def converse(self, message, *, attachments=None, permission_callback=None,
+                 prompt_fn=None, ask=None):
         with self._lock:
             self.entered += 1
         self.gate.wait(timeout=10)
@@ -248,11 +256,21 @@ class _PermissionGateOrch:
         self.permission_result = None
         self.entered = threading.Event()
 
-    def converse(self, message, *, attachments=None, permission_callback=None, ask=None):
+    def converse(self, message, *, attachments=None, permission_callback=None,
+                 prompt_fn=None, ask=None):
+        from modulatio import leader_gate as lg
         self.entered.set()
         # This blocks in request_and_wait until the client responds OR the
         # session is cancelled (which resolves the slot with None → deny).
-        self.permission_result = permission_callback("echo", {"x": "hi"})
+        # Drives the gate's prompt surface — the path production wires now.
+        decision = prompt_fn(lg.SecurityRequest(
+            action="read", resource="/data/x.txt", request_class="path",
+            why="test", available_scopes=(lg.SCOPE_ONCE, lg.SCOPE_DENY)))
+        # None = still pending; False = denied; scope str = allowed. The
+        # pending/denied distinction is load-bearing for the cancel test.
+        self.permission_result = (
+            False if decision.scope == lg.SCOPE_DENY else decision.scope
+        )
         return "allowed" if self.permission_result else "denied"
 
 
@@ -301,7 +319,9 @@ def test_cancel_only_affects_target_session(vault_root):
         # Now answer B's held permission request → B completes (allowed).
         msg_b = held[sid_b]
         client._push(rpc.make_response(
-            msg_b["id"], {"outcome": {"outcome": "selected", "optionId": "allow"}}))
+            # "once" — the gate-scope vocabulary the prompt_fn menu offers
+            # (the old raw callback's "allow"/"reject" ids are gone).
+            msg_b["id"], {"outcome": {"outcome": "selected", "optionId": "once"}}))
         assert client.wait(rid_b)["result"]["reply"] == "allowed"
     finally:
         client.close()
@@ -393,28 +413,6 @@ def test_ask_capability_cancelled_or_unknown_is_deny():
     s.cancelled = True
     assert s.ask_capability(cap) is Decision.DENY
     assert s._server.sent is None
-
-
-def test_acp_run_prompt_wires_ask_capability_into_converse():
-    """The WIRING (not the part): the ACP server passes ask=session.ask_capability
-    AND permission_callback=session.permission_cb into converse — so the broker's
-    capability questions reach the ACP client and the gate stays on the callback."""
-    import io
-    from modulatio.acp.server import ACPServer
-    from modulatio.acp.session import ACPSession
-    captured = {}
-
-    class _Orch:
-        def converse(self, message, **kw):
-            captured.update(kw)
-            return "reply"
-
-    srv = ACPServer("CODE", stub=True, stdin=io.StringIO(), stdout=io.StringIO())
-    sess = ACPSession("sid", srv)
-    sess.orch = _Orch()
-    srv._run_prompt("r1", sess, "hello", [])
-    assert captured.get("ask") == sess.ask_capability          # broker ask wired
-    assert captured.get("permission_callback") == sess.permission_cb  # gate wired
 
 
 # ── session/cancel framing (LOW-audit fold) ─────────────────────────────────
@@ -612,3 +610,117 @@ def test_regular_file_inside_root_still_accepted(tmp_path, monkeypatch):
 
     resolved = _validate_attachment_path(str(f))
     assert resolved == f.resolve()
+
+
+# ── ACP rides the REAL permission gate ──────────────────────────────
+#
+# The raw boolean permission_cb bypassed LeaderPermissionGate: an approved
+# outside path never entered LiveGrantRoots, so the tool refused the very
+# operation the operator had just approved. ACP now supplies a prompt_fn
+# bridge; orchestration builds the gate-backed callback from it — grants
+# land BEFORE dispatch, same as the TUI modal.
+
+
+def _security_request(**kw):
+    from modulatio import leader_gate as lg
+    defaults = dict(action="read", resource="/data/report.csv",
+                    request_class="path", why="the Leader asked",
+                    available_scopes=(lg.SCOPE_ONCE, lg.SCOPE_SESSION,
+                                      lg.SCOPE_DENY))
+    defaults.update(kw)
+    return lg.SecurityRequest(**defaults)
+
+
+def test_acp_prompt_fn_maps_each_scope_to_scoped_decision():
+    from modulatio import leader_gate as lg
+    cases = [("once", lg.SCOPE_ONCE), ("session", lg.SCOPE_SESSION),
+             ("deny", lg.SCOPE_DENY)]
+    for opt, scope in cases:
+        s = _session_with({"outcome": {"outcome": "selected", "optionId": opt}})
+        d = s.prompt_fn(_security_request())
+        assert d.scope == scope and d.granted_via == "acp"
+
+
+def test_acp_prompt_fn_offers_only_available_scopes():
+    # An exec-class request that may not offer "always" must not render the
+    # option — the gate raises on out-of-contract scopes, so the surface
+    # must constrain the menu, not the operator.
+    s = _session_with({"outcome": {"outcome": "selected", "optionId": "once"}})
+    s.prompt_fn(_security_request())
+    offered = [o["optionId"] for o in s._server.sent[1]["options"]]
+    assert offered == ["once", "session", "deny"]
+    assert "always" not in offered
+
+
+def test_acp_prompt_fn_cancelled_or_garbage_denies():
+    from modulatio import leader_gate as lg
+    s = _session_with({"outcome": {"outcome": "selected", "optionId": "session"}})
+    s.cancelled = True
+    assert s.prompt_fn(_security_request()).scope == lg.SCOPE_DENY
+    assert s._server.sent is None          # denied without asking
+    assert _session_with("garbage").prompt_fn(_security_request()).scope \
+        == lg.SCOPE_DENY
+
+
+def test_acp_run_prompt_wires_the_gate_prompt_fn_not_a_raw_callback():
+    """Behavioral replacement for the callback-identity pin : the
+    server supplies prompt_fn so orchestration builds the REAL gate-backed
+    callback (grants land in LiveGrantRoots before dispatch); the raw
+    boolean permission_callback path is gone."""
+    import io
+    from modulatio.acp.server import ACPServer
+    from modulatio.acp.session import ACPSession
+    captured = {}
+
+    class _Orch:
+        def converse(self, message, **kw):
+            captured.update(kw)
+            return "reply"
+
+    srv = ACPServer("CODE", stub=True, stdin=io.StringIO(), stdout=io.StringIO())
+    sess = ACPSession("sid", srv)
+    sess.orch = _Orch()
+    srv._run_prompt("r1", sess, "hello", [])
+    assert captured.get("prompt_fn") == sess.prompt_fn
+    assert captured.get("permission_callback") is None
+    assert captured.get("ask") == sess.ask_capability
+
+
+def test_acp_approved_outside_read_lands_and_returns_content(tmp_path, monkeypatch):
+    """The once-scope pin, end to end: an ACP 'once' approval enters the gate,
+    lands in LiveGrantRoots, and the SAME call's read_file returns the
+    content — with exactly ONE permission request on the wire. The raw
+    boolean callback failed precisely here: approval recorded nowhere, the
+    tool refused the operation the operator had just approved."""
+    from modulatio import leader_gate as lg
+    from modulatio import tools as T
+
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project("ACPE2E", "x", "y")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "report.txt").write_text("the facts")
+
+    sess = _session_with({"outcome": {"outcome": "selected", "optionId": "once"}})
+    gate = lg.LeaderPermissionGate("ACPE2E", workspace=ws)
+    cb = lg.build_permission_callback(gate, root=ws, prompt_fn=sess.prompt_fn)
+    live = lg.LiveGrantRoots(gate, "path", static=(ws,))
+    read_file = T.make_read_file(ws, extra_roots=live)
+
+    target = str(outside / "report.txt")
+    assert cb("read_file", {"path": target}) is True     # approved via ACP
+    sent = sess._server.sent
+    assert sent is not None and sent[0] == "session/request_permission"
+    assert read_file(path=target) == "the facts"          # the grant LANDED
+
+    # Deny leaves no root behind: fresh session answering deny, new call.
+    sess2 = _session_with({"outcome": {"outcome": "selected", "optionId": "deny"}})
+    cb2 = lg.build_permission_callback(gate, root=ws, prompt_fn=sess2.prompt_fn)
+    other = outside / "second.txt"
+    other.write_text("no")
+    gate.begin_tool_call()   # expire the once grant
+    assert cb2("read_file", {"path": str(other)}) is False
+    with pytest.raises(ValueError):
+        read_file(path=str(other))

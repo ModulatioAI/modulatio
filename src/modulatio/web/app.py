@@ -9,6 +9,8 @@ ES modules, no build step) is mounted last so API routes win.
 
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -52,7 +54,28 @@ def create_app(
     ``stub`` → actors run the engine on stub runners (the test suite's
     end-to-end path; production leaves it False).
     """
-    app = FastAPI(title="Modulatio WebOS", docs_url=None, redoc_url=None)
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        # Version stamp in the boot log: when a stale-server hunt reads this
+        # file later, the line pins WHICH engine this process actually loaded.
+        # Emitted from startup, NOT the factory body: the entry point passes
+        # create_app() as an argument to uvicorn.run(), so the factory runs
+        # before Uvicorn installs its logging config and the record would be
+        # discarded (not buffered). Startup runs once per server process.
+        #
+        # `uvicorn.error` IS the boot log (it carries "Application startup
+        # complete"). Uvicorn's dictConfig configures the uvicorn* loggers
+        # only — root gets no handler, so an INFO record on a `modulatio.*`
+        # logger propagates to root and dies at lastResort's WARNING floor.
+        # Verified by launching the real entry: the modulatio.web logger
+        # emitted nothing; this one lands.
+        from modulatio import __version__
+        logging.getLogger("uvicorn.error").info("modulatio-api %s", __version__)
+        yield
+
+    app = FastAPI(
+        title="Modulatio WebOS", docs_url=None, redoc_url=None, lifespan=_lifespan
+    )
     app.state.stub = stub
 
     served_hosts = _LOOPBACK_HOSTS | set(allowed_hosts or ())

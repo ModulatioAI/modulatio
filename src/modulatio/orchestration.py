@@ -1600,7 +1600,7 @@ def _topological_sort(tasks: list[Task]) -> list[Task]:
 # list), these are evaluated against LIVE task statuses after each wave
 # merge: they answer "given what has completed/failed so far, which tasks
 # can run RIGHT NOW (concurrently), and which are now dead because a dep
-# failed?" The concurrent execution loop (B4) calls _ready_wave in a loop,
+# failed?" The concurrent execution loop calls _ready_wave in a loop,
 # running each returned wave in parallel, then re-evaluating after merge.
 # _topological_sort stays as the cycle/unknown-ref validator + the
 # sequential fallback path; these are additive.
@@ -2451,7 +2451,7 @@ class Orchestrator:
         #: no-scatter / no-over-decompose contract into the decompose,
         #: task-plan, and producer prompts. Set per kickoff.
         self._pinned_files: list[str] = []
-        #: Job Template bound for this run (B2). ``None`` ⇒ greenfield (no JT
+        #: Job Template bound for this run. ``None`` ⇒ greenfield (no JT
         #: matched / supplied) and every downstream prompt stays byte-identical.
         #: When set, the Leader interviewed-or-defaulted the JT's params at
         #: intake; ``_bound_jt_params`` holds the answer set. Set per kickoff.
@@ -3855,7 +3855,7 @@ class Orchestrator:
 
     # ── Task planning: goal → tasks ──────────────────────────────────────
     def _plan_tasks(self, goal: Goal) -> list[Task]:
-        # Step 0 M3 (audit): the LLM call below
+        # Step 0 M3 : the LLM call below
         # dispatches via self._run("planner", prompt). The activity
         # event must reflect that — pre-fix it emitted role="leader",
         # which made the TUI/paper-trail story disagree with the
@@ -4217,7 +4217,7 @@ class Orchestrator:
         ``description`` only and adds a transition row capturing the
         rewrite for audit.
 
-        Step 0 M5 (audit): narrowed to
+        Step 0 M5 : narrowed to
         description-only. The previous shape also accepted
         ``artifact_kind`` and ``assignee_specialist`` mutations, but
         dispatch routing (capability floors, domain standards,
@@ -6680,25 +6680,30 @@ class Orchestrator:
             return ack
         if matched:
             message = stripped
-        # Wire the cross-cutting permission gate into the tool-loop: when the
-        # caller supplies a prompt surface (the TUI's approval modal), build the
-        # gate-backed callback so every out-of-workspace tool call is gated
-        # (extractor -> gate.decide -> bool). An explicit permission_callback
-        # (e.g. ACP) wins. The gate persists on the Orchestrator across turns.
-        if prompt_fn is not None and permission_callback is None:
-            from modulatio import leader_gate as _lg
-            permission_callback = _lg.build_permission_callback(
-                self.leader_gate(), root=self._leader_workspace(), prompt_fn=prompt_fn,
-            )
-        # §2 Task 2 — the autonomy-mode broker (CAPABILITY axis), composed with the
-        # gate above (FILESYSTEM axis) as a separate deny-chain arm in the runner.
-        # Wire it when a mode is active (/yolo auto-grants; /goal asks) OR an ask
-        # surface is supplied; DEFAULT + no ask keeps legacy behavior (no broker,
-        # no regression — the leader_gate still fences folders).
+        # The autonomy-mode broker (CAPABILITY axis). Wire it when
+        # a mode is active (/yolo auto-grants; /goal asks), an ask surface is
+        # supplied, OR a prompt surface is (the coordinator below carries
+        # capability asks over prompt_fn); DEFAULT + no surfaces keeps legacy
+        # behavior (no broker — the leader_gate still fences folders).
         from modulatio.permissions import RunMode as _RunMode
         permission_broker = None
-        if self._session_mode is not _RunMode.DEFAULT or ask is not None:
+        if (self._session_mode is not _RunMode.DEFAULT or ask is not None
+                or prompt_fn is not None):
             permission_broker = self._build_permission_broker(self._session_mode, ask)
+        # when the caller supplies a prompt surface (TUI modal /
+        # web ticket / ACP bridge), build the ONE authorization coordinator —
+        # both axes, at most one approval event per tool call, the capability
+        # riding the path prompt when a call needs both. The runner's second
+        # broker arm is retired on this lane (the coordinator owns it). An
+        # explicit permission_callback (tests/embedders) keeps the legacy
+        # two-arm compose.
+        if prompt_fn is not None and permission_callback is None:
+            from modulatio.permissions import build_authorization_coordinator
+            permission_callback = build_authorization_coordinator(
+                gate=self.leader_gate(), root=self._leader_workspace(),
+                prompt_fn=prompt_fn, broker=permission_broker,
+            )
+            permission_broker = None
         # Serialize the whole turn so two concurrent operator sessions on one
         # project can't interleave the durable log or race on shared state.
         with self._converse_lock:
@@ -8967,7 +8972,7 @@ class Orchestrator:
         operator killed it → no auto-resume). Best-effort — a teardown error never
         breaks the run's return."""
         code, rid = self.project.code, self.project.run_id
-        reason = "operator stopped the run (F8) — pipeline cleared"
+        reason = "operator stopped the run  — pipeline cleared"
         try:
             for t in store.list_tasks(code, run_id=rid):
                 if t.status not in (TaskStatus.COMPLETED, TaskStatus.ABANDONED):
@@ -9052,7 +9057,7 @@ class Orchestrator:
         """W2: return the ready tasks safe to run, BLOCKING (not serializing) any
         same-output-path conflict — two ready tasks colliding, OR a ready task
         colliding with an in-flight task's path (``held_paths``). Reuses
-        ``_block_wave_path_conflict`` (atomic block + ONE CRITICAL ticket, F5), so
+        ``_block_wave_path_conflict`` (atomic block + ONE CRITICAL ticket), so
         a per-completion-merge overwrite can't silently drop a deliverable and the
         human is surfaced the plan conflict."""
         by_path: dict[str, list[Task]] = {}
@@ -10829,7 +10834,7 @@ class Orchestrator:
         ``tasks`` may be empty when the parse itself failed before any
         Task objects were built — the ticket + goal-block still fire.
 
-        Step 0 H1 (audit): block the goal too.
+        Step 0 H1 : block the goal too.
         Pre-fix, kickoff marked the goal IN_PROGRESS before planning,
         and a plan rejection left it stuck IN_PROGRESS forever (no
         completed tasks → Leader-verify skipped → goal never saved
@@ -11297,6 +11302,19 @@ class Orchestrator:
                 rec = self._assembly_records.get(t.id)
                 if rec is not None and rec.digest is not None:
                     from modulatio import assembly as _assembly
+                    # Step 8: run the family's execution probes at VERIFY
+                    # time — the delivery boundary, where unavailable evidence
+                    # must bind (families without probes pass through). The
+                    # enriched digest feeds the prompt block AND the hard-issue
+                    # stream below; memoized on the snapshot identity, so the
+                    # fix loop's re-verify over an unchanged tree reuses the
+                    # evidence instead of rebuilding envs.
+                    rec.digest = _assembly.run_digest_probes(
+                        rec.digest,
+                        [p.get("label", "") for p in rec.digest.parts
+                         if p.get("label")],
+                        artifacts_root,
+                    )
                     block = _assembly.format_digest(rec.digest)
                     # #101 B.2: run the deterministic whole-deliverable check from the
                     # declared DeliverableSpec and SURFACE its findings to the verifier.
@@ -11757,8 +11775,20 @@ class Orchestrator:
                 and not stalled
                 and not deadlocked
                 and (
-                    bool(goal_spec_issues)
-                    or remediation.action is RemediationAction.REVISE_IN_PLACE
+                    # ENGINE-GATE-UNAVAILABLE issues clamp the
+                    # verdict but are EXCLUDED from remediation — the artifact
+                    # cannot fix the engine; no fixer, no retry budget spent.
+                    # When the UNAVAILABLE class is the ONLY measured issue,
+                    # even a model-declared revise_in_place is refused: a
+                    # fitness claim cannot cure an engine gap.
+                    bool(self._remediable_spec_issues(goal_spec_issues))
+                    or (
+                        remediation.action is RemediationAction.REVISE_IN_PLACE
+                        and not (
+                            goal_spec_issues
+                            and not self._remediable_spec_issues(goal_spec_issues)
+                        )
+                    )
                 )
             )
             # Goal-end QC last-resort sweep: redo is off the table (budget
@@ -12031,6 +12061,17 @@ class Orchestrator:
                 blind.append(t.output_path or str(path))
         return blind
 
+    @staticmethod
+    def _remediable_spec_issues(issues: "list[str]") -> "list[str]":
+        """The hard issues the FIX LOOP may act on : the
+        ENGINE-GATE-UNAVAILABLE class is excluded — it clamps ``satisfied``
+        (the deliverable is withheld through the honest-disappointed settle)
+        but never enters product remediation and consumes no retry budget."""
+        from modulatio import assembly as _assembly
+
+        return [i for i in issues
+                if _assembly.ENGINE_GATE_UNAVAILABLE_PREFIX not in i]
+
     def _deliverable_spec_issues(self, digest) -> "list[str]":
         """#101 B.2: run the deterministic whole-deliverable check from the run's
         declared ``DeliverableSpec`` against the engine-extracted digest. Empty spec →
@@ -12049,9 +12090,14 @@ class Orchestrator:
         correct fan-out."""
         from modulatio import assembly as _assembly
 
+        # a family's OWN deterministic hard issues (e.g. the code
+        # family's root ambiguity / closure holes) ride the same stream — they
+        # are engine-MEASURED facts the clamp must bind, spec or no spec.
+        issues = _assembly.digest_hard_issues(digest)
+
         spec = self._deliverable_spec
         if spec.is_empty():
-            return []
+            return issues
         floor = spec.part_floor
         if floor is not None:
             su = (spec.size_unit or "").strip().lower()
@@ -12063,7 +12109,7 @@ class Orchestrator:
                     su, du,
                 )
                 floor = None
-        return _assembly.check_deliverable(
+        return issues + _assembly.check_deliverable(
             digest, expected_count=None, part_floor=floor,
             required_structure=spec.required_structure,
         )
@@ -14602,7 +14648,7 @@ class Orchestrator:
         ask_operator: "Callable[[str], str] | None" = None,
         on_refused: str = "greenfield",
     ) -> RunSummary:
-        # Alpha (F1): bind Layer 1 (tool_summarization) + Layer 2
+        # Alpha : bind Layer 1 (tool_summarization) + Layer 2
         # (context_budget) configs for the duration of the kickoff so
         # ``runners.run_llm_with_tools`` actually sees them. Without
         # this binding the gates fall through to ``current_config() ->
@@ -15464,7 +15510,7 @@ class Orchestrator:
         self._post_run_capture_jt(summary, objective, goals)
         # Brick 4 + B4: autonomous self-codification (recurring lessons → skills)
         # and JT codification (recurring jobs → Job Templates). Best-effort; runs
-        # AFTER delivery + kickoff_ended (B1) so it's pure background learning, never
+        # AFTER delivery + kickoff_ended so it's pure background learning, never
         # on the user's critical path — and DURATION-bounded so a stalled cloud leader
         # call can't hold the process for the full per-call watchdog (post-A/B fix).
         self._run_post_run_codification_bounded(summary)

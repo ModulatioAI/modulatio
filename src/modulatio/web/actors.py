@@ -166,10 +166,16 @@ class OrchestratorActor:
             # prompt_fn (not a raw permission_callback): the engine builds the
             # gated chain itself — extraction, refusal floor, once/session/
             # always persistence — identically to the TUI (gate parity).
+            # ask: the broker's capability surface, riding the SAME approval
+            # ticket (default/goal can ask for shell/network
+            # in the browser instead of denying without a prompt; one
+            # approval UI serves both axes).
+            from modulatio.permissions import ask_via_prompt_fn
             return orch.converse(
                 message,
                 attachments=attachments,
                 prompt_fn=self.broker.prompt,
+                ask=ask_via_prompt_fn(self.broker.prompt),
             )
         finally:
             self._converse_busy = False

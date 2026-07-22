@@ -227,7 +227,18 @@ class LeaderPermissionGate:
         except OSError:
             return ScopedDecision(scope=SCOPE_DENY, granted_via="refused")
 
-    def _decide(self, request: SecurityRequest, *, prompt_fn) -> ScopedDecision:
+    def decide_silently(self, request: SecurityRequest) -> "ScopedDecision | None":
+        """The promptless half of ``decide`` (coordinator seam):
+        resolve standing roots, the refusal floor, and prior grants — return
+        the decision, or ``None`` when only an operator prompt can answer.
+        Same OSError posture as ``decide``: a pathological resource fails
+        closed as a deny, never a crash."""
+        try:
+            return self._decide_silently(request)
+        except OSError:
+            return ScopedDecision(scope=SCOPE_DENY, granted_via="refused")
+
+    def _decide_silently(self, request: SecurityRequest) -> "ScopedDecision | None":
         # STANDING roots first: the harness dirs are the Leader's home by
         # operator architecture — a PATH request there is not a widen ask, so
         # the refusal floor (which classifies model-asked widens) doesn't
@@ -245,7 +256,19 @@ class LeaderPermissionGate:
             return ScopedDecision(scope=SCOPE_DENY, granted_via="refused")
         if self.is_granted(request):
             return ScopedDecision(scope=SCOPE_SESSION, granted_via="prior")
-        decision = prompt_fn(request)
+        return None
+
+    def _decide(self, request: SecurityRequest, *, prompt_fn) -> ScopedDecision:
+        silent = self._decide_silently(request)
+        if silent is not None:
+            return silent
+        return self.record_prompted(request, prompt_fn(request))
+
+    def record_prompted(
+        self, request: SecurityRequest, decision: ScopedDecision,
+    ) -> ScopedDecision:
+        """Validate + record an operator's prompted answer (the recording half
+        of ``decide``; the coordinator prompts once and applies here)."""
         if decision.scope not in request.available_scopes:
             raise ValueError(
                 f"gate: prompt returned scope {decision.scope!r} not in this "

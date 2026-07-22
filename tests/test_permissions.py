@@ -424,3 +424,54 @@ def test_mode_status_rows_default_and_off_and_bypass():
     assert "off" in s_bypass.lower()       # explicit unsafe bypass surfaces as OFF
     a_goal, _ = mode_status_rows(RunMode.GOAL, sandbox_available=True, profile="standard", bypass=False)
     assert "ask" in a_goal.lower()         # /goal still asks for capabilities
+
+
+# ── capability asks on every surface × mode ──────────────────────────────
+
+
+def test_generic_tool_capability_is_silently_allowed(tmp_path):
+    """Goal mode denied read_file-class tools because the generic
+    tool:<name> capability hit the fail-closed ask path with no UI bridge.
+    Generic tool caps are the TOOL LOOP itself — fenced by the path gate, not
+    a capability. The broker allows them silently in every mode; REAL
+    capabilities (shell/network) still gate."""
+    from modulatio.permissions import GrantStore, PermissionBroker, RunMode
+
+    broker = PermissionBroker(
+        mode=RunMode.GOAL, grants=GrantStore(tmp_path / "g.json"),
+        ask=None, sandbox_available=lambda: True, fail_closed=True,
+    )
+    # benign generic tool: allowed with NO ask bridge, nothing recorded
+    assert broker.authorize("read_file", {"path": "x.txt"}) is True
+    assert broker.authorize("list_dir", {"path": "."}) is True
+    # real capabilities still fail closed without an ask surface
+    assert broker.authorize("run_shell", {"cmd": "ls"}) is False
+    assert broker.authorize("http_get", {"url": "https://x.example"}) is False
+
+
+def test_ask_via_prompt_fn_adapts_capability_to_the_gate_surface(tmp_path):
+    """One adapter, both surfaces: a Capability rides the EXISTING
+    prompt_fn(SecurityRequest)->ScopedDecision bridge (TUI modal / web
+    ticket), scope maps to Decision. No second approval UI exists."""
+    from modulatio import leader_gate as lg
+    from modulatio import leader_permissions as lp
+    from modulatio.permissions import Decision, ask_via_prompt_fn, capability_for
+
+    cap = capability_for("http_get", {"url": "https://x.example/a"})
+    seen = {}
+
+    def prompt_fn(request):
+        seen["req"] = request
+        return lg.ScopedDecision(scope=lp.SCOPE_SESSION)
+
+    ask = ask_via_prompt_fn(prompt_fn)
+    assert ask(cap) is Decision.ALLOW_SESSION
+    req = seen["req"]
+    assert req.request_class == "capability"
+    assert req.resource == cap.label            # the human utterance
+    assert req.why == cap.detail
+    assert set(req.available_scopes) == {lp.SCOPE_ONCE, lp.SCOPE_SESSION,
+                                         lp.SCOPE_ALWAYS, lp.SCOPE_DENY}
+
+    deny = ask_via_prompt_fn(lambda r: lg.ScopedDecision(scope=lp.SCOPE_DENY))
+    assert deny(cap) is Decision.DENY

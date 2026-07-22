@@ -591,7 +591,7 @@ class ModulatioApp(App):
             mode = "real"
 
         # Stay on LEADER — launching a job doesn't yank you to the floor; flip
-        # when you want to watch (F4 / the MOD SQUAD tab).
+        # when you want to watch (/ the MOD SQUAD tab).
 
         # Track elapsed time so the status line shows progress instead of
         # staying frozen. ``set_interval`` repaints once per second from the
@@ -1049,9 +1049,15 @@ class ModulatioApp(App):
         testable off the event loop). Supplies the cross-cutting permission
         gate's UI surface — the approval modal bridged from this worker thread —
         so any out-of-workspace tool call the Leader attempts is gated."""
+        from modulatio.permissions import ask_via_prompt_fn
         from modulatio.tui.leader_prompt import make_modal_prompt_fn
+        # ask: the broker's capability surface riding the SAME approval modal
+        # (default/goal ask for shell/network instead of goal
+        # denying without a prompt; one approval UI serves both axes).
+        prompt_fn = make_modal_prompt_fn(self)
         return orch.converse(
-            text, attachments=attachments, prompt_fn=make_modal_prompt_fn(self)
+            text, attachments=attachments, prompt_fn=prompt_fn,
+            ask=ask_via_prompt_fn(prompt_fn),
         )
 
     def _on_converse_done(self, reply: str) -> None:

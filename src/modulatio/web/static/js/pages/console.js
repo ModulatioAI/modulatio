@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Cowboy Claude and Clifton Knox.
 // The Console — the TUI's centerpiece in the browser. Lamp row,
-// LEADER / MOD SQUAD flip (F4), the TV fed by the SSE lane, the run
+// LEADER / MOD SQUAD flip , the TV fed by the SSE lane, the run
 // telemetry rail, the composer (`/kickoff … /end` brackets are the ONLY
 // job trigger), and the fail-closed approval modal.
 
@@ -162,7 +162,7 @@ export function mountConsole(page, ctx) {
   }, "Kick off…");
   const btnStop = el("button", {
     class: "btn", disabled: "", onclick: stopRun,
-  }, "⏹ Stop (F8)");
+  }, "⏹ Stop ");
   const composer = el("div", { class: "card composer" },
     input,
     el("div", { class: "spread" },
@@ -579,6 +579,18 @@ export function mountConsole(page, ctx) {
       // The ask was answered elsewhere (another tab, or it timed out) —
       // a dialog left open would be unanswerable.
       if (modal.open && modal.dataset.rid === frame.data.id) modal.close();
+    } else if (frame.type === "hello") {
+      // The version stamp: a reinstall under a running server serves new
+      // statics over old routes — surface the skew the moment a connection
+      // sees it, instead of letting it present as frontend bugs.
+      if (frame.data.stale) {
+        // Order-neutral: the server calls any non-empty mismatch stale, so a
+        // rollback lands here too — claiming "newer" would misreport the
+        // direction. Name both versions and the remedy, assert no ordering.
+        appendLine(tvLeader, el("div", { class: "stream-line mono error-text" },
+          `Modulatio ${frame.data.disk} is installed on disk — this `
+          + `server is still running ${frame.data.engine}; restart it`));
+      }
     }
   }, {
     onStatus: (s) => {

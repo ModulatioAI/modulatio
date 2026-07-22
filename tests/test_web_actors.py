@@ -265,3 +265,31 @@ def test_approval_timeout_publishes_resolved_frame():
         "type": "approval_resolved", "data": {"id": req["data"]["id"]},
     }
     get_bus("web").unsubscribe(bus_q)
+
+
+def test_converse_supplies_capability_ask_via_the_ticket_bridge(actor, monkeypatch):
+    """Broker wiring: the web actor passes ask= (the broker's
+    capability surface) adapted over its EXISTING approval-ticket prompt_fn —
+    so default/goal modes can actually ask for shell/network in the browser
+    instead of denying without a prompt . One approval UI, both
+    axes."""
+    captured = {}
+
+    class _Orch:
+        def converse(self, message, **kw):
+            captured.update(kw)
+            return "ok"
+
+        def session_mode_value(self):
+            return "default"
+
+    monkeypatch.setattr(actor, "_ensure_converse_orch", lambda: _Orch())
+    actor.converse("hi")
+    assert captured.get("prompt_fn") == actor.broker.prompt
+    ask = captured.get("ask")
+    assert ask is not None
+    # The ask rides the SAME bridge: driving it fires an approval ticket
+    # through broker.prompt (answered deny here via the zero-timeout path).
+    from modulatio.permissions import Decision, capability_for
+    monkeypatch.setattr(actor.broker, "_timeout_s", 0.01)
+    assert ask(capability_for("run_shell", {"cmd": "ls"})) is Decision.DENY

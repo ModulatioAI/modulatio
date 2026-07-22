@@ -333,10 +333,16 @@ class ACPServer:
             reply = session.orch.converse(
                 message,
                 attachments=attachments,
-                permission_callback=session.permission_cb,
+                # supply the gate's prompt surface,
+                # NOT a raw boolean callback. Orchestration builds the REAL
+                # gate-backed callback from prompt_fn — extraction, refusal
+                # floor, scope recording, and LiveGrantRoots widening all run,
+                # so an approved outside path is usable by the very call that
+                # asked (the raw callback approved paths the tools then refused).
+                prompt_fn=session.prompt_fn,
                 # The four-option capability ask — routes the broker's access
                 # questions (network/shell) to the ACP client (once/session/always/
-                # deny). The leader_gate fence stays on permission_callback above.
+                # deny). The leader_gate fence rides prompt_fn above.
                 ask=session.ask_capability,
             )
             self._respond(req_id, {"stopReason": "end_turn", "reply": reply})

@@ -171,7 +171,16 @@ async def event_stream(project: str) -> StreamingResponse:
     async def stream():
         q = bus.subscribe()
         try:
-            yield _sse("hello", {"project": code})
+            # The hello carries the version stamp: `engine` is this process's
+            # import-time version, `disk` is what a reinstall may have landed
+            # since. Read per connection, so the very reconnect that follows a
+            # reinstall is the one that reports the skew.
+            from modulatio import __version__, installed_version
+            disk = installed_version()
+            yield _sse("hello", {
+                "project": code, "engine": __version__, "disk": disk,
+                "stale": bool(disk and disk != __version__),
+            })
             while True:
                 try:
                     frame = await asyncio.to_thread(q.get, True, _KEEPALIVE_S)
