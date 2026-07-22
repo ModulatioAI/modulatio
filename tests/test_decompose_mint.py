@@ -1051,3 +1051,92 @@ def test_recovered_unclaimed_child_is_claimed_on_its_single_run(
     child = stored[f"{reloaded.id}-D1"]
     assert child.attempt_claim_id is not None
     assert child.lifetime_attempts == max(child.max_retries, 0) + 1
+
+
+# ── The full-tree bound — 584 per root at default policy ────────────────────
+
+def test_full_tree_bound_584_child_attempts_no_split_below_depth_3(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The frozen worst case: an always-8, always-overflowing tree at
+    default policy (max_retries=0) yields EXACTLY 584 child producer
+    attempts per root (8 + 64 + 512), splits stop at depth 3, and the mint
+    count is 73 UNIQUE mint ids (1 + 8 + 64) — counting mint events and
+    producer calls, not final task count."""
+    import json as _json
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+
+    def _split_specs(self, role, prompt, **kw):
+        tid = kw.get("task_id", "x")
+        return _json.dumps([
+            {"description": f"part {i} of {tid}",
+             "output_path": f"drafts/{tid}-p{i}.md"}
+            for i in range(8)
+        ])
+
+    monkeypatch.setattr(Orchestrator, "_run", _split_specs)
+    attempts = {"root": 0, "child": 0}
+
+    def _overflowing_producer(self, task, corrective_notes=""):
+        which = "child" if task.minted_by is not None else "root"
+        attempts[which] += 1
+        task.lifetime_attempts += 1
+        raise context_budget.RecoverableContextError(
+            model="m", estimated_tokens=999_999, max_input_tokens=1,
+            checkpoint_path=tmp_path / f"cp-{task.id}.json",
+        )
+
+    monkeypatch.setattr(Orchestrator, "_producer_execute", _overflowing_producer)
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+    root = _make_task(max_retries=0)
+    orch._run_task_with_redo(root, RunSummary(project=project_with_run))
+
+    assert attempts["child"] == 584, (
+        f"the per-root bound is exactly 584 child attempts; "
+        f"got {attempts['child']}"
+    )
+    assert attempts["root"] == 1
+    audit = orch._scope_root() / "audit.jsonl"
+    rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+    mint_ids = {r["mint_id"] for r in rows if r.get("event") == "decompose_mint"}
+    assert len(mint_ids) == 73, (
+        f"1 root + 8 + 64 = 73 unique mints; got {len(mint_ids)}"
+    )
+    refused = [r for r in rows if r.get("event") == "task_decompose_refused"]
+    assert len(refused) == 512, (
+        "every depth-3 leaf must refuse (depth cap), typed and audited"
+    )
+    assert all("depth" in r["reason"] for r in refused)
+    from modulatio import store
+    deep = [
+        t.id for t in store.list_tasks(
+            PROJECT_CODE, run_id=project_with_run.run_id)
+        if t.id.count("-D") > 3
+    ]
+    assert deep == [], f"no split below depth 3, but found {deep[:3]}"
+
+
+# ── Declared-key index (the O(n²) scan fix under the mint validator) ────────
+
+def test_declared_artifact_keys_tracks_saves_updates_and_deletes(
+    project_with_run
+):
+    """store.declared_artifact_keys: key → task id for every declared task,
+    cached by mtime+size so repeated scans parse only changed files — and it
+    must observe saves, updates, and deletions immediately."""
+    from modulatio import store
+    run_id = project_with_run.run_id
+    a = _make_task(id="MNT-T-K1", output_path="drafts/k1.md")
+    store.save_task(PROJECT_CODE, a, run_id=run_id)
+    keys = store.declared_artifact_keys(PROJECT_CODE, run_id=run_id)
+    assert keys["drafts/k1.md"] == "MNT-T-K1"
+    a.output_path = "drafts/k1-moved.md"
+    store.save_task(PROJECT_CODE, a, run_id=run_id)
+    keys = store.declared_artifact_keys(PROJECT_CODE, run_id=run_id)
+    assert "drafts/k1.md" not in keys
+    assert keys["drafts/k1-moved.md"] == "MNT-T-K1"
+    import os
+    os.remove(store._task_path(PROJECT_CODE, a.id, run_id=run_id))
+    keys = store.declared_artifact_keys(PROJECT_CODE, run_id=run_id)
+    assert "drafts/k1-moved.md" not in keys

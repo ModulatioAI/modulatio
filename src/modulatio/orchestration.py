@@ -10757,14 +10757,13 @@ class Orchestrator:
         for ancestor_key in t.artifact_lineage:
             blocked.setdefault(ancestor_key, "a decompose ancestor's artifact")
         try:
-            for declared in store.list_tasks(
+            for key, declared_id in store.declared_artifact_keys(
                 self.project.code, run_id=self.project.run_id,
-            ):
-                if declared.id == t.id:
+            ).items():
+                if declared_id == t.id:
                     continue
                 blocked.setdefault(
-                    task_output_rel_path(declared),
-                    f"task {declared.id}'s declared target")
+                    key, f"task {declared_id}'s declared target")
         except Exception:
             # A store read failure must not let an unvalidated split through.
             _logger.warning(
@@ -10975,14 +10974,11 @@ class Orchestrator:
         ``children_materialized`` is a best-effort convenience."""
         from modulatio.families import task_output_rel_path
         rec = t.decompose_mint
-        stored = {
-            task.id: task for task in store.list_tasks(
-                self.project.code, run_id=self.project.run_id)
-        }
         children: "list[Task]" = []
         for d in rec.child_descriptors:
             blueprint = Task.model_validate(d)
-            existing = stored.get(blueprint.id)
+            existing = store.get_task(
+                self.project.code, blueprint.id, run_id=self.project.run_id)
             if existing is None:
                 self._persist_child_task(blueprint)
                 children.append(blueprint)

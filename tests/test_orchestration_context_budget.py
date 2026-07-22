@@ -733,7 +733,7 @@ def test_attempt_decompose_children_inherit_retry_ceiling(
     assert all(c.max_retries == 2 for c in children)
 
 
-@pytest.mark.parametrize("cap", [2, 3, 4, 9])
+@pytest.mark.parametrize("cap", [0, 2, 3, 4, 9])
 def test_decompose_children_run_one_attempt_each(
     project_with_run, monkeypatch, tmp_path, cap
 ):
