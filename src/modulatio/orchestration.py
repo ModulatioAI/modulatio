@@ -1438,6 +1438,19 @@ def _token_floor(task: "Task") -> int | None:
 
 
 
+@dataclass(frozen=True)
+class _DecomposeRefusal:
+    """Typed outcome of a refused decompose split. Atomic by contract:
+    a refusal means NO children exist, no mint fact was written, and no
+    producer ran. ``reason`` names the specific violation (count vs cap,
+    offending path/collision, depth, …) so the stuck ticket and the
+    ``task_decompose_refused`` fact can surface WHY, not just that the
+    task stuck. Frozen + returned (never stored on the orchestrator) so
+    concurrent decompositions can't share refusal state."""
+
+    reason: str
+
+
 def _parse_redecompose_specs(resp: "str | None") -> "list[dict]":
     """Extract the child-task spec array from the planner's re-decompose
     response. Tolerant by design (it's an LLM): finds the first ``[...]``
@@ -9663,9 +9676,12 @@ class Orchestrator:
                 # that genuinely can't help (recursion cap, planner can't
                 # split) do we block + ticket — a real "stuck", not the old
                 # confused punt to a Leader-reflect turn that never decomposed.
-                if self._try_decompose_and_run(t, ctx_exc, summary):
+                handled, refusal = self._try_decompose_and_run(
+                    t, ctx_exc, summary)
+                if handled:
                     return
-                self._block_for_context_budget(t, ctx_exc, summary)
+                self._block_for_context_budget(
+                    t, ctx_exc, summary, decompose_refusal=refusal)
                 return
 
             except Exception as exc:
@@ -9723,7 +9739,7 @@ class Orchestrator:
             # before dead-ending at a ticket. Falls through to BLOCKED only when
             # it can't be split (planner declines / recursion cap).
             if isinstance(last_exc, _ctx_budget_module.CompressionChurnExceeded) \
-                    and self._try_decompose_and_run(t, last_exc, summary):
+                    and self._try_decompose_and_run(t, last_exc, summary)[0]:
                 return
             # Slice #9c: exception exhaustion is NOT an escalation path.
             # A tier bump cannot fix a broken runtime; the correct
@@ -10543,6 +10559,10 @@ class Orchestrator:
     #    within cap"); we wire the trigger + run the children, nothing more. ─
     #: Max overflow→decompose recursion before escalating (genuine stuck).
     _MAX_DECOMPOSE_DEPTH = 3
+    #: Max children per split — beyond it the WHOLE split refuses (no
+    #: silent take-N truncation; the decomposition contract is a
+    #: whole-plan assertion).
+    _MAX_DECOMPOSE_WIDTH = 8
 
     def _build_redecompose_prompt(
         self, t: "Task",
@@ -10578,11 +10598,13 @@ class Orchestrator:
     def _attempt_decompose(
         self, t: "Task",
         ctx_exc: "_ctx_budget_module.RecoverableContextError",
-    ) -> "list[Task] | None":
+    ) -> "list[Task] | _DecomposeRefusal":
         """Re-invoke the planner's decompose skill on an over-budget task →
-        smaller children, or ``None`` when it can't/shouldn't split (recursion
-        cap reached, planner errored, or fewer than 2 usable children). ``None``
-        falls through to the genuine-stuck ticket."""
+        smaller children, or a typed :class:`_DecomposeRefusal` naming why it
+        can't/shouldn't split (recursion cap, planner error, fewer than 2
+        usable children, over the width cap). A refusal is ATOMIC — no
+        children, no mint fact, no producer calls — and falls through to the
+        genuine-stuck ticket carrying its reason."""
         if _is_assembler_task(t):
             # Decomposing a MECHANICAL JOIN
             # yields partial assemblies — children inherit the assembly skill +
@@ -10591,9 +10613,13 @@ class Orchestrator:
             # 15 QC reads). The do-not-decompose twin of the size-fan's
             # do-not-split rule: an assembler overflow falls to the stuck
             # ticket — bounded and human-visible, never a cascade.
-            return None
+            return _DecomposeRefusal(
+                "assembler task: a mechanical join must not split — partial "
+                "assemblies re-overflow instead of converging")
         if t.decompose_depth >= self._MAX_DECOMPOSE_DEPTH:
-            return None  # recursion exhausted — genuine stuck, escalate
+            return _DecomposeRefusal(
+                f"decompose depth cap {self._MAX_DECOMPOSE_DEPTH} reached — "
+                f"recursion exhausted, genuine stuck")
         prompt = self._build_redecompose_prompt(t, ctx_exc)
         try:
             resp = self._run(
@@ -10603,7 +10629,7 @@ class Orchestrator:
         except Exception:
             _logger.warning("re-decompose planner call failed for task %s — "
                            "escalating as stuck", t.id, exc_info=True)
-            return None
+            return _DecomposeRefusal("re-decompose planner call failed")
         specs = _parse_redecompose_specs(resp)
         # Mint floor: a split is a MINT — the parent's remaining budget is
         # consumed BY the split, and every child is constructed with exactly
@@ -10649,22 +10675,35 @@ class Orchestrator:
                 decompose_depth=t.decompose_depth + 1,
                 status=TaskStatus.PENDING,
             ))
-        return children if len(children) >= 2 else None
+        if len(children) > self._MAX_DECOMPOSE_WIDTH:
+            # Whole-plan assertion: refuse the ENTIRE split — no silent
+            # take-N truncation of a plan the planner asserted as a unit.
+            return _DecomposeRefusal(
+                f"{len(children)} children exceeds the split width cap "
+                f"{self._MAX_DECOMPOSE_WIDTH} — the whole split is refused")
+        if len(children) < 2:
+            return _DecomposeRefusal(
+                f"planner returned {len(children)} usable child spec(s) — "
+                f"a split needs at least 2")
+        return children
 
     def _try_decompose_and_run(
         self, t: "Task",
         ctx_exc: "_ctx_budget_module.RecoverableContextError",
         summary: RunSummary,
-    ) -> bool:
+    ) -> "tuple[bool, _DecomposeRefusal | None]":
         """Overflow recovery: split the task and run the children INLINE
         (recursively through the same redo path — a child that still overflows
         re-decomposes, bounded by depth). The parent becomes a completed
         CONTAINER once all children complete; downstream depends on the
-        parent, then reads the children's artifacts. Returns True if handled,
-        False to fall through to the genuine-stuck ticket."""
-        children = self._attempt_decompose(t, ctx_exc)
-        if not children:
-            return False
+        parent, then reads the children's artifacts. Returns ``(True, None)``
+        when handled; ``(False, refusal)`` to fall through to the
+        genuine-stuck ticket carrying the typed refusal reason."""
+        outcome = self._attempt_decompose(t, ctx_exc)
+        if isinstance(outcome, _DecomposeRefusal):
+            self._emit_decompose_refused(t, outcome)
+            return False, outcome
+        children = outcome
         self._emit_activity(
             role="planner", phase="task_decomposed", task_id=t.id,
             agent_id="planner",
@@ -10699,7 +10738,31 @@ class Orchestrator:
             summary.errors.append(
                 f"{t.id}: decomposed but a child task did not complete"
             )
-        return True
+        return True, None
+
+    def _emit_decompose_refused(
+        self, t: "Task", refusal: "_DecomposeRefusal",
+    ) -> None:
+        """Surface a refused split as a first-class fact: live activity for
+        the console AND a durable ``audit.jsonl`` row (the refusal is
+        operational metadata on the event stream — the parent's transitions
+        still show plain went-to-stuck). A refusal writes NO mint fact and
+        no children — atomicity is the whole point."""
+        self._emit_activity(
+            role="planner", phase="task_decompose_refused", task_id=t.id,
+            agent_id="planner", detail=refusal.reason,
+        )
+        from modulatio.compression import _append_audit_row_0600
+        _append_audit_row_0600(
+            self._scope_root() / "audit.jsonl",
+            {
+                "event": "task_decompose_refused",
+                "task_id": t.id,
+                "reason": refusal.reason,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            },
+            self._store_lock,
+        )
 
     # ── Context-budget exhaustion — task BLOCKED, decompose ticket fired ─
     def _block_for_context_budget(
@@ -10707,6 +10770,7 @@ class Orchestrator:
         task: Task,
         ctx_exc: "_ctx_budget_module.RecoverableContextError",
         summary: RunSummary,
+        decompose_refusal: "_DecomposeRefusal | None" = None,
     ) -> None:
         """Alpha (W1) — Layer 2 raised RecoverableContextError:
         the prompt exceeded the model's window even after compression.
@@ -10729,6 +10793,10 @@ class Orchestrator:
             f"\n- **Checkpoint:** `{ctx_exc.checkpoint_path}`\n"
             if ctx_exc.checkpoint_path else ""
         )
+        refusal_line = (
+            f"\n- **Decompose refused:** {decompose_refusal.reason}\n"
+            if decompose_refusal else ""
+        )
         body = (
             f"## What happened\n\n"
             f"Task **{task.id}** hit the context-budget ceiling for "
@@ -10737,6 +10805,7 @@ class Orchestrator:
             f"**{ctx_exc.max_input_tokens}**. Layer 2's compression "
             f"pass already ran; the prompt still didn't fit.\n"
             f"{cp_line}"
+            f"{refusal_line}"
             f"\n"
             f"## Why it matters\n\n"
             f"Re-running with the same prompt would hit the same wall. "

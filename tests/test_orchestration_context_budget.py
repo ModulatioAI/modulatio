@@ -27,7 +27,7 @@ from uuid import uuid4
 import pytest
 
 from modulatio import context_budget, store, vault
-from modulatio.orchestration import Orchestrator, RunSummary
+from modulatio.orchestration import Orchestrator, RunSummary, _DecomposeRefusal
 from modulatio.types import Project, Task, TaskStatus, TicketPriority
 
 
@@ -761,8 +761,8 @@ def test_decompose_children_run_one_attempt_each(
     parent.max_retries = cap
     parent.lifetime_attempts = cap + 1  # fully spent for THIS setting
     summary = RunSummary(project=project_with_run)
-    handled = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
-    assert handled is True
+    handled, refusal = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
+    assert handled is True and refusal is None
     assert calls["n"] == 2, (
         f"cap={cap}: a split into 2 children must run exactly one producer "
         f"attempt per child, but {calls['n']} ran"
@@ -796,8 +796,8 @@ def test_decompose_children_one_attempt_each_partial_remaining(
     parent.max_retries = 3
     parent.lifetime_attempts = 3          # remaining = (3+1) - 3 = 1
     summary = RunSummary(project=project_with_run)
-    handled = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
-    assert handled is True
+    handled, refusal = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
+    assert handled is True and refusal is None
     assert calls["n"] == 2, (
         f"a split into 2 children must run one producer attempt per child, "
         f"but {calls['n']} ran"
@@ -810,21 +810,24 @@ def test_attempt_decompose_recursion_cap(project_with_run, monkeypatch, tmp_path
     _planner_returns(monkeypatch, '[{"description":"a"},{"description":"b"}]')
     parent = _make_task()
     parent.decompose_depth = orch._MAX_DECOMPOSE_DEPTH
-    assert orch._attempt_decompose(parent, _ctx_err(tmp_path)) is None
+    outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
 
 
-def test_attempt_decompose_junk_returns_none(project_with_run, monkeypatch, tmp_path):
-    """Planner returns non-JSON → no split → None (falls through to ticket)."""
+def test_attempt_decompose_junk_is_refused(project_with_run, monkeypatch, tmp_path):
+    """Planner returns non-JSON → no split → typed refusal (falls through to ticket)."""
     orch = _make_orchestrator(project_with_run)
     _planner_returns(monkeypatch, "I cannot split this further.")
-    assert orch._attempt_decompose(_make_task(), _ctx_err(tmp_path)) is None
+    outcome = orch._attempt_decompose(_make_task(), _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
 
 
 def test_attempt_decompose_single_child_is_not_a_split(project_with_run, monkeypatch, tmp_path):
-    """Fewer than 2 children isn't a real split → None."""
+    """Fewer than 2 children isn't a real split → typed refusal."""
     orch = _make_orchestrator(project_with_run)
     _planner_returns(monkeypatch, '[{"description":"only one"}]')
-    assert orch._attempt_decompose(_make_task(), _ctx_err(tmp_path)) is None
+    outcome = orch._attempt_decompose(_make_task(), _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
 
 
 def test_decompose_and_run_parent_completes_via_children(project_with_run, monkeypatch, tmp_path):
@@ -835,8 +838,8 @@ def test_decompose_and_run_parent_completes_via_children(project_with_run, monke
         lambda self, t, summary, **kw: setattr(t, "status", TaskStatus.COMPLETED))
     parent = _make_task()
     summary = RunSummary(project=project_with_run)
-    handled = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
-    assert handled is True
+    handled, refusal = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
+    assert handled is True and refusal is None
     assert parent.status == TaskStatus.COMPLETED
     tickets = store.list_tickets(project_with_run.code, run_id=project_with_run.run_id)
     assert not [tk for tk in tickets if tk.affected_task_id == parent.id]
@@ -852,8 +855,8 @@ def test_decompose_and_run_parent_blocks_if_a_child_fails(project_with_run, monk
             TaskStatus.BLOCKED if t.id.endswith("-D2") else TaskStatus.COMPLETED))
     parent = _make_task()
     summary = RunSummary(project=project_with_run)
-    handled = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
-    assert handled is True
+    handled, refusal = orch._try_decompose_and_run(parent, _ctx_err(tmp_path), summary)
+    assert handled is True and refusal is None
     assert parent.status == TaskStatus.BLOCKED
 
 
@@ -863,7 +866,8 @@ def test_decompose_and_run_falls_through_when_cannot_split(project_with_run, mon
     orch = _make_orchestrator(project_with_run)
     _planner_returns(monkeypatch, "no split possible")
     summary = RunSummary(project=project_with_run)
-    assert orch._try_decompose_and_run(_make_task(), _ctx_err(tmp_path), summary) is False
+    handled, refusal = orch._try_decompose_and_run(_make_task(), _ctx_err(tmp_path), summary)
+    assert handled is False and isinstance(refusal, _DecomposeRefusal)
 
 
 def test_churn_that_survives_retries_routes_to_decompose(project_with_run, monkeypatch):
@@ -890,7 +894,7 @@ def test_churn_that_survives_retries_routes_to_decompose(project_with_run, monke
         seen["exc"] = ctx_exc
         seen["task_id"] = t.id
         t.status = TaskStatus.COMPLETED  # simulate a successful split
-        return True
+        return True, None
 
     monkeypatch.setattr(Orchestrator, "_try_decompose_and_run", fake_decompose)
 
@@ -953,7 +957,8 @@ def test_attempt_decompose_refuses_assembler_tasks(project_with_run, monkeypatch
     monkeypatch.setattr(Orchestrator, "_run", _record)
     parent = _make_task()
     parent.required_skills = ["document-assembly"]
-    assert orch._attempt_decompose(parent, _ctx_err(tmp_path)) is None
+    outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
     assert calls == []  # not consulted, not swallowed-by-exception
 
 

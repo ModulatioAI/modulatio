@@ -126,3 +126,123 @@ def test_spent_parent_children_still_get_one_attempt_each(
             "child was staggered to the ceiling — the shared-remaining shape "
             "is retired; every child gets exactly one attempt"
         )
+
+
+# ── Width cap + typed refusal ───────────────────────────────────────────────
+
+def _nine_specs() -> str:
+    import json
+    return json.dumps([
+        {"description": f"part {i}", "output_path": f"drafts/p{i}.md"}
+        for i in range(9)
+    ])
+
+
+def _eight_specs() -> str:
+    import json
+    return json.dumps([
+        {"description": f"part {i}", "output_path": f"drafts/p{i}.md"}
+        for i in range(8)
+    ])
+
+
+def test_over_cap_split_refuses_typed_with_counts(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Nine valid specs → the ENTIRE split refuses (no children, no silent
+    take-8 truncation) with a typed reason naming the count and the cap."""
+    from modulatio.orchestration import _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, _nine_specs())
+    parent = _make_task()
+    outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+    assert "9" in outcome.reason and "8" in outcome.reason
+
+
+def test_cap_width_split_is_accepted(project_with_run, monkeypatch, tmp_path):
+    """Exactly eight children is within the width cap."""
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, _eight_specs())
+    parent = _make_task()
+    outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(outcome, list) and len(outcome) == 8
+
+
+def test_depth_cap_refusal_is_typed(project_with_run, monkeypatch, tmp_path):
+    from modulatio.orchestration import _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
+    parent = _make_task(decompose_depth=3)
+    outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+    assert "depth" in outcome.reason
+
+
+def test_single_child_refusal_is_typed(project_with_run, monkeypatch, tmp_path):
+    from modulatio.orchestration import _DecomposeRefusal
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, '[{"description":"only","output_path":"a.md"}]')
+    parent = _make_task()
+    outcome = orch._attempt_decompose(parent, _ctx_err(tmp_path))
+    assert isinstance(outcome, _DecomposeRefusal)
+
+
+def test_refusal_emits_refused_fact_and_no_children_no_producer(
+    project_with_run, monkeypatch, tmp_path
+):
+    """Over-cap atomicity through the run path: zero children persisted, zero
+    producer calls, a ``task_decompose_refused`` fact (live + durable audit
+    row) and NO ``task_decomposed`` fact."""
+    import json as _json
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, _nine_specs())
+    events = []
+    orch.activity_callback = lambda e: events.append(e)
+    calls = {"n": 0}
+
+    def _spy(task, corrective_notes=""):
+        calls["n"] += 1
+        raise AssertionError("producer must not run on a refused split")
+
+    orch._producer_execute = _spy  # type: ignore[assignment]
+    parent = _make_task()
+    summary = RunSummary(project=project_with_run)
+    handled, refusal = orch._try_decompose_and_run(
+        parent, _ctx_err(tmp_path), summary)
+    assert handled is False
+    assert refusal is not None and "9" in refusal.reason
+    assert calls["n"] == 0
+    phases = [e.phase for e in events]
+    assert "task_decompose_refused" in phases
+    assert "task_decomposed" not in phases
+    audit = orch._scope_root() / "audit.jsonl"
+    rows = [_json.loads(x) for x in audit.read_text().splitlines()]
+    refused = [r for r in rows if r.get("event") == "task_decompose_refused"]
+    assert len(refused) == 1
+    assert refused[0]["task_id"] == parent.id
+    assert "9" in refused[0]["reason"]
+    assert not [r for r in rows if r.get("event") == "decompose_mint"]
+
+
+def test_refusal_reason_reaches_stuck_ticket(
+    project_with_run, monkeypatch, tmp_path
+):
+    """The context-budget stuck ticket names the refusal reason — the
+    operator sees WHY the split was refused, not just that the task stuck."""
+    from modulatio import store
+    from modulatio.orchestration import RunSummary
+    orch = _make_orchestrator(project_with_run)
+    _planner_returns(monkeypatch, _nine_specs())
+    parent = _make_task()
+    summary = RunSummary(project=project_with_run)
+    handled, refusal = orch._try_decompose_and_run(
+        parent, _ctx_err(tmp_path), summary)
+    assert handled is False
+    orch._block_for_context_budget(
+        parent, _ctx_err(tmp_path), summary, decompose_refusal=refusal)
+    tickets = store.list_tickets(PROJECT_CODE, run_id=project_with_run.run_id)
+    assert tickets, "context-budget refusal must open the stuck ticket"
+    joined = " ".join(t.body for t in tickets)
+    assert "9" in joined and "8" in joined
