@@ -762,3 +762,30 @@ def test_bundle_recording_failure_fails_closed_and_restores_stores(
     assert broker.grants.grants_view() == {"session": [], "always": []}
     monkeypatch.setattr(lp, "add_grant", real_add)
     assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+
+
+def test_bundle_capability_record_failure_restores_both_stores(
+        env, tmp_path, monkeypatch):
+    """An injected failure at the CAPABILITY durable-write boundary (after
+    the gate grants have applied in-memory) executes nothing and restores
+    the gate stores AND the capability store to their exact pre-call state."""
+    from modulatio import permissions as perm
+
+    def prompt_fn(req):
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files_call(tmp_path)
+    cap_pf = tmp_path / "grants.json"
+    before = cap_pf.read_bytes() if cap_pf.exists() else None
+
+    def _boom(self):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(perm.GrantStore, "_write_always", _boom)
+    assert coord("run_shell", args) is False
+    after = cap_pf.read_bytes() if cap_pf.exists() else None
+    assert after == before                       # capability store untouched
+    assert gate._session == {}                   # gate rolled back
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert broker.grants.grants_view() == {"session": [], "always": []}

@@ -1040,10 +1040,16 @@ def doctor_access_snapshot(code: "str | None"):
     from modulatio import tools as _tools
     from modulatio import vault as _vault
 
+    from modulatio import orchestration as _orch
+
     if not code:
         return None
     try:
-        workspace = str(_vault.project_dir(code) / "workspace")
+        # The SAME production helpers the Orchestrator's gate binds — a
+        # doctor card can never report a different home or omit a standing
+        # root the live Leader actually holds.
+        workspace = str(_orch.leader_workspace_path(code))
+        standing = _orch.harness_roots()
     except Exception:
         return None
 
@@ -1054,12 +1060,19 @@ def doctor_access_snapshot(code: "str | None"):
             durable[cls] = grants
     broker_view = _perm.GrantStore(
         _vault.project_dir(code) / "capability_grants.json").grants_view()
-    folders = tuple(_config.list_folders())
+    # Malformed folder records must SURFACE in the capability statement, not
+    # vanish before it — collect the drops as reduced facts.
+    corrupt: list = []
+    folders = tuple(_config.list_folders(on_corrupt=corrupt.append))
     servers = tuple(
-        {"name": sid, "trust": s.trust}
+        {"name": sid, "trust": s.trust, "transport": s.transport}
         for sid, s in _mcp.enabled_servers().items())
-    loadout = tuple(sorted(_tools.build_registry(
-        artifacts_root=_vault.project_dir(code) / "workspace")))
+    # The complete served origin set: the path-bound builtins PLUS the
+    # Leader-only converse tools built outside build_registry.
+    loadout = tuple(sorted(
+        set(_tools.build_registry(
+            artifacts_root=_orch.leader_workspace_path(code)))
+        | set(_orch.LEADER_CONVERSE_TOOL_NAMES)))
 
     return _perm.effective_capability_snapshot(
         mode=_perm.RunMode.DEFAULT,
@@ -1067,7 +1080,7 @@ def doctor_access_snapshot(code: "str | None"):
         profile=_sandbox.current_profile(),
         bypass=_sandbox.is_bypass_requested(),
         workspace=workspace,
-        standing_roots=(),
+        standing_roots=standing,
         folders=folders,
         folder_reachable=_config.probe_folder,
         gate_session={},
@@ -1077,6 +1090,7 @@ def doctor_access_snapshot(code: "str | None"):
         clay_confined_tools=claude_cli._ALLOWED_CONFINED_TOOLS,
         clay_disallowed_tools=claude_cli._DISALLOWED_TOOLS,
         mcp_servers=servers,
+        corrupt_folders=tuple(corrupt),
     )
 
 

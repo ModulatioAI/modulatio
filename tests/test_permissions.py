@@ -596,3 +596,53 @@ def test_snapshot_substrate_refused_when_sandbox_unavailable():
         **_snapshot_kwargs(sandbox_available=False))
     sub = next(f for f in snap.facts if f.source == "substrate")
     assert sub.state == perm.STATE_REFUSED
+
+
+# ── GrantStore strict transactional snapshot/restore ────────────────────────
+
+
+def test_grantstore_restore_to_absent_removes_created_file(tmp_path):
+    from modulatio import permissions as perm
+
+    pf = tmp_path / "cap.json"
+    gs = perm.GrantStore(pf)
+    snap = gs.snapshot()
+    assert not pf.exists()
+    cap = perm.Capability("shell", "x", _scoped={"always": "shell:profile=full"})
+    gs.record(cap, perm.Decision.ALLOW_ALWAYS)
+    assert pf.exists()
+    gs.restore(snap)
+    assert not pf.exists()  # restored to the exact pre-call state (no file)
+
+
+def test_grantstore_restore_is_byte_identical(tmp_path):
+    from modulatio import permissions as perm
+
+    pf = tmp_path / "cap.json"
+    pf.write_text('{\n  "always_allow": ["shell:profile=full"]\n  }\n')  # noncanonical
+    original = pf.read_bytes()
+    gs = perm.GrantStore(pf)
+    snap = gs.snapshot()
+    cap = perm.Capability(
+        "network", "x", _scoped={"always": "network:domain=example.com"})
+    gs.record(cap, perm.Decision.ALLOW_ALWAYS)
+    assert pf.read_bytes() != original
+    gs.restore(snap)
+    assert pf.read_bytes() == original  # byte-for-byte
+
+
+def test_grantstore_strict_record_raises_on_write_failure(
+        tmp_path, monkeypatch):
+    from modulatio import permissions as perm
+
+    gs = perm.GrantStore(tmp_path / "cap.json")
+
+    def _boom(self):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(perm.GrantStore, "_write_always", _boom)
+    cap = perm.Capability("shell", "x", _scoped={"always": "shell:profile=full"})
+    # best-effort default swallows; strict surfaces for the transaction.
+    gs.record(cap, perm.Decision.ALLOW_ALWAYS)  # no raise
+    with pytest.raises(OSError):
+        gs.record(cap, perm.Decision.ALLOW_ALWAYS, strict=True)

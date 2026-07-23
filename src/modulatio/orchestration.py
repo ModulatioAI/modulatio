@@ -701,6 +701,42 @@ _CODE_KIND_TOKENS = frozenset({
 })
 
 
+#: The converse-Leader-only tools, built directly in the Leader's tool
+#: registry rather than served by ``tools.build_registry``. Named here as the
+#: one production inventory so a capability card/matrix can account for every
+#: served origin; a drift guard test asserts this equals what the registry
+#: actually builds.
+LEADER_CONVERSE_TOOL_NAMES = (
+    "list_job_templates", "create_job_template", "create_skill",
+    "improve_skill", "decide_approval", "team_status", "read_deliverable",
+    "list_logs", "read_log",
+)
+
+
+def leader_workspace_path(code: str) -> "Path":
+    """The converse Leader's per-project solo-coding folder. The one
+    production definition of that path — the capability snapshot assembler
+    shares it so a doctor/live card can never report a different home than
+    the gate actually binds."""
+    from modulatio import vault as _vault
+    return _vault.project_dir(code) / "leader_workspace"
+
+
+def harness_roots() -> "tuple[str, ...]":
+    """The converse Leader's STANDING home: the vault, the shared resources
+    (skills/standards/templates), and the config dir — read and changed
+    directly, no gate; the tools-layer secret floor still refuses dotfiles
+    below every root. The one production definition, shared with the
+    capability snapshot so a card can't omit a real standing root."""
+    from modulatio import config as _config
+    from modulatio import vault as _vault
+    return (
+        str(_vault.VAULT_ROOT),
+        str(_config.get_shared_resources_path()),
+        str(_config.CONFIG_DIR),
+    )
+
+
 def _is_code_artifact_kind(kind: str | None) -> bool:
     """True iff ``kind`` looks like a code artifact. Used to gate the
     aggressive prose-stripping behavior to ONLY code outputs — markdown
@@ -8572,28 +8608,12 @@ class Orchestrator:
 
     def _leader_workspace(self) -> "Path":
         """The Leader's own per-project solo-coding folder (created on demand)."""
-        from modulatio import vault as _vault
-        ws = _vault.project_dir(self.project.code) / "leader_workspace"
+        ws = leader_workspace_path(self.project.code)
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
     def _harness_roots(self) -> "tuple[str, ...]":
-        """The modulatio harness as the converse Leader's standing home:
-        the vault, the shared resources
-        (skills/standards/templates), and the config dir — his to read and
-        change directly, no gate. This retired the old
-        blocked-subtrees fence (runs/artifacts/delivery): the operator chose
-        a fully-trusted Leader over the self-grading fence. Only the converse
-        lane gets these roots; the swarm lanes keep their sandboxes, and the
-        tools-layer secret floor still refuses dotfiles (``.env``) below
-        every root."""
-        from modulatio import config as _config
-        from modulatio import vault as _vault
-        return (
-            str(_vault.VAULT_ROOT),
-            str(_config.get_shared_resources_path()),
-            str(_config.CONFIG_DIR),
-        )
+        return harness_roots()
 
     def leader_gate(self):
         """The per-project cross-cutting permission gate (cached so in-memory

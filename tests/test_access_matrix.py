@@ -24,12 +24,27 @@ import pytest
 from modulatio import claude_cli
 from modulatio import leader_gate as lg
 from modulatio import leader_permissions as lp
+from modulatio import orchestration as _orch
 from modulatio import permissions as perm
 from modulatio import tools, vault
 
 _T0 = time.monotonic()
 
 CODE = "matrix"
+
+
+@pytest.fixture
+def project_orch(tmp_path, monkeypatch):
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(CODE, "m", "m")
+    project = Project(
+        code=CODE, name="m", objective="m", leader_model="stub",
+        wiki_path=str(tmp_path / CODE.lower()))
+    runner = lambda prompt: "stub"  # noqa: E731 — test stub
+    return Orchestrator(project, runners=dict.fromkeys(
+        ("leader", "planner", "drafter", "qc"), runner))
 
 MODES = tuple(m.value for m in perm.RunMode)
 ANSWERS = tuple(d.value for d in perm.Decision)  # once/session/always/no
@@ -280,24 +295,52 @@ TOOL_CONTRACT = {
     "search_skills": "ungated: reads the engine-owned skill index",
     "load_skill": "ungated: reads an engine-owned skill body",
     "drop_skill": "ungated: releases a loaded engine-owned skill",
+    # media-generation service families (served when configured)
+    "generate_image": "capability: metered image service, authorizer-gated",
+    "generate_speech": "capability: metered speech service, authorizer-gated",
+    "generate_video": "capability: metered video service, authorizer-gated",
+    # converse-Leader-only tools (built outside build_registry)
+    "list_job_templates": "leader-only: reads the project's job templates",
+    "create_job_template": "leader-only: writes an engine-owned template",
+    "create_skill": "leader-only: writes an engine-owned skill",
+    "improve_skill": "leader-only: edits an engine-owned skill",
+    "decide_approval": "leader-only: resolves a pending approval ticket",
+    "team_status": "leader-only: reads run/team state",
+    "read_deliverable": "leader-only: reads a produced deliverable",
+    "list_logs": "leader-only: lists diagnostic logs",
+    "read_log": "leader-only: reads a diagnostic log",
 }
 
 
-#: Tools the registry serves only when the operator configures their
-#: backing service/provider — allowed to be absent from an isolated build,
-#: but never served without a contract row.
-_CONFIG_CONDITIONAL_TOOLS = {"api_call", "research_search"}
+#: Tools the registry serves only when the operator configures their backing
+#: service/provider, or that the Leader builds only in its converse
+#: registry — allowed to be absent from an unconfigured build, never served
+#: without a contract row.
+_CONFIG_CONDITIONAL_TOOLS = {
+    "api_call", "research_search",
+    "generate_image", "generate_speech", "generate_video",
+}
+_LEADER_ONLY_TOOLS = set(_orch.LEADER_CONVERSE_TOOL_NAMES)
 
 
 def test_tool_inventory_matches_contract(tmp_path):
     reg = tools.build_registry(
         artifacts_root=tmp_path, tool_calls_dir=tmp_path / "tc")
-    inventory = set(reg) | set(lg._GATED_TOOLS)
+    inventory = set(reg) | set(lg._GATED_TOOLS) | _LEADER_ONLY_TOOLS
     # Nothing served without a contract row — a new tool fails here.
     assert inventory <= set(TOOL_CONTRACT)
-    # Every contract row is a real tool: present now, or declared
-    # config-conditional — a stale row fails here.
-    assert set(TOOL_CONTRACT) - inventory <= _CONFIG_CONDITIONAL_TOOLS
+    # Every contract row is a real tool: served now, config-conditional, or
+    # a Leader-only tool — a stale row fails here.
+    assert (set(TOOL_CONTRACT) - inventory
+            <= _CONFIG_CONDITIONAL_TOOLS)
+
+
+def test_leader_only_inventory_matches_production(project_orch):
+    """The Leader-only tool constant equals what the Leader's converse
+    function registry actually builds — a drift guard, so a new converse
+    tool can't slip the matrix inventory."""
+    built = set(project_orch._leader_function_tools())
+    assert built == _LEADER_ONLY_TOOLS
 
 
 #: The confined seat's native tool posture: every allowed tool is declared
@@ -344,8 +387,10 @@ def test_cell(tmp_path, monkeypatch, mode, klass, substrate, answer):
 
 
 def _observed_parity_groups(tmp_path):
-    """Execute the backend fences that the declared exceptions compare —
-    the engine tool loop's checks against the confined seat's posture."""
+    """Execute the backend fences the declared exceptions compare, keyed by
+    each exception's stable IDENTITY (not its human resource label) — so the
+    two ``local network`` exceptions (Clay vs MCP-stdio) are observed
+    independently and neither collapses into the other."""
     dotfile = tmp_path / "root" / ".env"
     dotfile.parent.mkdir(exist_ok=True)
     dotfile.write_text("SECRET=1")
@@ -362,12 +407,25 @@ def _observed_parity_groups(tmp_path):
 
     loop_local_net = not _loop_private_refused()
     clay_local_net = "WebFetch" in claude_cli._ALLOWED_CONFINED_TOOLS
+    # MCP stdio servers run outside the engine sandbox: their egress is not
+    # engine-fenced, so from the tool loop's fence they are unrestricted.
+    mcp_local_net = True
     return {
-        "dotfiles under bound roots": {
+        "clay.dotfiles": {
             "tool-loop": loop_dotfile, "clay-confined": clay_dotfile},
-        "local network": {
+        "clay.local-network": {
             "tool-loop": loop_local_net, "clay-confined": clay_local_net},
+        "mcp-stdio.local-network": {
+            "tool-loop": loop_local_net, "mcp-stdio": mcp_local_net},
     }
+
+
+def test_parity_observes_every_declared_exception(tmp_path):
+    """Every ledger identity has its own observation — no two exceptions
+    share an observation group, so an unobserved one can be detected."""
+    observed = _observed_parity_groups(tmp_path)
+    declared = {eid for eid, *_ in perm.PARITY_EXCEPTIONS}
+    assert set(observed) == declared
 
 
 def test_parity_badge_is_derived_and_reduced(tmp_path):
@@ -379,8 +437,8 @@ def test_parity_flip_fails_the_claim(tmp_path):
     """Forcing one backend's outcome to agree makes the declared exception
     stale — the derivation refuses rather than keeping a quiet badge."""
     observed = _observed_parity_groups(tmp_path)
-    observed["dotfiles under bound roots"]["clay-confined"] = (
-        observed["dotfiles under bound roots"]["tool-loop"])
+    observed["clay.dotfiles"]["clay-confined"] = (
+        observed["clay.dotfiles"]["tool-loop"])
     with pytest.raises(ValueError, match="stale parity exception"):
         perm.parity_verdict(observed)
 
@@ -392,9 +450,12 @@ def test_parity_undeclared_divergence_fails(tmp_path):
         perm.parity_verdict(observed)
 
 
-def test_parity_declared_but_unobserved_fails(tmp_path):
+def test_parity_mcp_exception_unobserved_is_caught(tmp_path):
+    """Dropping ONLY the MCP local-network observation (which shares its
+    human label with the Clay one) is now caught — identities don't
+    collapse."""
     observed = _observed_parity_groups(tmp_path)
-    del observed["local network"]
+    del observed["mcp-stdio.local-network"]
     with pytest.raises(ValueError, match="never observed"):
         perm.parity_verdict(observed)
 

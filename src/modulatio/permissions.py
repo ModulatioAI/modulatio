@@ -371,7 +371,7 @@ def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
                     gate.record_prompted(req, answer)
                 if state == "ask":
                     if not broker.record_ask_decision(
-                            cap, Decision.coerce(scope)):
+                            cap, Decision.coerce(scope), strict=True):
                         raise RuntimeError("capability recording refused")
             except Exception:  # noqa: BLE001 — restore, fail closed
                 gate.restore_grants(gate_snap)
@@ -390,7 +390,7 @@ def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
                 )), "scope", None))
             broker_snap = broker.grants.snapshot()
             try:
-                return broker.record_ask_decision(cap, decision)
+                return broker.record_ask_decision(cap, decision, strict=True)
             except Exception:  # noqa: BLE001 — restore, fail closed
                 broker.grants.restore(broker_snap)
                 return False
@@ -456,16 +456,26 @@ class GrantStore:
             self._on_corrupt(f"dropped {len(bad)} invalid grant key(s) on load")
         return good
 
-    def _save(self) -> None:
+    def _write_always(self) -> None:
+        """Persist the durable ``always`` set (raises on IO failure)."""
+        self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            self._persist_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"always_allow": sorted(self._always)}, fh, indent=2)
+
+    def _save(self, *, strict: bool = False) -> None:
+        """Persist the durable set. Best-effort by default (a failed persist
+        just means we re-ask next session); ``strict`` re-raises so a caller
+        inside an authorization transaction can roll back rather than report
+        a swallowed failure as success."""
         if not self._persist_path:
             return
         try:
-            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(self._persist_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                json.dump({"always_allow": sorted(self._always)}, fh, indent=2)
+            self._write_always()
         except OSError:
-            pass  # best-effort; a failed persist just means we re-ask next session
+            if strict:
+                raise
 
     def remembered(self, cap: Capability) -> bool:
         """True if any covering key for ``cap`` is already granted (session or
@@ -474,10 +484,13 @@ class GrantStore:
             granted = self._session | self._always
         return any(k in granted for k in cap.covering_keys())
 
-    def record(self, cap: Capability, decision: Decision) -> None:
+    def record(self, cap: Capability, decision: Decision, *,
+               strict: bool = False) -> None:
         """Persist a SESSION/ALWAYS grant for the scoped key. ONCE/DENY persist
         nothing. (§6.D: only ever called by the broker as the result of an operator
-        answer through the trusted ``ask`` channel — never by model/tool code.)"""
+        answer through the trusted ``ask`` channel — never by model/tool code.)
+        ``strict`` re-raises a durable-write failure so an authorization
+        transaction can roll back instead of executing on a swallowed error."""
         if not is_valid_grant_key(cap.scoped_key(decision)):
             return  # never persist a malformed key
         if decision is Decision.ALLOW_SESSION:
@@ -486,29 +499,49 @@ class GrantStore:
         elif decision is Decision.ALLOW_ALWAYS:
             with self._lock:
                 self._always.add(cap.scoped_key(decision))
-            self._save()
+            self._save(strict=strict)
 
     def grants_view(self) -> dict:
         """Plain view of what's granted (for the JT 'show its grants' display)."""
         with self._lock:
             return {"session": sorted(self._session), "always": sorted(self._always)}
 
-    def snapshot(self) -> tuple[set, set]:
-        """Copy of (session, always) for restore-on-failure around a batch
-        recording — a partial batch must not survive."""
+    def snapshot(self) -> tuple:
+        """Strict transactional snapshot for restore-on-failure around a batch
+        recording: the session set, the always set, and the RAW durable-file
+        bytes (``None`` sentinel when the file did not exist) — so restore is
+        byte-identical, including leaving no file the pre-call state never
+        had."""
         with self._lock:
-            return set(self._session), set(self._always)
+            session, always = set(self._session), set(self._always)
+        raw = None
+        if self._persist_path:
+            try:
+                raw = self._persist_path.read_bytes()
+            except (FileNotFoundError, OSError):
+                raw = None
+        return session, always, raw
 
-    def restore(self, snapshot: tuple[set, set]) -> None:
-        """Reset both grant sets to a prior :meth:`snapshot`; re-persists the
-        durable set so the file matches the restored state."""
-        session, always = snapshot
+    def restore(self, snapshot: tuple) -> None:
+        """Reset both grant sets and the durable file to a prior
+        :meth:`snapshot` — the file is rewritten byte-for-byte, or removed
+        when the snapshot's sentinel says it did not exist."""
+        session, always, raw = snapshot
         with self._lock:
             self._session = set(session)
-            persist_needed = self._always != always
             self._always = set(always)
-        if persist_needed:
-            self._save()
+        if not self._persist_path:
+            return
+        if raw is None:
+            try:
+                self._persist_path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._persist_path.with_suffix(f".json.tmp.{os.getpid()}")
+        tmp.write_bytes(raw)
+        os.replace(tmp, self._persist_path)
 
 
 # ── the broker ─────────────────────────────────────────────────────────────
@@ -609,14 +642,17 @@ class PermissionBroker:
 
         return "ask", cap
 
-    def record_ask_decision(self, cap: Capability, decision: Decision) -> bool:
+    def record_ask_decision(self, cap: Capability, decision: Decision, *,
+                             strict: bool = False) -> bool:
         """Record an operator's answered capability ask (the recording half;
-        the coordinator prompts once on its own surface and applies here)."""
+        the coordinator prompts once on its own surface and applies here).
+        ``strict`` propagates a durable-write failure so the authorization
+        transaction rolls back instead of executing on a swallowed error."""
         if not decision.allows:
             self._emit(cap, Decision.DENY)
             return False
         # §6.D: record happens ONLY here, as the result of the operator's answer.
-        self.grants.record(cap, decision)
+        self.grants.record(cap, decision, strict=strict)
         self._emit(cap, decision)
         return True
 
@@ -684,14 +720,19 @@ _GRANT_STATES = frozenset({
 #: engine tool loop and other execution backends that are ACCEPTED and
 #: DISCLOSED rather than closed. Each renders on the card as Reduced/
 #: non-parity; while any entry exists, no full-parity claim is possible.
+#: Each entry carries a STABLE identity (source + request class) that is the
+#: parity key — two exceptions can share a human resource label (both
+#: "local network") without collapsing, because their ids differ. Fields:
+#: (id, source, request_class, resource_label, detail).
 PARITY_EXCEPTIONS = (
-    ("clay_confinement", "path", "dotfiles under bound roots",
+    ("clay.dotfiles", "clay_confinement", "path",
+     "dotfiles under bound roots",
      "native file tools read whole bound roots; the engine tool loop "
      "rejects every dot component"),
-    ("clay_confinement", "network", "local network",
+    ("clay.local-network", "clay_confinement", "network", "local network",
      "the confined seat runs network-on; the engine tool loop hard-refuses "
      "loopback/private targets"),
-    ("mcp_servers", "network", "local network",
+    ("mcp-stdio.local-network", "mcp_servers", "network", "local network",
      "stdio servers run outside the engine sandbox; their egress is not "
      "engine-fenced"),
 )
@@ -736,6 +777,7 @@ def effective_capability_snapshot(
     clay_confined_tools: tuple,
     clay_disallowed_tools: tuple,
     mcp_servers: tuple,
+    corrupt_folders: tuple = (),
 ) -> CapabilitySnapshot:
     """Assemble the snapshot from live state. Pure logic (web-UI-safe): the
     caller supplies every source's current objects; nothing is read from
@@ -771,13 +813,19 @@ def effective_capability_snapshot(
             "harness root — path only, never exec"))
 
     # folders — the registry is the standing decision; an unreachable root
-    # is stated, not hidden (and the claim stays cause-unknown).
+    # is stated, not hidden (and the claim stays cause-unknown). A malformed
+    # record SURFACES as a refused fact rather than vanishing before the
+    # statement.
     for rec in folders:
         reachable = folder_reachable(rec["path"])
         facts.append(CapabilityFact(
             "folders", "path", rec["path"],
             STATE_ALWAYS if reachable else STATE_UNREACHABLE,
             f"roots: {rec['mode']}"))
+    for reason in corrupt_folders:
+        facts.append(CapabilityFact(
+            "folders", "path", "(malformed record)", STATE_REFUSED,
+            str(reason)))
 
     # gate grants — durable always-grants plus live session grants.
     for cls, grants in sorted(gate_durable.items()):
@@ -816,18 +864,20 @@ def effective_capability_snapshot(
             "clay_confinement", "tool", f"clay:{name}", STATE_REFUSED,
             "confined seat ban"))
 
-    # mcp — per-server trust posture.
+    # mcp — per-server trust AND transport authority (a stdio server runs
+    # outside the engine sandbox; the transport is part of the authority).
     for server in mcp_servers:
         trusted = server.get("trust") == "trusted"
+        transport = server.get("transport", "?")
         facts.append(CapabilityFact(
             "mcp_servers", "tool", f"mcp:{server.get('name', '?')}",
             STATE_ALWAYS if trusted else STATE_ASKS,
-            "trusted (calls ride ungated)" if trusted
-            else "gated (calls prompt)"))
+            (f"trusted (calls ride ungated), {transport}" if trusted
+             else f"gated (calls prompt), {transport}")))
 
     # declared parity exceptions — always rendered; their presence is what
     # blocks a full-parity claim.
-    for source, cls, resource, detail in PARITY_EXCEPTIONS:
+    for _id, source, cls, resource, detail in PARITY_EXCEPTIONS:
         facts.append(CapabilityFact(
             source, cls, resource, STATE_REDUCED, detail))
 
@@ -853,15 +903,19 @@ def capability_card_rows(snapshot: CapabilitySnapshot) -> tuple:
 
 def parity_verdict(observed: dict, exceptions=PARITY_EXCEPTIONS) -> str:
     """Derive the parity badge from OBSERVED cross-backend outcomes plus the
-    declared exception ledger — never hand-selected. ``observed`` maps a
-    parity-group name to ``{backend: outcome}``.
+    declared exception ledger — never hand-selected. ``observed`` maps an
+    exception IDENTITY (source.request-class, e.g. ``clay.local-network``) to
+    ``{backend: outcome}``; keying by identity keeps two exceptions that
+    share a human resource label distinct.
 
     A group whose outcomes differ without a ledger entry raises (an
     undeclared divergence must fail the claim, not downgrade it); a ledger
     entry whose group's outcomes AGREE raises (a stale exception must be
-    removed, not quietly kept); any applicable exception yields
-    ``"reduced"`` — a full badge is impossible while one exists."""
-    declared = {resource for _src, _cls, resource, _detail in exceptions}
+    removed, not quietly kept); a declared exception with no observation
+    raises (an unobserved exception can't be trusted); any applicable
+    exception yields ``"reduced"`` — a full badge is impossible while one
+    exists."""
+    declared = {eid for eid, _src, _cls, _resource, _detail in exceptions}
     reduced = False
     for group, outcomes in sorted(observed.items()):
         differs = len(set(outcomes.values())) > 1

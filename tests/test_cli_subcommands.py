@@ -462,3 +462,37 @@ def test_doctor_access_card_renders_for_configured_project(
     assert "[tool_loadout]" in result.stdout
     # The declared parity exceptions surface as reduced-parity on the card.
     assert "Reduced/non-parity" in result.stdout
+
+
+def test_doctor_access_snapshot_uses_production_authority(tmp_path, monkeypatch):
+    """The doctor snapshot reports the SAME Leader workspace and standing
+    roots the Orchestrator's gate binds — not a guessed path or an empty
+    root set."""
+    from modulatio import cli, vault
+    from modulatio import orchestration as orch
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    vault.init_project("DOC", "d", "d")
+    snap = cli.doctor_access_snapshot("DOC")
+    assert snap is not None
+    ws_facts = [f for f in snap.facts if f.source == "workspace"]
+    assert ws_facts[0].resource == str(orch.leader_workspace_path("DOC"))
+    standing = {f.resource for f in snap.facts if f.source == "standing_roots"}
+    assert standing == set(orch.harness_roots())
+    assert len(standing) == 3
+
+
+def test_doctor_access_snapshot_surfaces_malformed_folder(
+        tmp_path, monkeypatch):
+    from modulatio import cli, config, vault
+    from modulatio import permissions as perm
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    vault.init_project("DOC", "d", "d")
+    monkeypatch.setattr(
+        config, "list_folders",
+        lambda on_corrupt=None: (on_corrupt("record 'x' dropped: bad mode")
+                                 or []) if on_corrupt else [])
+    snap = cli.doctor_access_snapshot("DOC")
+    malformed = [f for f in snap.facts
+                 if f.source == "folders" and f.state == perm.STATE_REFUSED]
+    assert malformed
+    assert "bad mode" in malformed[0].detail
