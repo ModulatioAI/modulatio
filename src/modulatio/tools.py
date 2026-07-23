@@ -55,7 +55,6 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -1106,17 +1105,31 @@ def shell_deadline(deadline: "float | None"):
         _SHELL_ABS_DEADLINE.reset(token)
 
 
+def _utf8_clamp(text: str, max_bytes: int, keep_end: bool = False) -> str:
+    """Bound ``text`` to ``max_bytes`` of UTF-8, keeping the start (or the
+    end). The cut lands on encoded bytes and re-decodes with ``ignore`` so a
+    split codepoint is dropped, never expanded — the result's encoding is
+    GUARANTEED ≤ ``max_bytes``."""
+    enc = text.encode("utf-8")
+    if len(enc) <= max_bytes:
+        return text
+    sliced = enc[-max_bytes:] if keep_end else enc[:max_bytes]
+    return sliced.decode("utf-8", errors="ignore")
+
+
 class _BoundedPipeCapture:
     """Memory-bounded capture for one child pipe: a head up to ``head_cap``
-    bytes plus a rolling tail up to ``tail_cap`` bytes; the middle is dropped
-    with a byte-count marker. A flooding child costs bounded memory instead
-    of an OOM, and decoding happens once at :meth:`text` (replacement for
-    undecodable bytes), never mid-stream."""
+    bytes plus a rolling tail holding EXACTLY the newest ``tail_cap``
+    post-head bytes (byte-granular eviction — a single read chunk larger
+    than the cap keeps its final bytes); the middle is dropped with a
+    byte-count marker. Decoding happens once at :meth:`text`, which
+    byte-bounds the DECODED pieces independently (tail budget reserved
+    first) so replacement-character expansion from undecodable bytes can
+    never push the composed body past the output cap."""
 
     def __init__(self, head_cap: int, tail_cap: int) -> None:
         self._head = bytearray()
-        self._tail: deque[bytes] = deque()
-        self._tail_len = 0
+        self._tail = bytearray()
         self._head_cap = head_cap
         self._tail_cap = tail_cap
         self._dropped = 0
@@ -1128,22 +1141,31 @@ class _BoundedPipeCapture:
             chunk = chunk[room:]
         if not chunk:
             return
-        self._tail.append(chunk)
-        self._tail_len += len(chunk)
-        while self._tail_len > self._tail_cap and self._tail:
-            gone = self._tail.popleft()
-            self._tail_len -= len(gone)
-            self._dropped += len(gone)
+        self._tail.extend(chunk)
+        excess = len(self._tail) - self._tail_cap
+        if excess > 0:
+            del self._tail[:excess]
+            self._dropped += excess
 
     def text(self) -> str:
-        body = bytes(self._head)
-        if self._dropped:
-            body += (
-                f"\n... [{self._dropped} bytes dropped mid-stream]\n"
-            ).encode("ascii")
+        tail_text = ""
         if self._tail:
-            body += b"".join(self._tail)
-        return body.decode("utf-8", errors="replace")
+            tail_text = _utf8_clamp(
+                bytes(self._tail).decode("utf-8", errors="replace"),
+                self._tail_cap, keep_end=True)
+        marker = (
+            f"\n... [{self._dropped} bytes dropped mid-stream]\n"
+            if self._dropped else ""
+        )
+        head_budget = (
+            _RUN_SHELL_MAX_OUTPUT_BYTES
+            - len(marker.encode("ascii"))
+            - len(tail_text.encode("utf-8"))
+        )
+        head_text = _utf8_clamp(
+            bytes(self._head).decode("utf-8", errors="replace"),
+            max(head_budget, 0))
+        return head_text + marker + tail_text
 
 
 def _drain_shell_pipes(
@@ -1495,9 +1517,15 @@ def make_run_shell(
                 wall = abs_deadline
             if time.monotonic() >= wall:
                 # Setup consumed the remainder: start no child. The wall is
-                # absolute from call start — setup cannot restart it.
-                return _format_run_shell_result(
-                    -1, "", "[lane deadline expired — command not started]")
+                # absolute from call start — setup cannot restart it. The
+                # classification follows whichever bound was binding, same
+                # decision the post-spawn timeout branch uses.
+                no_start = (
+                    "[lane deadline expired — command not started]"
+                    if lane_bound
+                    else f"[TIMEOUT after {timeout}s — command not started]"
+                )
+                return _format_run_shell_result(-1, "", no_start)
             proc = subprocess.Popen(
                 run_argv,
                 cwd=str(wd),

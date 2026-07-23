@@ -3159,3 +3159,86 @@ def test_run_shell_both_pipes_closed_child_still_alive(tmp_path, unsandboxed):
     assert took >= 2.0  # waited for the real exit, not the EOF
     assert out.startswith("exit_code: 7")
     assert "closing" in out
+
+
+def test_bounded_capture_tail_is_byte_granular():
+    """The rolling tail holds EXACTLY the newest ``tail_cap`` post-head
+    bytes: a single chunk larger than the cap keeps its final bytes, and
+    uneven chunks crossing the eviction boundary preserve the invariant."""
+    cap = tools._BoundedPipeCapture(10, 10)
+    cap.feed(b"A" * 50 + b"THE-END")
+    assert cap.text().endswith("THE-END")
+    fed = b""
+    cap2 = tools._BoundedPipeCapture(4, 16)
+    for chunk in (b"a" * 7, b"b" * 13, b"c" * 5, b"FINAL", b"d" * 9):
+        cap2.feed(chunk)
+        fed += chunk
+    expected_tail = fed[4:][-16:]
+    assert cap2.text().endswith(expected_tail.decode())
+
+
+def test_bounded_capture_invalid_utf8_cannot_evict_tail_at_format():
+    """Replacement-character expansion from undecodable head bytes must not
+    push the composed body past the output cap — the tail budget is
+    reserved first, and the rendered stream stays within its contract."""
+    cap = tools._BoundedPipeCapture(
+        tools._RUN_SHELL_HEAD_CAP_BYTES, tools._RUN_SHELL_TAIL_CAP_BYTES)
+    cap.feed(b"\xff" * (tools._RUN_SHELL_HEAD_CAP_BYTES + 2_000))
+    cap.feed(b"\xfe" * 500 + b"TAIL-MARKER")
+    body = cap.text()
+    assert "TAIL-MARKER" in body
+    assert len(body.encode("utf-8")) <= tools._RUN_SHELL_MAX_OUTPUT_BYTES
+    # And the full formatter path keeps the marker (no second head-only cut).
+    formatted = tools._format_run_shell_result(0, body, "")
+    assert "TAIL-MARKER" in formatted
+
+
+def test_run_shell_single_huge_write_keeps_final_bytes(
+        tmp_path, unsandboxed):
+    """A child emitting one write larger than head+tail caps on EACH stream
+    still lands its final bytes in the formatted result."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    out = rs(
+        cmd=("python3 -c \"import sys\n"
+             "sys.stdout.write('x' * 200000 + 'OUT-TAIL')\n"
+             "sys.stderr.write('y' * 200000 + 'ERR-TAIL')\""),
+        profile="full", timeout=60.0)
+    assert out.startswith("exit_code: 0")
+    assert "OUT-TAIL" in out
+    assert "ERR-TAIL" in out
+
+
+def test_run_shell_setup_expiry_classified_by_binding_bound(
+        tmp_path, unsandboxed, monkeypatch):
+    """Pre-spawn expiry names whichever bound was actually binding: an
+    unbound (or non-binding) lane never yields the lane classification."""
+    import subprocess as _sp
+
+    art = _make_artifacts(tmp_path)
+    real_resolve = tools._resolve_payload_binary
+
+    def _slow_resolve(head):
+        _time.sleep(0.3)
+        return real_resolve(head)
+
+    monkeypatch.setattr(tools, "_resolve_payload_binary", _slow_resolve)
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("child must not start past the wall")
+
+    monkeypatch.setattr(_sp, "Popen", _no_spawn)
+    rs = tools.make_run_shell(art)
+    # No lane bound at all: requested-timeout classification.
+    out = rs(cmd="python3 -c 'print(1)'", profile="full", timeout=0.1)
+    assert "command not started" in out
+    assert "TIMEOUT after 0.1s" in out
+    assert "lane deadline" not in out
+    # Distant lane wall, requested timeout still earliest: same.
+    with tools.shell_deadline(_time.monotonic() + 300.0):
+        far = rs(cmd="python3 -c 'print(1)'", profile="full", timeout=0.1)
+    assert "lane deadline" not in far
+    # Lane remainder binding: lane classification retained.
+    with tools.shell_deadline(_time.monotonic() + 0.2):
+        lane = rs(cmd="python3 -c 'print(1)'", profile="full", timeout=30.0)
+    assert "lane deadline expired" in lane

@@ -1298,3 +1298,79 @@ def test_sequential_redo_no_run_shell_installs_nothing(project, monkeypatch):
     orch._run_task_with_redo(_minimal_task(project), None)
     assert seen["registry"] is orch.tool_registry
     assert "run_shell" not in seen["registry"]
+
+
+def test_sequential_abort_kills_inflight_shell_live(project, monkeypatch):
+    """The production failure shape, live: sequential path, a sleeping
+    run_shell child under the rebound registry, operator abort mid-flight —
+    prompt non-success return with the abort classification, well inside
+    the child's own timeout."""
+    import threading as _threading
+
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    host_shell = tools.Tool(
+        name="run_shell", description="d", call=lambda **kw: "host")
+    orch = _redo_harness_orchestrator(project, {"run_shell": host_shell})
+    orch._shared_artifacts_root().mkdir(parents=True, exist_ok=True)
+    seen: dict = {}
+
+    def _inner(self, t, summary, notes=""):
+        shell = self._active_tool_registry()["run_shell"]
+        _threading.Timer(0.5, self.abort_event.set).start()
+        start = _time.monotonic()
+        seen["result"] = shell.call(
+            cmd="python3 -c 'import time; time.sleep(30)'",
+            profile="full", timeout=30.0)
+        seen["took"] = _time.monotonic() - start
+
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo_inner", _inner)
+    orch._run_task_with_redo(_minimal_task(project), None)
+    orch.abort_event.clear()
+    assert seen["took"] < 10.0
+    assert "[ABORTED by operator]" in seen["result"]
+    assert seen["result"].startswith("exit_code: -1")
+
+
+def test_sequential_producer_loop_abort_reaches_shell_live(
+        project, monkeypatch):
+    """Same live abort through the producer TOOL LOOP: the loop dispatches
+    run_shell from the rebound registry, the operator aborts mid-child, the
+    tool returns the abort classification and the loop stops at its next
+    boundary with the interrupt reply."""
+    import threading as _threading
+
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
+    host_shell = tools.Tool(
+        name="run_shell", description="d", call=lambda **kw: "host")
+    orch = _redo_harness_orchestrator(project, {"run_shell": host_shell})
+    orch._shared_artifacts_root().mkdir(parents=True, exist_ok=True)
+    seen: dict = {}
+
+    def _inner(self, t, summary, notes=""):
+        responses = iter([
+            mod_runners.ChatResponse(content="", tool_calls=[
+                mod_runners.ToolCall(id="1", name="run_shell", args={
+                    "cmd": "python3 -c 'import time; time.sleep(30)'",
+                    "profile": "full", "timeout": 30.0,
+                }),
+            ]),
+            mod_runners.ChatResponse(content="finished", tool_calls=[]),
+        ])
+        recorded: list = []
+        _threading.Timer(0.5, self.abort_event.set).start()
+        start = _time.monotonic()
+        seen["reply"] = mod_runners.run_llm_with_tools(
+            chat_runner=lambda **kw: next(responses),
+            prompt="p", tool_loadout=("run_shell",),
+            tool_registry=self._active_tool_registry(),
+            on_tool_call=lambda n, a, r: recorded.append(r),
+            should_abort=self.abort_event.is_set)
+        seen["took"] = _time.monotonic() - start
+        seen["tool_results"] = recorded
+
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo_inner", _inner)
+    orch._run_task_with_redo(_minimal_task(project), None)
+    orch.abort_event.clear()
+    assert seen["took"] < 10.0
+    assert seen["reply"] is mod_runners.INTERRUPTED_REPLY
+    assert any("[ABORTED by operator]" in r for r in seen["tool_results"])
