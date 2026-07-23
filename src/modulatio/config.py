@@ -582,24 +582,42 @@ def save_team_template(agents: list[dict]) -> None:
 _FOLDER_MODES = ("ro", "output", "rw")
 
 
-def list_folders() -> list[dict]:
+def list_folders(on_corrupt=None) -> list[dict]:
     """The registered folders, shape-checked. Malformed entries (bad mode,
-    relative path, missing/empty fields, unknown kind) are dropped — a
-    hand-edited defaults.json can't inject a bad record downstream."""
+    relative path, missing/empty fields, unknown kind) are dropped AND
+    reported — per record via ``on_corrupt`` when given, else the module
+    logger — so a hand-edited defaults.json can't inject a bad record
+    downstream, and a dropped folder never reads as merely unregistered.
+    The remaining well-formed records still load (warn-and-skip, never
+    warn-and-abort)."""
+
+    def _report(reason: str) -> None:
+        if on_corrupt is not None:
+            on_corrupt(reason)
+        else:
+            logger.warning("folder registry: %s", reason)
+
     raw = _load_defaults().get("folders")
+    if raw is None:
+        return []
     if not isinstance(raw, list):
+        _report("folders is not a list — all records dropped")
         return []
     folders: list[dict] = []
     for rec in raw:
         if not isinstance(rec, dict):
+            _report(f"non-record entry dropped: {rec!r:.80}")
             continue
         name = rec.get("name")
         path = rec.get("path")
         if not (isinstance(name, str) and name.strip()):
+            _report(f"record with missing/empty name dropped: {rec!r:.80}")
             continue
         if not (isinstance(path, str) and Path(path).is_absolute()):
+            _report(f"record {name!r} dropped: path must be absolute")
             continue
         if rec.get("mode") not in _FOLDER_MODES or rec.get("kind") != "path":
+            _report(f"record {name!r} dropped: unknown mode/kind")
             continue
         folders.append(rec)
     return folders

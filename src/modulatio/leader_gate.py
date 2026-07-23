@@ -158,13 +158,14 @@ class LeaderPermissionGate:
 
     def refusal_reason(self, request: SecurityRequest) -> "str | None":
         """Engine-bound HARD refusal: a reason this request can NEVER be granted
-        in v1 (regardless of the scope the operator picks) — else ``None``. This
+        (regardless of the scope the operator picks) — else ``None``. This
         is enforced here: a warning string alone let a
         dangerous root still be granted. Two binds:
 
-        * ``exec`` outside the workspace is refused outright (exec-widen is
-          deferred) — even if a stale exec grant exists, so v1 never accumulates
-          one.
+        * ``exec`` outside the workspace is GRANTABLE (it prompts as its own
+          request class — a path widen never confers exec), but a broad/
+          system root or one overlapping a swarm deliverable tree is refused
+          outright.
         * a ``path`` widen that overlaps a broad/system root or a swarm
           deliverable tree is refused."""
         if request.request_class == "exec":

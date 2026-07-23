@@ -178,3 +178,42 @@ def test_folder_grant_roots_refuses_broad_and_vault_roots(tmp_path, monkeypatch)
     rw, read = config.folder_grant_roots()
     assert rw == ()
     assert read == (str(tmp_path / "docs"),)
+
+
+def test_list_folders_reports_each_dropped_record(tmp_path, monkeypatch):
+    """Malformed records are dropped LOUDLY — one report per record via the
+    callback — while well-formed records still load (warn-and-skip)."""
+    good = {"name": "docs", "path": str(tmp_path / "d"), "mode": "ro",
+            "kind": "path"}
+    bad = [
+        "not-a-dict",
+        {"name": "", "path": str(tmp_path), "mode": "ro", "kind": "path"},
+        {"name": "rel", "path": "relative/x", "mode": "ro", "kind": "path"},
+        {"name": "mode", "path": str(tmp_path), "mode": "god", "kind": "path"},
+    ]
+    monkeypatch.setattr(
+        config, "_load_defaults", lambda: {"folders": [good, *bad]})
+    reasons: list[str] = []
+    out = config.list_folders(on_corrupt=reasons.append)
+    assert [r["name"] for r in out] == ["docs"]
+    assert len(reasons) == 4
+
+
+def test_list_folders_default_reporting_warns_via_logger(
+        tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(
+        config, "_load_defaults",
+        lambda: {"folders": [{"name": "x", "path": "rel", "mode": "ro",
+                              "kind": "path"}]})
+    import logging
+    with caplog.at_level(logging.WARNING, logger="modulatio.config"):
+        assert config.list_folders() == []
+    assert any("folder registry" in r.message for r in caplog.records)
+
+
+def test_list_folders_absent_key_reports_nothing(monkeypatch):
+    """No folders configured is a clean state, not a corrupt one."""
+    monkeypatch.setattr(config, "_load_defaults", lambda: {})
+    reasons: list[str] = []
+    assert config.list_folders(on_corrupt=reasons.append) == []
+    assert reasons == []
