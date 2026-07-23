@@ -613,3 +613,152 @@ def test_approved_outside_write_lands_and_is_honored(env, tmp_path):
     assert len(coord_prompts) == 1
     assert "wrote" in wa(path=target, content="body")
     assert (proj / "out" / "report.md").read_text() == "body"
+
+
+# ── the authorization bundle: one call, one prompt, one atomic decision ─────
+#
+# A tool call may extract SEVERAL ungranted requests (two outside file args,
+# an outside cwd) plus a capability rider. The coordinator aggregates them
+# into ONE engine-rendered bundle: intersected scopes, exactly one prompt,
+# the answer validated once, and every grant applied as one batch only after
+# the whole bundle is accepted. Deny, hard refusal, invalid scope, or a
+# recording failure executes nothing and leaves both stores exactly as they
+# were before the call.
+
+
+def _two_outside_files_call(tmp_path):
+    o1 = tmp_path / "alpha"
+    o2 = tmp_path / "beta"
+    o1.mkdir(exist_ok=True)
+    o2.mkdir(exist_ok=True)
+    (o1 / "a.txt").write_text("a")
+    (o2 / "b.txt").write_text("b")
+    return {"cmd": f"cat {o1 / 'a.txt'} {o2 / 'b.txt'}"}, o1, o2
+
+
+def test_bundle_two_outside_files_prompt_once(env, tmp_path):
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_SESSION)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files_call(tmp_path)
+    assert coord("run_shell", args) is True
+    assert len(prompts) == 1
+
+
+def test_bundle_session_approval_lands_all_roots_and_capability(
+        env, tmp_path):
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_SESSION)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files_call(tmp_path)
+    assert coord("run_shell", args) is True
+    n = len(prompts)
+    # Both roots granted at session scope; the repeat call is silent.
+    assert gate.is_granted(_req("read", o1 / "a.txt")) is True
+    assert gate.is_granted(_req("read", o2 / "b.txt")) is True
+    assert coord("run_shell", args) is True
+    assert len(prompts) == n
+    # The capability rider landed in the broker's store.
+    from modulatio.permissions import capability_for
+    assert broker.grants.remembered(capability_for("run_shell", {"cmd": "x"}))
+
+
+def test_bundle_deny_leaves_both_stores_unchanged(env, tmp_path):
+    def prompt_fn(req):
+        return lg.ScopedDecision(scope=lp.SCOPE_DENY)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files_call(tmp_path)
+    assert coord("run_shell", args) is False
+    assert gate._session == {}
+    assert gate._once == {}
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    view = broker.grants.grants_view()
+    assert view == {"session": [], "always": []}
+
+
+def test_bundle_hard_refused_member_prompts_zero_records_nothing(
+        env, tmp_path):
+    from modulatio import permissions as perm
+
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_SESSION)
+
+    ws = tmp_path / "ws2"
+    ws.mkdir()
+    blocked = tmp_path / "deliverables"
+    blocked.mkdir()
+    (blocked / "x.txt").write_text("x")
+    approvable = tmp_path / "gamma"
+    approvable.mkdir()
+    (approvable / "y.txt").write_text("y")
+    gate = lg.LeaderPermissionGate(
+        CODE, workspace=ws, blocked_subtrees=(str(blocked),))
+    coord = perm.build_authorization_coordinator(
+        gate=gate, root=ws, prompt_fn=prompt_fn, broker=None)
+    args = {"cmd": f"cat {blocked / 'x.txt'} {approvable / 'y.txt'}"}
+    assert coord("run_shell", args) is False
+    assert prompts == []
+    assert gate._session == {}
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+
+
+def test_bundle_once_expires_whole_bundle_at_next_call(env, tmp_path):
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_ONCE)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files_call(tmp_path)
+    assert coord("run_shell", args) is True
+    # ONCE is recorded nowhere durable — nothing is silently granted after.
+    assert gate.is_granted(_req("read", o1 / "a.txt")) is False
+    assert gate.is_granted(_req("read", o2 / "b.txt")) is False
+    # The identical call re-prompts: once covered exactly one call.
+    assert coord("run_shell", args) is True
+    assert len(prompts) == 2
+
+
+def test_bundle_recording_failure_fails_closed_and_restores_stores(
+        env, tmp_path, monkeypatch):
+    """An injected failure at the second durable recording point executes
+    nothing and leaves both stores byte/state-identical to pre-call."""
+    def prompt_fn(req):
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files_call(tmp_path)
+    pf = lp._permission_file(CODE)
+    before_bytes = pf.read_bytes() if pf.exists() else None
+
+    real_add = lp.add_grant
+    calls = {"n": 0}
+
+    def _flaky_add(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("disk full")
+        return real_add(*a, **kw)
+
+    monkeypatch.setattr(lp, "add_grant", _flaky_add)
+    assert coord("run_shell", args) is False
+    after_bytes = pf.read_bytes() if pf.exists() else None
+    assert after_bytes == before_bytes
+    assert gate._session == {}
+    assert gate._once == {}
+    assert broker.grants.grants_view() == {"session": [], "always": []}
+    monkeypatch.setattr(lp, "add_grant", real_add)
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []

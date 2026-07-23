@@ -146,6 +146,36 @@ def load_grants(code: str, request_class: str) -> list[dict]:
     return _load_grants(code).get(request_class, [])
 
 
+def snapshot_grants(code: str) -> "bytes | None":
+    """Raw persisted-store bytes (``None`` when no store file exists), for
+    restore-on-failure around a batch of ``add_grant`` calls — a partial
+    batch must not survive, and the restored file must be byte-identical to
+    the pre-batch state (including not existing at all)."""
+    pf = _permission_file(code)
+    with _lock:
+        try:
+            return pf.read_bytes()
+        except FileNotFoundError:
+            return None
+
+
+def restore_grants(code: str, snapshot: "bytes | None") -> None:
+    """Rewrite the persisted store to a prior :func:`snapshot_grants` state,
+    byte-exact; a ``None`` snapshot removes the file that did not exist."""
+    pf = _permission_file(code)
+    with _lock:
+        if snapshot is None:
+            try:
+                pf.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        pf.parent.mkdir(parents=True, exist_ok=True)
+        tmp = pf.with_suffix(f".json.tmp.{os.getpid()}")
+        tmp.write_bytes(snapshot)
+        os.replace(tmp, pf)
+
+
 def revoke_all(code: str) -> None:
     """The durable half of ``/rp``: drop ALL persisted grants, every class.
     (The gate clears in-memory session/once + pending tickets + caches too.)"""

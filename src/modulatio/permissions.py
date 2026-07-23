@@ -337,28 +337,63 @@ def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
             if state == "deny":
                 return False
 
-        # One prompt per pending gate request; the capability rides the FIRST
-        # as a disclosed line, its answer recorded on both axes.
-        for i, req in enumerate(pending):
-            shown = req
-            if i == 0 and state == "ask":
-                shown = replace(
-                    req, why=f"{req.why} — also grants the capability: {cap.label}")
-            decision = gate.record_prompted(req, prompt_fn(shown))
-            if decision.scope == lg.SCOPE_DENY:
+        # ONE authorization bundle: every pending request plus the
+        # capability rider becomes one engine-rendered prompt over the
+        # INTERSECTED scopes, validated once, and applied as one batch only
+        # after the whole bundle is accepted. Deny, invalid scope, or a
+        # recording failure executes nothing and leaves both stores exactly
+        # as they were before the call.
+        if pending:
+            common = [s for s in pending[0].available_scopes
+                      if all(s in r.available_scopes for r in pending[1:])]
+            askable = [s for s in common if s != lg.SCOPE_DENY]
+            if not askable:
+                return False  # no scope every member accepts — unaskable
+            base = pending[0]
+            extra = "; ".join(
+                f"{r.action}: {r.resource}" for r in pending[1:])
+            why = base.why
+            if extra:
+                why = f"{why} — this approval also covers: {extra}"
+            if state == "ask":
+                why = f"{why} — also grants the capability: {cap.label}"
+            shown = replace(base, why=why, available_scopes=tuple(common))
+            answer = prompt_fn(shown)
+            scope = getattr(answer, "scope", None)
+            if scope == lg.SCOPE_DENY:
                 return False
-            if i == 0 and state == "ask":
-                broker.record_ask_decision(cap, Decision.coerce(decision.scope))
-                state = "allow"
+            if scope not in askable:
+                return False  # invalid answer: fail closed, record nothing
+            gate_snap = gate.snapshot_grants()
+            broker_snap = broker.grants.snapshot() if broker is not None else None
+            try:
+                for req in pending:
+                    gate.record_prompted(req, answer)
+                if state == "ask":
+                    if not broker.record_ask_decision(
+                            cap, Decision.coerce(scope)):
+                        raise RuntimeError("capability recording refused")
+            except Exception:  # noqa: BLE001 — restore, fail closed
+                gate.restore_grants(gate_snap)
+                if broker_snap is not None:
+                    broker.grants.restore(broker_snap)
+                return False
+            return True
 
-        # Capability-only ask (no path prompt carried it): same surface.
+        # Capability-only ask (no path prompt carried it): same surface,
+        # same restore-on-failure posture around the single recording.
         if state == "ask":
             decision = Decision.coerce(
                 getattr(prompt_fn(lg.SecurityRequest(
                     action="capability", resource=cap.label,
                     request_class="capability", why=cap.detail,
                 )), "scope", None))
-            return broker.record_ask_decision(cap, decision)
+            broker_snap = broker.grants.snapshot()
+            try:
+                return broker.record_ask_decision(cap, decision)
+            except Exception:  # noqa: BLE001 — restore, fail closed
+                broker.grants.restore(broker_snap)
+                return False
         return True
 
     return authorize
@@ -457,6 +492,23 @@ class GrantStore:
         """Plain view of what's granted (for the JT 'show its grants' display)."""
         with self._lock:
             return {"session": sorted(self._session), "always": sorted(self._always)}
+
+    def snapshot(self) -> tuple[set, set]:
+        """Copy of (session, always) for restore-on-failure around a batch
+        recording — a partial batch must not survive."""
+        with self._lock:
+            return set(self._session), set(self._always)
+
+    def restore(self, snapshot: tuple[set, set]) -> None:
+        """Reset both grant sets to a prior :meth:`snapshot`; re-persists the
+        durable set so the file matches the restored state."""
+        session, always = snapshot
+        with self._lock:
+            self._session = set(session)
+            persist_needed = self._always != always
+            self._always = set(always)
+        if persist_needed:
+            self._save()
 
 
 # ── the broker ─────────────────────────────────────────────────────────────

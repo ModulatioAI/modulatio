@@ -299,6 +299,24 @@ class LeaderPermissionGate:
         self._session.clear()
         self._once.clear()
 
+    def snapshot_grants(self) -> tuple:
+        """Copy of every grant surface this gate can mutate — in-memory
+        session/once plus the persisted store — for restore-on-failure
+        around a batch of ``record_prompted`` calls."""
+        return (
+            {k: list(v) for k, v in self._session.items()},
+            {k: list(v) for k, v in self._once.items()},
+            lp.snapshot_grants(self.code),
+        )
+
+    def restore_grants(self, snapshot: tuple) -> None:
+        """Reset every grant surface to a prior :meth:`snapshot_grants` —
+        a partially applied batch must not survive."""
+        session, once, durable = snapshot
+        self._session = {k: list(v) for k, v in session.items()}
+        self._once = {k: list(v) for k, v in once.items()}
+        lp.restore_grants(self.code, durable)
+
 
 # ── resource extractor ────────────────────────────────────────────────────
 # Maps a tool call to the SecurityRequest(s) it needs gated — or [] if ungated.
