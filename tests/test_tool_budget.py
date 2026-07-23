@@ -387,21 +387,146 @@ def test_budget_prose_in_model_output_cannot_trip():
     assert out == prose
 
 
-def test_higher_candidate_budget_wins_merge(project_with_run):
+def test_candidate_ahead_of_canonical_is_typed_conflict(project_with_run):
+    """Only the store consume barrier advances the budget sequence — a
+    worker candidate can never legitimately lead the canonical record, so
+    a candidate-ahead merge is a typed conflict, never a mint."""
     _saved_task()
     candidate = _make_task()
     candidate.tool_budget_sequence = 5
     candidate.tool_calls_attempted = 4
-    candidate.tool_call_fingerprint = "cccc"
-    candidate.tool_call_streak = 2
-    candidate.storm_strikes = 1
-    merged = store_mod.save_task_monotonic(
-        PROJECT_CODE, candidate, run_id=RUN_ID)
-    assert merged.tool_budget_sequence == 5
-    assert merged.tool_calls_attempted == 4
-    assert merged.tool_call_fingerprint == "cccc"
-    assert merged.tool_call_streak == 2
-    assert merged.storm_strikes == 1
+    with pytest.raises(ToolBudgetConflict) as exc_info:
+        store_mod.save_task_monotonic(PROJECT_CODE, candidate, run_id=RUN_ID)
+    assert exc_info.value.canonical.tool_budget_sequence == 0
+    canonical = store_mod.get_task(PROJECT_CODE, "TBG-T-001", run_id=RUN_ID)
+    assert canonical.tool_calls_attempted == 0  # nothing minted
+
+
+def test_equal_sequence_mismatched_tuple_is_typed_conflict(project_with_run):
+    _saved_task()
+    store_mod.consume_tool_call_budget(
+        PROJECT_CODE, "TBG-T-001", expected_sequence=0,
+        fingerprint="aaaa", run_id=RUN_ID)
+    candidate = _make_task()
+    candidate.tool_budget_sequence = 1
+    candidate.tool_calls_attempted = 9      # same sequence, foreign tuple
+    candidate.tool_call_fingerprint = "aaaa"
+    candidate.tool_call_streak = 1
+    with pytest.raises(ToolBudgetConflict):
+        store_mod.save_task_monotonic(PROJECT_CODE, candidate, run_id=RUN_ID)
+
+
+def test_plain_save_mirrors_canonical_budget_never_advances(project_with_run):
+    """Every ordinary task save treats the canonical budget tuple as
+    authoritative: a stale candidate mirrors it, a candidate-ahead one is
+    a typed conflict — no direct save path can erase or mint a consume."""
+    task = _saved_task()
+    store_mod.consume_tool_call_budget(
+        PROJECT_CODE, "TBG-T-001", expected_sequence=0,
+        fingerprint="aaaa", run_id=RUN_ID)
+    stale = task.model_copy(deep=True)
+    assert stale.tool_budget_sequence == 0
+    store_mod.save_task(PROJECT_CODE, stale, run_id=RUN_ID)
+    canonical = store_mod.get_task(PROJECT_CODE, "TBG-T-001", run_id=RUN_ID)
+    assert canonical.tool_budget_sequence == 1   # consume survived the save
+    assert canonical.tool_calls_attempted == 1
+    ahead = task.model_copy(deep=True)
+    ahead.tool_budget_sequence = 9
+    with pytest.raises(ToolBudgetConflict):
+        store_mod.save_task(PROJECT_CODE, ahead, run_id=RUN_ID)
+
+
+def test_interleaved_consume_cannot_be_erased_by_merge(project_with_run):
+    """The R3-signed interrupt guarantee under concurrency: a consume that
+    lands while a monotonic merge is in flight is never overwritten — the
+    merge's read+project+write and the consume serialize on one store
+    lock. The merge's canonical read is deterministically delayed; the
+    consume must wait for it and apply on top."""
+    import threading
+    import time as _time
+
+    task = _saved_task()
+    store_mod.consume_tool_call_budget(
+        PROJECT_CODE, "TBG-T-001", expected_sequence=0,
+        fingerprint="aaaa", run_id=RUN_ID)
+    stale = task.model_copy(deep=True)          # pre-consume snapshot
+
+    real_get = store_mod.get_task
+    merge_thread_id = threading.get_ident()
+    merge_read_started = threading.Event()
+
+    def _slow_get(code, task_id, run_id=None):
+        result = real_get(code, task_id, run_id=run_id)
+        if threading.get_ident() == merge_thread_id:
+            merge_read_started.set()
+            _time.sleep(0.3)                    # the interleave window
+        return result
+
+    consume_done = {"sequence": None}
+
+    def _late_consume():
+        merge_read_started.wait(timeout=5)
+        updated = store_mod.consume_tool_call_budget(
+            PROJECT_CODE, "TBG-T-001", expected_sequence=1,
+            fingerprint="bbbb", run_id=RUN_ID)
+        consume_done["sequence"] = updated.tool_budget_sequence
+
+    consumer = threading.Thread(target=_late_consume)
+    consumer.start()
+    store_mod.get_task = _slow_get
+    try:
+        store_mod.save_task_monotonic(PROJECT_CODE, stale, run_id=RUN_ID)
+    finally:
+        store_mod.get_task = real_get
+        consumer.join(timeout=5)
+
+    canonical = store_mod.get_task(PROJECT_CODE, "TBG-T-001", run_id=RUN_ID)
+    assert consume_done["sequence"] == 2
+    assert canonical.tool_budget_sequence == 2   # the slot survived
+    assert canonical.tool_calls_attempted == 2
+
+
+def test_racing_consumes_and_saves_count_every_slot_once(project_with_run):
+    """Two consumers and a stale-saver race: every successful consume is
+    represented exactly once in the final canonical total."""
+    import threading
+
+    task = _saved_task()
+    stale = task.model_copy(deep=True)
+    consumed = []
+    lock = threading.Lock()
+
+    def _consumer():
+        for _ in range(25):
+            while True:
+                canonical = store_mod.get_task(
+                    PROJECT_CODE, "TBG-T-001", run_id=RUN_ID)
+                try:
+                    updated = store_mod.consume_tool_call_budget(
+                        PROJECT_CODE, "TBG-T-001",
+                        expected_sequence=canonical.tool_budget_sequence,
+                        fingerprint="racer", run_id=RUN_ID)
+                except ToolBudgetConflict:
+                    continue                    # stale view — resync, retry
+                with lock:
+                    consumed.append(updated.tool_budget_sequence)
+                break
+
+    def _saver():
+        for _ in range(25):
+            store_mod.save_task_monotonic(
+                PROJECT_CODE, stale.model_copy(deep=True), run_id=RUN_ID)
+
+    threads = [threading.Thread(target=_consumer) for _ in range(2)]
+    threads.append(threading.Thread(target=_saver))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    canonical = store_mod.get_task(PROJECT_CODE, "TBG-T-001", run_id=RUN_ID)
+    assert len(consumed) == 50
+    assert canonical.tool_calls_attempted == 50
+    assert canonical.tool_budget_sequence == 50
 
 
 # ── the engine closure: canonical store authority behind the loop hook ──────
@@ -465,9 +590,183 @@ def test_closure_consumes_canonical_and_mirrors_worker_copy(
     assert task.tool_calls_attempted == 3        # worker copy mirrored
 
 
-def test_closure_for_task_without_durable_record_is_none(project_with_run):
+def test_closure_for_task_without_durable_record_fails_closed(
+    project_with_run,
+):
+    """No canonical record (unsaved, deleted, or quarantined-corrupt) is
+    NOT permission to run uncapped — the hook build refuses typed before
+    any model call. The moment persistence is least trustworthy is the
+    moment the cap matters most."""
     orch = _make_orchestrator(project_with_run)
-    assert orch._tool_budget_consumer(_make_task("TBG-T-404")) is None
+    with pytest.raises(ToolBudgetConflict) as exc_info:
+        orch._tool_budget_consumer(_make_task("TBG-T-404"))
+    assert exc_info.value.canonical is None
+
+
+def test_unsaved_task_producer_makes_zero_model_calls(project_with_run):
+    """A tool-using task producer without a durable budget record starts
+    ZERO model calls and zero tools — the typed refusal fires before the
+    chat loop."""
+    from modulatio import skills as skills_mod
+
+    model_calls = {"n": 0}
+
+    def _chat(**kw):
+        model_calls["n"] += 1
+        return runners_mod.ChatResponse(content="done", tool_calls=())
+
+    orch = _make_orchestrator(
+        project_with_run, chat_runners={"drafter": _chat})
+    unsaved = _make_task("TBG-T-405", assigned_agent_id="drafter")
+    skill = skills_mod.Skill(
+        name="coder", description="d", prompt_template="",
+        tool_loadout=("ghost",))
+    with pytest.raises(ToolBudgetConflict):
+        orch._llm_with_tools_execute(
+            unsaved, skill, orch._artifacts_root() / "drafts" / "x.md",
+            tool_loadout=("ghost",))
+    assert model_calls["n"] == 0
+
+
+def test_budget_store_failure_routes_typed_no_retry_no_strike(
+    project_with_run, monkeypatch,
+):
+    """A consume persistence/CAS failure is a budget-store outcome, not a
+    storm and not a generic producer crash: ONE producer invocation (no
+    model re-asks while the authority store is down), no strike, no QC
+    salvage — the task settles through the typed terminal."""
+    monkeypatch.setenv("MODULATIO_TASK_MAX_RETRIES", "3")
+    orch = _make_orchestrator(project_with_run)
+    t = _saved_task("TBG-T-406", max_retries=3)
+    producer_calls = {"n": 0}
+
+    def _failing_producer(task, corrective_notes=""):
+        producer_calls["n"] += 1
+        raise ToolBudgetConflict(
+            "tool-budget store failure: disk unavailable", canonical=None)
+
+    orch._producer_execute = _failing_producer  # type: ignore[assignment]
+    qc_fix = {"n": 0}
+    orch._attempt_qc_fix_forward = (  # type: ignore[assignment]
+        lambda *a, **kw: qc_fix.__setitem__("n", qc_fix["n"] + 1) or True)
+    events = []
+    orch.activity_callback = lambda e: events.append(e)
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import TaskStatus
+    orch._run_task_with_redo_inner(t, RunSummary(project=project_with_run))
+    assert producer_calls["n"] == 1        # no repeated model attempts
+    assert qc_fix["n"] == 0                # not the storm/QC-salvage route
+    assert t.status == TaskStatus.BLOCKED
+    canonical = store_mod.get_task(PROJECT_CODE, t.id, run_id=RUN_ID)
+    assert canonical.storm_strikes == 0    # a store failure is not a storm
+    assert "tool_budget_store_failure" in [e.phase for e in events]
+
+
+def test_consume_hook_wraps_store_errors_typed(project_with_run, monkeypatch):
+    orch = _make_orchestrator(project_with_run)
+    task = _saved_task("TBG-T-407")
+    consume = orch._tool_budget_consumer(task)
+    monkeypatch.setattr(
+        store_mod, "consume_tool_call_budget",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("disk gone")))
+    with pytest.raises(ToolBudgetConflict):
+        consume("aaaa")
+
+
+# ── Clay: no pre-execution enforcement seam → refuse/fallback, never an
+# unbudgeted native loop ─────────────────────────────────────────────────────
+
+
+def _clay_marked_runner(invocations):
+    def run(**kw):
+        invocations.append(kw)
+        return runners_mod.ChatResponse(content="native", tool_calls=())
+    run.runs_native_tool_loop = True
+    return run
+
+
+def test_clay_seat_refused_for_budgeted_tool_producer(project_with_run):
+    """A budgeted tool-using producer on a Clay seat never launches the
+    native loop: the seat is refused as unavailable (the fallback-chain
+    signal) with zero Clay invocations."""
+    from modulatio import claude_cli as clay
+    from modulatio import skills as skills_mod
+
+    clay_calls: list = []
+    orch = _make_orchestrator(
+        project_with_run,
+        chat_runners={"drafter": _clay_marked_runner(clay_calls)})
+    task = _saved_task("TBG-T-408", assigned_agent_id="drafter")
+    skill = skills_mod.Skill(
+        name="coder", description="d", prompt_template="",
+        tool_loadout=("ghost",))
+    with pytest.raises(clay.ClaudeUnavailable):
+        orch._llm_with_tools_execute(
+            task, skill, orch._artifacts_root() / "drafts" / "x.md",
+            tool_loadout=("ghost",))
+    assert clay_calls == []
+
+
+def test_clay_primary_falls_back_continuing_canonical_budget(
+    project_with_run, monkeypatch,
+):
+    """Clay-primary with a function-loop fallback: the refusal advances
+    the chain, the fallback seat runs, and its consumes continue the SAME
+    canonical sequence — no fresh budget on the fallback."""
+    from modulatio import skills as skills_mod
+    from modulatio.orchestration import Orchestrator
+
+    clay_calls: list = []
+    responses = iter([
+        runners_mod.ChatResponse(content="", tool_calls=(
+            runners_mod.ToolCall(id="1", name="ghost", args={}),
+            runners_mod.ToolCall(id="2", name="ghost", args={}),
+        )),
+        runners_mod.ChatResponse(content="done", tool_calls=()),
+    ])
+
+    def _function_runner(**kw):
+        return next(responses)
+
+    orch = _make_orchestrator(
+        project_with_run,
+        chat_runners={"drafter": _clay_marked_runner(clay_calls)})
+    monkeypatch.setattr(
+        Orchestrator, "_seat_fallback_chain",
+        lambda self, agent_id, primary_model, primary_runner: [
+            ("clay-model", primary_runner),
+            ("fallback-model", _function_runner),
+        ])
+    task = _saved_task("TBG-T-409", assigned_agent_id="drafter")
+    store_mod.consume_tool_call_budget(
+        PROJECT_CODE, task.id, expected_sequence=0,
+        fingerprint="prior", run_id=RUN_ID)   # one slot spent pre-fallback
+    skill = skills_mod.Skill(
+        name="coder", description="d", prompt_template="",
+        tool_loadout=("ghost",))
+    draft = orch._artifacts_root() / "drafts" / "x.md"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    orch._llm_with_tools_execute(
+        task, skill, draft, tool_loadout=("ghost",))
+    assert clay_calls == []
+    canonical = store_mod.get_task(PROJECT_CODE, task.id, run_id=RUN_ID)
+    assert canonical.tool_calls_attempted == 3   # 1 prior + 2 on fallback
+
+
+def test_clay_runner_without_budget_hook_is_not_refused(project_with_run):
+    """Unbudgeted lanes (QC, leader converse) keep their Clay seats — the
+    refusal binds exactly where the budget authority does."""
+    clay_calls: list = []
+    orch = _make_orchestrator(
+        project_with_run,
+        chat_runners={"qc": _clay_marked_runner(clay_calls)})
+    reply = orch._run_chat_loop(
+        prompt="p", tool_loadout=(), role="qc", agent_id="qc",
+        task_id="TBG-T-410",
+        transcript_path=orch._artifacts_root() / "tool_calls" / "t.jsonl",
+        skill_name="review")
+    assert reply == "native"
+    assert len(clay_calls) == 1
 
 
 def test_reentry_at_cap_trips_before_any_execution(

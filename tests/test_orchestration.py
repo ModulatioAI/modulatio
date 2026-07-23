@@ -8074,6 +8074,7 @@ def test_breaker_trips_in_llm_with_tools(project, monkeypatch):
         tool_loadout=[],
     )
     task = _qcfix_task(artifact_kind="text")
+    store.save_task(PROJECT_CODE, task)  # tool budget anchors on the record
     path = orch._resolve_draft_path(task)
     path.parent.mkdir(parents=True, exist_ok=True)
     with pytest.raises(DispatchAbort):
@@ -11471,6 +11472,7 @@ def test_skill_routed_retry_carries_corrective_notes(project, monkeypatch):
     )
     task = _qcfix_task(artifact_kind="code", producer_mode="diff",
                        required_skills=["coding"])
+    store.save_task(PROJECT_CODE, task)  # tool budget anchors on the record
     path = orch._resolve_draft_path(task)
     path.parent.mkdir(parents=True, exist_ok=True)
     orch._llm_with_tools_execute(
@@ -11587,6 +11589,7 @@ def test_unbacked_loadout_tool_is_dropped_not_wedged(project):
     )
     task = _qcfix_task(assigned_agent_id="james",
                        required_skills=["generate-images"])
+    store.save_task(PROJECT_CODE, task)  # tool budget anchors on the record
     path = orch._resolve_draft_path(task)
     path.parent.mkdir(parents=True, exist_ok=True)
     out_path, _checksum, _tokens = orch._llm_with_tools_execute(
@@ -12372,6 +12375,7 @@ def test_tool_loop_honors_binary_assembly_output_file(project, tmp_path, monkeyp
     Pre-fix the receipt text was persisted and the binary temp file leaked."""
     orch = _orch_r4(project)
     task = _task(project_id=project.id, artifact_kind="media")
+    store.save_task(PROJECT_CODE, task)  # tool budget anchors on the record
 
     # Stand in for runners.run_llm_with_tools: the producer "finishes" with a
     # body the engine would normally shape into the deliverable.

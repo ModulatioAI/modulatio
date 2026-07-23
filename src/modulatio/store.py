@@ -797,9 +797,63 @@ def _task_path(code: str, task_id: str, run_id: str | None = None) -> Path:
     return _scope_dir(code, run_id) / "tasks" / f"{task_id}.md"
 
 
-def save_task(project_code: str, task: Task, body: str = "", run_id: str | None = None) -> Task:
+def _save_task_unguarded(
+    project_code: str, task: Task, body: str = "", run_id: str | None = None,
+) -> Task:
+    """Raw task write — callers already holding ``_store_lock`` with the
+    canonical authority in hand (the consume barrier, the monotonic
+    merge). Everything else goes through :func:`save_task`."""
     _write_entity(_task_path(project_code, task.id, run_id=run_id), task, body)
     return task
+
+
+def _project_budget_authority(current: Task, candidate: Task) -> None:
+    """Enforce the store-owned tool-budget authority on ``candidate``
+    against the canonical ``current``: a stale candidate MIRRORS the
+    canonical tuple (a save can never erase a durable consume); a
+    candidate whose sequence leads the canonical — or matches it with a
+    foreign tuple — is a typed conflict, because only the consume barrier
+    advances the sequence and every legitimate advance is already
+    persisted."""
+    from modulatio.types import ToolBudgetConflict
+
+    if current.tool_budget_sequence > candidate.tool_budget_sequence:
+        candidate.tool_budget_sequence = current.tool_budget_sequence
+        candidate.tool_calls_attempted = current.tool_calls_attempted
+        candidate.tool_call_fingerprint = current.tool_call_fingerprint
+        candidate.tool_call_streak = current.tool_call_streak
+        candidate.storm_strikes = current.storm_strikes
+        return
+    if candidate.tool_budget_sequence > current.tool_budget_sequence:
+        raise ToolBudgetConflict(
+            f"task {candidate.id}: candidate budget sequence "
+            f"{candidate.tool_budget_sequence} leads the canonical "
+            f"{current.tool_budget_sequence} — only the consume barrier "
+            f"advances the sequence",
+            canonical=current.model_copy(deep=True))
+    if (
+        candidate.tool_calls_attempted != current.tool_calls_attempted
+        or candidate.tool_call_fingerprint != current.tool_call_fingerprint
+        or candidate.tool_call_streak != current.tool_call_streak
+        or candidate.storm_strikes != current.storm_strikes
+    ):
+        raise ToolBudgetConflict(
+            f"task {candidate.id}: candidate carries budget sequence "
+            f"{candidate.tool_budget_sequence} with a tuple that differs "
+            f"from the canonical record's",
+            canonical=current.model_copy(deep=True))
+
+
+def save_task(project_code: str, task: Task, body: str = "", run_id: str | None = None) -> Task:
+    """Persist ``task``. The canonical record's tool-budget tuple is
+    authoritative on every ordinary save — a stale snapshot mirrors it and
+    an impossible one raises typed — serialized on the store lock with the
+    consume barrier so no save can interleave into a durable consume."""
+    with _store_lock:
+        current = get_task(project_code, task.id, run_id=run_id)
+        if current is not None:
+            _project_budget_authority(current, task)
+        return _save_task_unguarded(project_code, task, body=body, run_id=run_id)
 
 
 def get_task(project_code: str, task_id: str, run_id: str | None = None) -> Task | None:
@@ -818,12 +872,23 @@ def save_task_monotonic(
     is never removed (a different mint id is a typed conflict), the lifetime
     counter never decreases, a claim id is never cleared (a different one is
     a typed conflict), and a terminal record never regresses to nonterminal
-    (the stale snapshot is discarded whole)."""
+    (the stale snapshot is discarded whole).
+
+    Runs WHOLE under the store lock — read, projection, and write are one
+    serializable unit with the tool-budget consume barrier, so a consume
+    landing mid-merge can never be read-then-overwritten."""
+    with _store_lock:
+        return _save_task_monotonic_locked(project_code, candidate, run_id)
+
+
+def _save_task_monotonic_locked(
+    project_code: str, candidate: Task, run_id: str | None,
+) -> Task:
     from modulatio.types import DecomposeMintConflict
 
     current = get_task(project_code, candidate.id, run_id=run_id)
     if current is None:
-        return save_task(project_code, candidate, run_id=run_id)
+        return _save_task_unguarded(project_code, candidate, run_id=run_id)
     if current.decompose_mint is not None:
         if (
             candidate.decompose_mint is not None
@@ -846,23 +911,18 @@ def save_task_monotonic(
         candidate.attempt_claim_id = current.attempt_claim_id
     candidate.lifetime_attempts = max(
         candidate.lifetime_attempts, current.lifetime_attempts)
-    if current.tool_budget_sequence > candidate.tool_budget_sequence:
-        # The tool-budget authority is the record with the HIGHER sequence,
-        # and its fingerprint/streak/strike tuple travels with it whole — a
-        # stale snapshot can neither decrease totals nor restore any part
-        # of an older tuple.
-        candidate.tool_budget_sequence = current.tool_budget_sequence
-        candidate.tool_calls_attempted = current.tool_calls_attempted
-        candidate.tool_call_fingerprint = current.tool_call_fingerprint
-        candidate.tool_call_streak = current.tool_call_streak
-        candidate.storm_strikes = current.storm_strikes
+    # The canonical tool-budget tuple is authoritative: a stale candidate
+    # mirrors it whole; a candidate that leads the sequence (or matches it
+    # with a foreign tuple) is a typed conflict — only the consume barrier
+    # advances the sequence, and its advances are already persisted.
+    _project_budget_authority(current, candidate)
     terminal = (
         TaskStatus.COMPLETED, TaskStatus.QC_REJECTED,
         TaskStatus.BLOCKED, TaskStatus.ABANDONED,
     )
     if current.status in terminal and candidate.status not in terminal:
         return current  # the settled record stands; drop the stale snapshot
-    return save_task(project_code, candidate, run_id=run_id)
+    return _save_task_unguarded(project_code, candidate, run_id=run_id)
 
 
 def consume_tool_call_budget(
@@ -911,7 +971,7 @@ def consume_tool_call_budget(
             else:
                 current.tool_call_streak = 1
             current.tool_call_fingerprint = fingerprint
-        save_task(project_code, current, run_id=run_id)
+        _save_task_unguarded(project_code, current, run_id=run_id)
         return current.model_copy(deep=True)
 
 

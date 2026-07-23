@@ -49,6 +49,7 @@ from modulatio.types import (
     AssertionEvidence,
     ConventionContractConflict,
     DecomposeMintConflict,
+    ToolBudgetConflict,
     DecomposeMintRecord,
     EvidenceRequirement,
     Goal,
@@ -5824,14 +5825,20 @@ class Orchestrator:
         Seeded from the CANONICAL record — never the worker copy — so
         re-entry, producer retries, and model fallbacks all continue one
         budget; each consume mirrors the returned canonical state back onto
-        the worker's task copy (the worker never owns the authority). A task
-        with no durable record gets ``None``: there is no authority to
-        consume against, and no re-entry that could exploit its absence."""
+        the worker's task copy (the worker never owns the authority). A
+        task with NO durable record (unsaved, deleted, or quarantined as
+        corrupt) FAILS CLOSED with a typed raise before any model call —
+        a missing record is the moment persistence is least trustworthy,
+        never permission to run an uncapped loop. Store I/O failures
+        inside the hook normalize to the same typed outcome."""
         from modulatio import runners as _runners
         canonical = store.get_task(
             self.project.code, task.id, run_id=self.project.run_id)
         if canonical is None:
-            return None
+            raise ToolBudgetConflict(
+                f"task {task.id}: no durable record to anchor the tool "
+                f"budget — a tool-using task producer never runs uncapped",
+                canonical=None)
         sequence = canonical.tool_budget_sequence
 
         def _mirror(updated: Task) -> None:
@@ -5845,11 +5852,22 @@ class Orchestrator:
 
         def consume(fingerprint: str) -> "_runners.ToolBudgetState":
             nonlocal sequence
-            updated = store.consume_tool_call_budget(
-                self.project.code, task.id,
-                expected_sequence=sequence,
-                fingerprint=fingerprint,
-                run_id=self.project.run_id)
+            try:
+                updated = store.consume_tool_call_budget(
+                    self.project.code, task.id,
+                    expected_sequence=sequence,
+                    fingerprint=fingerprint,
+                    run_id=self.project.run_id)
+            except ToolBudgetConflict:
+                raise
+            except Exception as exc:
+                # Store I/O at the barrier is a budget-store outcome, not
+                # a producer failure — normalize typed so the redo loop
+                # settles without re-asking the model.
+                raise ToolBudgetConflict(
+                    f"task {task.id}: tool-budget store failure — "
+                    f"{type(exc).__name__}: {exc}", canonical=None,
+                ) from exc
             sequence = updated.tool_budget_sequence
             _mirror(updated)
             return _runners.ToolBudgetState(
@@ -6021,6 +6039,21 @@ class Orchestrator:
             )
 
             def _run_one(_model: "str | None", _runner: "Callable[..., Any]") -> str:
+                if consume_tool_budget is not None and getattr(
+                    _runner, "runs_native_tool_loop", False,
+                ):
+                    # A budgeted tool-using task must not run on a backend
+                    # whose tool loop executes natively inside its own
+                    # subprocess: no pre-execution seam exists there to
+                    # durably consume before each call, and post-hoc stream
+                    # events cannot stop the tripping call. Refuse the seat
+                    # (availability-shaped, so the fallback chain advances
+                    # to a function-loop seat) rather than run uncapped.
+                    from modulatio import claude_cli as _clay_refuse
+                    raise _clay_refuse.ClaudeUnavailable(
+                        "seat runs its tool loop natively — refused for a "
+                        "budgeted tool-using producer task (no "
+                        "pre-execution budget seam); falling back")
                 return _runners.run_llm_with_tools(
                     chat_runner=_runner,
                     prompt=prompt,
@@ -10189,6 +10222,25 @@ class Orchestrator:
                 )
                 break
 
+            except ToolBudgetConflict as conflict:
+                # Budget-store outcome: the authority store refused or
+                # failed BEFORE any tool ran (missing record, stale
+                # sequence, persistence failure). Not a storm — no strike,
+                # no QC salvage — and not a producer defect the model can
+                # retry away while the store is down: settle typed through
+                # the terminal below, zero further model attempts.
+                if conflict.canonical is not None:
+                    _sync_task_in_place(t, conflict.canonical)
+                last_exc = conflict
+                last_qc = None
+                self._emit_activity(
+                    role=self.default_producer_role,
+                    phase="tool_budget_store_failure",
+                    task_id=t.id,
+                    agent_id=t.assigned_agent_id,
+                )
+                break
+
             except MintedAttemptAlreadyClaimed:
                 # The seam refused a CLAIMED minted child (at-most-once
                 # enforced at the seam itself). The attempt is consumed —
@@ -11808,10 +11860,11 @@ class Orchestrator:
         try:
             canonical = store.save_task_monotonic(
                 self.project.code, task, run_id=self.project.run_id)
-        except DecomposeMintConflict as conflict:
+        except (DecomposeMintConflict, ToolBudgetConflict) as conflict:
             _logger.error(
-                "wave merge refused a conflicting mint/claim snapshot "
-                "for %s — durable record kept", task.id, exc_info=True)
+                "wave merge refused a conflicting mint/claim/budget "
+                "snapshot for %s — durable record kept", task.id,
+                exc_info=True)
             if conflict.canonical is None:
                 # No authority in hand and none promised — fail CLOSED:
                 # never return normally claiming a reconciliation that

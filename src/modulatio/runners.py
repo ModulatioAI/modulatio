@@ -2111,6 +2111,11 @@ def _build_claude_cli_chat_runner(
         )
         return ChatResponse(content=text, tool_calls=())
 
+    # The tool loop runs NATIVELY inside the subprocess — the outer dispatch
+    # loop sees zero tool_calls, so no per-call budget hook can fire here.
+    # Callers enforcing a durable tool budget read this marker and refuse or
+    # fall back rather than run an unbudgeted internal loop.
+    run.runs_native_tool_loop = True  # type: ignore[attr-defined]
     return run
 
 
