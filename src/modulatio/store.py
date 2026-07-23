@@ -846,6 +846,16 @@ def save_task_monotonic(
         candidate.attempt_claim_id = current.attempt_claim_id
     candidate.lifetime_attempts = max(
         candidate.lifetime_attempts, current.lifetime_attempts)
+    if current.tool_budget_sequence > candidate.tool_budget_sequence:
+        # The tool-budget authority is the record with the HIGHER sequence,
+        # and its fingerprint/streak/strike tuple travels with it whole — a
+        # stale snapshot can neither decrease totals nor restore any part
+        # of an older tuple.
+        candidate.tool_budget_sequence = current.tool_budget_sequence
+        candidate.tool_calls_attempted = current.tool_calls_attempted
+        candidate.tool_call_fingerprint = current.tool_call_fingerprint
+        candidate.tool_call_streak = current.tool_call_streak
+        candidate.storm_strikes = current.storm_strikes
     terminal = (
         TaskStatus.COMPLETED, TaskStatus.QC_REJECTED,
         TaskStatus.BLOCKED, TaskStatus.ABANDONED,
@@ -853,6 +863,56 @@ def save_task_monotonic(
     if current.status in terminal and candidate.status not in terminal:
         return current  # the settled record stands; drop the stale snapshot
     return save_task(project_code, candidate, run_id=run_id)
+
+
+def consume_tool_call_budget(
+    project_code: str,
+    task_id: str,
+    *,
+    expected_sequence: int,
+    fingerprint: str | None = None,
+    record_strike: bool = False,
+    run_id: str | None = None,
+) -> Task:
+    """Durably consume one attempted-tool-call slot (or record one storm
+    strike) against the canonical task record, under the store lock.
+
+    The narrowly declared durable-barrier exception to worker write
+    deferral: the loop calls this BEFORE each tool execution, so the spent
+    slot survives a crash between consume and execution (burned, never
+    refunded) and task re-entry can never mint a fresh budget. A stale
+    ``expected_sequence`` or a missing record raises
+    :class:`ToolBudgetConflict` with no write — fail closed, the tool
+    call must not run. Returns a deep copy of the saved canonical record.
+    """
+    from modulatio.types import ToolBudgetConflict
+
+    with _store_lock:
+        current = get_task(project_code, task_id, run_id=run_id)
+        if current is None:
+            raise ToolBudgetConflict(
+                f"task {task_id}: no durable record to consume tool budget "
+                f"against", canonical=None)
+        if current.tool_budget_sequence != expected_sequence:
+            raise ToolBudgetConflict(
+                f"task {task_id}: consume expected budget sequence "
+                f"{expected_sequence} but the store holds "
+                f"{current.tool_budget_sequence}",
+                canonical=current.model_copy(deep=True))
+        current.tool_budget_sequence += 1
+        if record_strike:
+            current.storm_strikes += 1
+        else:
+            current.tool_calls_attempted += 1
+            if fingerprint is not None and (
+                fingerprint == current.tool_call_fingerprint
+            ):
+                current.tool_call_streak += 1
+            else:
+                current.tool_call_streak = 1
+            current.tool_call_fingerprint = fingerprint
+        save_task(project_code, current, run_id=run_id)
+        return current.model_copy(deep=True)
 
 
 class DeclaredArtifactIndexError(RuntimeError):

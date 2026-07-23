@@ -198,6 +198,20 @@ class DecomposeMintConflict(RuntimeError):
         self.canonical = canonical
 
 
+class ToolBudgetConflict(RuntimeError):
+    """A durable tool-budget consume could not advance the canonical
+    authority: the caller's expected sequence is stale (another consumer
+    advanced it) or the task has no durable record at all. Fail closed —
+    the tool call that prompted the consume must not execute.
+
+    ``canonical`` carries a deep copy of the durable record when one
+    exists (so the caller can resync its view), else ``None``."""
+
+    def __init__(self, message: str, *, canonical=None):
+        super().__init__(message)
+        self.canonical = canonical
+
+
 class DecomposeMintRecord(BaseModel):
     """The committed decompose-mint transaction, attached to the PARENT task.
 
@@ -388,6 +402,27 @@ class Task(BaseModel):
     #: re-runs the producer for a claimed nonterminal child (at-most-once;
     #: a claim-then-crash conservatively costs the attempt).
     attempt_claim_id: str | None = None
+    #: Monotonic sequence of the durable tool-call budget. The STORE owns
+    #: it: ``consume_tool_call_budget`` advances it under the store lock
+    #: before each attempted tool call, and the wave merge keeps whichever
+    #: record carries the higher sequence (with its matching tuple below).
+    #: A worker-local counter would reset on re-entry; this one never does.
+    tool_budget_sequence: int = 0
+    #: Total ATTEMPTED tool calls across the task's whole lifetime — every
+    #: producer attempt, model fallback, retry, and re-entry. Denied calls,
+    #: errors, cache hits, and metered replays all count (each is evidence
+    #: the model is still looping); actual executions are separate
+    #: telemetry. A slot consumed before a crash stays consumed.
+    tool_calls_attempted: int = 0
+    #: Canonical digest of the most recent attempted call (tool name +
+    #: sorted args) — explains a storm; never bounds it (the total does).
+    tool_call_fingerprint: str | None = None
+    #: Consecutive attempts carrying the SAME fingerprint as the previous
+    #: one. Resets to 1 whenever the fingerprint changes.
+    tool_call_streak: int = 0
+    #: Count of tool-budget trips recorded against this task. Data for
+    #: future admission policy only — nothing reads it to gate dispatch.
+    storm_strikes: int = 0
     # QC-as-fixer Slice 3: True when QC AUTHORED a fix for this task's
     # artifact after the producer exhausted its attempts (or stormed).
     # LOAD-BEARING flag, not cosmetic: a qc-authored artifact has NO

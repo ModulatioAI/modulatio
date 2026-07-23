@@ -202,6 +202,20 @@ _PUMP_TICK_S = 2.0
 #: _CLAUDE_RETRY_BACKOFF_S`` idiom; waited on ``abort_event`` so F8 stays live.
 _AVAILABILITY_RETRY_BACKOFF_S = (2.0, 8.0, 20.0)
 
+#: Hard cap on TOTAL attempted tool calls per task — across every producer
+#: attempt, model fallback, retry, and re-entry (the durable authority is the
+#: task record; see ``store.consume_tool_call_budget``). Attempted, not
+#: executed: denied/error/cache-hit/metered-replay calls count, because each
+#: is evidence the model is still looping. Sized above a legitimately heavy
+#: multi-attempt task (~15 calls × 4 attempts) and below a storming loop's
+#: appetite; a trip yields the task to QC salvage, never a fresh budget.
+_TOOL_CALLS_PER_TASK_CAP = 80
+
+#: Cap on CONSECUTIVE attempts carrying an identical call fingerprint (tool
+#: name + sorted args). Explains-and-stops the plainest storm early; argument
+#: jitter walks past it, which is why the total cap above is the real bound.
+_TOOL_CALL_STREAK_CAP = 6
+
 #: How long a seat sits out of the dispatch pool after an availability-class
 #: exhaustion. A dead seat is otherwise a task MAGNET — always idle, always
 #: ranked "best-available" — and every task it attracts burns its budget.
@@ -5604,6 +5618,52 @@ class Orchestrator:
 
         return _dispatch
 
+    def _tool_budget_consumer(
+        self, task: Task,
+    ) -> "Callable[[str], object] | None":
+        """Build the tool-loop's durable budget hook for ``task``, bound to
+        the store-owned barrier (``store.consume_tool_call_budget``).
+
+        Seeded from the CANONICAL record — never the worker copy — so
+        re-entry, producer retries, and model fallbacks all continue one
+        budget; each consume mirrors the returned canonical state back onto
+        the worker's task copy (the worker never owns the authority). A task
+        with no durable record gets ``None``: there is no authority to
+        consume against, and no re-entry that could exploit its absence."""
+        from modulatio import runners as _runners
+        canonical = store.get_task(
+            self.project.code, task.id, run_id=self.project.run_id)
+        if canonical is None:
+            return None
+        sequence = canonical.tool_budget_sequence
+
+        def _mirror(updated: Task) -> None:
+            task.tool_budget_sequence = updated.tool_budget_sequence
+            task.tool_calls_attempted = updated.tool_calls_attempted
+            task.tool_call_fingerprint = updated.tool_call_fingerprint
+            task.tool_call_streak = updated.tool_call_streak
+            task.storm_strikes = updated.storm_strikes
+
+        _mirror(canonical)
+
+        def consume(fingerprint: str) -> "_runners.ToolBudgetState":
+            nonlocal sequence
+            updated = store.consume_tool_call_budget(
+                self.project.code, task.id,
+                expected_sequence=sequence,
+                fingerprint=fingerprint,
+                run_id=self.project.run_id)
+            sequence = updated.tool_budget_sequence
+            _mirror(updated)
+            return _runners.ToolBudgetState(
+                attempted=updated.tool_calls_attempted,
+                streak=updated.tool_call_streak,
+                attempted_cap=_TOOL_CALLS_PER_TASK_CAP,
+                streak_cap=_TOOL_CALL_STREAK_CAP,
+            )
+
+        return consume
+
     def _run_chat_loop(
         self,
         *,
@@ -5621,6 +5681,7 @@ class Orchestrator:
         permission_callback: "Callable[[str, dict], bool] | None" = None,
         permission_broker: "object | None" = None,
         deadline: float | None = None,
+        consume_tool_budget: "Callable[[str], object] | None" = None,
     ) -> str:
         """Shared helper: run the function-calling loop with a JSONL
         transcript sidecar and per-call activity events. Returns the
@@ -5782,6 +5843,7 @@ class Orchestrator:
                     # uses, so a kickoff's producer/QC tool-loops stop too.
                     should_abort=self.abort_event.is_set,
                     deadline=deadline,
+                    consume_tool_budget=consume_tool_budget,
                 )
 
             # #8 per-seat fallback: run the WHOLE task on the primary; if it's
@@ -7169,6 +7231,10 @@ class Orchestrator:
             needs_network=skill.needs_network,
             pass_env=skill.pass_env,
             budget_role=self._producer_budget_role(task),
+            # Durable tool-call budget: the producer loop consumes one
+            # store-persisted slot per attempted call and trips typed at
+            # the cap — the storm control the deadline wall can't provide.
+            consume_tool_budget=self._tool_budget_consumer(task),
         )
 
         # Extract producer inbox_proposals BEFORE the
@@ -9648,6 +9714,7 @@ class Orchestrator:
         when invoked from an auto-redo. Normal task dispatch passes
         empty string (first attempt has no prior feedback).
         """
+        from modulatio import runners as _runners_types
         if t.decompose_mint is not None:
             # Recovery routing: a minted container's disposition is
             # owned by its committed record — resume/materialize the
@@ -9660,6 +9727,9 @@ class Orchestrator:
         rescue_defect_type: str | None = None  # #81: last QC defect class for the witness
         last_exc: Exception | None = None
         last_breaker_abort: Exception | None = None  # QC-as-fixer Slice 2
+        #: A typed tool-budget trip ends producer attempts IMMEDIATELY —
+        #: the task yields to QC salvage, never to a same-producer redo.
+        budget_trip: "_runners_types.ToolLoopBudgetExceeded | None" = None
         prev_reject_checksum: str | None = None  # no-progress breaker (see below)
 
         self._emit_activity(
@@ -9853,6 +9923,43 @@ class Orchestrator:
                     agent_id=t.assigned_agent_id,
                 )
 
+            except _runners_types.ToolLoopBudgetExceeded as trip:
+                # The task's durable tool-call budget tripped. NOT a retry:
+                # a fresh attempt would re-run the same storm against a
+                # budget that (correctly) never resets, so producer attempts
+                # end here and the task routes DIRECTLY to QC salvage below.
+                # Record the storm strike on the canonical record first —
+                # data for future admission policy, never a gate, so a
+                # store failure here degrades to a log line, not a mask
+                # over the typed routing.
+                budget_trip = trip
+                last_exc = None
+                last_qc = None
+                try:
+                    struck = store.consume_tool_call_budget(
+                        self.project.code, t.id,
+                        expected_sequence=t.tool_budget_sequence,
+                        record_strike=True,
+                        run_id=self.project.run_id)
+                    t.tool_budget_sequence = struck.tool_budget_sequence
+                    t.storm_strikes = struck.storm_strikes
+                except Exception:
+                    _logger.warning(
+                        "storm-strike record failed for %s — the trip "
+                        "still routes to QC salvage", t.id, exc_info=True)
+                self._emit_activity(
+                    role=self.default_producer_role,
+                    phase="tool_budget_exceeded",
+                    task_id=t.id,
+                    agent_id=t.assigned_agent_id,
+                    detail={
+                        "reason": trip.reason,
+                        "attempted": trip.attempted,
+                        "streak": trip.streak,
+                    },
+                )
+                break
+
             except MintedAttemptAlreadyClaimed:
                 # The seam refused a CLAIMED minted child (at-most-once
                 # enforced at the seam itself). The attempt is consumed —
@@ -9899,6 +10006,19 @@ class Orchestrator:
                         self.abort_event.wait(_AVAILABILITY_RETRY_BACKOFF_S[
                             min(attempt, len(_AVAILABILITY_RETRY_BACKOFF_S) - 1)
                         ])
+
+        # Tool-budget trip: yield DIRECTLY to QC salvage — no same-producer
+        # regeneration, no decompose (a trip can never mint children; if QC
+        # declines, the existing terminal below settles it). The artifact
+        # authority is the resolved draft path — staged bytes or nothing;
+        # transcript prose is never substituted for work.
+        if budget_trip is not None:
+            if self._attempt_qc_fix_forward(
+                t, self._resolve_draft_path(t), None, summary,
+                last_error=budget_trip, defect_type="runtime",
+            ):
+                return
+            last_exc = budget_trip  # settle the existing BLOCKED terminal
 
         # Retry budget exhausted — settle on terminal state from last failure.
         if last_exc is not None:

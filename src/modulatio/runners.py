@@ -23,6 +23,7 @@ be churn for no benefit on the non-tool paths.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -1435,6 +1436,52 @@ class LoopDeadlineExceeded(RuntimeError):
     ``INTERRUPTED_REPLY``) and from per-call ``SeatCallHardTimeout``."""
 
 
+@dataclass(frozen=True)
+class ToolBudgetState:
+    """Canonical tool-budget state returned by a ``consume_tool_budget``
+    hook after durably consuming one attempted-call slot. The loop
+    compares the totals against the caps the hook supplies; policy
+    (cap values, persistence) lives entirely with the hook's owner."""
+
+    attempted: int
+    streak: int
+    attempted_cap: int
+    streak_cap: int
+
+
+class ToolLoopBudgetExceeded(RuntimeError):
+    """The task's durable tool-call budget tripped: total attempted calls
+    passed the cap, or one fingerprint repeated past the streak cap.
+    Mechanism facts only — the caller routes it (typed control flow,
+    never model-visible prose; no sentinel string exists to spoof). The
+    slot that tripped was consumed but its call was NOT executed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        iterations: int,
+        attempted: int,
+        fingerprint: str,
+        streak: int,
+    ):
+        super().__init__(message)
+        self.reason = reason
+        self.iterations = iterations
+        self.attempted = attempted
+        self.fingerprint = fingerprint
+        self.streak = streak
+
+
+def _tool_call_fingerprint(name: str, args: dict) -> str:
+    """Canonical digest of one proposed call: tool name + sorted args.
+    Explains a storm (identical-call streaks); never bounds it — the
+    total attempted count is the jitter-proof bound."""
+    canonical = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
 #: Returned (by identity) from the tool-loop when ``should_abort`` fires (operator
 #: pressed ESC). First-person so it reads naturally as a Leader turn in the chat,
 #: BUT it is also a public sentinel: callers compare ``reply is INTERRUPTED_REPLY``
@@ -1469,6 +1516,7 @@ def run_llm_with_tools(
     metered_authorizer: Callable[[str, dict], "tuple[bool, str]"] | None = None,
     should_abort: Callable[[], bool] | None = None,
     deadline: float | None = None,
+    consume_tool_budget: Callable[[str], "ToolBudgetState"] | None = None,
 ) -> str:
     """Run a function-calling loop. Returns the model's final text.
 
@@ -1714,6 +1762,42 @@ def run_llm_with_tools(
                     f"{call.name!r} — remaining calls in this response are "
                     f"not started"
                 )
+            # Durable tool-budget consumption, BEFORE any dispatch branch:
+            # every attempt category below (unknown/unlisted tool, permission
+            # or broker deny, metered deny/replay, cache hit, plain execution)
+            # consumes one attempted-call slot — each is evidence the model
+            # is still looping, whether or not a tool body runs. Consume
+            # precedes execution so a crash in between burns the slot, and a
+            # hook failure executes nothing (fail closed, exception
+            # propagates). Over-cap → typed trip: the call is counted but
+            # NEVER executed, mid-multi-call response included.
+            if consume_tool_budget is not None:
+                fingerprint = _tool_call_fingerprint(call.name, dict(call.args))
+                budget = consume_tool_budget(fingerprint)
+                if budget.attempted > budget.attempted_cap:
+                    raise ToolLoopBudgetExceeded(
+                        f"tool-call budget exceeded at iteration "
+                        f"{iteration + 1}: {budget.attempted} attempted "
+                        f"calls passed the cap of {budget.attempted_cap} — "
+                        f"{call.name!r} not executed",
+                        reason="total_attempted_calls",
+                        iterations=iteration + 1,
+                        attempted=budget.attempted,
+                        fingerprint=fingerprint,
+                        streak=budget.streak,
+                    )
+                if budget.streak > budget.streak_cap:
+                    raise ToolLoopBudgetExceeded(
+                        f"identical tool call repeated {budget.streak} "
+                        f"times in a row (cap {budget.streak_cap}) at "
+                        f"iteration {iteration + 1} — {call.name!r} not "
+                        f"executed",
+                        reason="repeated_identical_call",
+                        iterations=iteration + 1,
+                        attempted=budget.attempted,
+                        fingerprint=fingerprint,
+                        streak=budget.streak,
+                    )
             # Enforce the loadout authority boundary. An unlisted tool
             # resolves to the same safe deny path as an unknown one — refused,
             # never executed, fed back so the model can re-plan within its tools.
