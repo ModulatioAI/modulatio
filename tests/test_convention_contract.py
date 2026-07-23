@@ -866,15 +866,15 @@ def test_dropped_task_save_leaves_plan_uncommitted_zero_producers(
     orch = _kickoff_orchestrator(
         project, _WEBAPP_PLAN, producer_calls, monkeypatch)
 
-    real_save = store_mod.save_task
+    real_create = store_mod.create_task
 
-    def _dropping_save(code, task, body="", run_id=None):
+    def _dropping_create(code, task, body="", run_id=None):
         if task.description == "server module":
             return task  # write silently lost — never reaches disk
-        return real_save(code, task, body=body, run_id=run_id)
+        return real_create(code, task, body=body, run_id=run_id)
 
-    monkeypatch.setattr(store_mod, "save_task", _dropping_save)
-    monkeypatch.setattr(orch_mod.store, "save_task", _dropping_save)
+    monkeypatch.setattr(store_mod, "create_task", _dropping_create)
+    monkeypatch.setattr(orch_mod.store, "create_task", _dropping_create)
     orch.kickoff("build the webapp package")
 
     assert producer_calls == []

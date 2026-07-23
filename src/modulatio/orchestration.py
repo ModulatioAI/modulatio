@@ -429,6 +429,7 @@ def _merge_task_result(
     summary: RunSummary,
     *,
     save_task: "Callable[[Task], None] | None" = None,
+    save_child: "Callable[[Task], None] | None" = None,
     merged_ids: set | None = None,
 ) -> None:
     """Fold one worker ``result`` into shared state on the MAIN THREAD.
@@ -464,8 +465,12 @@ def _merge_task_result(
             continue
         if merged_ids is not None:
             merged_ids.add(child.id)
-        if save_task is not None:
-            save_task(child)
+        # A deferred child may be reaching the store for the FIRST time —
+        # a creation, not an update — so children take their own persist
+        # path when one is provided.
+        persist = save_child if save_child is not None else save_task
+        if persist is not None:
+            persist(child)
         if child not in summary.tasks:
             summary.tasks.append(child)
     for d in result.drafts:
@@ -5830,7 +5835,14 @@ class Orchestrator:
         corrupt) FAILS CLOSED with a typed raise before any model call —
         a missing record is the moment persistence is least trustworthy,
         never permission to run an uncapped loop. Store I/O failures
-        inside the hook normalize to the same typed outcome."""
+        inside the hook normalize to the same typed outcome.
+
+        KNOWN RESIDUAL: this budget binds the function-call tool loop.
+        A single-shot producer call on a backend that executes tools
+        natively inside its own subprocess is NOT consumed here — no
+        pre-execution seam exists there yet; its calls are bounded only
+        by the per-call timeout, hard kill, dispatch breaker, and
+        confinement walls. Never present that lane as budget-enforced."""
         from modulatio import runners as _runners
         canonical = store.get_task(
             self.project.code, task.id, run_id=self.project.run_id)
@@ -6050,7 +6062,7 @@ class Orchestrator:
                     # (availability-shaped, so the fallback chain advances
                     # to a function-loop seat) rather than run uncapped.
                     from modulatio import claude_cli as _clay_refuse
-                    raise _clay_refuse.ClaudeUnavailable(
+                    raise _clay_refuse.NativeToolLoopRefused(
                         "seat runs its tool loop natively — refused for a "
                         "budgeted tool-using producer task (no "
                         "pre-execution budget seam); falling back")
@@ -8564,7 +8576,15 @@ class Orchestrator:
         so the pre-run and post-run calls coalesce to one final entry."""
         buf = getattr(self._tls, "child_tasks", None)
         if buf is None:
-            store.save_task(self.project.code, child, run_id=self.project.run_id)
+            # A decompose child's FIRST persist is a creation (ordinary
+            # saves never create); a re-persist of an existing child
+            # record updates it.
+            try:
+                store.create_task(
+                    self.project.code, child, run_id=self.project.run_id)
+            except ToolBudgetConflict:
+                store.save_task(
+                    self.project.code, child, run_id=self.project.run_id)
             return
         for i, c in enumerate(buf):
             if c.id == child.id:
@@ -9598,6 +9618,16 @@ class Orchestrator:
         def _save(task: Task) -> None:
             self._merge_save(task, summary)
 
+        def _save_child(child: Task) -> None:
+            # First-time deferred children CREATE their record; children
+            # already persisted (the mint materialization barrier, or a
+            # prior merge) update through the monotonic path.
+            try:
+                store.create_task(
+                    self.project.code, child, run_id=self.project.run_id)
+            except ToolBudgetConflict:
+                self._merge_save(child, summary)
+
         def _cascade_dep_failures() -> None:
             for t in tasks:
                 if not _runnable(t):
@@ -9693,7 +9723,8 @@ class Orchestrator:
                         if res is not None:
                             self._merge_wave_artifacts({tid: res}, summary)
                             _merge_task_result(
-                                res, summary, save_task=_save, merged_ids=merged_ids,
+                                res, summary, save_task=_save,
+                                save_child=_save_child, merged_ids=merged_ids,
                             )
                     finally:
                         # J1: release agent + path + id together on EVERY exit
@@ -10279,9 +10310,15 @@ class Orchestrator:
                 # held — a sleeping worker is not a task magnet). No wait
                 # after the FINAL attempt (the QC backstop shouldn't queue
                 # behind a dead sleep).
+                from modulatio import claude_cli as _clay_types
                 from modulatio import runners as _runners
                 if _runners.is_availability_error(exc):
-                    if not in_qc_phase:
+                    # An architectural refusal (native-tool-loop seat on a
+                    # budgeted task) is availability-shaped for the chain
+                    # but the seat itself is healthy — never cool it.
+                    if not in_qc_phase and not isinstance(
+                        exc, _clay_types.NativeToolLoopRefused,
+                    ):
                         self._note_seat_unavailable(t.assigned_agent_id)
                     if attempt + 1 < remaining:
                         self.abort_event.wait(_AVAILABILITY_RETRY_BACKOFF_S[
@@ -11716,8 +11753,16 @@ class Orchestrator:
         its verification read is temporarily unavailable); a foreign
         authority on the diagnostic read is a typed conflict."""
         with self._mint_barrier_lock:
-            store.save_task(self.project.code, child,
-                            run_id=self.project.run_id)
+            # First materialization CREATES the child record; recovery
+            # re-materialization of an already-persisted child (or one
+            # carrying prior-life budget state) updates it. Try-create-
+            # then-update keeps each branch atomic under the store lock.
+            try:
+                store.create_task(self.project.code, child,
+                                  run_id=self.project.run_id)
+            except ToolBudgetConflict:
+                store.save_task(self.project.code, child,
+                                run_id=self.project.run_id)
             reloaded = store.get_task(
                 self.project.code, child.id, run_id=self.project.run_id)
             if reloaded is None:
@@ -12086,7 +12131,17 @@ class Orchestrator:
                 )
             )
             t.status = TaskStatus.BLOCKED
-            store.save_task(self.project.code, t, run_id=self.project.run_id)
+            # Rejection can fire before OR after the plan's first persist —
+            # create the record when this task never reached the creation
+            # seam, update it when it did.
+            if store.get_task(
+                self.project.code, t.id, run_id=self.project.run_id,
+            ) is None:
+                store.create_task(
+                    self.project.code, t, run_id=self.project.run_id)
+            else:
+                store.save_task(
+                    self.project.code, t, run_id=self.project.run_id)
             summary.tasks.append(t)
 
         # Block the goal too. Without this, the rejected goal stays
@@ -16603,9 +16658,9 @@ class Orchestrator:
 
             for t in tasks:
                 if t.status is TaskStatus.BLOCKED:
-                    # Ticketed by the dispatch step above. Persist the
-                    # state and keep moving — producer does not run.
-                    store.save_task(self.project.code, t, run_id=self.project.run_id)
+                    # Ticketed by the dispatch step above. First persist of
+                    # a freshly planned task — the creation seam.
+                    store.create_task(self.project.code, t, run_id=self.project.run_id)
                     summary.tasks.append(t)
                     continue
                 if t.assigned_agent_id:
@@ -16625,7 +16680,8 @@ class Orchestrator:
                     )
                 )
                 t.status = TaskStatus.DISPATCHED
-                store.save_task(self.project.code, t, run_id=self.project.run_id)
+                # First persist of a freshly planned task — the creation seam.
+                store.create_task(self.project.code, t, run_id=self.project.run_id)
                 summary.tasks.append(t)
 
             # Commit barrier: the exact expected set + projections verify

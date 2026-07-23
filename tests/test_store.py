@@ -21,6 +21,17 @@ from modulatio.types import (
 PROJECT_CODE = "TST"
 
 
+
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
+
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
@@ -254,7 +265,7 @@ def test_task_roundtrip_and_filter(project: Path):
             goal_id="TST-G-001",
             description=f"draft essay {i + 1}",
         )
-        store.save_task(PROJECT_CODE, t)
+        _seed_task_record(PROJECT_CODE, t)
     tasks = store.list_tasks(PROJECT_CODE, goal_id="TST-G-001")
     assert len(tasks) == 3
     assert all(t.description.startswith("draft essay") for t in tasks)
@@ -268,7 +279,7 @@ def test_corrupt_task_file_does_not_brick_listing(project: Path):
     from uuid import uuid4
     pid = uuid4()
     for tid in ("TST-T-A", "TST-T-B", "TST-T-C"):
-        store.save_task(
+        _seed_task_record(
             PROJECT_CODE,
             Task(id=tid, project_id=pid, goal_id="TST-G-001", description="d"),
         )
@@ -321,7 +332,7 @@ def _seed_tasks(*ids: str):
     from uuid import uuid4
     pid = uuid4()
     for tid in ids:
-        store.save_task(
+        _seed_task_record(
             PROJECT_CODE,
             Task(id=tid, project_id=pid, goal_id="TST-G-001", description="d"),
         )
@@ -417,7 +428,7 @@ def test_write_entity_is_atomic_no_partial_or_leftover_tmp(project: Path):
     for i in range(5):
         t = store.get_task(PROJECT_CODE, "TST-T-ATOMIC")
         t.description = f"rev {i}"
-        store.save_task(PROJECT_CODE, t)
+        _seed_task_record(PROJECT_CODE, t)
     tasks_dir = store._task_path(PROJECT_CODE, "TST-T-ATOMIC").parent
     assert not list(tasks_dir.glob("*.tmp"))
     assert not list(tasks_dir.glob(".*tmp*"))
@@ -465,7 +476,7 @@ def test_non_ascii_entity_reads_under_c_locale_not_quarantined(
     # Non-ASCII in the BODY (the frontmatter is yaml-escaped to ASCII by
     # safe_dump, but _compose writes the body raw): em-dash + accented name +
     # curly quotes land as real multibyte utf-8 on disk.
-    store.save_task(
+    _seed_task_record(
         PROJECT_CODE,
         Task(
             id="TST-T-NONASCII",

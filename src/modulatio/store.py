@@ -595,7 +595,13 @@ def _reopen_affected(
                     rationale=redo_rationale,
                 )
             )
-            save_task(project_code, task, run_id=run_id)
+            # This helper runs INSIDE the caller's ``_store_lock``
+            # transaction (the guarded ``save_task`` would deadlock on the
+            # non-reentrant lock). The record was read from canonical
+            # UNDER the held lock and only status/transition fields were
+            # touched, so the budget tuple is canonical by construction
+            # and no consume can interleave before this write.
+            _save_task_unguarded(project_code, task, run_id=run_id)
 
 
 def get_ticket(project_code: str, ticket_id: str, run_id: str | None = None) -> Ticket | None:
@@ -797,6 +803,75 @@ def _task_path(code: str, task_id: str, run_id: str | None = None) -> Path:
     return _scope_dir(code, run_id) / "tasks" / f"{task_id}.md"
 
 
+def _read_canonical_task_authority(
+    project_code: str, task_id: str, run_id: str | None,
+) -> Task | None:
+    """Strict canonical read for AUTHORITY-SENSITIVE writes. ``None`` means
+    GENUINELY ABSENT (no file, no quarantine record) — the only state a
+    creation seam may act on. Quarantined, unreadable, and unparseable
+    records raise typed instead of collapsing to "missing": an update path
+    must never interpret a record it cannot trust as permission to write a
+    fresh one, and this reader never quarantines or mutates anything."""
+    from modulatio.types import ToolBudgetConflict
+
+    path = _task_path(project_code, task_id, run_id=run_id)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        try:
+            quarantined = any(path.parent.glob(f"{path.stem}.broken.*"))
+        except OSError:
+            quarantined = False
+        if quarantined:
+            raise ToolBudgetConflict(
+                f"task {task_id}: canonical record is quarantined as "
+                f"corrupt — a quarantine never authorizes a fresh record",
+                canonical=None) from None
+        return None
+    except OSError as exc:
+        raise ToolBudgetConflict(
+            f"task {task_id}: canonical record unreadable "
+            f"({type(exc).__name__}: {exc}) — original bytes left "
+            f"untouched", canonical=None) from exc
+    try:
+        return _parse_entity(text, Task)  # type: ignore[return-value]
+    except _PARSE_ERRORS as exc:
+        raise ToolBudgetConflict(
+            f"task {task_id}: canonical record does not parse — corrupt "
+            f"authority is never overwritten by a held copy",
+            canonical=None) from exc
+
+
+def create_task(
+    project_code: str, task: Task, body: str = "", run_id: str | None = None,
+) -> Task:
+    """THE creation seam: persist a genuinely NEW task record. Refuses an
+    existing or quarantined record (creation never overwrites) and a
+    non-zero budget tuple (budget state only ever comes from the consume
+    barrier) — so no settlement, merge, or re-entry path can resurrect a
+    lost record with fresh authority by 'creating' it."""
+    from modulatio.types import ToolBudgetConflict
+
+    with _store_lock:
+        current = _read_canonical_task_authority(
+            project_code, task.id, run_id)
+        if current is not None:
+            raise ToolBudgetConflict(
+                f"task {task.id} already has a durable record — creation "
+                f"never overwrites; ordinary saves update",
+                canonical=current.model_copy(deep=True))
+        if (
+            task.tool_budget_sequence or task.tool_calls_attempted
+            or task.tool_call_streak or task.storm_strikes
+            or task.tool_call_fingerprint is not None
+        ):
+            raise ToolBudgetConflict(
+                f"task {task.id}: creation requires a zeroed budget tuple "
+                f"— budget state only ever comes from the consume barrier",
+                canonical=None)
+        return _save_task_unguarded(project_code, task, body=body, run_id=run_id)
+
+
 def _save_task_unguarded(
     project_code: str, task: Task, body: str = "", run_id: str | None = None,
 ) -> Task:
@@ -845,14 +920,23 @@ def _project_budget_authority(current: Task, candidate: Task) -> None:
 
 
 def save_task(project_code: str, task: Task, body: str = "", run_id: str | None = None) -> Task:
-    """Persist ``task``. The canonical record's tool-budget tuple is
-    authoritative on every ordinary save — a stale snapshot mirrors it and
-    an impossible one raises typed — serialized on the store lock with the
-    consume barrier so no save can interleave into a durable consume."""
+    """UPDATE ``task``'s existing durable record. The canonical budget
+    tuple is authoritative — a stale snapshot mirrors it and an impossible
+    one raises typed — serialized on the store lock with the consume
+    barrier so no save can interleave into a durable consume. Updates
+    NEVER create: a missing, quarantined, or unreadable record is a typed
+    refusal (creation lives at :func:`create_task`), so a lost authority
+    record can never be resurrected at sequence zero by a held copy."""
+    from modulatio.types import ToolBudgetConflict
+
     with _store_lock:
-        current = get_task(project_code, task.id, run_id=run_id)
-        if current is not None:
-            _project_budget_authority(current, task)
+        current = _read_canonical_task_authority(project_code, task.id, run_id)
+        if current is None:
+            raise ToolBudgetConflict(
+                f"task {task.id}: no canonical record to update — ordinary "
+                f"saves never create (create_task is the creation seam)",
+                canonical=None)
+        _project_budget_authority(current, task)
         return _save_task_unguarded(project_code, task, body=body, run_id=run_id)
 
 
@@ -884,11 +968,17 @@ def save_task_monotonic(
 def _save_task_monotonic_locked(
     project_code: str, candidate: Task, run_id: str | None,
 ) -> Task:
-    from modulatio.types import DecomposeMintConflict
+    from modulatio.types import DecomposeMintConflict, ToolBudgetConflict
 
-    current = get_task(project_code, candidate.id, run_id=run_id)
+    current = _read_canonical_task_authority(
+        project_code, candidate.id, run_id)
     if current is None:
-        return _save_task_unguarded(project_code, candidate, run_id=run_id)
+        # The merge's subject was persisted before dispatch by contract —
+        # its record being gone means the authority is lost, and a worker
+        # snapshot must never refound it with fresh budget.
+        raise ToolBudgetConflict(
+            f"task {candidate.id}: no canonical record to merge into — a "
+            f"wave merge never recreates a missing task", canonical=None)
     if current.decompose_mint is not None:
         if (
             candidate.decompose_mint is not None
@@ -948,7 +1038,7 @@ def consume_tool_call_budget(
     from modulatio.types import ToolBudgetConflict
 
     with _store_lock:
-        current = get_task(project_code, task_id, run_id=run_id)
+        current = _read_canonical_task_authority(project_code, task_id, run_id)
         if current is None:
             raise ToolBudgetConflict(
                 f"task {task_id}: no durable record to consume tool budget "
@@ -1086,6 +1176,7 @@ def list_tasks(
 
 
 __all__ = [
+    "create_task",
     "create_ticket",
     "get_goal",
     "get_task",

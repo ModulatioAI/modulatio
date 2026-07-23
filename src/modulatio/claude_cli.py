@@ -310,6 +310,15 @@ class ClaudeUnavailable(RuntimeError):
     it, so it advances to a fallback the same way a litellm RateLimitError does."""
 
 
+class NativeToolLoopRefused(ClaudeUnavailable):
+    """A seat whose tool loop runs natively inside its own subprocess was
+    refused for a BUDGETED tool-using task — no pre-execution seam exists
+    there to durably consume before each call. Availability-SHAPED (the
+    subclass keeps the fallback chain advancing to a function-loop seat)
+    but not an availability EVENT: the seat is healthy for unbudgeted
+    lanes, so this must never cool it out of the pool."""
+
+
 #: Bounded wait-retries for a TRANSIENT Clay provider error (529/overload/5xx) —
 #: the "wait state": hold for the blip to clear before falling back. The wait is
 #: SYNCHRONOUS and per-seat (worst case 1+3+8 = 12s), so a concurrent wave holds one

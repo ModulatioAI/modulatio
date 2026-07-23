@@ -29,6 +29,17 @@ from modulatio.types import (
 PROJECT_CODE = "APR"
 
 
+
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
+
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch) -> Project:
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
@@ -237,7 +248,7 @@ def _create_task(project: Project, goal_id: str, status=None) -> "Task":  # noqa
         description="A task under scrutiny",
         status=status or TaskStatus.QC_REJECTED,
     )
-    store.save_task(project.code, t)
+    _seed_task_record(project.code, t)
     return t
 
 
@@ -703,7 +714,7 @@ def test_reexecute_goal_runs_each_pending_task(project: Project, monkeypatch):
         status=TaskStatus.COMPLETED,
     )
     for t in (pending_a, pending_b, completed):
-        store.save_task(project.code, t)
+        _seed_task_record(project.code, t)
 
     orch = Orchestrator(project, runners={})
     called: list[str] = []
@@ -738,7 +749,7 @@ def test_reexecute_goal_marks_redispatched_in_transition_log(project: Project, m
         description="A",
         status=TaskStatus.PENDING,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     orch = Orchestrator(project, runners={})
     monkeypatch.setattr(

@@ -35,6 +35,18 @@ from modulatio.types import Project, Task, TaskStatus, TicketPriority
 PROJECT_CODE = "CTX"
 
 
+
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio import store as _seed_store
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return _seed_store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return _seed_store.save_task(code, task, body=body, run_id=run_id)
+
+
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch) -> Project:
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
@@ -65,13 +77,20 @@ def project_with_run(tmp_path: Path, monkeypatch) -> Project:
 
 
 def _make_task() -> Task:
-    return Task(
+    task = Task(
         id="CTX-T-001",
         project_id=uuid4(),
         goal_id="CTX-G-001",
         description="anything",
         max_retries=3,
     )
+    # The paths under test update the durable record (ordinary saves
+    # never create); register it at construction, keep-existing on repeat.
+    try:
+        _seed_task_record(PROJECT_CODE, task, run_id="run-ctx-001")
+    except Exception:
+        pass
+    return task
 
 
 def _make_orchestrator(project: Project) -> Orchestrator:
@@ -969,7 +988,6 @@ def test_manifest_from_deps_includes_fallback_path_units(project_with_run):
     the #85 recipe-verify saw a unit set that mismatched the authoritative
     deps, fail-closing QC to the byte-read that overflowed. A null-path dep
     contributes its drafts/<task-id>.<ext> fallback unit instead."""
-    from modulatio import store as _store
 
     orch = _make_orchestrator(project_with_run)
     project = orch.project
@@ -979,8 +997,8 @@ def test_manifest_from_deps_includes_fallback_path_units(project_with_run):
     d2 = _make_task()
     d2.id = "CTX-T-102"
     d2.output_path = None  # fits-whole gather: writes to the drafts fallback
-    _store.save_task(project.code, d1, run_id=project.run_id)
-    _store.save_task(project.code, d2, run_id=project.run_id)
+    _seed_task_record(project.code, d1, run_id=project.run_id)
+    _seed_task_record(project.code, d2, run_id=project.run_id)
     asm = _make_task()
     asm.id = "CTX-T-103"
     asm.required_skills = ["document-assembly"]
@@ -996,7 +1014,6 @@ def test_apply_assembly_manifest_joins_fallback_path_units(project_with_run):
     resolved fallback units but the _apply_assembly_manifest allowlist still
     filtered them before the join — the content defect survived half-fixed.
     Every authoritative dep-output consumer shares ONE resolver."""
-    from modulatio import store as _store
 
     orch = _make_orchestrator(project_with_run)
     project = orch.project
@@ -1011,8 +1028,8 @@ def test_apply_assembly_manifest_joins_fallback_path_units(project_with_run):
     d2 = _make_task()
     d2.id = "CTX-T-202"
     d2.output_path = None
-    _store.save_task(project.code, d1, run_id=project.run_id)
-    _store.save_task(project.code, d2, run_id=project.run_id)
+    _seed_task_record(project.code, d1, run_id=project.run_id)
+    _seed_task_record(project.code, d2, run_id=project.run_id)
     asm = _make_task()
     asm.id = "CTX-T-203"
     asm.required_skills = ["document-assembly"]

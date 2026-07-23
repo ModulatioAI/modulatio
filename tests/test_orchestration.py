@@ -72,6 +72,16 @@ def three_retries(monkeypatch) -> None:
     monkeypatch.setenv("MODULATIO_TASK_MAX_RETRIES", "3")
 
 
+def _seed_task_record(code, task, run_id=None, body=""):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
+
 def _seed_producers(code: str = PROJECT_CODE, n: int = 3) -> None:
     """Seed a producer roster so NO_CONSTRAINT tasks route through schedule_wave
     (capability + load-balance) like a real run. The producers' ``stub`` model
@@ -2014,7 +2024,7 @@ def _prepare_exhausted_goal(project: Project, project_code: str):
             artifact_kind="text",
             status=TaskStatus.COMPLETED,
         )
-        store.save_task(project_code, t)
+        _seed_task_record(project_code, t)
 
     return g
 
@@ -8074,7 +8084,7 @@ def test_breaker_trips_in_llm_with_tools(project, monkeypatch):
         tool_loadout=[],
     )
     task = _qcfix_task(artifact_kind="text")
-    store.save_task(PROJECT_CODE, task)  # tool budget anchors on the record
+    _seed_task_record(PROJECT_CODE, task)  # tool budget anchors on the record
     path = orch._resolve_draft_path(task)
     path.parent.mkdir(parents=True, exist_ok=True)
     with pytest.raises(DispatchAbort):
@@ -9067,6 +9077,13 @@ def _deliverable_task(code, *, output, floor=None):
     t.status = TaskStatus.COMPLETED
     t.deliverable = True
     t.output_path = output
+    # The verify/redo paths under test update the durable record — seed it
+    # (ordinary saves never create). These tests all run per-code vaults
+    # with run "run-1".
+    try:
+        _seed_task_record(code, t, run_id="run-1")
+    except Exception:
+        pass
     return t
 
 
@@ -9185,6 +9202,10 @@ def _redo_goal_and_tasks(code, n=2):
         t.status = TaskStatus.COMPLETED
         t.deliverable = True
         t.output_path = f"d{i}.md"
+        try:
+            _seed_task_record(code, t, run_id="run-1")
+        except Exception:
+            pass
         tasks.append(t)
     return goal, tasks
 
@@ -9430,7 +9451,7 @@ def test_team_status_reports_live_state(tmp_path, monkeypatch):
     t.status = TaskStatus.COMPLETED
     t.deliverable = True
     t.output_path = "report.md"
-    store.save_task(orch.project.code, t, run_id="run-1")
+    _seed_task_record(orch.project.code, t, run_id="run-1")
     art = orch._run_artifacts_root("run-1")
     art.mkdir(parents=True, exist_ok=True)
     (art / "report.md").write_text("# Report\n\n" + " ".join(["w"] * 50) + "\n")
@@ -10560,6 +10581,10 @@ def _produce_task(code, idx, kind="document", *, skills=(), evidence=()):
              required_skills=list(skills), evidence_required=list(evidence))
     t.status = TaskStatus.PENDING
     t.deliverable = True
+    try:
+        _seed_task_record(code, t, run_id="run-1")
+    except Exception:
+        pass
     return t
 
 
@@ -10842,7 +10867,7 @@ def test_cross_goal_assembler_wires_units_from_store(project, tmp_path):
                required_skills=["document-assembly"], deliverable=True,
                output_path="book.md")
     for t in (u2, u1, asm):  # saved out of order on purpose
-        store.save_task(code, t)
+        _seed_task_record(code, t)
 
     orch._wire_cross_goal_assembler_deps([asm])
 
@@ -10857,7 +10882,6 @@ def test_assembler_engine_binds_when_producer_emits_no_manifest(project, tmp_pat
     outputs and concatenates the REAL units from disk — the deliverable never
     depends on the producer cooperating."""
     from uuid import uuid4
-    from modulatio import store
     from modulatio.types import Task
 
     artifacts = tmp_path / "art"
@@ -10874,7 +10898,7 @@ def test_assembler_engine_binds_when_producer_emits_no_manifest(project, tmp_pat
                description="assemble", required_skills=["document-assembly"],
                depends_on=["X-T-001", "X-T-002"], summary_for_state_doc="")
     for t in (u1, u2):
-        store.save_task(code, t)
+        _seed_task_record(code, t)
 
     # The producer emitted NO manifest — pure fabrication-style prose.
     out = orch._apply_assembly_manifest(
@@ -10959,7 +10983,7 @@ def test_cross_goal_wiring_is_product_agnostic_and_sealed(project, tmp_path):
             store.save_goal(code, Goal(id=gid, project_id=uuid4(), description=gid,
                                        success_criteria="s"), run_id=rid)
         for tid, gid, kind in units:
-            store.save_task(code, Task(id=tid, project_id=uuid4(), goal_id=gid,
+            _seed_task_record(code, Task(id=tid, project_id=uuid4(), goal_id=gid,
                                        description="u", output_path=f"{tid}.x",
                                        artifact_kind=kind, deliverable=True), run_id=rid)
         asm = Task(id=asm_id, project_id=uuid4(), goal_id=asm_goal,
@@ -10999,7 +11023,6 @@ def test_assembler_engine_binds_in_every_producer_mode(project, tmp_path):
     the producer fabricated a digest. The producer LLM call must NEVER be made for
     a resolvable assembler, whatever the mode."""
     from uuid import uuid4
-    from modulatio import store
     from modulatio.types import Task
 
     artifacts = tmp_path / "art"
@@ -11009,7 +11032,7 @@ def test_assembler_engine_binds_in_every_producer_mode(project, tmp_path):
     orch = _assembly_orch(project, tmp_path, artifacts)
     code = project.code
     for tid, op in (("X-T-001", "s1.txt"), ("X-T-002", "s2.txt")):
-        store.save_task(code, Task(id=tid, project_id=uuid4(), goal_id="X-G-001",
+        _seed_task_record(code, Task(id=tid, project_id=uuid4(), goal_id="X-G-001",
                                    description="u", output_path=op, deliverable=True))
     asm = Task(id="X-T-009", project_id=uuid4(), goal_id="X-G-002",
                description="assemble", required_skills=["document-assembly"],
@@ -11472,7 +11495,7 @@ def test_skill_routed_retry_carries_corrective_notes(project, monkeypatch):
     )
     task = _qcfix_task(artifact_kind="code", producer_mode="diff",
                        required_skills=["coding"])
-    store.save_task(PROJECT_CODE, task)  # tool budget anchors on the record
+    _seed_task_record(PROJECT_CODE, task)  # tool budget anchors on the record
     path = orch._resolve_draft_path(task)
     path.parent.mkdir(parents=True, exist_ok=True)
     orch._llm_with_tools_execute(
@@ -11589,7 +11612,7 @@ def test_unbacked_loadout_tool_is_dropped_not_wedged(project):
     )
     task = _qcfix_task(assigned_agent_id="james",
                        required_skills=["generate-images"])
-    store.save_task(PROJECT_CODE, task)  # tool budget anchors on the record
+    _seed_task_record(PROJECT_CODE, task)  # tool budget anchors on the record
     path = orch._resolve_draft_path(task)
     path.parent.mkdir(parents=True, exist_ok=True)
     out_path, _checksum, _tokens = orch._llm_with_tools_execute(
@@ -11900,7 +11923,7 @@ def test_wave_crash_handler_sweeps_leaked_staging(tmp_path, monkeypatch):
     raises and the synthetic crash result carries NO staging_root — so
     _merge_wave_artifacts won't tear that task's .staging/<tid> dir down. The
     main-thread collection handler must sweep it, or it leaks every crash."""
-    from modulatio import dispatch, store
+    from modulatio import dispatch
 
     orch = _orch_rsw(tmp_path, monkeypatch)
     goal = Goal(
@@ -11913,7 +11936,7 @@ def test_wave_crash_handler_sweeps_leaked_staging(tmp_path, monkeypatch):
         description="t", depends_on=[],
     )
     task.status = TaskStatus.PENDING
-    store.save_task(orch.project.code, task, run_id=orch.project.run_id)
+    _seed_task_record(orch.project.code, task, run_id=orch.project.run_id)
 
     # Assign the task so the wave actually submits it to the pool.
     monkeypatch.setattr(
@@ -11990,7 +12013,6 @@ def test_assembly_allowlist_filter_rejects_undeclared_dotfile(tmp_path, monkeypa
     canonical _norm_unit keeps `.config.json` distinct from `config.json`, so
     the undeclared dotfile is correctly filtered OUT."""
     orch = _orch_rsw(tmp_path, monkeypatch)
-    from modulatio import store
 
     # The ONLY declared dependency output is `config.json` (no leading dot).
     dep = Task(
@@ -11999,7 +12021,7 @@ def test_assembly_allowlist_filter_rejects_undeclared_dotfile(tmp_path, monkeypa
     )
     dep.output_path = "config.json"
     dep.status = TaskStatus.COMPLETED
-    store.save_task(orch.project.code, dep, run_id=orch.project.run_id)
+    _seed_task_record(orch.project.code, dep, run_id=orch.project.run_id)
 
     art = orch._artifacts_root()
     art.mkdir(parents=True, exist_ok=True)
@@ -12284,7 +12306,7 @@ def test_wave_reflect_rejects_assembler_skill_swap(project: Project):
         required_skills=["document-assembly"],
         status=TaskStatus.PENDING,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     reflection = json.dumps(
         {
@@ -12375,7 +12397,7 @@ def test_tool_loop_honors_binary_assembly_output_file(project, tmp_path, monkeyp
     Pre-fix the receipt text was persisted and the binary temp file leaked."""
     orch = _orch_r4(project)
     task = _task(project_id=project.id, artifact_kind="media")
-    store.save_task(PROJECT_CODE, task)  # tool budget anchors on the record
+    _seed_task_record(PROJECT_CODE, task)  # tool budget anchors on the record
 
     # Stand in for runners.run_llm_with_tools: the producer "finishes" with a
     # body the engine would normally shape into the deliverable.
@@ -13098,7 +13120,7 @@ def test_wave_capacity_starved_blocks_tasks(project: Project, monkeypatch):
     )
     task = _make_task(pid, "R2A-T-CAP", required_skills=["writing"])
     task.status = TaskStatus.PENDING
-    store.save_task(project.code, task, run_id=project.run_id)
+    _seed_task_record(project.code, task, run_id=project.run_id)
 
     # Force schedule_wave to return an empty assignment set (capacity starved):
     # the only producers carry cap 0, so the skill-routed task is deferred and
@@ -13273,7 +13295,7 @@ def test_verify_runs_probes_and_unavailable_clamps_without_fixer(
                 description="g", success_criteria="works",
                 status=GoalStatus.IN_PROGRESS)
     store.save_goal(project.code, goal)
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
     fixes = []
     monkeypatch.setattr(orch, "_leader_fix_in_place",
                         lambda *a, **k: fixes.append(1) or True)

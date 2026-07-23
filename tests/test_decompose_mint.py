@@ -49,7 +49,26 @@ def _make_task(**overrides) -> Task:
         max_retries=3,
     )
     fields.update(overrides)
-    return Task(**fields)
+    task = Task(**fields)
+    # Every engine path under test assumes the production invariant that a
+    # driven task has a durable record (ordinary saves never create), so
+    # register the record at construction; a repeat id keeps the existing
+    # record and later explicit saves become the updates they model.
+    try:
+        store_mod.create_task(PROJECT_CODE, task, run_id="run-mnt-001")
+    except Exception:
+        pass
+    return task
+
+
+def _seed_task(task: Task, run_id: str | None = None) -> Task:
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store_mod.create_task(PROJECT_CODE, task, run_id=run_id)
+    except ToolBudgetConflict:
+        return store_mod.save_task(PROJECT_CODE, task, run_id=run_id)
 
 
 def _make_orchestrator(project: Project) -> Orchestrator:
@@ -349,11 +368,10 @@ def test_declared_task_target_collision_refuses(
 ):
     """A child key colliding with an already-declared task's target refuses —
     the reservation authority sees every declared task, not just the split."""
-    from modulatio import store
     from modulatio.orchestration import _DecomposeRefusal
     orch = _make_orchestrator(project_with_run)
     other = _make_task(id="MNT-T-777", output_path="drafts/taken.md")
-    store.save_task(PROJECT_CODE, other, run_id=project_with_run.run_id)
+    _seed_task(other, run_id=project_with_run.run_id)
     _planner_returns(monkeypatch,
         '[{"description":"a","output_path":"drafts/taken.md"},'
         '{"description":"b","output_path":"drafts/free.md"}]')
@@ -484,7 +502,7 @@ def test_mint_commits_marker_spend_and_record_in_one_parent_write(
     from modulatio import store
     orch = _make_orchestrator(project_with_run)
     parent = _make_task(max_retries=9)  # unspent: remaining 10
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
     assert handled is True
     stored = {
@@ -518,7 +536,7 @@ def test_crash_before_first_child_leaves_complete_committed_record(
     from modulatio.orchestration import RunSummary
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
 
     def _die(self, child):
@@ -545,7 +563,7 @@ def test_refusal_writes_no_mint_record(project_with_run, monkeypatch, tmp_path):
     from modulatio.orchestration import RunSummary
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     _planner_returns(monkeypatch, _nine_specs())
     summary = RunSummary(project=project_with_run)
     handled, refusal = orch._try_decompose_and_run(
@@ -598,7 +616,7 @@ def _committed_parent_no_children(orch, monkeypatch, project, tmp_path):
     from modulatio import store
     from modulatio.orchestration import RunSummary
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project.run_id)
+    _seed_task(parent, run_id=project.run_id)
     _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
 
     def _die(self, child):
@@ -675,7 +693,7 @@ def test_partial_materialization_preserves_existing_children(
     rec = reloaded.decompose_mint
     d1 = Task.model_validate(rec.child_descriptors[0])
     d1.status = TaskStatus.COMPLETED
-    store.save_task(PROJECT_CODE, d1, run_id=project_with_run.run_id)
+    _seed_task(d1, run_id=project_with_run.run_id)
     producer_calls = []
 
     def _spy(self, task, corrective_notes=""):
@@ -715,7 +733,7 @@ def test_planted_child_with_foreign_authority_is_typed_conflict(
     foreign = Task.model_validate(rec.child_descriptors[0])
     foreign.minted_by = "some-other-mint"
     foreign.description = "foreign payload"
-    store.save_task(PROJECT_CODE, foreign, run_id=project_with_run.run_id)
+    _seed_task(foreign, run_id=project_with_run.run_id)
     with pytest.raises(DecomposeMintConflict):
         orch._materialize_mint_children(reloaded)
     stored = {
@@ -770,12 +788,11 @@ def test_mint_fact_carries_stable_id_and_real_arithmetic(
     committed record, actual child count, cap, depth, and the pre-burn parent
     remaining — audit evidence with real arithmetic."""
     import json as _json
-    from modulatio import store
     orch = _make_orchestrator(project_with_run)
     events = []
     orch.activity_callback = lambda e: events.append(e)
     parent = _make_task(max_retries=9)
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
     assert handled is True
     audit = orch._scope_root() / "audit.jsonl"
@@ -796,11 +813,10 @@ def test_same_process_replay_emits_one_mint_row(
     """Re-entering the minted parent in the same process does not double the
     mint fact — the emitter dedups by stable id."""
     import json as _json
-    from modulatio import store
     from modulatio.orchestration import RunSummary
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
     assert handled is True
     orch._resume_decompose_mint(parent, RunSummary(project=project_with_run))
@@ -821,7 +837,7 @@ def test_restart_replay_counts_one_unique_mint_id(
     from modulatio.orchestration import RunSummary
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
     assert handled is True
     fresh = _make_orchestrator(project_with_run)  # restart: empty dedup set
@@ -941,12 +957,11 @@ def test_ordinary_task_never_claims_and_counts_per_attempt(
 
 
 def _plant_child(project, parent, idx, **overrides):
-    from modulatio import store
     from modulatio.types import Task
     d = dict(parent.decompose_mint.child_descriptors[idx])
     d.update(overrides)
     child = Task.model_validate(d)
-    store.save_task(PROJECT_CODE, child, run_id=project.run_id)
+    _seed_task(child, run_id=project.run_id)
     return child
 
 
@@ -1129,11 +1144,11 @@ def test_declared_artifact_keys_tracks_saves_updates_and_deletes(
     from modulatio import store
     run_id = project_with_run.run_id
     a = _make_task(id="MNT-T-K1", output_path="drafts/k1.md")
-    store.save_task(PROJECT_CODE, a, run_id=run_id)
+    _seed_task(a, run_id=run_id)
     keys = store.declared_artifact_keys(PROJECT_CODE, run_id=run_id)
     assert keys["drafts/k1.md"] == "MNT-T-K1"
     a.output_path = "drafts/k1-moved.md"
-    store.save_task(PROJECT_CODE, a, run_id=run_id)
+    _seed_task(a, run_id=run_id)
     keys = store.declared_artifact_keys(PROJECT_CODE, run_id=run_id)
     assert "drafts/k1.md" not in keys
     assert keys["drafts/k1-moved.md"] == "MNT-T-K1"
@@ -1161,7 +1176,7 @@ def test_wal_commit_is_durable_under_worker_deferral(
     from modulatio import store
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
     children = orch._attempt_decompose(parent, _ctx_err(tmp_path))
     assert isinstance(children, list)
@@ -1189,7 +1204,7 @@ def test_claim_is_durable_under_worker_deferral(
     orch = _make_orchestrator(project_with_run)
     child = _make_task(id="MNT-T-001-D1", minted_by="mint-1")
     child.lifetime_attempts = max(child.max_retries, 0)
-    store.save_task(PROJECT_CODE, child, run_id=project_with_run.run_id)
+    _seed_task(child, run_id=project_with_run.run_id)
     _enter_worker_tls(orch)
     try:
         orch._claim_and_count(child)
@@ -1284,7 +1299,7 @@ def test_merge_cannot_regress_barrier_state(project_with_run):
     current.lifetime_attempts = 4
     current.status = TaskStatus.COMPLETED
     current.decompose_mint = DecomposeMintRecord(mint_id="m-1")
-    store.save_task(PROJECT_CODE, current, run_id=run_id)
+    _seed_task(current, run_id=run_id)
     stale = _make_task(id="MNT-T-MONO", minted_by="mint-1")
     stale.lifetime_attempts = 0  # pre-claim snapshot
     store.save_task_monotonic(PROJECT_CODE, stale, run_id=run_id)
@@ -1303,7 +1318,7 @@ def test_merge_conflicting_claim_id_is_typed_conflict(project_with_run):
     run_id = project_with_run.run_id
     current = _make_task(id="MNT-T-MONO2", minted_by="mint-1")
     current.attempt_claim_id = "claim-1"
-    store.save_task(PROJECT_CODE, current, run_id=run_id)
+    _seed_task(current, run_id=run_id)
     imposter = _make_task(id="MNT-T-MONO2", minted_by="mint-1")
     imposter.attempt_claim_id = "claim-OTHER"
     with pytest.raises(DecomposeMintConflict):
@@ -1353,7 +1368,7 @@ def test_same_size_mtime_restored_replacement_is_observed(
     from modulatio import store
     run_id = project_with_run.run_id
     a = _make_task(id="MNT-T-SWP", output_path="drafts/aaa.md")
-    store.save_task(PROJECT_CODE, a, run_id=run_id)
+    _seed_task(a, run_id=run_id)
     keys = store.declared_artifact_keys(PROJECT_CODE, run_id=run_id)
     assert "drafts/aaa.md" in keys
     path = store._task_path(PROJECT_CODE, a.id, run_id=run_id)
@@ -1417,7 +1432,7 @@ def test_altered_immutable_descriptor_is_typed_conflict(
     rec = reloaded.decompose_mint
     planted = Task.model_validate(rec.child_descriptors[0])
     setattr(planted, field, value)
-    store.save_task(PROJECT_CODE, planted, run_id=project_with_run.run_id)
+    _seed_task(planted, run_id=project_with_run.run_id)
     producer_calls = []
     monkeypatch.setattr(
         Orchestrator, "_producer_execute",
@@ -1439,7 +1454,6 @@ def test_honest_reassigned_completed_child_is_preserved(
     engine legitimately changes after birth — assigned agent, status,
     counter, claim — must NOT be treated as authority; an honest completed
     child that was reassigned is preserved, not conflicted."""
-    from modulatio import store
     from modulatio.types import Task, TaskStatus
     orch = _make_orchestrator(project_with_run)
     reloaded = _committed_parent_no_children(
@@ -1450,7 +1464,7 @@ def test_honest_reassigned_completed_child_is_preserved(
     honest.status = TaskStatus.COMPLETED
     honest.lifetime_attempts = 99
     honest.attempt_claim_id = "claim-x"
-    store.save_task(PROJECT_CODE, honest, run_id=project_with_run.run_id)
+    _seed_task(honest, run_id=project_with_run.run_id)
     children = orch._materialize_mint_children(reloaded)
     got = {c.id: c for c in children}[honest.id]
     assert got.status is TaskStatus.COMPLETED
@@ -1466,11 +1480,11 @@ def test_audit_append_failure_keeps_mint_fact_recoverable(
     delivered — a later resume re-emits the same stable id and the durable
     fact lands."""
     import json as _json
-    from modulatio import compression, store
+    from modulatio import compression
     from modulatio.orchestration import RunSummary
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
 
     def _broken_append(path, row, lock=None, **kw):
         raise OSError("audit disk full")
@@ -1497,7 +1511,6 @@ def test_activity_callback_failure_does_not_lose_durable_fact(
     """A raising live-activity subscriber neither aborts the
     mint nor loses the durable audit fact (which lands BEFORE delivery)."""
     import json as _json
-    from modulatio import store
     orch = _make_orchestrator(project_with_run)
 
     def _bad_subscriber(event):
@@ -1506,7 +1519,7 @@ def test_activity_callback_failure_does_not_lose_durable_fact(
 
     orch.activity_callback = _bad_subscriber
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
     assert handled is True
     audit = orch._scope_root() / "audit.jsonl"
@@ -1526,7 +1539,7 @@ def test_fresh_process_reemit_appends_no_duplicate_row(
     from modulatio.orchestration import RunSummary
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
     assert handled is True
     fresh = _make_orchestrator(project_with_run)
@@ -1565,7 +1578,7 @@ def test_worker_path_wal_durable_before_first_child_write(
     from modulatio import store
     orch = _make_orchestrator(project_with_run)
     parent = _make_task(description="OVERFLOW-ME-PARENT")
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
     _worker_overflow_setup(orch, monkeypatch, "OVERFLOW-ME-PARENT")
     monkeypatch.setattr(
@@ -1603,7 +1616,7 @@ def test_worker_path_claim_durable_at_child_model_call(
     from modulatio import store
     orch = _make_orchestrator(project_with_run)
     parent = _make_task(description="OVERFLOW-ME-PARENT")
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     observed = {}
 
     def _model_call(self, agent_id, role, prompt, **kw):
@@ -1648,7 +1661,7 @@ def test_worker_death_after_wal_resumes_same_mint_from_fresh_process(
     from modulatio.orchestration import RunSummary
     orch = _make_orchestrator(project_with_run)
     parent = _make_task(description="OVERFLOW-ME-PARENT")
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     _worker_overflow_setup(orch, monkeypatch, "OVERFLOW-ME-PARENT")
     monkeypatch.setattr(
         Orchestrator, "_run",
@@ -1698,14 +1711,13 @@ def test_two_workers_contesting_one_key_exactly_one_mints(
     parent mints it."""
     import json as _json
     import threading
-    from modulatio import store
     orch = _make_orchestrator(project_with_run)
     parents = [
         _make_task(id="MNT-T-W1", description="OVERFLOW-ME-PARENT"),
         _make_task(id="MNT-T-W2", description="OVERFLOW-ME-PARENT"),
     ]
     for p in parents:
-        store.save_task(PROJECT_CODE, p, run_id=project_with_run.run_id)
+        _seed_task(p, run_id=project_with_run.run_id)
     _worker_overflow_setup(orch, monkeypatch, "OVERFLOW-ME-PARENT")
 
     def _split(self, role, prompt, **kw):
@@ -1753,7 +1765,7 @@ def test_verify_read_unavailable_after_save_is_not_a_refusal(
     for worker in (False, True):
         orch = _make_orchestrator(project_with_run)
         parent = _make_task(id=f"MNT-T-CP-{int(worker)}")
-        store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+        _seed_task(parent, run_id=project_with_run.run_id)
         _planner_returns(
             monkeypatch,
             f'[{{"description":"a","output_path":"drafts/b7-{int(worker)}-a.md"}},'
@@ -1800,12 +1812,11 @@ def test_verify_read_foreign_authority_is_typed_barrier_conflict(
     """Verification reads back a DIFFERENT mint authority —
     typed MintBarrierConflict: no children, no producer, no rollback, and no
     'nothing minted' refusal (the in-memory committed record is retained)."""
-    from modulatio import store
     from modulatio.orchestration import MintBarrierConflict, RunSummary
     from modulatio.types import DecomposeMintRecord
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
     producer_calls = []
     monkeypatch.setattr(
@@ -1843,7 +1854,7 @@ def test_claim_verify_read_unavailable_claim_is_consumed(
     orch = _make_orchestrator(project_with_run)
     child = _make_task(id="MNT-T-001-D1", minted_by="mint-1")
     child.lifetime_attempts = max(child.max_retries, 0)
-    store.save_task(PROJECT_CODE, child, run_id=project_with_run.run_id)
+    _seed_task(child, run_id=project_with_run.run_id)
     orig_get = store_mod.get_task
     monkeypatch.setattr(
         store_mod, "get_task",
@@ -1868,7 +1879,7 @@ def test_failed_disclosure_recovers_via_real_startup(
     from modulatio import compression, store
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     orig_append = compression._append_audit_row_0600
     monkeypatch.setattr(
         compression, "_append_audit_row_0600",
@@ -1907,13 +1918,13 @@ def test_crash_between_append_and_advance_yields_one_row(
     from modulatio import store
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     handled, _ = _run_split(orch, monkeypatch, project_with_run, parent, tmp_path)
     assert handled is True
     on_disk = store.get_task(
         PROJECT_CODE, parent.id, run_id=project_with_run.run_id)
     on_disk.decompose_mint.disclosure = "pending"  # simulate the lost advance
-    store.save_task(PROJECT_CODE, on_disk, run_id=project_with_run.run_id)
+    _seed_task(on_disk, run_id=project_with_run.run_id)
     fresh = _make_orchestrator(project_with_run)
     monkeypatch.setattr(
         Orchestrator, "_kickoff_inner",
@@ -1947,7 +1958,7 @@ def test_merge_syncs_canonical_terminal_state_into_live_objects(
     durable.attempt_claim_id = "claim-1"
     durable.lifetime_attempts = 4
     durable.status = TaskStatus.COMPLETED
-    store.save_task(PROJECT_CODE, durable, run_id=run_id)
+    _seed_task(durable, run_id=run_id)
     stale = _make_task(id="MNT-T-MG", minted_by="mint-1")
     stale.status = TaskStatus.PENDING
     stale.lifetime_attempts = 0
@@ -1983,7 +1994,7 @@ def test_merge_conflict_reconciles_live_object_and_surfaces_error(
     orch = _make_orchestrator(project_with_run)
     durable = _make_task(id="MNT-T-MC", minted_by="mint-1")
     durable.attempt_claim_id = "claim-1"
-    store.save_task(PROJECT_CODE, durable, run_id=run_id)
+    _seed_task(durable, run_id=run_id)
     imposter = _make_task(id="MNT-T-MC", minted_by="mint-1")
     imposter.attempt_claim_id = "claim-EVIL"
     summary = RunSummary(project=project_with_run)
@@ -2017,7 +2028,7 @@ def test_genuine_foreign_parent_on_disk_converges_live_to_disk(
     from modulatio.types import DecomposeMintRecord
     orch = _make_orchestrator(project_with_run)
     parent = _make_task()
-    store.save_task(PROJECT_CODE, parent, run_id=project_with_run.run_id)
+    _seed_task(parent, run_id=project_with_run.run_id)
     _planner_returns(monkeypatch, TWO_CHILD_SPLIT)
     producer_calls = []
     monkeypatch.setattr(
@@ -2057,12 +2068,11 @@ def test_genuine_foreign_claim_on_disk_converges_live_to_disk(
     """A claimed child whose durable claim is GENUINELY
     different — typed conflict; the live child converges to the disk
     claim."""
-    from modulatio import store
     from modulatio.orchestration import MintBarrierConflict
     orch = _make_orchestrator(project_with_run)
     child = _make_task(id="MNT-T-001-D1", minted_by="mint-1")
     child.lifetime_attempts = max(child.max_retries, 0)
-    store.save_task(PROJECT_CODE, child, run_id=project_with_run.run_id)
+    _seed_task(child, run_id=project_with_run.run_id)
     orig_save = store_mod.save_task
 
     def _race_writer(code, task, body="", run_id=None):
@@ -2088,7 +2098,6 @@ def test_merge_conflict_reconciles_from_payload_without_second_read(
     """The store conflict carries the canonical task; the
     merge reconciles from that payload even when every subsequent get_task
     returns None — disk, result, task map, and summary all converge."""
-    from modulatio import store
     from modulatio.orchestration import (
         RunSummary, TaskExecutionResult, _merge_task_result,
     )
@@ -2096,7 +2105,7 @@ def test_merge_conflict_reconciles_from_payload_without_second_read(
     orch = _make_orchestrator(project_with_run)
     durable = _make_task(id="MNT-T-PL", minted_by="mint-1")
     durable.attempt_claim_id = "claim-1"
-    store.save_task(PROJECT_CODE, durable, run_id=run_id)
+    _seed_task(durable, run_id=run_id)
     imposter = _make_task(id="MNT-T-PL", minted_by="mint-1")
     imposter.attempt_claim_id = "claim-EVIL"
     orig_get = store_mod.get_task
@@ -2140,7 +2149,6 @@ def test_raising_conflict_subscriber_cannot_break_reconciliation(
     """A raising activity subscriber on
     mint_merge_conflict — reconciliation and the summary error remain
     intact; the merge does not fail."""
-    from modulatio import store
     from modulatio.orchestration import (
         RunSummary, TaskExecutionResult, _merge_task_result,
     )
@@ -2154,7 +2162,7 @@ def test_raising_conflict_subscriber_cannot_break_reconciliation(
     orch.activity_callback = _bad_subscriber
     durable = _make_task(id="MNT-T-PS", minted_by="mint-1")
     durable.attempt_claim_id = "claim-1"
-    store.save_task(PROJECT_CODE, durable, run_id=run_id)
+    _seed_task(durable, run_id=run_id)
     imposter = _make_task(id="MNT-T-PS", minted_by="mint-1")
     imposter.attempt_claim_id = "claim-EVIL"
     summary = RunSummary(project=project_with_run)

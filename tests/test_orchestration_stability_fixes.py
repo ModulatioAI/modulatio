@@ -40,6 +40,18 @@ from modulatio.types import (
 PROJECT_CODE = "STB"
 
 
+
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio import store as _seed_store
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return _seed_store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return _seed_store.save_task(code, task, body=body, run_id=run_id)
+
+
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch) -> Project:
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
@@ -63,10 +75,17 @@ def _orch(project: Project) -> Orchestrator:
 
 
 def _make_task(pid, tid: str, **kw) -> Task:
-    return Task(
+    task = Task(
         id=tid, project_id=pid, goal_id="STB-G-001",
         description=f"task {tid}", **kw,
     )
+    # The reopened/redo paths under test update the durable record
+    # (ordinary saves never create); register at construction.
+    try:
+        _seed_task_record(PROJECT_CODE, task)
+    except Exception:
+        pass
+    return task
 
 
 def _make_goal(pid) -> Goal:
@@ -87,7 +106,7 @@ def test_auto_redo_with_zero_completed_settles_goal(project: Project):
     task = _make_task(pid, "STB-T-001", deliverable=True)
     task.status = TaskStatus.QC_REJECTED
     store.save_goal(PROJECT_CODE, goal, run_id=project.run_id)
-    store.save_task(PROJECT_CODE, task, run_id=project.run_id)
+    _seed_task_record(PROJECT_CODE, task, run_id=project.run_id)
 
     # Make the redo run land the task QC_REJECTED again (zero completed) and
     # never re-verify (so the only terminal must come from the new settle path).
@@ -191,8 +210,8 @@ def test_reexecute_goal_routes_reopened_tasks_dependency_ordered(project: Projec
     t1.status = TaskStatus.PENDING
     t2.status = TaskStatus.PENDING
     store.save_goal(PROJECT_CODE, goal, run_id=project.run_id)
-    store.save_task(PROJECT_CODE, t1, run_id=project.run_id)
-    store.save_task(PROJECT_CODE, t2, run_id=project.run_id)
+    _seed_task_record(PROJECT_CODE, t1, run_id=project.run_id)
+    _seed_task_record(PROJECT_CODE, t2, run_id=project.run_id)
 
     ran: list[str] = []
 
@@ -461,11 +480,11 @@ def test_reexecute_goal_zero_completed_settles_goal(project: Project):
     task = _make_task(project.id, "STB-T-001")
     task.status = TaskStatus.PENDING  # reopened by the decline
     store.save_goal(PROJECT_CODE, goal, run_id=project.run_id)
-    store.save_task(PROJECT_CODE, task, run_id=project.run_id)
+    _seed_task_record(PROJECT_CODE, task, run_id=project.run_id)
 
     def _redo(t, summary, initial_corrective_notes=""):
         t.status = TaskStatus.QC_REJECTED  # re-fails again → zero completed
-        store.save_task(PROJECT_CODE, t, run_id=project.run_id)
+        _seed_task_record(PROJECT_CODE, t, run_id=project.run_id)
 
     orch._run_task_with_redo = _redo  # type: ignore[assignment]
     # _leader_verify_goal must NOT be the thing that terminalizes here.
@@ -492,7 +511,7 @@ def test_auto_resume_zero_completed_settles_goal(project: Project):
     task = _make_task(project.id, "STB-T-001")
     task.status = TaskStatus.QC_REJECTED
     store.save_goal(PROJECT_CODE, goal, run_id=project.run_id)
-    store.save_task(PROJECT_CODE, task, run_id=project.run_id)
+    _seed_task_record(PROJECT_CODE, task, run_id=project.run_id)
 
     # A BLOCKER ticket whose refresh_at has already passed, pointing at the goal.
     ticket = Ticket(
@@ -505,7 +524,7 @@ def test_auto_resume_zero_completed_settles_goal(project: Project):
 
     def _redo(t, summary, initial_corrective_notes=""):
         t.status = TaskStatus.QC_REJECTED  # fails again on the fresh budget
-        store.save_task(PROJECT_CODE, t, run_id=project.run_id)
+        _seed_task_record(PROJECT_CODE, t, run_id=project.run_id)
 
     orch._run_task_with_redo = _redo  # type: ignore[assignment]
     orch._leader_verify_goal = lambda *a, **k: None  # type: ignore[assignment]

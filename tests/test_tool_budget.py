@@ -57,7 +57,7 @@ def _make_task(task_id: str = "TBG-T-001", **overrides) -> Task:
 
 def _saved_task(task_id: str = "TBG-T-001", **overrides) -> Task:
     task = _make_task(task_id, **overrides)
-    store_mod.save_task(PROJECT_CODE, task, run_id=RUN_ID)
+    store_mod.create_task(PROJECT_CODE, task, run_id=RUN_ID)
     return task
 
 
@@ -451,12 +451,12 @@ def test_interleaved_consume_cannot_be_erased_by_merge(project_with_run):
         fingerprint="aaaa", run_id=RUN_ID)
     stale = task.model_copy(deep=True)          # pre-consume snapshot
 
-    real_get = store_mod.get_task
+    real_read = store_mod._read_canonical_task_authority
     merge_thread_id = threading.get_ident()
     merge_read_started = threading.Event()
 
-    def _slow_get(code, task_id, run_id=None):
-        result = real_get(code, task_id, run_id=run_id)
+    def _slow_read(code, task_id, run_id):
+        result = real_read(code, task_id, run_id)
         if threading.get_ident() == merge_thread_id:
             merge_read_started.set()
             _time.sleep(0.3)                    # the interleave window
@@ -473,12 +473,12 @@ def test_interleaved_consume_cannot_be_erased_by_merge(project_with_run):
 
     consumer = threading.Thread(target=_late_consume)
     consumer.start()
-    store_mod.get_task = _slow_get
+    store_mod._read_canonical_task_authority = _slow_read
     try:
         store_mod.save_task_monotonic(PROJECT_CODE, stale, run_id=RUN_ID)
     finally:
-        store_mod.get_task = real_get
-        consumer.join(timeout=5)
+        store_mod._read_canonical_task_authority = real_read
+        consumer.join(timeout=10)
 
     canonical = store_mod.get_task(PROJECT_CODE, "TBG-T-001", run_id=RUN_ID)
     assert consume_done["sequence"] == 2
@@ -673,6 +673,115 @@ def test_consume_hook_wraps_store_errors_typed(project_with_run, monkeypatch):
         consume("aaaa")
 
 
+# ── creation vs update: an ordinary save can never resurrect authority ──────
+
+
+def _task_file(task_id: str = "TBG-T-001") -> Path:
+    from modulatio import vault
+    return Path(vault.VAULT_ROOT) / PROJECT_CODE.lower() / "runs" / RUN_ID \
+        / "tasks" / f"{task_id}.md"
+
+
+def test_ordinary_save_never_recreates_a_missing_record(project_with_run):
+    """Delete the canonical record after a consume; an ordinary save of a
+    stale pre-consume copy must NOT recreate the task at sequence zero —
+    a missing authority record is a typed refusal, never fresh budget."""
+    task = _saved_task()
+    stale = task.model_copy(deep=True)
+    store_mod.consume_tool_call_budget(
+        PROJECT_CODE, task.id, expected_sequence=0,
+        fingerprint="aaaa", run_id=RUN_ID)
+    path = _task_file()
+    assert path.exists()
+    path.unlink()
+    with pytest.raises(ToolBudgetConflict):
+        store_mod.save_task(PROJECT_CODE, stale, run_id=RUN_ID)
+    assert not path.exists()               # nothing resurrected
+    with pytest.raises(ToolBudgetConflict):
+        store_mod.save_task_monotonic(PROJECT_CODE, stale, run_id=RUN_ID)
+    assert not path.exists()
+
+
+def test_quarantined_record_is_not_replaced_by_stale_copy(project_with_run):
+    task = _saved_task()
+    stale = task.model_copy(deep=True)
+    path = _task_file()
+    quarantine = path.with_suffix(".broken.md")
+    path.rename(quarantine)
+    quarantined_bytes = quarantine.read_bytes()
+    with pytest.raises(ToolBudgetConflict):
+        store_mod.save_task(PROJECT_CODE, stale, run_id=RUN_ID)
+    assert quarantine.read_bytes() == quarantined_bytes
+    assert not path.exists()
+
+
+def test_unreadable_record_raises_typed_and_stays_untouched(
+    project_with_run,
+):
+    task = _saved_task()
+    stale = task.model_copy(deep=True)
+    path = _task_file()
+    original = path.read_bytes()
+    path.chmod(0o000)
+    try:
+        with pytest.raises(ToolBudgetConflict):
+            store_mod.save_task(PROJECT_CODE, stale, run_id=RUN_ID)
+    finally:
+        path.chmod(0o600)
+    assert path.read_bytes() == original
+
+
+def test_corrupt_record_raises_typed_never_overwritten(project_with_run):
+    task = _saved_task()
+    stale = task.model_copy(deep=True)
+    path = _task_file()
+    path.write_text("---\nnot: [valid frontmatter\n", encoding="utf-8")
+    corrupt = path.read_bytes()
+    with pytest.raises(ToolBudgetConflict):
+        store_mod.save_task(PROJECT_CODE, stale, run_id=RUN_ID)
+    assert path.read_bytes() == corrupt
+
+
+def test_create_task_is_the_only_creation_seam(project_with_run):
+    """Explicit creation succeeds on genuine absence with a zeroed budget
+    tuple; creation never overwrites an existing record; a non-zero
+    budget tuple is not creatable (budget state only ever comes from the
+    consume barrier)."""
+    fresh = _make_task("TBG-T-500")
+    created = store_mod.create_task(PROJECT_CODE, fresh, run_id=RUN_ID)
+    assert created.tool_budget_sequence == 0
+    assert store_mod.get_task(
+        PROJECT_CODE, "TBG-T-500", run_id=RUN_ID) is not None
+    with pytest.raises(ToolBudgetConflict):
+        store_mod.create_task(PROJECT_CODE, fresh, run_id=RUN_ID)
+    seeded = _make_task("TBG-T-501")
+    seeded.tool_budget_sequence = 3
+    seeded.tool_calls_attempted = 3
+    with pytest.raises(ToolBudgetConflict):
+        store_mod.create_task(PROJECT_CODE, seeded, run_id=RUN_ID)
+
+
+def test_settlement_after_record_loss_does_not_resurrect(project_with_run):
+    """End to end: record deleted mid-run → the typed budget failure
+    settles the task → neither the settlement save nor a merge recreates
+    the record, and re-entry finds no sequence-zero authority."""
+    orch = _make_orchestrator(project_with_run)
+    t = _saved_task("TBG-T-502", max_retries=1)
+    store_mod.consume_tool_call_budget(
+        PROJECT_CODE, t.id, expected_sequence=0,
+        fingerprint="aaaa", run_id=RUN_ID)
+    t.tool_budget_sequence = 1             # worker mirrored the consume
+    t.tool_calls_attempted = 1
+    _task_file(t.id).unlink()
+
+    orch._producer_execute = (  # type: ignore[assignment]
+        lambda task, corrective_notes="": (_ for _ in ()).throw(
+            ToolBudgetConflict("no durable record", canonical=None)))
+    from modulatio.orchestration import RunSummary
+    orch._run_task_with_redo_inner(t, RunSummary(project=project_with_run))
+    assert not _task_file(t.id).exists()   # settled without resurrection
+
+
 # ── Clay: no pre-execution enforcement seam → refuse/fallback, never an
 # unbudgeted native loop ─────────────────────────────────────────────────────
 
@@ -753,6 +862,38 @@ def test_clay_primary_falls_back_continuing_canonical_budget(
     assert canonical.tool_calls_attempted == 3   # 1 prior + 2 on fallback
 
 
+def test_native_loop_refusal_does_not_cool_the_seat(project_with_run):
+    """The architectural refusal is availability-SHAPED (the chain must
+    advance) but not an availability EVENT: a healthy seat refused for one
+    task shape must not sit out the pool like a dead endpoint."""
+    from modulatio import claude_cli as clay
+    from modulatio import skills as skills_mod
+    from modulatio.orchestration import RunSummary
+
+    clay_calls: list = []
+    orch = _make_orchestrator(
+        project_with_run,
+        chat_runners={"drafter": _clay_marked_runner(clay_calls)})
+    t = _saved_task("TBG-T-411", assigned_agent_id="drafter", max_retries=0)
+    skill = skills_mod.Skill(
+        name="coder", description="d", prompt_template="",
+        tool_loadout=("ghost",))
+
+    def _producer(task, corrective_notes=""):
+        return orch._llm_with_tools_execute(
+            task, skill, orch._artifacts_root() / "drafts" / "x.md",
+            tool_loadout=("ghost",))
+
+    orch._producer_execute = _producer  # type: ignore[assignment]
+    orch._attempt_qc_fix_forward = (  # type: ignore[assignment]
+        lambda *a, **kw: True)
+    orch._run_task_with_redo_inner(t, RunSummary(project=project_with_run))
+    assert clay_calls == []
+    assert isinstance(  # the refusal is a typed subclass, still chain-advancing
+        clay.NativeToolLoopRefused("x"), clay.ClaudeUnavailable)
+    assert not orch._seat_in_cooldown("drafter")
+
+
 def test_clay_runner_without_budget_hook_is_not_refused(project_with_run):
     """Unbudgeted lanes (QC, leader converse) keep their Clay seats — the
     refusal binds exactly where the budget authority does."""
@@ -776,10 +917,13 @@ def test_reentry_at_cap_trips_before_any_execution(
     the cap trips on the FIRST consume — no tool body runs, so a
     side-effecting call consumed by a previous life never executes twice."""
     monkeypatch.setattr(orch_mod, "_TOOL_CALLS_PER_TASK_CAP", 2)
-    task = _make_task()
-    task.tool_budget_sequence = 7
-    task.tool_calls_attempted = 2
-    store_mod.save_task(PROJECT_CODE, task, run_id=RUN_ID)
+    task = _saved_task()
+    sequence = 0
+    for fp in ("prior-1", "prior-2"):      # the prior life spent the cap
+        updated = store_mod.consume_tool_call_budget(
+            PROJECT_CODE, task.id, expected_sequence=sequence,
+            fingerprint=fp, run_id=RUN_ID)
+        sequence = updated.tool_budget_sequence
     orch = _make_orchestrator(project_with_run)
     # A fresh dispatch builds a fresh closure — seeded from the CANONICAL
     # record, not from any worker-local memory of the prior life.
