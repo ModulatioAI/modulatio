@@ -1023,6 +1023,75 @@ def _doctor_version_line() -> str:
     return f"Version: {__version__}{skew}"
 
 
+def doctor_access_snapshot(code: "str | None"):
+    """Assemble the effective-capability snapshot from CONFIGURED install
+    state — the default autonomy mode, the live sandbox posture, the folder
+    registry, the persisted gate/broker grants for ``code`` (live session
+    grants exist only during a run, so they read empty here), the served
+    tool loadout, the confined-seat constants, and the enabled MCP servers.
+    Pure over the state it reads; returns ``None`` when no default project
+    is configured (grants and workspace are project-scoped)."""
+    from modulatio import claude_cli
+    from modulatio import config as _config
+    from modulatio import leader_permissions as _lp
+    from modulatio import mcp_config as _mcp
+    from modulatio import permissions as _perm
+    from modulatio import sandbox as _sandbox
+    from modulatio import tools as _tools
+    from modulatio import vault as _vault
+
+    if not code:
+        return None
+    try:
+        workspace = str(_vault.project_dir(code) / "workspace")
+    except Exception:
+        return None
+
+    durable: dict = {}
+    for cls in ("path", "exec", "network"):
+        grants = _lp.load_grants(code, cls)
+        if grants:
+            durable[cls] = grants
+    broker_view = _perm.GrantStore(
+        _vault.project_dir(code) / "capability_grants.json").grants_view()
+    folders = tuple(_config.list_folders())
+    servers = tuple(
+        {"name": sid, "trust": s.trust}
+        for sid, s in _mcp.enabled_servers().items())
+    loadout = tuple(sorted(_tools.build_registry(
+        artifacts_root=_vault.project_dir(code) / "workspace")))
+
+    return _perm.effective_capability_snapshot(
+        mode=_perm.RunMode.DEFAULT,
+        sandbox_available=_sandbox.is_sandbox_available(),
+        profile=_sandbox.current_profile(),
+        bypass=_sandbox.is_bypass_requested(),
+        workspace=workspace,
+        standing_roots=(),
+        folders=folders,
+        folder_reachable=_config.probe_folder,
+        gate_session={},
+        gate_durable=durable,
+        broker_grants=broker_view,
+        tool_loadout=loadout,
+        clay_confined_tools=claude_cli._ALLOWED_CONFINED_TOOLS,
+        clay_disallowed_tools=claude_cli._DISALLOWED_TOOLS,
+        mcp_servers=servers,
+    )
+
+
+def _doctor_access_card(code: "str | None") -> None:
+    from modulatio import permissions as _perm
+
+    typer.echo("\nAccess (configured authority — live grants appear at run):")
+    snap = doctor_access_snapshot(code)
+    if snap is None:
+        typer.echo("  (no default project — access grants are project-scoped)")
+        return
+    for line in _perm.capability_card_rows(snap):
+        typer.echo(f"  {line}")
+
+
 def _run_doctor_checks() -> None:
     from modulatio import auth_alerts, oauth_helpers
 
@@ -1207,6 +1276,10 @@ def _run_doctor_checks() -> None:
                 "    trusted: network on + pip enabled for agents; cloud "
                 "API keys/secrets are still stripped."
             )
+
+    # Access capability card: the configured (install-level) authority
+    # posture, rendered from the same snapshot the run-time card uses.
+    _doctor_access_card(code)
 
     # Code deliverable verification: the execution digest builds + tests
     # a code deliverable in a throwaway sandbox, provisioning its build

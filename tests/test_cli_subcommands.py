@@ -435,3 +435,30 @@ def test_bare_launch_enables_splash(monkeypatch):
     result = CliRunner().invoke(app, [])
     assert result.exit_code == 0
     assert captured.get("splash") is True
+
+
+def test_doctor_access_card_no_project():
+    """With no default project, the Access section states grants are
+    project-scoped rather than rendering an empty card."""
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "Access (configured authority" in result.stdout
+    assert "no default project" in result.stdout
+
+
+def test_doctor_access_card_renders_for_configured_project(
+        tmp_path, monkeypatch):
+    """A configured default project renders the capability card from the
+    same snapshot generator the run-time card uses — the registry's
+    vocabulary, not a second one."""
+    from modulatio import vault
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path / "vault")
+    vault.init_project("DOC", "d", "d")
+    config.set_default_project_code("DOC")
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "Access (configured authority" in result.stdout
+    assert "[substrate]" in result.stdout
+    assert "[tool_loadout]" in result.stdout
+    # The declared parity exceptions surface as reduced-parity on the card.
+    assert "Reduced/non-parity" in result.stdout
