@@ -1069,9 +1069,17 @@ def _truncate_output(text: str, max_bytes: int = _RUN_SHELL_MAX_OUTPUT_BYTES) ->
     return head + f"\n... [truncated, {len(encoded) - max_bytes} more bytes]"
 
 
-def _format_run_shell_result(returncode: int, stdout: str, stderr: str) -> str:
+def _format_run_shell_result(
+    returncode: int, stdout: str, stderr: str, status: str = "",
+) -> str:
+    """Render the tool result. ``status`` is ENGINE-owned terminal framing
+    (abort/timeout classification) — emitted as its own line outside the
+    per-stream truncation, so a child that fills a stream to the cap cannot
+    suppress the engine's classification."""
+    status_line = f"status: {status}\n" if status else ""
     return (
         f"exit_code: {returncode}\n"
+        f"{status_line}"
         f"stdout:\n{_truncate_output(stdout)}\n"
         f"stderr:\n{_truncate_output(stderr)}"
     )
@@ -1525,7 +1533,7 @@ def make_run_shell(
                     if lane_bound
                     else f"[TIMEOUT after {timeout}s — command not started]"
                 )
-                return _format_run_shell_result(-1, "", no_start)
+                return _format_run_shell_result(-1, "", "", status=no_start)
             proc = subprocess.Popen(
                 run_argv,
                 cwd=str(wd),
@@ -1548,15 +1556,17 @@ def make_run_shell(
                     "[TIMEOUT at lane deadline]" if lane_bound
                     else f"[TIMEOUT after {timeout}s]"
                 )
-                stderr = (stderr or "") + f"\n{marker}"
-                return _format_run_shell_result(-1, stdout or "", stderr)
+                return _format_run_shell_result(
+                    -1, stdout or "", stderr or "", status=marker)
             if outcome == "abort":
-                # Engine-owned classification, assembled from the drain
-                # outcome — tool-call arguments can neither supply nor
-                # suppress it, and an aborted run can never format as
-                # exit_code: 0.
-                stderr = (stderr or "") + "\n[ABORTED by operator]"
-                return _format_run_shell_result(-1, stdout or "", stderr)
+                # Engine-owned classification, carried in the status framing
+                # OUTSIDE the truncated child streams — a child that fills
+                # stderr to the cap cannot suppress it, tool-call arguments
+                # can neither supply nor set it, and an aborted run can
+                # never format as exit_code: 0.
+                return _format_run_shell_result(
+                    -1, stdout or "", stderr or "",
+                    status="[ABORTED by operator]")
             return _format_run_shell_result(
                 proc.returncode,
                 stdout or "",

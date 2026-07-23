@@ -3242,3 +3242,66 @@ def test_run_shell_setup_expiry_classified_by_binding_bound(
     with tools.shell_deadline(_time.monotonic() + 0.2):
         lane = rs(cmd="python3 -c 'print(1)'", profile="full", timeout=30.0)
     assert "lane deadline expired" in lane
+
+
+def test_format_status_line_immune_to_full_streams():
+    """The engine-owned status line survives byte-exact full child streams —
+    child output cannot suppress the terminal classification."""
+    full = "A" * 8_000
+    for status in ("[ABORTED by operator]", "[TIMEOUT at lane deadline]",
+                   "[TIMEOUT after 30.0s]"):
+        out = tools._format_run_shell_result(-1, full, full, status=status)
+        assert f"status: {status}" in out
+        assert out.startswith("exit_code: -1")
+
+
+def test_run_shell_abort_marker_survives_stderr_saturation(
+        tmp_path, unsandboxed):
+    """A child that fills stderr with invalid bytes to the cap and then
+    sleeps cannot suppress the abort classification."""
+    art = _make_artifacts(tmp_path)
+    t0 = _time.monotonic()
+    rs = tools.make_run_shell(
+        art, should_abort=lambda: _time.monotonic() - t0 > 0.5)
+    out = rs(
+        cmd=("python3 -c \"import sys, time\n"
+             "sys.stderr.buffer.write(b'\\xff' * 10000)\n"
+             "sys.stderr.flush()\n"
+             "time.sleep(30)\""),
+        profile="full", timeout=30.0)
+    assert out.startswith("exit_code: -1")
+    assert "status: [ABORTED by operator]" in out
+    assert len(out.encode("utf-8")) < 20_000
+
+
+def test_run_shell_lane_marker_survives_stderr_saturation(
+        tmp_path, unsandboxed):
+    """Same saturation under the binding lane wall keeps the lane
+    classification."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    with tools.shell_deadline(_time.monotonic() + 0.7):
+        out = rs(
+            cmd=("python3 -c \"import sys, time\n"
+                 "sys.stderr.buffer.write(b'\\xff' * 10000)\n"
+                 "sys.stderr.flush()\n"
+                 "time.sleep(30)\""),
+            profile="full", timeout=30.0)
+    assert out.startswith("exit_code: -1")
+    assert "status: [TIMEOUT at lane deadline]" in out
+
+
+def test_run_shell_timeout_marker_survives_stderr_saturation(
+        tmp_path, unsandboxed):
+    """Same saturation with the requested timeout binding keeps the
+    per-call classification."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    out = rs(
+        cmd=("python3 -c \"import sys, time\n"
+             "sys.stderr.buffer.write(b'\\xff' * 10000)\n"
+             "sys.stderr.flush()\n"
+             "time.sleep(30)\""),
+        profile="full", timeout=1.0)
+    assert out.startswith("exit_code: -1")
+    assert "status: [TIMEOUT after 1.0s]" in out
