@@ -641,3 +641,211 @@ __all__ = [
     "GrantStore",
     "PermissionBroker",
 ]
+
+
+# ── effective-capability snapshot (the card's single truth source) ─────────
+#
+# One typed, read-only statement of what may act, where, and why — assembled
+# from LIVE production objects, never hand-written prose. The human-readable
+# capability card is a pure renderer of this snapshot; conformance tests
+# execute the real gates independently and never compare the card to the
+# snapshot that rendered it.
+
+#: Every authority source the snapshot represents. The assembler takes one
+#: REQUIRED argument per source — an unrepresented source is a TypeError at
+#: the call site, never a silently thinner card.
+CAPABILITY_AUTHORITY_SOURCES = (
+    "mode", "substrate", "workspace", "standing_roots", "folders",
+    "gate_grants", "broker_grants", "tool_loadout", "clay_confinement",
+    "mcp_servers",
+)
+
+#: Canonical operator-facing grant states — one meaning each. ONCE grants
+#: never appear in a snapshot (they are recorded nowhere durable and expire
+#: with the call they covered); "Allowed this call" exists only in live
+#: prompt scopes.
+STATE_ALWAYS = "Always allowed"
+STATE_SESSION = "Allowed this session"
+STATE_ASKS = "Asks first"
+STATE_REFUSED = "Refused"
+STATE_AVAILABLE = "Available"
+#: Honest-degrade states: "Reduced" names a KNOWN declared exception;
+#: "Unreachable" names an UNKNOWN substrate cause. The substrate claim is
+#: deliberately narrow — no mounted/unmounted semantics are modeled.
+STATE_REDUCED = "Reduced/non-parity"
+STATE_UNREACHABLE = "Unreachable (cause unknown)"
+
+_GRANT_STATES = frozenset({
+    STATE_ALWAYS, STATE_SESSION, STATE_ASKS, STATE_REFUSED,
+    STATE_AVAILABLE, STATE_REDUCED, STATE_UNREACHABLE,
+})
+
+#: The declared parity-exception ledger: capability differences between the
+#: engine tool loop and other execution backends that are ACCEPTED and
+#: DISCLOSED rather than closed. Each renders on the card as Reduced/
+#: non-parity; while any entry exists, no full-parity claim is possible.
+PARITY_EXCEPTIONS = (
+    ("clay_confinement", "path", "dotfiles under bound roots",
+     "native file tools read whole bound roots; the engine tool loop "
+     "rejects every dot component"),
+    ("clay_confinement", "network", "local network",
+     "the confined seat runs network-on; the engine tool loop hard-refuses "
+     "loopback/private targets"),
+    ("mcp_servers", "network", "local network",
+     "stdio servers run outside the engine sandbox; their egress is not "
+     "engine-fenced"),
+)
+
+
+@dataclass(frozen=True)
+class CapabilityFact:
+    """One row of effective authority: which source lets what act, on which
+    resource, in what state."""
+
+    source: str
+    request_class: str
+    resource: str
+    state: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class CapabilitySnapshot:
+    """The full effective-capability statement plus the authority sources it
+    was assembled from (asserted complete by tests against
+    ``CAPABILITY_AUTHORITY_SOURCES``)."""
+
+    facts: tuple
+    sources: tuple
+
+
+def effective_capability_snapshot(
+    *,
+    mode: "RunMode",
+    sandbox_available: bool,
+    profile: str,
+    bypass: bool,
+    workspace: str,
+    standing_roots: tuple,
+    folders: tuple,
+    folder_reachable: "Callable[[str], bool]",
+    gate_session: dict,
+    gate_durable: dict,
+    broker_grants: dict,
+    tool_loadout: tuple,
+    clay_confined_tools: tuple,
+    clay_disallowed_tools: tuple,
+    mcp_servers: tuple,
+) -> CapabilitySnapshot:
+    """Assemble the snapshot from live state. Pure logic (web-UI-safe): the
+    caller supplies every source's current objects; nothing is read from
+    globals, so the same inputs always yield the same snapshot."""
+    facts: list[CapabilityFact] = []
+
+    # mode — whether capability asks auto-grant.
+    facts.append(CapabilityFact(
+        "mode", "capability", "capability asks",
+        STATE_ALWAYS if mode.auto_grants_capabilities else STATE_ASKS,
+        f"autonomy mode: {mode.value}" if hasattr(mode, "value") else ""))
+
+    # substrate — the sandbox posture, never hidden by the mode. Reuses the
+    # exact status text the settings surfaces render.
+    _access_row, sandbox_row = mode_status_rows(
+        mode, sandbox_available=sandbox_available, profile=profile,
+        bypass=bypass)
+    facts.append(CapabilityFact(
+        "substrate", "substrate", "run_shell sandbox",
+        STATE_REFUSED if (not sandbox_available and not bypass
+                          and profile != "off") else STATE_AVAILABLE,
+        sandbox_row))
+
+    # workspace — the structural home: full file+exec authority, silently.
+    facts.append(CapabilityFact(
+        "workspace", "path", str(workspace), STATE_ALWAYS,
+        "structural home (path + exec)"))
+
+    # standing roots — harness dirs; path class only, exec never rides them.
+    for root in standing_roots:
+        facts.append(CapabilityFact(
+            "standing_roots", "path", str(root), STATE_ALWAYS,
+            "harness root — path only, never exec"))
+
+    # folders — the registry is the standing decision; an unreachable root
+    # is stated, not hidden (and the claim stays cause-unknown).
+    for rec in folders:
+        reachable = folder_reachable(rec["path"])
+        facts.append(CapabilityFact(
+            "folders", "path", rec["path"],
+            STATE_ALWAYS if reachable else STATE_UNREACHABLE,
+            f"roots: {rec['mode']}"))
+
+    # gate grants — durable always-grants plus live session grants.
+    for cls, grants in sorted(gate_durable.items()):
+        for g in grants:
+            facts.append(CapabilityFact(
+                "gate_grants", cls, g["resource"], STATE_ALWAYS,
+                f"actions: {', '.join(g.get('actions', []))}"))
+    for cls, grants in sorted(gate_session.items()):
+        for g in grants:
+            facts.append(CapabilityFact(
+                "gate_grants", cls, g["resource"], STATE_SESSION,
+                f"actions: {', '.join(g.get('actions', []))}"))
+
+    # broker grants — remembered capability keys.
+    for key in broker_grants.get("always", []):
+        facts.append(CapabilityFact(
+            "broker_grants", "capability", key, STATE_ALWAYS))
+    for key in broker_grants.get("session", []):
+        facts.append(CapabilityFact(
+            "broker_grants", "capability", key, STATE_SESSION))
+
+    # tool loadout — what is served at all; authorization gates each call.
+    for name in tool_loadout:
+        facts.append(CapabilityFact(
+            "tool_loadout", "tool", name, STATE_AVAILABLE,
+            "authorization gated per call"))
+
+    # clay confinement — the confined seat's native tool set: the allowlist
+    # is available inside its bound roots, the ban list can never load.
+    for name in clay_confined_tools:
+        facts.append(CapabilityFact(
+            "clay_confinement", "tool", f"clay:{name}", STATE_AVAILABLE,
+            "confined seat allowlist"))
+    for name in clay_disallowed_tools:
+        facts.append(CapabilityFact(
+            "clay_confinement", "tool", f"clay:{name}", STATE_REFUSED,
+            "confined seat ban"))
+
+    # mcp — per-server trust posture.
+    for server in mcp_servers:
+        trusted = server.get("trust") == "trusted"
+        facts.append(CapabilityFact(
+            "mcp_servers", "tool", f"mcp:{server.get('name', '?')}",
+            STATE_ALWAYS if trusted else STATE_ASKS,
+            "trusted (calls ride ungated)" if trusted
+            else "gated (calls prompt)"))
+
+    # declared parity exceptions — always rendered; their presence is what
+    # blocks a full-parity claim.
+    for source, cls, resource, detail in PARITY_EXCEPTIONS:
+        facts.append(CapabilityFact(
+            source, cls, resource, STATE_REDUCED, detail))
+
+    return CapabilitySnapshot(
+        facts=tuple(facts), sources=CAPABILITY_AUTHORITY_SOURCES)
+
+
+def capability_card_rows(snapshot: CapabilitySnapshot) -> tuple:
+    """Render the snapshot as human-readable card lines, grouped by source.
+    A pure function of the snapshot — every render surface calls this one
+    generator, never a second one."""
+    lines: list[str] = []
+    for source in snapshot.sources:
+        rows = [f for f in snapshot.facts if f.source == source]
+        if not rows:
+            continue
+        lines.append(f"[{source}]")
+        for f in rows:
+            detail = f" — {f.detail}" if f.detail else ""
+            lines.append(f"  {f.state}: {f.request_class} {f.resource}{detail}")
+    return tuple(lines)

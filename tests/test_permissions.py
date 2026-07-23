@@ -475,3 +475,124 @@ def test_ask_via_prompt_fn_adapts_capability_to_the_gate_surface(tmp_path):
 
     deny = ask_via_prompt_fn(lambda r: lg.ScopedDecision(scope=lp.SCOPE_DENY))
     assert deny(cap) is Decision.DENY
+
+
+# ── effective-capability snapshot + card ────────────────────────────────────
+
+
+def _snapshot_kwargs(**overrides):
+    from modulatio import permissions as perm
+
+    base = dict(
+        mode=perm.RunMode.DEFAULT,
+        sandbox_available=True,
+        profile="standard",
+        bypass=False,
+        workspace="/ws",
+        standing_roots=("/vault", "/shared"),
+        folders=({"name": "docs", "path": "/docs", "mode": "ro",
+                  "kind": "path"},
+                 {"name": "proj", "path": "/proj", "mode": "rw",
+                  "kind": "path"}),
+        folder_reachable=lambda path: path != "/proj",
+        gate_session={"path": [{"resource": "/tmp/s",
+                                "actions": ["read", "edit", "write"]}]},
+        gate_durable={"exec": [{"resource": "/tmp/e",
+                                "actions": ["exec"]}]},
+        broker_grants={"session": ["network:host=api.example.com"],
+                       "always": ["shell:profile=full"]},
+        tool_loadout=("run_shell", "http_get"),
+        clay_confined_tools=("Read", "Write"),
+        clay_disallowed_tools=("Bash",),
+        mcp_servers=({"name": "files", "trust": "trusted"},
+                     {"name": "web", "trust": "gated"}),
+    )
+    base.update(overrides)
+    return base
+
+
+def test_snapshot_requires_every_authority_source():
+    """An unrepresented authority source is a TypeError at the call site —
+    the snapshot can never be silently thinner than its declared sources."""
+    from modulatio import permissions as perm
+
+    kwargs = _snapshot_kwargs()
+    del kwargs["mcp_servers"]
+    with pytest.raises(TypeError):
+        perm.effective_capability_snapshot(**kwargs)
+    snap = perm.effective_capability_snapshot(**_snapshot_kwargs())
+    assert snap.sources == perm.CAPABILITY_AUTHORITY_SOURCES
+    represented = {f.source for f in snap.facts}
+    assert represented == set(perm.CAPABILITY_AUTHORITY_SOURCES)
+
+
+def test_snapshot_states_use_the_canonical_vocabulary():
+    from modulatio import permissions as perm
+
+    snap = perm.effective_capability_snapshot(**_snapshot_kwargs())
+    allowed = {perm.STATE_ALWAYS, perm.STATE_SESSION, perm.STATE_ASKS,
+               perm.STATE_REFUSED, perm.STATE_AVAILABLE, perm.STATE_REDUCED,
+               perm.STATE_UNREACHABLE}
+    assert {f.state for f in snap.facts} <= allowed
+
+
+def test_snapshot_grant_scopes_map_to_states():
+    from modulatio import permissions as perm
+
+    snap = perm.effective_capability_snapshot(**_snapshot_kwargs())
+    by = {(f.source, f.resource): f for f in snap.facts}
+    assert by[("gate_grants", "/tmp/e")].state == perm.STATE_ALWAYS
+    assert by[("gate_grants", "/tmp/s")].state == perm.STATE_SESSION
+    assert by[("broker_grants", "shell:profile=full")].state == perm.STATE_ALWAYS
+    assert (by[("broker_grants", "network:host=api.example.com")].state
+            == perm.STATE_SESSION)
+    assert by[("mcp_servers", "mcp:files")].state == perm.STATE_ALWAYS
+    assert by[("mcp_servers", "mcp:web")].state == perm.STATE_ASKS
+    assert by[("clay_confinement", "clay:Bash")].state == perm.STATE_REFUSED
+
+
+def test_snapshot_unreachable_folder_states_narrow_claim():
+    """An unreachable registered root is stated with the cause-unknown
+    wording — never hidden, never given mount-state semantics."""
+    from modulatio import permissions as perm
+
+    snap = perm.effective_capability_snapshot(**_snapshot_kwargs())
+    folders = {f.resource: f for f in snap.facts if f.source == "folders"}
+    assert folders["/docs"].state == perm.STATE_ALWAYS
+    assert folders["/proj"].state == perm.STATE_UNREACHABLE
+    assert "cause unknown" in folders["/proj"].state
+
+
+def test_snapshot_declared_exceptions_render_reduced():
+    """Every ledger entry appears as Reduced/non-parity — their presence is
+    what blocks a full-parity claim."""
+    from modulatio import permissions as perm
+
+    snap = perm.effective_capability_snapshot(**_snapshot_kwargs())
+    reduced = [f for f in snap.facts if f.state == perm.STATE_REDUCED]
+    assert len(reduced) == len(perm.PARITY_EXCEPTIONS)
+
+
+def test_card_is_a_pure_renderer_of_the_snapshot():
+    from modulatio import permissions as perm
+
+    snap = perm.effective_capability_snapshot(**_snapshot_kwargs())
+    rows1 = perm.capability_card_rows(snap)
+    rows2 = perm.capability_card_rows(snap)
+    assert rows1 == rows2
+    body = "\n".join(rows1)
+    assert "roots: rw" in body        # the registry's term, not "folder"
+    assert "Always allowed" in body
+    assert "Allowed this session" in body
+    assert "Asks first" in body
+    assert "Reduced/non-parity" in body
+    assert "Unreachable (cause unknown)" in body
+
+
+def test_snapshot_substrate_refused_when_sandbox_unavailable():
+    from modulatio import permissions as perm
+
+    snap = perm.effective_capability_snapshot(
+        **_snapshot_kwargs(sandbox_available=False))
+    sub = next(f for f in snap.facts if f.source == "substrate")
+    assert sub.state == perm.STATE_REFUSED
