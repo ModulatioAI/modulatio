@@ -358,14 +358,21 @@ def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
             if state == "ask":
                 why = f"{why} — also grants the capability: {cap.label}"
             shown = replace(base, why=why, available_scopes=tuple(common))
+            # Snapshot BEFORE prompting: a snapshot read error must deny the
+            # call without a prompt or any mutation, leaving both stores
+            # intact — never a rollback that deletes a store it couldn't read.
+            try:
+                gate_snap = gate.snapshot_grants()
+                broker_snap = (
+                    broker.grants.snapshot() if broker is not None else None)
+            except OSError:
+                return False
             answer = prompt_fn(shown)
             scope = getattr(answer, "scope", None)
             if scope == lg.SCOPE_DENY:
                 return False
             if scope not in askable:
                 return False  # invalid answer: fail closed, record nothing
-            gate_snap = gate.snapshot_grants()
-            broker_snap = broker.grants.snapshot() if broker is not None else None
             try:
                 for req in pending:
                     gate.record_prompted(req, answer)
@@ -456,13 +463,32 @@ class GrantStore:
             self._on_corrupt(f"dropped {len(bad)} invalid grant key(s) on load")
         return good
 
+    def _atomic_write_0600(self, data: bytes) -> None:
+        """Publish ``data`` to the store as an engine-owned ``0600`` file by
+        atomic replace: a fresh ``O_CREAT|O_EXCL`` temp at 0600, fully
+        written and fsynced, then ``os.replace`` — so a concurrent reader
+        never sees a torn or mode-loosened file, and a crash mid-write
+        leaves the original intact. Cleans the temp on any failure."""
+        self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._persist_path.with_suffix(f".json.tmp.{os.getpid()}")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self._persist_path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
     def _write_always(self) -> None:
         """Persist the durable ``always`` set (raises on IO failure)."""
-        self._persist_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(
-            self._persist_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            json.dump({"always_allow": sorted(self._always)}, fh, indent=2)
+        self._atomic_write_0600(json.dumps(
+            {"always_allow": sorted(self._always)}, indent=2).encode("utf-8"))
 
     def _save(self, *, strict: bool = False) -> None:
         """Persist the durable set. Best-effort by default (a failed persist
@@ -508,40 +534,40 @@ class GrantStore:
 
     def snapshot(self) -> tuple:
         """Strict transactional snapshot for restore-on-failure around a batch
-        recording: the session set, the always set, and the RAW durable-file
-        bytes (``None`` sentinel when the file did not exist) — so restore is
-        byte-identical, including leaving no file the pre-call state never
-        had."""
+        recording: the session set, the always set, and a durable-file token
+        that is one of THREE distinguishable outcomes — ``("none",)`` (no
+        persistence path), ``("absent",)`` (the file did not exist), or
+        ``("bytes", raw)`` (present). ONLY a genuine ``FileNotFoundError``
+        yields ``absent``; any other read error raises, so a transient read
+        or permission failure can never be mistaken for absence and turn a
+        rollback into deletion of a real authority store."""
         with self._lock:
             session, always = set(self._session), set(self._always)
-        raw = None
-        if self._persist_path:
-            try:
-                raw = self._persist_path.read_bytes()
-            except (FileNotFoundError, OSError):
-                raw = None
-        return session, always, raw
+        if not self._persist_path:
+            return session, always, ("none",)
+        try:
+            return session, always, ("bytes", self._persist_path.read_bytes())
+        except FileNotFoundError:
+            return session, always, ("absent",)
 
     def restore(self, snapshot: tuple) -> None:
         """Reset both grant sets and the durable file to a prior
-        :meth:`snapshot` — the file is rewritten byte-for-byte, or removed
-        when the snapshot's sentinel says it did not exist."""
-        session, always, raw = snapshot
+        :meth:`snapshot`: the file is republished byte-for-byte at ``0600``
+        via the atomic writer, or removed when the token says it was
+        absent."""
+        session, always, token = snapshot
         with self._lock:
             self._session = set(session)
             self._always = set(always)
-        if not self._persist_path:
+        if token[0] == "none" or not self._persist_path:
             return
-        if raw is None:
+        if token[0] == "absent":
             try:
                 self._persist_path.unlink()
             except FileNotFoundError:
                 pass
             return
-        self._persist_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._persist_path.with_suffix(f".json.tmp.{os.getpid()}")
-        tmp.write_bytes(raw)
-        os.replace(tmp, self._persist_path)
+        self._atomic_write_0600(token[1])
 
 
 # ── the broker ─────────────────────────────────────────────────────────────
@@ -723,18 +749,23 @@ _GRANT_STATES = frozenset({
 #: Each entry carries a STABLE identity (source + request class) that is the
 #: parity key — two exceptions can share a human resource label (both
 #: "local network") without collapsing, because their ids differ. Fields:
-#: (id, source, request_class, resource_label, detail).
+#: (id, source, request_class, resource_label, detail, observable).
+#: ``observable`` marks whether the divergence is proven by executing both
+#: backends' fences (a conformance test must observe it, and a production
+#: change that closes the gap makes it stale) versus ARCHITECTURAL — true by
+#: construction, with no runtime probe that could change it (declared,
+#: reduces parity, never claimed as an executed observation).
 PARITY_EXCEPTIONS = (
     ("clay.dotfiles", "clay_confinement", "path",
      "dotfiles under bound roots",
      "native file tools read whole bound roots; the engine tool loop "
-     "rejects every dot component"),
+     "rejects every dot component", True),
     ("clay.local-network", "clay_confinement", "network", "local network",
      "the confined seat runs network-on; the engine tool loop hard-refuses "
-     "loopback/private targets"),
+     "loopback/private targets", True),
     ("mcp-stdio.local-network", "mcp_servers", "network", "local network",
      "stdio servers run outside the engine sandbox; their egress is not "
-     "engine-fenced"),
+     "engine-fenced", False),
 )
 
 
@@ -877,7 +908,7 @@ def effective_capability_snapshot(
 
     # declared parity exceptions — always rendered; their presence is what
     # blocks a full-parity claim.
-    for _id, source, cls, resource, detail in PARITY_EXCEPTIONS:
+    for _id, source, cls, resource, detail, _obs in PARITY_EXCEPTIONS:
         facts.append(CapabilityFact(
             source, cls, resource, STATE_REDUCED, detail))
 
@@ -908,27 +939,34 @@ def parity_verdict(observed: dict, exceptions=PARITY_EXCEPTIONS) -> str:
     ``{backend: outcome}``; keying by identity keeps two exceptions that
     share a human resource label distinct.
 
-    A group whose outcomes differ without a ledger entry raises (an
-    undeclared divergence must fail the claim, not downgrade it); a ledger
-    entry whose group's outcomes AGREE raises (a stale exception must be
-    removed, not quietly kept); a declared exception with no observation
-    raises (an unobserved exception can't be trusted); any applicable
-    exception yields ``"reduced"`` — a full badge is impossible while one
-    exists."""
-    declared = {eid for eid, _src, _cls, _resource, _detail in exceptions}
-    reduced = False
+    OBSERVABLE exceptions must be proven by an executed observation: an
+    observable entry whose outcomes AGREE raises (stale — the gap closed),
+    and an observable entry with no observation raises (can't be trusted).
+    ARCHITECTURAL exceptions are true by construction (no runtime probe
+    changes them): they reduce parity by declaration and must NOT appear on
+    the observed side (doing so would falsely claim an executed outcome). An
+    observed divergence with no ledger entry raises (undeclared). Any
+    exception of either kind yields ``"reduced"`` — a full badge is
+    impossible while one exists."""
+    observable = {eid for eid, _s, _c, _r, _d, obs in exceptions if obs}
+    architectural = {eid for eid, _s, _c, _r, _d, obs in exceptions if not obs}
+    reduced = bool(architectural)
     for group, outcomes in sorted(observed.items()):
+        if group in architectural:
+            raise ValueError(
+                f"architectural exception {group!r} must not be observed — "
+                f"it is declared, not executed")
         differs = len(set(outcomes.values())) > 1
-        if differs and group not in declared:
+        if differs and group not in observable:
             raise ValueError(
                 f"undeclared parity divergence in group {group!r}: {outcomes}")
-        if not differs and group in declared:
+        if not differs and group in observable:
             raise ValueError(
                 f"stale parity exception {group!r}: outcomes agree {outcomes}")
         if differs:
             reduced = True
-    unobserved = declared - set(observed)
+    unobserved = observable - set(observed)
     if unobserved:
         raise ValueError(
-            f"declared exceptions never observed: {sorted(unobserved)}")
+            f"observable exceptions never observed: {sorted(unobserved)}")
     return "reduced" if reduced else "full"

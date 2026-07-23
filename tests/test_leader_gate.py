@@ -789,3 +789,34 @@ def test_bundle_capability_record_failure_restores_both_stores(
     assert gate._session == {}                   # gate rolled back
     assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
     assert broker.grants.grants_view() == {"session": [], "always": []}
+
+
+def test_bundle_snapshot_read_error_denies_before_prompt(
+        env, tmp_path, monkeypatch):
+    """A snapshot read error denies the call WITHOUT prompting or mutating —
+    never a rollback that deletes a store it couldn't read."""
+    from pathlib import Path
+
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files_call(tmp_path)
+    cap_pf = tmp_path / "grants.json"
+    cap_pf.write_text('{"always_allow": []}')
+    orig = Path.read_bytes
+
+    def _boom(self, *a, **k):
+        if str(self) == str(cap_pf):
+            raise PermissionError("EACCES")
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    assert coord("run_shell", args) is False
+    monkeypatch.setattr(Path, "read_bytes", orig)
+    assert prompts == []          # denied before the prompt
+    assert cap_pf.exists()        # the unreadable store was not deleted
+    assert gate._session == {}

@@ -646,3 +646,77 @@ def test_grantstore_strict_record_raises_on_write_failure(
     gs.record(cap, perm.Decision.ALLOW_ALWAYS)  # no raise
     with pytest.raises(OSError):
         gs.record(cap, perm.Decision.ALLOW_ALWAYS, strict=True)
+
+
+def test_grantstore_snapshot_read_error_aborts_not_absent(tmp_path, monkeypatch):
+    """A read error during snapshot must NOT masquerade as 'file absent' —
+    only FileNotFoundError yields the absent token; any other OSError raises
+    so the caller denies rather than deleting a store it couldn't read."""
+    from pathlib import Path
+
+    from modulatio import permissions as perm
+
+    pf = tmp_path / "cap.json"
+    pf.write_text('{"always_allow": ["shell:profile=full"]}')
+    gs = perm.GrantStore(pf)
+    orig = Path.read_bytes
+
+    def _boom(self, *a, **k):
+        if str(self) == str(pf):
+            raise PermissionError("EACCES")
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    with pytest.raises(OSError):
+        gs.snapshot()
+    monkeypatch.setattr(Path, "read_bytes", orig)
+    assert pf.exists()  # a snapshot that can't read must never delete
+
+
+def test_grantstore_restore_preserves_0600(tmp_path):
+    from modulatio import permissions as perm
+
+    pf = tmp_path / "cap.json"
+    pf.write_text('{"always_allow": ["shell:profile=full"]}')
+    import os
+    os.chmod(pf, 0o600)
+    gs = perm.GrantStore(pf)
+    snap = gs.snapshot()
+    cap = perm.Capability("network", "x",
+                          _scoped={"always": "network:domain=e.com"})
+    gs.record(cap, perm.Decision.ALLOW_ALWAYS)
+    gs.restore(snap)
+    assert stat.S_IMODE(pf.stat().st_mode) == 0o600  # mode preserved
+
+
+def test_grantstore_write_is_0600_and_atomic(tmp_path):
+    from modulatio import permissions as perm
+
+    pf = tmp_path / "cap.json"
+    gs = perm.GrantStore(pf)
+    cap = perm.Capability("shell", "x", _scoped={"always": "shell:profile=full"})
+    gs.record(cap, perm.Decision.ALLOW_ALWAYS)
+    assert stat.S_IMODE(pf.stat().st_mode) == 0o600
+    # no temp survives a clean write
+    assert list(tmp_path.glob("*.tmp.*")) == []
+
+
+def test_grantstore_write_failure_leaves_original_and_no_temp(
+        tmp_path, monkeypatch):
+    from modulatio import permissions as perm
+
+    pf = tmp_path / "cap.json"
+    pf.write_text('{"always_allow": ["shell:profile=full"]}')
+    original = pf.read_bytes()
+    gs = perm.GrantStore(pf)
+    gs._always.add("network:domain=e.com")
+
+    def _fail_replace(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("modulatio.permissions.os.replace", _fail_replace)
+    with pytest.raises(OSError):
+        gs._write_always()
+    monkeypatch.undo()
+    assert pf.read_bytes() == original          # original intact
+    assert list(tmp_path.glob("*.tmp.*")) == []  # no temp survives

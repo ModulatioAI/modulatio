@@ -407,25 +407,38 @@ def _observed_parity_groups(tmp_path):
 
     loop_local_net = not _loop_private_refused()
     clay_local_net = "WebFetch" in claude_cli._ALLOWED_CONFINED_TOOLS
-    # MCP stdio servers run outside the engine sandbox: their egress is not
-    # engine-fenced, so from the tool loop's fence they are unrestricted.
-    mcp_local_net = True
+    # Only the OBSERVABLE exceptions are executed here. The MCP-stdio
+    # local-network divergence is ARCHITECTURAL (stdio servers run outside
+    # the engine sandbox by construction — no runtime probe changes it), so
+    # it is declared in the ledger, never faked as an observation.
     return {
         "clay.dotfiles": {
             "tool-loop": loop_dotfile, "clay-confined": clay_dotfile},
         "clay.local-network": {
             "tool-loop": loop_local_net, "clay-confined": clay_local_net},
-        "mcp-stdio.local-network": {
-            "tool-loop": loop_local_net, "mcp-stdio": mcp_local_net},
     }
 
 
-def test_parity_observes_every_declared_exception(tmp_path):
-    """Every ledger identity has its own observation — no two exceptions
-    share an observation group, so an unobserved one can be detected."""
+def test_parity_observes_every_observable_exception(tmp_path):
+    """Every OBSERVABLE ledger identity has its own executed observation;
+    architectural exceptions are declared, not observed."""
     observed = _observed_parity_groups(tmp_path)
-    declared = {eid for eid, *_ in perm.PARITY_EXCEPTIONS}
-    assert set(observed) == declared
+    observable = {eid for eid, _s, _c, _r, _d, obs in perm.PARITY_EXCEPTIONS
+                  if obs}
+    architectural = {eid for eid, _s, _c, _r, _d, obs in perm.PARITY_EXCEPTIONS
+                     if not obs}
+    assert set(observed) == observable
+    assert architectural  # at least one declared-not-executed exception
+
+
+def test_parity_architectural_exception_rejected_on_observed_side(tmp_path):
+    """Placing an architectural exception on the observed side is a category
+    error — the derivation refuses a faked executed outcome."""
+    observed = _observed_parity_groups(tmp_path)
+    observed["mcp-stdio.local-network"] = {
+        "tool-loop": False, "mcp-stdio": True}
+    with pytest.raises(ValueError, match="must not be observed"):
+        perm.parity_verdict(observed)
 
 
 def test_parity_badge_is_derived_and_reduced(tmp_path):
@@ -450,12 +463,12 @@ def test_parity_undeclared_divergence_fails(tmp_path):
         perm.parity_verdict(observed)
 
 
-def test_parity_mcp_exception_unobserved_is_caught(tmp_path):
-    """Dropping ONLY the MCP local-network observation (which shares its
-    human label with the Clay one) is now caught — identities don't
+def test_parity_observable_exception_unobserved_is_caught(tmp_path):
+    """Dropping an OBSERVABLE observation (which shares its human label with
+    the architectural MCP one) is caught by identity — labels don't
     collapse."""
     observed = _observed_parity_groups(tmp_path)
-    del observed["mcp-stdio.local-network"]
+    del observed["clay.local-network"]
     with pytest.raises(ValueError, match="never observed"):
         perm.parity_verdict(observed)
 
